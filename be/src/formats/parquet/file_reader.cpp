@@ -438,8 +438,11 @@ bool FileReader::_filter_group_with_more_filter(const tparquet::RowGroup& row_gr
         StatisticsHelper::StatSupportedFilter filter_type;
         for (auto ctx : kv.second) {
             if (StatisticsHelper::can_be_used_for_statistics_filter(ctx, filter_type)) {
-                const TupleDescriptor& tuple_desc = *(_scanner_ctx->tuple_desc);
-                SlotDescriptor* slot = tuple_desc.get_slot_by_id(kv.first);
+                SlotDescriptor* slot = std::find_if(
+                    _scanner_ctx->slot_descs.begin(),
+                    _scanner_ctx->slot_descs.end(),
+                    [&](const SlotDescriptor* s) { return s->id() == kv.first; }
+                );
                 if (UNLIKELY(slot == nullptr)) {
                     // it shouldn't be here, just some defensive code
                     DCHECK(false) << "couldn't find slot id " << kv.first << " in tuple desc";
@@ -753,3 +756,5 @@ Status FileReader::_exec_no_materialized_column_scan(ChunkPtr* chunk) {
 }
 
 } // namespace starrocks::parquet
+
+
