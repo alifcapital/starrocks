@@ -255,14 +255,14 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 invalidateCache(icebergTableName);
                 return;
             }
-            
+
             TableMetadata currentPointer = currentOps.current();
             TableMetadata updatePointer = updateOps.current();
             if (currentPointer == null || updatePointer == null) {
                 invalidateCache(icebergTableName);
                 return;
             }
-            
+
             String currentLocation = currentOps.current().metadataFileLocation();
             String updateLocation = updateOps.current().metadataFileLocation();
             if (currentLocation == null || updateLocation == null) {
@@ -286,7 +286,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             }
         }
     }
-    
+
     private void refreshTable(BaseTable updatedTable, long baseSnapshotId,
                               String dbName, String tableName, ExecutorService executorService) {
         Long updatedSnapshotId = updatedTable.currentSnapshot().snapshotId();
@@ -294,18 +294,18 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         IcebergTableName baseIcebergTableName = new IcebergTableName(dbName, tableName, baseSnapshotId);
         IcebergTableName updatedIcebergTableName = new IcebergTableName(dbName, tableName, updatedSnapshotId);
         Long latestRefreshTime = tableLatestRefreshTime.computeIfAbsent(new IcebergTableName(dbName, tableName), ignore -> -1L);
-        
+
         List<String> updatedPartitionNames = updatedTable.spec().isPartitioned() ?
                 listPartitionNamesWithSnapshotId(updatedTable, dbName, tableName, updatedSnapshotId, executorService) :
                 new ArrayList<>();
-        
+
         synchronized (this) {
             partitionNames.put(updatedIcebergTableName, updatedPartitionNames);
             tables.put(updatedIcebergTableName, updatedTable);
             partitionNames.invalidate(baseIcebergTableName);
             tables.invalidate(baseIcebergTableName);
         }
-        
+
         TableMetadata updatedTableMetadata = updatedTable.operations().current();
         List<ManifestFile> manifestFiles = updatedTable.currentSnapshot().dataManifests(updatedTable.io()).stream()
                 .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()) != null)
