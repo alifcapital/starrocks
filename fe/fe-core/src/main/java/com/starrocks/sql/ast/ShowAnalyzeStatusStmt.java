@@ -16,6 +16,8 @@
 package com.starrocks.sql.ast;
 
 import com.google.common.collect.Lists;
+import com.starrocks.analysis.LimitElement;
+import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.catalog.BasicTable;
@@ -23,8 +25,6 @@ import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Authorizer;
-import com.starrocks.sql.ast.expression.LimitElement;
-import com.starrocks.sql.ast.expression.Predicate;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.StatsConstants;
@@ -34,7 +34,7 @@ import org.apache.logging.log4j.Logger;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-public class ShowAnalyzeStatusStmt extends EnhancedShowStmt {
+public class ShowAnalyzeStatusStmt extends ShowStmt {
     private static final Logger LOG = LogManager.getLogger(ShowAnalyzeStatusStmt.class);
 
     public ShowAnalyzeStatusStmt(Predicate predicate, List<OrderByElement> orderByElements,
@@ -55,7 +55,7 @@ public class ShowAnalyzeStatusStmt extends EnhancedShowStmt {
         row.set(2, analyzeStatus.getTableName());
 
         BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(
-                analyzeStatus.getCatalogName(), analyzeStatus.getDbName(), analyzeStatus.getTableName());
+                context, analyzeStatus.getCatalogName(), analyzeStatus.getDbName(), analyzeStatus.getTableName());
 
         if (table == null) {
             throw new MetaNotFoundException("Table " + analyzeStatus.getDbName() + "."
@@ -64,8 +64,7 @@ public class ShowAnalyzeStatusStmt extends EnhancedShowStmt {
 
         // In new privilege framework(RBAC), user needs any action on the table to show analysis status on it
         try {
-            Authorizer.checkAnyActionOnTableLikeObject(context.getCurrentUserIdentity(),
-                    context.getCurrentRoleIds(), analyzeStatus.getDbName(), table);
+            Authorizer.checkAnyActionOnTableLikeObject(context, analyzeStatus.getDbName(), table);
         } catch (AccessDeniedException e) {
             return null;
         }
@@ -103,6 +102,6 @@ public class ShowAnalyzeStatusStmt extends EnhancedShowStmt {
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
-        return ((AstVisitorExtendInterface<R, C>) visitor).visitShowAnalyzeStatusStatement(this, context);
+        return visitor.visitShowAnalyzeStatusStatement(this, context);
     }
 }

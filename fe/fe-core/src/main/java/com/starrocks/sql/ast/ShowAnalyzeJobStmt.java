@@ -15,6 +15,8 @@
 package com.starrocks.sql.ast;
 
 import com.google.common.collect.Lists;
+import com.starrocks.analysis.LimitElement;
+import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.catalog.BasicTable;
@@ -23,8 +25,6 @@ import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Authorizer;
-import com.starrocks.sql.ast.expression.LimitElement;
-import com.starrocks.sql.ast.expression.Predicate;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.AnalyzeJob;
 
@@ -32,7 +32,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-public class ShowAnalyzeJobStmt extends EnhancedShowStmt {
+public class ShowAnalyzeJobStmt extends ShowStmt {
 
     public ShowAnalyzeJobStmt(Predicate predicate, List<OrderByElement> orderByElements,
                               LimitElement limitElement, NodePosition pos) {
@@ -62,7 +62,7 @@ public class ShowAnalyzeJobStmt extends EnhancedShowStmt {
             if (!analyzeJob.isAnalyzeAllTable()) {
                 String tableName = analyzeJob.getTableName();
                 BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(
-                        analyzeJob.getCatalogName(), dbName, tableName);
+                        context, analyzeJob.getCatalogName(), dbName, tableName);
 
                 if (table == null) {
                     throw new MetaNotFoundException("Table " + analyzeJob.getDbName() + "."
@@ -109,6 +109,6 @@ public class ShowAnalyzeJobStmt extends EnhancedShowStmt {
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
-        return ((AstVisitorExtendInterface<R, C>) visitor).visitShowAnalyzeJobStatement(this, context);
+        return visitor.visitShowAnalyzeJobStatement(this, context);
     }
 }
