@@ -15,17 +15,19 @@
 package com.starrocks.sql.ast;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.LimitElement;
-import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.analysis.RedirectStatus;
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.catalog.BasicTable;
+import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
-import com.starrocks.catalog.Table;
+import com.starrocks.catalog.ScalarType;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Authorizer;
+import com.starrocks.sql.ast.expression.LimitElement;
+import com.starrocks.sql.ast.expression.Predicate;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.AnalyzeJob;
 
@@ -33,7 +35,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-public class ShowAnalyzeJobStmt extends ShowStmt {
+public class ShowAnalyzeJobStmt extends EnhancedShowStmt {
 
     public ShowAnalyzeJobStmt(Predicate predicate, List<OrderByElement> orderByElements,
                               LimitElement limitElement, NodePosition pos) {
@@ -62,13 +64,13 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
 
             if (!analyzeJob.isAnalyzeAllTable()) {
                 String tableName = analyzeJob.getTableName();
-                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                        .getTable(context, analyzeJob.getCatalogName(), dbName, tableName);
+                BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(
+                        analyzeJob.getCatalogName(), dbName, tableName);
 
                 if (table == null) {
-                    throw new MetaNotFoundException("No found table: " + tableName);
+                    throw new MetaNotFoundException("Table " + analyzeJob.getDbName() + "."
+                            + analyzeJob.getTableName() + " not found");
                 }
-
                 row.set(3, table.getName());
 
                 // In new privilege framework(RBAC), user needs any action on the table to show analysis job on it,
@@ -80,8 +82,7 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
                     return null;
                 }
 
-                if (null != columns && !columns.isEmpty()
-                        && (columns.size() != table.getBaseSchema().size())) {
+                if (null != columns && !columns.isEmpty()) {
                     String str = String.join(",", columns);
                     if (str.length() > 100) {
                         row.set(4, str.substring(0, 100) + "...");
@@ -111,11 +112,6 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
-        return visitor.visitShowAnalyzeJobStatement(this, context);
-    }
-
-    @Override
-    public RedirectStatus getRedirectStatus() {
-        return RedirectStatus.FORWARD_NO_SYNC;
+        return ((AstVisitorExtendInterface<R, C>) visitor).visitShowAnalyzeJobStatement(this, context);
     }
 }

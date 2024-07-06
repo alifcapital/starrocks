@@ -16,19 +16,22 @@
 package com.starrocks.sql.ast;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.LimitElement;
-import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.analysis.RedirectStatus;
-import com.starrocks.catalog.Table;
+import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.catalog.BasicTable;
+import com.starrocks.catalog.Column;
+import com.starrocks.catalog.ScalarType;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.ShowResultSetMetaData;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.expression.LimitElement;
+import com.starrocks.sql.ast.expression.Predicate;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.AnalyzeStatus;
-import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -36,7 +39,7 @@ import org.apache.logging.log4j.Logger;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-public class ShowAnalyzeStatusStmt extends ShowStmt {
+public class ShowAnalyzeStatusStmt extends EnhancedShowStmt {
     private static final Logger LOG = LogManager.getLogger(ShowAnalyzeStatusStmt.class);
 
     public ShowAnalyzeStatusStmt(Predicate predicate, List<OrderByElement> orderByElements,
@@ -56,22 +59,23 @@ public class ShowAnalyzeStatusStmt extends ShowStmt {
         row.set(1, analyzeStatus.getCatalogName() + "." + analyzeStatus.getDbName());
         row.set(2, analyzeStatus.getTableName());
 
-        Table table;
-        // In new privilege framework(RBAC), user needs any action on the table to show analysis status for it.
+        BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(
+                analyzeStatus.getCatalogName(), analyzeStatus.getDbName(), analyzeStatus.getTableName());
+
+        if (table == null) {
+            throw new MetaNotFoundException("Table " + analyzeStatus.getDbName() + "."
+                    + analyzeStatus.getTableName() + " not found");
+        }
+
+        // In new privilege framework(RBAC), user needs any action on the table to show analysis status on it
         try {
-            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(
-                    context, analyzeStatus.getCatalogName(), analyzeStatus.getDbName(), analyzeStatus.getTableName());
-            if (table == null) {
-                throw new SemanticException("Table %s is not found", analyzeStatus.getTableName());
-            }
-            Authorizer.checkAnyActionOnTableLikeObject(context, analyzeStatus.getDbName(), table);
-        } catch (Exception e) {
-            LOG.warn("Failed to check privilege for show analyze status for table {}.", analyzeStatus.getTableName(), e);
+            Authorizer.checkAnyActionOnTableLikeObject(context.getCurrentUserIdentity(),
+                    context.getCurrentRoleIds(), analyzeStatus.getDbName(), table);
+        } catch (AccessDeniedException e) {
             return null;
         }
 
-        long totalCollectColumnsSize = StatisticUtils.getCollectibleColumns(table).size();
-        if (null != columns && !columns.isEmpty() && (columns.size() != totalCollectColumnsSize)) {
+        if (null != columns && !columns.isEmpty()) {
             String str = String.join(",", columns);
             row.set(3, str);
         }
@@ -103,12 +107,7 @@ public class ShowAnalyzeStatusStmt extends ShowStmt {
     }
 
     @Override
-    public RedirectStatus getRedirectStatus() {
-        return RedirectStatus.FORWARD_NO_SYNC;
-    }
-
-    @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
-        return visitor.visitShowAnalyzeStatusStatement(this, context);
+        return ((AstVisitorExtendInterface<R, C>) visitor).visitShowAnalyzeStatusStatement(this, context);
     }
 }
