@@ -142,7 +142,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
 
         if (tables.getIfPresent(icebergTableName) != null) {
-            return tables.getIfPresent(icebergTableName);
+            Table icebergTable = tables.getIfPresent(icebergTableName);
+            // prolong table cache
+            tables.put(icebergTableName, icebergTable);
+            return icebergTable;
         }
 
         Table icebergTable = delegate.getTable(dbName, tableName);
@@ -324,13 +327,26 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         List<IcebergTableName> identifiers = Lists.newArrayList(tables.asMap().keySet());
         for (IcebergTableName identifier : identifiers) {
             try {
-                Long latestAccessTime = tableLatestAccessTime.get(identifier);
-                if (latestAccessTime == null || (System.currentTimeMillis() - latestAccessTime) / 1000 >
-                        Config.background_refresh_metadata_time_secs_since_last_access_secs) {
-                    return;
+                IcebergTableName icebergTableName = new IcebergTableName(identifier.dbName, identifier.tableName);
+                Long latestAccessTime = tableLatestAccessTime.get(icebergTableName);
+                Long latestRefreshTime = tableLatestRefreshTime.get(icebergTableName);
+                Long latestSnapshotTime = tableLatestSnapshotTime.get(icebergTableName);
+                Long metaCacheTtlSec = icebergProperties.getIcebergMetaCacheTtlSec();
+                Long tableCacheTtlSec = icebergProperties.getIcebergTableCacheTtlSec();
+
+                // refresh tables with expired manifest time
+                // don't refresh tables that were not accessed by queries
+                if ((latestAccessTime != null &&
+                        (System.currentTimeMillis() - latestAccessTime) / 1000 < tableCacheTtlSec) &&
+                        (latestSnapshotTime == null ||
+                        (System.currentTimeMillis() - latestSnapshotTime) / 1000 > metaCacheTtlSec) &&
+                        (latestRefreshTime == null ||
+                        (System.currentTimeMillis() - latestRefreshTime) / 1000 > metaCacheTtlSec)) {
+                    LOG.info("Iceberg table {}.{} eligible for refresh", identifier.dbName, identifier.tableName);
+                    LOG.debug("{}.{} latestSnapshotTime: {}", identifier.dbName, identifier.tableName, latestSnapshotTime);
+                    LOG.debug("{}.{} latestRefreshTime: {}", identifier.dbName, identifier.tableName, latestRefreshTime);
+                    refreshTable(identifier.dbName, identifier.tableName, backgroundExecutor);
                 }
-                
-                refreshTable(identifier.dbName, identifier.tableName, backgroundExecutor);
             } catch (Exception e) {
                 LOG.warn("refresh {}.{} metadata cache failed, msg : ", identifier.dbName, identifier.tableName, e);
                 invalidateCache(identifier);
