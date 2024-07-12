@@ -19,7 +19,6 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Database;
-import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.connector.PlanMode;
 import com.starrocks.connector.exception.StarRocksConnectorException;
@@ -75,6 +74,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private final Cache<String, Set<DeleteFile>> deleteFileCache;
     private final Map<IcebergTableName, Long> tableLatestAccessTime = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestRefreshTime = new ConcurrentHashMap<>();
+    private final Map<IcebergTableName, Long> tableLatestSnapshotTime = new ConcurrentHashMap<>();
 
     public CachingIcebergCatalog(String catalogName, IcebergCatalog delegate, IcebergCatalogProperties icebergProperties,
                                  ExecutorService executorService) {
@@ -82,19 +82,19 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         this.delegate = delegate;
         this.icebergProperties = icebergProperties;
         boolean enableCache = icebergProperties.isEnableIcebergMetadataCache();
-        this.databases = newCacheBuilder(icebergProperties.getIcebergMetaCacheTtlSec(),
+        this.databases = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
         this.tables = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
-        this.partitionNames = newCacheBuilder(icebergProperties.getIcebergMetaCacheTtlSec(),
+        this.partitionNames = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
         this.dataFileCache = enableCache ?
                 newCacheBuilder(
-                        icebergProperties.getIcebergMetaCacheTtlSec(), icebergProperties.getIcebergManifestCacheMaxNum()).build()
+                        icebergProperties.getIcebergTableCacheTtlSec(), icebergProperties.getIcebergManifestCacheMaxNum()).build()
                 : null;
         this.deleteFileCache = enableCache ?
                 newCacheBuilder(
-                        icebergProperties.getIcebergMetaCacheTtlSec(), icebergProperties.getIcebergManifestCacheMaxNum()).build()
+                        icebergProperties.getIcebergTableCacheTtlSec(), icebergProperties.getIcebergManifestCacheMaxNum()).build()
                 : null;
         this.backgroundExecutor = executorService;
     }
@@ -137,7 +137,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     public Table getTable(String dbName, String tableName) throws StarRocksConnectorException {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
 
-        if (ConnectContext.get() == null || ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
+        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
         }
 
@@ -241,6 +241,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     @Override
     public synchronized void refreshTable(String dbName, String tableName, ExecutorService executorService) {
+        Long latestRefreshTime = tableLatestRefreshTime.computeIfAbsent(new IcebergTableName(dbName, tableName), ignore -> -1L);
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
         if (tables.getIfPresent(icebergTableName) == null) {
             partitionNames.invalidate(icebergTableName);
@@ -271,19 +272,28 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 invalidateCache(icebergTableName);
                 return;
             }
-            if (!currentLocation.equals(updateLocation)) {
+
+            Long currentSnapshotId = currentTable.currentSnapshot().snapshotId();
+            Long updateSnapshotId = updateTable.currentSnapshot().snapshotId();
+
+            // if latest refresh is -1, it means the table has never been refreshed
+            if (!currentSnapshotId.equals(updateSnapshotId) || latestRefreshTime == -1) {
                 LOG.info("Refresh iceberg caching catalog table {}.{} from {} to {}",
                         dbName, tableName, currentLocation, updateLocation);
-                long baseSnapshotId = currentOps.current().currentSnapshot().snapshotId();
-                refreshTable(updateTable, baseSnapshotId, dbName, tableName, executorService);
+                refreshTable(updateTable, currentSnapshotId, dbName, tableName, executorService);
                 LOG.info("Finished to refresh iceberg table {}.{}", dbName, tableName);
+            } else {
+                LOG.info("Not refreshing iceberg table {}.{} because snapshot is the same",
+                        dbName, tableName);
+                tableLatestRefreshTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
             }
         }
     }
 
     private void refreshTable(BaseTable updatedTable, long baseSnapshotId,
                               String dbName, String tableName, ExecutorService executorService) {
-        long updatedSnapshotId = updatedTable.currentSnapshot().snapshotId();
+        Long updatedSnapshotId = updatedTable.currentSnapshot().snapshotId();
+        Long updatedSnapshotTime = updatedTable.currentSnapshot().timestampMillis();
         IcebergTableName baseIcebergTableName = new IcebergTableName(dbName, tableName, baseSnapshotId);
         IcebergTableName updatedIcebergTableName = new IcebergTableName(dbName, tableName, updatedSnapshotId);
         Long latestRefreshTime = tableLatestRefreshTime.computeIfAbsent(new IcebergTableName(dbName, tableName), ignore -> -1L);
@@ -296,22 +306,26 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             partitionNames.put(updatedIcebergTableName, updatedPartitionNames);
             tables.put(updatedIcebergTableName, updatedTable);
             partitionNames.invalidate(baseIcebergTableName);
+            tables.invalidate(baseIcebergTableName);
         }
 
         TableMetadata updatedTableMetadata = updatedTable.operations().current();
         List<ManifestFile> manifestFiles = updatedTable.currentSnapshot().dataManifests(updatedTable.io()).stream()
                 .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()) != null)
                 .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()).timestampMillis() > latestRefreshTime)
-                .filter(f -> dataFileCache.getIfPresent(f.path()) == null)
-                .filter(f -> f.hasAddedFiles() || f.hasExistingFiles())
-                .filter(f -> f.length() >= icebergProperties.getRefreshIcebergManifestMinLength())
                 .collect(Collectors.toList());
 
-        if (manifestFiles.isEmpty()) {
-            tableLatestRefreshTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
+        boolean alreadyCached = manifestFiles.stream().allMatch(f -> dataFileCache.getIfPresent(f.path()) != null);
+
+        if (manifestFiles.isEmpty() || alreadyCached) {
+            LOG.debug("Not caching manifests on the table {}.{}: {}",
+                    dbName, tableName, alreadyCached ? "all manifests already cached" : "no manifests to cache");
+            if (alreadyCached) {
+                tableLatestRefreshTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
+                tableLatestSnapshotTime.put(new IcebergTableName(dbName, tableName), updatedSnapshotTime);
+            }
             return;
         }
-
         StarRocksIcebergTableScanContext scanContext = new StarRocksIcebergTableScanContext(
                 catalogName, dbName, tableName, PlanMode.LOCAL);
         StarRocksIcebergTableScan tableScan = (StarRocksIcebergTableScan) getTableScan(updatedTable, scanContext)
@@ -319,10 +333,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 .useSnapshot(updatedSnapshotId);
         tableScan.refreshDataFileCache(manifestFiles);
 
+        LOG.debug("Refreshed LatestSnapshotTime for table {}.{} is {}", dbName, tableName, updatedSnapshotTime);
         tableLatestRefreshTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
-        LOG.info("Refreshed {} iceberg manifests on the table [{}.{}]", manifestFiles.size(), dbName, tableName);
+        tableLatestSnapshotTime.put(new IcebergTableName(dbName, tableName), updatedSnapshotTime);
     }
 
+    // This is called every background_refresh_metadata_interval_millis
     public void refreshCatalog() {
         List<IcebergTableName> identifiers = Lists.newArrayList(tables.asMap().keySet());
         for (IcebergTableName identifier : identifiers) {
