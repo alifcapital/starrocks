@@ -105,7 +105,9 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
     @Override
     public void registerQuery(TUniqueId queryId, QueryInfo info) throws UserException {
         if (needLogRegisterAndUnregisterQueryId(info)) {
-            LOG.info("register query id = {}", DebugUtil.printId(queryId));
+            LOG.info("register query id = {}, sql = {}",
+                     DebugUtil.printId(queryId),
+                     info.getSql() != null ? info.getSql() : "N/A");
         }
         final QueryInfo result = coordinatorMap.putIfAbsent(queryId, info);
         if (result != null) {
@@ -310,7 +312,7 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
 
         private boolean isMVJob = false;
 
-        // from Export, Pull load, Insert 
+        // from Export, Pull load, Insert
         public QueryInfo(Coordinator coord) {
             this(null, null, coord);
         }
