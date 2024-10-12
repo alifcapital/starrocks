@@ -151,7 +151,7 @@ public:
                     .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids, params, state);
         } else if (delete_file.file_content == TIcebergFileContent::EQUALITY_DELETES) {
             HdfsScannerParams scanner_params;
-            return ORCEqualityDeleteBuilder(_fs, _datafile_path)
+            return ORCEqualityDeleteBuilder(_fs, _datacache_options, _datafile_path)
                     .build(timezone, delete_file.full_path, delete_file.length, std::move(mor_processor),
                            std::move(slots), nullptr, nullptr, state, scanner_params);
         } else {
@@ -185,9 +185,9 @@ public:
 private:
     FileSystem* _fs;
     std::string _datafile_path;
-    std::set<int64_t>* _need_skip_rowids;
     std::vector<ExprContext*> _conjunct_ctxs;
     std::vector<SlotDescriptor*> _materialize_slots;
+    std::set<int64_t>* _need_skip_rowids;
     const DataCacheOptions _datacache_options;
 };
 
