@@ -186,6 +186,8 @@ private:
     FileSystem* _fs;
     std::string _datafile_path;
     std::set<int64_t>* _need_skip_rowids;
+    std::vector<ExprContext*> _conjunct_ctxs;
+    std::vector<SlotDescriptor*> _materialize_slots;
     const DataCacheOptions _datacache_options;
 };
 
