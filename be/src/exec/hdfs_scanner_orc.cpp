@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "exec/exec_node.h"
+#include "exec/hdfs_scanner.h"
 #include "exec/iceberg/iceberg_delete_builder.h"
 #include "exec/paimon/paimon_delete_file_builder.h"
 #include "formats/orc/orc_chunk_reader.h"
