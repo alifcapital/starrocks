@@ -597,12 +597,33 @@ A set of parameters about how StarRocks update the cache of the Iceberg metadata
 
 From v3.3.3 onwards, StarRocks supports the [periodic metadata refresh strategy](#appendix-periodic-metadata-refresh-strategy). In most cases, you can ignore `MetadataUpdateParams` and do not need to tune the policy parameters in it, because the default values of these parameters already provide you with an out-of-the-box performance. You can adjust the Iceberg metadata caching plan using the system variable [`plan_mode`](../../sql-reference/System_variable.md#plan_mode).
 
+###### enable_iceberg_metadata_cache
+
+The main parameter is `enable_iceberg_metadata_cache`, which specifies whether to cache Iceberg tables metadata.
+This parameter is supported from v3.2.1 onwards:
+
 | **Parameter**                                 | **Default**           | **Description**                                              |
 | :-------------------------------------------- | :-------------------- | :----------------------------------------------------------- |
 | enable_iceberg_metadata_cache                 | true                  | Whether to cache Iceberg-related metadata, including Table Cache, Partition Name Cache, and the Data File Cache and Delete Data File Cache in Manifest. |
 | iceberg_manifest_cache_with_column_statistics | false                 | Whether to cache the statistics of columns.                  |
 | iceberg_manifest_cache_max_num                | 100000                | The maximum number of Manifest files that can be cached.     |
 | refresh_iceberg_manifest_min_length           | 2 * 1024 * 1024       | The minimum Manifest file length that triggers a Data File Cache refresh. |
+
+When you enable enable_iceberg_metadata_cache, backig catalog will be polled every https://docs.starrocks.io/docs/administration/management/FE_configuration/#background_refresh_metadata_interval_millis
+
+###### iceberg_meta_cache_ttl_sec
+
+This parameter controls when to update table's metadata. If you commit to iceberg table, starrocks will refresh table's metadata if cached commit timestamp is older than iceberg_meta_cache_ttl_sec on it's next refresh run.
+
+If tables metadata have not changed on refresh run, cache will be extended by this value.
+
+Default is 48 hours.
+
+##### iceberg_table_cache_ttl_sec
+
+This parameter controls when to expire cache of table names and hence when to stop refreshing tables' metadata.
+
+Default is 30 minutes.
 
 ### Examples
 
