@@ -2411,6 +2411,12 @@ public class Config extends ConfigBase {
     public static long iceberg_metadata_cache_max_entry_size = 8388608L;
 
     /**
+     * Comma sepatated list of db.table pairs to be excluded from catalog cache
+     */
+    @ConfField(mutable = true)
+    public static String iceberg_caching_excluded_tables = "";
+
+    /**
      * fe will call es api to get es index shard info every es_state_sync_interval_secs
      */
     @ConfField

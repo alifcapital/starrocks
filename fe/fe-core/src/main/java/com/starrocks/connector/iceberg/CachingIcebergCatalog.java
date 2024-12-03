@@ -20,6 +20,7 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.Database;
+import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
 import com.starrocks.connector.ConnectorViewDefinition;
@@ -139,6 +140,14 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return delegate.listTables(dbName);
     }
 
+    private Set<String> getExcludedTables() {
+        String excludedTablesStr = Config.iceberg_caching_excluded_tables;
+        return excludedTablesStr == null ? Collections.emptySet() :
+               Arrays.stream(excludedTablesStr.split(","))
+                     .map(String::trim)
+                     .collect(Collectors.toSet());
+    }
+
     @Override
     public Table getTable(String dbName, String tableName) throws StarRocksConnectorException {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
@@ -149,7 +158,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
         Table icebergTable = delegate.getTable(dbName, tableName);
 
-        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
+        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY
+                && !getExcludedTables().contains(tableName)) {
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
             tables.put(icebergTableName, icebergTable);
         }
