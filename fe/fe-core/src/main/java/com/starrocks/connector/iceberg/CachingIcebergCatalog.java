@@ -143,19 +143,17 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     public Table getTable(String dbName, String tableName) throws StarRocksConnectorException {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
 
-        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
-            tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
-        }
-
         if (tables.getIfPresent(icebergTableName) != null) {
-            Table icebergTable = tables.getIfPresent(icebergTableName);
-            // prolong table cache
-            tables.put(icebergTableName, icebergTable);
-            return icebergTable;
+            return tables.getIfPresent(icebergTableName);
         }
 
         Table icebergTable = delegate.getTable(dbName, tableName);
-        tables.put(icebergTableName, icebergTable);
+
+        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
+            tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
+            tables.put(icebergTableName, icebergTable);
+        }
+
         return icebergTable;
     }
 
