@@ -25,6 +25,8 @@ import com.starrocks.common.profile.Timer;
 import com.starrocks.common.profile.Tracers;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
+import com.starrocks.qe.feedback.OperatorTuningGuides;
+import com.starrocks.qe.feedback.PlanTuningAdvisor;
 import com.starrocks.sql.Explain;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -49,6 +51,7 @@ import com.starrocks.sql.optimizer.rule.transformation.CTEProduceAddProjectionRu
 import com.starrocks.sql.optimizer.rule.transformation.ConvertToEqualForNullRule;
 import com.starrocks.sql.optimizer.rule.transformation.DeriveRangeJoinPredicateRule;
 import com.starrocks.sql.optimizer.rule.transformation.EliminateAggRule;
+import com.starrocks.sql.optimizer.rule.transformation.EliminateConstantCTERule;
 import com.starrocks.sql.optimizer.rule.transformation.ForceCTEReuseRule;
 import com.starrocks.sql.optimizer.rule.transformation.GroupByCountDistinctRewriteRule;
 import com.starrocks.sql.optimizer.rule.transformation.IcebergEqualityDeleteRewriteRule;
@@ -514,6 +517,9 @@ public class Optimizer {
             CTEUtils.collectCteOperators(tree, context);
         }
 
+        ruleRewriteIterative(tree, rootTaskContext, new EliminateConstantCTERule());
+        CTEUtils.collectCteOperators(tree, context);
+
         ruleRewriteOnlyOnce(tree, rootTaskContext, new IcebergPartitionsTableRewriteRule());
         ruleRewriteIterative(tree, rootTaskContext, RuleSetType.AGGREGATE_REWRITE);
         ruleRewriteIterative(tree, rootTaskContext, RuleSetType.PUSH_DOWN_SUBQUERY);
@@ -961,6 +967,12 @@ public class Optimizer {
         // if we can change the distribution to adjust the plan because of skew data, bad statistics or something else.
         result = new MarkParentRequiredDistributionRule().rewrite(result, rootTaskContext);
         result = new ApplyTuningGuideRule(connectContext).rewrite(result, rootTaskContext);
+
+        OperatorTuningGuides.OptimizedRecord optimizedRecord = PlanTuningAdvisor.getInstance()
+                .getOptimizedRecord(context.getQueryId());
+        if (optimizedRecord != null) {
+            Tracers.record(Tracers.Module.BASE, "DynamicTuningGuides", optimizedRecord.getExplainString());
+        }
         return result;
     }
 
