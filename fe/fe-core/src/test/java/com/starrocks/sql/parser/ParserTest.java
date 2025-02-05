@@ -41,6 +41,7 @@ import org.antlr.v4.runtime.CharStreams;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -59,7 +60,7 @@ class ParserTest {
 
     @Test
     void test() {
-        String sql = "add into plan advisor  " +
+        String sql = "alter plan advisor add " +
                 "select count(*) from customer join " +
                 "(select * from skew_tbl where c_custkey_skew = 100) t on abs(c_custkey) = c_custkey_skew;";
         SqlParser.parse(sql, new SessionVariable());
@@ -577,6 +578,17 @@ class ParserTest {
         arguments.add(Arguments.of("create MATERIALIZED VIEW  as select * from (t1 join t2);",
                 "the most similar input is {a legal identifier}."));
         return arguments.stream();
+    }
+
+    @Test
+    public void testTranslateFunction() {
+        String sql = "select translate('abcabc', 'ab', '12') as test;";
+        SessionVariable sessionVariable = new SessionVariable();
+        try {
+            SqlParser.parse(sql, sessionVariable);
+        } catch (Exception e) {
+            Assertions.fail("sql should success. errMsg: " +  e.getMessage());
+        }
     }
 
 }

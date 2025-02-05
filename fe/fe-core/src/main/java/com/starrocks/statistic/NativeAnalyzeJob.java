@@ -204,6 +204,10 @@ public class NativeAnalyzeJob implements AnalyzeJob, Writable {
         return tableId == StatsConstants.DEFAULT_ALL_ID;
     }
 
+    public boolean isDefaultJob() {
+        return isAnalyzeAllDb() && isAnalyzeAllTable() && getScheduleType() == ScheduleType.SCHEDULE;
+    }
+
     @Override
     public List<StatisticsCollectJob> instantiateJobs() {
         return StatisticsCollectJobFactory.buildStatisticsCollectJob(this);
@@ -220,6 +224,9 @@ public class NativeAnalyzeJob implements AnalyzeJob, Writable {
 
         boolean hasFailedCollectJob = false;
         for (StatisticsCollectJob statsJob : jobs) {
+            if (!StatisticAutoCollector.checkoutAnalyzeTime()) {
+                break;
+            }
             AnalyzeStatus analyzeStatus = new NativeAnalyzeStatus(GlobalStateMgr.getCurrentState().getNextId(),
                     statsJob.getDb().getId(), statsJob.getTable().getId(), statsJob.getColumnNames(),
                     statsJob.getType(), statsJob.getScheduleType(), statsJob.getProperties(), LocalDateTime.now());

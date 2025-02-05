@@ -40,6 +40,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.authentication.AuthenticationMgr;
+import com.starrocks.authorization.PrivilegeBuiltinConstants;
 import com.starrocks.catalog.FsBroker;
 import com.starrocks.catalog.ResourceGroup;
 import com.starrocks.common.AnalysisException;
@@ -65,7 +66,6 @@ import com.starrocks.planner.ResultSink;
 import com.starrocks.planner.RuntimeFilterDescription;
 import com.starrocks.planner.ScanNode;
 import com.starrocks.planner.StreamLoadPlanner;
-import com.starrocks.privilege.PrivilegeBuiltinConstants;
 import com.starrocks.proto.PPlanFragmentCancelReason;
 import com.starrocks.proto.PQueryStatistics;
 import com.starrocks.qe.scheduler.Coordinator;
@@ -167,7 +167,7 @@ public class DefaultCoordinator extends Coordinator {
     private boolean isShortCircuit = false;
     private boolean isBinaryRow = false;
 
-    private ExecutionSchedule schedule;
+    private ExecutionSchedule scheduler;
 
     public static class Factory implements Coordinator.Factory {
 
@@ -310,9 +310,9 @@ public class DefaultCoordinator extends Coordinator {
             isShortCircuit = true;
         }
         if (enablePhasedScheduler) {
-            schedule = new PhasedExecutionSchedule(connectContext);
+            scheduler = new PhasedExecutionSchedule(connectContext);
         } else {
-            schedule = new AllAtOnceExecutionSchedule();
+            scheduler = new AllAtOnceExecutionSchedule();
         }
 
         this.queryProfile =
@@ -502,9 +502,16 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
+    public void onReleaseSlots() {
+        if (slot != null) {
+            jobSpec.getSlotProvider().cancelSlotRequirement(slot);
+            jobSpec.getSlotProvider().releaseSlot(slot);
+        }
+    }
+
+    @Override
     public void onFinished() {
-        jobSpec.getSlotProvider().cancelSlotRequirement(slot);
-        jobSpec.getSlotProvider().releaseSlot(slot);
+        onReleaseSlots();
         // for async profile, if Be doesn't report profile in time, we upload the most complete profile
         // into profile Manager here. IN other case, queryProfile.finishAllInstances just do nothing here
         queryProfile.finishAllInstances(Status.OK);
@@ -528,7 +535,7 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
-    public void startScheduling(boolean needDeploy) throws Exception {
+    public void startScheduling(ScheduleOption option) throws Exception {
         try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Pending")) {
             QueryQueueManager.getInstance().maybeWait(connectContext, this);
         }
@@ -543,11 +550,11 @@ public class DefaultCoordinator extends Coordinator {
         }
 
         try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Deploy")) {
-            deliverExecFragments(needDeploy);
+            deliverExecFragments(option);
         }
 
         // Prevent `explain scheduler` from waiting until the profile timeout.
-        if (!needDeploy) {
+        if (!option.doDeploy) {
             queryProfile.finishAllInstances(Status.OK);
         }
     }
@@ -555,7 +562,7 @@ public class DefaultCoordinator extends Coordinator {
     @Override
     public Status scheduleNextTurn(TUniqueId fragmentInstanceId) {
         try {
-            schedule.tryScheduleNextTurn(fragmentInstanceId);
+            scheduler.tryScheduleNextTurn(fragmentInstanceId);
         } catch (Exception e) {
             LOG.warn("schedule fragment:{} next internal error:", DebugUtil.printId(fragmentInstanceId), e);
             cancel(PPlanFragmentCancelReason.INTERNAL_ERROR, e.getMessage());
@@ -638,14 +645,14 @@ public class DefaultCoordinator extends Coordinator {
         }
     }
 
-    private void deliverExecFragments(boolean needDeploy) throws RpcException, UserException {
+    private void deliverExecFragments(ScheduleOption option) throws RpcException, UserException {
         lock();
         try (Timer ignored = Tracers.watchScope(Tracers.Module.SCHEDULER, "DeployLockInternalTime")) {
             Deployer deployer =
                     new Deployer(connectContext, jobSpec, executionDAG, coordinatorPreprocessor.getCoordAddress(),
-                            this::handleErrorExecution, needDeploy);
-            schedule.prepareSchedule(this, deployer, executionDAG);
-            this.schedule.schedule();
+                            this::handleErrorExecution, option.doDeploy);
+            scheduler.prepareSchedule(this, deployer, executionDAG);
+            this.scheduler.schedule(option);
             queryProfile.attachExecutionProfiles(executionDAG.getExecutions());
         } finally {
             unlock();
@@ -899,7 +906,7 @@ public class DefaultCoordinator extends Coordinator {
                 throw new RpcException("unknown", copyStatus.getErrorMsg());
             } else {
                 String errMsg = copyStatus.getErrorMsg();
-                LOG.warn("query failed: {}", errMsg);
+                LOG.warn("query {} failed: {}", connectContext.queryId, errMsg);
 
                 // hide host info
                 int hostIndex = errMsg.indexOf("host");
@@ -912,7 +919,9 @@ public class DefaultCoordinator extends Coordinator {
                     ec = InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR;
                 } else if (copyStatus.isTimeout()) {
                     ErrorReport.reportTimeoutException(
-                            ErrorCode.ERR_TIMEOUT, "Query", jobSpec.getQueryOptions().query_timeout, errMsg);
+                            ErrorCode.ERR_TIMEOUT, "Query", jobSpec.getQueryOptions().query_timeout,
+                            String.format("please increase the '%s' session variable and retry",
+                                    SessionVariable.QUERY_TIMEOUT));
                 }
                 throw new UserException(ec, errMsg);
             }
@@ -954,7 +963,7 @@ public class DefaultCoordinator extends Coordinator {
                 queryStatus.setStatus(Status.CANCELLED);
                 queryStatus.setErrorMsg(message);
             }
-            LOG.warn("cancel execState of query, this is outside invoke");
+            LOG.info("cancel query {} because {}", connectContext.queryId, message);
             cancelInternal(reason);
         } finally {
             try {
@@ -998,7 +1007,7 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     private boolean isPhasedSchedule() {
-        return schedule instanceof PhasedExecutionSchedule;
+        return scheduler instanceof PhasedExecutionSchedule;
     }
 
     // For phased schedule execution, we cancel the query context. (BE will cancel the relevant fragment internally)
@@ -1007,6 +1016,7 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     private void cancelRemoteFragmentsAsync(PPlanFragmentCancelReason cancelReason) {
+        scheduler.cancel();
         for (FragmentInstanceExecState execState : executionDAG.getExecutions()) {
             // If the execState fails to be cancelled, and it has been finished or not been deployed,
             // count down the profileDoneSignal of this execState immediately,

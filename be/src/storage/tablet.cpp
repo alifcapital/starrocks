@@ -628,6 +628,14 @@ Status Tablet::add_inc_rowset(const RowsetSharedPtr& rowset, int64_t version) {
 }
 
 bool Tablet::add_committed_rowset(const RowsetSharedPtr& rowset) {
+    // There are several scenarios where _committed_rs_map might be modified:
+    //   1. Adding to _committed_rs_map when committing a transaction.
+    //   2. Removing from _committed_rs_map when publishing a transaction.
+    //   3. Clear _committed_rs_map during a schema update.
+    // Add and Delete from _committed_rs_map is thread safe but there are concurrent issue between
+    // add(delete) and clear operation.
+    // So we use schema_lock to prevent the concurrent issue.
+    std::shared_lock l(_schema_lock);
     if (_committed_rs_map.size() >= config::max_committed_without_schema_rowset) {
         VLOG(2) << "tablet: " << tablet_id()
                 << " too many committed without schema rowset : " << _committed_rs_map.size();
@@ -642,6 +650,7 @@ bool Tablet::add_committed_rowset(const RowsetSharedPtr& rowset) {
 }
 
 void Tablet::erase_committed_rowset(const RowsetSharedPtr& rowset) {
+    std::shared_lock l(_schema_lock);
     if (rowset != nullptr) {
         _committed_rs_map.erase(rowset->rowset_id());
     }
@@ -1818,6 +1827,7 @@ const TabletSchemaCSPtr Tablet::thread_safe_get_tablet_schema() const {
     return _max_version_schema;
 }
 
+DEFINE_FAIL_POINT(tablet_get_visible_rowset);
 // for non-pk tablet, all published rowset will be rewrite when save `tablet_meta`
 // for pk tablet, we need to get the rowset which without `tablet_schema` and rewrite
 // the rowsets in `_committed_rs_map` is committed success but not publish yet, so if we update the
@@ -1832,6 +1842,14 @@ void Tablet::_get_rewrite_meta_rs(std::vector<RowsetSharedPtr>& rewrite_meta_rs)
     if (_updates) {
         _updates->rewrite_rs_meta(true);
     }
+    FAIL_POINT_TRIGGER_EXECUTE(tablet_get_visible_rowset, {
+        if (_updates) {
+            auto rowset_map = _updates->get_rowset_map();
+            for (const auto& [_, rs] : (*rowset_map)) {
+                rewrite_meta_rs.emplace_back(rs);
+            }
+        }
+    });
 }
 
 void Tablet::update_max_version_schema(const TabletSchemaCSPtr& tablet_schema) {
@@ -1848,7 +1866,8 @@ void Tablet::update_max_version_schema(const TabletSchemaCSPtr& tablet_schema) {
         }
         std::vector<RowsetSharedPtr> rewrite_meta_rs;
         _get_rewrite_meta_rs(rewrite_meta_rs);
-        _tablet_meta->save_tablet_schema(_max_version_schema, rewrite_meta_rs, _data_dir);
+        _tablet_meta->save_tablet_schema(_max_version_schema, rewrite_meta_rs, _data_dir,
+                                         _max_version_schema->keys_type() == KeysType::PRIMARY_KEYS);
         _committed_rs_map.clear();
     }
 }

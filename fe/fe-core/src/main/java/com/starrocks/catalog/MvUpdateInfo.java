@@ -18,6 +18,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.common.Config;
 import com.starrocks.sql.common.PCell;
+import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.Map;
 import java.util.Set;
@@ -144,15 +145,7 @@ public class MvUpdateInfo {
         if (mvToRefreshType == MvToRefreshType.FULL) {
             return null;
         }
-        if (queryRewriteConsistencyMode == TableProperty.QueryRewriteConsistencyMode.LOOSE) {
-            MvBaseTableUpdateInfo mvBaseTableUpdateInfo = baseTableUpdateInfos.get(refBaseTable);
-            if (mvBaseTableUpdateInfo == null) {
-                return null;
-            }
-            return mvBaseTableUpdateInfo.getToRefreshPartitionNames();
-        }
-
-        if (mvPartToBasePartNames == null || mvPartToBasePartNames.isEmpty()) {
+        if (CollectionUtils.sizeIsEmpty(mvPartToBasePartNames)) {
             return null;
         }
         // MV's partition names to refresh are not only affected by the ref base table, but also other base tables.

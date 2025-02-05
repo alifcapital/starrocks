@@ -25,6 +25,7 @@ import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.DnsCache;
 import com.starrocks.datacache.DataCacheMetrics;
+import com.starrocks.persist.gson.GsonPostProcessable;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.CoordinatorMonitor;
 import com.starrocks.qe.GlobalVariable;
@@ -53,7 +54,7 @@ import java.util.stream.Collectors;
  * This class extends the primary identifier of a compute node with computing capabilities
  * and no storage capacity。
  */
-public class ComputeNode implements IComputable, Writable {
+public class ComputeNode implements IComputable, Writable, GsonPostProcessable {
     private static final Logger LOG = LogManager.getLogger(ComputeNode.class);
 
     @SerializedName("id")
@@ -73,8 +74,8 @@ public class ComputeNode implements IComputable, Writable {
     private volatile int beRpcPort; // be rpc port
     @SerializedName("brpcPort")
     private volatile int brpcPort = -1;
-    @SerializedName("beArrowPort")
-    private volatile int beArrowPort; // be arrow port
+    @SerializedName("arrowFlightPort")
+    private volatile int arrowFlightPort = -1; // be arrow port
 
     @SerializedName("cpuCores")
     private volatile int cpuCores = 0; // Cpu cores of node
@@ -161,7 +162,7 @@ public class ComputeNode implements IComputable, Writable {
         this.bePort = 0;
         this.httpPort = 0;
         this.beRpcPort = 0;
-        this.beArrowPort = 0;
+        this.arrowFlightPort = -1;
 
         this.backendState = Backend.BackendState.free.ordinal();
 
@@ -177,7 +178,7 @@ public class ComputeNode implements IComputable, Writable {
         this.bePort = -1;
         this.httpPort = -1;
         this.beRpcPort = -1;
-        this.beArrowPort = -1;
+        this.arrowFlightPort = -1;
         this.lastUpdateMs = -1L;
         this.lastStartTime = -1L;
 
@@ -252,12 +253,12 @@ public class ComputeNode implements IComputable, Writable {
         return brpcPort;
     }
 
-    public int getBeArrowPort() {
-        return beArrowPort;
+    public int getArrowFlightPort() {
+        return arrowFlightPort;
     }
 
-    public void setBeArrowPort(int beArrowPort) {
-        this.beArrowPort = beArrowPort;
+    public void setArrowFlightPort(int arrowFlightPort) {
+        this.arrowFlightPort = arrowFlightPort;
     }
 
     public TNetworkAddress getAddress() {
@@ -585,9 +586,9 @@ public class ComputeNode implements IComputable, Writable {
                 this.starletPort = hbResponse.getStarletPort();
             }
 
-            if (this.beArrowPort != hbResponse.getBeArrowPort()) {
+            if (this.arrowFlightPort != hbResponse.getArrowFlightPort()) {
                 isChanged = true;
-                this.beArrowPort = hbResponse.getBeArrowPort();
+                this.arrowFlightPort = hbResponse.getArrowFlightPort();
             }
 
             if (RunMode.isSharedDataMode() && this.isSetStoragePath != hbResponse.isSetStoragePath()) {
@@ -764,6 +765,15 @@ public class ComputeNode implements IComputable, Writable {
 
     public Status getStatus() {
         return status;
+    }
+
+    @Override
+    public void gsonPostProcess() {
+        if (isAlive.get()) {
+            // Upgraded from an old version where the status is not properly set.
+            // reset the status according to the aliveness
+            status = Status.OK;
+        }
     }
 
     public static class ResourceGroupUsage {

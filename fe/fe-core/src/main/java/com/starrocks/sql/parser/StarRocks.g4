@@ -126,6 +126,8 @@ statement
     | killStatement
     | syncStatement
     | executeScriptStatement
+    | adminSetAutomatedSnapshotOnStatement
+    | adminSetAutomatedSnapshotOffStatement
 
     // Cluster Management Statement
     | alterSystemStatement
@@ -302,9 +304,9 @@ statement
     | cancelRefreshDictionaryStatement
 
     // Plan advisor statement
-    | addPlanAdvisorStatement
-    | clearPlanAdvisorStatement
-    | delPlanAdvisorStatement
+    | alterPlanAdvisorAddStatement
+    | truncatePlanAdvisorStatement
+    | alterPlanAdvisorDropStatement
     | showPlanAdvisorStatement
 
     // Warehouse Statement
@@ -316,6 +318,9 @@ statement
     | showWarehousesStatement
     | showClustersStatement
     | showNodesStatement
+
+    // Translate Statement
+    | translateStatement
 
     // Unsupported Statement
     | unsupportedStatement
@@ -674,7 +679,7 @@ alterMaterializedViewStatement
     ;
 
 refreshMaterializedViewStatement
-    : REFRESH MATERIALIZED VIEW mvName=qualifiedName (PARTITION (partitionRangeDesc | listPartitionValues))? FORCE? (WITH (SYNC | ASYNC) MODE)?
+    : REFRESH MATERIALIZED VIEW mvName=qualifiedName (PARTITION (partitionRangeDesc | listPartitionValues))? FORCE? (WITH (SYNC | ASYNC) MODE)? (WITH PRIORITY priority=INTEGER_VALUE)?
     ;
 
 cancelRefreshMaterializedViewStatement
@@ -723,6 +728,14 @@ killStatement
 
 syncStatement
     : SYNC
+    ;
+
+adminSetAutomatedSnapshotOnStatement
+    : ADMIN SET AUTOMATED CLUSTER SNAPSHOT ON (STORAGE VOLUME svName=identifier)?
+    ;
+
+adminSetAutomatedSnapshotOffStatement
+    : ADMIN SET AUTOMATED CLUSTER SNAPSHOT OFF
     ;
 
 // ------------------------------------------- Cluster Management Statement ---------------------------------------------
@@ -898,6 +911,7 @@ alterClause
     | dropBranchClause
     | dropTagClause
     | tableOperationClause
+    | dropPersistentIndexClause
 
     //Alter partition clause
     | addPartitionClause
@@ -1122,6 +1136,14 @@ timeUnit
     | MINUTES
     ;
 
+integer_list
+    : '(' INTEGER_VALUE (',' INTEGER_VALUE)* ')'
+    ;
+
+dropPersistentIndexClause
+    : DROP PERSISTENT INDEX ON TABLETS integer_list
+    ;
+
 // ---------Alter partition clause---------
 
 addPartitionClause
@@ -1132,6 +1154,7 @@ addPartitionClause
 dropPartitionClause
     : DROP TEMPORARY? (PARTITION (IF EXISTS)? identifier | PARTITIONS (IF EXISTS)? identifierList) FORCE?
     | DROP TEMPORARY? PARTITIONS (IF EXISTS)? multiRangePartition FORCE?
+    | DROP TEMPORARY? PARTITIONS (IF EXISTS)? WHERE where=expression FORCE?
     ;
 
 truncatePartitionClause
@@ -1161,8 +1184,13 @@ insertStatement
 
 // for compatibility with the case 'LABEL before columnAliases'
 insertLabelOrColumnAliases
-    : WITH LABEL label=identifier
-    | columnAliases
+    : columnAliasesOrByName
+    | WITH LABEL label=identifier
+    ;
+
+columnAliasesOrByName
+    : columnAliases
+    | BY NAME
     ;
 
 updateStatement
@@ -1989,14 +2017,14 @@ lock_type
     ;
 
 // ------------------------------------------- Plan Tuning Statement ---------------------------------------------------
-addPlanAdvisorStatement
-    : ADD INTO PLAN ADVISOR queryStatement;
+alterPlanAdvisorAddStatement
+    : ALTER PLAN ADVISOR ADD queryStatement;
 
-clearPlanAdvisorStatement
-    : CLEAR PLAN ADVISOR;
+truncatePlanAdvisorStatement
+    : TRUNCATE PLAN ADVISOR;
 
-delPlanAdvisorStatement
-    : DELETE PLAN ADVISOR string;
+alterPlanAdvisorDropStatement
+    : ALTER PLAN ADVISOR DROP string;
 
 showPlanAdvisorStatement
     : SHOW PLAN ADVISOR;
@@ -2035,6 +2063,19 @@ showClustersStatement
 showNodesStatement
     : SHOW NODES FROM WAREHOUSES (LIKE pattern=string)?
     | SHOW NODES FROM WAREHOUSE identifier
+    ;
+
+// ------------------------------------------- Translate Statement -----------------------------------------------------
+translateStatement
+    : TRANSLATE dialect translateSQL
+    ;
+
+dialect
+    : identifier
+    ;
+
+translateSQL
+    : .+
     ;
 
 // ------------------------------------------- Query Statement ---------------------------------------------------------
@@ -2401,6 +2442,7 @@ functionCall
     | specialFunctionExpression                                                           #specialFunction
     | aggregationFunction over?                                                           #aggregationFunctionCall
     | windowFunction over                                                                 #windowFunctionCall
+    | TRANSLATE '(' (expression (',' expression)*)? ')'                                   #translateFunctionCall
     | qualifiedName '(' (expression (',' expression)*)? ')'  over?                        #simpleFunctionCall
     ;
 
@@ -2864,7 +2906,7 @@ number
     ;
 
 nonReserved
-    : ACCESS | ACTIVE | ADVISOR | AFTER | AGGREGATE | APPLY | ASYNC | AUTHORS | AVG | ADMIN | ANTI | AUTHENTICATION | AUTO_INCREMENT
+    : ACCESS | ACTIVE | ADVISOR | AFTER | AGGREGATE | APPLY | ASYNC | AUTHORS | AVG | ADMIN | ANTI | AUTHENTICATION | AUTO_INCREMENT | AUTOMATED
     | ARRAY_AGG | ARRAY_AGG_DISTINCT
     | BACKEND | BACKENDS | BACKUP | BEGIN | BITMAP_UNION | BLACKLIST | BLACKHOLE | BINARY | BODY | BOOLEAN | BRANCH | BROKER | BUCKETS
     | BUILTIN | BASE | BEFORE
@@ -2883,7 +2925,7 @@ nonReserved
     | LABEL | LAST | LESS | LEVEL | LIST | LOCAL | LOCATION | LOGS | LOGICAL | LOW_PRIORITY | LOCK | LOCATIONS
     | MANUAL | MAP | MAPPING | MAPPINGS | MASKING | MATCH | MAPPINGS | MATERIALIZED | MAX | META | MIN | MINUTE | MINUTES | MODE | MODIFY | MONTH | MERGE | MINUS
     | NAME | NAMES | NEGATIVE | NO | NODE | NODES | NONE | NULLS | NUMBER | NUMERIC
-    | OBSERVER | OF | OFFSET | ONLY | OPTIMIZER | OPEN | OPERATE | OPTION | OVERWRITE
+    | OBSERVER | OF | OFFSET | ONLY | OPTIMIZER | OPEN | OPERATE | OPTION | OVERWRITE | OFF
     | PARTITIONS | PASSWORD | PATH | PAUSE | PENDING | PERCENTILE_UNION | PIVOT | PLAN | PLUGIN | PLUGINS | POLICY | POLICIES
     | PERCENT_RANK | PRECEDING | PRIORITY | PROC | PROCESSLIST | PROFILE | PROFILELIST | PRIVILEGES | PROBABILITY | PROPERTIES | PROPERTY | PIPE | PIPES
     | QUARTER | QUERY | QUERIES | QUEUE | QUOTA | QUALIFY
@@ -2893,7 +2935,7 @@ nonReserved
     | SAMPLE | SCHEDULE | SCHEDULER | SECOND | SECURITY | SEPARATOR | SERIALIZABLE |SEMI | SESSION | SETS | SIGNED | SNAPSHOT | SNAPSHOTS | SQLBLACKLIST | START
     | STREAM | SUM | STATUS | STOP | SKIP_HEADER | SWAP
     | STORAGE| STRING | STRUCT | STATS | SUBMIT | SUSPEND | SYNC | SYSTEM_TIME
-    | TABLES | TABLET | TABLETS | TAG | TASK | TEMPORARY | TIMESTAMP | TIMESTAMPADD | TIMESTAMPDIFF | THAN | TIME | TIMES | TRANSACTION | TRACE
+    | TABLES | TABLET | TABLETS | TAG | TASK | TEMPORARY | TIMESTAMP | TIMESTAMPADD | TIMESTAMPDIFF | THAN | TIME | TIMES | TRANSACTION | TRACE | TRANSLATE
     | TRIM_SPACE
     | TRIGGERS | TRUNCATE | TYPE | TYPES
     | UNBOUNDED | UNCOMMITTED | UNSET | UNINSTALL | USAGE | USER | USERS | UNLOCK
@@ -2903,4 +2945,5 @@ nonReserved
     | DOTDOTDOT | NGRAMBF | VECTOR
     | FIELD
     | ARRAY_ELEMENT
+    | PERSISTENT
     ;
