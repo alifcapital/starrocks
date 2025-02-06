@@ -163,12 +163,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
         Table icebergTable = delegate.getTable(dbName, tableName);
 
-        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY
-                && !getExcludedTables().contains(tableName)) {
+        ConnectContext context = ConnectContext.get();
+        if (context != null &&
+                context.getCommand() == MysqlCommand.COM_QUERY &&
+                !getExcludedTables().contains(tableName)) {
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
             tables.put(icebergTableName, icebergTable);
         }
-
         return icebergTable;
     }
 
