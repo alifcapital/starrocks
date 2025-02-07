@@ -758,7 +758,8 @@ public class MvRewritePreprocessor {
                 if (!checkMvPartitionNamesToRefresh(mv, partitionNamesToRefresh, mvPlanContext)) {
                     continue;
                 }
-                logMVPrepare(mv, "MV' partitions to refresh: {}", partitionNamesToRefresh);
+                logMVPrepare(mv, "MV' partitions to refresh: {}/{}", partitionNamesToRefresh.size(),
+                        MvUtils.shrinkToSize(partitionNamesToRefresh, Config.max_mv_task_run_meta_message_values_length));
 
                 MaterializationContext materializationContext = buildMaterializationContext(context, mv, mvPlanContext,
                         mvUpdateInfo, queryTables);
@@ -914,7 +915,7 @@ public class MvRewritePreprocessor {
 
         // first add base schema to avoid replaced in full schema.
         Set<String> columnNames = Sets.newHashSet();
-        for (Column column : mv.getBaseSchema()) {
+        for (Column column : mv.getBaseSchemaWithoutGeneratedColumn()) {
             ColumnRefOperator columnRef = columnRefFactory.create(column.getName(),
                     column.getType(),
                     column.isAllowNull());

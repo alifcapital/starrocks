@@ -46,6 +46,7 @@ import com.starrocks.common.util.DateUtils;
 import com.starrocks.common.util.DynamicPartitionUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.common.util.concurrent.lock.AutoCloseableLock;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.persist.AlterViewInfo;
@@ -328,9 +329,9 @@ public class AlterJobExecutor implements AstVisitor<Void, ConnectContext> {
                 }
 
                 // inactive the related MVs
-                AlterMVJobExecutor.inactiveRelatedMaterializedView(db, origTable,
+                AlterMVJobExecutor.inactiveRelatedMaterializedView(origTable,
                         MaterializedViewExceptions.inactiveReasonForBaseTableSwapped(origTblName), false);
-                AlterMVJobExecutor.inactiveRelatedMaterializedView(db, olapNewTbl,
+                AlterMVJobExecutor.inactiveRelatedMaterializedView(olapNewTbl,
                         MaterializedViewExceptions.inactiveReasonForBaseTableSwapped(newTblName), false);
 
                 SwapTableOperationLog log = new SwapTableOperationLog(db.getId(), origTable.getId(), olapNewTbl.getId());
@@ -550,14 +551,12 @@ public class AlterJobExecutor implements AstVisitor<Void, ConnectContext> {
 
     @Override
     public Void visitRollupRenameClause(RollupRenameClause clause, ConnectContext context) {
-        Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.WRITE);
-        try {
+        try (AutoCloseableLock ignore =
+                    new AutoCloseableLock(new Locker(), db.getId(), Lists.newArrayList(table.getId()), LockType.WRITE)) {
             ErrorReport.wrapWithRuntimeException(() ->
                     GlobalStateMgr.getCurrentState().getLocalMetastore().renameRollup(db, (OlapTable) table, clause));
-        } finally {
-            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.WRITE);
         }
+
         return null;
     }
 
@@ -610,8 +609,12 @@ public class AlterJobExecutor implements AstVisitor<Void, ConnectContext> {
             DynamicPartitionUtil.checkAlterAllowed((OlapTable) table);
         }
 
-        ErrorReport.wrapWithRuntimeException(() ->
-                GlobalStateMgr.getCurrentState().getLocalMetastore().dropPartition(db, table, clause));
+        try (AutoCloseableLock ignore =
+                    new AutoCloseableLock(new Locker(), db.getId(), Lists.newArrayList(table.getId()), LockType.WRITE)) {
+            ErrorReport.wrapWithRuntimeException(() ->
+                    GlobalStateMgr.getCurrentState().getLocalMetastore().dropPartition(db, table, clause));
+        }
+
         return null;
     }
 

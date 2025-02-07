@@ -16,6 +16,7 @@ package com.starrocks.alter;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.IntLiteral;
 import com.starrocks.analysis.StringLiteral;
 import com.starrocks.analysis.TableName;
@@ -49,6 +50,7 @@ import com.starrocks.scheduler.Task;
 import com.starrocks.scheduler.TaskBuilder;
 import com.starrocks.scheduler.TaskManager;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.MaterializedViewAnalyzer;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.analyzer.SetStmtAnalyzer;
 import com.starrocks.sql.ast.AlterMaterializedViewStatusClause;
@@ -119,8 +121,11 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
         String ttlRetentionCondition = null;
         if (properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_RETENTION_CONDITION)) {
             Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(materializedView.getDbId());
+            TableName mvTableName = new TableName(db.getFullName(), materializedView.getName());
+            Map<Expr, Expr> mvPartitionByExprToAdjustMap =
+                    MaterializedViewAnalyzer.getMVPartitionByExprToAdjustMap(mvTableName, materializedView);
             ttlRetentionCondition = PropertyAnalyzer.analyzePartitionRetentionCondition(db,
-                    materializedView, properties, true);
+                    materializedView, properties, true, mvPartitionByExprToAdjustMap);
         }
         int partitionRefreshNumber = INVALID;
         if (properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_REFRESH_NUMBER)) {
@@ -251,6 +256,8 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
                 !ttlRetentionCondition.equalsIgnoreCase(materializedView.getTableProperty().getPartitionRetentionCondition())) {
             curProp.put(PropertyAnalyzer.PROPERTIES_PARTITION_RETENTION_CONDITION, ttlRetentionCondition);
             materializedView.getTableProperty().setPartitionRetentionCondition(ttlRetentionCondition);
+            // re-analyze mv retention condition
+            materializedView.analyzeMVRetentionCondition(context);
             isChanged = true;
         } else if (propClone.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_REFRESH_NUMBER) &&
                 materializedView.getTableProperty().getPartitionRefreshNumber() != partitionRefreshNumber) {
@@ -487,7 +494,7 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
     /**
      * Inactive related materialized views because of base table/view is changed or dropped in the leader background.
      */
-    public static void inactiveRelatedMaterializedView(Database db, Table olapTable, String reason, boolean isReplay) {
+    public static void inactiveRelatedMaterializedView(Table olapTable, String reason, boolean isReplay) {
         if (!Config.enable_mv_automatic_inactive_by_base_table_changes) {
             LOG.warn("Skip to inactive related materialized views because of automatic inactive is disabled, " +
                     "table:{}, reason:{}", olapTable.getName(), reason);
@@ -501,8 +508,15 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
             return;
         }
         for (MvId mvId : olapTable.getRelatedMaterializedViews()) {
-            MaterializedView mv = (MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore()
-                    .getTable(db.getId(), mvId.getId());
+            Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(mvId.getDbId());
+            if (db == null) {
+                LOG.warn("Table {} inactive MaterializedView, viewId {} ,db {} not found",
+                        olapTable.getName(),
+                        mvId.getId(),
+                        mvId.getDbId());
+                continue;
+            }
+            MaterializedView mv = (MaterializedView) db.getTable(mvId.getId());
             if (mv != null) {
                 LOG.warn("Inactive MV {}/{} because {}", mv.getName(), mv.getId(), reason);
                 // inactive mv by reason
@@ -518,7 +532,7 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
                     mv.setInactiveAndReason(reason);
                 }
                 // recursive inactive
-                inactiveRelatedMaterializedView(db, mv,
+                inactiveRelatedMaterializedView(mv,
                         MaterializedViewExceptions.inactiveReasonForBaseTableActive(mv.getName()), false);
             } else {
                 LOG.info("Ignore materialized view {} does not exists", mvId);
