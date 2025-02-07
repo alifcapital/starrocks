@@ -145,12 +145,24 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return delegate.listTables(dbName);
     }
 
-    private Set<String> getExcludedTables() {
+    private Set<IcebergTableName> getExcludedTables() {
         String excludedTablesStr = Config.iceberg_caching_excluded_tables;
-        return excludedTablesStr == null ? Collections.emptySet() :
-               Arrays.stream(excludedTablesStr.split(","))
-                     .map(String::trim)
-                     .collect(Collectors.toSet());
+        if (excludedTablesStr == null) {
+            return Collections.emptySet();
+        }
+
+        return Arrays.stream(excludedTablesStr.split(","))
+            .map(String::trim)
+            .map(fullTableName -> {
+                String[] parts = fullTableName.split("\\.");
+                if (parts.length != 2) {
+                    // Could log warning here about malformed table name
+                    return null;
+                }
+                return new IcebergTableName(parts[0], parts[1]);
+            })
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
     }
 
     @Override
@@ -162,14 +174,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
 
         Table icebergTable = delegate.getTable(dbName, tableName);
-
         ConnectContext context = ConnectContext.get();
+
         if (context != null &&
                 context.getCommand() == MysqlCommand.COM_QUERY &&
-                !getExcludedTables().contains(tableName)) {
+                !getExcludedTables().contains(icebergTableName)) {
+
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
             tables.put(icebergTableName, icebergTable);
         }
+
         return icebergTable;
     }
 
@@ -311,7 +325,6 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         partitionCache.getUnchecked(updatedIcebergTableName);
         synchronized (this) {
             tables.put(updatedIcebergTableName, updatedTable);
-            tables.invalidate(baseIcebergTableName);
         }
 
         TableMetadata updatedTableMetadata = updatedTable.operations().current();
