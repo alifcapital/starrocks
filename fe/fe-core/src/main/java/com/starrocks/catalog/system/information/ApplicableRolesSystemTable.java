@@ -28,7 +28,7 @@ public class ApplicableRolesSystemTable {
     public static SystemTable create(String catalogName) {
         return new SystemTable(
                 catalogName,
-                SystemId.PARTITIONS_ID,
+                SystemId.APPLICABLE_ROLES_ID,
                 NAME,
                 Table.TableType.SCHEMA,
                 builder()
@@ -41,6 +41,6 @@ public class ApplicableRolesSystemTable {
                         .column("IS_GRANTABLE", ScalarType.createVarchar(3))
                         .column("IS_DEFAULT", ScalarType.createVarchar(3))
                         .column("IS_MANDATORY", ScalarType.createVarchar(3))
-                        .build(), TSchemaTableType.SCH_PARTITIONS);
+                        .build(), TSchemaTableType.SCH_APPLICABLE_ROLES);
     }
 }
