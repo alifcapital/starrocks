@@ -39,6 +39,7 @@ import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.TupleDescriptor;
 import com.starrocks.catalog.ColumnAccessPath;
+import com.starrocks.catalog.Table;
 import com.starrocks.common.UserException;
 import com.starrocks.datacache.DataCacheOptions;
 import com.starrocks.server.WarehouseManager;
@@ -50,6 +51,7 @@ import org.jetbrains.annotations.TestOnly;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -100,6 +102,10 @@ public abstract class ScanNode extends PlanNode {
 
     public String getTableName() {
         return desc.getTable().getName();
+    }
+
+    public Table getTable() {
+        return desc.getTable();
     }
 
     public boolean isLocalNativeTable() {
