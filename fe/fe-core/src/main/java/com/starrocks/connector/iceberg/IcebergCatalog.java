@@ -190,12 +190,18 @@ public interface IcebergCatalog extends MemoryTrackable {
     default Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
         Table nativeTable = icebergTable.getNativeTable();
         Map<String, Partition> partitionMap = Maps.newHashMap();
-        PartitionsTable partitionsTable = (PartitionsTable) MetadataTableUtils.
-                createMetadataTableInstance(nativeTable, MetadataTableType.PARTITIONS);
-        TableScan tableScan = partitionsTable.newScan();
+
+        // Create a table instance pinned to the target snapshot
+        Table snapshotTable = nativeTable;
         if (snapshotId != -1) {
-            tableScan = tableScan.useSnapshot(snapshotId);
+            snapshotTable = nativeTable.useSnapshot(snapshotId);
         }
+
+        // Create metadata table from the snapshot-pinned table
+        PartitionsTable partitionsTable = (PartitionsTable) MetadataTableUtils.
+                createMetadataTableInstance(snapshotTable, MetadataTableType.PARTITIONS);
+
+        TableScan tableScan = partitionsTable.newScan();
         if (executorService != null) {
             tableScan = tableScan.planWith(executorService);
         }
