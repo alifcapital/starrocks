@@ -4822,6 +4822,9 @@ public class LocalMetastore implements ConnectorMetadata {
         TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentState().getTabletInvertedIndex();
         for (MaterializedIndex index : partition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
             for (Tablet tablet : index.getTablets()) {
+                if (index == null) {
+                    continue;
+                }
                 long tabletId = tablet.getId();
                 invertedIndex.deleteTablet(tabletId);
             }
