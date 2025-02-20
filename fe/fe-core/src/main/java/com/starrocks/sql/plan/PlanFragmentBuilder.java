@@ -116,7 +116,6 @@ import com.starrocks.planner.stream.StreamAggNode;
 import com.starrocks.planner.stream.StreamJoinNode;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
-import com.starrocks.scheduler.mv.MaterializedViewMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
 import com.starrocks.server.RunMode;
@@ -269,8 +268,8 @@ public class PlanFragmentBuilder {
         PartitionInfo partitionInfo = LocalMetastore.buildPartitionInfo(createStmt);
         long mvId = GlobalStateMgr.getCurrentState().getNextId();
         long dbId = GlobalStateMgr.getCurrentState().getDb(createStmt.getTableName().getDb()).getId();
-        MaterializedView view =
-                MaterializedViewMgr.getInstance().createSinkTable(createStmt, partitionInfo, mvId, dbId);
+        MaterializedView view = GlobalStateMgr.getCurrentState().getMaterializedViewMgr()
+                .createSinkTable(createStmt, partitionInfo, mvId, dbId);
         TupleDescriptor tupleDesc = buildTupleDesc(execPlan, view);
         view.setMaintenancePlan(execPlan);
         List<Long> fakePartitionIds = Arrays.asList(1L, 2L, 3L);
@@ -389,6 +388,10 @@ public class PlanFragmentBuilder {
             fragment.computeLocalRfWaitingSet(fragment.getPlanRoot(), shouldClearRuntimeFilters);
         }
 
+        fragments.forEach(PlanFragment::removeDictMappingProbeRuntimeFilters);
+        fragments.forEach(PlanFragment::collectBuildRuntimeFilters);
+        fragments.forEach(PlanFragment::collectProbeRuntimeFilters);
+
         if (useQueryCache(execPlan)) {
             for (PlanFragment fragment : execPlan.getFragments()) {
                 FragmentNormalizer normalizer = new FragmentNormalizer(execPlan, fragment);
@@ -459,8 +462,6 @@ public class PlanFragmentBuilder {
 
             if (projection != null) {
                 fragment = buildProjectNode(optExpression, projection, fragment, context);
-                // push project to the same group
-                currentExecGroup.add(fragment.getPlanRoot());
             }
             PlanNode planRoot = fragment.getPlanRoot();
             if (!(optExpression.getOp() instanceof PhysicalProjectOperator) && planRoot instanceof ProjectNode) {
@@ -672,6 +673,7 @@ public class PlanFragmentBuilder {
 
             projectNode.setLimit(inputFragment.getPlanRoot().getLimit());
             inputFragment.setPlanRoot(projectNode);
+            currentExecGroup.add(projectNode);
             return inputFragment;
         }
 
@@ -808,19 +810,28 @@ public class PlanFragmentBuilder {
                             .getBackendIdByHost(FrontendOptions.getLocalHostAddress());
                 }
 
-                List<Long> selectedNonEmptyPartitionIds = node.getSelectedPartitionId().stream().filter(p -> {
-                    List<Long> selectTabletIds = scanNode.getPartitionToScanTabletMap().get(p);
-                    return selectTabletIds != null && !selectTabletIds.isEmpty();
-                }).collect(Collectors.toList());
-                scanNode.setSelectedPartitionIds(selectedNonEmptyPartitionIds);
-
+                // Filter out empty partitions from all selected partitions, original selected partition ids may be
+                // only parent partition ids if table contains subpartitions, use the real sub partition ids instead.
+                // eg:
+                // partition        : 10001 -> (tablet_1)
+                //  subpartition1   : 10002 -> (tablet_2)
+                //  subpartition2   : 10004 -> (tablet_3)
+                // original selected partition id with tablet ids: 10001 -> (tablet_2)
+                // after:
+                // selected partition ids   : 10002
+                // selected tablet ids      : tablet_2
+                // total tablets num        : 1
+                List<Long> selectedNonEmptyPartitionIds = Lists.newArrayList();
                 for (Long partitionId : scanNode.getSelectedPartitionIds()) {
                     final Partition partition = referenceTable.getPartition(partitionId);
-
                     for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
-                        Map<Long, Integer> tabletId2BucketSeq = Maps.newHashMap();
                         List<Long> selectTabletIds = scanNode.getPartitionToScanTabletMap()
                                 .get(physicalPartition.getId());
+                        if (CollectionUtils.isEmpty(selectTabletIds)) {
+                            continue;
+                        }
+                        selectedNonEmptyPartitionIds.add(physicalPartition.getId());
+                        Map<Long, Integer> tabletId2BucketSeq = Maps.newHashMap();
                         Preconditions.checkState(selectTabletIds != null && !selectTabletIds.isEmpty());
                         final MaterializedIndex selectedTable = physicalPartition.getIndex(selectedIndexId);
                         List<Long> allTabletIds = selectedTable.getTabletIdsInOrder();
@@ -834,6 +845,7 @@ public class PlanFragmentBuilder {
                         scanNode.addScanRangeLocations(partition, physicalPartition, selectedTable, tablets, localBeId);
                     }
                 }
+                scanNode.setSelectedPartitionIds(selectedNonEmptyPartitionIds);
                 scanNode.setTotalTabletsNum(totalTabletsNum);
             } catch (UserException e) {
                 throw new StarRocksPlannerException(
@@ -1061,6 +1073,7 @@ public class PlanFragmentBuilder {
             }
 
             hudiScanNode.setLimit(node.getLimit());
+            hudiScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(hudiScanNode);
@@ -1103,6 +1116,7 @@ public class PlanFragmentBuilder {
             }
 
             hdfsScanNode.setLimit(node.getLimit());
+            hdfsScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(hdfsScanNode);
@@ -1143,6 +1157,7 @@ public class PlanFragmentBuilder {
             }
 
             fileTableScanNode.setLimit(node.getLimit());
+            fileTableScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(fileTableScanNode);
@@ -1197,6 +1212,7 @@ public class PlanFragmentBuilder {
             }
 
             deltaLakeScanNode.setLimit(node.getLimit());
+            deltaLakeScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(deltaLakeScanNode);
@@ -1241,6 +1257,7 @@ public class PlanFragmentBuilder {
             }
 
             paimonScanNode.setLimit(node.getLimit());
+            paimonScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(paimonScanNode);
@@ -1384,6 +1401,7 @@ public class PlanFragmentBuilder {
             }
 
             icebergScanNode.setLimit(node.getLimit());
+            icebergScanNode.setDataCacheOptions(node.getDataCacheOptions());
 
             tupleDescriptor.computeMemLayout();
             context.getScanNodes().add(icebergScanNode);
@@ -2715,7 +2733,8 @@ public class PlanFragmentBuilder {
             joinNode.setLimit(node.getLimit());
             joinNode.computeStatistics(optExpr.getStatistics());
             joinNode.setProbePartitionByExprs(probePartitionByExprs);
-            joinNode.setEnableLateMaterialization(ConnectContext.get().getSessionVariable().isJoinLateMaterialization());
+            joinNode.setEnableLateMaterialization(
+                    ConnectContext.get().getSessionVariable().isJoinLateMaterialization());
             // enable group execution for colocate join
             currentExecGroup = leftExecGroup;
             if (ConnectContext.get().getSessionVariable().isEnableGroupExecution()) {
@@ -2724,14 +2743,19 @@ public class PlanFragmentBuilder {
                     currentExecGroup.setColocateGroup();
                     currentExecGroup.merge(rightExecGroup);
                     execGroups.remove(rightExecGroup);
-                } else if ((distributionMode.equals(JoinNode.DistributionMode.BROADCAST) || distributionMode.equals(
-                        JoinNode.DistributionMode.LOCAL_HASH_BUCKET)) &&
-                        !leftExecGroup.isDisableColocateGroup()) {
+                } else if (!leftExecGroup.isDisableColocateGroup() &&
+                        (distributionMode.equals(JoinNode.DistributionMode.BROADCAST) ||
+                                (distributionMode.equals(JoinNode.DistributionMode.LOCAL_HASH_BUCKET) &&
+                                        !joinOperator.isRightJoin()))) {
+                    // case 1: broadcast join
+                    // case 2: local bucket shuffle (no-right) join
                     // do nothing
                 } else {
                     // we don't support group execution for other join
-                    currentExecGroup = execGroups.newExecGroup();
-                    currentExecGroup.setDisableColocateGroup();
+                    currentExecGroup.disableColocateGroup(leftFragmentPlanRoot);
+                    rightExecGroup.disableColocateGroup(rightFragmentPlanRoot);
+                    currentExecGroup.merge(rightExecGroup);
+                    execGroups.remove(rightExecGroup);
                 }
             }
             currentExecGroup.add(joinNode);
@@ -3007,6 +3031,7 @@ public class PlanFragmentBuilder {
 
             ScalarOperatorToExpr.FormatterContext formatterContext =
                     new ScalarOperatorToExpr.FormatterContext(context.getColRefToExpr());
+            List<PlanFragment> childFragments = Lists.newArrayList();
             for (int i = 0; i < optExpr.getInputs().size(); i++) {
                 List<ColumnRefOperator> childOutput = setOperation.getChildOutputColumns().get(i);
                 ExecGroup setExecGroup = this.currentExecGroup;
@@ -3034,9 +3059,16 @@ public class PlanFragmentBuilder {
                         new ExchangeNode(context.getNextNodeId(), fragment.getPlanRoot(), fragment.getDataPartition());
                 this.currentExecGroup.add(exchangeNode, true);
 
+                childFragments.add(fragment);
                 exchangeNode.setFragment(setOperationFragment);
-                fragment.setDestination(exchangeNode);
                 setOperationNode.addChild(exchangeNode);
+            }
+
+            // keep the fragment child order with execution order
+            // for intersect and except. child(0) is build node.
+            for (int i = setOperationNode.getChildren().size() - 1; i >= 0; i--) {
+                final PlanFragment planFragment = childFragments.get(i);
+                planFragment.setDestination((ExchangeNode) setOperationNode.getChild(i));
             }
 
             // reset column is nullable, for handle union select xx join select xxx...

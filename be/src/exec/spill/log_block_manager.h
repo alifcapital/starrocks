@@ -45,14 +45,14 @@ using LogBlockContainerPtr = std::shared_ptr<LogBlockContainer>;
 // so theoretically, the number of containers being written at the same time will be equivalent to the number of io threads
 class LogBlockManager : public BlockManager {
 public:
-    LogBlockManager(TUniqueId query_id, DirManager* dir_mgr);
+    LogBlockManager(const TUniqueId& query_id, DirManager* dir_mgr);
     ~LogBlockManager() override;
 
     Status open() override;
     void close() override;
 
     StatusOr<BlockPtr> acquire_block(const AcquireBlockOptions& opts) override;
-    Status release_block(const BlockPtr& block) override;
+    Status release_block(BlockPtr block) override;
 
 #ifdef BE_TEST
     void set_dir_manager(DirManager* dir_mgr) { _dir_mgr = dir_mgr; }

@@ -117,7 +117,8 @@ import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.rule.mv.MVUtils;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.sql.plan.ExecPlan;
-import com.starrocks.system.BackendCoreStat;
+import com.starrocks.sql.plan.PlanTestBase;
+import com.starrocks.system.BackendResourceStat;
 import mockit.Mock;
 import mockit.MockUp;
 import org.apache.commons.lang.StringUtils;
@@ -466,6 +467,7 @@ public class StarRocksAssert {
 
     /**
      * Create tables and do insert datas and later actions.
+     *
      * @param cluster : insert into datas into table if it's not null.
      * @param tables  : tables which needs to be created and inserted.
      * @param action  : actions which will be used to do later.
@@ -495,7 +497,7 @@ public class StarRocksAssert {
             }
         } catch (Exception e) {
             e.printStackTrace();
-            Assert.fail("Do action failed:" +  e.getMessage());
+            Assert.fail("Do action failed:" + e.getMessage());
         } finally {
             if (action != null) {
                 for (String table : tables) {
@@ -672,17 +674,17 @@ public class StarRocksAssert {
 
     public StarRocksAssert alterTableProperties(String sql) throws Exception {
         AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(sql, ctx);
-        Assert.assertFalse(alterTableStmt.getOps().isEmpty());
-        Assert.assertTrue(alterTableStmt.getOps().get(0) instanceof ModifyTablePropertiesClause);
+        Assert.assertFalse(alterTableStmt.getAlterClauseList().isEmpty());
+        Assert.assertTrue(alterTableStmt.getAlterClauseList().get(0) instanceof ModifyTablePropertiesClause);
         Analyzer.analyze(alterTableStmt, ctx);
-        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(alterTableStmt);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(ctx, alterTableStmt);
         return this;
     }
 
     public StarRocksAssert alterTable(String sql) throws Exception {
         AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(sql, ctx);
         Analyzer.analyze(alterTableStmt, ctx);
-        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(alterTableStmt);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(ctx, alterTableStmt);
         return this;
     }
 
@@ -979,7 +981,7 @@ public class StarRocksAssert {
     // Add rollup
     public StarRocksAssert withRollup(String sql) throws Exception {
         AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(sql, ctx);
-        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(alterTableStmt);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(ctx, alterTableStmt);
         checkAlterJob();
         return this;
     }
@@ -993,7 +995,7 @@ public class StarRocksAssert {
 
     public void executeResourceGroupDdlSql(String sql) throws Exception {
         ConnectContext ctx = UtFrameUtils.createDefaultCtx();
-        BackendCoreStat.setNumOfHardwareCoresOfBe(1, 32);
+        BackendResourceStat.getInstance().setNumHardwareCoresOfBe(1, 32);
         StatementBase statement = com.starrocks.sql.parser.SqlParser.parse(sql, ctx.getSessionVariable()).get(0);
         Analyzer.analyze(statement, ctx);
 
@@ -1005,7 +1007,7 @@ public class StarRocksAssert {
 
     public List<List<String>> executeResourceGroupShowSql(String sql) throws Exception {
         ConnectContext ctx = UtFrameUtils.createDefaultCtx();
-        BackendCoreStat.setNumOfHardwareCoresOfBe(1, 32);
+        BackendResourceStat.getInstance().setNumHardwareCoresOfBe(1, 32);
 
         StatementBase statement = com.starrocks.sql.parser.SqlParser.parse(sql, ctx.getSessionVariable().getSqlMode()).get(0);
         Analyzer.analyze(statement, ctx);
@@ -1020,7 +1022,7 @@ public class StarRocksAssert {
         StatementBase stmt = com.starrocks.sql.parser.SqlParser.parse(sql, ctx.getSessionVariable().getSqlMode()).get(0);
         Analyzer.analyze(stmt, ctx);
 
-        ShowResultSet res =  ShowExecutor.execute((ShowStmt) stmt, ctx);
+        ShowResultSet res = ShowExecutor.execute((ShowStmt) stmt, ctx);
         String header = res.getMetaData().getColumns().stream().map(Column::getName).collect(Collectors.joining("|"));
         String body = res.getResultRows().stream()
                 .map(row -> String.join("|", row))
@@ -1041,6 +1043,15 @@ public class StarRocksAssert {
 
     public void ddl(String sql) throws Exception {
         DDLStmtExecutor.execute(UtFrameUtils.parseStmtWithNewParser(sql, ctx), ctx);
+    }
+
+    public void dropAnalyzeForTable(String tableName) throws Exception {
+        List<String> showJob = show(String.format("show analyze job where `table` = '%s' ", tableName)).get(0);
+        if (showJob.isEmpty()) {
+            return;
+        }
+        long jobId = Long.parseLong(showJob.get(0));
+        ddl("drop analyze " + jobId);
     }
 
     private void checkAlterJob() throws InterruptedException {
@@ -1119,7 +1130,9 @@ public class StarRocksAssert {
 
         public void explainContains(String... keywords) throws Exception {
             String plan = explainQuery();
-            Assert.assertTrue(plan, Stream.of(keywords).allMatch(plan::contains));
+            for (String keyword : keywords) {
+                PlanTestBase.assertContains(plan, keyword);
+            }
         }
 
         public void explainContains(String keywords, int count) throws Exception {
@@ -1127,7 +1140,7 @@ public class StarRocksAssert {
         }
 
         public void explainWithout(String s) throws Exception {
-            Assert.assertFalse(explainQuery().contains(s));
+            PlanTestBase.assertNotContains(explainQuery(), s);
         }
 
         public String explainQuery() throws Exception {

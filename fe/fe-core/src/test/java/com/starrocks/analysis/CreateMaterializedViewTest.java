@@ -40,7 +40,7 @@ import com.starrocks.common.util.DateUtils;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.persist.CreateTableInfo;
 import com.starrocks.persist.OperationType;
-import com.starrocks.persist.metablock.SRMetaBlockReader;
+import com.starrocks.persist.metablock.SRMetaBlockReaderV2;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DDLStmtExecutor;
 import com.starrocks.qe.StmtExecutor;
@@ -58,7 +58,6 @@ import com.starrocks.sql.ast.AsyncRefreshSchemeDesc;
 import com.starrocks.sql.ast.CreateMaterializedViewStatement;
 import com.starrocks.sql.ast.CreateMaterializedViewStmt;
 import com.starrocks.sql.ast.DmlStmt;
-import com.starrocks.sql.ast.ExpressionPartitionDesc;
 import com.starrocks.sql.ast.RefreshSchemeClause;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.common.MetaUtils;
@@ -127,6 +126,10 @@ public class CreateMaterializedViewTest {
     public static void beforeClass() throws Exception {
         ConnectorPlanTestBase.doInit(temp.newFolder().toURI().toString());
 
+        // set default config for async mvs
+        UtFrameUtils.setDefaultConfigForAsyncMVTest(connectContext);
+        Config.default_mv_refresh_immediate = true;
+
         UtFrameUtils.createMinStarRocksCluster();
         // create connect context
         connectContext = UtFrameUtils.createDefaultCtx();
@@ -137,10 +140,6 @@ public class CreateMaterializedViewTest {
             StatisticsMetaManager m = new StatisticsMetaManager();
             m.createStatisticsTablesForTest();
         }
-
-        // set default config for async mvs
-        UtFrameUtils.setDefaultConfigForAsyncMVTest(connectContext);
-        Config.default_mv_refresh_immediate = true;
 
         starRocksAssert.withDatabase("test").useDatabase("test")
                 .withTable("CREATE TABLE test.tbl1\n" +
@@ -855,10 +854,10 @@ public class CreateMaterializedViewTest {
         try {
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertFalse(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof SlotRef);
-            Assert.assertEquals("ss", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof SlotRef);
+            SlotRef slotRef = (SlotRef) partitionByExpr;
+            Assert.assertEquals("ss", slotRef.getColumnName());
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }
@@ -877,10 +876,10 @@ public class CreateMaterializedViewTest {
         try {
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertFalse(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof SlotRef);
-            Assert.assertEquals("ss", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof SlotRef);
+            SlotRef slotRef = (SlotRef) partitionByExpr;
+            Assert.assertEquals("ss", slotRef.getColumnName());
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }
@@ -916,11 +915,12 @@ public class CreateMaterializedViewTest {
         try {
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertTrue(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof FunctionCallExpr);
-            Assert.assertEquals(partitionExpDesc.getExpr().getChild(1), partitionExpDesc.getSlotRef());
-            Assert.assertEquals("ss", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof FunctionCallExpr);
+            List<SlotRef> slotRefs = Lists.newArrayList();
+            partitionByExpr.collect(SlotRef.class, slotRefs);
+            Assert.assertEquals(partitionByExpr.getChild(1), slotRefs.get(0));
+            Assert.assertEquals("ss", slotRefs.get(0).getColumnName());
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }
@@ -940,11 +940,12 @@ public class CreateMaterializedViewTest {
                     "as select a, b, c, d from jdbc0.partitioned_db0.tbl1;";
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertTrue(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof FunctionCallExpr);
-            Assert.assertEquals(partitionExpDesc.getExpr().getChild(0), partitionExpDesc.getSlotRef());
-            Assert.assertEquals("d", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof FunctionCallExpr);
+            List<SlotRef> slotRefs = Lists.newArrayList();
+            partitionByExpr.collect(SlotRef.class, slotRefs);
+            Assert.assertEquals(partitionByExpr.getChild(0), slotRefs.get(0));
+            Assert.assertEquals("d", slotRefs.get(0).getColumnName());
         }
 
         // slot
@@ -987,11 +988,12 @@ public class CreateMaterializedViewTest {
         try {
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertTrue(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof FunctionCallExpr);
-            Assert.assertEquals(partitionExpDesc.getExpr().getChild(1), partitionExpDesc.getSlotRef());
-            Assert.assertEquals("k1", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof FunctionCallExpr);
+            List<SlotRef> slotRefs = Lists.newArrayList();
+            partitionByExpr.collect(SlotRef.class, slotRefs);
+            Assert.assertEquals(partitionByExpr.getChild(1), slotRefs.get(0));
+            Assert.assertEquals("k1", slotRefs.get(0).getColumnName());
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }
@@ -1010,11 +1012,12 @@ public class CreateMaterializedViewTest {
         try {
             CreateMaterializedViewStatement createMaterializedViewStatement =
                     (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-            ExpressionPartitionDesc partitionExpDesc = createMaterializedViewStatement.getPartitionExpDesc();
-            Assert.assertFalse(partitionExpDesc.isFunction());
-            Assert.assertTrue(partitionExpDesc.getExpr() instanceof SlotRef);
-            Assert.assertEquals(partitionExpDesc.getExpr(), partitionExpDesc.getSlotRef());
-            Assert.assertEquals("k1", partitionExpDesc.getSlotRef().getColumnName());
+            Expr partitionByExpr = createMaterializedViewStatement.getPartitionByExpr();
+            Assert.assertTrue(partitionByExpr instanceof SlotRef);
+            List<SlotRef> slotRefs = Lists.newArrayList();
+            partitionByExpr.collect(SlotRef.class, slotRefs);
+            Assert.assertEquals(partitionByExpr, slotRefs.get(0));
+            Assert.assertEquals("k1", slotRefs.get(0).getColumnName());
         } catch (Exception e) {
             Assert.fail(e.getMessage());
         }
@@ -3750,7 +3753,6 @@ public class CreateMaterializedViewTest {
         starRocksAssert.dropTable("list_partition_tbl1");
     }
 
-
     @Test
     public void testCreateMaterializedViewOnListPartitionTables3() {
         String createSQL = "CREATE TABLE test.list_partition_tbl1 (\n" +
@@ -4724,7 +4726,7 @@ public class CreateMaterializedViewTest {
         // init empty image
         UtFrameUtils.PseudoJournalReplayer.resetFollowerJournalQueue();
         UtFrameUtils.PseudoImage initialImage = new UtFrameUtils.PseudoImage();
-        GlobalStateMgr.getCurrentState().getLocalMetastore().save(initialImage.getDataOutputStream());
+        GlobalStateMgr.getCurrentState().getLocalMetastore().save(initialImage.getImageWriter());
 
         // Create a mv with specific location, we should expect the tablets of that mv will only distribute on
         // that single labeled backend.
@@ -4744,11 +4746,11 @@ public class CreateMaterializedViewTest {
 
         // make final image
         UtFrameUtils.PseudoImage finalImage = new UtFrameUtils.PseudoImage();
-        GlobalStateMgr.getCurrentState().getLocalMetastore().save(finalImage.getDataOutputStream());
+        GlobalStateMgr.getCurrentState().getLocalMetastore().save(finalImage.getImageWriter());
 
         // test replay
         LocalMetastore localMetastoreFollower = new LocalMetastore(GlobalStateMgr.getCurrentState(), null, null);
-        localMetastoreFollower.load(new SRMetaBlockReader(initialImage.getDataInputStream()));
+        localMetastoreFollower.load(new SRMetaBlockReaderV2(initialImage.getJsonReader()));
         CreateTableInfo info = (CreateTableInfo)
                 UtFrameUtils.PseudoJournalReplayer.replayNextJournal(OperationType.OP_CREATE_TABLE_V2);
         localMetastoreFollower.replayCreateTable(info);
@@ -4760,7 +4762,7 @@ public class CreateMaterializedViewTest {
 
         // test restart
         LocalMetastore localMetastoreLeader = new LocalMetastore(GlobalStateMgr.getCurrentState(), null, null);
-        localMetastoreLeader.load(new SRMetaBlockReader(finalImage.getDataInputStream()));
+        localMetastoreLeader.load(new SRMetaBlockReaderV2(finalImage.getJsonReader()));
         mv = (MaterializedView) localMetastoreLeader.getDb("test")
                 .getTable("mv_with_location");
         System.out.println(mv.getLocation());
@@ -4776,5 +4778,59 @@ public class CreateMaterializedViewTest {
                 connectContext);
         backend = systemInfoService.getBackend(12011);
         systemInfoService.dropBackend(backend);
+    }
+
+    @Test
+    public void testCreateListPartitionedMVOfOlap() throws Exception {
+        String sql = "CREATE TABLE `s1` (\n" +
+                "   `id` varchar(36),\n" +
+                "   `location_id` varchar(36),\n" +
+                "   `location_id_hash` int,\n" +
+                "   `source_id` varchar(36),\n" +
+                "   `person_id` varchar(36)\n" +
+                ") ENGINE=OLAP\n" +
+                "PRIMARY KEY(`id`,`location_id`,`location_id_hash`)\n" +
+                "PARTITION BY (`location_id_hash`)\n" +
+                "DISTRIBUTED BY HASH(`id`) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "   \"replication_num\" = \"1\"\n" +
+                ");";
+        starRocksAssert.withTable(sql);
+        String mvSql = "create materialized view test_mv1\n" +
+                "PARTITION BY `location_id_hash`\n" +
+                "DISTRIBUTED BY HASH(`id`) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "    \"replication_num\" = \"1\"\n" +
+                ") \n" +
+                "as select `id`, `location_id`, `location_id_hash` from `s1`;";
+        starRocksAssert.withMaterializedView(mvSql, () -> {
+            MaterializedView mv = starRocksAssert.getMv("test", "test_mv1");
+            Assert.assertTrue(mv.getPartitionInfo().isListPartition());
+        });
+        starRocksAssert.dropTable("s1");
+    }
+
+    @Test
+    public void testCreateListPartitionedMVOfExternal() throws Exception {
+        String sql = "create materialized view mv1 " +
+                "partition by (d)" +
+                "distributed by hash(a) buckets 10 " +
+                "REFRESH DEFERRED MANUAL " +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\"\n" +
+                ") " +
+                "as select a, b, c, d from jdbc0.partitioned_db0.tbl1;";
+        CreateMaterializedViewStatement stmt =
+                (CreateMaterializedViewStatement) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
+        Expr partitionByExpr = stmt.getPartitionByExpr();
+        Assert.assertTrue(partitionByExpr instanceof SlotRef);
+        List<SlotRef> slotRefs = Lists.newArrayList();
+        partitionByExpr.collect(SlotRef.class, slotRefs);
+        Assert.assertEquals(partitionByExpr, slotRefs.get(0));
+        Assert.assertEquals("d", slotRefs.get(0).getColumnName());
+        starRocksAssert.withMaterializedView(sql, () -> {
+            MaterializedView mv = starRocksAssert.getMv("test", "mv1");
+            Assert.assertTrue(mv.getPartitionInfo().isListPartition());
+        });
     }
 }

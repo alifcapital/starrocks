@@ -188,6 +188,10 @@ public abstract class StarRocksHttpTestCase {
     }
 
     public static OlapTable newTable(String name) {
+        return newTable(name, 1024000L);
+    }
+
+    public static OlapTable newTable(String name, long replicaDataSize) {
         GlobalStateMgr.getCurrentState().getTabletInvertedIndex().clear();
         Column k1 = new Column("k1", Type.BIGINT);
         Column k2 = new Column("k2", Type.DOUBLE);
@@ -197,15 +201,15 @@ public abstract class StarRocksHttpTestCase {
 
         Replica replica1 =
                 new Replica(testReplicaId1, testBackendId1, testStartVersion, testSchemaHash,
-                        1024000L, 2000L,
+                        replicaDataSize, 2000L,
                         Replica.ReplicaState.NORMAL, -1, 0);
         Replica replica2 =
                 new Replica(testReplicaId2, testBackendId2, testStartVersion, testSchemaHash,
-                        1024000L, 2000L,
+                        replicaDataSize, 2000L,
                         Replica.ReplicaState.NORMAL, -1, 0);
         Replica replica3 =
                 new Replica(testReplicaId3, testBackendId3, testStartVersion, testSchemaHash,
-                        1024000L, 2000L,
+                        replicaDataSize, 2000L,
                         Replica.ReplicaState.NORMAL, -1, 0);
 
         // tablet
@@ -449,6 +453,43 @@ public abstract class StarRocksHttpTestCase {
     @Before
     public void setUp() {
         GlobalStateMgr globalStateMgr = newDelegateCatalog();
+        setUpWithGlobalStateMgr(globalStateMgr);
+    }
+
+    public void setUpWithCatalog() {
+        GlobalStateMgr globalStateMgr = newDelegateGlobalStateMgr();
+        setUpWithGlobalStateMgr(globalStateMgr);
+
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            SchemaChangeHandler getSchemaChangeHandler() {
+                return new SchemaChangeHandler();
+            }
+
+            @Mock
+            MaterializedViewHandler getRollupHandler() {
+                return new MaterializedViewHandler();
+            }
+
+            @Mock
+            GlobalTransactionMgr getGlobalTransactionMgr() {
+                new MockUp<GlobalTransactionMgr>() {
+                    @Mock
+                    TransactionStatus getLabelState(long dbId, String label) {
+                        if (label == "a") {
+                            return TransactionStatus.PREPARED;
+                        } else {
+                            return TransactionStatus.PREPARE;
+                        }
+                    }
+                };
+
+                return new GlobalTransactionMgr(null);
+            }
+        };
+    }
+
+    protected void setUpWithGlobalStateMgr(GlobalStateMgr globalStateMgr) {
         SystemInfoService systemInfoService = new SystemInfoService();
         TabletInvertedIndex tabletInvertedIndex = new TabletInvertedIndex();
         NodeMgr nodeMgr = new NodeMgr();
@@ -490,72 +531,6 @@ public abstract class StarRocksHttpTestCase {
                 globalStateMgr.isSafeMode();
                 minTimes = 0;
                 result = true;
-            }
-        };
-
-        new Expectations(nodeMgr) {
-            {
-                nodeMgr.getClusterInfo();
-                minTimes = 0;
-                result = systemInfoService;
-            }
-        };
-
-        assignBackends();
-        doSetUp();
-    }
-
-    public void setUpWithCatalog() {
-        GlobalStateMgr globalStateMgr = newDelegateGlobalStateMgr();
-        SystemInfoService systemInfoService = new SystemInfoService();
-        TabletInvertedIndex tabletInvertedIndex = new TabletInvertedIndex();
-        NodeMgr nodeMgr = new NodeMgr();
-
-        new MockUp<GlobalStateMgr>() {
-            @Mock
-            SchemaChangeHandler getSchemaChangeHandler() {
-                return new SchemaChangeHandler();
-            }
-
-            @Mock
-            MaterializedViewHandler getRollupHandler() {
-                return new MaterializedViewHandler();
-            }
-
-            @Mock
-            GlobalTransactionMgr getGlobalTransactionMgr() {
-                new MockUp<GlobalTransactionMgr>() {
-                    @Mock
-                    TransactionStatus getLabelState(long dbId, String label) {
-                        if (label == "a") {
-                            return TransactionStatus.PREPARED;
-                        } else {
-                            return TransactionStatus.PREPARE;
-                        }
-                    }
-                };
-
-                return new GlobalTransactionMgr(null);
-            }
-        };
-
-        new Expectations() {
-            {
-                GlobalStateMgr.getCurrentState();
-                minTimes = 0;
-                result = globalStateMgr;
-            }
-        };
-
-        new Expectations(globalStateMgr) {
-            {
-                globalStateMgr.getNodeMgr();
-                minTimes = 0;
-                result = nodeMgr;
-
-                globalStateMgr.getTabletInvertedIndex();
-                minTimes = 0;
-                result = tabletInvertedIndex;
             }
         };
 

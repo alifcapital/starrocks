@@ -51,6 +51,7 @@ import com.starrocks.common.ErrorReport;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.FrontendDaemon;
+import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.RecoverInfo;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
@@ -65,7 +66,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataOutput;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -909,6 +909,11 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
         }
     }
 
+    @VisibleForTesting
+    synchronized boolean isContainedInidToRecycleTime(long id) {
+        return idToRecycleTime.get(id) != null;
+    }
+
     @Override
     public void write(DataOutput out) throws IOException {
         int count = idToDatabase.size();
@@ -1027,24 +1032,24 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
         return Lists.newArrayList(idToDatabase.keySet());
     }
 
-    public void save(DataOutputStream dos) throws IOException, SRMetaBlockException {
+    public void save(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
         int numJson = 1 + idToDatabase.size() + 1 + idToTableInfo.size()
                 + 1 + idToPartition.size() + 1;
-        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos, SRMetaBlockID.CATALOG_RECYCLE_BIN, numJson);
+        SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.CATALOG_RECYCLE_BIN, numJson);
 
-        writer.writeJson(idToDatabase.size());
+        writer.writeInt(idToDatabase.size());
         for (RecycleDatabaseInfo recycleDatabaseInfo : idToDatabase.values()) {
             writer.writeJson(recycleDatabaseInfo);
         }
 
-        writer.writeJson(idToTableInfo.size());
+        writer.writeInt(idToTableInfo.size());
         for (Map<Long, RecycleTableInfo> tableEntry : idToTableInfo.rowMap().values()) {
             for (RecycleTableInfo recycleTableInfo : tableEntry.values()) {
                 writer.writeJson(recycleTableInfo);
             }
         }
 
-        writer.writeJson(idToPartition.size());
+        writer.writeInt(idToPartition.size());
         for (RecyclePartitionInfo recyclePartitionInfo : idToPartition.values()) {
             if (recyclePartitionInfo instanceof RecyclePartitionInfoV1) {
                 RecyclePartitionInfoV1 recyclePartitionInfoV1 = (RecyclePartitionInfoV1) recyclePartitionInfo;
@@ -1065,24 +1070,18 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
     }
 
     public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
-        int idToDatabaseSize = reader.readInt();
-        for (int i = 0; i < idToDatabaseSize; ++i) {
-            RecycleDatabaseInfo recycleDatabaseInfo = reader.readJson(RecycleDatabaseInfo.class);
+        reader.readCollection(RecycleDatabaseInfo.class, recycleDatabaseInfo -> {
             idToDatabase.put(recycleDatabaseInfo.db.getId(), recycleDatabaseInfo);
-        }
+        });
 
-        int idToTableInfoSize = reader.readInt();
-        for (int i = 0; i < idToTableInfoSize; ++i) {
-            RecycleTableInfo recycleTableInfo = reader.readJson(RecycleTableInfo.class);
+        reader.readCollection(RecycleTableInfo.class, recycleTableInfo -> {
             idToTableInfo.put(recycleTableInfo.dbId, recycleTableInfo.table.getId(), recycleTableInfo);
             nameToTableInfo.put(recycleTableInfo.getDbId(), recycleTableInfo.getTable().getName(), recycleTableInfo);
-        }
+        });
 
-        int idToPartitionSize = reader.readInt();
-        for (int i = 0; i < idToPartitionSize; ++i) {
-            RecyclePartitionInfo recycleRangePartitionInfo = reader.readJson(RecyclePartitionInfoV2.class);
-            idToPartition.put(recycleRangePartitionInfo.partition.getId(), recycleRangePartitionInfo);
-        }
+        reader.readCollection(RecyclePartitionInfoV2.class, recyclePartitionInfo -> {
+            idToPartition.put(recyclePartitionInfo.partition.getId(), recyclePartitionInfo);
+        });
 
         idToRecycleTime = (Map<Long, Long>) reader.readJson(new TypeToken<Map<Long, Long>>() {
         }.getType());

@@ -117,7 +117,7 @@ Status StorageEngine::start_bg_threads() {
     // convert store map to vector
     std::vector<DataDir*> data_dirs;
     for (auto& tmp_store : _store_map) {
-        data_dirs.push_back(tmp_store.second);
+        data_dirs.push_back(tmp_store.second.get());
     }
     const auto data_dir_num = static_cast<int32_t>(data_dirs.size());
 
@@ -939,8 +939,8 @@ void* StorageEngine::_schedule_apply_thread_callback(void* arg) {
             auto time_point = std::chrono::steady_clock::now();
             while (!_bg_worker_stopped.load(std::memory_order_consume) && !_schedule_apply_tasks.empty() &&
                    _schedule_apply_tasks.top().first <= time_point) {
-                _schedule_apply_tasks.pop();
                 auto tablet_id = _schedule_apply_tasks.top().second;
+                _schedule_apply_tasks.pop();
                 auto tablet = _tablet_manager->get_tablet(tablet_id);
                 if (tablet == nullptr || tablet->updates() == nullptr) {
                     continue;

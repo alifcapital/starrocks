@@ -18,15 +18,17 @@ package com.starrocks.catalog;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.alter.AlterJobV2;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.catalog.MaterializedIndex.IndexState;
-import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
 import com.starrocks.persist.AlterMaterializedViewBaseTableInfosLog;
+import com.starrocks.planner.MaterializedViewTestBase;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.DDLStmtExecutor;
 import com.starrocks.qe.QueryState;
 import com.starrocks.qe.ShowExecutor;
 import com.starrocks.qe.ShowResultSet;
@@ -38,6 +40,7 @@ import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.ShowCreateTableStmt;
 import com.starrocks.sql.ast.StatementBase;
+import com.starrocks.sql.optimizer.MVTestUtils;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
@@ -68,13 +71,13 @@ public class MaterializedViewTest {
 
     @Before
     public void setUp() {
-        UtFrameUtils.createMinStarRocksCluster();
-
         connectContext = UtFrameUtils.createDefaultCtx();
         starRocksAssert = new StarRocksAssert(connectContext);
 
         // set default config for async mvs
         UtFrameUtils.setDefaultConfigForAsyncMVTest(connectContext);
+
+        UtFrameUtils.createMinStarRocksCluster();
 
         columns.add(new Column("k1", ScalarType.createType(PrimitiveType.TINYINT), true, null, "", ""));
         columns.add(new Column("k2", ScalarType.createType(PrimitiveType.SMALLINT), true, null, "", ""));
@@ -279,7 +282,7 @@ public class MaterializedViewTest {
         Assert.assertNotNull(table);
         // test partition related info
         MaterializedView oldMv = (MaterializedView) table;
-        Map<Table, Column> partitionMap = oldMv.getRelatedPartitionTableAndColumn();
+        Map<Table, Column> partitionMap = oldMv.getRefBaseTablePartitionColumns();
         Table table1 = db.getTable("tbl1");
         Assert.assertTrue(partitionMap.containsKey(table1));
         List<Table.TableType> baseTableType = oldMv.getBaseTableTypes();
@@ -288,7 +291,7 @@ public class MaterializedViewTest {
         connectContext.executeSql("refresh materialized view mv_to_rename with sync mode");
         Optional<Long> maxTime = oldMv.maxBaseTableRefreshTimestamp();
         Assert.assertTrue(maxTime.isPresent());
-        Pair<Table, Column> pair = oldMv.getDirectTableAndPartitionColumn();
+        Pair<Table, Column> pair = MaterializedViewTestBase.getRefBaseTablePartitionColumn(oldMv);
         Assert.assertEquals("tbl1", pair.first.getName());
 
         String alterSql = "alter materialized view mv_to_rename rename mv_new_name;";
@@ -609,16 +612,24 @@ public class MaterializedViewTest {
                 .withMaterializedView("create materialized view index_mv_to_check\n" +
                         "distributed by hash(k2) buckets 3\n" +
                         "as select k2, sum(v1) as total from table1 group by k2;");
+
+        Database db = connectContext.getGlobalStateMgr().getDb("test");
+        Assert.assertNotNull(db);
+        Table table = db.getTable("index_mv_to_check");
+        Assert.assertNotNull(table);
+
         String bitmapSql = "create index index1 ON test.index_mv_to_check (k2) USING BITMAP COMMENT 'balabala'";
-        String bloomfilterSql = "alter table test.index_mv_to_check set (\"bloom_filter_columns\"=\"k2\")";
-
         AlterTableStmt alterMVStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(bitmapSql, connectContext);
-        GlobalStateMgr.getCurrentState().getAlterJobMgr().processAlterTable(alterMVStmt);
-        waitForSchemaChangeAlterJobFinish();
+        DDLStmtExecutor.execute(alterMVStmt, connectContext);
+        Optional<AlterJobV2> job = MVTestUtils.findAlterJobV2(db.getId(), table.getId());
+        Assert.assertTrue("Alter job should be present", job.isPresent());
+        waitForSchemaChangeAlterJobFinish(job.get());
 
+        String bloomfilterSql = "alter table test.index_mv_to_check set (\"bloom_filter_columns\"=\"k2\")";
         alterMVStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(bloomfilterSql, connectContext);
-        GlobalStateMgr.getCurrentState().getAlterJobMgr().processAlterTable(alterMVStmt);
-        waitForSchemaChangeAlterJobFinish();
+        DDLStmtExecutor.execute(alterMVStmt, connectContext);
+        job = MVTestUtils.findAlterJobV2(db.getId(), table.getId());
+        waitForSchemaChangeAlterJobFinish(job.get());
 
         Assert.assertEquals(QueryState.MysqlStateType.OK, connectContext.getState().getStateType());
     }
@@ -655,8 +666,8 @@ public class MaterializedViewTest {
         String bitmapSql = "create index index1 ON test.index_view_to_check (k2) USING BITMAP COMMENT 'balabala'";
         AlterTableStmt alterViewStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(bitmapSql, connectContext);
         Assert.assertThrows("Do not support alter non-native table/materialized-view[index_view_to_check]",
-                DdlException.class,
-                () -> GlobalStateMgr.getCurrentState().getAlterJobMgr().processAlterTable(alterViewStmt));
+                SemanticException.class,
+                () -> DDLStmtExecutor.execute(alterViewStmt, connectContext));
     }
 
     public void testCreateMV(String mvSql) throws Exception {

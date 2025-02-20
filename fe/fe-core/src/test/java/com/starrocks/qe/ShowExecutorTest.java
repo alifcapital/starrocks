@@ -69,7 +69,6 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ExceptionChecker;
 import com.starrocks.common.FeConstants;
-import com.starrocks.common.PatternMatcher;
 import com.starrocks.common.UserException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.proc.ComputeNodeProcDir;
@@ -118,7 +117,6 @@ import com.starrocks.statistic.AnalyzeMgr;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.system.Backend;
-import com.starrocks.system.BackendCoreStat;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TDataCacheMetrics;
@@ -201,6 +199,7 @@ public class ShowExecutorTest {
 
         // mock table
         OlapTable table = new OlapTable();
+        table.setId(10001);
         new Expectations(table) {
             {
                 table.getName();
@@ -501,7 +500,6 @@ public class ShowExecutorTest {
             }
         };
 
-
         // Ok to test
         ShowPartitionsStmt stmt = new ShowPartitionsStmt(new TableName("testDb", "testTbl"),
                 null, null, null, false);
@@ -562,48 +560,6 @@ public class ShowExecutorTest {
             e.printStackTrace();
             Assert.fail();
         }
-    }
-
-    @Test
-    public void testShowVariable() throws AnalysisException, DdlException {
-        // Mock variable
-        VariableMgr variableMgr = new VariableMgr();
-        List<List<String>> rows = Lists.newArrayList();
-        rows.add(Lists.newArrayList("var1", "abc"));
-        rows.add(Lists.newArrayList("var2", "abc"));
-        new Expectations(variableMgr) {
-            {
-                VariableMgr.dump((SetType) any, (SessionVariable) any, (PatternMatcher) any);
-                minTimes = 0;
-                result = rows;
-
-                VariableMgr.dump((SetType) any, (SessionVariable) any, null);
-                minTimes = 0;
-                result = rows;
-            }
-        };
-
-        ShowVariablesStmt stmt = new ShowVariablesStmt(SetType.SESSION, "var%");
-
-        ShowResultSet resultSet = ShowExecutor.execute(stmt, ctx);
-        Assert.assertEquals(2, resultSet.getMetaData().getColumnCount());
-        Assert.assertEquals(2, resultSet.getResultRows().get(0).size());
-
-        Assert.assertTrue(resultSet.next());
-        Assert.assertEquals("var1", resultSet.getString(0));
-        Assert.assertTrue(resultSet.next());
-        Assert.assertEquals("var2", resultSet.getString(0));
-        Assert.assertFalse(resultSet.next());
-
-        stmt = new ShowVariablesStmt(SetType.SESSION, null);
-
-        resultSet = ShowExecutor.execute(stmt, ctx);
-
-        Assert.assertTrue(resultSet.next());
-        Assert.assertEquals("var1", resultSet.getString(0));
-        Assert.assertTrue(resultSet.next());
-        Assert.assertEquals("var2", resultSet.getString(0));
-        Assert.assertFalse(resultSet.next());
     }
 
     @Test
@@ -752,7 +708,9 @@ public class ShowExecutorTest {
 
         // mock backends
         Backend backend = new Backend(1L, "127.0.0.1", 12345);
-        backend.updateResourceUsage(0, 100L, 1L, 30);
+        backend.setCpuCores(16);
+        backend.setMemLimitBytes(100L);
+        backend.updateResourceUsage(0, 1L, 30);
         clusterInfo.addBackend(backend);
 
         NodeMgr nodeMgr = new NodeMgr();
@@ -815,20 +773,24 @@ public class ShowExecutorTest {
 
         ShowResultSet resultSet = ShowExecutor.execute(stmt, ctx);
 
-        Assert.assertEquals(31, resultSet.getMetaData().getColumnCount());
+        Assert.assertEquals(32, resultSet.getMetaData().getColumnCount());
         Assert.assertEquals("BackendId", resultSet.getMetaData().getColumn(0).getName());
-        Assert.assertEquals("NumRunningQueries", resultSet.getMetaData().getColumn(23).getName());
-        Assert.assertEquals("MemUsedPct", resultSet.getMetaData().getColumn(24).getName());
-        Assert.assertEquals("CpuUsedPct", resultSet.getMetaData().getColumn(25).getName());
-        Assert.assertEquals("DataCacheMetrics", resultSet.getMetaData().getColumn(26).getName());
-        Assert.assertEquals("StarletPort", resultSet.getMetaData().getColumn(28).getName());
-        Assert.assertEquals("WorkerId", resultSet.getMetaData().getColumn(29).getName());
+        Assert.assertEquals("CpuCores", resultSet.getMetaData().getColumn(22).getName());
+        Assert.assertEquals("MemLimit", resultSet.getMetaData().getColumn(23).getName());
+        Assert.assertEquals("NumRunningQueries", resultSet.getMetaData().getColumn(24).getName());
+        Assert.assertEquals("MemUsedPct", resultSet.getMetaData().getColumn(25).getName());
+        Assert.assertEquals("CpuUsedPct", resultSet.getMetaData().getColumn(26).getName());
+        Assert.assertEquals("DataCacheMetrics", resultSet.getMetaData().getColumn(27).getName());
+        Assert.assertEquals("StarletPort", resultSet.getMetaData().getColumn(29).getName());
+        Assert.assertEquals("WorkerId", resultSet.getMetaData().getColumn(30).getName());
 
         Assert.assertTrue(resultSet.next());
         Assert.assertEquals("1", resultSet.getString(0));
-        Assert.assertEquals("0", resultSet.getString(23));
-        Assert.assertEquals("N/A", resultSet.getString(26));
-        Assert.assertEquals(String.valueOf(workerId), resultSet.getString(29));
+        Assert.assertEquals("16", resultSet.getString(22));
+        Assert.assertEquals("100.000B", resultSet.getString(23));
+        Assert.assertEquals("0", resultSet.getString(24));
+        Assert.assertEquals("N/A", resultSet.getString(27));
+        Assert.assertEquals(String.valueOf(workerId), resultSet.getString(30));
         Assert.assertEquals(String.valueOf(tabletNum), resultSet.getString(11));
     }
 
@@ -838,7 +800,9 @@ public class ShowExecutorTest {
         SystemInfoService clusterInfo = AccessTestUtil.fetchSystemInfoService();
 
         ComputeNode node = new ComputeNode(1L, "127.0.0.1", 80);
-        node.updateResourceUsage(10, 100L, 1L, 30);
+        node.setCpuCores(16);
+        node.setMemLimitBytes(100L);
+        node.updateResourceUsage(10, 1L, 30);
         TDataCacheMetrics tDataCacheMetrics = new TDataCacheMetrics();
         tDataCacheMetrics.setStatus(TDataCacheStatus.NORMAL);
         tDataCacheMetrics.setDisk_quota_bytes(1024 * 1024 * 1024);
@@ -864,13 +828,6 @@ public class ShowExecutorTest {
                 globalStateMgr.getStarOSAgent();
                 minTimes = 0;
                 result = starosAgent;
-            }
-        };
-
-        new MockUp<BackendCoreStat>() {
-            @Mock
-            int getCoresOfBe(long beId) {
-                return 16;
             }
         };
 
@@ -915,12 +872,13 @@ public class ShowExecutorTest {
         }
 
         Assert.assertTrue(resultSet.next());
-        Assert.assertEquals("16", resultSet.getString(13));
-        Assert.assertEquals("10", resultSet.getString(14));
-        Assert.assertEquals("1.00 %", resultSet.getString(15));
-        Assert.assertEquals("3.0 %", resultSet.getString(16));
-        Assert.assertEquals("Status: Normal, DiskUsage: 0B/1GB, MemUsage: 0B/1GB", resultSet.getString(17));
-        Assert.assertEquals(String.valueOf(tabletNum), resultSet.getString(22));
+        Assert.assertEquals("16", resultSet.getString(13)); // CpuCores
+        Assert.assertEquals("100.000B", resultSet.getString(14)); // MemLimit
+        Assert.assertEquals("10", resultSet.getString(15));
+        Assert.assertEquals("1.00 %", resultSet.getString(16));
+        Assert.assertEquals("3.0 %", resultSet.getString(17));
+        Assert.assertEquals("Status: Normal, DiskUsage: 0B/1GB, MemUsage: 0B/1GB", resultSet.getString(18));
+        Assert.assertEquals(String.valueOf(tabletNum), resultSet.getString(23));
     }
 
     @Test
@@ -1041,14 +999,15 @@ public class ShowExecutorTest {
         Assert.assertEquals("", resultSet.getString(12));
         Assert.assertEquals("false", resultSet.getString(13));
         System.out.println(resultSet.getResultRows());
-        for (int i = 14; i < mvSchemaTable.size() - 4; i++) {
+        for (int i = 14; i < mvSchemaTable.size() - 5; i++) {
             System.out.println(i);
             Assert.assertEquals("", resultSet.getString(i));
         }
-        Assert.assertEquals("10", resultSet.getString(mvSchemaTable.size() - 4));
-        Assert.assertEquals(expectedSqlText, resultSet.getString(mvSchemaTable.size() - 3));
-        Assert.assertEquals("", resultSet.getString(mvSchemaTable.size() - 2));
-        Assert.assertEquals("VALID", resultSet.getString(mvSchemaTable.size() - 1));
+        Assert.assertEquals("10", resultSet.getString(mvSchemaTable.size() - 5));
+        Assert.assertEquals(expectedSqlText, resultSet.getString(mvSchemaTable.size() - 4));
+        Assert.assertEquals("", resultSet.getString(mvSchemaTable.size() - 3));
+        Assert.assertEquals("VALID", resultSet.getString(mvSchemaTable.size() - 2));
+        Assert.assertEquals("", resultSet.getString(mvSchemaTable.size() - 1));
         Assert.assertFalse(resultSet.next());
     }
 
@@ -1117,7 +1076,62 @@ public class ShowExecutorTest {
                         "  `year` int(11) DEFAULT NULL,\n" +
                         "  `dt` int(11) DEFAULT NULL\n" +
                         ")\n" +
-                        "PARTITION BY ( year, dt )\n" +
+                        "PARTITION BY (year, dt)\n" +
+                        "PROPERTIES (\"location\" = \"hdfs://hadoop/hive/warehouse/test.db/test\");",
+                resultSet.getResultRows().get(0).get(1));
+    }
+
+    @Test
+    public void testShowCreateHiveExternalTable() {
+        new MockUp<MetadataMgr>() {
+            @Mock
+            public Database getDb(String catalogName, String dbName) {
+                return new Database();
+            }
+
+            @Mock
+            public Table getTable(String catalogName, String dbName, String tblName) {
+                List<Column> fullSchema = new ArrayList<>();
+                Column columnId = new Column("id", Type.INT, true);
+                columnId.setComment("id");
+                Column columnName = new Column("name", Type.VARCHAR);
+                Column columnYear = new Column("year", Type.INT);
+                Column columnDt = new Column("dt", Type.INT);
+                fullSchema.add(columnId);
+                fullSchema.add(columnName);
+                fullSchema.add(columnYear);
+                fullSchema.add(columnDt);
+                List<String> partitions = Lists.newArrayList();
+                partitions.add("year");
+                partitions.add("dt");
+                HiveTable.Builder tableBuilder = HiveTable.builder()
+                        .setId(1)
+                        .setTableName("test_table")
+                        .setCatalogName("hive_catalog")
+                        .setResourceName(toResourceName("hive_catalog", "hive"))
+                        .setHiveDbName("hive_db")
+                        .setHiveTableName("test_table")
+                        .setPartitionColumnNames(partitions)
+                        .setFullSchema(fullSchema)
+                        .setTableLocation("hdfs://hadoop/hive/warehouse/test.db/test")
+                        .setCreateTime(10000)
+                        .setHiveTableType(HiveTable.HiveTableType.EXTERNAL_TABLE);
+                return tableBuilder.build();
+            }
+        };
+
+        ShowCreateTableStmt stmt = new ShowCreateTableStmt(new TableName("hive_catalog", "hive_db", "test_table"),
+                ShowCreateTableStmt.CreateTableType.TABLE);
+
+        ShowResultSet resultSet = ShowExecutor.execute(stmt, ctx);
+        Assert.assertEquals("test_table", resultSet.getResultRows().get(0).get(0));
+        Assert.assertEquals("CREATE EXTERNAL TABLE `test_table` (\n" +
+                        "  `id` int(11) DEFAULT NULL COMMENT \"id\",\n" +
+                        "  `name` varchar DEFAULT NULL,\n" +
+                        "  `year` int(11) DEFAULT NULL,\n" +
+                        "  `dt` int(11) DEFAULT NULL\n" +
+                        ")\n" +
+                        "PARTITION BY (year, dt)\n" +
                         "PROPERTIES (\"location\" = \"hdfs://hadoop/hive/warehouse/test.db/test\");",
                 resultSet.getResultRows().get(0).get(1));
     }

@@ -43,6 +43,7 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.UserException;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.PrintableMap;
+import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -226,7 +227,7 @@ public class PluginMgr implements Writable {
      * It must add the plugin to the "plugins" and "dynamicPluginNames", even if the plugin
      * is not loaded successfully.
      */
-    public void replayLoadDynamicPlugin(PluginInfo info) throws IOException, UserException {
+    public void replayLoadDynamicPlugin(PluginInfo info) throws IOException {
         DynamicPluginLoader pluginLoader = new DynamicPluginLoader(Config.plugin_dir, info);
         try {
             // should add to "plugins" first before loading.
@@ -360,12 +361,12 @@ public class PluginMgr implements Writable {
         return checksum;
     }
 
-    public void save(DataOutputStream dos) throws IOException, SRMetaBlockException {
+    public void save(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
         List<PluginInfo> pluginInfos = getAllDynamicPluginInfo();
 
         int numJson = 1 + pluginInfos.size();
-        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos, SRMetaBlockID.PLUGIN_MGR, numJson);
-        writer.writeJson(pluginInfos.size());
+        SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.PLUGIN_MGR, numJson);
+        writer.writeInt(pluginInfos.size());
         for (PluginInfo pluginInfo : pluginInfos) {
             writer.writeJson(pluginInfo);
         }
@@ -374,14 +375,6 @@ public class PluginMgr implements Writable {
     }
 
     public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
-        try {
-            int pluginInfoSize = reader.readInt();
-            for (int i = 0; i < pluginInfoSize; ++i) {
-                PluginInfo pluginInfo = reader.readJson(PluginInfo.class);
-                replayLoadDynamicPlugin(pluginInfo);
-            }
-        } catch (UserException e) {
-            throw new RuntimeException(e);
-        }
+        reader.readCollection(PluginInfo.class, this::replayLoadDynamicPlugin);
     }
 }

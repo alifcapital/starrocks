@@ -77,18 +77,15 @@ public class OptExpressionDuplicator {
     // old ColumnRefOperator -> new ColumnRefOperator
     private final Map<ColumnRefOperator, ColumnRefOperator> columnMapping;
     private final ReplaceColumnRefRewriter rewriter;
-    private final Table partitionByTable;
-    private final Column partitionColumn;
     private final boolean partialPartitionRewrite;
     private final OptimizerContext optimizerContext;
+    private final Map<Table, Column> mvRefBaseTableColumns;
 
     public OptExpressionDuplicator(MaterializationContext materializationContext) {
         this.columnRefFactory = materializationContext.getQueryRefFactory();
         this.columnMapping = Maps.newHashMap();
         this.rewriter = new ReplaceColumnRefRewriter(columnMapping);
-        Pair<Table, Column> partitionInfo = materializationContext.getMv().getDirectTableAndPartitionColumn();
-        this.partitionByTable = partitionInfo == null ? null : partitionInfo.first;
-        this.partitionColumn = partitionInfo == null ? null : partitionInfo.second;
+        this.mvRefBaseTableColumns = materializationContext.getMv().getRefBaseTablePartitionColumns();
         this.partialPartitionRewrite = !materializationContext.getMvUpdateInfo().getMvToRefreshPartitionNames().isEmpty();
         this.optimizerContext = materializationContext.getOptimizerContext();
     }
@@ -97,8 +94,7 @@ public class OptExpressionDuplicator {
         this.columnRefFactory = columnRefFactory;
         this.columnMapping = Maps.newHashMap();
         this.rewriter = new ReplaceColumnRefRewriter(columnMapping);
-        this.partitionByTable = null;
-        this.partitionColumn = null;
+        this.mvRefBaseTableColumns = null;
         this.partialPartitionRewrite = false;
         this.optimizerContext = optimizerContext;
     }
@@ -231,29 +227,18 @@ public class OptExpressionDuplicator {
                     }
                 }
             } else {
-                try {
-                    if (isRefreshExternalTable && scanOperator.getOpType() == OperatorType.LOGICAL_ICEBERG_SCAN) {
-                        // refresh iceberg table's metadata
-                        Table refBaseTable = scanOperator.getTable();
-                        IcebergTable cachedIcebergTable = (IcebergTable) refBaseTable;
-                        String catalogName = cachedIcebergTable.getCatalogName();
-                        String dbName = cachedIcebergTable.getRemoteDbName();
-                        TableName tableName = new TableName(catalogName, dbName, cachedIcebergTable.getName());
-                        Table currentTable = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(tableName).orElse(null);
-                        if (currentTable == null) {
-                            return null;
-                        }
-                        // Iceberg table's snapshot is cached in the mv's plan cache, need to reset it to get the latest snapshot
-                        scanBuilder.setTable(currentTable);
+                if (isRefreshExternalTable && scanOperator.getOpType() == OperatorType.LOGICAL_ICEBERG_SCAN) {
+                    // refresh iceberg table's metadata
+                    Table refBaseTable = scanOperator.getTable();
+                    IcebergTable cachedIcebergTable = (IcebergTable) refBaseTable;
+                    String catalogName = cachedIcebergTable.getCatalogName();
+                    String dbName = cachedIcebergTable.getRemoteDbName();
+                    TableName tableName = new TableName(catalogName, dbName, cachedIcebergTable.getName());
+                    Table currentTable = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(tableName).orElse(null);
+                    if (currentTable == null) {
+                        return null;
                     }
-                    ScanOperatorPredicates scanOperatorPredicates = scanOperator.getScanOperatorPredicates();
-                    if (isResetSelectedPartitions) {
-                        scanOperatorPredicates.clear();
-                    } else {
-                        scanOperatorPredicates.duplicate(rewriter);
-                    }
-                } catch (AnalysisException e) {
-                    // ignore exception
+                    scanBuilder.setTable(currentTable);
                 }
             }
 
@@ -261,13 +246,15 @@ public class OptExpressionDuplicator {
 
             if (partialPartitionRewrite
                     && optExpression.getOp() instanceof LogicalOlapScanOperator
-                    && partitionByTable != null) {
+                    && mvRefBaseTableColumns != null) {
                 // maybe partition column is not in the output columns, should add it
 
                 LogicalOlapScanOperator olapScan = (LogicalOlapScanOperator) optExpression.getOp();
                 OlapTable table = (OlapTable) olapScan.getTable();
-                if (table.getId() == partitionByTable.getId()) {
-                    if (!columnRefOperatorColumnMap.containsValue(partitionColumn)) {
+                if (mvRefBaseTableColumns.containsKey(table)) {
+                    Column partitionColumn = mvRefBaseTableColumns.get(table);
+                    if (!columnRefOperatorColumnMap.containsValue(partitionColumn) &&
+                            newColumnMetaToColRefMap.containsKey(partitionColumn)) {
                         ColumnRefOperator partitionColumnRef = newColumnMetaToColRefMap.get(partitionColumn);
                         columnRefColumnMapBuilder.put(partitionColumnRef, partitionColumn);
                     }
@@ -276,7 +263,25 @@ public class OptExpressionDuplicator {
             ImmutableMap<ColumnRefOperator, Column> newColumnRefColumnMap = columnRefColumnMapBuilder.build();
             scanBuilder.setColRefToColumnMetaMap(newColumnRefColumnMap);
 
-            return OptExpression.create(opBuilder.build());
+            // process external table scan operator's predicates
+            LogicalScanOperator newScanOperator = (LogicalScanOperator) opBuilder.build();
+            if (!(scanOperator instanceof LogicalOlapScanOperator)) {
+                processExternalTableScanOperator(newScanOperator);
+            }
+            return OptExpression.create(newScanOperator);
+        }
+
+        private void processExternalTableScanOperator(LogicalScanOperator newScanOperator) {
+            try {
+                ScanOperatorPredicates scanOperatorPredicates = newScanOperator.getScanOperatorPredicates();
+                if (isResetSelectedPartitions) {
+                    scanOperatorPredicates.clear();
+                } else {
+                    scanOperatorPredicates.duplicate(rewriter);
+                }
+            } catch (AnalysisException e) {
+                // ignore exception
+            }
         }
 
         @Override

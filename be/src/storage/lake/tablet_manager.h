@@ -86,6 +86,12 @@ public:
 
     Status delete_tablet_metadata(int64_t tablet_id, int64_t version);
 
+    // Use this function instead of get_tablet_metadata where you just need to check if tablet metadata exists
+    Status tablet_metadata_exists(int64_t tablet_id, int64_t version);
+
+    // Do not use this function except in a list dir
+    Status tablet_metadata_exists(const std::string& path);
+
     Status put_txn_log(const TxnLog& log);
 
     Status put_txn_log(const TxnLogPtr& log);
@@ -109,6 +115,9 @@ public:
     StatusOr<TxnLogPtr> get_txn_vlog(int64_t tablet_id, int64_t version);
 
     StatusOr<TxnLogPtr> get_txn_vlog(const std::string& path, bool fill_cache = true);
+
+    StatusOr<TabletSchemaPtr> get_output_rowset_schema(std::vector<uint32_t>& input_rowset,
+                                                       const TabletMetadata* metadata);
 
 #ifdef USE_STAROS
     bool is_tablet_in_worker(int64_t tablet_id);
@@ -162,9 +171,7 @@ public:
 
     int64_t in_writing_data_size(int64_t tablet_id);
 
-    void add_in_writing_data_size(int64_t tablet_id, int64_t size);
-
-    void remove_in_writing_data_size(int64_t tablet_id);
+    int64_t add_in_writing_data_size(int64_t tablet_id, int64_t size);
 
     void clean_in_writing_data_size();
 

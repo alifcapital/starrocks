@@ -54,6 +54,12 @@ TEST_F(LakeCompactionSchedulerTest, test_task_queue) {
     queue.set_target_size(5);
     ASSERT_EQ(5, queue.target_size());
     queue.put_by_txn_id(ctx->txn_id, ctx);
+
+    std::vector<std::unique_ptr<CompactionTaskContext>> v;
+    auto ctx2 = std::make_unique<CompactionTaskContext>(101 /* txn_id */, 102 /* tablet_id */, 1 /* version */,
+                                                        false /* is_checker */, nullptr);
+    v.push_back(std::move(ctx2));
+    queue.put_by_txn_id(101 /* txn_id */, v);
 }
 
 TEST_F(LakeCompactionSchedulerTest, test_list_tasks) {
@@ -120,7 +126,7 @@ TEST_F(LakeCompactionSchedulerTest, test_compaction_cancel) {
     {
         auto cb = std::make_shared<CompactionTaskCallback>(nullptr, &request, &response, nullptr);
         CompactionTaskContext ctx(100 /* txn_id */, 101 /* tablet_id */, 1 /* version */, true /* is_checker */, cb);
-        ctx.last_check_time = 0;
+        cb->set_last_check_time(0);
         EXPECT_TRUE(compaction_should_cancel(&ctx).ok());
     }
 }

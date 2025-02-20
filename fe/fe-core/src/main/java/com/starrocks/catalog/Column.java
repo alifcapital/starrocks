@@ -39,7 +39,6 @@ import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.alter.SchemaChangeHandler;
 import com.starrocks.analysis.Expr;
-import com.starrocks.analysis.IndexDef;
 import com.starrocks.analysis.NullLiteral;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.StringLiteral;
@@ -57,6 +56,7 @@ import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.analyzer.AstToSQLBuilder;
 import com.starrocks.sql.ast.ColumnDef;
+import com.starrocks.sql.ast.IndexDef;
 import com.starrocks.thrift.TColumn;
 import org.apache.commons.lang.StringEscapeUtils;
 
@@ -175,7 +175,7 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
     }
 
     public Column(String name, Type type, boolean isKey, AggregateType aggregateType, boolean isAllowNull,
-            ColumnDef.DefaultValueDef defaultValueDef, String comment) {
+                  ColumnDef.DefaultValueDef defaultValueDef, String comment) {
         this(name, type, isKey, aggregateType, isAllowNull, defaultValueDef, comment,
                 COLUMN_UNIQUE_ID_INIT_VALUE);
     }
@@ -530,14 +530,18 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
         if (generatedColumnExpr == null) {
             return null;
         }
-        return generatedColumnExpr.convertToColumnNameExpr(idToColumn).clone();
+        Expr expr = generatedColumnExpr.convertToColumnNameExpr(idToColumn).clone();
+        expr.setType(type);
+        return expr;
     }
 
     public Expr getGeneratedColumnExpr(List<Column> schema) {
         if (generatedColumnExpr == null) {
             return null;
         }
-        return generatedColumnExpr.convertToColumnNameExpr(schema).clone();
+        Expr res = generatedColumnExpr.convertToColumnNameExpr(schema).clone();
+        res.setType(type);
+        return res;
     }
 
     public void setGeneratedColumnExpr(ColumnIdExpr expr) {
@@ -640,7 +644,7 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
                 }
             }
         }
-        
+
         if (defaultValue != null) {
             return defaultValue;
         }
@@ -699,18 +703,20 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
         } else {
             sb.append("NOT NULL ");
         }
-        if (defaultExpr == null && isAutoIncrement) {
-            sb.append("AUTO_INCREMENT ");
-        } else if (defaultExpr != null) {
+        if (defaultExpr == null) {
+            if (isAutoIncrement) {
+                sb.append("AUTO_INCREMENT ");
+            }
+            if (defaultValue != null && !type.isOnlyMetricType()) {
+                sb.append("DEFAULT \"").append(StringEscapeUtils.escapeJava(defaultValue)).append("\" ");
+            }
+        } else {
             if ("now()".equalsIgnoreCase(defaultExpr.getExpr())) {
                 // compatible with mysql
                 sb.append("DEFAULT ").append("CURRENT_TIMESTAMP").append(" ");
             } else {
                 sb.append("DEFAULT ").append("(").append(defaultExpr.getExpr()).append(") ");
             }
-        }
-        if (defaultValue != null && !type.isOnlyMetricType()) {
-            sb.append("DEFAULT \"").append(StringEscapeUtils.escapeJava(defaultValue)).append("\" ");
         }
         if (isGeneratedColumn()) {
             String generatedColumnSql;
@@ -813,6 +819,13 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
         return GsonUtils.GSON.fromJson(json, Column.class);
     }
 
+    public String generatedColumnExprToString() {
+        if (generatedColumnExprSerialized != null && generatedColumnExprSerialized.getExpressionSql() != null) {
+            return generatedColumnExprSerialized.deserialize().toSql();
+        }
+        return null;
+    }
+
     @Override
     public void gsonPostProcess() throws IOException {
         if (generatedColumnExprSerialized != null && generatedColumnExprSerialized.getExpressionSql() != null) {
@@ -841,6 +854,11 @@ public class Column implements Writable, GsonPreProcessable, GsonPostProcessable
 
     public int getUniqueId() {
         return this.uniqueId;
+    }
+
+    // return max unique id of all fields
+    public int getMaxUniqueId() {
+        return Math.max(this.uniqueId, type.getMaxUniqueId());
     }
 
     public void setIndexFlag(TColumn tColumn, List<Index> indexes, Set<ColumnId> bfColumns) {

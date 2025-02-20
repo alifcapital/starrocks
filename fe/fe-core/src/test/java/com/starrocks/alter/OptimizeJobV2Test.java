@@ -23,8 +23,10 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.OlapTable.OlapTableState;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Replica;
+import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.scheduler.Constants;
+import com.starrocks.scheduler.persist.TaskRunStatus;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.DDLTestBase;
 import com.starrocks.sql.ast.AlterTableStmt;
@@ -62,11 +64,13 @@ public class OptimizeJobV2Test extends DDLTestBase {
         super.setUp();
         String stmt = "alter table testTable7 distributed by hash(v1)";
         alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmt, starRocksAssert.getCtx());
+        Config.enable_online_optimize_table = false;
     }
 
     @After
     public void clear() {
         GlobalStateMgr.getCurrentState().getSchemaChangeHandler().clearJobs();
+        Config.enable_online_optimize_table = true;
     }
 
     @Test
@@ -146,7 +150,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
         Database db = GlobalStateMgr.getCurrentState().getDb(GlobalStateMgrTestUtil.testDb1);
         OlapTable olapTable = (OlapTable) db.getTable(GlobalStateMgrTestUtil.testTable7);
 
-        schemaChangeHandler.process(alterTableStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterTableStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         Assert.assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
@@ -160,7 +164,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
         OlapTable olapTable = (OlapTable) db.getTable(GlobalStateMgrTestUtil.testTable7);
         Partition testPartition = olapTable.getPartition(GlobalStateMgrTestUtil.testTable7);
 
-        schemaChangeHandler.process(alterTableStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterTableStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();
@@ -175,8 +179,18 @@ public class OptimizeJobV2Test extends DDLTestBase {
 
         // runRunningJob
         List<OptimizeTask> optimizeTasks = optimizeJob.getOptimizeTasks();
-        for (OptimizeTask optimizeTask : optimizeTasks) {
-            optimizeTask.setOptimizeTaskState(Constants.TaskRunState.SUCCESS);
+        for (int i = 0; i < optimizeTasks.size(); ++i) {
+            OptimizeTask optimizeTask = optimizeTasks.get(i);
+            GlobalStateMgr.getCurrentState().getTaskManager().getTaskRunManager()
+                        .getTaskRunScheduler().removeRunningTask(optimizeTask.getId());
+            GlobalStateMgr.getCurrentState().getTaskManager().getTaskRunManager()
+                        .getTaskRunScheduler().removePendingTask(optimizeTask);
+            TaskRunStatus taskRunStatus = new TaskRunStatus();
+            taskRunStatus.setTaskName(optimizeTask.getName());
+            taskRunStatus.setState(Constants.TaskRunState.SUCCESS);
+            taskRunStatus.setDbName(db.getFullName());
+            GlobalStateMgr.getCurrentState().getTaskManager()
+                        .getTaskRunManager().getTaskRunHistory().addHistory(taskRunStatus);
         }
         optimizeJob.runRunningJob();
 
@@ -190,7 +204,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
         Database db = GlobalStateMgr.getCurrentState().getDb(GlobalStateMgrTestUtil.testDb1);
         OlapTable olapTable = (OlapTable) db.getTable(GlobalStateMgrTestUtil.testTable7);
 
-        schemaChangeHandler.process(alterTableStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterTableStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();
@@ -236,7 +250,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
         OlapTable olapTable = (OlapTable) db.getTable(GlobalStateMgrTestUtil.testTable7);
         Partition testPartition = olapTable.getPartition(GlobalStateMgrTestUtil.testTable7);
 
-        schemaChangeHandler.process(alterTableStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterTableStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();
@@ -285,7 +299,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
         Database db = GlobalStateMgr.getCurrentState().getDb(GlobalStateMgrTestUtil.testDb1);
         OlapTable olapTable = (OlapTable) db.getTable(GlobalStateMgrTestUtil.testTable7);
 
-        schemaChangeHandler.process(alterTableStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterTableStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();
@@ -333,7 +347,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
 
         String stmt = "alter table testTable2 distributed by hash(v1)";
         AlterTableStmt alterStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmt, starRocksAssert.getCtx());
-        schemaChangeHandler.process(alterStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();
@@ -378,7 +392,7 @@ public class OptimizeJobV2Test extends DDLTestBase {
 
         String stmt = "alter table testTable2 distributed by hash(v1)";
         AlterTableStmt alterStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmt, starRocksAssert.getCtx());
-        schemaChangeHandler.process(alterStmt.getOps(), db, olapTable);
+        schemaChangeHandler.process(alterStmt.getAlterClauseList(), db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         OptimizeJobV2 optimizeJob = (OptimizeJobV2) alterJobsV2.values().stream().findAny().get();

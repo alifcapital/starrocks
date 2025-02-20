@@ -22,8 +22,10 @@ import com.starrocks.catalog.Table;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.util.DebugUtil;
+import com.starrocks.qe.DmlType;
 import com.starrocks.scheduler.Constants;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.transaction.InsertOverwriteJobStats;
 import com.starrocks.transaction.PartitionCommitInfo;
 import com.starrocks.transaction.TableCommitInfo;
 import com.starrocks.transaction.TransactionState;
@@ -44,27 +46,44 @@ public class LoadJobMVListener implements LoadJobListener {
 
     public static final LoadJobMVListener INSTANCE = new LoadJobMVListener();
 
+    private static boolean isTriggerOnTransactionFinish(TransactionState transactionState) {
+        if (transactionState.getSourceType() == TransactionState.LoadJobSourceType.LAKE_COMPACTION) {
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public void onStreamLoadTransactionFinish(TransactionState transactionState) {
+        if (!isTriggerOnTransactionFinish(transactionState)) {
+            return;
+        }
         // how to handle stream load transaction?
         triggerToRefreshRelatedMVs(transactionState, false);
     }
 
     @Override
     public void onLoadJobTransactionFinish(TransactionState transactionState) {
+        if (!isTriggerOnTransactionFinish(transactionState)) {
+            return;
+        }
         triggerToRefreshRelatedMVs(transactionState, false);
     }
 
     @Override
-    public void onDMLStmtJobTransactionFinish(TransactionState transactionState, Database db, Table table) {
+    public void onDMLStmtJobTransactionFinish(TransactionState transactionState, Database db, Table table,
+                                              DmlType dmlType) {
         if (table != null && table.isMaterializedView()) {
+            return;
+        }
+        if (!isTriggerOnTransactionFinish(transactionState)) {
             return;
         }
         triggerToRefreshRelatedMVs(db, table);
     }
 
     @Override
-    public void onInsertOverwriteJobCommitFinish(Database db, Table table) {
+    public void onInsertOverwriteJobCommitFinish(Database db, Table table, InsertOverwriteJobStats stats) {
         triggerToRefreshRelatedMVs(db, table);
     }
 
@@ -89,14 +108,11 @@ public class LoadJobMVListener implements LoadJobListener {
                 LOG.warn("failed to get transaction tableId {} when pending refresh.", tableId);
                 return;
             }
-            if (!isTriggerIfBaseTableIsMV) {
+            if (!isTriggerIfBaseTableIsMV && table.isMaterializedView()) {
                 LOG.info("Skip to trigger refresh related materialized views in publish version phase because " +
                         "base table {} is a materialized view.", table.getName());
                 continue;
             }
-            List<PartitionCommitInfo> txnPartitionCommitInfos = getPartitionCommitInfos(transactionState, tableId);
-            LOG.info("Trigger auto materialized view refresh because of base table {} has changed, " +
-                    "transaction state:{}", table.getName(), txnPartitionCommitInfos);
             triggerToRefreshRelatedMVs(db, table);
         }
     }

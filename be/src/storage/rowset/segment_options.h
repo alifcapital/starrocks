@@ -73,6 +73,8 @@ public:
     RuntimeProfile* profile = nullptr;
 
     bool use_page_cache = false;
+    // temporary data does not allow caching
+    bool temporary_data = false;
     LakeIOOptions lake_io_opts{.fill_data_cache = true};
 
     ReaderType reader_type = READER_QUERY;
@@ -103,6 +105,7 @@ public:
 
     bool prune_column_after_index_filter = false;
     bool enable_gin_filter = false;
+    bool has_preaggregation = true;
 
 public:
     Status convert_to(SegmentReadOptions* dst, const std::vector<LogicalType>& new_types, ObjectPool* obj_pool) const;

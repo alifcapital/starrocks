@@ -179,6 +179,7 @@ ${CMAKE_CMD}  -G "${CMAKE_GENERATOR}" \
             -DSTARLET_INSTALL_DIR=${STARLET_INSTALL_DIR}          \
             -DWITH_GCOV=${WITH_GCOV} \
             -DWITH_STARCACHE=${WITH_STARCACHE} \
+            -DWITH_RELATIVE_SRC_PATH=OFF \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ../
 
 ${BUILD_SYSTEM} -j${PARALLEL}
@@ -225,6 +226,10 @@ else
 fi
 
 export LD_LIBRARY_PATH=$STARROCKS_HOME/lib/hadoop/native:$LD_LIBRARY_PATH
+if [[ -n "$STARROCKS_GCC_HOME" ]] ; then
+    # add gcc lib64 into LD_LIBRARY_PATH because of dynamic link libstdc++ and libgcc
+    export LD_LIBRARY_PATH=$STARROCKS_GCC_HOME/lib64:$LD_LIBRARY_PATH
+fi
 
 THIRDPARTY_HADOOP_HOME=${STARROCKS_THIRDPARTY}/installed/hadoop/share/hadoop
 if [[ -d ${THIRDPARTY_HADOOP_HOME} ]] ; then

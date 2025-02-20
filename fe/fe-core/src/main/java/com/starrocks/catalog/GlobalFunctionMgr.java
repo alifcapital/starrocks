@@ -18,6 +18,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.starrocks.common.UserException;
+import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -177,12 +178,12 @@ public class GlobalFunctionMgr {
         return checksum;
     }
 
-    public void save(DataOutputStream dos) throws IOException, SRMetaBlockException {
+    public void save(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
         List<Function> functions = getFunctions();
 
         int numJson = 1 + functions.size();
-        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos, SRMetaBlockID.GLOBAL_FUNCTION_MGR, numJson);
-        writer.writeJson(functions.size());
+        SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.GLOBAL_FUNCTION_MGR, numJson);
+        writer.writeInt(functions.size());
         for (Function function : functions) {
             writer.writeJson(function);
         }
@@ -191,11 +192,7 @@ public class GlobalFunctionMgr {
     }
 
     public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
-        int numJson = reader.readInt();
-        for (int i = 0; i < numJson; ++i) {
-            Function function = reader.readJson(Function.class);
-            replayAddFunction(function);
-        }
+        reader.readCollection(Function.class, this::replayAddFunction);
     }
 }
 

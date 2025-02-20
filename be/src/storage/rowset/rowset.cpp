@@ -51,6 +51,7 @@
 #include "storage/inverted/index_descriptor.hpp"
 #include "storage/merge_iterator.h"
 #include "storage/projection_iterator.h"
+#include "storage/rowset/metadata_cache.h"
 #include "storage/rowset/rowid_range_option.h"
 #include "storage/rowset/short_key_range_option.h"
 #include "storage/storage_engine.h"
@@ -76,6 +77,13 @@ Rowset::Rowset(const TabletSchemaCSPtr& schema, std::string rowset_path, RowsetM
 }
 
 Rowset::~Rowset() {
+#ifndef BE_TEST
+    if (_keys_type != PRIMARY_KEYS) {
+        // ONLY support non-pk table now.
+        // evict rowset before destroy, in case this rowset no close yet.
+        MetadataCache::instance()->evict_rowset(this);
+    }
+#endif
     MEM_TRACKER_SAFE_RELEASE(GlobalEnv::GetInstance()->rowset_metadata_mem_tracker(), _mem_usage());
 }
 
@@ -85,6 +93,7 @@ Status Rowset::load() {
     // if the state is ROWSET_UNLOADING it means close() is called
     // and the rowset is already loaded, and the resource is not closed yet.
     if (_rowset_state_machine.rowset_state() == ROWSET_LOADED) {
+        warmup_lrucache();
         return Status::OK();
     }
     // after lock, if rowset state is ROWSET_UNLOADING, it is ok to return
@@ -176,7 +185,24 @@ Status Rowset::do_load() {
         }
         _segments.push_back(std::move(res).value());
     }
+#ifndef BE_TEST
+    if (config::metadata_cache_memory_limit_percent > 0 && _keys_type != PRIMARY_KEYS) {
+        // Add rowset to lru metadata cache for memory control.
+        // ONLY support non-pk table now.
+        MetadataCache::instance()->cache_rowset(this);
+    }
+#endif
     return Status::OK();
+}
+
+void Rowset::warmup_lrucache() {
+#ifndef BE_TEST
+    if (config::metadata_cache_memory_limit_percent > 0 && _keys_type != PRIMARY_KEYS) {
+        // Move this item to newest item in lru cache.
+        // ONLY support non-pk table now.
+        MetadataCache::instance()->warmup_rowset(this);
+    }
+#endif
 }
 
 // this function is only used for partial update so far
@@ -609,6 +635,14 @@ void Rowset::do_close() {
     _segments.clear();
 }
 
+size_t Rowset::segment_memory_usage() {
+    size_t total = 0;
+    for (const auto& segment : _segments) {
+        total += segment->mem_usage();
+    }
+    return total;
+}
+
 class SegmentIteratorWrapper : public ChunkIterator {
 public:
     SegmentIteratorWrapper(std::shared_ptr<Rowset> rowset, ChunkIteratorPtr iter)
@@ -692,6 +726,7 @@ Status Rowset::get_segment_iterators(const Schema& schema, const RowsetReadOptio
     }
     seg_options.prune_column_after_index_filter = options.prune_column_after_index_filter;
     seg_options.enable_gin_filter = options.enable_gin_filter;
+    seg_options.has_preaggregation = options.has_preaggregation;
 
     auto segment_schema = schema;
     // Append the columns with delete condition to segment schema.

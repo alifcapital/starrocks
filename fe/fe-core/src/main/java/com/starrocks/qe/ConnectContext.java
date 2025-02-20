@@ -38,6 +38,9 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.starrocks.analysis.StringLiteral;
+import com.starrocks.analysis.VariableExpr;
+import com.starrocks.authentication.UserProperty;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
@@ -79,6 +82,7 @@ import com.starrocks.thrift.TUniqueId;
 import com.starrocks.thrift.TWorkGroup;
 import com.starrocks.warehouse.Warehouse;
 import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -92,6 +96,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.net.ssl.SSLContext;
 
 // When one client connect in, we create a connection context for it.
@@ -165,7 +170,8 @@ public class ConnectContext {
     // all the modified session variables, will forward to leader
     protected Map<String, SystemVariable> modifiedSessionVariables = new HashMap<>();
     // user define variable in this session
-    protected HashMap<String, UserVariable> userVariables;
+    protected Map<String, UserVariable> userVariables;
+    protected Map<String, UserVariable> userVariablesCopyInWrite;
     // Scheduler this connection belongs to
     protected ConnectScheduler connectScheduler;
     // Executor
@@ -265,8 +271,8 @@ public class ConnectContext {
         serverCapability = MysqlCapability.DEFAULT_CAPABILITY;
         isKilled = false;
         serializer = MysqlSerializer.newInstance();
-        sessionVariable = VariableMgr.newSessionVariable();
-        userVariables = new HashMap<>();
+        sessionVariable = GlobalStateMgr.getCurrentState().getVariableMgr().newSessionVariable();
+        userVariables = new ConcurrentHashMap<>();
         command = MysqlCommand.COM_SLEEP;
         queryDetail = null;
 
@@ -395,8 +401,9 @@ public class ConnectContext {
     }
 
     public void modifySystemVariable(SystemVariable setVar, boolean onlySetSessionVar) throws DdlException {
-        VariableMgr.setSystemVariable(sessionVariable, setVar, onlySetSessionVar);
-        if (!SetType.GLOBAL.equals(setVar.getType()) && VariableMgr.shouldForwardToLeader(setVar.getVariable())) {
+        GlobalStateMgr.getCurrentState().getVariableMgr().setSystemVariable(sessionVariable, setVar, onlySetSessionVar);
+        if (!SetType.GLOBAL.equals(setVar.getType()) && GlobalStateMgr.getCurrentState().getVariableMgr()
+                .shouldForwardToLeader(setVar.getVariable())) {
             modifiedSessionVariables.put(setVar.getVariable(), setVar);
         }
     }
@@ -406,6 +413,56 @@ public class ConnectContext {
             throw new SemanticException("User variable exceeds the maximum limit of 1024");
         }
         userVariables.put(userVariable.getVariable(), userVariable);
+    }
+
+    /**
+     * 1. The {@link ConnectContext#userVariables} in the current session should not be modified
+     * until you are sure that the set sql was executed successfully.
+     * 2. Changes to user variables during set sql execution should
+     * be effected in the {@link ConnectContext#userVariablesCopyInWrite}.
+     * */
+    public void modifyUserVariableCopyInWrite(UserVariable userVariable) {
+        if (userVariablesCopyInWrite != null) {
+            if (userVariablesCopyInWrite.size() > 1024) {
+                throw new SemanticException("User variable exceeds the maximum limit of 1024");
+            }
+            userVariablesCopyInWrite.put(userVariable.getVariable(), userVariable);
+        }
+    }
+
+    /**
+     * The SQL execution that sets the variable must reset userVariablesCopyInWrite when it finishes,
+     * either normally or abnormally.
+     *
+     * This method needs to be called at the time of setting the user variable.
+     * call by {@link SetExecutor#execute()}, {@link StmtExecutor#processQueryScopeHint()}
+     * */
+    public void resetUserVariableCopyInWrite() {
+        userVariablesCopyInWrite = null;
+    }
+
+    /**
+     * After the successful execution of the SQL that set the variable,
+     * the result of the change to the copy of userVariables is set back to the current session.
+     *
+     * call by {@link SetExecutor#execute()}, {@link StmtExecutor#processQueryScopeHint()}
+     * */
+    public void modifyUserVariables(Map<String, UserVariable> userVarCopyInWrite) {
+        if (userVarCopyInWrite.size() > 1024) {
+            throw new SemanticException("User variable exceeds the maximum limit of 1024");
+        }
+        this.userVariables = userVarCopyInWrite;
+    }
+
+    /**
+     * Instead of using {@link ConnectContext#userVariables} when set userVariables,
+     * use a copy of it, the purpose of which is to ensure atomicity/isolation of modifications to userVariables
+     *
+     * This method needs to be called at the time of setting the user variable.
+     * call by {@link SetExecutor#execute()}, {@link StmtExecutor#processQueryScopeHint()}
+     * */
+    public void modifyUserVariablesCopyInWrite(Map<String, UserVariable> userVariables) {
+        this.userVariablesCopyInWrite = userVariables;
     }
 
     public SetStmt getModifiedSessionVariables() {
@@ -441,8 +498,24 @@ public class ConnectContext {
     }
 
     public void resetSessionVariable() {
-        this.sessionVariable = VariableMgr.newSessionVariable();
+        this.sessionVariable = GlobalStateMgr.getCurrentState().getVariableMgr().newSessionVariable();
         modifiedSessionVariables.clear();
+    }
+
+    public UserVariable getUserVariableCopyInWrite(String variable) {
+        if (userVariablesCopyInWrite == null) {
+            return null;
+        }
+
+        return userVariablesCopyInWrite.get(variable);
+    }
+
+    public Map<String, UserVariable> getUserVariablesCopyInWrite() {
+        if (userVariablesCopyInWrite == null) {
+            return null;
+        }
+
+        return userVariablesCopyInWrite;
     }
 
     public void setSessionVariable(SessionVariable sessionVariable) {
@@ -522,12 +595,23 @@ public class ConnectContext {
         this.state = state;
     }
 
-    public String getErrorCode() {
-        return errorCode;
+    public String getNormalizedErrorCode() {
+        // TODO: how to unify TStatusCode, ErrorCode, ErrType, ConnectContext.errorCode
+        if (StringUtils.isNotEmpty(errorCode)) {
+            // error happens in BE execution.
+            return errorCode;
+        }
+
+        if (state.getErrType() != QueryState.ErrType.UNKNOWN) {
+            // error happens in FE execution.
+            return state.getErrType().name();
+        }
+
+        return "";
     }
 
-    public void setErrorCode(String errorCode) {
-        this.errorCode = errorCode;
+    public void resetErrorCode() {
+        this.errorCode = "";
     }
 
     public void setErrorCodeOnce(String errorCode) {
@@ -833,11 +917,15 @@ public class ConnectContext {
         long delta = now - startTimeMillis;
         boolean killFlag = false;
         boolean killConnection = false;
+        String sql = "";
+        if (executor != null) {
+            sql = executor.getOriginStmtInString();
+        }
         if (command == MysqlCommand.COM_SLEEP) {
             if (delta > sessionVariable.getWaitTimeoutS() * 1000L) {
                 // Need kill this connection.
-                LOG.warn("kill wait timeout connection, remote: {}, wait timeout: {}",
-                        getMysqlChannel().getRemoteHostPortString(), sessionVariable.getWaitTimeoutS());
+                LOG.warn("kill wait timeout connection, remote: {}, wait timeout: {}, query id: {}, sql: {}",
+                        getMysqlChannel().getRemoteHostPortString(), sessionVariable.getWaitTimeoutS(), queryId, sql);
 
                 killFlag = true;
                 killConnection = true;
@@ -845,8 +933,8 @@ public class ConnectContext {
         } else {
             long timeoutSecond = sessionVariable.getQueryTimeoutS();
             if (delta > timeoutSecond * 1000L) {
-                LOG.warn("kill query timeout, remote: {}, query timeout: {}",
-                        getMysqlChannel().getRemoteHostPortString(), sessionVariable.getQueryTimeoutS());
+                LOG.warn("kill query timeout, remote: {}, query timeout: {}, query id: {}, sql: {}",
+                        getMysqlChannel().getRemoteHostPortString(), sessionVariable.getQueryTimeoutS(), queryId, sql);
 
                 // Only kill
                 killFlag = true;
@@ -1029,6 +1117,53 @@ public class ConnectContext {
             executor.execute();
         } catch (Throwable e) {
             LOG.warn("Failed to clean temporary table on session {}, {}", sessionId, e);
+        }
+    }
+
+    // We can not make sure the set variables are all valid. Even if some variables are invalid, we should let user continue
+    // to execute SQL.
+    public void updateByUserProperty(UserProperty userProperty) {
+        try {
+            // set session variables
+            Map<String, String> sessionVariables = userProperty.getSessionVariables();
+            for (Map.Entry<String, String> entry : sessionVariables.entrySet()) {
+                String currentValue = GlobalStateMgr.getCurrentState().getVariableMgr().getValue(
+                        sessionVariable, new VariableExpr(entry.getKey()));
+                if (!currentValue.equalsIgnoreCase(
+                        GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultValue(entry.getKey()))) {
+                    // If the current session variable is not default value, we should respect it.
+                    continue;
+                }
+                SystemVariable variable = new SystemVariable(entry.getKey(), new StringLiteral(entry.getValue()));
+                modifySystemVariable(variable, true);
+            }
+
+            // set catalog and database
+            boolean dbHasBeenSetByUser = !getCurrentCatalog().equals(
+                    GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultValue(SessionVariable.CATALOG))
+                    || !getDatabase().isEmpty();
+            if (!dbHasBeenSetByUser) {
+                String catalog = userProperty.getCatalog();
+                String database = userProperty.getDatabase();
+                if (catalog.equals(UserProperty.CATALOG_DEFAULT_VALUE)) {
+                    if (!database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
+                        changeCatalogDb(userProperty.getCatalogDbName());
+                    }
+                } else {
+                    if (database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
+                        changeCatalog(catalog);
+                    } else {
+                        changeCatalogDb(userProperty.getCatalogDbName());
+                    }
+                    SystemVariable variable = new SystemVariable(SessionVariable.CATALOG, new StringLiteral(catalog));
+                    modifySystemVariable(variable, true);
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("set session env failed: ", e);
+            // In handshake, we will send error message to client. But it seems that client will ignore it.
+            getState().setOk(0L, 0,
+                    String.format("set session variables from user property failed: %s", e.getMessage()));
         }
     }
 

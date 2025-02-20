@@ -206,6 +206,7 @@ import com.starrocks.sql.ast.pipe.DescPipeStmt;
 import com.starrocks.sql.ast.pipe.DropPipeStmt;
 import com.starrocks.sql.ast.pipe.PipeName;
 import com.starrocks.sql.ast.pipe.ShowPipeStmt;
+import com.starrocks.sql.common.MetaUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -1481,7 +1482,9 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
                         PrivilegeType.DROP.name(), ObjectType.VIEW.name(), statement.getTbl().getTbl());
             }
         } else {
+            Table table = null;
             try {
+                table = MetaUtils.getSessionAwareTable(context, null, statement.getTbl());
                 Authorizer.checkTableAction(context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
                         statement.getTbl(), PrivilegeType.DROP);
             } catch (AccessDeniedException e) {
@@ -1489,6 +1492,12 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
                         statement.getTbl().getCatalog(),
                         context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
                         PrivilegeType.DROP.name(), ObjectType.TABLE.name(), statement.getTbl().getTbl());
+            } catch (Exception e) {
+                if (table == null && statement.isSetIfExists()) {
+                    // an exception will be thrown if table is not found, ignore it if `if exists` is set.
+                    return null;
+                }
+                throw e;
             }
         }
         return null;
@@ -1561,16 +1570,10 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
         if (statement.getAlterType() == ShowAlterStmt.AlterType.MATERIALIZED_VIEW) {
             Database db = GlobalStateMgr.getCurrentState().getDb(statement.getDbName());
             if (db != null) {
-                Locker locker = new Locker();
-                try {
-                    locker.lockDatabase(db, LockType.READ);
-                    Table table = db.getTable(statement.getTableName());
-                    if (table == null || !table.isMaterializedView()) {
-                        // ignore privilege check for old mv
-                        return null;
-                    }
-                } finally {
-                    locker.unLockDatabase(db, LockType.READ);
+                Table table = db.getTable(statement.getTableName());
+                if (table == null || !table.isMaterializedView()) {
+                    // ignore privilege check for old mv
+                    return null;
                 }
             }
 
@@ -1599,6 +1602,10 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
 
     @Override
     public Void visitDescTableStmt(DescribeStmt statement, ConnectContext context) {
+        if (statement.isTableFunctionTable()) {
+            return null;
+        }
+
         try {
             Authorizer.checkAnyActionOnTable(context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
                     statement.getDbTableName());

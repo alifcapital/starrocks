@@ -14,6 +14,9 @@
 package com.starrocks.scheduler;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
+import com.google.common.collect.Sets;
+import com.starrocks.analysis.TableName;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvRefreshArbiter;
@@ -26,13 +29,17 @@ import com.starrocks.pseudocluster.PseudoCluster;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.CreateMaterializedViewStatement;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.QueryMaterializationContext;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvRewriteTestBase;
 import com.starrocks.sql.parser.SqlParser;
+import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.statistic.StatisticsMetaManager;
+import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.junit.AfterClass;
@@ -43,6 +50,7 @@ import org.junit.rules.TemporaryFolder;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public class MVRefreshTestBase {
     private static final Logger LOG = LogManager.getLogger(MvRewriteTestBase.class);
@@ -157,5 +165,46 @@ public class MVRefreshTestBase {
         System.out.println(cacheStats);
         return GsonUtils.GSON.fromJson(cacheStats,
                 QueryMaterializationContext.QueryCacheStats.class);
+    }
+
+    protected Map<Table, Set<String>> getRefTableRefreshedPartitions(PartitionBasedMvRefreshProcessor processor) {
+        Map<TableSnapshotInfo, Set<String>> baseTables = processor
+                .getRefTableRefreshPartitions(Sets.newHashSet("p20220101"));
+        Assert.assertEquals(2, baseTables.size());
+        return baseTables.entrySet().stream().collect(Collectors.toMap(x -> x.getKey().getBaseTable(), x -> x.getValue()));
+    }
+
+    protected void assertPlanContains(ExecPlan execPlan, String... explain) throws Exception {
+        String explainString = execPlan.getExplainString(TExplainLevel.NORMAL);
+
+        for (String expected : explain) {
+            Assert.assertTrue("expected is: " + expected + " but plan is \n" + explainString,
+                    StringUtils.containsIgnoreCase(explainString.toLowerCase(), expected));
+        }
+    }
+
+    protected static ExecPlan getMVRefreshExecPlan(TaskRun taskRun) throws Exception {
+        initAndExecuteTaskRun(taskRun);
+        PartitionBasedMvRefreshProcessor processor = (PartitionBasedMvRefreshProcessor)
+                taskRun.getProcessor();
+        MvTaskRunContext mvTaskRunContext = processor.getMvContext();
+        return mvTaskRunContext.getExecPlan();
+    }
+
+    protected static void initAndExecuteTaskRun(TaskRun taskRun) throws Exception {
+        taskRun.initStatus(UUIDUtil.genUUID().toString(), System.currentTimeMillis());
+        taskRun.executeTaskRun();
+    }
+
+    protected static void createAndRefreshMv(String sql) throws Exception {
+        StatementBase stmt = UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
+        Assert.assertTrue(stmt instanceof CreateMaterializedViewStatement);
+        CreateMaterializedViewStatement createMaterializedViewStatement = (CreateMaterializedViewStatement) stmt;
+        TableName mvTableName = createMaterializedViewStatement.getTableName();
+        Assert.assertTrue(mvTableName != null);
+        String dbName = Strings.isNullOrEmpty(mvTableName.getDb()) ? "test" : mvTableName.getDb();
+        String mvName = mvTableName.getTbl();
+        starRocksAssert.withMaterializedView(sql);
+        cluster.runSql(dbName, String.format("refresh materialized view %s with sync mode", mvName));
     }
 }

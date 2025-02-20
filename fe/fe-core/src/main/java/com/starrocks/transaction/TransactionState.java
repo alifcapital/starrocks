@@ -50,7 +50,6 @@ import com.starrocks.common.TraceManager;
 import com.starrocks.common.UserException;
 import com.starrocks.common.io.Writable;
 import com.starrocks.metric.MetricRepo;
-import com.starrocks.proto.TxnTypePB;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.service.FrontendOptions;
@@ -59,7 +58,6 @@ import com.starrocks.task.PublishVersionTask;
 import com.starrocks.thrift.TOlapTablePartition;
 import com.starrocks.thrift.TPartitionVersionInfo;
 import com.starrocks.thrift.TTabletLocation;
-import com.starrocks.thrift.TTxnType;
 import com.starrocks.thrift.TUniqueId;
 import io.opentelemetry.api.trace.Span;
 import org.apache.commons.lang3.StringUtils;
@@ -698,6 +696,11 @@ public class TransactionState implements Writable {
         this.txnCommitAttachment = txnCommitAttachment;
     }
 
+    public boolean isVersionOverwrite() {
+        return txnCommitAttachment instanceof InsertTxnCommitAttachment
+                && ((InsertTxnCommitAttachment) txnCommitAttachment).getIsVersionOverwrite();
+    }
+
     // return true if txn is in final status and label is expired
     public boolean isExpired(long currentMillis) {
         return transactionStatus.isFinalStatus() && (currentMillis - finishTime) / 1000 > Config.label_keep_max_second;
@@ -792,12 +795,9 @@ public class TransactionState implements Writable {
         return sourceType;
     }
 
-    public TTxnType getTxnType() {
-        return sourceType == LoadJobSourceType.REPLICATION ? TTxnType.TXN_REPLICATION : TTxnType.TXN_NORMAL;
-    }
-
-    public TxnTypePB getTxnTypePB() {
-        return sourceType == LoadJobSourceType.REPLICATION ? TxnTypePB.TXN_REPLICATION : TxnTypePB.TXN_NORMAL;
+    public TransactionType getTransactionType() {
+        return sourceType == LoadJobSourceType.REPLICATION ? TransactionType.TXN_REPLICATION
+                : TransactionType.TXN_NORMAL;
     }
 
     public Map<Long, PublishVersionTask> getPublishVersionTasks() {
@@ -859,6 +859,9 @@ public class TransactionState implements Writable {
         for (PartitionCommitInfo commitInfo : partitionCommitInfos) {
             TPartitionVersionInfo version = new TPartitionVersionInfo(commitInfo.getPartitionId(),
                     commitInfo.getVersion(), 0);
+            if (commitInfo.isDoubleWrite()) {
+                version.setIs_double_write(true);
+            }
             partitionVersions.add(version);
         }
 
@@ -874,7 +877,8 @@ public class TransactionState implements Writable {
                     createTime,
                     this,
                     Config.enable_sync_publish,
-                    this.getTxnType());
+                    this.getTransactionType(),
+                    isVersionOverwrite());
             this.addPublishVersionTask(backendId, task);
             tasks.add(task);
         }

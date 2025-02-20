@@ -341,7 +341,7 @@ public class TabletInvertedIndex implements MemoryTrackable {
      * And this process will also output a report in `fe.log`, including valid number of
      * tablet and number of tablet in recycle bin for each backend.
      */
-    public void checkTabletMetaConsistency() {
+    public void checkTabletMetaConsistency(Map<Long, Integer> creatingTableIds) {
         LocalMetastore localMetastore = GlobalStateMgr.getCurrentState().getLocalMetastore();
         CatalogRecycleBin recycleBin = GlobalStateMgr.getCurrentState().getRecycleBin();
 
@@ -390,6 +390,9 @@ public class TabletInvertedIndex implements MemoryTrackable {
 
                     // validate table
                     long tableId = tabletMeta.getTableId();
+                    if (creatingTableIds.containsKey(tableId)) {
+                        continue;
+                    }
                     com.starrocks.catalog.Table table = db.getTable(tableId);
                     if (table == null) {
                         table = recycleBin.getTable(dbId, tableId);
@@ -882,5 +885,24 @@ public class TabletInvertedIndex implements MemoryTrackable {
                                "TabletCount", getTabletCount(),
                                "ReplicateCount", getReplicaCount());
     }
-}
 
+    @Override
+    public List<Pair<List<Object>, Long>> getSamples() {
+        readLock();
+        try {
+            List<Object> tabletMetaSamples = tabletMetaMap.values()
+                    .stream()
+                    .limit(1)
+                    .collect(Collectors.toList());
+
+            List<Object> longSamples = Lists.newArrayList(0L);
+            long longSize = tabletMetaMap.size() + replicaToTabletMap.size() * 2L + forceDeleteTablets.size() * 4L
+                    + replicaMetaTable.size() * 2L + backingReplicaMetaTable.size() * 2L;
+
+            return Lists.newArrayList(Pair.create(tabletMetaSamples, (long) tabletMetaMap.size()),
+                    Pair.create(longSamples, longSize));
+        } finally {
+            readUnlock();
+        }
+    }
+}

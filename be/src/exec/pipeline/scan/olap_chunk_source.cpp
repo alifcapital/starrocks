@@ -173,7 +173,6 @@ void OlapChunkSource::_init_counter(RuntimeState* state) {
     // IOTime
     _io_timer = ADD_CHILD_TIMER(_runtime_profile, "IOTime", IO_TASK_EXEC_TIMER_NAME);
 
-    _json_flatten_timer = ADD_CHILD_TIMER(_runtime_profile, "JsonFlattern", segment_read_name);
     _access_path_hits_counter = ADD_COUNTER(_runtime_profile, "AccessPathHits", TUnit::UNIT);
     _access_path_unhits_counter = ADD_COUNTER(_runtime_profile, "AccessPathUnhits", TUnit::UNIT);
 }
@@ -324,7 +323,7 @@ Status OlapChunkSource::_init_column_access_paths(Schema* schema) {
     int64_t leaf_size = 0;
     for (const auto& path : *paths) {
         auto& root = path->path();
-        int32_t index = _tablet->field_index_with_max_version(root);
+        int32_t index = _tablet_schema->field_index(root);
         auto field = schema->get_field_by_name(root);
         if (index >= 0 && field != nullptr) {
             auto res = path->convert_by_index(field.get(), index);
@@ -400,7 +399,10 @@ Status OlapChunkSource::_prune_schema_by_access_paths(Schema* schema) {
             LOG(WARNING) << "failed to find column in schema: " << root;
             continue;
         }
-        RETURN_IF_ERROR(prune_field_by_access_paths(field.get(), path.get()));
+        // field maybe modified, so we need to deep copy
+        auto new_field = std::make_shared<Field>(*field);
+        schema->set_field_by_name(new_field, root);
+        RETURN_IF_ERROR(prune_field_by_access_paths(new_field.get(), path.get()));
     }
 
     return Status::OK();
@@ -417,15 +419,22 @@ Status OlapChunkSource::_init_olap_reader(RuntimeState* runtime_state) {
 
     auto scope = IOProfiler::scope(IOProfiler::TAG_QUERY, _scan_range->tablet_id);
 
-    // if column_desc come from fe, reset tablet schema
-    if (_scan_node->thrift_olap_scan_node().__isset.columns_desc &&
-        !_scan_node->thrift_olap_scan_node().columns_desc.empty() &&
-        _scan_node->thrift_olap_scan_node().columns_desc[0].col_unique_id >= 0) {
-        _tablet_schema =
-                TabletSchema::copy(*_tablet->tablet_schema(), _scan_node->thrift_olap_scan_node().columns_desc);
-    } else {
-        // struct column prune will modify fields, so deep copy a new schema
-        _tablet_schema = TabletSchema::copy(*_tablet->tablet_schema());
+    // schema_id that not greater than 0 is invalid
+    if (_scan_node->thrift_olap_scan_node().__isset.schema_id && _scan_node->thrift_olap_scan_node().schema_id > 0 &&
+        _scan_node->thrift_olap_scan_node().schema_id == _tablet->tablet_schema()->id()) {
+        _tablet_schema = _tablet->tablet_schema();
+    }
+
+    if (_tablet_schema == nullptr) {
+        // if column_desc come from fe, reset tablet schema
+        if (_scan_node->thrift_olap_scan_node().__isset.columns_desc &&
+            !_scan_node->thrift_olap_scan_node().columns_desc.empty() &&
+            _scan_node->thrift_olap_scan_node().columns_desc[0].col_unique_id >= 0) {
+            _tablet_schema =
+                    TabletSchema::copy(*_tablet->tablet_schema(), _scan_node->thrift_olap_scan_node().columns_desc);
+        } else {
+            _tablet_schema = _tablet->tablet_schema();
+        }
     }
 
     RETURN_IF_ERROR(_init_global_dicts(&_params));
@@ -473,11 +482,6 @@ Status OlapChunkSource::_read_chunk(RuntimeState* state, ChunkPtr* chunk) {
                                                _runtime_state->use_column_pool()));
     auto scope = IOProfiler::scope(IOProfiler::TAG_QUERY, _tablet->tablet_id());
     return _read_chunk_from_storage(_runtime_state, (*chunk).get());
-}
-
-const workgroup::WorkGroupScanSchedEntity* OlapChunkSource::_scan_sched_entity(const workgroup::WorkGroup* wg) const {
-    DCHECK(wg != nullptr);
-    return wg->scan_sched_entity();
 }
 
 // mapping a slot-column-id to schema-columnid
@@ -642,13 +646,23 @@ void OlapChunkSource::_update_counter() {
         COUNTER_UPDATE(c2, _reader->stats().rows_del_filtered);
     }
 
-    if (_reader->stats().flat_json_hits.size() > 0) {
+    if (_reader->stats().flat_json_hits.size() > 0 || _reader->stats().merge_json_hits.size() > 0) {
         std::string access_path_hits = "AccessPathHits";
         int64_t total = 0;
         for (auto& [k, v] : _reader->stats().flat_json_hits) {
-            auto* path_counter = _runtime_profile->get_counter(fmt::format("[Hit]{}", k));
+            std::string path = fmt::format("[Hit]{}", k);
+            auto* path_counter = _runtime_profile->get_counter(path);
             if (path_counter == nullptr) {
-                path_counter = ADD_CHILD_COUNTER(_runtime_profile, k, TUnit::UNIT, access_path_hits);
+                path_counter = ADD_CHILD_COUNTER(_runtime_profile, path, TUnit::UNIT, access_path_hits);
+            }
+            total += v;
+            COUNTER_UPDATE(path_counter, v);
+        }
+        for (auto& [k, v] : _reader->stats().merge_json_hits) {
+            std::string merge_path = fmt::format("[HitMerge]{}", k);
+            auto* path_counter = _runtime_profile->get_counter(merge_path);
+            if (path_counter == nullptr) {
+                path_counter = ADD_CHILD_COUNTER(_runtime_profile, merge_path, TUnit::UNIT, access_path_hits);
             }
             total += v;
             COUNTER_UPDATE(path_counter, v);
@@ -659,9 +673,10 @@ void OlapChunkSource::_update_counter() {
         std::string access_path_unhits = "AccessPathUnhits";
         int64_t total = 0;
         for (auto& [k, v] : _reader->stats().dynamic_json_hits) {
-            auto* path_counter = _runtime_profile->get_counter(fmt::format("[Unhit]{}", k));
+            std::string path = fmt::format("[Unhit]{}", k);
+            auto* path_counter = _runtime_profile->get_counter(path);
             if (path_counter == nullptr) {
-                path_counter = ADD_CHILD_COUNTER(_runtime_profile, k, TUnit::UNIT, access_path_unhits);
+                path_counter = ADD_CHILD_COUNTER(_runtime_profile, path, TUnit::UNIT, access_path_unhits);
             }
             total += v;
             COUNTER_UPDATE(path_counter, v);
@@ -669,7 +684,23 @@ void OlapChunkSource::_update_counter() {
         COUNTER_UPDATE(_access_path_unhits_counter, total);
     }
 
-    COUNTER_UPDATE(_json_flatten_timer, _reader->stats().json_flatten_ns);
+    std::string parent_name = "SegmentRead";
+    if (_reader->stats().json_init_ns > 0) {
+        RuntimeProfile::Counter* c = ADD_CHILD_TIMER(_runtime_profile, "FlatJsonInit", parent_name);
+        COUNTER_UPDATE(c, _reader->stats().json_init_ns);
+    }
+    if (_reader->stats().json_cast_ns > 0) {
+        RuntimeProfile::Counter* c = ADD_CHILD_TIMER(_runtime_profile, "FlatJsonCast", parent_name);
+        COUNTER_UPDATE(c, _reader->stats().json_cast_ns);
+    }
+    if (_reader->stats().json_merge_ns > 0) {
+        RuntimeProfile::Counter* c = ADD_CHILD_TIMER(_runtime_profile, "FlatJsonMerge", parent_name);
+        COUNTER_UPDATE(c, _reader->stats().json_merge_ns);
+    }
+    if (_reader->stats().json_flatten_ns > 0) {
+        RuntimeProfile::Counter* c = ADD_CHILD_TIMER(_runtime_profile, "FlatJsonFlatten", parent_name);
+        COUNTER_UPDATE(c, _reader->stats().json_flatten_ns);
+    }
 }
 
 } // namespace starrocks::pipeline

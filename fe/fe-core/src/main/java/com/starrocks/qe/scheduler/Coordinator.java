@@ -105,6 +105,10 @@ public abstract class Coordinator {
      */
     public abstract void startScheduling(boolean needDeploy) throws Exception;
 
+    public Status scheduleNextTurn(TUniqueId fragmentInstanceId) {
+        return Status.OK;
+    }
+
     public void startScheduling() throws Exception {
         startScheduling(true);
     }
@@ -231,6 +235,8 @@ public abstract class Coordinator {
     public abstract boolean isProfileAlreadyReported();
 
     public abstract String getWarehouseName();
+
+    public abstract String getResourceGroupName();
 
     public abstract boolean isShortCircuit();
 }

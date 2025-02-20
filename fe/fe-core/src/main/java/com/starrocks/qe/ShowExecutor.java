@@ -54,10 +54,10 @@ import com.starrocks.backup.RestoreJob;
 import com.starrocks.catalog.BasicTable;
 import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.ConnectorView;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DynamicPartitionProperty;
 import com.starrocks.catalog.Function;
-import com.starrocks.catalog.HiveMetaStoreTable;
 import com.starrocks.catalog.Index;
 import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.LocalTablet;
@@ -86,6 +86,7 @@ import com.starrocks.common.ErrorReport;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.PatternMatcher;
+import com.starrocks.common.SchemaConstants;
 import com.starrocks.common.proc.BackendsProcDir;
 import com.starrocks.common.proc.ComputeNodeProcDir;
 import com.starrocks.common.proc.FrontendsProcNode;
@@ -268,8 +269,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
-import static com.starrocks.catalog.Table.TableType.JDBC;
-
 // Execute one show statement.
 public class ShowExecutor {
     private static final Logger LOG = LogManager.getLogger(ShowExecutor.class);
@@ -287,6 +286,7 @@ public class ShowExecutor {
     public static class ShowExecutorVisitor implements AstVisitor<ShowResultSet, ConnectContext> {
         private static final Logger LOG = LogManager.getLogger(ShowExecutor.ShowExecutorVisitor.class);
         private static final ShowExecutor.ShowExecutorVisitor INSTANCE = new ShowExecutor.ShowExecutorVisitor();
+
         public static ShowExecutor.ShowExecutorVisitor getInstance() {
             return INSTANCE;
         }
@@ -323,26 +323,31 @@ public class ShowExecutor {
                             continue;
                         }
 
-                        AtomicBoolean baseTableHasPrivilege = new AtomicBoolean(true);
-                        mvTable.getBaseTableInfos().forEach(baseTableInfo -> {
-                            Table baseTable = MvUtils.getTableChecked(baseTableInfo);
-                            // TODO: external table should check table action after AuthorizationManager support it.
-                            if (baseTable != null && baseTable.isNativeTableOrMaterializedView()) {
-                                try {
-                                    Authorizer.checkTableAction(context.getCurrentUserIdentity(),
-                                            context.getCurrentRoleIds(), baseTableInfo.getDbName(),
-                                            baseTableInfo.getTableName(),
-                                            PrivilegeType.SELECT);
-                                } catch (AccessDeniedException e) {
-                                    baseTableHasPrivilege.set(false);
-                                }
-                            }
-                        });
-                        if (!baseTableHasPrivilege.get()) {
-                            continue;
-                        }
-
                         try {
+                            AtomicBoolean baseTableHasPrivilege = new AtomicBoolean(true);
+                            mvTable.getBaseTableInfos().stream()
+                                    .forEach(baseTableInfo -> {
+                                        // skip if base table not existed
+                                        Optional<Table> baseTableOpt = MvUtils.getTable(baseTableInfo);
+                                        if (baseTableOpt.isEmpty()) {
+                                            return;
+                                        }
+                                        Table baseTable = baseTableOpt.get();
+                                        // TODO: external table should check table action after AuthorizationManager support it.
+                                        if (baseTable != null && baseTable.isNativeTableOrMaterializedView()) {
+                                            try {
+                                                Authorizer.checkTableAction(context.getCurrentUserIdentity(),
+                                                        context.getCurrentRoleIds(), baseTableInfo.getDbName(),
+                                                        baseTableInfo.getTableName(),
+                                                        PrivilegeType.SELECT);
+                                            } catch (AccessDeniedException e) {
+                                                baseTableHasPrivilege.set(false);
+                                            }
+                                        }
+                                    });
+                            if (!baseTableHasPrivilege.get()) {
+                                continue;
+                            }
                             Authorizer.checkAnyActionOnMaterializedView(context.getCurrentUserIdentity(),
                                     context.getCurrentRoleIds(), new TableName(db.getFullName(), mvTable.getName()));
                         } catch (AccessDeniedException e) {
@@ -781,62 +786,16 @@ public class ShowExecutor {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR, tableName);
             }
 
-            // create table catalogName.dbName.tableName (
-            StringBuilder createTableSql = new StringBuilder();
-            createTableSql.append("CREATE TABLE ")
-                    .append("`").append(tableName).append("`")
-                    .append(" (\n");
-
-            // Columns
-            List<String> columns = table.getFullSchema().stream().map(
-                    this::toMysqlDDL).collect(Collectors.toList());
-            createTableSql.append(String.join(",\n", columns))
-                    .append("\n)");
-
-            // Partition column names
-            if (table.getType() != JDBC && !table.isUnPartitioned()) {
-                createTableSql.append("\nPARTITION BY ( ")
-                        .append(String.join(", ", table.getPartitionColumnNames()))
-                        .append(" )");
-            }
-
-            // Location
-            String location = null;
-            if (table.isHiveTable() || table.isHudiTable()) {
-                location = ((HiveMetaStoreTable) table).getTableLocation();
-            } else if (table.isIcebergTable()) {
-                location = table.getTableLocation();
-            } else if (table.isDeltalakeTable()) {
-                location = table.getTableLocation();
-            } else if (table.isPaimonTable()) {
-                location = table.getTableLocation();
-            }
-
-            // Comment
-            if (!Strings.isNullOrEmpty(table.getComment())) {
-                createTableSql.append("\nCOMMENT (\"").append(table.getComment()).append("\")");
-            }
-
-            if (!Strings.isNullOrEmpty(location)) {
-                createTableSql.append("\nPROPERTIES (\"location\" = \"").append(location).append("\");");
-            }
-
             List<List<String>> rows = Lists.newArrayList();
-            rows.add(Lists.newArrayList(tableName, createTableSql.toString()));
-            return new ShowResultSet(showStmt.getMetaData(), rows);
-        }
-
-        private String toMysqlDDL(Column column) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("  `").append(column.getName()).append("` ");
-            sb.append(column.getType().toSql());
-            sb.append(" DEFAULT NULL");
-
-            if (!Strings.isNullOrEmpty(column.getComment())) {
-                sb.append(" COMMENT \"").append(column.getDisplayComment()).append("\"");
+            if (table.isConnectorView()) {
+                String createViewSql = AstToStringBuilder.getExternalCatalogViewDdlStmt((ConnectorView) table);
+                rows.add(Lists.newArrayList(tableName, createViewSql));
+                return new ShowResultSet(ShowCreateTableStmt.getConnectorViewMetaData(), rows);
+            } else {
+                String createTableSql = AstToStringBuilder.getExternalCatalogTableDdlStmt(table);
+                rows.add(Lists.newArrayList(tableName, createTableSql));
+                return new ShowResultSet(showStmt.getMetaData(), rows);
             }
-
-            return sb.toString();
         }
 
         @Override
@@ -1007,7 +966,8 @@ public class ShowExecutor {
                 matcher = PatternMatcher.createMysqlPattern(statement.getPattern(),
                         CaseSensibility.VARIABLES.getCaseSensibility());
             }
-            List<List<String>> rows = VariableMgr.dump(statement.getType(), context.getSessionVariable(), matcher);
+            List<List<String>> rows = GlobalStateMgr.getCurrentState().getVariableMgr().dump(statement.getType(),
+                    context.getSessionVariable(), matcher);
             return new ShowResultSet(statement.getMetaData(), rows);
         }
 
@@ -1022,15 +982,16 @@ public class ShowExecutor {
             String dbName = statement.getDb();
             Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(catalogName, dbName);
             MetaUtils.checkDbNullAndReport(db, statement.getDb());
+            Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                    .getTable(catalogName, dbName, statement.getTable());
+            if (table == null) {
+                ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR,
+                        statement.getDb() + "." + statement.getTable());
+            }
+
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
             try {
-                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                        .getTable(catalogName, dbName, statement.getTable());
-                if (table == null) {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR,
-                            statement.getDb() + "." + statement.getTable());
-                }
                 PatternMatcher matcher = null;
                 if (statement.getPattern() != null) {
                     matcher = PatternMatcher.createMysqlPattern(statement.getPattern(),
@@ -1043,8 +1004,8 @@ public class ShowExecutor {
                     }
                     final String columnName = col.getName();
                     final String columnType = col.getType().canonicalName().toLowerCase();
-                    final String isAllowNull = col.isAllowNull() ? "YES" : "NO";
-                    final String isKey = col.isKey() ? "YES" : "NO";
+                    final String isAllowNull = col.isAllowNull() ? SchemaConstants.YES : SchemaConstants.NO;
+                    final String isKey = col.isKey() ? SchemaConstants.YES : SchemaConstants.NO;
                     String defaultValue = null;
                     if (!col.getType().isOnlyMetricType()) {
                         defaultValue = col.getMetaDefaultValue(Lists.newArrayList());
@@ -1074,7 +1035,7 @@ public class ShowExecutor {
                     }
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
             }
             return new ShowResultSet(statement.getMetaData(), rows);
         }
@@ -2191,14 +2152,16 @@ public class ShowExecutor {
             List<List<String>> rows = Lists.newArrayList();
             Database db = context.getGlobalStateMgr().getDb(statement.getDbName());
             MetaUtils.checkDbNullAndReport(db, statement.getDbName());
+            Table table = MetaUtils.getSessionAwareTable(context, db, statement.getTableName());
+            if (table == null) {
+                ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR,
+                        db.getOriginName() + "." + statement.getTableName().toString());
+            }
+
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
             try {
-                Table table = MetaUtils.getSessionAwareTable(context, db, statement.getTableName());
-                if (table == null) {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR,
-                            db.getOriginName() + "." + statement.getTableName().toString());
-                } else if (table instanceof OlapTable) {
+                if (table instanceof OlapTable) {
                     List<Index> indexes = ((OlapTable) table).getIndexes();
                     for (Index index : indexes) {
                         List<String> indexColumnNames = MetaUtils.getColumnNamesByColumnIds(table, index.getColumns());
@@ -2212,7 +2175,7 @@ public class ShowExecutor {
                     // do nothing
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
             }
             return new ShowResultSet(statement.getMetaData(), rows);
         }
@@ -2317,8 +2280,8 @@ public class ShowExecutor {
                     if (result != null) {
                         rows.add(result);
                     }
-                } catch (MetaNotFoundException e) {
-                    // pass
+                } catch (Exception e) {
+                    // The catalog(HMS/Glue...) may can not connected, so the meta can not be found. Just ignore it.
                 }
             }
 

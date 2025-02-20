@@ -82,6 +82,7 @@ struct TColumnDesc {
   // Let FE control the type, which makes it easier to modify and display complex types
   26: optional string columnTypeStr
   27: optional string dataType
+  28: optional string generatedColumnExprStr
 }
 
 // A column definition; used by CREATE TABLE and DESCRIBE <table> statements. A column
@@ -404,6 +405,8 @@ struct TMaterializedViewStatus {
 
     26: optional string extra_message
     27: optional string query_rewrite_status
+
+    28: optional string creator
 }
 
 struct TListPipesParams {
@@ -495,6 +498,7 @@ struct TTaskInfo {
     6: optional i64 expire_time
     7: optional string properties
     8: optional string catalog
+    9: optional string creator
 }
 
 struct TGetTaskInfoResult {
@@ -734,6 +738,16 @@ struct TReportExecStatusParams {
   29: optional DataCache.TLoadDataCacheMetrics load_datacache_metrics
 }
 
+struct TReportFragmentFinishParams {
+    1: optional Types.TUniqueId query_id
+    2: optional Types.TUniqueId fragment_instance_id
+    4: optional i32 backend_num
+}
+
+struct TReportFragmentFinishResponse {
+    1: optional Status.TStatus status
+}
+
 struct TAuditStatistics {
     3: optional i64 scan_rows
     4: optional i64 scan_bytes
@@ -856,7 +870,7 @@ struct TLoadTxnBeginRequest {
     // The real value of timeout should be i32. i64 ensures the compatibility of interface.
     10: optional i64 timeout
     11: optional Types.TUniqueId request_id
-    
+
     // begin from 101, in case of conflict with other's change
     101: optional string warehouse  // deprecated, use backend_id implicitly convey information about the warehouse
     102: optional i64 backend_id
@@ -925,7 +939,7 @@ struct TStreamLoadPutRequest {
     // only valid when file type is CSV
     54: optional byte escape
     55: optional Types.TPartialUpdateMode partial_update_mode
-    56: optional string payload_compression_type 
+    56: optional string payload_compression_type
 
     // begin from 101, in case of conflict with other's change
     101: optional string warehouse  // deprecated, use backend_id implicitly convey information about the warehouse
@@ -1448,6 +1462,9 @@ struct TPartitionMetaInfo {
     23: optional double p50_cs
     24: optional double max_cs
     25: optional string storage_path
+    26: optional i64 data_version
+    27: optional i64 version_epoch
+    28: optional Types.TTxnType version_txn_type = Types.TTxnType.TXN_NORMAL
 }
 
 struct TGetTablesInfoRequest {
@@ -1508,6 +1525,31 @@ struct TUpdateResourceUsageRequest {
 
 struct TUpdateResourceUsageResponse {
     1: optional Status.TStatus status
+}
+
+struct TGetQueryStatisticsRequest {
+}
+
+struct TQueryStatisticsInfo {
+    1: optional i64 queryStartTime
+    2: optional string feIp
+    3: optional string queryId
+    4: optional string connId
+    5: optional string db
+    6: optional string user
+    7: optional i64 cpuCostNs
+    8: optional i64 scanBytes
+    9: optional i64 scanRows
+    10: optional i64 memUsageBytes
+    11: optional i64 spillBytes
+    12: optional i64 execTime
+    13: optional string wareHouseName
+    15: optional string resourceGroupName
+}
+
+struct TGetQueryStatisticsResponse {
+    1: optional Status.TStatus status
+    2: optional list<TQueryStatisticsInfo> queryStatistics_infos;
 }
 
 struct TResourceLogicalSlot {
@@ -1740,6 +1782,7 @@ struct TPartitionReplicationInfo {
     1: optional i64 partition_id
     2: optional i64 src_version
     3: optional map<i64, TIndexReplicationInfo> index_replication_infos
+    4: optional i64 src_version_epoch
 }
 
 struct TTableReplicationRequest {
@@ -1864,6 +1907,8 @@ service FrontendService {
 
     TGetWarehousesResponse getWarehouses(1: TGetWarehousesRequest request)
 
+    TGetQueryStatisticsResponse getQueryStatistics(1: TGetQueryStatisticsRequest request)
+
     // For Materialized View
     MVMaintenance.TMVReportEpochResponse mvReport(1: MVMaintenance.TMVMaintenanceTasks request)
 
@@ -1899,5 +1944,7 @@ service FrontendService {
 
     TListSessionsResponse listSessions(1: TListSessionsRequest request)
     TGetTemporaryTablesInfoResponse getTemporaryTablesInfo(1: TGetTemporaryTablesInfoRequest request)
+
+    TReportFragmentFinishResponse reportFragmentFinish(TReportFragmentFinishParams request)
 }
 

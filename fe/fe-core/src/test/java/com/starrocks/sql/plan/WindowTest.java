@@ -1375,11 +1375,16 @@ public class WindowTest extends PlanTestBase {
         assertContains(plan, "4:ANALYTIC\n" +
                 "  |  functions: [, row_number(), ]\n" +
                 "  |  order by: 2: v2 ASC\n" +
-                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n" +
-                "  |  \n" +
-                "  3:Project\n" +
-                "  |  <slot 2> : 2: v2\n" +
-                "  |  <slot 6> : array_length(3: v3)\n" +
-                "  |  limit: 1");
+                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n");
+    }
+
+    @Test
+    public void testOrderByConstant() throws Exception {
+        String sql = "with cc as (select *, 1 as a from t0) select v1, row_number() over (order by a) from cc";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "4:ANALYTIC\n" +
+                "  |  functions: [, row_number(), ]\n" +
+                "  |  order by: 9: a ASC\n" +
+                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW");
     }
 }

@@ -19,7 +19,6 @@ import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.common.ClientPool;
 import com.starrocks.common.Config;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
@@ -46,11 +45,12 @@ import com.starrocks.qe.DefaultCoordinator;
 import com.starrocks.qe.QeProcessorImpl;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.scheduler.Coordinator;
+import com.starrocks.rpc.ThriftConnectionPool;
+import com.starrocks.rpc.ThriftRPCRequestExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.FrontendOptions;
 import com.starrocks.sql.LoadPlanner;
 import com.starrocks.task.LoadEtlTask;
-import com.starrocks.thrift.BackendService;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
@@ -134,6 +134,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     private long startPreparingTimeMs;
     @SerializedName(value = "finishPreparingTimeMs")
     private long finishPreparingTimeMs;
+    @SerializedName(value = "commitTimeMs")
+    private long commitTimeMs;
     @SerializedName(value = "endTimeMs")
     private long endTimeMs;
     @SerializedName(value = "txnId")
@@ -596,7 +598,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         boolean exception = false;
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     resp.setOKMsg("txn could not be prepared because task state is: " + state
                             + ", error_msg: " + errorMsg);
@@ -668,7 +670,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         boolean exception = false;
         readLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     resp.setOKMsg("txn could not be committed because task state is: " + state
                             + ", error_msg: " + errorMsg);
@@ -777,16 +779,15 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
 
     private void unprotectedFinishStreamLoadChannel(int channelId) throws UserException {
         TNetworkAddress address = channelIdToBEHTTPPort.get(channelId);
-
-        boolean ok = false;
-        BackendService.Client client = null;
         try {
-            client = ClientPool.backendPool.borrowObject(address);
             TStreamLoadChannel streamLoadChannel = new TStreamLoadChannel();
             streamLoadChannel.setLabel(label);
             streamLoadChannel.setChannel_id(channelId);
-            TStatus tStatus = client.finish_stream_load_channel(streamLoadChannel);
-            ok = true;
+
+            TStatus tStatus = ThriftRPCRequestExecutor.callNoRetry(
+                    ThriftConnectionPool.backendPool,
+                    address,
+                    client -> client.finish_stream_load_channel(streamLoadChannel));
 
             if (tStatus.getStatus_code() != TStatusCode.OK) {
                 // ignore fail status
@@ -794,12 +795,6 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             LOG.info("finish stream load channel label: {} channel id {}", label, channelId);
         } catch (Exception e) {
             throw new UserException("failed to send finish stream load channel: " + e.getMessage(), e);
-        } finally {
-            if (ok) {
-                ClientPool.backendPool.returnObject(address, client);
-            } else {
-                ClientPool.backendPool.invalidateObject(address, client);
-            }
         }
     }
 
@@ -855,7 +850,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         }
         readLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     return "cur task state is: " + state
                             + ", error_msg: " + errorMsg;
@@ -943,7 +938,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     public void beforePrepared(TransactionState txnState) throws TransactionException {
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 throw new TransactionException("txn could not be prepared because task state is: " + state);
             }
         } finally {
@@ -987,7 +982,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     public void beforeCommitted(TransactionState txnState) throws TransactionException {
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 throw new TransactionException("txn could not be commited because task state is: " + state);
             }
             isCommitting = true;
@@ -1013,8 +1008,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
                 this.channels.set(i, State.COMMITED);
             }
             this.state = State.COMMITED;
+            commitTimeMs = System.currentTimeMillis();
             isCommitting = false;
-            endTimeMs = System.currentTimeMillis();
         } finally {
             writeUnlock();
             // sync stream load related query info should unregister here
@@ -1097,8 +1092,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
                 this.channels.set(i, State.COMMITED);
             }
             this.state = State.COMMITED;
+            commitTimeMs = txnState.getCommitTime();
             this.preparedChannelNum = this.channelNum;
-            this.endTimeMs = txnState.getCommitTime();
         } finally {
             writeUnlock();
         }
@@ -1113,7 +1108,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
 
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 return;
             }
             if (coord != null && !isSyncStreamLoad) {
@@ -1254,11 +1249,19 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         return createTimeMs;
     }
 
+    public long commitTimeMs() {
+        return commitTimeMs;
+    }
+
     public long endTimeMs() {
         return endTimeMs;
     }
 
     public boolean isFinalState() {
+        return state == State.CANCELLED || state == State.FINISHED;
+    }
+
+    public boolean isUnreversibleState() {
         return state == State.CANCELLED || state == State.COMMITED || state == State.FINISHED;
     }
 

@@ -122,6 +122,7 @@ Status RowsetWriter::init() {
 
     _writer_options.global_dicts = _context.global_dicts != nullptr ? _context.global_dicts : nullptr;
     _writer_options.referenced_column_ids = _context.referenced_column_ids;
+    _writer_options.is_compaction = _context.is_compaction;
 
     if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS &&
         (_context.is_partial_update || !_context.merge_condition.empty() || _context.miss_auto_increment_column)) {
@@ -146,7 +147,7 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
     }
     _rowset_meta_pb->set_num_rows(_num_rows_written);
     _rowset_meta_pb->set_total_row_size(_total_row_size);
-    _rowset_meta_pb->set_total_disk_size(_total_data_size);
+    _rowset_meta_pb->set_total_disk_size(_total_data_size + _total_index_size);
     _rowset_meta_pb->set_data_disk_size(_total_data_size);
     _rowset_meta_pb->set_index_disk_size(_total_index_size);
     // TODO write zonemap to meta
@@ -164,6 +165,7 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
         _rowset_meta_pb->set_num_delete_files(_num_delfile);
         _rowset_meta_pb->set_num_update_files(_num_uptfile);
         _rowset_meta_pb->set_total_update_row_size(_total_update_row_size);
+        _rowset_meta_pb->set_num_rows_upt(_num_rows_upt);
         if (_num_segment <= 1) {
             _rowset_meta_pb->set_segments_overlap_pb(NONOVERLAPPING);
         }
@@ -198,6 +200,11 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
             }
             // set partial update mode
             _rowset_txn_meta_pb->set_partial_update_mode(_context.partial_update_mode);
+            if (_context.column_to_expr_value != nullptr) {
+                for (auto& [name, value] : (*_context.column_to_expr_value)) {
+                    _rowset_txn_meta_pb->mutable_column_to_expr_value()->insert({name, value});
+                }
+            }
             *_rowset_meta_pb->mutable_txn_meta() = *_rowset_txn_meta_pb;
         } else if (!_context.merge_condition.empty()) {
             _rowset_txn_meta_pb->set_merge_condition(_context.merge_condition);

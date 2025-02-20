@@ -24,6 +24,7 @@
 #include "runtime/runtime_state.h"
 #include "storage/rowset/bloom_filter.h"
 #include "types/logical_type_infra.h"
+#include "udf/java/java_udf.h"
 
 namespace starrocks {
 
@@ -107,7 +108,7 @@ bool FunctionContext::is_notnull_constant_column(int i) const {
     return col && col->is_constant() && !col->is_null(0);
 }
 
-starrocks::ColumnPtr FunctionContext::get_constant_column(int i) const {
+ColumnPtr FunctionContext::get_constant_column(int i) const {
     if (i < 0 || i >= _constant_columns.size()) {
         return nullptr;
     }
@@ -128,6 +129,13 @@ void* FunctionContext::get_function_state(FunctionStateScope scope) const {
     default:
         // TODO: signal error somehow
         return nullptr;
+    }
+}
+
+void FunctionContext::release_mems() {
+    if (_jvm_udaf_ctxs != nullptr && _jvm_udaf_ctxs->states) {
+        auto env = JVMFunctionHelper::getInstance().getEnv();
+        _jvm_udaf_ctxs->states->clear(this, env);
     }
 }
 
@@ -159,6 +167,10 @@ const char* FunctionContext::error_msg() const {
 
 bool FunctionContext::error_if_overflow() const {
     return _state != nullptr && _state->error_if_overflow();
+}
+
+bool FunctionContext::allow_throw_exception() const {
+    return _state != nullptr && _state->query_options().allow_throw_exception;
 }
 
 void FunctionContext::set_function_state(FunctionStateScope scope, void* ptr) {

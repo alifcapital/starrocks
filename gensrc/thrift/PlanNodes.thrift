@@ -84,6 +84,7 @@ enum TPlanNodeType {
   STREAM_JOIN_NODE,
   STREAM_AGG_NODE,
   LAKE_META_SCAN_NODE,
+  CAPTURE_VERSION_NODE,
 }
 
 // phases of an execution node
@@ -551,6 +552,7 @@ struct TOlapScanNode {
   34: optional bool partition_order_hint
   35: optional bool enable_prune_column_after_index_filter
   36: optional bool enable_gin_filter
+  37: optional i64 schema_id
 }
 
 struct TJDBCScanNode {
@@ -1102,6 +1104,8 @@ struct THdfsScanNode {
 
     // if load column statistics for metadata table scan
     20: optional bool load_column_stats;
+
+    22: optional DataCache.TDataCacheOptions datacache_options;
 }
 
 struct TProjectNode {

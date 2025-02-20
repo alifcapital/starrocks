@@ -305,7 +305,7 @@ void ScalarColumnReader::collect_column_io_range(std::vector<io::SharedBufferedI
     const auto& column = _opts.row_group_meta->columns[_field->physical_column_index];
     if (type == ColumnIOType::PAGES) {
         const tparquet::ColumnMetaData& column_metadata = column.meta_data;
-        if (_offset_index_ctx != nullptr) {
+        if (_offset_index_ctx != nullptr && !_offset_index_ctx->page_selected.empty()) {
             // add dict page
             if (column_metadata.__isset.dictionary_page_offset) {
                 auto r = io::SharedBufferedInputStream::IORange(
@@ -987,7 +987,6 @@ void ColumnReader::get_subfield_pos_with_pruned_type(const ParquetField& field, 
 
         auto it = field_name_2_pos.find(formatted_subfield_name);
         if (it == field_name_2_pos.end()) {
-            LOG(WARNING) << "Struct subfield name: " + formatted_subfield_name + " not found.";
             pos[i] = -1;
             continue;
         }
@@ -1032,7 +1031,6 @@ void ColumnReader::get_subfield_pos_with_pruned_type(const ParquetField& field, 
         if (parquet_field_it == field_id_2_pos.end()) {
             // Means newly added struct subfield not existed in original parquet file, we put nullptr
             // column reader in children_reader, we will append default value for this subfield later.
-            LOG(INFO) << "Struct subfield name: " + format_subfield_name + " not found in ParquetField.";
             pos[i] = -1;
             iceberg_schema_subfield[i] = nullptr;
             continue;
@@ -1041,6 +1039,16 @@ void ColumnReader::get_subfield_pos_with_pruned_type(const ParquetField& field, 
         pos[i] = parquet_field_it->second;
         iceberg_schema_subfield[i] = iceberg_it->second;
     }
+}
+
+bool ColumnReader::_has_valid_subfield_column_reader(
+        const std::map<std::string, std::unique_ptr<ColumnReader>>& children_readers) {
+    for (const auto& pair : children_readers) {
+        if (pair.second != nullptr) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField* field, const TypeDescriptor& col_type,
@@ -1053,9 +1061,13 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
     if (field->type.type == LogicalType::TYPE_ARRAY) {
         std::unique_ptr<ColumnReader> child_reader;
         RETURN_IF_ERROR(ColumnReader::create(opts, &field->children[0], col_type.children[0], &child_reader));
-        std::unique_ptr<ListColumnReader> reader(new ListColumnReader(opts));
-        RETURN_IF_ERROR(reader->init(field, std::move(child_reader)));
-        *output = std::move(reader);
+        if (child_reader != nullptr) {
+            std::unique_ptr<ListColumnReader> reader(new ListColumnReader(opts));
+            RETURN_IF_ERROR(reader->init(field, std::move(child_reader)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else if (field->type.type == LogicalType::TYPE_MAP) {
         std::unique_ptr<ColumnReader> key_reader = nullptr;
         std::unique_ptr<ColumnReader> value_reader = nullptr;
@@ -1067,9 +1079,13 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
             RETURN_IF_ERROR(ColumnReader::create(opts, &(field->children[1]), col_type.children[1], &value_reader));
         }
 
-        std::unique_ptr<MapColumnReader> reader(new MapColumnReader());
-        RETURN_IF_ERROR(reader->init(field, std::move(key_reader), std::move(value_reader)));
-        *output = std::move(reader);
+        if (key_reader != nullptr || value_reader != nullptr) {
+            std::unique_ptr<MapColumnReader> reader(new MapColumnReader());
+            RETURN_IF_ERROR(reader->init(field, std::move(key_reader), std::move(value_reader)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else if (field->type.type == LogicalType::TYPE_STRUCT) {
         std::vector<int32_t> subfield_pos(col_type.children.size());
         get_subfield_pos_with_pruned_type(*field, col_type, opts.case_sensitive, subfield_pos);
@@ -1087,10 +1103,14 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
             children_readers.emplace(col_type.field_names[i], std::move(child_reader));
         }
 
-        std::unique_ptr<StructColumnReader> reader(new StructColumnReader());
-        RETURN_IF_ERROR(reader->init(field, std::move(children_readers)));
-        *output = std::move(reader);
-        return Status::OK();
+        // maybe struct subfield ColumnReader is null
+        if (_has_valid_subfield_column_reader(children_readers)) {
+            std::unique_ptr<StructColumnReader> reader(new StructColumnReader());
+            RETURN_IF_ERROR(reader->init(field, std::move(children_readers)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else {
         std::unique_ptr<ScalarColumnReader> reader(new ScalarColumnReader(opts));
         RETURN_IF_ERROR(reader->init(field, col_type, &opts.row_group_meta->columns[field->physical_column_index]));
@@ -1112,9 +1132,13 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
         const TIcebergSchemaField* element_schema = &iceberg_schema_field->children[0];
         RETURN_IF_ERROR(
                 ColumnReader::create(opts, &field->children[0], col_type.children[0], element_schema, &child_reader));
-        std::unique_ptr<ListColumnReader> reader(new ListColumnReader(opts));
-        RETURN_IF_ERROR(reader->init(field, std::move(child_reader)));
-        *output = std::move(reader);
+        if (child_reader != nullptr) {
+            std::unique_ptr<ListColumnReader> reader(new ListColumnReader(opts));
+            RETURN_IF_ERROR(reader->init(field, std::move(child_reader)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else if (field->type.type == LogicalType::TYPE_MAP) {
         std::unique_ptr<ColumnReader> key_reader = nullptr;
         std::unique_ptr<ColumnReader> value_reader = nullptr;
@@ -1131,9 +1155,13 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
                                                  value_iceberg_schema, &value_reader));
         }
 
-        std::unique_ptr<MapColumnReader> reader(new MapColumnReader());
-        RETURN_IF_ERROR(reader->init(field, std::move(key_reader), std::move(value_reader)));
-        *output = std::move(reader);
+        if (key_reader != nullptr || value_reader != nullptr) {
+            std::unique_ptr<MapColumnReader> reader(new MapColumnReader());
+            RETURN_IF_ERROR(reader->init(field, std::move(key_reader), std::move(value_reader)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else if (field->type.type == LogicalType::TYPE_STRUCT) {
         std::vector<int32_t> subfield_pos(col_type.children.size());
         std::vector<const TIcebergSchemaField*> iceberg_schema_subfield(col_type.children.size());
@@ -1154,10 +1182,14 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ParquetField*
             children_readers.emplace(col_type.field_names[i], std::move(child_reader));
         }
 
-        std::unique_ptr<StructColumnReader> reader(new StructColumnReader());
-        RETURN_IF_ERROR(reader->init(field, std::move(children_readers)));
-        *output = std::move(reader);
-        return Status::OK();
+        // maybe struct subfield ColumnReader is null
+        if (_has_valid_subfield_column_reader(children_readers)) {
+            std::unique_ptr<StructColumnReader> reader(new StructColumnReader());
+            RETURN_IF_ERROR(reader->init(field, std::move(children_readers)));
+            *output = std::move(reader);
+        } else {
+            *output = nullptr;
+        }
     } else {
         std::unique_ptr<ScalarColumnReader> reader(new ScalarColumnReader(opts));
         RETURN_IF_ERROR(reader->init(field, col_type, &opts.row_group_meta->columns[field->physical_column_index]));

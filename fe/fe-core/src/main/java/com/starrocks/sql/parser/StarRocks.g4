@@ -524,7 +524,7 @@ showAlterStatement
     ;
 
 descTableStatement
-    : (DESC | DESCRIBE) table=qualifiedName ALL?
+    : (DESC | DESCRIBE) ((table=qualifiedName ALL?) | (FILES propertyList))
     ;
 
 createTableLikeStatement
@@ -639,7 +639,7 @@ alterMaterializedViewStatement
     ;
 
 refreshMaterializedViewStatement
-    : REFRESH MATERIALIZED VIEW mvName=qualifiedName (PARTITION partitionRangeDesc)? FORCE? (WITH (SYNC | ASYNC) MODE)?
+    : REFRESH MATERIALIZED VIEW mvName=qualifiedName (PARTITION (partitionRangeDesc | listPartitionValues))? FORCE? (WITH (SYNC | ASYNC) MODE)?
     ;
 
 cancelRefreshMaterializedViewStatement
@@ -1055,7 +1055,7 @@ partitionRenameClause
 // ------------------------------------------- DML Statement -----------------------------------------------------------
 
 insertStatement
-    : explainDesc? INSERT (INTO | OVERWRITE) (qualifiedName | (FILES propertyList) | (BLACKHOLE '(' ')')) partitionNames?
+    : explainDesc? INSERT (INTO | OVERWRITE) (qualifiedName partitionNames? | (FILES propertyList) | (BLACKHOLE '(' ')'))
         (WITH LABEL label=identifier)? columnAliases?
         (queryStatement | (VALUES expressionsWithDefault (',' expressionsWithDefault)*))
     ;
@@ -1230,8 +1230,8 @@ alterResourceGroupStatement
     ;
 
 showResourceGroupStatement
-    : SHOW RESOURCE GROUP identifier
-    | SHOW RESOURCE GROUPS ALL?
+    : SHOW VERBOSE? RESOURCE GROUP identifier
+    | SHOW VERBOSE? RESOURCE GROUPS ALL?
     ;
 
 showResourceGroupUsageStatement
@@ -1458,6 +1458,7 @@ showTriggersStatement
 
 showUserPropertyStatement
     : SHOW PROPERTY (FOR string)? (LIKE string)?
+    | SHOW PROPERTIES (FOR string)? (LIKE string)?
     ;
 
 showVariablesStatement
@@ -1475,7 +1476,7 @@ helpStatement
 // ------------------------------------------- Authz Statement -----------------------------------------------------
 
 createUserStatement
-    : CREATE USER (IF NOT EXISTS)? user authOption? (DEFAULT ROLE roleList)?
+    : CREATE USER (IF NOT EXISTS)? user authOption? (DEFAULT ROLE roleList)? properties?
     ;
 
 dropUserStatement
@@ -1485,6 +1486,7 @@ dropUserStatement
 alterUserStatement
     : ALTER USER (IF EXISTS)? user authOption
     | ALTER USER (IF EXISTS)? user DEFAULT ROLE (NONE| ALL | roleList)
+    | ALTER USER (IF EXISTS)? user SET properties
     ;
 
 showUserStatement
@@ -2377,15 +2379,24 @@ listPartitionDesc
     ;
 
 singleItemListPartitionDesc
-    : PARTITION (IF NOT EXISTS)? identifier VALUES IN listPartitionValueList propertyList?
+    : PARTITION (IF NOT EXISTS)? identifier VALUES IN singleListPartitionValues propertyList?
     ;
 
 multiItemListPartitionDesc
-    : PARTITION (IF NOT EXISTS)? identifier VALUES IN '(' listPartitionValueList (',' listPartitionValueList)* ')' propertyList?
+    : PARTITION (IF NOT EXISTS)? identifier VALUES IN  multiListPartitionValues propertyList?
     ;
 
-listPartitionValueList
-    : '(' listPartitionValue (',' listPartitionValue)* ')'
+multiListPartitionValues
+    :'(' singleListPartitionValues (',' singleListPartitionValues)* ')' // list partition values with multi partition columns: ('a, 'b', 'c'), ('d', 'e', 'f')
+    ;
+
+singleListPartitionValues
+    : '(' listPartitionValue (',' listPartitionValue)* ')' // list partition value: ('a, 'b', 'c')
+    ;
+
+listPartitionValues // list partition values which can be with single or multi partition columns
+    : singleListPartitionValues
+    | multiListPartitionValues
     ;
 
 listPartitionValue

@@ -25,6 +25,8 @@
 #include "exprs/runtime_filter_bank.h"
 #include "formats/parquet/encoding_plain.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/schema.h"
+#include "formats/parquet/statistics_helper.h"
 #include "formats/parquet/utils.h"
 #include "fs/fs.h"
 #include "gutil/strings/substitute.h"
@@ -78,16 +80,17 @@ static int64_t _get_row_group_end_offset(const tparquet::RowGroup& row_group) {
     return _get_column_start_offset(last_column) + last_column.total_compressed_size;
 }
 
-FileReader::FileReader(int chunk_size, RandomAccessFile* file, size_t file_size, int64_t file_mtime,
-                       io::SharedBufferedInputStream* sb_stream, const std::set<int64_t>* _need_skip_rowids)
+FileReader::FileReader(int chunk_size, RandomAccessFile* file, size_t file_size,
+                       const DataCacheOptions& datacache_options, io::SharedBufferedInputStream* sb_stream,
+                       const std::set<int64_t>* _need_skip_rowids)
         : _chunk_size(chunk_size),
           _file(file),
           _file_size(file_size),
-          _file_mtime(file_mtime),
+          _datacache_options(datacache_options),
           _sb_stream(sb_stream),
           _need_skip_rowids(_need_skip_rowids) {}
 
-FileReader::~FileReader() {}
+FileReader::~FileReader() = default;
 
 std::string FileReader::_build_metacache_key() {
     auto& filename = _file->filename();
@@ -102,8 +105,8 @@ std::string FileReader::_build_metacache_key() {
     // While some data source, such as Hudi, have no modification time because their files
     // cannot be overwritten. So, if the modification time is unsupported, we use file size instead.
     // Also, to reduce memory usage, we only use the high four bytes to represent the second timestamp.
-    if (_file_mtime > 0) {
-        uint32_t mtime_s = (_file_mtime >> 9) & 0x00000000FFFFFFFF;
+    if (_datacache_options.modification_time > 0) {
+        uint32_t mtime_s = (_datacache_options.modification_time >> 9) & 0x00000000FFFFFFFF;
         memcpy(data + 10, &mtime_s, sizeof(mtime_s));
     } else {
         uint32_t size = _file_size;
@@ -123,17 +126,15 @@ Status FileReader::init(HdfsScannerContext* ctx) {
     RETURN_IF_ERROR(_get_footer());
 
     // set existed SlotDescriptor in this parquet file
-    std::unordered_set<std::string> names;
+    std::unordered_set<std::string> existed_column_names;
     _meta_helper = _build_meta_helper();
-    _meta_helper->set_existed_column_names(&names);
-    RETURN_IF_ERROR(_scanner_ctx->update_materialized_columns(names));
+    _prepare_read_columns(existed_column_names);
+    RETURN_IF_ERROR(_scanner_ctx->update_materialized_columns(existed_column_names));
 
     ASSIGN_OR_RETURN(_is_file_filtered, _scanner_ctx->should_skip_by_evaluating_not_existed_slots());
     if (_is_file_filtered) {
         return Status::OK();
     }
-
-    _prepare_read_columns();
 
     RETURN_IF_ERROR(_build_split_tasks());
     if (_scanner_ctx->split_tasks.size() > 0) {
@@ -159,6 +160,15 @@ std::shared_ptr<MetaHelper> FileReader::_build_meta_helper() {
 
 FileMetaData* FileReader::get_file_metadata() {
     return _file_metadata.get();
+}
+
+Status FileReader::collect_scan_io_ranges(std::vector<io::SharedBufferedInputStream::IORange>* io_ranges) {
+    int64_t dummy_offset = 0;
+    for (auto& r : _row_group_readers) {
+        r->collect_io_ranges(io_ranges, &dummy_offset, ColumnIOType::PAGE_INDEX);
+        r->collect_io_ranges(io_ranges, &dummy_offset, ColumnIOType::PAGES);
+    }
+    return Status::OK();
 }
 
 Status FileReader::_parse_footer(FileMetaDataPtr* file_metadata_ptr, int64_t* file_metadata_size) {
@@ -250,7 +260,7 @@ Status FileReader::_get_footer() {
         });
         auto deleter = [capture]() { delete capture; };
         WriteCacheOptions options;
-        options.evict_probability = _scanner_ctx->datacache_evict_probability;
+        options.evict_probability = _datacache_options.datacache_evict_probability;
         st = cache->write_object(metacache_key, capture, file_metadata_size, deleter, &cache_handle, &options);
     } else {
         LOG(ERROR) << "Parsing unexpected parquet file metadata size";
@@ -271,9 +281,7 @@ Status FileReader::_build_split_tasks() {
         const tparquet::RowGroup& row_group = _file_metadata->t_metadata().row_groups[i];
         bool selected = _select_row_group(row_group);
         if (!selected) continue;
-        StatusOr<bool> st = _filter_group(row_group);
-        if (!st.ok()) return st.status();
-        if (st.value()) {
+        if (_filter_group(row_group)) {
             DLOG(INFO) << "row group " << i << " of file has been filtered by min/max conjunct";
             continue;
         }
@@ -347,22 +355,29 @@ StatusOr<uint32_t> FileReader::_parse_metadata_length(const std::vector<char>& f
     return metadata_length;
 }
 
-StatusOr<bool> FileReader::_filter_group(const tparquet::RowGroup& row_group) {
+bool FileReader::_filter_group_with_min_max_conjuncts(const tparquet::RowGroup& row_group) {
     // filter by min/max conjunct ctxs.
     if (!_scanner_ctx->min_max_conjunct_ctxs.empty()) {
         const TupleDescriptor& tuple_desc = *(_scanner_ctx->min_max_tuple_desc);
         ChunkPtr min_chunk = ChunkHelper::new_chunk(tuple_desc, 0);
         ChunkPtr max_chunk = ChunkHelper::new_chunk(tuple_desc, 0);
 
-        bool exist = false;
-        RETURN_IF_ERROR(_read_min_max_chunk(row_group, tuple_desc.slots(), &min_chunk, &max_chunk, &exist));
-        if (!exist) {
+        auto st = _read_min_max_chunk(row_group, tuple_desc.slots(), &min_chunk, &max_chunk);
+        if (!st.ok()) {
+            // if there are some error when dealing statistics, shouldn't return the error status,
+            // just read data ignore the statistics.
             return false;
         }
 
         for (auto& min_max_conjunct_ctx : _scanner_ctx->min_max_conjunct_ctxs) {
-            ASSIGN_OR_RETURN(auto min_column, min_max_conjunct_ctx->evaluate(min_chunk.get()));
-            ASSIGN_OR_RETURN(auto max_column, min_max_conjunct_ctx->evaluate(max_chunk.get()));
+            auto res_min = min_max_conjunct_ctx->evaluate(min_chunk.get());
+            auto res_max = min_max_conjunct_ctx->evaluate(max_chunk.get());
+            if (!res_min.ok() || !res_max.ok()) {
+                // maybe one of the conjuncts encounter error when dealing statistics, just ignore it and continue
+                continue;
+            }
+            auto min_column = res_min.value();
+            auto max_column = res_max.value();
             auto f = [&](Column* c) {
                 // is_null(0) only when something unexpected happens
                 if (c->is_null(0)) return (int8_t)0;
@@ -375,7 +390,10 @@ StatusOr<bool> FileReader::_filter_group(const tparquet::RowGroup& row_group) {
             }
         }
     }
+    return false;
+}
 
+bool FileReader::_filter_group_with_bloom_filter_min_max_conjuncts(const tparquet::RowGroup& row_group) {
     // filter by min/max in runtime filter.
     if (_scanner_ctx->runtime_filter_collector) {
         std::vector<SlotDescriptor*> min_max_slots(1);
@@ -400,9 +418,9 @@ StatusOr<bool> FileReader::_filter_group(const tparquet::RowGroup& row_group) {
             min_max_slots[0] = slot;
             ChunkPtr min_chunk = ChunkHelper::new_chunk(min_max_slots, 0);
             ChunkPtr max_chunk = ChunkHelper::new_chunk(min_max_slots, 0);
-            bool exist = false;
-            RETURN_IF_ERROR(_read_min_max_chunk(row_group, min_max_slots, &min_chunk, &max_chunk, &exist));
-            if (!exist) continue;
+
+            auto st = _read_min_max_chunk(row_group, min_max_slots, &min_chunk, &max_chunk);
+            if (!st.ok()) continue;
             bool discard = RuntimeFilterHelper::filter_zonemap_with_min_max(
                     slot->type().type, filter, min_chunk->columns()[0].get(), max_chunk->columns()[0].get());
             if (discard) {
@@ -410,12 +428,85 @@ StatusOr<bool> FileReader::_filter_group(const tparquet::RowGroup& row_group) {
             }
         }
     }
+    return false;
+}
+
+bool FileReader::_filter_group_with_more_filter(const tparquet::RowGroup& row_group) {
+    // runtime_in_filter, the sql-original in_filter and is_null/not_null filter will be in
+    // _scanner_ctx->conjunct_ctxs_by_slot
+    for (auto kv : _scanner_ctx->conjunct_ctxs_by_slot) {
+        StatisticsHelper::StatSupportedFilter filter_type;
+        for (auto ctx : kv.second) {
+            if (StatisticsHelper::can_be_used_for_statistics_filter(ctx, filter_type)) {
+                const TupleDescriptor& tuple_desc = *(_scanner_ctx->tuple_desc);
+                SlotDescriptor* slot = tuple_desc.get_slot_by_id(kv.first);
+                if (UNLIKELY(slot == nullptr)) {
+                    // it shouldn't be here, just some defensive code
+                    DCHECK(false) << "couldn't find slot id " << kv.first << " in tuple desc";
+                    LOG(WARNING) << "couldn't find slot id " << kv.first << " in tuple desc";
+                    continue;
+                }
+                std::unordered_map<std::string, size_t> column_name_2_pos_in_meta{};
+                std::vector<SlotDescriptor*> slot_v{slot};
+                _meta_helper->build_column_name_2_pos_in_meta(column_name_2_pos_in_meta, row_group, slot_v);
+                const tparquet::ColumnMetaData* column_meta =
+                        _meta_helper->get_column_meta(column_name_2_pos_in_meta, row_group, slot->col_name());
+                if (column_meta == nullptr || !column_meta->__isset.statistics) continue;
+                if (filter_type == StatisticsHelper::StatSupportedFilter::IS_NULL) {
+                    if (!column_meta->statistics.__isset.null_count) continue;
+                    if (column_meta->statistics.null_count == 0) {
+                        return true;
+                    }
+                } else if (filter_type == StatisticsHelper::StatSupportedFilter::IS_NOT_NULL) {
+                    if (!column_meta->statistics.__isset.null_count) continue;
+                    if (column_meta->statistics.null_count == row_group.num_rows) {
+                        return true;
+                    }
+                } else if (filter_type == StatisticsHelper::StatSupportedFilter::FILTER_IN) {
+                    std::vector<string> min_values;
+                    std::vector<string> max_values;
+
+                    const ParquetField* field = _meta_helper->get_parquet_field(slot->col_name());
+                    if (field == nullptr) {
+                        LOG(WARNING) << "Can't get " + slot->col_name() + "'s ParquetField in _read_min_max_chunk.";
+                        continue;
+                    }
+                    auto st = _get_min_max_value(slot, column_meta, field, min_values, max_values);
+                    if (!st.ok()) continue;
+                    Filter selected(min_values.size(), 1);
+                    st = StatisticsHelper::in_filter_on_min_max_stat(min_values, max_values, ctx, field,
+                                                                     _scanner_ctx->timezone, selected);
+                    if (!st.ok()) continue;
+                    if (!selected[0]) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// when doing row group filter, there maybe some error, but we'd better just ignore it instead of returning the error
+// status and lead to the query failed.
+bool FileReader::_filter_group(const tparquet::RowGroup& row_group) {
+    if (_filter_group_with_min_max_conjuncts(row_group)) {
+        return true;
+    }
+
+    if (_filter_group_with_bloom_filter_min_max_conjuncts(row_group)) {
+        return true;
+    }
+
+    if (config::parquet_statistics_process_more_filter_enable && _filter_group_with_more_filter(row_group)) {
+        return true;
+    }
 
     return false;
 }
 
 Status FileReader::_read_min_max_chunk(const tparquet::RowGroup& row_group, const std::vector<SlotDescriptor*>& slots,
-                                       ChunkPtr* min_chunk, ChunkPtr* max_chunk, bool* exist) const {
+                                       ChunkPtr* min_chunk, ChunkPtr* max_chunk) const {
     const HdfsScannerContext& ctx = *_scanner_ctx;
 
     // Key is column name, format with case sensitive, comes from SlotDescription.
@@ -447,44 +538,25 @@ Status FileReader::_read_min_max_chunk(const tparquet::RowGroup& row_group, cons
             }
         } else if (!column_meta->__isset.statistics) {
             // statistics not exist in parquet file
-            *exist = false;
-            return Status::OK();
+            return Status::Aborted("No exist statistics");
         } else {
-            // When statistics is empty, column_meta->__isset.statistics is still true,
-            // but statistics.__isset.xxx may be false, so judgment is required here.
-            bool is_set_min_max =
-                    (column_meta->statistics.__isset.max && column_meta->statistics.__isset.min) ||
-                    (column_meta->statistics.__isset.max_value && column_meta->statistics.__isset.min_value);
-            if (!is_set_min_max) {
-                *exist = false;
-                return Status::OK();
-            }
+            std::vector<string> min_values;
+            std::vector<string> max_values;
 
             const ParquetField* field = _meta_helper->get_parquet_field(slot->col_name());
             if (field == nullptr) {
                 LOG(WARNING) << "Can't get " + slot->col_name() + "'s ParquetField in _read_min_max_chunk.";
-                *exist = false;
-                return Status::OK();
-            }
-            const tparquet::ColumnOrder* column_order = nullptr;
-            if (_file_metadata->t_metadata().__isset.column_orders) {
-                const auto& column_orders = _file_metadata->t_metadata().column_orders;
-                int column_idx = field->physical_column_index;
-                column_order = column_idx < column_orders.size() ? &column_orders[column_idx] : nullptr;
+                return Status::InternalError(strings::Substitute("Can't get $0 field", slot->col_name()));
             }
 
-            bool decode_ok = false;
-            RETURN_IF_ERROR(_decode_min_max_column(*field, ctx.timezone, slot->type(), *column_meta, column_order,
-                                                   &(*min_chunk)->columns()[i], &(*max_chunk)->columns()[i],
-                                                   &decode_ok));
-            if (!decode_ok) {
-                *exist = false;
-                return Status::OK();
-            }
+            RETURN_IF_ERROR(_get_min_max_value(slot, column_meta, field, min_values, max_values));
+            RETURN_IF_ERROR(StatisticsHelper::decode_value_into_column((*min_chunk)->columns()[i], min_values,
+                                                                       slot->type(), field, ctx.timezone));
+            RETURN_IF_ERROR(StatisticsHelper::decode_value_into_column((*max_chunk)->columns()[i], max_values,
+                                                                       slot->type(), field, ctx.timezone));
         }
     }
 
-    *exist = true;
     return Status::OK();
 }
 
@@ -497,110 +569,30 @@ int32_t FileReader::_get_partition_column_idx(const std::string& col_name) const
     return -1;
 }
 
-Status FileReader::_decode_min_max_column(const ParquetField& field, const std::string& timezone,
-                                          const TypeDescriptor& type, const tparquet::ColumnMetaData& column_meta,
-                                          const tparquet::ColumnOrder* column_order, ColumnPtr* min_column,
-                                          ColumnPtr* max_column, bool* decode_ok) const {
-    DCHECK_EQ(field.physical_type, column_meta.type);
-    *decode_ok = true;
-
-    // We need to make sure min_max column append value succeed
-    bool ret = true;
-    auto sort_order = sort_order_of_logical_type(type.type);
-    if (!_has_correct_min_max_stats(column_meta, sort_order)) {
-        *decode_ok = false;
-        return Status::OK();
+Status FileReader::_get_min_max_value(const SlotDescriptor* slot, const tparquet::ColumnMetaData* column_meta,
+                                      const ParquetField* field, std::vector<std::string>& min_values,
+                                      std::vector<std::string>& max_values) const {
+    // When statistics is empty, column_meta->__isset.statistics is still true,
+    // but statistics.__isset.xxx may be false, so judgment is required here.
+    bool is_set_min_max = (column_meta->statistics.__isset.max && column_meta->statistics.__isset.min) ||
+                          (column_meta->statistics.__isset.max_value && column_meta->statistics.__isset.min_value);
+    if (!is_set_min_max) {
+        return Status::Aborted("No exist min/max");
     }
 
-    switch (column_meta.type) {
-    case tparquet::Type::type::INT32: {
-        int32_t min_value = 0;
-        int32_t max_value = 0;
-        if (column_meta.statistics.__isset.min_value) {
-            RETURN_IF_ERROR(PlainDecoder<int32_t>::decode(column_meta.statistics.min_value, &min_value));
-            RETURN_IF_ERROR(PlainDecoder<int32_t>::decode(column_meta.statistics.max_value, &max_value));
-        } else {
-            RETURN_IF_ERROR(PlainDecoder<int32_t>::decode(column_meta.statistics.min, &min_value));
-            RETURN_IF_ERROR(PlainDecoder<int32_t>::decode(column_meta.statistics.max, &max_value));
-        }
-        std::unique_ptr<ColumnConverter> converter;
-        RETURN_IF_ERROR(ColumnConverterFactory::create_converter(field, type, timezone, &converter));
+    DCHECK_EQ(field->physical_type, column_meta->type);
+    auto sort_order = sort_order_of_logical_type(slot->type().type);
 
-        if (!converter->need_convert) {
-            ret &= ((*min_column)->append_numbers(&min_value, sizeof(int32_t)) > 0);
-            ret &= ((*max_column)->append_numbers(&max_value, sizeof(int32_t)) > 0);
-        } else {
-            ColumnPtr min_scr_column = converter->create_src_column();
-            ret &= (min_scr_column->append_numbers(&min_value, sizeof(int32_t)) > 0);
-            RETURN_IF_ERROR(converter->convert(min_scr_column, min_column->get()));
-
-            ColumnPtr max_scr_column = converter->create_src_column();
-            ret &= (max_scr_column->append_numbers(&max_value, sizeof(int32_t)) > 0);
-            RETURN_IF_ERROR(converter->convert(max_scr_column, max_column->get()));
-        }
-        break;
-    }
-    case tparquet::Type::type::INT64: {
-        int64_t min_value = 0;
-        int64_t max_value = 0;
-        if (column_meta.statistics.__isset.min_value) {
-            RETURN_IF_ERROR(PlainDecoder<int64_t>::decode(column_meta.statistics.min_value, &min_value));
-            RETURN_IF_ERROR(PlainDecoder<int64_t>::decode(column_meta.statistics.max_value, &max_value));
-        } else {
-            RETURN_IF_ERROR(PlainDecoder<int64_t>::decode(column_meta.statistics.max, &max_value));
-            RETURN_IF_ERROR(PlainDecoder<int64_t>::decode(column_meta.statistics.min, &min_value));
-        }
-        std::unique_ptr<ColumnConverter> converter;
-        RETURN_IF_ERROR(ColumnConverterFactory::create_converter(field, type, timezone, &converter));
-
-        if (!converter->need_convert) {
-            ret &= ((*min_column)->append_numbers(&min_value, sizeof(int64_t)) > 0);
-            ret &= ((*max_column)->append_numbers(&max_value, sizeof(int64_t)) > 0);
-        } else {
-            ColumnPtr min_scr_column = converter->create_src_column();
-            ret &= (min_scr_column->append_numbers(&min_value, sizeof(int64_t)) > 0);
-            RETURN_IF_ERROR(converter->convert(min_scr_column, min_column->get()));
-
-            ColumnPtr max_scr_column = converter->create_src_column();
-            ret &= (max_scr_column->append_numbers(&max_value, sizeof(int64_t)) > 0);
-            RETURN_IF_ERROR(converter->convert(max_scr_column, max_column->get()));
-        }
-        break;
-    }
-    case tparquet::Type::type::BYTE_ARRAY: {
-        Slice min_slice;
-        Slice max_slice;
-
-        if (column_meta.statistics.__isset.min_value) {
-            RETURN_IF_ERROR(PlainDecoder<Slice>::decode(column_meta.statistics.min_value, &min_slice));
-            RETURN_IF_ERROR(PlainDecoder<Slice>::decode(column_meta.statistics.max_value, &max_slice));
-        } else {
-            RETURN_IF_ERROR(PlainDecoder<Slice>::decode(column_meta.statistics.min, &min_slice));
-            RETURN_IF_ERROR(PlainDecoder<Slice>::decode(column_meta.statistics.max, &max_slice));
-        }
-        std::unique_ptr<ColumnConverter> converter;
-        RETURN_IF_ERROR(ColumnConverterFactory::create_converter(field, type, timezone, &converter));
-
-        if (!converter->need_convert) {
-            ret &= (*min_column)->append_strings(std::vector<Slice>{min_slice});
-            ret &= (*max_column)->append_strings(std::vector<Slice>{max_slice});
-        } else {
-            ColumnPtr min_scr_column = converter->create_src_column();
-            ret &= min_scr_column->append_strings(std::vector<Slice>{min_slice});
-            RETURN_IF_ERROR(converter->convert(min_scr_column, min_column->get()));
-
-            ColumnPtr max_scr_column = converter->create_src_column();
-            ret &= max_scr_column->append_strings(std::vector<Slice>{max_slice});
-            RETURN_IF_ERROR(converter->convert(max_scr_column, max_column->get()));
-        }
-        break;
-    }
-    default:
-        *decode_ok = false;
+    if (!_has_correct_min_max_stats(*column_meta, sort_order)) {
+        return Status::Aborted("The file has incorrect order");
     }
 
-    if (UNLIKELY(!ret)) {
-        return Status::InternalError("Decode min-max column failed");
+    if (column_meta->statistics.__isset.min_value) {
+        min_values.emplace_back(column_meta->statistics.min_value);
+        max_values.emplace_back(column_meta->statistics.max_value);
+    } else {
+        min_values.emplace_back(column_meta->statistics.min);
+        max_values.emplace_back(column_meta->statistics.max);
     }
 
     return Status::OK();
@@ -611,8 +603,9 @@ bool FileReader::_has_correct_min_max_stats(const tparquet::ColumnMetaData& colu
     return _file_metadata->writer_version().HasCorrectStatistics(column_meta, sort_order);
 }
 
-void FileReader::_prepare_read_columns() {
-    _meta_helper->prepare_read_columns(_scanner_ctx->materialized_columns, _group_reader_param.read_cols);
+void FileReader::_prepare_read_columns(std::unordered_set<std::string>& existed_column_names) {
+    _meta_helper->prepare_read_columns(_scanner_ctx->materialized_columns, _group_reader_param.read_cols,
+                                       existed_column_names);
     _no_materialized_column_scan = (_group_reader_param.read_cols.size() == 0);
 }
 
@@ -634,7 +627,7 @@ Status FileReader::_init_group_readers() {
     _group_reader_param.conjunct_ctxs_by_slot = fd_scanner_ctx.conjunct_ctxs_by_slot;
     _group_reader_param.timezone = fd_scanner_ctx.timezone;
     _group_reader_param.stats = fd_scanner_ctx.stats;
-    _group_reader_param.sb_stream = nullptr;
+    _group_reader_param.sb_stream = _sb_stream;
     _group_reader_param.chunk_size = _chunk_size;
     _group_reader_param.file = _file;
     _group_reader_param.file_metadata = _file_metadata.get();
@@ -693,36 +686,10 @@ Status FileReader::_init_group_readers() {
 
     if (!_row_group_readers.empty()) {
         // prepare first row group
-        RETURN_IF_ERROR(_prepare_cur_row_group());
+        RETURN_IF_ERROR(_row_group_readers[_cur_row_group_idx]->prepare());
     }
 
     return Status::OK();
-}
-
-Status FileReader::_prepare_cur_row_group() {
-    auto& r = _row_group_readers[_cur_row_group_idx];
-    // if coalesce read enabled, we have to
-    // 0. clear last group memory
-    // 1. allocate shared buffered input stream and
-    // 2. collect io ranges of every row group reader.
-    // 3. set io ranges to the stream.
-    if (config::parquet_coalesce_read_enable && _sb_stream != nullptr) {
-        std::vector<io::SharedBufferedInputStream::IORange> ranges;
-        int64_t end_offset = 0;
-        r->collect_io_ranges(&ranges, &end_offset, ColumnIOType::PAGES);
-        int32_t counter = _scanner_ctx->lazy_column_coalesce_counter->load(std::memory_order_relaxed);
-        if (counter >= 0 || !config::io_coalesce_adaptive_lazy_active) {
-            _scanner_ctx->stats->group_active_lazy_coalesce_together += 1;
-        } else {
-            _scanner_ctx->stats->group_active_lazy_coalesce_seperately += 1;
-        }
-        r->set_end_offset(end_offset);
-        RETURN_IF_ERROR(_sb_stream->set_io_ranges(ranges, counter >= 0));
-        _group_reader_param.sb_stream = _sb_stream;
-    }
-
-    // prepare row group
-    return r->prepare();
 }
 
 Status FileReader::get_next(ChunkPtr* chunk) {
@@ -748,7 +715,7 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                 _cur_row_group_idx++;
                 if (_cur_row_group_idx < _row_group_size) {
                     // prepare new group
-                    RETURN_IF_ERROR(_prepare_cur_row_group());
+                    RETURN_IF_ERROR(_row_group_readers[_cur_row_group_idx]->prepare());
                 }
 
                 return Status::OK();

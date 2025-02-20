@@ -254,12 +254,47 @@ public class OlapTableSink extends DataSink {
                 enableAutomaticPartition, automaticBucketSize, partitionIds);
         tSink.setPartition(partitionParam);
         tSink.setLocation(createLocation(dstTable, partitionParam, enableReplicatedStorage, warehouseId));
-        tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(warehouseId));
+        tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(warehouseId,
+                getSystemInfoService(dstTable)));
         tSink.setPartial_update_mode(this.partialUpdateMode);
         tSink.setAutomatic_bucket_size(automaticBucketSize);
         if (canUseColocateMVIndex(dstTable)) {
             tSink.setEnable_colocate_mv_index(true);
         }
+
+        Map<Long, Long> doubleWritePartitions = dstTable.getDoubleWritePartitions();
+        if (!doubleWritePartitions.isEmpty()) {
+            List<Long> doubleWritePartitionIds = new ArrayList<>();
+            for (Long partitionId : partitionIds) {
+                if (doubleWritePartitions.containsKey(partitionId)) {
+                    doubleWritePartitionIds.add(doubleWritePartitions.get(partitionId));
+                }
+            }
+
+            if (!doubleWritePartitionIds.isEmpty()) {
+                TOlapTableSink tSink2 = new TOlapTableSink(tSink);
+                tSink2.unsetPartition();
+                tSink2.unsetLocation();
+                TOlapTablePartitionParam partitionParam2 = createPartition(tSink2.getDb_id(), dstTable, tupleDescriptor,
+                        enableAutomaticPartition, automaticBucketSize, doubleWritePartitionIds);
+                tSink2.setPartition(partitionParam2);
+                tSink2.setLocation(createLocation(dstTable, partitionParam2, enableReplicatedStorage, warehouseId));
+                tSink2.setIgnore_out_of_partition(true);
+
+                TDataSink tDataSink2 = new TDataSink();
+                tDataSink2.setType(TDataSinkType.OLAP_TABLE_SINK);
+                tDataSink2.setOlap_table_sink(tSink2);
+
+                TDataSink newDataSink = new TDataSink(TDataSinkType.MULTI_OLAP_TABLE_SINK);
+                tDataSink.setSink_id(0);
+                newDataSink.addToMulti_olap_table_sinks(tDataSink);
+                tDataSink2.setSink_id(1);
+                newDataSink.addToMulti_olap_table_sinks(tDataSink2);
+                tDataSink = newDataSink;
+            }
+        }
+
+        LOG.debug("tDataSink: {}", tDataSink);
     }
 
     @Override
@@ -303,6 +338,7 @@ public class OlapTableSink extends DataSink {
             List<String> columns = Lists.newArrayList();
             List<TColumn> columnsDesc = Lists.newArrayList();
             List<Integer> columnSortKeyUids = Lists.newArrayList();
+            Map<String, String> columnToExprValue = new HashMap<>();
             columns.addAll(indexMeta
                     .getSchema()
                     .stream()
@@ -313,6 +349,9 @@ public class OlapTableSink extends DataSink {
                 tColumn.setColumn_name(column.getColumnId().getId());
                 column.setIndexFlag(tColumn, table.getIndexes(), table.getBfColumnIds());
                 columnsDesc.add(tColumn);
+                if (column.getDefaultExpr() != null && column.calculatedDefaultValue() != null) {
+                    columnToExprValue.put(column.getColumnId().getId(), column.calculatedDefaultValue());
+                }
             }
             if (indexMeta.getSortKeyUniqueIds() != null) {
                 columnSortKeyUids.addAll(indexMeta.getSortKeyUniqueIds());
@@ -328,6 +367,7 @@ public class OlapTableSink extends DataSink {
                     indexMeta.getSchemaHash());
             indexSchema.setColumn_param(columnParam);
             indexSchema.setSchema_id(indexMeta.getSchemaId());
+            indexSchema.setColumn_to_expr_value(columnToExprValue);
             schemaParam.addToIndexes(indexSchema);
             if (indexMeta.getWhereClause() != null) {
                 String dbName = MetaUtils.getDatabase(dbId).getFullName();
@@ -678,6 +718,14 @@ public class OlapTableSink extends DataSink {
                 WarehouseManager.DEFAULT_WAREHOUSE_ID);
     }
 
+    public static SystemInfoService getSystemInfoService(OlapTable table) {
+        if (table instanceof ExternalOlapTable) {
+            return ((ExternalOlapTable) table).getExternalSystemInfoService();
+        } else {
+            return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+        }
+    }
+
     public static TOlapTableLocationParam createLocation(OlapTable table, TOlapTablePartitionParam partitionParam,
                                                          boolean enableReplicatedStorage,
                                                          long warehouseId) throws UserException {
@@ -685,7 +733,7 @@ public class OlapTableSink extends DataSink {
         // replica -> path hash
         Multimap<Long, Long> allBePathsMap = HashMultimap.create();
         Map<Long, Long> bePrimaryMap = new HashMap<>();
-        SystemInfoService infoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+        SystemInfoService infoService = getSystemInfoService(table);
         if (partitionParam.getPartitions() == null) {
             return locationParam;
         }
@@ -708,7 +756,7 @@ public class OlapTableSink extends DataSink {
                         // otherwise, there will be a 'unknown node id, id=xxx' error for stream load
                         LocalTablet localTablet = (LocalTablet) tablet;
                         Multimap<Replica, Long> bePathsMap =
-                                localTablet.getNormalReplicaBackendPathMap();
+                                localTablet.getNormalReplicaBackendPathMap(infoService);
                         if (bePathsMap.keySet().size() < quorum) {
                             throw new UserException(InternalErrorCode.REPLICA_FEW_ERR,
                                     String.format("Tablet lost replicas. Check if any backend is down or not. " +

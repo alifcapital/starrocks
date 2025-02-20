@@ -16,6 +16,7 @@
 
 #include <utility>
 
+#include "block_cache/cache_options.h"
 #include "common/status.h"
 #include "exec/hdfs_scanner.h"
 #include "exec/mor_processor.h"
@@ -27,20 +28,33 @@
 namespace starrocks {
 struct IcebergColumnMeta;
 
-class PositionDeleteBuilder {
+class DeleteBuilder {
 public:
-    PositionDeleteBuilder() = default;
-    virtual ~PositionDeleteBuilder() = default;
+    DeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options)
+            : _fs(fs), _datacache_options(datacache_options){};
+    virtual ~DeleteBuilder() = default;
+
+protected:
+    FileSystem* _fs;
+    const DataCacheOptions& _datacache_options;
+};
+
+class PositionDeleteBuilder : public DeleteBuilder {
+public:
+    PositionDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options)
+            : DeleteBuilder(fs, datacache_options) {}
+    ~PositionDeleteBuilder() override = default;
 
     virtual Status build(const std::string& timezone, const std::string& file_path, int64_t file_length,
                          std::set<int64_t>* need_skip_rowids, const HdfsScannerParams& scanner_params,
                          RuntimeState* state) = 0;
 };
 
-class EqualityDeleteBuilder {
+class EqualityDeleteBuilder : public DeleteBuilder {
 public:
-    EqualityDeleteBuilder() = default;
-    virtual ~EqualityDeleteBuilder() = default;
+    EqualityDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options)
+            : DeleteBuilder(fs, datacache_options) {}
+    ~EqualityDeleteBuilder() override = default;
 
     virtual Status build(const std::string& timezone, const std::string& file_path, int64_t file_length,
                          std::shared_ptr<DefaultMORProcessor> mor_processor, std::vector<SlotDescriptor*> slots,
@@ -48,10 +62,10 @@ public:
                          RuntimeState* state, const HdfsScannerParams& scanner_params) = 0;
 };
 
-class ORCEqualityDeleteBuilder : public EqualityDeleteBuilder {
+class ORCEqualityDeleteBuilder final : public EqualityDeleteBuilder {
 public:
-    ORCEqualityDeleteBuilder(FileSystem* fs, std::string datafile_path)
-            : _fs(fs), _datafile_path(std::move(datafile_path)) {}
+    ORCEqualityDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options, std::string datafile_path)
+            : EqualityDeleteBuilder(fs, datacache_options), _datafile_path(std::move(datafile_path)) {}
     ~ORCEqualityDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& file_path, int64_t file_length,
@@ -60,14 +74,13 @@ public:
                  RuntimeState* stage, const HdfsScannerParams& scanner_params) override;
 
 private:
-    FileSystem* _fs;
     std::string _datafile_path;
 };
 
-class ParquetEqualityDeleteBuilder : public EqualityDeleteBuilder {
+class ParquetEqualityDeleteBuilder final : public EqualityDeleteBuilder {
 public:
-    ParquetEqualityDeleteBuilder(FileSystem* fs, std::string datafile_path)
-            : _fs(fs), _datafile_path(std::move(datafile_path)) {}
+    ParquetEqualityDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options, std::string datafile_path)
+            : EqualityDeleteBuilder(fs, datacache_options), _datafile_path(std::move(datafile_path)) {}
     ~ParquetEqualityDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& file_path, int64_t file_length,
@@ -80,15 +93,14 @@ public:
                               std::shared_ptr<io::SharedBufferedInputStream> shared_buffered_input_stream, int64_t hashtable_rows);
 
 private:
-    FileSystem* _fs;
     std::string _datafile_path;
     std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
 };
 
-class ORCPositionDeleteBuilder : public PositionDeleteBuilder {
+class ORCPositionDeleteBuilder final : public PositionDeleteBuilder {
 public:
-    ORCPositionDeleteBuilder(FileSystem* fs, std::string datafile_path)
-            : _fs(fs), _datafile_path(std::move(datafile_path)) {}
+    ORCPositionDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options, std::string datafile_path)
+            : PositionDeleteBuilder(fs, datacache_options), _datafile_path(std::move(datafile_path)) {}
     ~ORCPositionDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& delete_file_path, int64_t file_length,
@@ -96,14 +108,13 @@ public:
                  RuntimeState* state) override;
 
 private:
-    FileSystem* _fs;
     std::string _datafile_path;
 };
 
-class ParquetPositionDeleteBuilder : public PositionDeleteBuilder {
+class ParquetPositionDeleteBuilder final : public PositionDeleteBuilder {
 public:
-    ParquetPositionDeleteBuilder(FileSystem* fs, std::string datafile_path)
-            : _fs(fs), _datafile_path(std::move(datafile_path)) {}
+    ParquetPositionDeleteBuilder(FileSystem* fs, const DataCacheOptions& datacache_options, std::string datafile_path)
+            : PositionDeleteBuilder(fs, datacache_options), _datafile_path(std::move(datafile_path)) {}
     ~ParquetPositionDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& delete_file_path, int64_t file_length,
@@ -114,57 +125,87 @@ public:
                               std::shared_ptr<io::SharedBufferedInputStream> shared_buffered_input_stream);
 
 private:
-    FileSystem* _fs;
     std::string _datafile_path;
     std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
 };
 
 class IcebergDeleteBuilder {
 public:
-    IcebergDeleteBuilder(FileSystem* fs, std::string datafile_path, std::vector<ExprContext*> conjunct_ctxs,
-                         std::vector<SlotDescriptor*> materialize_slots, std::set<int64_t>* need_skip_rowids)
-            : _fs(fs),
-              _datafile_path(std::move(datafile_path)),
-              _conjunct_ctxs(std::move(conjunct_ctxs)),
-              _materialize_slots(std::move(materialize_slots)),
-              _need_skip_rowids(need_skip_rowids) {}
+    IcebergDeleteBuilder(FileSystem* fs,
+                        std::string datafile_path,
+                        std::set<int64_t>* need_skip_rowids,
+                        const DataCacheOptions& datacache_options = DataCacheOptions())
+        : _fs(fs)
+        , _datafile_path(std::move(datafile_path))
+        , _need_skip_rowids(need_skip_rowids)
+        , _datacache_options(datacache_options) {}
+
     ~IcebergDeleteBuilder() = default;
 
-    Status build_orc(const std::string& timezone, const TIcebergDeleteFile& delete_file,
-                     const std::vector<SlotDescriptor*>& slots, RuntimeState* state,
-                     std::shared_ptr<DefaultMORProcessor> mor_processor) const {
+    Status build_orc(const std::string& timezone,
+                    const TIcebergDeleteFile& delete_file,
+                    const std::vector<SlotDescriptor*>& slots,
+                    RuntimeState* state,
+                    std::shared_ptr<DefaultMORProcessor> mor_processor) const {
         HdfsScannerParams params;
         if (delete_file.file_content == TIcebergFileContent::POSITION_DELETES) {
-            return ORCPositionDeleteBuilder(_fs, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids, params, state);
+            return ORCPositionDeleteBuilder(_fs, _datacache_options, _datafile_path)
+                .build(timezone,
+                       delete_file.full_path,
+                       delete_file.length,
+                       _need_skip_rowids,
+                       params,
+                       state);
         } else if (delete_file.file_content == TIcebergFileContent::EQUALITY_DELETES) {
             HdfsScannerParams scanner_params;
-            return ORCEqualityDeleteBuilder(_fs, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, std::move(mor_processor),
-                           std::move(slots), nullptr, nullptr, state, scanner_params);
+            return ORCEqualityDeleteBuilder(_fs, _datacache_options, _datafile_path)
+                .build(timezone,
+                       delete_file.full_path,
+                       delete_file.length,
+                       std::move(mor_processor),
+                       std::move(slots),
+                       nullptr,
+                       nullptr,
+                       state,
+                       scanner_params);
         } else {
-            const auto s = strings::Substitute("Unsupported iceberg file content: $0", delete_file.file_content);
+            const auto s = strings::Substitute("Unsupported iceberg file content: $0",
+                                            delete_file.file_content);
             LOG(WARNING) << s;
             return Status::InternalError(s);
         }
     }
 
-    Status build_parquet(const std::string& timezone, const TIcebergDeleteFile& delete_file,
-                         const std::vector<SlotDescriptor*>& slots, TupleDescriptor* delete_column_tuple_desc,
-                         const TIcebergSchema* iceberg_equal_delete_schema, RuntimeState* state,
-                         std::shared_ptr<DefaultMORProcessor> mor_processor,
-                         const HdfsScannerParams& scanner_params) const {
+    Status build_parquet(const std::string& timezone,
+                        const TIcebergDeleteFile& delete_file,
+                        const std::vector<SlotDescriptor*>& slots,
+                        TupleDescriptor* delete_column_tuple_desc,
+                        const TIcebergSchema* iceberg_equal_delete_schema,
+                        RuntimeState* state,
+                        std::shared_ptr<DefaultMORProcessor> mor_processor,
+                        const HdfsScannerParams& scanner_params) const {
         if (delete_file.file_content == TIcebergFileContent::POSITION_DELETES) {
-            return ParquetPositionDeleteBuilder(_fs, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids, scanner_params,
-                           state);
+            return ParquetPositionDeleteBuilder(_fs, _datacache_options, _datafile_path)
+                .build(timezone,
+                       delete_file.full_path,
+                       delete_file.length,
+                       _need_skip_rowids,
+                       scanner_params,
+                       state);
         } else if (delete_file.file_content == TIcebergFileContent::EQUALITY_DELETES) {
-            return ParquetEqualityDeleteBuilder(_fs, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, std::move(mor_processor),
-                           std::move(slots), delete_column_tuple_desc, iceberg_equal_delete_schema, state,
-                           scanner_params);
+            return ParquetEqualityDeleteBuilder(_fs, _datacache_options, _datafile_path)
+                .build(timezone,
+                       delete_file.full_path,
+                       delete_file.length,
+                       std::move(mor_processor),
+                       std::move(slots),
+                       delete_column_tuple_desc,
+                       iceberg_equal_delete_schema,
+                       state,
+                       scanner_params);
         } else {
-            auto s = strings::Substitute("Unsupported iceberg file content: $0", delete_file.file_content);
+            auto s = strings::Substitute("Unsupported iceberg file content: $0",
+                                       delete_file.file_content);
             LOG(WARNING) << s;
             return Status::InternalError(s);
         }
@@ -173,9 +214,8 @@ public:
 private:
     FileSystem* _fs;
     std::string _datafile_path;
-    std::vector<ExprContext*> _conjunct_ctxs;
-    std::vector<SlotDescriptor*> _materialize_slots;
     std::set<int64_t>* _need_skip_rowids;
+    const DataCacheOptions _datacache_options;
 };
 
 class IcebergDeleteFileMeta {

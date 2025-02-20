@@ -78,7 +78,7 @@ public class Locker {
      * @throws LockTimeoutException    when the transaction time limit was exceeded.
      * @throws NotSupportLockException when not support param or operation
      */
-    public void lock(long rid, LockType lockType, long timeout) throws IllegalLockStateException {
+    public void lock(long rid, LockType lockType, long timeout) throws LockException {
         if (timeout < 0) {
             throw new NotSupportLockException("lock timeout value cannot be less than 0");
         }
@@ -89,7 +89,7 @@ public class Locker {
         LOG.debug(this + " | LockManager acquire lock : rid " + rid + ", lock type " + lockType);
     }
 
-    public void lock(long rid, LockType lockType) throws IllegalLockStateException {
+    public void lock(long rid, LockType lockType) throws LockException {
         this.lock(rid, lockType, 0);
     }
 
@@ -102,7 +102,11 @@ public class Locker {
     public void release(long rid, LockType lockType) {
         LockManager lockManager = GlobalStateMgr.getCurrentState().getLockManager();
         LOG.debug(this + " | LockManager release lock : rid " + rid + ", lock type " + lockType);
-        lockManager.release(rid, this, lockType);
+        try {
+            lockManager.release(rid, this, lockType);
+        } catch (LockException e) {
+            throw ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
+        }
     }
 
     /**
@@ -113,8 +117,8 @@ public class Locker {
             Preconditions.checkNotNull(database);
             try {
                 lock(database.getId(), lockType, 0);
-            } catch (IllegalLockStateException e) {
-                ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
+            } catch (LockException e) {
+                throw ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
             }
         } else {
             if (lockType.isWriteLock()) {
@@ -145,9 +149,8 @@ public class Locker {
                 return true;
             } catch (LockTimeoutException e) {
                 return false;
-            } catch (IllegalLockStateException e) {
-                ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
-                return false;
+            } catch (LockException e) {
+                throw ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
             }
         } else {
             Preconditions.checkState(lockType.equals(LockType.READ) || lockType.equals(LockType.WRITE));
@@ -342,8 +345,8 @@ public class Locker {
                 for (Long rid : tableListClone) {
                     this.lock(rid, lockType, 0);
                 }
-            } catch (IllegalLockStateException e) {
-                ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
+            } catch (LockException e) {
+                throw ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
             }
         } else {
             //Fallback to db lock
@@ -351,6 +354,9 @@ public class Locker {
         }
     }
 
+    /**
+     * No need to release lock explicitly, it will be released automatically when the locker failed.
+     */
     public boolean tryLockTablesWithIntensiveDbLock(Database database, List<Long> tableList, LockType lockType, 
                                                     long timeout, TimeUnit unit) {
         long timeoutMillis = timeout;
@@ -370,7 +376,7 @@ public class Locker {
                 } else {
                     this.lock(database.getId(), LockType.INTENTION_SHARED, timeout);
                 }
-            } catch (IllegalLockStateException e) {
+            } catch (LockException e) {
                 return false;
             }
 
@@ -383,7 +389,7 @@ public class Locker {
                 }
 
                 return true;
-            } catch (IllegalLockStateException e) {
+            } catch (LockException e) {
                 if (lockType == LockType.WRITE) {
                     release(database.getId(), LockType.INTENTION_EXCLUSIVE);
                 } else {
@@ -425,8 +431,9 @@ public class Locker {
 
     /**
      * Lock database and table with intensive db lock.
+     *
      * @param database database for intensive db lock
-     * @param table table to be locked
+     * @param table    table to be locked
      * @param lockType lock type
      * @return true if database exits, false otherwise
      */
@@ -467,8 +474,9 @@ public class Locker {
 
     /**
      * Lock table with intensive db lock.
+     *
      * @param database db for intensive db lock
-     * @param tableId table to be locked
+     * @param tableId  table to be locked
      * @param lockType lock type
      */
     public void lockTableWithIntensiveDbLock(Database database, Long tableId, LockType lockType) {
@@ -481,8 +489,8 @@ public class Locker {
                     this.lock(database.getId(), LockType.INTENTION_SHARED, 0);
                 }
                 this.lock(tableId, lockType, 0);
-            } catch (IllegalLockStateException e) {
-                ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
+            } catch (LockException e) {
+                throw ErrorReportException.report(ErrorCode.ERR_LOCK_ERROR, e.getMessage());
             }
         } else {
             //Fallback to db lock
@@ -492,6 +500,7 @@ public class Locker {
 
     /**
      * Try lock database and table with intensive db lock.
+     *
      * @return try if try lock success, false otherwise.
      */
     public boolean tryLockTableWithIntensiveDbLock(Database db, Table table, LockType lockType, long timeout, TimeUnit unit) {
@@ -500,25 +509,15 @@ public class Locker {
 
     /**
      * Try lock database and table id with intensive db lock.
+     *
      * @return try if try lock success, false otherwise.
      */
     public boolean tryLockTableWithIntensiveDbLock(Database db, Long tableId, LockType lockType, long timeout, TimeUnit unit) {
-        boolean isLockSuccess = false;
-        try {
-            if (!tryLockTablesWithIntensiveDbLock(db, ImmutableList.of(tableId), lockType, timeout, unit)) {
-                return false;
-            }
-            isLockSuccess = true;
-        } finally {
-            if (!isLockSuccess) {
-                unLockTablesWithIntensiveDbLock(db, ImmutableList.of(tableId), lockType);
-            }
-        }
-        return true;
+        return tryLockTablesWithIntensiveDbLock(db, ImmutableList.of(tableId), lockType, timeout, unit);
     }
 
     /**
-     * Try lock database and tables with intensive db lock.
+     * Try to lock multi database and tables with intensive db lock.
      * @return try if try lock success, false otherwise.
      */
     public boolean tryLockTableWithIntensiveDbLock(LockParams lockParams, LockType lockType, long timeout, TimeUnit unit) {

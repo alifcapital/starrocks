@@ -1,10 +1,10 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 ---
 
 # Realtime synchronization from MySQL
 
-import InsertPrivNote from '../assets/commonMarkdown/insertPrivNote.md'
+import InsertPrivNote from '../_assets/commonMarkdown/insertPrivNote.md'
 
 StarRocks supports multiple methods to synchronize data from MySQL to StarRocks in real time, delivering low latency real-time analytics of massive data.
 
@@ -22,7 +22,7 @@ Flink CDC is used in the synchronization from MySQL to Flink. This topic uses Fl
 
 The following figure illustrates the entire synchronization process.
 
-![img](../assets/4.9.2.png)
+![img](../_assets/4.9.2.png)
 
 Real-time synchronization from MySQL through Flink to StarRocks is implemented in two stages: synchronizing database & table schema and synchronizing data. First, the SMT converts MySQL database & table schema into table creation statements for StarRocks. Then, the Flink cluster runs Flink jobs to synchronize full and incremental MySQL data to StarRocks.
 
@@ -286,7 +286,7 @@ To synchronize data from MySQL in real time, the system needs to read data from 
 
     > **NOTICE**
     >
-    > Since v2.5.7, StarRocks can automatically set the number of buckets (BUCKETS) when you create a table or add a partition. You no longer need to manually set the number of buckets. For detailed information, see [set the number of buckets](../table_design/Data_distribution.md#set-the-number-of-buckets).
+    > Since v2.5.7, StarRocks can automatically set the number of buckets (BUCKETS) when you create a table or add a partition. You no longer need to manually set the number of buckets. For detailed information, see [set the number of buckets](../table_design/data_distribution/Data_distribution.md#set-the-number-of-buckets).
 
 ## Synchronize data
 
@@ -385,7 +385,7 @@ Run the Flink cluster and submit a Flink job to continuously synchronize full an
 2. You can use the [Flink WebUI](https://nightlies.apache.org/flink/flink-docs-master/docs/try-flink/flink-operations-playground/#flink-webui) or run the `bin/flink list -running` command on  your Flink SQL client to view Flink jobs that are running in the Flink cluster and the job IDs.
 
     - Flink WebUI
-      ![img](../assets/4.9.3.png)
+      ![img](../_assets/4.9.3.png)
 
     - `bin/flink list -running`
 

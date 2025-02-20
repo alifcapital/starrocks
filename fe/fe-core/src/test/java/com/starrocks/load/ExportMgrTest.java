@@ -21,13 +21,11 @@ import com.starrocks.analysis.TableName;
 import com.starrocks.common.Config;
 import com.starrocks.common.util.OrderByPair;
 import com.starrocks.persist.metablock.SRMetaBlockReader;
+import com.starrocks.persist.metablock.SRMetaBlockReaderV2;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.utframe.UtFrameUtils;
-import mockit.Expectations;
-import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -43,21 +41,10 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 public class ExportMgrTest {
-    @Mocked
-    GlobalStateMgr globalStateMgr;
-    @Mocked
-    Authorizer authorizer;
 
     @Test
     public void testExpiredJob() throws Exception {
-        new Expectations() {
-            {
-                GlobalStateMgr.getCurrentState();
-                minTimes = 0;
-                result = globalStateMgr;
-            }
-        };
-        Config.history_job_keep_max_second = 10;
+        Config.history_job_keep_max_second = 100;
         ExportMgr mgr = new ExportMgr();
 
         // 1. create job 1
@@ -130,10 +117,10 @@ public class ExportMgrTest {
         leaderMgr.replayCreateExportJob(job);
 
         UtFrameUtils.PseudoImage image = new UtFrameUtils.PseudoImage();
-        leaderMgr.saveExportJobV2(image.getDataOutputStream());
+        leaderMgr.saveExportJobV2(image.getImageWriter());
 
         ExportMgr followerMgr = new ExportMgr();
-        SRMetaBlockReader reader = new SRMetaBlockReader(image.getDataInputStream());
+        SRMetaBlockReader reader = new SRMetaBlockReaderV2(image.getJsonReader());
         followerMgr.loadExportJobV2(reader);
         reader.close();
 

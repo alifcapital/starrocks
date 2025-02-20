@@ -90,7 +90,6 @@ import com.starrocks.privilege.RolePrivilegeCollectionV2;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.SqlModeHelper;
-import com.starrocks.qe.VariableMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.ArrayExpr;
@@ -121,6 +120,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
 
@@ -146,6 +146,10 @@ public class ExpressionAnalyzer {
 
     public void analyzeIgnoreSlot(Expr expression, AnalyzeState analyzeState, Scope scope) {
         IgnoreSlotVisitor visitor = new IgnoreSlotVisitor(analyzeState, session);
+        bottomUpAnalyze(visitor, expression, scope);
+    }
+
+    public void analyzeWithVisitor(Expr expression, AnalyzeState analyzeState, Scope scope, Visitor visitor) {
         bottomUpAnalyze(visitor, expression, scope);
     }
 
@@ -1181,8 +1185,12 @@ public class ExpressionAnalyzer {
                         Type toBitmapArg0Type = toBitmapArg0.getType();
                         if (toBitmapArg0Type.isIntegerType() || toBitmapArg0Type.isBoolean()
                                 || toBitmapArg0Type.isLargeIntType()) {
+                            argumentTypes = new Type[] {toBitmapArg0Type};
                             node.setChild(0, toBitmapArg0);
                             node.resetFnName("", FunctionSet.BITMAP_AGG);
+                            node.getParams().setExprs(Lists.newArrayList(toBitmapArg0));
+                            fn = Expr.getBuiltinFunction(FunctionSet.BITMAP_AGG, argumentTypes,
+                                    Function.CompareMode.IS_IDENTICAL);
                         }
                     }
                 }
@@ -1684,7 +1692,8 @@ public class ExpressionAnalyzer {
             if (funcType.equalsIgnoreCase(FunctionSet.DATABASE) || funcType.equalsIgnoreCase(FunctionSet.SCHEMA)) {
                 node.setType(Type.VARCHAR);
                 node.setStrValue(ClusterNamespace.getNameFromFullName(session.getDatabase()));
-            } else if (funcType.equalsIgnoreCase(FunctionSet.USER)) {
+            } else if (funcType.equalsIgnoreCase(FunctionSet.USER)
+                    || funcType.equalsIgnoreCase(FunctionSet.SESSION_USER)) {
                 node.setType(Type.VARCHAR);
 
                 String user = session.getQualifiedUser();
@@ -1733,7 +1742,7 @@ public class ExpressionAnalyzer {
         @Override
         public Void visitVariableExpr(VariableExpr node, Scope context) {
             try {
-                VariableMgr.fillValue(session.getSessionVariable(), node);
+                GlobalStateMgr.getCurrentState().getVariableMgr().fillValue(session.getSessionVariable(), node);
                 if (!Strings.isNullOrEmpty(node.getName()) &&
                         node.getName().equalsIgnoreCase(SessionVariable.SQL_MODE)) {
                     node.setType(Type.VARCHAR);
@@ -1747,7 +1756,13 @@ public class ExpressionAnalyzer {
 
         @Override
         public Void visitUserVariableExpr(UserVariableExpr node, Scope context) {
-            UserVariable userVariable = session.getUserVariable(node.getName());
+            UserVariable userVariable;
+            if (session.getUserVariablesCopyInWrite() == null) {
+                userVariable = session.getUserVariable(node.getName());
+            } else {
+                userVariable = session.getUserVariableCopyInWrite(node.getName());
+            }
+
             if (userVariable == null) {
                 node.setValue(NullLiteral.create(Type.STRING));
             } else {
@@ -1974,10 +1989,17 @@ public class ExpressionAnalyzer {
             List<String> dictionaryKeys = dictionary.getKeys();
             int dictionaryKeysSize = dictionaryKeys.size();
             int paramDictionaryKeysSize = params.size() - 1;
-            if (paramDictionaryKeysSize != dictionaryKeysSize) {
-                throw new SemanticException("dictionary: " + dictionaryName + " has keys size: " +
-                                            Integer.toString(dictionaryKeysSize) +
-                                            " but param give: " + Integer.toString(paramDictionaryKeysSize));
+            if (!(paramDictionaryKeysSize == dictionaryKeysSize || paramDictionaryKeysSize == dictionaryKeysSize + 1)) {
+                throw new SemanticException("dictionary: " + dictionaryName + " has expected keys size: " +
+                                            Integer.toString(dictionaryKeysSize) + " keys: " +
+                                            "[" + String.join(", ", dictionaryKeys) + "]" +
+                                            " plus null_if_not_exist flag(optional)" +
+                                            " but param given: " + Integer.toString(paramDictionaryKeysSize));
+            }
+
+            if (paramDictionaryKeysSize == dictionaryKeysSize + 1 && !(params.get(params.size() - 1) instanceof BoolLiteral)) {
+                throw new SemanticException("dictionary: " + dictionaryName + " has invalid parameter for `null_if_not_exist` "
+                                            + "invalid parameter: " + params.get(params.size() - 1).toString());
             }
 
             Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(
@@ -2024,6 +2046,9 @@ public class ExpressionAnalyzer {
                 }
             }
 
+            boolean nullIfNotExist = (paramDictionaryKeysSize == dictionaryKeysSize + 1) ?
+                                     ((BoolLiteral) params.get(params.size() - 1)).getValue() : false;
+            node.setNullIfNotExist(nullIfNotExist);
             node.setDictionaryId(dictionary.getDictionaryId());
             node.setDictionaryTxnId(GlobalStateMgr.getCurrentState().getDictionaryMgr().
                     getLastSuccessTxnId(dictionary.getDictionaryId()));
@@ -2057,6 +2082,23 @@ public class ExpressionAnalyzer {
         }
     }
 
+    static class ResolveSlotVisitor extends Visitor {
+
+        private java.util.function.Consumer<SlotRef> resolver;
+
+        public ResolveSlotVisitor(AnalyzeState state, ConnectContext session,
+                                  java.util.function.Consumer<SlotRef> slotResolver) {
+            super(state, session);
+            resolver = slotResolver;
+        }
+
+        @Override
+        public Void visitSlot(SlotRef node, Scope scope) {
+            resolver.accept(node);
+            return null;
+        }
+    }
+
     public static void analyzeExpression(Expr expression, AnalyzeState state, Scope scope, ConnectContext session) {
         ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(session);
         expressionAnalyzer.analyze(expression, state, scope);
@@ -2068,5 +2110,14 @@ public class ExpressionAnalyzer {
                 new Scope(RelationId.anonymous(), new RelationFields()));
     }
 
+    public static void analyzeExpressionResolveSlot(Expr expression, ConnectContext session,
+                                                    Consumer<SlotRef> slotRefConsumer) {
+        ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(session);
+        AnalyzeState state = new AnalyzeState();
+        Scope scope = new Scope(RelationId.anonymous(), new RelationFields());
+
+        ResolveSlotVisitor visitor = new ResolveSlotVisitor(new AnalyzeState(), ConnectContext.get(), slotRefConsumer);
+        expressionAnalyzer.analyzeWithVisitor(expression, state, scope, visitor);
+    }
 }
 

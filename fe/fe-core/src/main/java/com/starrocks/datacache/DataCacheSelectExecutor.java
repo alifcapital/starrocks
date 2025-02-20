@@ -44,12 +44,14 @@ public class DataCacheSelectExecutor {
         // force enable datacache and populate
         tmpSessionVariable.setEnableScanDataCache(true);
         tmpSessionVariable.setEnablePopulateDataCache(true);
+        tmpSessionVariable.setDataCachePopulateMode(DataCachePopulateMode.ALWAYS.modeName());
         // make sure all accessed data must be cached
         tmpSessionVariable.setEnableDataCacheAsyncPopulateMode(false);
         tmpSessionVariable.setEnableDataCacheIOAdaptor(false);
         tmpSessionVariable.setDataCacheEvictProbability(100);
         tmpSessionVariable.setDataCachePriority(statement.getPriority());
         tmpSessionVariable.setDatacacheTTLSeconds(statement.getTTLSeconds());
+        tmpSessionVariable.setEnableCacheSelect(true);
         connectContext.setSessionVariable(tmpSessionVariable);
 
         InsertStmt insertStmt = statement.getInsertStmt();
@@ -82,8 +84,10 @@ public class DataCacheSelectExecutor {
         connectContext.setSessionVariable(sessionVariableBackup);
 
         Preconditions.checkNotNull(metrics, "Failed to retrieve cache select metrics");
+        // Don't update datacache metrics after cache select, because of datacache instance still not unified.
+        // Here update will display wrong metrics in show backends/compute nodes
         // update backend's datacache metrics after cache select
-        updateBackendDataCacheMetrics(metrics);
+        // updateBackendDataCacheMetrics(metrics);
         return metrics;
     }
 

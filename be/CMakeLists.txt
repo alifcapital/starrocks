@@ -97,6 +97,8 @@ option(USE_AVX2 "Build with AVX2 instruction" ON)
 
 option(USE_AVX512 "Build with AVX512f/AVX512BW instruction" OFF)
 
+option(WITH_RELATIVE_SRC_PATH "Build source file with relative path" ON)
+
 # Check gcc
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.8.2")
@@ -598,6 +600,12 @@ endforeach()
 # Check Clang-Tidy
 include(cmake_modules/FindClangTidy.cmake)
 
+if (CLANG_TIDY_PATH)
+    # enable clang-tidy check for all source code files
+    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_PATH}")
+endif()
+
+
 # Check if functions are supported in this platform. All flags will generated
 # in gensrc/build/common/env_config.h.
 # You can check funcion here which depends on platform. Don't forget add this
@@ -628,7 +636,9 @@ set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall -Wno-sign-compare -Wno-unknown-p
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-strict-aliasing -fno-omit-frame-pointer")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -std=gnu++20 -D__STDC_FORMAT_MACROS")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-deprecated -Wno-vla -Wno-comment")
-set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${FILE_PREFIX_MAP_FLAG}")
+if("${WITH_RELATIVE_SRC_PATH}" STREQUAL "ON")
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${FILE_PREFIX_MAP_FLAG}")
+endif()
 # disable link delete(void*, long)
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fno-sized-deallocation")
 
@@ -775,8 +785,10 @@ endif()
 
 # Add flags that are common across build types
 SET(CMAKE_CXX_FLAGS "${CXX_COMMON_FLAGS} ${CMAKE_CXX_FLAGS}")
-# apply -ffile-prefix-map option to .c source files as well
-SET(CMAKE_C_FLAGS "${FILE_PREFIX_MAP_FLAG} ${CMAKE_C_FLAGS}")
+if("${WITH_RELATIVE_SRC_PATH}" STREQUAL "ON")
+    # apply -ffile-prefix-map option to .c source files as well
+    SET(CMAKE_C_FLAGS "${FILE_PREFIX_MAP_FLAG} ${CMAKE_C_FLAGS}")
+endif()
 
 message(STATUS "Compiler Flags: ${CMAKE_CXX_FLAGS}")
 
@@ -807,6 +819,8 @@ endif()
 
 set(WL_START_GROUP "-Wl,--start-group")
 set(WL_END_GROUP "-Wl,--end-group")
+set(WL_LINK_STATIC "-Wl,-Bstatic")
+set(WL_LINK_DYNAMIC "-Wl,-Bdynamic")
 
 # Set starrocks libraries
 set(STARROCKS_LINK_LIBS
@@ -960,14 +974,9 @@ if ("${CMAKE_BUILD_TARGET_ARCH}" STREQUAL "x86" OR "${CMAKE_BUILD_TARGET_ARCH}" 
 endif()
 
 # Add all external dependencies. They should come after the starrocks libs.
-# static link gcc's lib
-set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS}
-    ${STARROCKS_DEPENDENCIES}
-    -static-libstdc++
-    -static-libgcc
-    -lresolv
-)
+set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} ${STARROCKS_DEPENDENCIES})
 
+set(BUILD_FOR_SANITIZE "OFF")
 # Add sanitize static link flags or jemalloc
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG" OR "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
     message("use jemalloc")
@@ -978,19 +987,30 @@ elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "ASAN")
     else()
         set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} -static-libasan)
     endif()
+    set(BUILD_FOR_SANITIZE "ON")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "LSAN")
     set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} -static-liblsan)
+    set(BUILD_FOR_SANITIZE "ON")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "UBSAN")
     message("use jemalloc")
     set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} -static-libubsan jemalloc)
+    set(BUILD_FOR_SANITIZE "ON")
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "TSAN")
     set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} -static-libtsan)
+    set(BUILD_FOR_SANITIZE "ON")
 else()
     message(FATAL_ERROR "Unknown build type: ${CMAKE_BUILD_TYPE}")
 endif()
 
+if (NOT ("${MAKE_TEST}" STREQUAL "ON" AND "${BUILD_FOR_SANITIZE}" STREQUAL "ON"))
+    # In other words, turn to dynamic link when MAKE_TEST and BUILD_TYPE == *SAN
+    # otherwise do static link gcc's lib
+    set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS} -static-libstdc++ -static-libgcc)
+endif()
+
 set(STARROCKS_LINK_LIBS ${STARROCKS_LINK_LIBS}
-    -lbfd -liberty -lc -lm -ldl -rdynamic -pthread -Wl,-wrap=__cxa_throw
+    ${WL_LINK_STATIC} -lbfd
+    ${WL_LINK_DYNAMIC} -lresolv -liberty -lc -lm -ldl -rdynamic -pthread -Wl,-wrap=__cxa_throw
 )
 
 # link gcov if WITH_GCOV is on

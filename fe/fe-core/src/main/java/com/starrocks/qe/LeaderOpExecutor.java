@@ -45,7 +45,8 @@ import com.starrocks.common.util.AuditStatisticsUtil;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.mysql.MysqlChannel;
 import com.starrocks.qe.QueryState.MysqlStateType;
-import com.starrocks.rpc.FrontendServiceProxy;
+import com.starrocks.rpc.ThriftConnectionPool;
+import com.starrocks.rpc.ThriftRPCRequestExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.AstToSQLBuilder;
 import com.starrocks.sql.ast.SetListItem;
@@ -137,7 +138,8 @@ public class LeaderOpExecutor {
                 SetStmt stmt = (SetStmt) parsedStmt;
                 for (SetListItem var : stmt.getSetListItems()) {
                     if (var instanceof SystemVariable) {
-                        VariableMgr.setSystemVariable(ctx.getSessionVariable(), (SystemVariable) var, true);
+                        GlobalStateMgr.getCurrentState().getVariableMgr().setSystemVariable(
+                                ctx.getSessionVariable(), (SystemVariable) var, true);
                     }
                 }
             } catch (DdlException e) {
@@ -160,7 +162,7 @@ public class LeaderOpExecutor {
         }
         if (forwardTimes > MAX_FORWARD_TIMES) {
             LOG.warn("too many forward times, max allowed forward time is {}", MAX_FORWARD_TIMES);
-            ErrorReportException.report(ErrorCode.ERR_FORWARD_TOO_MANY_TIMES, forwardTimes);
+            throw ErrorReportException.report(ErrorCode.ERR_FORWARD_TOO_MANY_TIMES, forwardTimes);
         }
 
         Pair<String, Integer> ipAndPort = GlobalStateMgr.getCurrentState().getNodeMgr().getLeaderIpAndRpcPort();
@@ -168,9 +170,10 @@ public class LeaderOpExecutor {
         TMasterOpRequest params = createTMasterOpRequest(ctx, forwardTimes);
         LOG.info("Forward statement {} to Leader {}", ctx.getStmtId(), thriftAddress);
 
-        result = FrontendServiceProxy.call(thriftAddress,
+        result = ThriftRPCRequestExecutor.call(
+                ThriftConnectionPool.frontendPool,
+                thriftAddress,
                 thriftTimeoutMs,
-                Config.thrift_rpc_retry_times,
                 client -> client.forward(params));
     }
 

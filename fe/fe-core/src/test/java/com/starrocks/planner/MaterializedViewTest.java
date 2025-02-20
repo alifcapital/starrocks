@@ -913,7 +913,6 @@ public class MaterializedViewTest extends MaterializedViewTestBase {
 
     @Test
     public void testAggregateWithGroupByKeyExpr1() {
-        setTracLogModule("MV");
         testRewriteOK("select empid, deptno," +
                         " sum(salary) as total, count(salary) + 1 as cnt" +
                         " from emps group by empid, deptno ",
@@ -5505,12 +5504,10 @@ public class MaterializedViewTest extends MaterializedViewTestBase {
                     " group by lo_orderdate" +
                     " having sum(lo_tax) > 100";
             MVRewriteChecker checker = testRewriteOK(mv, query);
-            checker.contains("4:Project\n" +
+            checker.contains("  4:Project\n" +
                     "  |  <slot 6> : 21: lo_orderdate\n" +
                     "  |  <slot 18> : 26: sum\n" +
                     "  |  <slot 19> : 27: sum\n" +
-                    "  |  <slot 26> : clone(26: sum)\n" +
-                    "  |  <slot 27> : clone(27: sum)\n" +
                     "  |  \n" +
                     "  3:AGGREGATE (merge finalize)");
         }
@@ -5592,5 +5589,17 @@ public class MaterializedViewTest extends MaterializedViewTestBase {
                     "0:OlapScanNode\n" +
                     "TABLE: mv0");
         }
+    }
+
+    @Test
+    public void testRangePredicateRewriteCase1() {
+        String mv = "select lo_orderkey, lo_orderdate, lo_linenumber, lo_shipmode from lineorder";
+        String query = "select distinct lo_orderkey from lineorder where lo_shipmode in (upper('a'), lower('a')) and " +
+                "lo_linenumber = 1";
+        String plan = testRewriteOK(mv, query)
+                .getExecPlan();
+        PlanTestBase.assertContains(plan, "   TABLE: mv0\n" +
+                "     PREAGGREGATION: ON\n" +
+                "     PREDICATES: 20: lo_linenumber = 1, 21: lo_shipmode IN ('A', 'a')");
     }
 }

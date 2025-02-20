@@ -29,6 +29,7 @@ import com.starrocks.common.util.Util;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.IcebergApiConverter;
 import com.starrocks.connector.iceberg.IcebergCatalogType;
+import com.starrocks.rpc.ConfigurableSerDesFactory;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TColumn;
@@ -40,6 +41,7 @@ import com.starrocks.thrift.TTableDescriptor;
 import com.starrocks.thrift.TTableType;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.PartitionField;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SortField;
@@ -48,7 +50,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
-import org.apache.thrift.protocol.TBinaryProtocol;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -138,8 +139,9 @@ public class IcebergTable extends Table {
     @Override
     public String getUUID() {
         if (CatalogMgr.isExternalCatalog(catalogName)) {
+            String uuid = ((BaseTable) getNativeTable()).operations().current().uuid();
             return String.join(".", catalogName, remoteDbName, remoteTableName,
-                    ((BaseTable) getNativeTable()).operations().current().uuid());
+                    uuid == null ? "" : uuid);
         } else {
             return Long.toString(id);
         }
@@ -217,13 +219,16 @@ public class IcebergTable extends Table {
         return indexes;
     }
 
+    // TODO(stephen): we should refactor this part to be compatible with cases of different transform result types
+    //  in the same partition column.
     // day(dt) -> identity dt
     public boolean hasPartitionTransformedEvolution() {
-        return getNativeTable().spec().fields().stream().anyMatch(field -> field.transform().isVoid());
+        return (!isV2Format() && getNativeTable().spec().fields().stream().anyMatch(field -> field.transform().isVoid())) ||
+                (isV2Format() && getNativeTable().spec().specId() > 0);
     }
 
     public void resetSnapshot() {
-        snapshot = Optional.empty();
+        snapshot = null;
     }
 
     public boolean isV2Format() {
@@ -273,9 +278,15 @@ public class IcebergTable extends Table {
                 .collect(Collectors.toList());
     }
 
+    public List<String> getPartitionColumnNamesWithTransform() {
+        PartitionSpec partitionSpec = getNativeTable().spec();
+        return IcebergApiConverter.toPartitionFields(partitionSpec);
+    }
+
     @Override
     public String getTableIdentifier() {
-        return Joiner.on(":").join(name, ((BaseTable) getNativeTable()).operations().current().uuid());
+        String uuid = ((BaseTable) getNativeTable()).operations().current().uuid();
+        return Joiner.on(":").join(name, uuid == null ? "" : uuid);
     }
 
     public IcebergCatalogType getCatalogType() {
@@ -307,7 +318,7 @@ public class IcebergTable extends Table {
         }
         return nativeTable;
     }
-
+    
     public void setIdentifierFieldIds(Set<Integer> identifierFieldIds) {
         this.identifierFieldIds = identifierFieldIds;
     }
@@ -355,7 +366,7 @@ public class IcebergTable extends Table {
             // partition info may be very big, and it is the same in plan fragment send to every be.
             // extract and serialize it as a string, will get better performance(about 3x in test).
             try {
-                TSerializer serializer = new TSerializer(TBinaryProtocol::new);
+                TSerializer serializer = ConfigurableSerDesFactory.getTSerializer();
                 byte[] bytes = serializer.serialize(tPartitionMap);
                 byte[] compressedBytes = Util.compress(bytes);
                 TCompressedPartitionMap tCompressedPartitionMap = new TCompressedPartitionMap();

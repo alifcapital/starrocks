@@ -26,6 +26,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.MetaNotFoundException;
+import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
 import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
@@ -33,6 +34,7 @@ import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.http.rest.TransactionResult;
 import com.starrocks.memory.MemoryTrackable;
+import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -59,6 +61,7 @@ import java.util.stream.Collectors;
 
 public class StreamLoadMgr implements MemoryTrackable {
     private static final Logger LOG = LogManager.getLogger(StreamLoadMgr.class);
+    private static final int MEMORY_JOB_SAMPLES = 10;
 
     // label -> streamLoadTask
     private Map<String, StreamLoadTask> idToStreamLoadTask;
@@ -460,9 +463,11 @@ public class StreamLoadMgr implements MemoryTrackable {
         long dbId = streamLoadTask.getDBId();
         String label = streamLoadTask.getLabel();
 
-        dbToLabelToStreamLoadTask.get(dbId).remove(label);
-        if (dbToLabelToStreamLoadTask.get(dbId).isEmpty()) {
-            dbToLabelToStreamLoadTask.remove(dbId);
+        if (dbToLabelToStreamLoadTask.containsKey(dbId)) {
+            dbToLabelToStreamLoadTask.get(dbId).remove(label);
+            if (dbToLabelToStreamLoadTask.get(dbId).isEmpty()) {
+                dbToLabelToStreamLoadTask.remove(dbId);
+            }
         }
     }
 
@@ -626,10 +631,10 @@ public class StreamLoadMgr implements MemoryTrackable {
         return streamLoadManager;
     }
 
-    public void save(DataOutputStream dos) throws IOException, SRMetaBlockException {
+    public void save(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
         int numJson = 1 + idToStreamLoadTask.size();
-        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos, SRMetaBlockID.STREAM_LOAD_MGR, numJson);
-        writer.writeJson(idToStreamLoadTask.size());
+        SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.STREAM_LOAD_MGR, numJson);
+        writer.writeInt(idToStreamLoadTask.size());
         for (StreamLoadTask streamLoadTask : idToStreamLoadTask.values()) {
             writer.writeJson(streamLoadTask);
         }
@@ -639,22 +644,29 @@ public class StreamLoadMgr implements MemoryTrackable {
 
     public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
         long currentMs = System.currentTimeMillis();
-        int numJson = reader.readInt();
-        for (int i = 0; i < numJson; ++i) {
-            StreamLoadTask loadTask = reader.readJson(StreamLoadTask.class);
+        reader.readCollection(StreamLoadTask.class, loadTask -> {
             loadTask.init();
             // discard expired task right away
             if (loadTask.checkNeedRemove(currentMs, false)) {
                 LOG.info("discard expired task: {}", loadTask.getLabel());
-                continue;
+                return;
             }
 
             addLoadTask(loadTask);
-        }
+        });
     }
 
     @Override
     public Map<String, Long> estimateCount() {
         return ImmutableMap.of("StreamLoad", (long) idToStreamLoadTask.size());
+    }
+
+    @Override
+    public List<Pair<List<Object>, Long>> getSamples() {
+        List<Object> samples = idToStreamLoadTask.values()
+                .stream()
+                .limit(MEMORY_JOB_SAMPLES)
+                .collect(Collectors.toList());
+        return Lists.newArrayList(Pair.create(samples, (long) idToStreamLoadTask.size()));
     }
 }

@@ -73,6 +73,10 @@ public class StructField {
         return position;
     }
 
+    public int getFieldId() {
+        return fieldId;
+    }
+
     public void setPosition(int position) {
         this.position = position;
     }
@@ -142,12 +146,17 @@ public class StructField {
         }
         StructField otherStructField = (StructField) other;
         // Both are named struct field
-        return StringUtils.equalsIgnoreCase(name, otherStructField.name) && Objects.equal(type, otherStructField.type);
+        return StringUtils.equalsIgnoreCase(name, otherStructField.name) && Objects.equal(type, otherStructField.type) &&
+                    (fieldId == otherStructField.fieldId);
     }
 
     @Override
     public StructField clone() {
         return new StructField(name, fieldId, type.clone(), comment);
+    }
+
+    public int getMaxUniqueId() {
+        return Math.max(fieldId, type.getMaxUniqueId());
     }
 }
 

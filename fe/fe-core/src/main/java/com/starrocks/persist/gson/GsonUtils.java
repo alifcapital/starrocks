@@ -65,6 +65,7 @@ import com.starrocks.alter.AlterJobV2;
 import com.starrocks.alter.LakeTableAlterMetaJob;
 import com.starrocks.alter.LakeTableAsyncFastSchemaChangeJob;
 import com.starrocks.alter.LakeTableSchemaChangeJob;
+import com.starrocks.alter.OnlineOptimizeJobV2;
 import com.starrocks.alter.OptimizeJobV2;
 import com.starrocks.alter.RollupJobV2;
 import com.starrocks.alter.SchemaChangeJobV2;
@@ -110,6 +111,7 @@ import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.RecycleListPartitionInfo;
 import com.starrocks.catalog.RecyclePartitionInfoV2;
 import com.starrocks.catalog.RecycleRangePartitionInfo;
+import com.starrocks.catalog.RecycleUnPartitionInfo;
 import com.starrocks.catalog.Resource;
 import com.starrocks.catalog.ScalarFunction;
 import com.starrocks.catalog.ScalarType;
@@ -125,6 +127,7 @@ import com.starrocks.lake.LakeTable;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.lake.RecycleLakeListPartitionInfo;
 import com.starrocks.lake.RecycleLakeRangePartitionInfo;
+import com.starrocks.lake.RecycleLakeUnPartitionInfo;
 import com.starrocks.lake.backup.LakeBackupJob;
 import com.starrocks.lake.backup.LakeRestoreJob;
 import com.starrocks.lake.backup.LakeTableSnapshotInfo;
@@ -260,6 +263,7 @@ public class GsonUtils {
                     .registerSubtype(RollupJobV2.class, "RollupJobV2")
                     .registerSubtype(SchemaChangeJobV2.class, "SchemaChangeJobV2")
                     .registerSubtype(OptimizeJobV2.class, "OptimizeJobV2")
+                    .registerSubtype(OnlineOptimizeJobV2.class, "OnlineOptimizeJobV2")
                     .registerSubtype(LakeTableSchemaChangeJob.class, "LakeTableSchemaChangeJob")
                     .registerSubtype(LakeTableAlterMetaJob.class, "LakeTableAlterMetaJob")
                     .registerSubtype(LakeTableAsyncFastSchemaChangeJob.class, "LakeTableFastSchemaEvolutionJob");
@@ -296,7 +300,9 @@ public class GsonUtils {
             .registerSubtype(RecycleRangePartitionInfo.class, "RecycleRangePartitionInfo")
             .registerSubtype(RecycleLakeRangePartitionInfo.class, "RecycleLakeRangePartitionInfo")
             .registerSubtype(RecycleListPartitionInfo.class, "RecycleListPartitionInfo")
-            .registerSubtype(RecycleLakeListPartitionInfo.class, "RecycleLakeListPartitionInfo");
+            .registerSubtype(RecycleLakeListPartitionInfo.class, "RecycleLakeListPartitionInfo")
+            .registerSubtype(RecycleUnPartitionInfo.class, "RecycleUnPartitionInfo")
+            .registerSubtype(RecycleLakeUnPartitionInfo.class, "RecycleLakeUnPartitionInfo");
 
     private static final RuntimeTypeAdapterFactory<com.starrocks.catalog.Table> TABLE_TYPE_ADAPTER_FACTORY
             = RuntimeTypeAdapterFactory.of(com.starrocks.catalog.Table.class, "clazz")

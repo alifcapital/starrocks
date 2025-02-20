@@ -38,6 +38,7 @@ import com.starrocks.common.util.concurrent.lock.LockManager;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.persist.EditLog;
+import com.starrocks.qe.VariableMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.NodeMgr;
 import com.starrocks.system.Backend;
@@ -52,6 +53,7 @@ import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
 import com.starrocks.thrift.TTabletSchema;
 import com.starrocks.thrift.TTabletType;
+import com.starrocks.transaction.GtidGenerator;
 import mockit.Expectations;
 import mockit.Mocked;
 import org.apache.commons.lang3.tuple.Triple;
@@ -87,6 +89,7 @@ public class TabletSchedulerTest {
     TabletSchedulerStat tabletSchedulerStat;
     FakeEditLog fakeEditLog;
     LockManager lockManager;
+    VariableMgr variableMgr;
 
     @Before
     public void setup() throws Exception {
@@ -95,6 +98,8 @@ public class TabletSchedulerTest {
         tabletSchedulerStat = new TabletSchedulerStat();
         fakeEditLog = new FakeEditLog();
         lockManager = new LockManager();
+        variableMgr = new VariableMgr();
+
 
         new Expectations() {
             {
@@ -125,6 +130,14 @@ public class TabletSchedulerTest {
                 globalStateMgr.getLockManager();
                 minTimes = 0;
                 result = lockManager;
+
+                globalStateMgr.getGtidGenerator();
+                minTimes = 0;
+                result = new GtidGenerator();
+
+                globalStateMgr.getVariableMgr();
+                minTimes = 0;
+                result = variableMgr;
             }
         };
 

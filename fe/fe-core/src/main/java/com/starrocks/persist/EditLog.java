@@ -83,12 +83,10 @@ import com.starrocks.privilege.RolePrivilegeCollectionV2;
 import com.starrocks.privilege.UserPrivilegeCollectionV2;
 import com.starrocks.proto.EncryptionKeyPB;
 import com.starrocks.qe.SessionVariable;
-import com.starrocks.qe.VariableMgr;
 import com.starrocks.replication.ReplicationJob;
 import com.starrocks.scheduler.Task;
 import com.starrocks.scheduler.mv.MVEpoch;
 import com.starrocks.scheduler.mv.MVMaintenanceJob;
-import com.starrocks.scheduler.mv.MaterializedViewMgr;
 import com.starrocks.scheduler.persist.ArchiveTaskRunsLog;
 import com.starrocks.scheduler.persist.DropTaskRunsLog;
 import com.starrocks.scheduler.persist.DropTasksLog;
@@ -497,15 +495,12 @@ public class EditLog {
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().updateInMemoryStateBackend(be);
                     break;
                 }
-                case OperationType.OP_ADD_FIRST_FRONTEND:
                 case OperationType.OP_ADD_FIRST_FRONTEND_V2:
-                case OperationType.OP_ADD_FRONTEND:
                 case OperationType.OP_ADD_FRONTEND_V2: {
                     Frontend fe = (Frontend) journal.getData();
                     globalStateMgr.getNodeMgr().replayAddFrontend(fe);
                     break;
                 }
-                case OperationType.OP_REMOVE_FRONTEND:
                 case OperationType.OP_REMOVE_FRONTEND_V2: {
                     Frontend fe = (Frontend) journal.getData();
                     globalStateMgr.getNodeMgr().replayDropFrontend(fe);
@@ -514,10 +509,14 @@ public class EditLog {
                     }
                     break;
                 }
-                case OperationType.OP_UPDATE_FRONTEND:
                 case OperationType.OP_UPDATE_FRONTEND_V2: {
                     Frontend fe = (Frontend) journal.getData();
                     globalStateMgr.getNodeMgr().replayUpdateFrontend(fe);
+                    break;
+                }
+                case OperationType.OP_RESET_FRONTENDS: {
+                    Frontend fe = (Frontend) journal.getData();
+                    globalStateMgr.getNodeMgr().replayResetFrontends(fe);
                     break;
                 }
                 case OperationType.OP_TIMESTAMP:
@@ -818,6 +817,7 @@ public class EditLog {
                 case OperationType.OP_MODIFY_WRITE_QUORUM:
                 case OperationType.OP_MODIFY_REPLICATED_STORAGE:
                 case OperationType.OP_MODIFY_BUCKET_SIZE:
+                case OperationType.OP_MODIFY_MUTABLE_BUCKET_NUM:
                 case OperationType.OP_MODIFY_BINLOG_AVAILABLE_VERSION:
                 case OperationType.OP_MODIFY_BINLOG_CONFIG:
                 case OperationType.OP_MODIFY_ENABLE_PERSISTENT_INDEX:
@@ -888,7 +888,7 @@ public class EditLog {
                 }
                 case OperationType.OP_GLOBAL_VARIABLE_V2: {
                     GlobalVarPersistInfo info = (GlobalVarPersistInfo) journal.getData();
-                    VariableMgr.replayGlobalVariableV2(info);
+                    globalStateMgr.getVariableMgr().replayGlobalVariableV2(info);
                     break;
                 }
                 case OperationType.OP_SWAP_TABLE: {
@@ -1071,7 +1071,7 @@ public class EditLog {
                 case OperationType.OP_ALTER_USER_V2: {
                     AlterUserInfo info = (AlterUserInfo) journal.getData();
                     globalStateMgr.getAuthenticationMgr().replayAlterUser(
-                            info.getUserIdentity(), info.getAuthenticationInfo());
+                            info.getUserIdentity(), info.getAuthenticationInfo(), info.getProperties());
                     break;
                 }
                 case OperationType.OP_UPDATE_USER_PROP_V2:
@@ -1102,12 +1102,12 @@ public class EditLog {
                 }
                 case OperationType.OP_MV_JOB_STATE: {
                     MVMaintenanceJob job = (MVMaintenanceJob) journal.getData();
-                    MaterializedViewMgr.getInstance().replay(job);
+                    GlobalStateMgr.getCurrentState().getMaterializedViewMgr().replay(job);
                     break;
                 }
                 case OperationType.OP_MV_EPOCH_UPDATE: {
                     MVEpoch epoch = (MVEpoch) journal.getData();
-                    MaterializedViewMgr.getInstance().replayEpoch(epoch);
+                    GlobalStateMgr.getCurrentState().getMaterializedViewMgr().replayEpoch(epoch);
                     break;
                 }
                 case OperationType.OP_MODIFY_TABLE_ADD_OR_DROP_COLUMNS: {
@@ -1180,12 +1180,24 @@ public class EditLog {
                     globalStateMgr.getReplicationMgr().replayReplicationJob(replicationJobLog.getReplicationJob());
                     break;
                 }
-                case OperationType.OP_RECOVER_PARTITION_VERSION:
+                case OperationType.OP_DELETE_REPLICATION_JOB: {
+                    ReplicationJobLog replicationJobLog = (ReplicationJobLog) journal.getData();
+                    globalStateMgr.getReplicationMgr().replayDeleteReplicationJob(replicationJobLog.getReplicationJob());
+                    break;
+                }
+                case OperationType.OP_RECOVER_PARTITION_VERSION: {
                     PartitionVersionRecoveryInfo info = (PartitionVersionRecoveryInfo) journal.getData();
                     GlobalStateMgr.getCurrentState().getMetaRecoveryDaemon().recoverPartitionVersion(info);
                     break;
+                }
+                case OperationType.OP_ADD_KEY: {
+                    Text keyJson = (Text) journal.getData();
+                    EncryptionKeyPB keyPB = GsonUtils.GSON.fromJson(keyJson.toString(), EncryptionKeyPB.class);
+                    GlobalStateMgr.getCurrentState().getKeyMgr().replayAddKey(keyPB);
+                    break;
+                }
                 default: {
-                    if (Config.ignore_unknown_log_id) {
+                    if (Config.metadata_ignore_unknown_operation_type) {
                         LOG.warn("UNKNOWN Operation Type {}", opCode);
                     } else {
                         throw new IOException("UNKNOWN Operation Type " + opCode);
@@ -1488,6 +1500,10 @@ public class EditLog {
         logJsonObject(OperationType.OP_LEADER_INFO_CHANGE_V2, info);
     }
 
+    public void logResetFrontends(Frontend frontend) {
+        logEdit(OperationType.OP_RESET_FRONTENDS, frontend);
+    }
+
     public void logMetaVersion(MetaVersion metaVersion) {
         logEdit(OperationType.OP_META_VERSION_V2, metaVersion);
     }
@@ -1709,6 +1725,10 @@ public class EditLog {
         logEdit(OperationType.OP_MODIFY_BUCKET_SIZE, info);
     }
 
+    public void logModifyMutableBucketNum(ModifyTablePropertyOperationLog info) {
+        logEdit(OperationType.OP_MODIFY_MUTABLE_BUCKET_NUM, info);
+    }
+
     public void logReplaceTempPartition(ReplacePartitionOperationLog info) {
         logEdit(OperationType.OP_REPLACE_TEMP_PARTITION, info);
     }
@@ -1873,8 +1893,9 @@ public class EditLog {
         logEdit(OperationType.OP_CREATE_USER_V2, info);
     }
 
-    public void logAlterUser(UserIdentity userIdentity, UserAuthenticationInfo authenticationInfo) {
-        AlterUserInfo info = new AlterUserInfo(userIdentity, authenticationInfo);
+    public void logAlterUser(UserIdentity userIdentity, UserAuthenticationInfo authenticationInfo,
+                             Map<String, String> properties) {
+        AlterUserInfo info = new AlterUserInfo(userIdentity, authenticationInfo, properties);
         logEdit(OperationType.OP_ALTER_USER_V2, info);
     }
 
@@ -1971,6 +1992,11 @@ public class EditLog {
     public void logReplicationJob(ReplicationJob replicationJob) {
         ReplicationJobLog replicationJobLog = new ReplicationJobLog(replicationJob);
         logEdit(OperationType.OP_REPLICATION_JOB, replicationJobLog);
+    }
+
+    public void logDeleteReplicationJob(ReplicationJob replicationJob) {
+        ReplicationJobLog replicationJobLog = new ReplicationJobLog(replicationJob);
+        logEdit(OperationType.OP_DELETE_REPLICATION_JOB, replicationJobLog);
     }
 
     public void logColumnRename(ColumnRenameInfo columnRenameInfo) {

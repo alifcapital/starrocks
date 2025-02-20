@@ -32,8 +32,8 @@ namespace starrocks::lake {
 
 HorizontalGeneralTabletWriter::HorizontalGeneralTabletWriter(TabletManager* tablet_mgr, int64_t tablet_id,
                                                              std::shared_ptr<const TabletSchema> schema, int64_t txn_id,
-                                                             ThreadPool* flush_pool)
-        : TabletWriter(tablet_mgr, tablet_id, std::move(schema), txn_id, flush_pool) {}
+                                                             bool is_compaction, ThreadPool* flush_pool)
+        : TabletWriter(tablet_mgr, tablet_id, std::move(schema), txn_id, is_compaction, flush_pool) {}
 
 HorizontalGeneralTabletWriter::~HorizontalGeneralTabletWriter() = default;
 
@@ -44,7 +44,6 @@ Status HorizontalGeneralTabletWriter::open() {
 }
 
 Status HorizontalGeneralTabletWriter::write(const starrocks::Chunk& data, SegmentPB* segment) {
-    SCOPED_RAW_TIMER(&_stats.segment_write_ns);
     if (_seg_writer == nullptr || _seg_writer->estimate_segment_size() >= config::max_segment_file_size ||
         _seg_writer->num_rows_written() + data.num_rows() >= INT32_MAX /*TODO: configurable*/) {
         RETURN_IF_ERROR(flush_segment_writer(segment));
@@ -60,7 +59,6 @@ Status HorizontalGeneralTabletWriter::flush(SegmentPB* segment) {
 }
 
 Status HorizontalGeneralTabletWriter::finish(SegmentPB* segment) {
-    SCOPED_RAW_TIMER(&_stats.segment_write_ns);
     RETURN_IF_ERROR(flush_segment_writer(segment));
     _finished = true;
     return Status::OK();
@@ -82,6 +80,7 @@ Status HorizontalGeneralTabletWriter::reset_segment_writer() {
     DCHECK(_schema != nullptr);
     auto name = gen_segment_filename(_txn_id);
     SegmentWriterOptions opts;
+    opts.is_compaction = _is_compaction;
     WritableFileOptions wopts;
     if (config::enable_transparent_data_encryption) {
         ASSIGN_OR_RETURN(auto pair, KeyCache::instance().create_encryption_meta_pair_using_current_kek());
@@ -118,8 +117,9 @@ Status HorizontalGeneralTabletWriter::flush_segment_writer(SegmentPB* segment) {
 
 VerticalGeneralTabletWriter::VerticalGeneralTabletWriter(TabletManager* tablet_mgr, int64_t tablet_id,
                                                          std::shared_ptr<const TabletSchema> schema, int64_t txn_id,
-                                                         uint32_t max_rows_per_segment, ThreadPool* flush_pool)
-        : TabletWriter(tablet_mgr, tablet_id, std::move(schema), txn_id, flush_pool),
+                                                         uint32_t max_rows_per_segment, bool is_compaction,
+                                                         ThreadPool* flush_pool)
+        : TabletWriter(tablet_mgr, tablet_id, std::move(schema), txn_id, is_compaction, flush_pool),
           _max_rows_per_segment(max_rows_per_segment) {}
 
 VerticalGeneralTabletWriter::~VerticalGeneralTabletWriter() {
@@ -143,7 +143,6 @@ Status VerticalGeneralTabletWriter::open() {
 
 Status VerticalGeneralTabletWriter::write_columns(const Chunk& data, const std::vector<uint32_t>& column_indexes,
                                                   bool is_key) {
-    SCOPED_RAW_TIMER(&_stats.segment_write_ns);
     const size_t chunk_num_rows = data.num_rows();
     if (_segment_writers.empty()) {
         DCHECK(is_key);
@@ -215,7 +214,6 @@ Status VerticalGeneralTabletWriter::flush(SegmentPB* segment) {
 }
 
 Status VerticalGeneralTabletWriter::flush_columns() {
-    SCOPED_RAW_TIMER(&_stats.segment_write_ns);
     if (_segment_writers.empty()) {
         return Status::OK();
     }
@@ -231,7 +229,6 @@ Status VerticalGeneralTabletWriter::flush_columns() {
 }
 
 Status VerticalGeneralTabletWriter::finish(SegmentPB* segment) {
-    SCOPED_RAW_TIMER(&_stats.segment_write_ns);
     for (auto& segment_writer : _segment_writers) {
         uint64_t segment_size = 0;
         uint64_t footer_position = 0;
@@ -267,6 +264,7 @@ StatusOr<std::shared_ptr<SegmentWriter>> VerticalGeneralTabletWriter::create_seg
     DCHECK(_schema != nullptr);
     auto name = gen_segment_filename(_txn_id);
     SegmentWriterOptions opts;
+    opts.is_compaction = _is_compaction;
     WritableFileOptions wopts;
     if (config::enable_transparent_data_encryption) {
         ASSIGN_OR_RETURN(auto pair, KeyCache::instance().create_encryption_meta_pair_using_current_kek());

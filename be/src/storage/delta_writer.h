@@ -51,6 +51,7 @@ struct DeltaWriterOptions {
     int32_t schema_hash;
     int64_t txn_id;
     int64_t partition_id;
+    int64_t sink_id;
     PUniqueId load_id;
     // slots are in order of tablet's schema
     const std::vector<SlotDescriptor*>* slots;
@@ -70,6 +71,7 @@ struct DeltaWriterOptions {
     // If you need to access it after intialization, please make sure the pointer is valid.
     const POlapTableSchemaParam* ptable_schema_param = nullptr;
     int64_t immutable_tablet_size = 0;
+    std::map<string, string>* column_to_expr_value = nullptr;
 };
 
 enum State {

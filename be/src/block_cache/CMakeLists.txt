@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if (CLANG_TIDY_PATH)
-    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_PATH}")
-endif()
-
 # where to put generated libraries
 set(LIBRARY_OUTPUT_PATH "${BUILD_DIR}/src/block_cache")
 
@@ -28,6 +24,7 @@ set(CACHE_FILES
   cache_options.cpp
   datacache_utils.cpp
   disk_space_monitor.cpp
+  block_cache_hit_rate_counter.hpp
 )
 
 if (${WITH_CACHELIB} STREQUAL "ON")

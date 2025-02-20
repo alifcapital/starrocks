@@ -46,6 +46,10 @@ Status Tablet::delete_metadata(int64_t version) {
     return _mgr->delete_tablet_metadata(_id, version);
 }
 
+Status Tablet::metadata_exists(int64_t version) {
+    return _mgr->tablet_metadata_exists(_id, version);
+}
+
 Status Tablet::put_txn_log(const TxnLog& log) {
     return _mgr->put_txn_log(log);
 }
@@ -85,11 +89,12 @@ StatusOr<std::unique_ptr<TabletWriter>> Tablet::new_writer(WriterType type, int6
         }
     } else {
         if (type == kHorizontal) {
-            return std::make_unique<HorizontalGeneralTabletWriter>(_mgr, _id, tablet_schema, txn_id, flush_pool);
+            return std::make_unique<HorizontalGeneralTabletWriter>(_mgr, _id, tablet_schema, txn_id, is_compaction,
+                                                                   flush_pool);
         } else {
             DCHECK(type == kVertical);
             return std::make_unique<VerticalGeneralTabletWriter>(_mgr, _id, tablet_schema, txn_id, max_rows_per_segment,
-                                                                 flush_pool);
+                                                                 is_compaction, flush_pool);
         }
     }
 }

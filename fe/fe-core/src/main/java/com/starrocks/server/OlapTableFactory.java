@@ -18,8 +18,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.BloomFilterIndexUtil;
-import com.starrocks.analysis.IndexDef.IndexType;
-import com.starrocks.analysis.KeysDesc;
 import com.starrocks.binlog.BinlogConfig;
 import com.starrocks.catalog.ColocateTableIndex;
 import com.starrocks.catalog.Column;
@@ -29,7 +27,6 @@ import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.ExpressionRangePartitionInfo;
 import com.starrocks.catalog.ExternalOlapTable;
-import com.starrocks.catalog.ForeignKeyConstraint;
 import com.starrocks.catalog.HashDistributionInfo;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.ListPartitionInfo;
@@ -41,7 +38,8 @@ import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableIndexes;
-import com.starrocks.catalog.UniqueConstraint;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
@@ -61,6 +59,8 @@ import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.ast.CreateTemporaryTableStmt;
 import com.starrocks.sql.ast.DistributionDesc;
 import com.starrocks.sql.ast.ExpressionPartitionDesc;
+import com.starrocks.sql.ast.IndexDef.IndexType;
+import com.starrocks.sql.ast.KeysDesc;
 import com.starrocks.sql.ast.ListPartitionDesc;
 import com.starrocks.sql.ast.PartitionDesc;
 import com.starrocks.sql.ast.RangePartitionDesc;
@@ -401,6 +401,18 @@ public class OlapTableFactory implements AbstractTableFactory {
                 throw new DdlException(e.getMessage());
             }
 
+            try {
+                long mutableBucketNum = PropertyAnalyzer.analyzeLongProp(properties,
+                        PropertyAnalyzer.PROPERTIES_MUTABLE_BUCKET_NUM, 0);
+                if (mutableBucketNum >= 0) {
+                    table.setMutableBucketNum(mutableBucketNum);
+                } else {
+                    throw new DdlException("Illegal mutable bucket num: " + mutableBucketNum);
+                }
+            } catch (AnalysisException e) {
+                throw new DdlException(e.getMessage());
+            }
+
             // write quorum
             try {
                 table.setWriteQuorum(PropertyAnalyzer.analyzeWriteQuorum(properties));
@@ -567,7 +579,7 @@ public class OlapTableFactory implements AbstractTableFactory {
                 List<Column> rollupColumns = stateMgr.getRollupHandler().checkAndPrepareMaterializedView(addRollupClause,
                         table, baseRollupIndex);
                 short rollupShortKeyColumnCount =
-                        GlobalStateMgr.calcShortKeyColumnCount(rollupColumns, alterClause.getProperties());
+                        GlobalStateMgr.calcShortKeyColumnCount(rollupColumns, addRollupClause.getProperties());
                 int rollupSchemaHash = Util.schemaHash(schemaVersion, rollupColumns, bfColumns, bfFpp);
                 long rollupIndexId = metastore.getNextId();
                 table.setIndexMeta(rollupIndexId, addRollupClause.getRollupName(), rollupColumns, schemaVersion,
@@ -607,12 +619,19 @@ public class OlapTableFactory implements AbstractTableFactory {
             // partition live number
             int partitionLiveNumber;
             if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_LIVE_NUMBER)) {
-                try {
-                    partitionLiveNumber = PropertyAnalyzer.analyzePartitionLiveNumber(properties, true);
-                } catch (AnalysisException e) {
-                    throw new DdlException(e.getMessage());
-                }
+                partitionLiveNumber = PropertyAnalyzer.analyzePartitionLiveNumber(properties, true);
                 table.setPartitionLiveNumber(partitionLiveNumber);
+            }
+
+            // analyze partition ttl duration
+            Pair<String, PeriodDuration> ttlDuration = null;
+            if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_TTL)) {
+                ttlDuration = PropertyAnalyzer.analyzePartitionTTL(properties, true);
+                if (ttlDuration == null) {
+                    throw new DdlException("Invalid partition ttl duration");
+                }
+                table.getTableProperty().getProperties().put(PropertyAnalyzer.PROPERTIES_PARTITION_TTL, ttlDuration.first);
+                table.getTableProperty().setPartitionTTL(ttlDuration.second);
             }
 
             try {

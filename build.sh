@@ -98,6 +98,11 @@ Usage: $0 <options>
      --output-compile-time 
                         save a list of the compile time for every C++ file in ${ROOT}/compile_times.txt.
                         Turning this option on automatically disables ccache.
+     --with-compress-debug-symbol {ON|OFF}
+                        build with compressing debug symbol. (default: $WITH_COMPRESS)
+     --with-source-file-relative-path {ON|OFF}
+                        build source file with relative path. (default: $WITH_RELATIVE_SRC_PATH)
+     -h,--help          Show this help message
 
   Eg.
     $0                                           build all
@@ -113,8 +118,7 @@ Usage: $0 <options>
 
 OPTS=$(getopt \
   -n $0 \
-  -o '' \
-  -o 'h' \
+  -o 'hj:' \
   -l 'be' \
   -l 'fe' \
   -l 'spark-dpp' \
@@ -130,7 +134,8 @@ OPTS=$(getopt \
   -l 'with-brpc-keepalive' \
   -l 'enable-shared-data' \
   -l 'output-compile-time' \
-  -o 'j:' \
+  -l 'with-compress-debug-symbol:' \
+  -l 'with-source-file-relative-path:' \
   -l 'help' \
   -- "$@")
 
@@ -149,11 +154,12 @@ RUN_UT=
 WITH_GCOV=OFF
 WITH_BENCH=OFF
 WITH_CLANG_TIDY=OFF
-WITH_BRPC_KEEPALIVE=OFF
+WITH_COMPRESS=ON
 WITH_STARCACHE=ON
 USE_STAROS=OFF
 BUILD_JAVA_EXT=ON
 OUTPUT_COMPILE_TIME=OFF
+WITH_RELATIVE_SRC_PATH=ON
 MSG=""
 MSG_FE="Frontend"
 MSG_DPP="Spark Dpp application"
@@ -235,9 +241,10 @@ else
             --with-bench) WITH_BENCH=ON; shift ;;
             --with-clang-tidy) WITH_CLANG_TIDY=ON; shift ;;
             --without-java-ext) BUILD_JAVA_EXT=OFF; shift ;;
-            --with-brpc-keepalive) WITH_BRPC_KEEPALIVE=ON; shift ;;
             --without-starcache) WITH_STARCACHE=OFF; shift ;;
             --output-compile-time) OUTPUT_COMPILE_TIME=ON; shift ;;
+            --with-compress-debug-symbol) WITH_COMPRESS=$2 ; shift 2 ;;
+            --with-source-file-relative-path) WITH_RELATIVE_SRC_PATH=$2 ; shift 2 ;;
             -h) HELP=1; shift ;;
             --help) HELP=1; shift ;;
             -j) PARALLEL=$2; shift 2 ;;
@@ -269,6 +276,7 @@ echo "Get params:
     WITH_GCOV           -- $WITH_GCOV
     WITH_BENCH          -- $WITH_BENCH
     WITH_CLANG_TIDY     -- $WITH_CLANG_TIDY
+    WITH_COMPRESS_DEBUG_SYMBOL  -- $WITH_COMPRESS
     WITH_STARCACHE      -- $WITH_STARCACHE
     ENABLE_SHARED_DATA  -- $USE_STAROS
     USE_AVX2            -- $USE_AVX2
@@ -280,6 +288,7 @@ echo "Get params:
     ENABLE_FAULT_INJECTION -- $ENABLE_FAULT_INJECTION
     BUILD_JAVA_EXT      -- $BUILD_JAVA_EXT
     OUTPUT_COMPILE_TIME   -- $OUTPUT_COMPILE_TIME
+    WITH_RELATIVE_SRC_PATH      -- $WITH_RELATIVE_SRC_PATH
 "
 
 check_tool()
@@ -357,6 +366,11 @@ if [ ${BUILD_BE} -eq 1 ] ; then
     else
         CXX_COMPILER_LAUNCHER=${CCACHE}
     fi
+    if [ "${WITH_CLANG_TIDY}" == "ON" ];then
+        # this option cannot work with clang-14
+        WITH_COMPRESS=OFF
+    fi
+
 
     ${CMAKE_CMD} -G "${CMAKE_GENERATOR}"                                \
                   -DSTARROCKS_THIRDPARTY=${STARROCKS_THIRDPARTY}        \
@@ -371,10 +385,10 @@ if [ ${BUILD_BE} -eq 1 ] ; then
                   -DWITH_BENCH=${WITH_BENCH}                            \
                   -DWITH_CLANG_TIDY=${WITH_CLANG_TIDY}                  \
                   -DWITH_COMPRESS=${WITH_COMPRESS}                      \
-                  -DWITH_BRPC_KEEPALIVE=${WITH_BRPC_KEEPALIVE}          \
                   -DWITH_STARCACHE=${WITH_STARCACHE}                    \
                   -DUSE_STAROS=${USE_STAROS}                            \
                   -DENABLE_FAULT_INJECTION=${ENABLE_FAULT_INJECTION}    \
+                  -DWITH_RELATIVE_SRC_PATH=${WITH_RELATIVE_SRC_PATH}    \
                   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  ..
 
     time ${BUILD_SYSTEM} -j${PARALLEL}
@@ -539,8 +553,11 @@ if [ ${BUILD_BE} -eq 1 ]; then
     cp -p ${STARROCKS_THIRDPARTY}/installed/gcs_connector/*.jar ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs
     cp -r -p ${STARROCKS_THIRDPARTY}/installed/hadoop/lib/native ${STARROCKS_OUTPUT}/be/lib/hadoop/
 
-    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/common/lib/log4j-1.2.17.jar
-    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs/lib/log4j-1.2.17.jar
+    # remove zookeeper
+    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/common/lib/zookeeper-3.8.3.jar
+    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs/lib/zookeeper-3.8.3.jar
+    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/common/lib/avro-1.9.2.jar
+    rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs/lib/avro-1.9.2.jar
 
     MSG="${MSG} √ ${MSG_BE}"
 fi

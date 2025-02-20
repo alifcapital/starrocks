@@ -61,6 +61,7 @@ import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.memory.MemoryTrackable;
+import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -92,6 +93,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -698,11 +700,11 @@ public class BackupHandler extends FrontendDaemon implements Writable, MemoryTra
         return checksum;
     }
 
-    public void saveBackupHandlerV2(DataOutputStream dos) throws IOException, SRMetaBlockException {
-        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos,
+    public void saveBackupHandlerV2(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
+        SRMetaBlockWriter writer = imageWriter.getBlockWriter(
                 SRMetaBlockID.BACKUP_MGR, 2 + dbIdToBackupOrRestoreJob.size());
         writer.writeJson(this);
-        writer.writeJson(dbIdToBackupOrRestoreJob.size());
+        writer.writeInt(dbIdToBackupOrRestoreJob.size());
         for (AbstractJob job : dbIdToBackupOrRestoreJob.values()) {
             writer.writeJson(job);
         }
@@ -712,17 +714,16 @@ public class BackupHandler extends FrontendDaemon implements Writable, MemoryTra
     public void loadBackupHandlerV2(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
         BackupHandler data = reader.readJson(BackupHandler.class);
         this.repoMgr = data.repoMgr;
-        int size = reader.readInt();
+
         long currentTimeMs = System.currentTimeMillis();
-        while (size-- > 0) {
-            AbstractJob job = reader.readJson(AbstractJob.class);
+        reader.readCollection(AbstractJob.class, job -> {
             if (isJobExpired(job, currentTimeMs)) {
                 LOG.warn("skip expired job {}", job);
-                continue;
+                return;
             }
             dbIdToBackupOrRestoreJob.put(job.getDbId(), job);
             mvRestoreContext.addIntoMvBaseTableBackupInfo(job);
-        }
+        });
     }
 
     /**
@@ -757,6 +758,10 @@ public class BackupHandler extends FrontendDaemon implements Writable, MemoryTra
     public Map<String, Long> estimateCount() {
         return ImmutableMap.of("BackupOrRestoreJob", (long) dbIdToBackupOrRestoreJob.size());
     }
+
+    @Override
+    public List<Pair<List<Object>, Long>> getSamples() {
+        List<Object> jobSamples = new ArrayList<>(dbIdToBackupOrRestoreJob.values());
+        return Lists.newArrayList(Pair.create(jobSamples, (long) dbIdToBackupOrRestoreJob.size()));
+    }
 }
-
-

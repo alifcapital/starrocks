@@ -22,12 +22,14 @@
 #include "common/logging.h"
 #include "common/prof/heap_prof.h"
 #include "exec/schema_scanner/schema_be_tablets_scanner.h"
+#include "fs/key_cache.h"
 #include "gen_cpp/olap_file.pb.h"
 #include "gutil/strings/substitute.h"
 #include "http/action/compaction_action.h"
 #include "io/io_profiler.h"
 #include "runtime/exec_env.h"
 #include "runtime/mem_tracker.h"
+#include "storage/del_vector.h"
 #include "storage/primary_key_dump.h"
 #include "storage/storage_engine.h"
 #include "storage/tablet.h"
@@ -134,7 +136,7 @@ std::string exec(const std::string& cmd) {
     std::string ret;
 
     FILE* fp = popen(cmd.c_str(), "r");
-    if (fp == NULL) {
+    if (fp == nullptr) {
         ret = strings::Substitute("popen failed: $0 cmd: $1", strerror(errno), cmd);
         return ret;
     }
@@ -157,7 +159,7 @@ std::string exec(const std::string& cmd) {
 }
 
 static std::string exec_whitelist(const std::string& cmd) {
-    static std::regex legal_cmd("(ls|cat|head|tail|grep|free|echo)[^<>\\|;`\\\\]*");
+    static std::regex legal_cmd(R"((ls|cat|head|tail|grep|free|echo)[^<>\|;`\\]*)");
     std::cmatch m;
     if (!std::regex_match(cmd.c_str(), m, legal_cmd)) {
         return "illegal cmd";
@@ -167,6 +169,10 @@ static std::string exec_whitelist(const std::string& cmd) {
 
 static std::string io_profile_and_get_topn_stats(const std::string& mode, int seconds, size_t topn) {
     return IOProfiler::profile_and_get_topn_stats_str(mode, seconds, topn);
+}
+
+static std::string key_cache_info() {
+    return KeyCache::instance().to_string();
 }
 
 void bind_exec_env(ForeignModule& m) {
@@ -201,6 +207,7 @@ void bind_exec_env(ForeignModule& m) {
         // uncomment this to enable executing shell commands
         // cls.funcStaticExt<&exec_whitelist>("exec");
         cls.funcStaticExt<&list_stack_trace_of_long_wait_mutex>("list_stack_trace_of_long_wait_mutex");
+        cls.funcStaticExt<&key_cache_info>("key_cache_info");
     }
     {
         auto& cls = m.klass<GlobalEnv>("GlobalEnv");
@@ -340,6 +347,16 @@ public:
         } else {
             return ret;
         }
+    }
+
+    // this method is specifically used to recover "no delete vector found" error caused by corrupt pk tablet metadata
+    static std::string reset_delvec(int64_t tablet_id, int64_t segment_id, int64_t version) {
+        auto tablet = get_tablet(tablet_id);
+        RETURN_IF_UNLIKELY_NULL(tablet, "tablet not found");
+        DelVector dv;
+        dv.init(version, nullptr, 0);
+        auto st = TabletMetaManager::set_del_vector(tablet->data_dir()->get_meta(), tablet_id, segment_id, dv);
+        return st.to_string();
     }
 
     static size_t submit_manual_compaction_task_for_table(int64_t table_id, int64_t rowset_size_threshold) {
@@ -538,6 +555,7 @@ public:
             REG_STATIC_METHOD(StorageEngineRef, get_tablet_info);
             REG_STATIC_METHOD(StorageEngineRef, get_tablet_infos);
             REG_STATIC_METHOD(StorageEngineRef, get_tablet_meta_json);
+            REG_STATIC_METHOD(StorageEngineRef, reset_delvec);
             REG_STATIC_METHOD(StorageEngineRef, get_tablet);
             REG_STATIC_METHOD(StorageEngineRef, drop_tablet);
             REG_STATIC_METHOD(StorageEngineRef, get_data_dirs);

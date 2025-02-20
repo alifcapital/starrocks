@@ -1,13 +1,13 @@
 ---
-displayed_sidebar: "Chinese"
+displayed_sidebar: docs
 keywords: ['Canshu']
 ---
 
-import BEConfigMethod from '../../assets/commonMarkdown/BE_config_method.md'
+import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.md'
 
-import PostBEConfig from '../../assets/commonMarkdown/BE_dynamic_note.md'
+import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.md'
 
-import StaticBEConfigNote from '../../assets/commonMarkdown/StaticBE_config_note.md'
+import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.md'
 
 # BE 配置项
 
@@ -1536,7 +1536,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 类型：Int
 - 单位：-
 - 是否动态：是
-- 描述：生效版本的最大线程数。当该参数被设置为小于或等于 `0` 时，系统默认使用 CPU 核数的一半，以避免因使用固定值而导致在导入并行较高时线程资源不足。自 2.5 版本起，默认值由 `8` 变更为 `0`。
+- 描述：生效版本的最大线程数。当该参数被设置为小于或等于 `0` 时，系统默认使用当前节点的 CPU 核数，以避免因使用固定值而导致在导入并行较高时线程资源不足。自 2.5 版本起，默认值由 `8` 变更为 `0`。
 - 引入版本：-
 
 <!--
@@ -1747,19 +1747,26 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 类型：Int
 - 单位：-
 - 是否动态：否
-- 描述：单节点上所有的导入线程占据的内存上限比例。
+- 描述：单节点上所有的导入线程占据内存的软上限（百分比）。
 - 引入版本：-
 
-<!--
+##### load_process_max_memory_hard_limit_ratio
+
+- 默认值：2
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 描述：单节点上所有的导入线程占据内存的硬上限（比例）。当 `enable_new_load_on_memory_limit_exceeded` 设置为 `false`，并且所有导入线程的内存占用超过 `load_process_max_memory_limit_percent * load_process_max_memory_hard_limit_ratio` 时，系统将会拒绝新的导入线程。
+- 引入版本：v3.3.2
+
 ##### enable_new_load_on_memory_limit_exceeded
 
-- 默认值：true
+- 默认值：false
 - 类型：Boolean
 - 单位：-
 - 是否动态：是
-- 描述：
-- 引入版本：-
--->
+- 描述：在导入线程内存占用达到硬上限后，是否允许新的导入线程。`true` 表示允许新导入线程，`false` 表示拒绝新导入线程。
+- 引入版本：v3.3.2
 
 ##### txn_commit_rpc_timeout_ms (Deprecated)
 
@@ -3193,23 +3200,41 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 描述：控制 Flat JSON 时，同名列的占比阈值，当同名列占比低于该值时不进行提取，默认为 0.9。该参数仅在 `enable_json_flat` 为 `true` 时生效。
 - 引入版本：v3.3.0
 
-##### json_flat_internal_column_min_limit
-
-- 默认值：5
-- 类型：Int
-- 单位：
-- 是否动态：是
-- 描述：控制 Flat JSON 时，JSON 内部字段数量限制，低于该数量的 JSON 不执行 Flat JSON 优化，默认为 5。该参数仅在 `enable_json_flat` 为 `true` 时生效。
-- 引入版本：v3.3.0
-
 ##### json_flat_column_max
 
-- 默认值：20
+- 默认值：100
 - 类型：Int
 - 单位：
 - 是否动态：是
-- 描述：控制 Flat JSON 时，最多提取的子列数量，默认为 20。该参数仅在 `enable_json_flat` 为 `true` 时生效。
+- 描述：控制 Flat JSON 时，最多提取的子列数量。该参数仅在 `enable_json_flat` 为 `true` 时生效。
 - 引入版本：v3.3.0
+
+##### enable_compaction_flat_json
+
+- 默认值：True
+- 类型：Bool
+- 单位：
+- 是否动态：是
+- 描述：控制是否为 Flat Json 数据进行 Compaction。
+- 引入版本：v3.3.3
+
+##### enable_lazy_dynamic_flat_json
+
+- 默认值：True
+- 类型：Bool
+- 单位：
+- 是否动态：是
+- 描述：当查询在读过程中未命中 Flat JSON Schema 时，是否启用 Lazy Dynamic Flat JSON。当此项设置为 `true` 时，StarRocks 将把 Flat JSON 操作推迟到计算流程，而不是读取流程。
+- 引入版本：v3.3.3
+
+##### jit_lru_cache_size
+
+- 默认值：0
+- 类型：Int
+- 单位：GB
+- 是否动态：是
+- 描述：JIT 编译的 LRU 缓存大小。如果设置为大于 0，则表示实际的缓存大小。如果设置为小于或等于 0，系统将自适应设置缓存大小，使用的公式为 `jit_lru_cache_size = min(mem_limit*0.01, 1GB)` （节点的 `mem_limit` 必须大于或等于 16 GB）。
+- 引入版本：-
 
 ### 存算分离
 
@@ -3255,6 +3280,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 引入版本：-
 -->
 
+<!--
 ##### starlet_cache_evict_interval
 
 - 默认值：60
@@ -3263,7 +3289,9 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 是否动态：是
 - 描述：在存算分离模式下启用 file data cache，系统进行缓存淘汰（Cache Eviction）的间隔。
 - 引入版本：v3.0
+-->
 
+<!--
 ##### starlet_cache_evict_low_water
 
 - 默认值：0.1
@@ -3272,7 +3300,9 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 是否动态：是
 - 描述：在存算分离模式下启用 file data cache，如果当前剩余磁盘空间（百分比）低于此配置项中指定的值，将会触发缓存淘汰。
 - 引入版本：v3.0
-
+-->
+  
+<!--  
 ##### starlet_cache_evict_high_water
 
 - 默认值：0.2
@@ -3281,7 +3311,8 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 是否动态：是
 - 描述：在存算分离模式下启用 file data cache，如果当前剩余磁盘空间（百分比）高于此配置项中指定的值，将会停止缓存淘汰。
 - 引入版本：v3.0
-
+-->
+  
 <!--
 ##### starlet_cache_dir_allocate_policy
 
@@ -3939,6 +3970,33 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 描述：Data Cache 自动扩缩容时的最小有效容量。当需要调整的目标容量小于该值时，系统会直接将缓存空间调整为 `0`，以避免缓存空间过小导致频繁填充和淘汰带来负优化。
 - 引入版本：v3.3.0
 
+##### datacache_block_buffer_enable
+
+- 默认值：true
+- 类型：Boolean
+- 单位：-
+- 是否动态：否
+- 描述：是否启用 Block Buffer 优化 Data Cache 效率。当启用 Block Buffer 时，系统会从 Data Cache 中读取完整的 Block 数据并缓存在临时 Buffer 中，从而减少频繁读取缓存带来的额外开销。
+- 引入版本：v3.2.0
+
+##### datacache_tiered_cache_enable
+
+- 默认值：true
+- 类型：Boolean
+- 单位：-
+- 是否动态：否
+- 描述：是否为 Data Cache 启用分层模式。当启用分层模式时，Data Cache 配置的的内存和磁盘构成两级缓存，磁盘数据变为热数据时会自动载入到内存缓存，内存缓存中的数据变冷时自动落至磁盘。当不启用分层模式时，为 Data Cache 配置的内存和磁盘构成两个独立的缓存空间，并分别缓存不同类型数据，两者之间不进行数据流动。
+- 引入版本：v3.2.5
+
+##### query_max_memory_limit_percent
+
+- 默认值：90
+- 类型：Int
+- 单位：-
+- 是否动态：否
+- 描述：Query Pool 能够使用的最大内存上限。以 Process 内存上限的百分比来表示。
+- 引入版本：v3.1.0
+
 <!--
 ##### datacache_block_size
 
@@ -4404,7 +4462,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 <!--
 ##### get_txn_status_internal_sec
 
-- 默认值：30
+- 默认值：10
 - 类型：Int
 - 单位：Seconds
 - 是否动态：是
@@ -4508,61 +4566,6 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 -->
 
 <!--
-##### enable_json_flat
-
-- 默认值：true
-- 类型：Boolean
-- 单位：-
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### json_flat_null_factor
-
-- 默认值：0.3
-- 类型：Double
-- 单位：
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### json_flat_sparsity_factor
-
-- 默认值：0.9
-- 类型：Double
-- 单位：
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### json_flat_internal_column_min_limit
-
-- 默认值：5
-- 类型：Int
-- 单位：
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### json_flat_column_max
-
-- 默认值：20
-- 类型：Int
-- 单位：
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
 ##### pk_dump_interval_seconds
 
 - 默认值：3600
@@ -4588,17 +4591,6 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 ##### olap_string_max_length
 
 - 默认值：1048576
-- 类型：Int
-- 单位：
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### jit_lru_cache_size
-
-- 默认值：0
 - 类型：Int
 - 单位：
 - 是否动态：是

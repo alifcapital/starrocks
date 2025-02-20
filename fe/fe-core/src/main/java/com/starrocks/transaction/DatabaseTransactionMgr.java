@@ -72,6 +72,7 @@ import com.starrocks.server.RunMode;
 import com.starrocks.sql.analyzer.FeNameFormat;
 import com.starrocks.thrift.TTransactionStatus;
 import com.starrocks.thrift.TUniqueId;
+import com.starrocks.transaction.InsertTxnCommitAttachment;
 import io.opentelemetry.api.trace.Span;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -110,6 +111,7 @@ import static com.starrocks.common.ErrorCode.ERR_NO_PARTITIONS_HAVE_DATA_LOAD;
 public class DatabaseTransactionMgr {
     public static final String TXN_TIMEOUT_BY_MANAGER = "timeout by txn manager";
     private static final Logger LOG = LogManager.getLogger(DatabaseTransactionMgr.class);
+    private static final int MEMORY_TXN_SAMPLES = 10;
     private final TransactionStateListenerFactory stateListenerFactory = new TransactionStateListenerFactory();
     private final TransactionLogApplierFactory txnLogApplierFactory = new TransactionLogApplierFactory();
     private final GlobalStateMgr globalStateMgr;
@@ -360,8 +362,9 @@ public class DatabaseTransactionMgr {
                 // after state transform
                 transactionState.afterStateTransform(TransactionStatus.PREPARED, txnOperated, callback, null);
             }
-
-            persistTxnStateInTxnLevelLock(transactionState);
+            if (writeEditLog) {
+                persistTxnStateInTxnLevelLock(transactionState);
+            }
 
             LOG.info("transaction:[{}] successfully prepare", transactionState);
         } finally {
@@ -630,8 +633,7 @@ public class DatabaseTransactionMgr {
         return labelToTxnIds.get(label);
     }
 
-    @VisibleForTesting
-    protected int getRunningTxnNums() {
+    public int getRunningTxnNums() {
         return runningTxnNums;
     }
 
@@ -903,6 +905,8 @@ public class DatabaseTransactionMgr {
 
                     // The version of a replication transaction may not continuously
                     if (txn.getSourceType() != TransactionState.LoadJobSourceType.REPLICATION &&
+                            !txn.isVersionOverwrite() &&
+                            !partitionCommitInfo.isDoubleWrite() &&
                             partition.getVisibleVersion() != partitionCommitInfo.getVersion() - 1) {
                         return false;
                     }
@@ -1025,7 +1029,13 @@ public class DatabaseTransactionMgr {
                     }
                     Set<Long> droppedPartitionIds = Sets.newHashSet();
                     PartitionInfo partitionInfo = table.getPartitionInfo();
-                    for (PartitionCommitInfo partitionCommitInfo : tableCommitInfo.getIdToPartitionCommitInfo().values()) {
+
+                    Map<Long, PartitionCommitInfo> idToPartitionCommitInfo = tableCommitInfo.getIdToPartitionCommitInfo();
+                    if (idToPartitionCommitInfo == null) {
+                        LOG.warn("table {} has no partition commit info,{}", tableId, transactionState);
+                        continue;
+                    }
+                    for (PartitionCommitInfo partitionCommitInfo : idToPartitionCommitInfo.values()) {
                         long partitionId = partitionCommitInfo.getPartitionId();
                         PhysicalPartition partition = table.getPhysicalPartition(partitionId);
                         // partition maybe dropped between commit and publish version, ignore this error
@@ -1038,12 +1048,15 @@ public class DatabaseTransactionMgr {
                         }
                         // The version of a replication transaction may not continuously
                         if (transactionState.getSourceType() != TransactionState.LoadJobSourceType.REPLICATION &&
+                                !transactionState.isVersionOverwrite() &&
+                                !partitionCommitInfo.isDoubleWrite() &&
                                 partition.getVisibleVersion() != partitionCommitInfo.getVersion() - 1) {
                             // prevent excessive logging
                             if (transactionState.getLastErrTimeMs() + 3000 < System.nanoTime() / 1000000) {
-                                LOG.debug("transactionId {} partition commitInfo version {} is not equal with " +
+                                LOG.debug("transactionId {} partition {} commitInfo version {} is not equal with " +
                                                 "partition visible version {} plus one, need wait",
                                         transactionId,
+                                        partitionId,
                                         partitionCommitInfo.getVersion(),
                                         partition.getVisibleVersion());
                             }
@@ -1067,8 +1080,16 @@ public class DatabaseTransactionMgr {
                             for (Tablet tablet : index.getTablets()) {
                                 int healthReplicaNum = 0;
                                 for (Replica replica : ((LocalTablet) tablet).getImmutableReplicas()) {
+                                    if (transactionState.isVersionOverwrite()) {
+                                        ++healthReplicaNum;
+                                        continue;
+                                    }
                                     if (!errorReplicaIds.contains(replica.getId())
                                             && replica.getLastFailedVersion() < 0) {
+                                        if (partitionCommitInfo.isDoubleWrite()) {
+                                            ++healthReplicaNum;
+                                            continue;
+                                        }
                                         // if replica not commit yet, skip it. This may happen when it's just create by clone.
                                         if (!transactionState.tabletCommitInfosContainsReplica(tablet.getId(),
                                                 replica.getBackendId(), replica.getState())) {
@@ -1140,6 +1161,10 @@ public class DatabaseTransactionMgr {
                     transactionState.removeTable(tableId);
                 }
                 if (hasError) {
+                    LOG.warn("transaction state {} has error, the replica not appeared in error replica list and its " +
+                                    "version not equal to partition commit version or commit version - 1 if it's not a " +
+                                    "upgrade stage, its a fatal error. ",
+                            transactionState);
                     return;
                 }
                 boolean txnOperated = false;
@@ -1169,6 +1194,9 @@ public class DatabaseTransactionMgr {
                 } finally {
                     updateCatalogSpan.end();
                 }
+            } catch (Exception e) {
+                LOG.warn("finish transaction failed", e);
+                throw e;
             } finally {
                 transactionState.writeUnlock();
             }
@@ -1180,6 +1208,7 @@ public class DatabaseTransactionMgr {
         transactionState.notifyVisible();
         // do after transaction finish
         GlobalStateMgr.getCurrentState().getOperationListenerBus().onStreamJobTransactionFinish(transactionState);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().handleMVRepair(transactionState);
         LOG.info("finish transaction {} successfully", transactionState);
     }
 
@@ -1207,6 +1236,8 @@ public class DatabaseTransactionMgr {
                         transactionState);
                 continue;
             }
+            Map<Long, PartitionCommitInfo> doubleWritePartitionCommitInfos = Maps.newHashMap();
+            Map<Long, Long> doubleWritePartitionVersions = Maps.newHashMap();
             Iterator<PartitionCommitInfo> partitionCommitInfoIterator = tableCommitInfo.getIdToPartitionCommitInfo()
                     .values().iterator();
             while (partitionCommitInfoIterator.hasNext()) {
@@ -1222,11 +1253,50 @@ public class DatabaseTransactionMgr {
                     continue;
                 }
                 if (transactionState.getSourceType() == TransactionState.LoadJobSourceType.REPLICATION) {
-                    Map<Long, Long> partitionVersions = ((ReplicationTxnCommitAttachment) transactionState
-                            .getTxnCommitAttachment()).getPartitionVersions();
-                    partitionCommitInfo.setVersion(partitionVersions.get(partitionCommitInfo.getPartitionId()));
+                    ReplicationTxnCommitAttachment replicationTxnAttachment = (ReplicationTxnCommitAttachment) transactionState
+                            .getTxnCommitAttachment();
+                    Map<Long, Long> partitionVersions = replicationTxnAttachment.getPartitionVersions();
+                    long newVersion = partitionVersions.get(partitionCommitInfo.getPartitionId());
+                    long versionDiff = newVersion - partition.getVisibleVersion();
+                    partitionCommitInfo.setVersion(newVersion);
+                    partitionCommitInfo.setDataVersion(partition.getDataVersion() + versionDiff);
+                    Map<Long, Long> partitionVersionEpochs = replicationTxnAttachment.getPartitionVersionEpochs();
+                    if (partitionVersionEpochs != null) {
+                        long newVersionEpoch = partitionVersionEpochs.get(partitionCommitInfo.getPartitionId());
+                        partitionCommitInfo.setVersionEpoch(newVersionEpoch);
+                    }
+                } else if (transactionState.isVersionOverwrite()) {
+                    partitionCommitInfo.setVersion(((InsertTxnCommitAttachment) transactionState
+                            .getTxnCommitAttachment()).getPartitionVersion());
+                    // reset data version to visible version
+                    partitionCommitInfo.setDataVersion(partitionCommitInfo.getVersion());
+                    if (partition.getVersionTxnType() == TransactionType.TXN_REPLICATION) {
+                        partitionCommitInfo.setVersionEpoch(partition.nextVersionEpoch());
+                    }
                 } else {
-                    partitionCommitInfo.setVersion(partition.getNextVersion());
+                    Map<Long, Long> doubleWritePartitions = table.getDoubleWritePartitions();
+                    if (doubleWritePartitions != null && !doubleWritePartitions.isEmpty()) {
+                        // double write source partition
+                        if (doubleWritePartitions.containsKey(partitionId)) {
+                            doubleWritePartitionVersions.put(doubleWritePartitions.get(partitionId), partition.getNextVersion());
+                            partitionCommitInfo.setVersion(partition.getNextVersion());
+                        // double write target partition
+                        } else if (doubleWritePartitions.containsValue(partitionId)) {
+                            doubleWritePartitionCommitInfos.put(partitionId, partitionCommitInfo);
+                        } else {
+                            partitionCommitInfo.setVersion(partition.getNextVersion());
+                        }
+                    } else {
+                        partitionCommitInfo.setVersion(partition.getNextVersion());
+                    }
+                    // update data version
+                    partitionCommitInfo.setDataVersion(partition.getNextDataVersion());
+                    if (transactionState.getSourceType() != TransactionState.LoadJobSourceType.LAKE_COMPACTION &&
+                            partition.getVersionTxnType() == TransactionType.TXN_REPLICATION) { 
+                        partitionCommitInfo.setVersionEpoch(partition.nextVersionEpoch());
+                    }
+                    LOG.debug("set partition {} version to {} in transaction {}",
+                            partitionId, partitionCommitInfo.getVersion(), transactionState);
                 }
                 // versionTime has different meanings in shared data and shared nothing mode.
                 // In shared nothing mode, versionTime is the time when the transaction was
@@ -1234,6 +1304,16 @@ public class DatabaseTransactionMgr {
                 // transaction was successfully published. This is a design error due to
                 // carelessness, and should have been consistent here.
                 partitionCommitInfo.setVersionTime(table.isCloudNativeTableOrMaterializedView() ? 0 : commitTs);
+            }
+
+            for (Map.Entry<Long, Long> entry : doubleWritePartitionVersions.entrySet()) {
+                PartitionCommitInfo partitionCommitInfo = doubleWritePartitionCommitInfos.get(entry.getKey());
+                if (partitionCommitInfo != null) {
+                    partitionCommitInfo.setVersion(entry.getValue());
+                    partitionCommitInfo.setIsDoubleWrite(true);
+                    LOG.debug("set double write partition {} version to {} in transaction {}",
+                            entry.getKey(), entry.getValue(), transactionState);
+                }
             }
         }
 
@@ -1813,6 +1893,7 @@ public class DatabaseTransactionMgr {
 
         // do after transaction finish
         GlobalStateMgr.getCurrentState().getOperationListenerBus().onStreamJobTransactionFinish(transactionState);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().handleMVRepair(transactionState);
         LOG.info("finish transaction {} successfully", transactionState);
     }
 
@@ -1879,6 +1960,7 @@ public class DatabaseTransactionMgr {
         // do after transaction finish in batch
         for (TransactionState transactionState : stateBatch.getTransactionStates()) {
             GlobalStateMgr.getCurrentState().getOperationListenerBus().onStreamJobTransactionFinish(transactionState);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().handleMVRepair(transactionState);
         }
 
         LOG.info("finish transaction {} batch successfully", stateBatch);
@@ -1948,5 +2030,26 @@ public class DatabaseTransactionMgr {
 
     public void updateDatabaseUsedQuotaData(long usedQuotaDataBytes) {
         this.usedQuotaDataBytes = usedQuotaDataBytes;
+    }
+
+    public List<Object> getSamplesForMemoryTracker() {
+        readLock();
+        try {
+            if (idToRunningTransactionState.size() > 0) {
+                return idToRunningTransactionState.values()
+                        .stream()
+                        .limit(MEMORY_TXN_SAMPLES)
+                        .collect(Collectors.toList());
+            }
+            if (idToFinalStatusTransactionState.size() > 0) {
+                return idToFinalStatusTransactionState.values()
+                        .stream()
+                        .limit(MEMORY_TXN_SAMPLES)
+                        .collect(Collectors.toList());
+            }
+            return new ArrayList<>();
+        } finally {
+            readUnlock();
+        }
     }
 }

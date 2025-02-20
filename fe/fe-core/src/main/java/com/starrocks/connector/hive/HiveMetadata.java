@@ -26,6 +26,8 @@ import com.starrocks.catalog.Table;
 import com.starrocks.common.AlreadyExistsException;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.MetaNotFoundException;
+import com.starrocks.common.profile.Timer;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.HdfsEnvironment;
 import com.starrocks.connector.PartitionInfo;
@@ -58,6 +60,7 @@ import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 import static com.starrocks.catalog.Table.TableType.HIVE;
+import static com.starrocks.common.profile.Tracers.Module.EXTERNAL;
 import static com.starrocks.connector.PartitionUtil.toHivePartitionName;
 import static com.starrocks.connector.PartitionUtil.toPartitionValues;
 import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.isResourceMappingCatalog;
@@ -164,8 +167,12 @@ public class HiveMetadata implements ConnectorMetadata {
                         " 'Force' must be set when dropping a hive table." +
                         " Please execute 'drop table %s.%s.%s force'", stmt.getCatalogName(), dbName, tableName));
             }
-
-            HiveTable hiveTable = (HiveTable) getTable(dbName, tableName);
+            HiveTable hiveTable = null;
+            try {
+                hiveTable = (HiveTable) getTable(dbName, tableName);
+            } catch (Exception e) {
+                // ignore not found exception
+            }
             if (hiveTable == null && stmt.isSetIfExists()) {
                 LOG.warn("Table {}.{} doesn't exist", dbName, tableName);
                 return;
@@ -185,6 +192,9 @@ public class HiveMetadata implements ConnectorMetadata {
         Table table;
         try {
             table = hmsOps.getTable(dbName, tblName);
+        } catch (StarRocksConnectorException e) {
+            LOG.error("Failed to get hive table [{}.{}.{}]", catalogName, dbName, tblName, e);
+            throw e;
         } catch (Exception e) {
             LOG.error("Failed to get hive table [{}.{}.{}]", catalogName, dbName, tblName, e);
             return null;
@@ -343,7 +353,9 @@ public class HiveMetadata implements ConnectorMetadata {
 
         HiveCommitter committer = new HiveCommitter(
                 hmsOps, fileOps, updateExecutor, refreshOthersFeExecutor, table, new Path(stagingDir));
-        committer.commit(partitionUpdates);
+        try (Timer ignored = Tracers.watchScope(EXTERNAL, "HIVE.SINK.commit")) {
+            committer.commit(partitionUpdates);
+        }
     }
 
     @Override

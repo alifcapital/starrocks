@@ -30,8 +30,6 @@
 #include "formats/parquet/parquet_test_util/util.h"
 #include "fs/fs.h"
 #include "fs/fs_memory.h"
-#include "gutil/casts.h"
-#include "runtime/descriptor_helper.h"
 #include "testutil/assert.h"
 
 namespace starrocks::formats {
@@ -90,7 +88,7 @@ protected:
         auto ctx = _create_scan_context(type_descs);
         ASSIGN_OR_ABORT(auto file, _fs.new_random_access_file(_file_path));
         ASSIGN_OR_ABORT(auto file_size, _fs.get_file_size(_file_path));
-        auto file_reader = std::make_shared<parquet::FileReader>(config::vector_chunk_size, file.get(), file_size, 0);
+        auto file_reader = std::make_shared<parquet::FileReader>(config::vector_chunk_size, file.get(), file_size);
 
         auto st = file_reader->init(ctx);
         if (!st.ok()) {
@@ -172,7 +170,7 @@ TEST_F(ParquetFileWriterTest, TestWriteIntegralTypes) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -203,8 +201,8 @@ TEST_F(ParquetFileWriterTest, TestWriteIntegralTypes) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -229,7 +227,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDecimal) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -254,8 +252,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDecimal) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -281,7 +279,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDecimalCompatibleWithHiveReader) {
     writer_options->use_legacy_decimal_encoding = true;
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -306,8 +304,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDecimalCompatibleWithHiveReader) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -329,7 +327,7 @@ TEST_F(ParquetFileWriterTest, TestWriteBoolean) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -345,8 +343,8 @@ TEST_F(ParquetFileWriterTest, TestWriteBoolean) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -368,7 +366,7 @@ TEST_F(ParquetFileWriterTest, TestWriteFloat) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -385,8 +383,8 @@ TEST_F(ParquetFileWriterTest, TestWriteFloat) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -408,7 +406,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDouble) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -425,8 +423,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDouble) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -448,7 +446,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDate) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -474,8 +472,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDate) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -497,7 +495,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDatetime) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -524,8 +522,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDatetime) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -548,7 +546,7 @@ TEST_F(ParquetFileWriterTest, TestWriteDatetimeCompatibleWithHiveReader) {
     writer_options->use_int96_timestamp_encoding = true;
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -574,8 +572,8 @@ TEST_F(ParquetFileWriterTest, TestWriteDatetimeCompatibleWithHiveReader) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -596,7 +594,7 @@ TEST_F(ParquetFileWriterTest, TestWriteVarchar) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -616,8 +614,8 @@ TEST_F(ParquetFileWriterTest, TestWriteVarchar) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -643,7 +641,7 @@ TEST_F(ParquetFileWriterTest, TestWriteArray) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     // [1], NULL, [], [2, NULL, 3]
@@ -671,8 +669,8 @@ TEST_F(ParquetFileWriterTest, TestWriteArray) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -701,7 +699,7 @@ TEST_F(ParquetFileWriterTest, TestWriteStruct) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -739,8 +737,8 @@ TEST_F(ParquetFileWriterTest, TestWriteStruct) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -768,7 +766,7 @@ TEST_F(ParquetFileWriterTest, TestWriteMap) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     // [1 -> 1], NULL, [], [2 -> 2, 3 -> NULL, 4 -> 4]
@@ -804,8 +802,8 @@ TEST_F(ParquetFileWriterTest, TestWriteMap) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -833,7 +831,7 @@ TEST_F(ParquetFileWriterTest, TestWriteMapOfNullKey) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     // [NULL -> 1], NULL, [], [2 -> 2, 3 -> NULL, 4 -> 4]
@@ -869,7 +867,7 @@ TEST_F(ParquetFileWriterTest, TestWriteMapOfNullKey) {
     }
 
     // write chunk
-    ASSERT_FALSE(writer->write(chunk).get().ok());
+    ASSERT_FALSE(writer->write(chunk.get()).ok());
 }
 
 TEST_F(ParquetFileWriterTest, TestWriteNestedArray) {
@@ -889,7 +887,7 @@ TEST_F(ParquetFileWriterTest, TestWriteNestedArray) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     // [[1], NULL, [], [2, NULL, 3]], [[4, 5], [6]], NULL
@@ -928,8 +926,8 @@ TEST_F(ParquetFileWriterTest, TestWriteNestedArray) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 3);
@@ -950,7 +948,7 @@ TEST_F(ParquetFileWriterTest, TestWriteVarbinary) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -970,8 +968,53 @@ TEST_F(ParquetFileWriterTest, TestWriteVarbinary) {
     }
 
     // write chunk
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
+
+    ASSERT_TRUE(result.io_status.ok());
+    ASSERT_EQ(result.file_statistics.record_count, 4);
+
+    auto read_chunk = _read_chunk(type_descs);
+    ASSERT_TRUE(read_chunk != nullptr);
+    ASSERT_EQ(read_chunk->num_rows(), 4);
+    parquet::Utils::assert_equal_chunk(chunk.get(), read_chunk.get());
+}
+
+TEST_F(ParquetFileWriterTest, TestAllocatedBytes) {
+    auto type_varbinary = TypeDescriptor::from_logical_type(TYPE_VARBINARY);
+    std::vector<TypeDescriptor> type_descs{type_varbinary};
+
+    auto column_names = _make_type_names(type_descs);
+    auto output_file = _fs.new_writable_file(_file_path).value();
+    auto output_stream = std::make_unique<parquet::ParquetOutputStream>(std::move(output_file));
+    auto column_evaluators = ColumnSlotIdEvaluator::from_types(type_descs);
+    auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
+    auto writer = std::make_unique<formats::ParquetFileWriter>(
+            _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
+    ASSERT_OK(writer->init());
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        // not-null column
+        auto data_column = BinaryColumn::create();
+        data_column->append("hello");
+        data_column->append("world");
+        data_column->append("starrocks");
+        data_column->append("lakehouse");
+
+        auto null_column = UInt8Column::create();
+        std::vector<uint8_t> nulls = {1, 0, 1, 0};
+        null_column->append_numbers(nulls.data(), nulls.size());
+        auto nullable_column = NullableColumn::create(data_column, null_column);
+        chunk->append_column(nullable_column, chunk->num_columns());
+    }
+
+    // write chunk
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    ASSERT_TRUE(writer->get_allocated_bytes() > 0);
+    auto result = writer->commit();
+    ASSERT_TRUE(writer->get_allocated_bytes() == 0);
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 4);
@@ -994,7 +1037,7 @@ TEST_F(ParquetFileWriterTest, TestFlushRowgroup) {
     writer_options->rowgroup_size = 1;
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -1010,84 +1053,12 @@ TEST_F(ParquetFileWriterTest, TestFlushRowgroup) {
     }
 
     // write chunk twice
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 8);
-}
-
-TEST_F(ParquetFileWriterTest, TestFlushRowgroupWithExecutors) {
-    auto type_bool = TypeDescriptor::from_logical_type(TYPE_BOOLEAN);
-    std::vector<TypeDescriptor> type_descs{type_bool};
-
-    auto column_names = _make_type_names(type_descs);
-    auto output_file = _fs.new_writable_file(_file_path).value();
-    auto output_stream = std::make_unique<parquet::ParquetOutputStream>(std::move(output_file));
-    auto column_evaluators = ColumnSlotIdEvaluator::from_types(type_descs);
-    auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
-    writer_options->rowgroup_size = 1;
-    auto executors = PriorityThreadPool("test", 1, 10);
-    auto writer = std::make_unique<formats::ParquetFileWriter>(
-            _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, &executors, nullptr);
-    ASSERT_OK(writer->init());
-
-    auto chunk = std::make_shared<Chunk>();
-    {
-        auto data_column = BooleanColumn::create();
-        std::vector<uint8_t> values = {0, 1, 1, 0};
-        data_column->append_numbers(values.data(), values.size() * sizeof(uint8_t));
-        auto null_column = UInt8Column::create();
-        std::vector<uint8_t> nulls = {1, 0, 1, 0};
-        null_column->append_numbers(nulls.data(), nulls.size());
-        auto nullable_column = NullableColumn::create(data_column, null_column);
-        chunk->append_column(nullable_column, chunk->num_columns());
-    }
-
-    // write chunk twice
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
-
-    ASSERT_TRUE(result.io_status.ok());
-    ASSERT_EQ(result.file_statistics.record_count, 8);
-}
-
-TEST_F(ParquetFileWriterTest, TestFlushRowgroupAndCommitDependency) {
-    auto type_bool = TypeDescriptor::from_logical_type(TYPE_BOOLEAN);
-    std::vector<TypeDescriptor> type_descs{type_bool};
-
-    auto column_names = _make_type_names(type_descs);
-    auto output_file = _fs.new_writable_file(_file_path).value();
-    auto output_stream = std::make_unique<parquet::ParquetOutputStream>(std::move(output_file));
-    auto column_evaluators = ColumnSlotIdEvaluator::from_types(type_descs);
-    auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
-    writer_options->rowgroup_size = 1;
-    auto executors = PriorityThreadPool("test", 2, 10);
-    auto writer = std::make_unique<formats::ParquetFileWriter>(
-            _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, &executors, nullptr);
-    ASSERT_OK(writer->init());
-
-    auto chunk = std::make_shared<Chunk>();
-    {
-        auto data_column = BooleanColumn::create();
-        std::vector<uint8_t> values = {0, 1, 1, 0};
-        data_column->append_numbers(values.data(), values.size() * sizeof(uint8_t));
-        auto null_column = UInt8Column::create();
-        std::vector<uint8_t> nulls = {1, 0, 1, 0};
-        null_column->append_numbers(nulls.data(), nulls.size());
-        auto nullable_column = NullableColumn::create(data_column, null_column);
-        chunk->append_column(nullable_column, chunk->num_columns());
-    }
-
-    auto f = writer->write(chunk);
-    auto result = writer->commit().get();
-    ASSERT_TRUE(f.get().ok());
-    ASSERT_TRUE(result.io_status.ok());
-    ASSERT_EQ(result.file_statistics.record_count, 4);
 }
 
 TEST_F(ParquetFileWriterTest, TestWriteWithFieldID) {
@@ -1102,7 +1073,7 @@ TEST_F(ParquetFileWriterTest, TestWriteWithFieldID) {
     writer_options->column_ids = {FileColumnId{1, {}}};
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::NO_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::NO_COMPRESSION, writer_options, []() {});
     ASSERT_OK(writer->init());
 
     auto chunk = std::make_shared<Chunk>();
@@ -1118,9 +1089,9 @@ TEST_F(ParquetFileWriterTest, TestWriteWithFieldID) {
     }
 
     // write chunk twice
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    ASSERT_TRUE(writer->write(chunk).get().ok());
-    auto result = writer->commit().get();
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    ASSERT_TRUE(writer->write(chunk.get()).ok());
+    auto result = writer->commit();
 
     ASSERT_TRUE(result.io_status.ok());
     ASSERT_EQ(result.file_statistics.record_count, 8);
@@ -1137,7 +1108,7 @@ TEST_F(ParquetFileWriterTest, TestUnknownCompression) {
     auto writer_options = std::make_shared<formats::ParquetWriterOptions>();
     auto writer = std::make_unique<formats::ParquetFileWriter>(
             _file_path, std::move(output_stream), column_names, type_descs, std::move(column_evaluators),
-            TCompressionType::UNKNOWN_COMPRESSION, writer_options, []() {}, nullptr, nullptr);
+            TCompressionType::UNKNOWN_COMPRESSION, writer_options, []() {});
     ASSERT_ERROR(writer->init());
 }
 
@@ -1153,8 +1124,6 @@ TEST_F(ParquetFileWriterTest, TestFactory) {
     ASSERT_OK(factory.init());
     auto maybe_writer = factory.create(_file_path);
     ASSERT_OK(maybe_writer.status());
-    auto writer = maybe_writer.value();
-    ASSERT_OK(writer->init());
 }
 
 } // namespace starrocks::formats

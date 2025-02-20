@@ -34,6 +34,9 @@
 
 package com.starrocks.catalog;
 
+import com.starrocks.alter.AlterJobException;
+import com.starrocks.analysis.LiteralExpr;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.ConfigBase;
@@ -43,7 +46,6 @@ import com.starrocks.common.util.DynamicPartitionUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.persist.CreateTableInfo;
 import com.starrocks.persist.OperationType;
-import com.starrocks.persist.metablock.SRMetaBlockReader;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DDLStmtExecutor;
 import com.starrocks.qe.ShowExecutor;
@@ -69,6 +71,7 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class CreateTableTest {
     private static ConnectContext connectContext;
@@ -92,6 +95,7 @@ public class CreateTableTest {
         GlobalStateMgr.getCurrentState().getMetadata().createDb(createDbStmt.getFullDbName());
 
         UtFrameUtils.setUpForPersistTest();
+        starRocksAssert.useDatabase("test");
     }
 
     private static void createTable(String sql) throws Exception {
@@ -101,7 +105,7 @@ public class CreateTableTest {
 
     private static void alterTableWithNewParser(String sql) throws Exception {
         AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
-        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(alterTableStmt);
+        GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(connectContext, alterTableStmt);
     }
 
     @Test(expected = DdlException.class)
@@ -432,8 +436,7 @@ public class CreateTableTest {
 
         ExceptionChecker
                 .expectThrowsWithMsg(AnalysisException.class,
-                        "Getting analyzing error from line 1, column 53 to line 1, column 65. Detail message: " +
-                                "More than one AUTO_INCREMENT column defined in CREATE TABLE Statement.",
+                        "More than one AUTO_INCREMENT column defined in CREATE TABLE Statement.",
                         () -> createTable(
                                 "create table test.atbl11(col1 bigint AUTO_INCREMENT, col2 bigint AUTO_INCREMENT) \n"
                                         + "Primary KEY (col1) distributed by hash(col1) buckets 1 \n"
@@ -637,7 +640,7 @@ public class CreateTableTest {
                         "\"replication_num\" = \"1\"\n" +
                         ")"
         ));
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
+        ExceptionChecker.expectThrowsWithMsg(AlterJobException.class,
                 "Invalid bloom filter column 'k3': unsupported type JSON",
                 () -> alterTableWithNewParser(
                         "ALTER TABLE test.t_json_bloomfilter set (\"bloom_filter_columns\"= \"k3\");"));
@@ -1030,7 +1033,7 @@ public class CreateTableTest {
 
         UtFrameUtils.PseudoJournalReplayer.resetFollowerJournalQueue();
         UtFrameUtils.PseudoImage initialImage = new UtFrameUtils.PseudoImage();
-        GlobalStateMgr.getCurrentState().getLocalMetastore().save(initialImage.getDataOutputStream());
+        GlobalStateMgr.getCurrentState().getLocalMetastore().save(initialImage.getImageWriter());
 
         createTable("CREATE TABLE test.`test_location_persist_t1` (\n" +
                 "    k1 int,\n" +
@@ -1047,11 +1050,11 @@ public class CreateTableTest {
 
         // make final image
         UtFrameUtils.PseudoImage finalImage = new UtFrameUtils.PseudoImage();
-        GlobalStateMgr.getCurrentState().getLocalMetastore().save(finalImage.getDataOutputStream());
+        GlobalStateMgr.getCurrentState().getLocalMetastore().save(finalImage.getImageWriter());
 
         // ** test replay from edit log
         LocalMetastore localMetastoreFollower = new LocalMetastore(GlobalStateMgr.getCurrentState(), null, null);
-        localMetastoreFollower.load(new SRMetaBlockReader(initialImage.getDataInputStream()));
+        localMetastoreFollower.load(initialImage.getMetaBlockReader());
         CreateTableInfo info = (CreateTableInfo)
                 UtFrameUtils.PseudoJournalReplayer.replayNextJournal(OperationType.OP_CREATE_TABLE_V2);
         localMetastoreFollower.replayCreateTable(info);
@@ -1063,7 +1066,7 @@ public class CreateTableTest {
 
         // ** test load from image(simulate restart)
         LocalMetastore localMetastoreLeader = new LocalMetastore(GlobalStateMgr.getCurrentState(), null, null);
-        localMetastoreLeader.load(new SRMetaBlockReader(finalImage.getDataInputStream()));
+        localMetastoreLeader.load(finalImage.getMetaBlockReader());
         olapTable = (OlapTable) localMetastoreLeader.getDb("test")
                 .getTable("test_location_persist_t1");
         System.out.println(olapTable.getLocation());
@@ -1226,7 +1229,7 @@ public class CreateTableTest {
                         "\"replication_num\" = \"1\"\n" +
                         ")"
         ));
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
+        ExceptionChecker.expectThrowsWithMsg(AlterJobException.class,
                 "Invalid bloom filter column 'k3': unsupported type VARBINARY",
                 () -> alterTableWithNewParser(
                         "ALTER TABLE test.t_varbinary_bf set (\"bloom_filter_columns\"= \"k3\");"));
@@ -1284,7 +1287,7 @@ public class CreateTableTest {
                         "\"replication_num\" = \"1\"\n" +
                         ")"
         ));
-        ExceptionChecker.expectThrowsWithMsg(DdlException.class,
+        ExceptionChecker.expectThrowsWithMsg(AlterJobException.class,
                 "Invalid bloom filter column 'k3': unsupported type VARBINARY",
                 () -> alterTableWithNewParser("ALTER TABLE test.t_binary_bf set (\"bloom_filter_columns\"= \"k3\");"));
 
@@ -1412,9 +1415,9 @@ public class CreateTableTest {
         Assert.assertTrue(table.hasUniqueConstraints());
         List<UniqueConstraint> uniqueConstraint = table.getUniqueConstraints();
         Assert.assertEquals(1, uniqueConstraint.size());
-        Assert.assertEquals(2, uniqueConstraint.get(0).getUniqueColumnNames().size());
-        Assert.assertEquals("k1", uniqueConstraint.get(0).getUniqueColumnNames().get(0));
-        Assert.assertEquals("k2", uniqueConstraint.get(0).getUniqueColumnNames().get(1));
+        Assert.assertEquals(2, uniqueConstraint.get(0).getUniqueColumnNames(table).size());
+        Assert.assertEquals("k1", uniqueConstraint.get(0).getUniqueColumnNames(table).get(0));
+        Assert.assertEquals("k2", uniqueConstraint.get(0).getUniqueColumnNames(table).get(1));
 
         ExceptionChecker.expectThrowsNoException(() -> createTable(
                 "CREATE TABLE test.parent_table2(\n" +
@@ -1435,10 +1438,10 @@ public class CreateTableTest {
         Assert.assertTrue(table2.hasUniqueConstraints());
         List<UniqueConstraint> uniqueConstraint2 = table2.getUniqueConstraints();
         Assert.assertEquals(2, uniqueConstraint2.size());
-        Assert.assertEquals(1, uniqueConstraint2.get(0).getUniqueColumnNames().size());
-        Assert.assertEquals("k1", uniqueConstraint2.get(0).getUniqueColumnNames().get(0));
-        Assert.assertEquals(1, uniqueConstraint2.get(1).getUniqueColumnNames().size());
-        Assert.assertEquals("k2", uniqueConstraint2.get(1).getUniqueColumnNames().get(0));
+        Assert.assertEquals(1, uniqueConstraint2.get(0).getUniqueColumnNames(table2).size());
+        Assert.assertEquals("k1", uniqueConstraint2.get(0).getUniqueColumnNames(table2).get(0));
+        Assert.assertEquals(1, uniqueConstraint2.get(1).getUniqueColumnNames(table2).size());
+        Assert.assertEquals("k2", uniqueConstraint2.get(1).getUniqueColumnNames(table2).get(0));
 
         ExceptionChecker.expectThrowsNoException(() -> createTable(
                 "CREATE TABLE test.parent_primary_key_table1(\n" +
@@ -1761,6 +1764,61 @@ public class CreateTableTest {
                                 "\"storage_format\" = \"DEFAULT\"\n" +
                                 ");"
                 ));
+
+        ExceptionChecker.expectThrows(AnalysisException.class, () -> createTable(
+                "CREATE TABLE test.`bill_detail_1` (\n" +
+                        "  `day` datetime \n" +
+                        ") ENGINE=OLAP \n" +
+                        "PRIMARY KEY(`day`)\n" +
+                        "PARTITION BY RANGE(cast(substr(day, 1, 10) as datetime))\n" +
+                        "(PARTITION p201704 VALUES LESS THAN (\"20170501\"),\n" +
+                        "PARTITION p201705 VALUES LESS THAN (\"20170601\"),\n" +
+                        "PARTITION p201706 VALUES LESS THAN (\"20170701\"))\n" +
+                        "DISTRIBUTED BY HASH(`bill_code`) BUCKETS 10 \n" +
+                        "PROPERTIES (\"replication_num\" = \"1\",\n" +
+                        "\"in_memory\" = \"false\",\n" +
+                        "\"storage_format\" = \"DEFAULT\");"
+        ));
+
+        ExceptionChecker.expectThrows(AnalysisException.class, () -> createTable(
+                "CREATE TABLE test.`bill_detail_2` (\n" +
+                        "  `bill_code` varchar(200) NOT NULL DEFAULT \"\" COMMENT \"\"\n" +
+                        ") ENGINE=OLAP \n" +
+                        "PRIMARY KEY(`bill_code`)\n" +
+                        "PARTITION BY RANGE(cast(substr(bill_code, '3', 13) as bigint))\n" +
+                        "(PARTITION p1 VALUES [('0'), ('5000000')),\n" +
+                        "PARTITION p2 VALUES [('5000000'), ('10000000')),\n" +
+                        "PARTITION p3 VALUES [('10000000'), ('15000000')),\n" +
+                        "PARTITION p4 VALUES [('15000000'), ('20000000')),\n" +
+                        "PARTITION p999 VALUES[('2921712368983'), ('2921712368985'))\n" +
+                        ")\n" +
+                        "DISTRIBUTED BY HASH(`bill_code`) BUCKETS 10 \n" +
+                        "PROPERTIES (\n" +
+                        "\"replication_num\" = \"1\",\n" +
+                        "\"in_memory\" = \"false\",\n" +
+                        "\"storage_format\" = \"DEFAULT\"\n" +
+                        ");"
+        ));
+
+        ExceptionChecker.expectThrows(AnalysisException.class, () -> createTable(
+                "CREATE TABLE test.`bill_detail_3` (\n" +
+                        "  `bill_code` varchar(200) NOT NULL DEFAULT \"\" COMMENT \"\"\n" +
+                        ") ENGINE=OLAP \n" +
+                        "PRIMARY KEY(`bill_code`)\n" +
+                        "PARTITION BY RANGE(cast(substr(bill_code, 3, '13') as bigint))\n" +
+                        "(PARTITION p1 VALUES [('0'), ('5000000')),\n" +
+                        "PARTITION p2 VALUES [('5000000'), ('10000000')),\n" +
+                        "PARTITION p3 VALUES [('10000000'), ('15000000')),\n" +
+                        "PARTITION p4 VALUES [('15000000'), ('20000000')),\n" +
+                        "PARTITION p999 VALUES[('2921712368983'), ('2921712368985'))\n" +
+                        ")\n" +
+                        "DISTRIBUTED BY HASH(`bill_code`) BUCKETS 10 \n" +
+                        "PROPERTIES (\n" +
+                        "\"replication_num\" = \"1\",\n" +
+                        "\"in_memory\" = \"false\",\n" +
+                        "\"storage_format\" = \"DEFAULT\"\n" +
+                        ");"
+        ));
     }
 
     @Test
@@ -2018,5 +2076,61 @@ public class CreateTableTest {
         String createTableSql = starRocksAssert.showCreateTable("show create table news_rt;");
         starRocksAssert.dropTable("news_rt");
         starRocksAssert.withTable(createTableSql);
+    }
+
+    @Test
+    public void testCreateTableWithNullableColumns1() throws Exception {
+        String createSQL = "CREATE TABLE list_partition_tbl1 (\n" +
+                "      id BIGINT,\n" +
+                "      age SMALLINT,\n" +
+                "      dt VARCHAR(10),\n" +
+                "      province VARCHAR(64) \n" +
+                ")\n" +
+                "DUPLICATE KEY(id)\n" +
+                "PARTITION BY LIST (province) (\n" +
+                "     PARTITION p1 VALUES IN ((NULL),(\"chongqing\")) ,\n" +
+                "     PARTITION p2 VALUES IN ((\"guangdong\")) \n" +
+                ")\n" +
+                "DISTRIBUTED BY RANDOM\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\"\n" +
+                ");";
+        starRocksAssert.withTable(createSQL);
+        Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb("test");
+        OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(),
+                "list_partition_tbl1");
+        PartitionInfo info = table.getPartitionInfo();
+        Assert.assertTrue(info.isListPartition());
+        ListPartitionInfo listPartitionInfo = (ListPartitionInfo) info;
+        Map<Long, List<List<LiteralExpr>>> long2Literal =  listPartitionInfo.getMultiLiteralExprValues();
+        Assert.assertEquals(2, long2Literal.size());
+    }
+
+    @Test
+    public void testCreateTableWithNullableColumns2() {
+        String createSQL = "\n" +
+                "CREATE TABLE t3 (\n" +
+                "  dt date,\n" +
+                "  city varchar(20),\n" +
+                "  name varchar(20),\n" +
+                "  num int\n" +
+                ") ENGINE=OLAP\n" +
+                "PRIMARY KEY(dt, city, name)\n" +
+                "PARTITION BY LIST (dt) (\n" +
+                "    PARTITION p1 VALUES IN ((NULL), (\"2022-04-01\")),\n" +
+                "    PARTITION p2 VALUES IN ((\"2022-04-02\")),\n" +
+                "    PARTITION p3 VALUES IN ((\"2022-04-03\"))\n" +
+                ")\n" +
+                "DISTRIBUTED BY HASH(dt) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "    \"replication_num\" = \"1\"\n" +
+                ");";
+        try {
+            starRocksAssert.withTable(createSQL);
+            Assert.fail();
+        } catch (Exception e) {
+            Assert.assertTrue(e.getMessage().contains("Partition column[dt] could not be null but contains null " +
+                    "value in partition[p1]."));
+        }
     }
 }
