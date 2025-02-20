@@ -94,8 +94,6 @@ public class HudiScanNode extends ScanNode {
 
         output.append(prefix)
             .append("TABLE: ")
-            .append(hudiTable.getCatalogDBName())
-            .append(".")
             .append(hudiTable.getName())
             .append("\n");
 

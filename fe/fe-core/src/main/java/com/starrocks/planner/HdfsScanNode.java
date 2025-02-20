@@ -114,8 +114,6 @@ public class HdfsScanNode extends ScanNode {
 
         output.append(prefix)
             .append("TABLE: ")
-            .append(hiveTable.getCatalogDBName())
-            .append(".")
             .append(hiveTable.getName())
             .append("\n");
 

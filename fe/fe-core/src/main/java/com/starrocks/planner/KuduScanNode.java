@@ -144,8 +144,6 @@ public class KuduScanNode extends ScanNode {
 
         output.append(prefix)
             .append("TABLE: ")
-            .append(kuduTable.getCatalogDBName())
-            .append(".")
             .append(kuduTable.getName())
             .append("\n");
 

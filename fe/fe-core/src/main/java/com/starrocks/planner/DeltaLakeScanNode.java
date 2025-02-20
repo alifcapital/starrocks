@@ -218,8 +218,6 @@ public class DeltaLakeScanNode extends ScanNode {
 
         output.append(prefix)
             .append("TABLE: ")
-            .append(deltaLakeTable.getCatalogDBName())
-            .append(".")
             .append(deltaLakeTable.getName())
             .append("\n");
 

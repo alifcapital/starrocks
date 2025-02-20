@@ -206,7 +206,7 @@ public class StatisticAutoCollector extends FrontendDaemon {
         }
     }
 
-    private String stripQuotes(String str) {
+    private static String stripQuotes(String str) {
         return str != null ? str.replaceAll("[\"']", "") : str;
     }
 }

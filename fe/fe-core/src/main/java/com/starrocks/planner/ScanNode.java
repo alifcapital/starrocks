@@ -40,8 +40,6 @@ import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.TupleDescriptor;
 import com.starrocks.catalog.ColumnAccessPath;
 import com.starrocks.common.UserException;
-import com.starrocks.common.StarRocksException;
-import com.starrocks.connector.RemoteFilesSampleStrategy;
 import com.starrocks.catalog.Table;
 import com.starrocks.datacache.DataCacheOptions;
 import com.starrocks.server.WarehouseManager;

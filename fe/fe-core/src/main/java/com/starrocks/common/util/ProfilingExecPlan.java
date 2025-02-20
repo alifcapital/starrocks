@@ -24,14 +24,6 @@ import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.OrderByElement;
 import com.starrocks.analysis.SlotId;
 import com.starrocks.analysis.SortInfo;
-import com.starrocks.catalog.DeltaLakeTable;
-import com.starrocks.catalog.HiveTable;
-import com.starrocks.catalog.HudiTable;
-import com.starrocks.catalog.IcebergTable;
-import com.starrocks.catalog.JDBCTable;
-import com.starrocks.catalog.KuduTable;
-import com.starrocks.catalog.OdpsTable;
-import com.starrocks.catalog.PaimonTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Pair;
 import com.starrocks.planner.AggregationNode;
@@ -391,21 +383,7 @@ public class ProfilingExecPlan {
         } else if (node instanceof ScanNode) {
             ScanNode scanNode = (ScanNode) node;
             Table table = scanNode.getTable();
-            String tableName;
-
-            if (table instanceof IcebergTable ||
-                    table instanceof HiveTable ||
-                    table instanceof HudiTable ||
-                    table instanceof JDBCTable ||
-                    table instanceof KuduTable ||
-                    table instanceof OdpsTable ||
-                    table instanceof PaimonTable ||
-                    table instanceof DeltaLakeTable) {
-                tableName = table.getCatalogDBName() + "." + table.getName();
-            } else {
-                tableName = table.getName();
-            }
-
+            String tableName = table.getName();
             element.addInfo("TABLE", tableName);
         }
     }

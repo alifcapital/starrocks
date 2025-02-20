@@ -300,8 +300,6 @@ public class PaimonScanNode extends ScanNode {
 
         output.append(prefix)
             .append("TABLE: ")
-            .append(paimonTable.getCatalogDBName())
-            .append(".")
             .append(paimonTable.getName())
             .append("\n");
 
