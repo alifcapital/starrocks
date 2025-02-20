@@ -438,14 +438,20 @@ bool FileReader::_filter_group_with_more_filter(const tparquet::RowGroup& row_gr
         StatisticsHelper::StatSupportedFilter filter_type;
         for (auto ctx : kv.second) {
             if (StatisticsHelper::can_be_used_for_statistics_filter(ctx, filter_type)) {
-                const TupleDescriptor& tuple_desc = *(_scanner_ctx->tuple_desc);
-                SlotDescriptor* slot = tuple_desc.get_slot_by_id(kv.first);
-                if (UNLIKELY(slot == nullptr)) {
-                    // it shouldn't be here, just some defensive code
-                    DCHECK(false) << "couldn't find slot id " << kv.first << " in tuple desc";
-                    LOG(WARNING) << "couldn't find slot id " << kv.first << " in tuple desc";
-                    continue;
+                // Direct adaptation of original get_slot_by_id logic
+                SlotDescriptor* slot = nullptr;
+                for (auto s : _scanner_ctx->slot_descs) {
+                    if (s->id() == kv.first) {
+                        slot = s;
+                        break;
+                    }
                 }
+
+                 if (UNLIKELY(slot == nullptr)) {
+                    DCHECK(false) << "couldn't find slot id " << kv.first << " in slot descs";
+                    LOG(WARNING) << "couldn't find slot id " << kv.first << " in slot descs";
+                     continue;
+                 }
                 std::unordered_map<std::string, size_t> column_name_2_pos_in_meta{};
                 std::vector<SlotDescriptor*> slot_v{slot};
                 _meta_helper->build_column_name_2_pos_in_meta(column_name_2_pos_in_meta, row_group, slot_v);
