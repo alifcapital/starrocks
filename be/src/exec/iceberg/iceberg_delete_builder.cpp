@@ -92,6 +92,8 @@ Status ParquetPositionDeleteBuilder::build(
 
     // Setup scanner context
     auto scanner_ctx = std::make_unique<HdfsScannerContext>();
+    auto scan_stats = std::make_unique<HdfsScanStats>();
+
     std::vector<HdfsScannerContext::ColumnInfo> columns;
     THdfsScanRange scan_range;
     scan_range.offset = 0;
@@ -119,8 +121,8 @@ Status ParquetPositionDeleteBuilder::build(
     TIcebergSchema iceberg_schema = TIcebergSchema();
     iceberg_schema.__set_fields(schema_fields);
 
-    std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
     scanner_ctx->timezone = timezone;
+    scanner_ctx->stats = scan_stats.get();
     scanner_ctx->slot_descs = slot_descriptors;
     scanner_ctx->iceberg_schema = &iceberg_schema;
     scanner_ctx->materialized_columns = std::move(columns);
@@ -318,6 +320,8 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
     }
 
     auto scanner_ctx = std::make_unique<HdfsScannerContext>();
+    auto scan_stats = std::make_unique<HdfsScanStats>();
+
     std::vector<HdfsScannerContext::ColumnInfo> columns;
     THdfsScanRange scan_range;
     scan_range.offset = 0;
@@ -331,6 +335,7 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
         columns.emplace_back(column);
     }
     scanner_ctx->timezone = timezone;
+    scanner_ctx->stats = scan_stats.get();
     scanner_ctx->slot_descs = delete_column_tuple_desc->slots();
     scanner_ctx->iceberg_schema = iceberg_equal_delete_schema;
     scanner_ctx->materialized_columns = std::move(columns);
