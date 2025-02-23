@@ -62,7 +62,31 @@ Status ParquetPositionDeleteBuilder::build(
         .max_buffer_size = config::io_coalesce_read_max_buffer_size
     };
     shared_buffered_input_stream->set_coalesce_options(shared_options);
+
+    // small file optimization
+    if (file_length < config::io_coalesce_read_max_buffer_size) {
+        std::vector<io::SharedBufferedInputStream::IORange> io_ranges{};
+        io_ranges.emplace_back(0, file_length);
+        RETURN_IF_ERROR(shared_buffered_input_stream->set_io_ranges(io_ranges));
+    }
+
     input_stream = shared_buffered_input_stream;
+
+    // Setup cache stream if needed
+    std::shared_ptr<io::CacheInputStream> cache_input_stream = nullptr;
+    if (_datacache_options.enable_datacache) {
+        cache_input_stream = std::make_shared<io::CacheInputStream>(
+            shared_buffered_input_stream,
+            filename,
+            file_length,
+            _datacache_options.modification_time);
+        cache_input_stream->set_enable_populate_cache(_datacache_options.enable_populate_datacache);
+        cache_input_stream->set_enable_async_populate_mode(_datacache_options.enable_datacache_async_populate_mode);
+        cache_input_stream->set_enable_cache_io_adaptor(_datacache_options.enable_datacache_io_adaptor);
+        cache_input_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+        shared_buffered_input_stream->set_align_size(cache_input_stream->get_align_size());
+        input_stream = cache_input_stream;
+    }
 
     // Create final file object
     auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
@@ -285,6 +309,14 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
         .max_buffer_size = config::io_coalesce_read_max_buffer_size
     };
     shared_buffered_input_stream->set_coalesce_options(shared_options);
+
+    // small file optimization
+    if (file_length < config::io_coalesce_read_max_buffer_size) {
+        std::vector<io::SharedBufferedInputStream::IORange> io_ranges{};
+        io_ranges.emplace_back(0, file_length);
+        RETURN_IF_ERROR(shared_buffered_input_stream->set_io_ranges(io_ranges));
+    }
+
     input_stream = shared_buffered_input_stream;
 
     // Setup cache stream if needed
