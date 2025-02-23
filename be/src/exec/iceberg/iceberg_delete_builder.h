@@ -115,6 +115,7 @@ public:
 
 private:
     std::string _datafile_path;
+    std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
 };
 
 class IcebergDeleteBuilder {
