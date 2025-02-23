@@ -186,22 +186,59 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
                                            std::vector<SlotDescriptor*> slot_descs,
                                            TupleDescriptor* delete_column_tuple_desc,
                                            const TIcebergSchema* iceberg_equal_delete_schema, RuntimeState* state) {
-    std::unique_ptr<RandomAccessFile> file;
-    ASSIGN_OR_RETURN(file, _fs->new_random_access_file(delete_file_path));
 
+    // Create initial file
+    std::unique_ptr<RandomAccessFile> raw_file;
+    ASSIGN_OR_RETURN(raw_file, _fs->new_random_access_file(delete_file_path));
+    raw_file->set_size(file_length);
+    const std::string& filename = raw_file->filename();
+
+    // Setup stream pipeline
+    std::shared_ptr<io::SeekableInputStream> input_stream = raw_file->stream();
+
+    // Setup buffered stream
+    auto shared_buffered_input_stream = std::make_shared<io::SharedBufferedInputStream>(
+        input_stream, filename, file_length);
+    const io::SharedBufferedInputStream::CoalesceOptions shared_options = {
+        .max_dist_size = config::io_coalesce_read_max_distance_size,
+        .max_buffer_size = config::io_coalesce_read_max_buffer_size
+    };
+    shared_buffered_input_stream->set_coalesce_options(shared_options);
+    input_stream = shared_buffered_input_stream;
+
+    // Setup cache stream if needed
+    std::shared_ptr<io::CacheInputStream> cache_input_stream = nullptr;
+    if (_datacache_options.enable_datacache) {
+        cache_input_stream = std::make_shared<io::CacheInputStream>(
+            shared_buffered_input_stream,
+            filename,
+            file_length,
+            _datacache_options.modification_time);
+        cache_input_stream->set_enable_populate_cache(_datacache_options.enable_populate_datacache);
+        cache_input_stream->set_enable_async_populate_mode(_datacache_options.enable_datacache_async_populate_mode);
+        cache_input_stream->set_enable_cache_io_adaptor(_datacache_options.enable_datacache_io_adaptor);
+        cache_input_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+        shared_buffered_input_stream->set_align_size(cache_input_stream->get_align_size());
+        input_stream = cache_input_stream;
+    }
+
+    // Create final file object
+    auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
+    file->set_size(file_length);
+    // Create and initialize parquet reader
     std::unique_ptr<parquet::FileReader> reader;
     try {
-        reader = std::make_unique<parquet::FileReader>(state->chunk_size(), file.get(), file->get_size().value(),
-                                                       _datacache_options);
+        reader = std::make_unique<parquet::FileReader>(
+            state->chunk_size(), file.get(), file->get_size().value(), _datacache_options);
     } catch (std::exception& e) {
         const auto s = strings::Substitute(
-                "ParquetEqualityDeleteBuilder::build create parquet::FileReader failed. reason = $0", e.what());
+            "ParquetEqualityDeleteBuilder::build create parquet::FileReader failed. reason = $0",
+            e.what());
         LOG(WARNING) << s;
         return Status::InternalError(s);
     }
 
     auto scanner_ctx = std::make_unique<HdfsScannerContext>();
-    auto scan_stats = std::make_unique<HdfsScanStats>();
     std::vector<HdfsScannerContext::ColumnInfo> columns;
     THdfsScanRange scan_range;
     scan_range.offset = 0;
@@ -215,8 +252,7 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
         columns.emplace_back(column);
     }
     scanner_ctx->timezone = timezone;
-    scanner_ctx->stats = scan_stats.get();
-    scanner_ctx->tuple_desc = delete_column_tuple_desc;
+    scanner_ctx->slot_descs = delete_column_tuple_desc->slots();
     scanner_ctx->iceberg_schema = iceberg_equal_delete_schema;
     scanner_ctx->materialized_columns = std::move(columns);
     scanner_ctx->scan_range = &scan_range;
