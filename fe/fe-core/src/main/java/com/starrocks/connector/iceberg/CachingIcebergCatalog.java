@@ -140,8 +140,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     @Override
     public Table getTable(String dbName, String tableName) throws StarRocksConnectorException {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
+        ConnectContext context = ConnectContext.get();
 
-        if (ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
+        if (context != null &&
+                context.getCommand() == MysqlCommand.COM_QUERY) {
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
         }
 
