@@ -3190,6 +3190,9 @@ public class OlapTable extends Table {
         for (Partition partition : allPartitions) {
             for (PhysicalPartition subPartition : partition.getSubPartitions()) {
                 for (MaterializedIndex index : subPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                    if (index == null) {
+                        continue;
+                    }
                     for (Tablet tablet : index.getTablets()) {
                         invertedIndex.deleteTablet(tablet.getId());
                     }
