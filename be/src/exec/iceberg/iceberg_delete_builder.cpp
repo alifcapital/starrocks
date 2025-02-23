@@ -38,41 +38,146 @@ static const IcebergColumnMeta k_delete_file_path{
 static const IcebergColumnMeta k_delete_file_pos{
         .id = INT32_MAX - 102, .col_name = "pos", .type = TPrimitiveType::BIGINT};
 
-Status ParquetPositionDeleteBuilder::build(const std::string& timezone, const std::string& delete_file_path,
-                                           int64_t file_length, std::set<int64_t>* need_skip_rowids) {
-    std::vector<SlotDescriptor*> slot_descriptors{&(IcebergDeleteFileMeta::get_delete_file_path_slot()),
-                                                  &(IcebergDeleteFileMeta::get_delete_file_pos_slot())};
-    auto iter = std::make_unique<IcebergDeleteFileIterator>();
-    RETURN_IF_ERROR(iter->init(_fs, timezone, delete_file_path, file_length, slot_descriptors, true));
-    std::shared_ptr<::arrow::RecordBatch> batch;
+Status ParquetPositionDeleteBuilder::build(
+    const std::string& timezone,
+    const std::string& delete_file_path,
+    int64_t file_length,
+    std::set<int64_t>* need_skip_rowids,
+    RuntimeState* state) {
 
-    Status status;
+    // Create initial file
+    std::unique_ptr<RandomAccessFile> raw_file;
+    ASSIGN_OR_RETURN(raw_file, _fs->new_random_access_file(delete_file_path));
+    raw_file->set_size(file_length);
+    const std::string& filename = raw_file->filename();
+
+    // Setup stream pipeline
+    std::shared_ptr<io::SeekableInputStream> input_stream = raw_file->stream();
+
+    // Setup buffered stream
+    auto shared_buffered_input_stream = std::make_shared<io::SharedBufferedInputStream>(
+        input_stream, filename, file_length);
+    const io::SharedBufferedInputStream::CoalesceOptions shared_options = {
+        .max_dist_size = config::io_coalesce_read_max_distance_size,
+        .max_buffer_size = config::io_coalesce_read_max_buffer_size
+    };
+    shared_buffered_input_stream->set_coalesce_options(shared_options);
+
+    // small file optimization
+    if (file_length < config::io_coalesce_read_max_buffer_size) {
+        std::vector<io::SharedBufferedInputStream::IORange> io_ranges{};
+        io_ranges.emplace_back(0, file_length);
+        RETURN_IF_ERROR(shared_buffered_input_stream->set_io_ranges(io_ranges));
+    }
+
+    input_stream = shared_buffered_input_stream;
+
+    // Setup cache stream if needed
+    std::shared_ptr<io::CacheInputStream> cache_input_stream = nullptr;
+    if (_datacache_options.enable_datacache) {
+        cache_input_stream = std::make_shared<io::CacheInputStream>(
+            shared_buffered_input_stream,
+            filename,
+            file_length,
+            _datacache_options.modification_time);
+        cache_input_stream->set_enable_populate_cache(_datacache_options.enable_populate_datacache);
+        cache_input_stream->set_enable_async_populate_mode(_datacache_options.enable_datacache_async_populate_mode);
+        cache_input_stream->set_enable_cache_io_adaptor(_datacache_options.enable_datacache_io_adaptor);
+        cache_input_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+        shared_buffered_input_stream->set_align_size(cache_input_stream->get_align_size());
+        input_stream = cache_input_stream;
+    }
+
+    // Create final file object
+    auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
+    file->set_size(file_length);
+
+    // Setup slot descriptors
+    std::vector<SlotDescriptor*> slot_descriptors{
+        &(IcebergDeleteFileMeta::get_delete_file_path_slot()),
+        &(IcebergDeleteFileMeta::get_delete_file_pos_slot())
+    };
+
+     // Create and initialize parquet reader
+     std::unique_ptr<parquet::FileReader> reader;
+     try {
+         reader = std::make_unique<parquet::FileReader>(
+             state->chunk_size(),
+             file.get(),
+             file->get_size().value(),
+             _datacache_options);
+     } catch (std::exception& e) {
+         const auto s = strings::Substitute(
+             "ParquetPositionDeleteBuilder::build create parquet::FileReader failed. reason = $0",
+             e.what());
+         LOG(WARNING) << s;
+         return Status::InternalError(s);
+     }
+
+    // Setup scanner context
+    auto scanner_ctx = std::make_unique<HdfsScannerContext>();
+    auto scan_stats = std::make_unique<HdfsScanStats>();
+
+    std::vector<HdfsScannerContext::ColumnInfo> columns;
+    THdfsScanRange scan_range;
+    scan_range.offset = 0;
+    scan_range.length = file_length;
+
+    for (size_t i = 0; i < slot_descriptors.size(); i++) {
+        auto* slot = slot_descriptors[i];
+        HdfsScannerContext::ColumnInfo column;
+        column.slot_desc = slot;
+        column.idx_in_chunk = i;
+        column.decode_needed = true;
+        columns.emplace_back(column);
+    }
+
+    // Setup Iceberg schema
+    std::vector<TIcebergSchemaField> schema_fields;
+    TIcebergSchemaField file_path_field = TIcebergSchemaField();
+    file_path_field.__set_field_id(k_delete_file_path.id);
+    file_path_field.__set_name(k_delete_file_path.col_name);
+    TIcebergSchemaField pos_field = TIcebergSchemaField();
+    pos_field.__set_field_id(k_delete_file_pos.id);
+    pos_field.__set_name(k_delete_file_pos.col_name);
+    schema_fields.push_back(file_path_field);
+    schema_fields.push_back(pos_field);
+    TIcebergSchema iceberg_schema = TIcebergSchema();
+    iceberg_schema.__set_fields(schema_fields);
+
+    scanner_ctx->timezone = timezone;
+    scanner_ctx->stats = scan_stats.get();
+    scanner_ctx->slot_descs = slot_descriptors;
+    scanner_ctx->iceberg_schema = &iceberg_schema;
+    scanner_ctx->materialized_columns = std::move(columns);
+    scanner_ctx->scan_range = &scan_range;
+    scanner_ctx->lazy_column_coalesce_counter = &_lazy_column_coalesce_counter;
+
+    RETURN_IF_ERROR(reader->init(scanner_ctx.get()));
+
+    // Process chunks
     while (true) {
-        status = iter->has_next();
-        if (!status.ok()) {
+        ChunkPtr chunk = ChunkHelper::new_chunk(slot_descriptors, state->chunk_size());
+        Status status = reader->get_next(&chunk);
+        if (status.is_end_of_file()) {
             break;
         }
 
-        batch = iter->next();
-        ::arrow::StringArray* file_path_array = static_cast<arrow::StringArray*>(batch->column(0).get());
-        ::arrow::Int64Array* pos_array = static_cast<arrow::Int64Array*>(batch->column(1).get());
-        for (size_t row = 0; row < batch->num_rows(); row++) {
-            if (file_path_array->Value(row) == _datafile_path) {
-                need_skip_rowids->emplace(pos_array->Value(row));
+        ColumnPtr& file_path = chunk->get_column_by_slot_id(k_delete_file_path.id);
+        ColumnPtr& pos = chunk->get_column_by_slot_id(k_delete_file_pos.id);
+        for (int i = 0; i < chunk->num_rows(); i++) {
+            if (file_path->get(i).get_slice() == _datafile_path) {
+                need_skip_rowids->emplace(pos->get(i).get_int64());
             }
         }
+        RETURN_IF_ERROR(status);
     }
 
-    // eof is expected, otherwise propagate error
-    if (!status.is_end_of_file()) {
-        LOG(WARNING) << status;
-        return status;
-    }
     return Status::OK();
 }
 
 Status ORCPositionDeleteBuilder::build(const std::string& timezone, const std::string& delete_file_path,
-                                       int64_t file_length, std::set<int64_t>* need_skip_rowids) {
+                                       int64_t file_length, std::set<int64_t>* need_skip_rowids, RuntimeState* state) {
     std::vector<SlotDescriptor*> slot_descriptors{&(IcebergDeleteFileMeta::get_delete_file_path_slot()),
                                                   &(IcebergDeleteFileMeta::get_delete_file_pos_slot())};
 
@@ -186,22 +291,69 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
                                            std::vector<SlotDescriptor*> slot_descs,
                                            TupleDescriptor* delete_column_tuple_desc,
                                            const TIcebergSchema* iceberg_equal_delete_schema, RuntimeState* state) {
-    std::unique_ptr<RandomAccessFile> file;
-    ASSIGN_OR_RETURN(file, _fs->new_random_access_file(delete_file_path));
 
+    // Create initial file
+    std::unique_ptr<RandomAccessFile> raw_file;
+    ASSIGN_OR_RETURN(raw_file, _fs->new_random_access_file(delete_file_path));
+    raw_file->set_size(file_length);
+    const std::string& filename = raw_file->filename();
+
+    // Setup stream pipeline
+    std::shared_ptr<io::SeekableInputStream> input_stream = raw_file->stream();
+
+    // Setup buffered stream
+    auto shared_buffered_input_stream = std::make_shared<io::SharedBufferedInputStream>(
+        input_stream, filename, file_length);
+    const io::SharedBufferedInputStream::CoalesceOptions shared_options = {
+        .max_dist_size = config::io_coalesce_read_max_distance_size,
+        .max_buffer_size = config::io_coalesce_read_max_buffer_size
+    };
+    shared_buffered_input_stream->set_coalesce_options(shared_options);
+
+    // small file optimization
+    if (file_length < config::io_coalesce_read_max_buffer_size) {
+        std::vector<io::SharedBufferedInputStream::IORange> io_ranges{};
+        io_ranges.emplace_back(0, file_length);
+        RETURN_IF_ERROR(shared_buffered_input_stream->set_io_ranges(io_ranges));
+    }
+
+    input_stream = shared_buffered_input_stream;
+
+    // Setup cache stream if needed
+    std::shared_ptr<io::CacheInputStream> cache_input_stream = nullptr;
+    if (_datacache_options.enable_datacache) {
+        cache_input_stream = std::make_shared<io::CacheInputStream>(
+            shared_buffered_input_stream,
+            filename,
+            file_length,
+            _datacache_options.modification_time);
+        cache_input_stream->set_enable_populate_cache(_datacache_options.enable_populate_datacache);
+        cache_input_stream->set_enable_async_populate_mode(_datacache_options.enable_datacache_async_populate_mode);
+        cache_input_stream->set_enable_cache_io_adaptor(_datacache_options.enable_datacache_io_adaptor);
+        cache_input_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+        shared_buffered_input_stream->set_align_size(cache_input_stream->get_align_size());
+        input_stream = cache_input_stream;
+    }
+
+    // Create final file object
+    auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
+    file->set_size(file_length);
+    // Create and initialize parquet reader
     std::unique_ptr<parquet::FileReader> reader;
     try {
-        reader = std::make_unique<parquet::FileReader>(state->chunk_size(), file.get(), file->get_size().value(),
-                                                       _datacache_options);
+        reader = std::make_unique<parquet::FileReader>(
+            state->chunk_size(), file.get(), file->get_size().value(), _datacache_options);
     } catch (std::exception& e) {
         const auto s = strings::Substitute(
-                "ParquetEqualityDeleteBuilder::build create parquet::FileReader failed. reason = $0", e.what());
+            "ParquetEqualityDeleteBuilder::build create parquet::FileReader failed. reason = $0",
+            e.what());
         LOG(WARNING) << s;
         return Status::InternalError(s);
     }
 
     auto scanner_ctx = std::make_unique<HdfsScannerContext>();
     auto scan_stats = std::make_unique<HdfsScanStats>();
+
     std::vector<HdfsScannerContext::ColumnInfo> columns;
     THdfsScanRange scan_range;
     scan_range.offset = 0;
@@ -216,7 +368,7 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
     }
     scanner_ctx->timezone = timezone;
     scanner_ctx->stats = scan_stats.get();
-    scanner_ctx->tuple_desc = delete_column_tuple_desc;
+    scanner_ctx->slot_descs = delete_column_tuple_desc->slots();
     scanner_ctx->iceberg_schema = iceberg_equal_delete_schema;
     scanner_ctx->materialized_columns = std::move(columns);
     scanner_ctx->scan_range = &scan_range;
