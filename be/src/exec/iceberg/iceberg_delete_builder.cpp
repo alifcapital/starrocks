@@ -39,7 +39,7 @@ static const IcebergColumnMeta k_delete_file_pos{
         .id = INT32_MAX - 102, .col_name = "pos", .type = TPrimitiveType::BIGINT};
 
 Status ParquetPositionDeleteBuilder::build(const std::string& timezone, const std::string& delete_file_path,
-                                           int64_t file_length, std::set<int64_t>* need_skip_rowids) {
+                                           int64_t file_length, std::set<int64_t>* need_skip_rowids, RuntimeState* state) {
     std::vector<SlotDescriptor*> slot_descriptors{&(IcebergDeleteFileMeta::get_delete_file_path_slot()),
                                                   &(IcebergDeleteFileMeta::get_delete_file_pos_slot())};
     auto iter = std::make_unique<IcebergDeleteFileIterator>();
@@ -72,7 +72,7 @@ Status ParquetPositionDeleteBuilder::build(const std::string& timezone, const st
 }
 
 Status ORCPositionDeleteBuilder::build(const std::string& timezone, const std::string& delete_file_path,
-                                       int64_t file_length, std::set<int64_t>* need_skip_rowids) {
+                                       int64_t file_length, std::set<int64_t>* need_skip_rowids, RuntimeState* state) {
     std::vector<SlotDescriptor*> slot_descriptors{&(IcebergDeleteFileMeta::get_delete_file_path_slot()),
                                                   &(IcebergDeleteFileMeta::get_delete_file_pos_slot())};
 
