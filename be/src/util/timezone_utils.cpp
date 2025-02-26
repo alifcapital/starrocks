@@ -61,11 +61,6 @@ Timestamp ts_add_seconds(Timestamp ts, int seconds) {
     return timestamp::add<TimeUnit::SECOND>(ts, seconds);
 }
 
-// Implementation for external linkage function called from time_types.h
-int timezone_utils_get_offset_for_timestamp(const cctz::time_zone& ctz, Timestamp timestamp) {
-    return TimezoneUtils::get_offset_for_timestamp(ctz, timestamp);
-}
-
 const std::string TimezoneUtils::default_time_zone = "+08:00";
 
 static phmap::flat_hash_map<std::string_view, cctz::time_zone> _s_cached_timezone;

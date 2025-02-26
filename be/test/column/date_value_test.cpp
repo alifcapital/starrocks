@@ -24,6 +24,11 @@
 #include "runtime/time_types.h"
 #include "types/date_value.h"
 #include "types/timestamp_value.h"
+#include <cctz/time_zone.h>
+#include <chrono>
+#include <iostream>
+#include <string>
+#include "util/timezone_utils.h"
 
 namespace starrocks {
 
@@ -179,7 +184,7 @@ TEST(DateValueTest, getOffsetByTimezone) {
         cctz::time_zone ctz;
         TimezoneUtils::find_cctz_time_zone(timezone, ctz);
 
-        auto offset = timestamp::get_offset_by_timezone(timestampInDST, ctz);
+        auto offset = TimezoneUtils::get_offset_for_timestamp(ctz, timestampInDST);
 
         ASSERT_EQ(32400, offset);
     }
@@ -190,7 +195,7 @@ TEST(DateValueTest, getOffsetByTimezone) {
         cctz::time_zone ctz;
         TimezoneUtils::find_cctz_time_zone(timezone, ctz);
 
-        auto offset = timestamp::get_offset_by_timezone(timestampOutOfDST, ctz);
+        auto offset = TimezoneUtils::get_offset_for_timestamp(ctz, timestampOutOfDST);
 
         ASSERT_EQ(28800, offset);
     }

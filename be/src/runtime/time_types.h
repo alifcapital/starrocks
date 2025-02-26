@@ -219,8 +219,6 @@ public:
 
     inline static bool check(int year, int month, int day, int hour, int minute, int second, int microsecond);
 
-    inline static int get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz);
-
     template <TimeUnit UNIT>
     static Timestamp add(Timestamp timestamp, int count);
 
@@ -369,12 +367,6 @@ Timestamp timestamp::from_time(int hour, int minute, int second, int microsecond
 
 bool timestamp::check(int year, int month, int day, int hour, int minute, int second, int microsecond) {
     return date::check(year, month, day) && check_time(hour, minute, second, microsecond);
-}
-
-inline static int get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz) {
-    // Use the centralized TimezoneUtils implementation - with external linkage
-    extern int timezone_utils_get_offset_for_timestamp(const cctz::time_zone& ctz, Timestamp timestamp);
-    return timezone_utils_get_offset_for_timestamp(ctz, timestamp);
 }
 
 inline void timestamp::to_time(Timestamp timestamp, int* hour, int* minute, int* second, int* microsecond) {
