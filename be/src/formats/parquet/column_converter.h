@@ -57,4 +57,42 @@ public:
                                    const std::string& timezone, std::unique_ptr<ColumnConverter>* converter);
 };
 
+class Int64ToDateTimeConverter final : public ColumnConverter {
+public:
+    Int64ToDateTimeConverter() = default;
+    ~Int64ToDateTimeConverter() override = default;
+
+    // Initialize with timezone and schema information
+    // Supports both pre-1970 and post-1970 timestamps
+    Status init(const std::string& timezone, const tparquet::SchemaElement& schema_element);
+
+    // Convert parquet INT64 to timestamp
+    // Correctly handles timezone transitions for both pre-1970 and post-1970 dates
+    Status convert(const ColumnPtr& src, Column* dst) override;
+
+private:
+    bool _is_adjusted_to_utc = false;
+    cctz::time_zone _ctz;
+    int64_t _second_mask = 0;
+    int64_t _scale_to_nano_factor = 0;
+
+    // Use the centralized timezone offset cache
+    std::unique_ptr<TimezoneOffsetCache> _tz_cache;
+};
+
+class Int96ToDateTimeConverter final : public ColumnConverter {
+public:
+    Int96ToDateTimeConverter() = default;
+    ~Int96ToDateTimeConverter() override = default;
+
+    Status init(const std::string& timezone);
+    // convert column from int96 to timestamp
+    Status convert(const ColumnPtr& src, Column* dst) override;
+
+private:
+    cctz::time_zone _ctz;
+    // Use the centralized timezone offset cache
+    std::unique_ptr<TimezoneOffsetCache> _tz_cache;
+};
+
 } // namespace starrocks::parquet

@@ -24,6 +24,9 @@
 
 namespace starrocks {
 
+// Forward declare TimezoneUtils as a class rather than a namespace
+class TimezoneUtils;
+
 // Date: Julian Date -2000-01-01 ~ 9999-01-01
 // MAX USE 22 bits
 typedef int32_t JulianDate;
@@ -368,12 +371,10 @@ bool timestamp::check(int year, int month, int day, int hour, int minute, int se
     return date::check(year, month, day) && check_time(hour, minute, second, microsecond);
 }
 
-int timestamp::get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz) {
-    int64_t days = timestamp::to_julian(timestamp);
-    int64_t seconds_from_epoch = (days - date::UNIX_EPOCH_JULIAN) * SECS_PER_DAY;
-
-    std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds_from_epoch);
-    return ctz.lookup(tp).offset;
+inline static int get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz) {
+    // Use the centralized TimezoneUtils implementation - with external linkage
+    extern int timezone_utils_get_offset_for_timestamp(const cctz::time_zone& ctz, Timestamp timestamp);
+    return timezone_utils_get_offset_for_timestamp(ctz, timestamp);
 }
 
 inline void timestamp::to_time(Timestamp timestamp, int* hour, int* minute, int* second, int* microsecond) {
