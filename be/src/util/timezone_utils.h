@@ -44,25 +44,9 @@
 
 #include "cctz/time_zone.h"
 #include "util/timezone_hsscan.h"
+#include "runtime/time_types.h"
 
 namespace starrocks {
-
-// Forward declarations - only use basic types to avoid conflicts
-typedef int32_t JulianDate;
-typedef int64_t Timestamp;
-
-// Forward declare necessary classes without defining their contents
-class date;
-class timestamp;
-
-// Constant needed for timestamp calculations
-constexpr JulianDate UNIX_EPOCH_JULIAN = 2440588;
-
-// Forward declare functions we need without using namespaces
-// We'll implement these via external linkage
-int64_t ts_to_julian(Timestamp ts);
-int64_t ts_to_time(Timestamp ts);
-Timestamp ts_add_seconds(Timestamp ts, int seconds);
 
 /**
  * Utility class for timezone operations.

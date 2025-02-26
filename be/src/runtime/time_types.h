@@ -24,9 +24,6 @@
 
 namespace starrocks {
 
-// Forward declare TimezoneUtils as a class rather than a namespace
-class TimezoneUtils;
-
 // Date: Julian Date -2000-01-01 ~ 9999-01-01
 // MAX USE 22 bits
 typedef int32_t JulianDate;

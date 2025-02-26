@@ -48,18 +48,6 @@
 
 namespace starrocks {
 
-// Implementation of helper functions for external linkage
-int64_t ts_to_julian(Timestamp ts) {
-    return timestamp::to_julian(ts);
-}
-
-int64_t ts_to_time(Timestamp ts) {
-    return timestamp::to_time(ts);
-}
-
-Timestamp ts_add_seconds(Timestamp ts, int seconds) {
-    return timestamp::add<TimeUnit::SECOND>(ts, seconds);
-}
 
 const std::string TimezoneUtils::default_time_zone = "+08:00";
 
@@ -237,12 +225,12 @@ int TimezoneUtils::get_offset_at_timestamp(const cctz::time_zone& ctz, int64_t s
 }
 
 int TimezoneUtils::get_offset_for_timestamp(const cctz::time_zone& ctz, Timestamp timestamp) {
-    // Use our helper functions instead of directly calling timestamp methods
-    int64_t days = ts_to_julian(timestamp);
-    int64_t microseconds = ts_to_time(timestamp);
+    // Use timestamp namespace functions directly
+    int64_t days = timestamp::to_julian(timestamp);
+    int64_t microseconds = timestamp::to_time(timestamp);
 
     // Use constants from time_types.h
-    int64_t seconds_from_epoch = (days - UNIX_EPOCH_JULIAN) * SECS_PER_DAY + microseconds / USECS_PER_SEC;
+    int64_t seconds_from_epoch = (days - date::UNIX_EPOCH_JULIAN) * SECS_PER_DAY + microseconds / USECS_PER_SEC;
 
     // Convert to time_point with appropriate precision
     std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds_from_epoch);
@@ -354,10 +342,10 @@ int TimezoneOffsetCache::get_offset_for_seconds(int64_t seconds_since_epoch) {
 }
 
 int TimezoneOffsetCache::get_offset_for_timestamp(Timestamp timestamp) {
-    // Convert timestamp to seconds since epoch using our helper functions
-    JulianDate julian_days = ts_to_julian(timestamp);
-    int64_t microseconds = ts_to_time(timestamp);
-    int64_t seconds_since_epoch = (julian_days - UNIX_EPOCH_JULIAN) * SECS_PER_DAY + microseconds / USECS_PER_SEC;
+    // Convert timestamp to seconds since epoch using timestamp namespace functions
+    JulianDate julian_days = timestamp::to_julian(timestamp);
+    int64_t microseconds = timestamp::to_time(timestamp);
+    int64_t seconds_since_epoch = (julian_days - date::UNIX_EPOCH_JULIAN) * SECS_PER_DAY + microseconds / USECS_PER_SEC;
 
     return get_offset_for_seconds(seconds_since_epoch);
 }
@@ -366,8 +354,7 @@ Timestamp TimezoneOffsetCache::utc_to_local(Timestamp timestamp) {
     // Get the offset for this timestamp
     int offset = get_offset_for_timestamp(timestamp);
 
-    // Apply the offset using our helper function
-    return ts_add_seconds(timestamp, offset);
+    return timestamp::add<TimeUnit::SECOND>(timestamp, offset);
 }
 
 } // namespace starrocks
