@@ -33,6 +33,7 @@
 #include "types/date_value.h"
 #include "util/defer_op.h"
 #include "utils.h"
+#include "util/timezone_utils.h"
 
 namespace starrocks::parquet {
 
@@ -58,12 +59,14 @@ LevelBuilder::LevelBuilder(TypeDescriptor type_desc, ::parquet::schema::NodePtr 
           _root(std::move(root)),
           _timezone(std::move(timezone)),
           _use_legacy_decimal_encoding(use_legacy_decimal_encoding),
-          _use_int96_timestamp_encoding(use_int96_timestamp_encoding) {}
+          _use_int96_timestamp_encoding(use_int96_timestamp_encoding),
+          _tz_cache(_ctz) {}
 
 Status LevelBuilder::init() {
     if (!TimezoneUtils::find_cctz_time_zone(_timezone, _ctz)) {
-        return Status::InternalError(fmt::format("can not find cctz time zone {}", timezone));
+        return Status::InternalError(fmt::format("can not find cctz time zone {}", _timezone));
     }
+    _tz_cache = TimezoneOffsetCache(_ctz);
     return Status::OK();
 }
 
@@ -353,7 +356,8 @@ Status LevelBuilder::_write_datetime_column_chunk(const LevelBuilderContext& ctx
     DeferOp defer([&] { delete[] values; });
 
     for (size_t i = 0; i < col->size(); i++) {
-        auto offset = timestamp::get_offset_by_timezone(data_col[i]._timestamp, _ctz);
+        // Use the cached version instead of calling TimezoneUtils directly
+        auto offset = _tz_cache.get_offset_for_timestamp(data_col[i]._timestamp);
 
         auto timestamp = use_int96_timestamp_encoding ? timestamp::sub<TimeUnit::SECOND>(data_col[i]._timestamp, offset)
                                                       : data_col[i]._timestamp;

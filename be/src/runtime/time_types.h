@@ -216,8 +216,6 @@ public:
 
     inline static bool check(int year, int month, int day, int hour, int minute, int second, int microsecond);
 
-    inline static int get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz);
-
     template <TimeUnit UNIT>
     static Timestamp add(Timestamp timestamp, int count);
 
@@ -234,7 +232,7 @@ public:
 
     inline static double time_to_literal(double time);
 
-    inline static Timestamp of_epoch_second(int64_t seconds, int64_t microseconds);
+    inline static Timestamp of_epoch_second(int64_t seconds, int64_t nanoseconds);
 
 public:
     // MAX_DATE | USECS_PER_DAY
@@ -334,7 +332,9 @@ bool date::check(int year, int month, int day) {
 // ============================== Timestamp inline function ==================================
 
 Timestamp timestamp::to_time(Timestamp timestamp) {
-    return timestamp & TIMESTAMP_BITS_TIME;
+    // Explicitly cast to uint64_t to prevent sign issues
+    // and ensure we only get the bottom 40 bits
+    return static_cast<uint64_t>(timestamp) & TIMESTAMP_BITS_TIME;
 }
 
 JulianDate timestamp::to_julian(Timestamp timestamp) {
@@ -357,7 +357,8 @@ void timestamp::to_datetime(Timestamp timestamp, int* year, int* month, int* day
 }
 
 Timestamp timestamp::from_julian_and_time(JulianDate julian, Timestamp microsecond) {
-    return date::to_timestamp(julian) | microsecond;
+    // Mask microseconds to ensure no high bits interfere with Julian date bits
+    return date::to_timestamp(julian) | (microsecond & TIMESTAMP_BITS_TIME);
 }
 
 Timestamp timestamp::from_time(int hour, int minute, int second, int microsecond) {
@@ -366,14 +367,6 @@ Timestamp timestamp::from_time(int hour, int minute, int second, int microsecond
 
 bool timestamp::check(int year, int month, int day, int hour, int minute, int second, int microsecond) {
     return date::check(year, month, day) && check_time(hour, minute, second, microsecond);
-}
-
-int timestamp::get_offset_by_timezone(Timestamp timestamp, const cctz::time_zone& ctz) {
-    int64_t days = timestamp::to_julian(timestamp);
-    int64_t seconds_from_epoch = (days - date::UNIX_EPOCH_JULIAN) * SECS_PER_DAY;
-
-    std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds_from_epoch);
-    return ctz.lookup(tp).offset;
 }
 
 inline void timestamp::to_time(Timestamp timestamp, int* hour, int* minute, int* second, int* microsecond) {
@@ -427,11 +420,20 @@ double timestamp::time_to_literal(double time) {
 }
 
 Timestamp timestamp::of_epoch_second(int64_t seconds, int64_t nanoseconds) {
-    int64_t second = seconds + timestamp::UNIX_EPOCH_SECONDS;
-    JulianDate day = second / SECS_PER_DAY;
+    // Convert epoch seconds to Julian day
+    JulianDate julian_day = date::UNIX_EPOCH_JULIAN + (seconds / SECS_PER_DAY);
 
-    int64_t microseconds = (second % SECS_PER_DAY) * USECS_PER_SEC + nanoseconds / NANOSECS_PER_USEC;
-    return timestamp::from_julian_and_time(day, microseconds);
+    // Calculate microseconds within the day
+    int64_t day_seconds = seconds % SECS_PER_DAY;
+    int64_t microseconds = day_seconds * USECS_PER_SEC + nanoseconds / NANOSECS_PER_USEC;
+
+    // Handle overflow to next day
+    if (microseconds >= USECS_PER_DAY) {
+        julian_day += 1;
+        microseconds -= USECS_PER_DAY;
+    }
+
+    return timestamp::from_julian_and_time(julian_day, microseconds);
 }
 
 bool timestamp::check_time(int hour, int minute, int second, int microsecond) {

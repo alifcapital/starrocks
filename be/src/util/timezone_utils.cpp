@@ -43,9 +43,11 @@
 #include <vector>
 
 #include "glog/logging.h"
+#include "runtime/time_types.h"
 #include "util/phmap/phmap.h"
 
 namespace starrocks {
+
 
 const std::string TimezoneUtils::default_time_zone = "+08:00";
 
@@ -213,7 +215,78 @@ int64_t TimezoneUtils::to_utc_offset(const cctz::time_zone& ctz) {
     const std::chrono::time_point<std::chrono::system_clock> tp;
     const cctz::time_zone::absolute_lookup a = ctz.lookup(tp);
     const cctz::time_zone::absolute_lookup b = utc.lookup(tp);
-    return a.cs - b.cs;
+    return a.offset - b.offset;
+}
+
+int TimezoneUtils::get_offset_at_timestamp(const cctz::time_zone& ctz, int64_t seconds_since_epoch) {
+    // Handle both positive (post-1970) and negative (pre-1970) timestamps
+    std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds_since_epoch);
+    return ctz.lookup(tp).offset;
+}
+
+int TimezoneUtils::get_offset_for_date_time(const cctz::time_zone& ctz, int year, int month, int day,
+                                          int hour, int minute, int second) {
+    cctz::civil_second cs(year, month, day, hour, minute, second);
+    auto tp = cctz::convert(cs, ctz);
+    return ctz.lookup(tp).offset;
+}
+
+int TimezoneOffsetCache::get_offset_for_seconds(int64_t seconds_since_epoch) {
+    // 1. Check if the timestamp is within our cached range
+    if (seconds_since_epoch >= _prev_transition_seconds && seconds_since_epoch < _next_transition_seconds) {
+        return _current_offset;
+    }
+
+    // 2. Not in cache boundaries - need to update
+    std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds_since_epoch);
+
+    // Get current offset
+    const auto lookup = _ctz.lookup(tp);
+    _current_offset = lookup.offset;
+
+    // Find previous transition
+    cctz::time_zone::civil_transition prev_transition;
+    bool has_prev_transition = _ctz.prev_transition(tp, &prev_transition);
+
+    if (has_prev_transition) {
+        // Convert the civil time to time_point to get the exact transition time
+        auto transition_tp = cctz::convert(prev_transition.from, _ctz);
+        // Get seconds since epoch
+        _prev_transition_seconds = std::chrono::system_clock::to_time_t(transition_tp);
+    } else {
+        // No more previous transitions, use minimum value
+        _prev_transition_seconds = std::numeric_limits<int64_t>::min();
+    }
+
+    // Find next transition
+    cctz::time_zone::civil_transition next_transition;
+    bool has_next_transition = _ctz.next_transition(tp, &next_transition);
+
+    if (has_next_transition) {
+        // Convert the civil time to time_point to get the exact transition time
+        auto transition_tp = cctz::convert(next_transition.to, _ctz);
+        // Get seconds since epoch
+        _next_transition_seconds = std::chrono::system_clock::to_time_t(transition_tp);
+    } else {
+        // No more transitions, use maximum value
+        _next_transition_seconds = std::numeric_limits<int64_t>::max();
+    }
+
+    return _current_offset;
+}
+
+int TimezoneOffsetCache::get_offset_for_timestamp(Timestamp timestamp) {
+    int64_t days = timestamp::to_julian(timestamp);
+    int64_t microseconds = timestamp::to_time(timestamp);
+    int64_t seconds_since_epoch = (days - date::UNIX_EPOCH_JULIAN) * SECS_PER_DAY + microseconds / USECS_PER_SEC;
+
+    return get_offset_for_seconds(seconds_since_epoch);
+}
+
+Timestamp TimezoneOffsetCache::utc_to_local(Timestamp timestamp) {
+    int offset = get_offset_for_timestamp(timestamp);
+
+    return timestamp::add<TimeUnit::SECOND>(timestamp, offset);
 }
 
 } // namespace starrocks

@@ -1,4 +1,3 @@
-
 // Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,6 +35,7 @@
 #include "fs/fs.h"
 #include "runtime/runtime_state.h"
 #include "util/priority_thread_pool.hpp"
+#include "util/timezone_utils.h"
 
 namespace starrocks::parquet {
 
@@ -163,9 +163,10 @@ private:
     TypeDescriptor _type_desc;
     ::parquet::schema::NodePtr _root;
     std::string _timezone;
+    bool _use_legacy_decimal_encoding;
+    bool _use_int96_timestamp_encoding;
     cctz::time_zone _ctz;
-    bool _use_legacy_decimal_encoding = false;
-    bool _use_int96_timestamp_encoding = false;
+    TimezoneOffsetCache _tz_cache;
 };
 
 } // namespace starrocks::parquet
