@@ -57,10 +57,13 @@ QueryContext::~QueryContext() noexcept {
     // current RuntimeState to release Operators, OperatorFactories in the remaining RuntimeStates will trigger
     // segmentation fault.
     if (_mem_tracker != nullptr) {
-        LOG(INFO) << fmt::format(
-                "finished query_id:{} context life time:{} cpu costs:{} peak memusage:{} scan_bytes:{} spilled "
-                "bytes:{}",
-                print_id(query_id()), lifetime(), cpu_cost(), mem_cost_bytes(), get_scan_bytes(), get_spill_bytes());
+        if (lifetime() > config::big_query_sec * 1000 * 1000 * 1000) {
+            LOG(INFO) << fmt::format(
+                    "finished query_id:{} context life time:{} cpu costs:{} peak memusage:{} scan_bytes:{} spilled "
+                    "bytes:{}",
+                    print_id(query_id()), lifetime(), cpu_cost(), mem_cost_bytes(), get_scan_bytes(),
+                    get_spill_bytes());
+        }
     }
 
     {
@@ -381,8 +384,8 @@ QueryContext* QueryContextManager::get_or_register(const TUniqueId& query_id) {
             // lookup query context for the second chance in sc_map
             if (sc_it != sc_map.end()) {
                 auto ctx = std::move(sc_it->second);
-                RETURN_NULL_IF_CTX_CANCELLED(ctx);
                 sc_map.erase(sc_it);
+                RETURN_NULL_IF_CTX_CANCELLED(ctx);
                 auto* raw_ctx_ptr = ctx.get();
                 context_map.emplace(query_id, std::move(ctx));
                 return raw_ctx_ptr;

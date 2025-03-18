@@ -345,6 +345,10 @@ public class GlobalTransactionMgr implements MemoryTrackable {
         } finally {
             locker.unLockTablesWithIntensiveDbLock(db, tableIdList, LockType.WRITE);
         }
+        if (waiter == null) {
+            throw new TransactionCommitFailedException(String.format("transaction fail to commit, %s",
+                    transactionState.toString()));
+        }
 
         MetricRepo.COUNTER_LOAD_FINISHED.increase(1L);
         stopWatch.stop();
@@ -859,11 +863,6 @@ public class GlobalTransactionMgr implements MemoryTrackable {
                 LOG.warn("Abort txn on coordinate BE {} failed, msg={}", coordinateHost, e.getMessage());
             }
         }
-    }
-
-    public void updateDatabaseUsedQuotaData(long dbId, long usedQuotaDataBytes) throws AnalysisException {
-        DatabaseTransactionMgr dbTransactionMgr = getDatabaseTransactionMgr(dbId);
-        dbTransactionMgr.updateDatabaseUsedQuotaData(usedQuotaDataBytes);
     }
 
     public void saveTransactionStateV2(ImageWriter imageWriter) throws IOException, SRMetaBlockException {

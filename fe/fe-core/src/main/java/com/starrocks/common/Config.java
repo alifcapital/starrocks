@@ -37,6 +37,7 @@ package com.starrocks.common;
 import com.starrocks.StarRocksFE;
 import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.Replica;
+import com.starrocks.qe.scheduler.slot.QueryQueueOptions;
 
 public class Config extends ConfigBase {
 
@@ -695,6 +696,10 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static int query_queue_v2_concurrency_level = 4;
+
+    @ConfField(mutable = true, comment = "Schedule strategy of pending queries: SWRR/SJF")
+    public static String query_queue_v2_schedule_strategy = QueryQueueOptions.SchedulePolicy.createDefault().name();
+
     /**
      * Used to estimate the number of slots of a query based on the cardinality of the Source Node. It is equal to the
      * cardinality of the Source Node divided by the configuration value and is limited to between [1, DOP*numBEs].
@@ -2401,6 +2406,12 @@ public class Config extends ConfigBase {
     public static long iceberg_metadata_cache_max_entry_size = 8388608L;
 
     /**
+     * paimon metadata cache preheat, default false
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_paimon_refresh_manifest_files = false;
+
+    /**
      * fe will call es api to get es index shard info every es_state_sync_interval_secs
      */
     @ConfField
@@ -2788,6 +2799,10 @@ public class Config extends ConfigBase {
                     "Only takes effect for tables in clusters with run_mode=shared_data.\n")
     public static long lake_autovacuum_stale_partition_threshold = 12;
 
+    @ConfField(mutable = true, comment = 
+            "Determine whether a vacuum operation needs to be initiated based on the vacuum version.\n")
+    public static boolean lake_autovacuum_detect_vaccumed_version = true;
+
     @ConfField(mutable = true, comment =
             "Whether enable throttling ingestion speed when compaction score exceeds the threshold.\n" +
                     "Only takes effect for tables in clusters with run_mode=shared_data.")
@@ -3082,6 +3097,9 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "Whether enable to refresh materialized view in sync mode mergeable or not")
     public static boolean enable_mv_refresh_sync_refresh_mergeable = false;
 
+    @ConfField(mutable = true, comment = "Whether enable profile in refreshing materialized view or not by default")
+    public static boolean enable_mv_refresh_collect_profile = false;
+
     @ConfField(mutable = true, comment = "The max length for mv task run extra message's values(set/map) to avoid " +
             "occupying too much meta memory")
     public static int max_mv_task_run_meta_message_values_length = 16;
@@ -3322,4 +3340,11 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true)
     public static int max_show_proc_transactions_entry = 2000;
+
+    /**
+     *  max partition meta count will be returned when BE/CN call GetPartitionsMeta
+     *  if one table's partition count exceeds this, it will return all partitions for this table
+     */
+    @ConfField(mutable = true)
+    public static int max_get_partitions_meta_result_count = 100000;
 }

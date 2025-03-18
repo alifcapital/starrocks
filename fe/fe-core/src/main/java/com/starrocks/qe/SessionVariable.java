@@ -425,6 +425,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_ICEBERG_COLUMN_STATISTICS = "enable_iceberg_column_statistics";
     public static final String ENABLE_DELTA_LAKE_COLUMN_STATISTICS = "enable_delta_lake_column_statistics";
+
+    public static final String ENABLE_PAIMON_COLUMN_STATISTICS = "enable_paimon_column_statistics";
+
     public static final String PLAN_MODE = "plan_mode";
 
     public static final String ENABLE_HIVE_COLUMN_STATS = "enable_hive_column_stats";
@@ -605,6 +608,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_MATERIALIZED_VIEW_VIEW_DELTA_REWRITE =
             "enable_materialized_view_view_delta_rewrite";
+    public static final String ENABLE_MATERIALIZED_VIEW_MULTI_STAGES_REWRITE =
+            "enable_materialized_view_multi_stages_rewrite";
+    public static final String MATERIALIZED_VIEW_MAX_RELATION_MAPPING_SIZE =
+            "materialized_view_max_relation_mapping_size";
 
     public static final String MATERIALIZED_VIEW_JOIN_SAME_TABLE_PERMUTATION_LIMIT =
             "materialized_view_join_same_table_permutation_limit";
@@ -612,6 +619,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_MATERIALIZED_VIEW_SINGLE_TABLE_VIEW_DELTA_REWRITE =
             "enable_materialized_view_single_table_view_delta_rewrite";
     public static final String ANALYZE_FOR_MV = "analyze_mv";
+    public static final String ANALYZE_FOR_MV_V2 = "analyze_mv_v2";
     public static final String QUERY_EXCLUDING_MV_NAMES = "query_excluding_mv_names";
     public static final String QUERY_INCLUDING_MV_NAMES = "query_including_mv_names";
     public static final String ENABLE_MATERIALIZED_VIEW_REWRITE_GREEDY_MODE =
@@ -1872,6 +1880,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_MATERIALIZED_VIEW_VIEW_DELTA_REWRITE)
     private boolean enableMaterializedViewViewDeltaRewrite = true;
 
+    @VarAttr(name = ENABLE_MATERIALIZED_VIEW_MULTI_STAGES_REWRITE)
+    private boolean enableMaterializedViewMultiStagesRewrite = true;
+
+    @VarAttr(name = MATERIALIZED_VIEW_MAX_RELATION_MAPPING_SIZE)
+    private int materializedViewMaxRelationMappingSize = 10;
+
     @VarAttr(name = MATERIALIZED_VIEW_JOIN_SAME_TABLE_PERMUTATION_LIMIT, flag = VariableMgr.INVISIBLE)
     private int materializedViewJoinSameTablePermutationLimit = 5;
 
@@ -1918,7 +1932,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
      * Materialized view rewrite related mv limit: how many related MVs would be considered for rewrite to a query?
      */
     @VarAttr(name = CBO_MATERIALIZED_VIEW_REWRITE_RELATED_MVS_LIMIT, flag = VariableMgr.INVISIBLE)
-    private int cboMaterializedViewRewriteRelatedMVsLimit = 64;
+    private int cboMaterializedViewRewriteRelatedMVsLimit = 16;
 
     @VarAttr(name = QUERY_EXCLUDING_MV_NAMES, flag = VariableMgr.INVISIBLE)
     private String queryExcludingMVNames = "";
@@ -1926,8 +1940,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = QUERY_INCLUDING_MV_NAMES, flag = VariableMgr.INVISIBLE)
     private String queryIncludingMVNames = "";
 
-    @VarAttr(name = ANALYZE_FOR_MV)
-    private String analyzeTypeForMV = "sample";
+    // no trigger to analyze table for mv by default
+    @VarAttr(name = ANALYZE_FOR_MV_V2, alias = ANALYZE_FOR_MV, show = ANALYZE_FOR_MV)
+    private String analyzeTypeForMV = "";
 
     // if enable_big_query_log = true and cpu/io cost of a query exceeds the related threshold,
     // the information will be written to the big query log
@@ -2125,6 +2140,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_DELTA_LAKE_COLUMN_STATISTICS)
     private boolean enableDeltaLakeColumnStatistics = false;
 
+    @VarAttr(name = ENABLE_PAIMON_COLUMN_STATISTICS)
+    private boolean enablePaimonColumnStatistics = false;
+
     @VarAttr(name = PLAN_MODE)
     private String planMode = PlanMode.AUTO.modeName();
 
@@ -2293,6 +2311,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
             return Optional.empty();
         }
         return Optional.of(followerForwardMode.equalsIgnoreCase(FollowerQueryForwardMode.LEADER.toString()));
+    }
+
+    public void setEnablePaimonColumnStatistics(boolean enablePaimonColumnStatistics) {
+        this.enablePaimonColumnStatistics = enablePaimonColumnStatistics;
+    }
+
+    public boolean enablePaimonColumnStatistics() {
+        return this.enablePaimonColumnStatistics;
     }
 
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_SHUFFLE, flag = VariableMgr.INVISIBLE)
@@ -3659,6 +3685,22 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMaterializedViewViewDeltaRewrite(boolean enableMaterializedViewViewDeltaRewrite) {
         this.enableMaterializedViewViewDeltaRewrite = enableMaterializedViewViewDeltaRewrite;
+    }
+
+    public boolean isEnableMaterializedViewMultiStagesRewrite() {
+        return enableMaterializedViewMultiStagesRewrite;
+    }
+
+    public void setEnableMaterializedViewMultiStagesRewrite(boolean enableMaterializedViewMultiStagesRewrite) {
+        this.enableMaterializedViewMultiStagesRewrite = enableMaterializedViewMultiStagesRewrite;
+    }
+
+    public int getMaterializedViewMaxRelationMappingSize() {
+        return materializedViewMaxRelationMappingSize;
+    }
+
+    public void setMaterializedViewMaxRelationMappingSize(int materializedViewMaxRelationMappingSize) {
+        this.materializedViewMaxRelationMappingSize = materializedViewMaxRelationMappingSize;
     }
 
     public int getMaterializedViewJoinSameTablePermutationLimit() {

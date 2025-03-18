@@ -101,7 +101,7 @@ struct ArrayUnionAggAggregateState {
 };
 
 template <LogicalType LT, bool is_distinct, typename MyHashSet = std::set<int>>
-class ArrayUnionAggAggregateFunction
+class ArrayUnionAggAggregateFunction final
         : public AggregateFunctionBatchHelper<ArrayUnionAggAggregateState<LT, is_distinct, MyHashSet>,
                                               ArrayUnionAggAggregateFunction<LT, is_distinct, MyHashSet>> {
 public:
@@ -156,7 +156,8 @@ public:
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
                                      ColumnPtr* dst) const override {
-        (*dst)->append(*(src[0].get()));
+        const Column* src_data = ColumnHelper::get_data_column(src[0].get());
+        (*dst)->append(*src_data);
     }
 
     std::string get_name() const override { return is_distinct ? "array_unique_agg" : "array_union_agg"; }

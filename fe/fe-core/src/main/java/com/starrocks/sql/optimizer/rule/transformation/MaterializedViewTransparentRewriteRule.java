@@ -158,7 +158,7 @@ public class MaterializedViewTransparentRewriteRule extends TransformationRule {
         logMVRewrite(context, this, "MV to refresh partition info: {}", mvUpdateInfo);
 
         MaterializationContext mvContext = MvRewritePreprocessor.buildMaterializationContext(context,
-                mv, mvPlanContext, ConstantOperator.TRUE, mvUpdateInfo, queryTables);
+                mv, mvPlanContext, ConstantOperator.TRUE, mvUpdateInfo, queryTables, 0);
 
         Map<Column, ColumnRefOperator> columnToColumnRefMap = olapScanOperator.getColumnMetaToColRefMap();
         // use ordered output columns to ensure the order of output columns if the mv contains order-by clause.
@@ -206,7 +206,7 @@ public class MaterializedViewTransparentRewriteRule extends TransformationRule {
         mvUpdateInfo.addMvToRefreshPartitionNames(mv.getPartitionNames());
 
         MaterializationContext mvContext = MvRewritePreprocessor.buildMaterializationContext(context,
-                mv, mvPlanContext, ConstantOperator.TRUE, mvUpdateInfo, queryTables);
+                mv, mvPlanContext, ConstantOperator.TRUE, mvUpdateInfo, queryTables, 0);
         logMVRewrite(mvContext, "Get mv transparent plan failed, and redirect to mv's defined query");
         Map<Column, ColumnRefOperator> columnToColumnRefMap = olapScanOperator.getColumnMetaToColRefMap();
         List<Column> mvColumns = mv.getBaseSchema();
@@ -260,7 +260,8 @@ public class MaterializedViewTransparentRewriteRule extends TransformationRule {
                                                 MaterializationContext mvContext,
                                                 List<ColumnRefOperator> originalOutputColumns) {
         OptExpressionDuplicator duplicator = new OptExpressionDuplicator(mvContext);
-        OptExpression newMvQueryPlan = duplicator.duplicate(mvPlan, true, true);
+        OptExpression newMvQueryPlan = duplicator.duplicate(mvPlan, mvContext.getMvColumnRefFactory(),
+                true, true);
 
         List<ColumnRefOperator> orgMvQueryOutputColumnRefs = mvContext.getMvOutputColumnRefs();
         List<ColumnRefOperator> newQueryOutputColumns = duplicator.getMappedColumns(orgMvQueryOutputColumnRefs);

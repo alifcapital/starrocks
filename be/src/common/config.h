@@ -123,7 +123,7 @@ CONF_Int32(clone_worker_count, "3");
 // The count of thread to clone.
 CONF_Int32(storage_medium_migrate_count, "3");
 // The count of thread to check consistency.
-CONF_Int32(check_consistency_worker_count, "1");
+CONF_mInt32(check_consistency_worker_count, "1");
 // The count of thread to update scheam
 CONF_Int32(update_schema_worker_count, "3");
 // The count of thread to upload.
@@ -378,6 +378,10 @@ CONF_mInt64(size_tiered_min_level_size, "131072");
 CONF_mInt64(size_tiered_level_multiple, "5");
 CONF_mInt64(size_tiered_level_multiple_dupkey, "10");
 CONF_mInt64(size_tiered_level_num, "7");
+
+// random compaction strategy is only used for chaos test,
+// should never be true in prodution.
+CONF_mBool(chaos_test_enable_random_compaction_strategy, "false");
 
 CONF_Bool(enable_check_string_lengths, "true");
 
@@ -1469,4 +1473,5 @@ CONF_mInt32(json_parse_many_batch_size, "1000000");
 CONF_mBool(enable_dynamic_batch_size_for_json_parse_many, "true");
 CONF_mInt32(put_combined_txn_log_thread_pool_num_max, "64");
 CONF_mBool(enable_put_combinded_txn_log_parallel, "false");
+CONF_mInt32(big_query_sec, "1");
 } // namespace starrocks::config

@@ -233,7 +233,6 @@ import com.starrocks.thrift.TStatusCode;
 import com.starrocks.transaction.GlobalTransactionMgr;
 import com.starrocks.transaction.GtidGenerator;
 import com.starrocks.transaction.PublishVersionDaemon;
-import com.starrocks.transaction.UpdateDbUsedDataQuotaDaemon;
 import com.starrocks.warehouse.WarehouseIdleChecker;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -311,7 +310,7 @@ public class GlobalStateMgr {
     private final BackupHandler backupHandler;
     private final PublishVersionDaemon publishVersionDaemon;
     private final DeleteMgr deleteMgr;
-    private final UpdateDbUsedDataQuotaDaemon updateDbUsedDataQuotaDaemon;
+    private final DatabaseQuotaRefresher updateDbUsedDataQuotaDaemon;
 
     private FrontendDaemon labelCleaner; // To clean old LabelInfo, ExportJobInfos
     private FrontendDaemon txnTimeoutChecker; // To abort timeout txns
@@ -643,7 +642,7 @@ public class GlobalStateMgr {
         this.backupHandler = new BackupHandler(this);
         this.publishVersionDaemon = new PublishVersionDaemon();
         this.deleteMgr = new DeleteMgr();
-        this.updateDbUsedDataQuotaDaemon = new UpdateDbUsedDataQuotaDaemon();
+        this.updateDbUsedDataQuotaDaemon = new DatabaseQuotaRefresher();
         this.statisticsMetaManager = new StatisticsMetaManager();
         this.statisticAutoCollector = new StatisticAutoCollector();
         this.safeModeChecker = new SafeModeChecker();
@@ -1147,12 +1146,6 @@ public class GlobalStateMgr {
             // 6. start task cleaner thread
             createTaskCleaner();
             createTableKeeper();
-
-            // 7. init starosAgent
-            if (RunMode.isSharedDataMode() && !starOSAgent.init(null)) {
-                LOG.error("init starOSAgent failed");
-                System.exit(-1);
-            }
         } catch (Exception e) {
             try {
                 if (isFirstTimeStart) {
@@ -1393,6 +1386,10 @@ public class GlobalStateMgr {
         taskRunStateSynchronizer.start();
 
         if (RunMode.isSharedDataMode()) {
+            // Need to rebuild active lake compaction transactions before lake scheduler starting to run
+            // Lake compactionMgr is started on all FE nodes and scheduler only starts to run when the FE is leader
+            compactionMgr.buildActiveCompactionTransactionMap();
+
             starMgrMetaSyncer.start();
             autovacuumDaemon.start();
         }
@@ -2461,7 +2458,7 @@ public class GlobalStateMgr {
 
     private boolean supportRefreshTableType(Table table) {
         return table.isHiveTable() || table.isHudiTable() || table.isHiveView() || table.isIcebergTable()
-                    || table.isJDBCTable() || table.isDeltalakeTable();
+                || table.isJDBCTable() || table.isDeltalakeTable() || table.isPaimonTable();
     }
 
     public void refreshExternalTable(TableName tableName, List<String> partitions) {

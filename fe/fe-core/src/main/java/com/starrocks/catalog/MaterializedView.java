@@ -38,6 +38,8 @@ import com.starrocks.backup.mv.MvBackupInfo;
 import com.starrocks.backup.mv.MvBaseTableBackupInfo;
 import com.starrocks.backup.mv.MvRestoreContext;
 import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.GlobalConstraintManager;
+import com.starrocks.catalog.mv.MVPlanValidationResult;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.MaterializedViewExceptions;
@@ -836,7 +838,7 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
         long mvStaleness = (baseTableRefreshTimestamp - mvRefreshTimestamp) / 1000;
         if (mvStaleness > this.maxMVRewriteStaleness) {
             ZoneId currentTimeZoneId = TimeUtils.getTimeZone().toZoneId();
-            LOG.info("MV is outdated because MV's staleness {} (baseTables' lastRefreshTime {} - " +
+            LOG.debug("MV is outdated because MV's staleness {} (baseTables' lastRefreshTime {} - " +
                             "MV's lastRefreshTime {}) is greater than the staleness config {}",
                     DateUtils.formatTimeStampInMill(baseTableRefreshTimestamp, currentTimeZoneId),
                     DateUtils.formatTimeStampInMill(mvRefreshTimestamp, currentTimeZoneId),
@@ -1004,6 +1006,10 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
             if (desiredActive && reloadActive) {
                 setActive();
             }
+
+            // register constraints from global state manager
+            GlobalConstraintManager globalConstraintManager = GlobalStateMgr.getCurrentState().getGlobalConstraintManager();
+            globalConstraintManager.registerConstraint(this);
         } catch (Throwable e) {
             LOG.error("reload mv failed: {}", this, e);
             setInactiveAndReason("reload failed: " + e.getMessage());
@@ -1024,6 +1030,7 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
      * @return active or not
      */
     private boolean onReloadImpl() {
+        long startTime = System.currentTimeMillis();
         Database db = GlobalStateMgr.getCurrentState().getDb(dbId);
         if (db == null) {
             LOG.warn("db:{} do not exist. materialized view id:{} name:{} should not exist", dbId, id, name);
@@ -1106,7 +1113,10 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
                 );
             }
         }
+        // analyze partition info
         analyzePartitionInfo();
+
+        LOG.info("finish to reload mv:{} cost:{}(ms)", getName(), System.currentTimeMillis() - startTime);
         return res;
     }
 
@@ -1651,9 +1661,17 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
     private <K> Map<Table, K> refreshBaseTable(Map<Table, K> cached) {
         Map<Table, K> result = Maps.newHashMap();
         for (Map.Entry<Table, K> e : cached.entrySet()) {
-            Preconditions.checkState(tableToBaseTableInfoCache.containsKey(e.getKey()));
-            Table refreshedTable = MvUtils.getTableChecked(tableToBaseTableInfoCache.get(e.getKey()));
-            result.put(refreshedTable, e.getValue());
+            Table table = e.getKey();
+            if (table instanceof IcebergTable || table instanceof DeltaLakeTable) {
+                Preconditions.checkState(tableToBaseTableInfoCache.containsKey(table));
+                // TODO: get table from current context rather than metadata catalog
+                // it's fine to re-get table from metadata catalog again since metadata catalog should cache
+                // the newest table info.
+                Table refreshedTable = MvUtils.getTableChecked(tableToBaseTableInfoCache.get(table));
+                result.put(refreshedTable, e.getValue());
+            } else {
+                result.put(table, e.getValue());
+            }
         }
         return result;
     }
@@ -1735,12 +1753,17 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
      * Return the status and reason about query rewrite
      */
     public String getQueryRewriteStatus() {
-        Pair<Boolean, String> status =
-                MvRewritePreprocessor.isMVValidToRewriteQuery(ConnectContext.get(), this, true, Sets.newHashSet());
-        if (status.first) {
-            return "VALID";
+        // since check mv valid to rewrite query is a heavy operation, we only check it when it's in the plan cache.
+        final MVPlanValidationResult result = MvRewritePreprocessor.isMVValidToRewriteQuery(ConnectContext.get(),
+                this, false, Sets.newHashSet(), true);
+        switch (result.getStatus()) {
+            case VALID:
+                return "VALID";
+            case INVALID:
+                return "INVALID: " + result.getReason();
+            default:
+                return "UNKNOWN: " + result.getReason();
         }
-        return "INVALID: " + status.second;
     }
 
     @Override

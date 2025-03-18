@@ -392,7 +392,9 @@ SegmentIterator::SegmentIterator(std::shared_ptr<Segment> segment, Schema schema
     }
     if (_opts.dcg_loader != nullptr) {
         SCOPED_RAW_TIMER(&_opts.stats->get_delta_column_group_ns);
-        if (_opts.is_primary_keys) {
+        if (_opts.is_primary_keys ||
+            (_opts.read_by_generated_column_adding && _opts.tablet_schema != nullptr &&
+             _opts.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS) /* for adding generated column */) {
             TabletSegmentId tsid;
             tsid.tablet_id = _opts.tablet_id;
             tsid.segment_id = _opts.rowset_id + segment_id();
@@ -1127,7 +1129,6 @@ Status SegmentIterator::_do_get_next(Chunk* result, vector<rowid_t>* rowid) {
         if (buf_size <= 0) {
             buf_size = 1048576; // 1MB
         }
-        std::unique_ptr<char[]> buf(new char[buf_size]);
         for (auto& [cid, stream] : _column_files) {
             ASSIGN_OR_RETURN(auto vec, _column_iterators[cid]->get_io_range_vec(_scan_range));
             for (auto e : vec) {
@@ -1137,7 +1138,7 @@ Status SegmentIterator::_do_get_next(Chunk* result, vector<rowid_t>* rowid) {
                 size_t size = e.second + (e.first % buf_size);
                 while (size > 0) {
                     size_t cur_size = std::min(buf_size, size);
-                    RETURN_IF_ERROR(stream->read_at_fully(offset, buf.get(), cur_size));
+                    RETURN_IF_ERROR(stream->touch_cache(offset, cur_size));
                     offset += cur_size;
                     size -= cur_size;
                 }

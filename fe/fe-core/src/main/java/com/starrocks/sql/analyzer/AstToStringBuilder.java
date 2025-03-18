@@ -102,6 +102,7 @@ import com.starrocks.sql.ast.CreateUserStmt;
 import com.starrocks.sql.ast.DataDescription;
 import com.starrocks.sql.ast.DefaultValueExpr;
 import com.starrocks.sql.ast.DeleteStmt;
+import com.starrocks.sql.ast.DescribeStmt;
 import com.starrocks.sql.ast.DictionaryGetExpr;
 import com.starrocks.sql.ast.DropMaterializedViewStmt;
 import com.starrocks.sql.ast.ExceptRelation;
@@ -818,14 +819,18 @@ public class AstToStringBuilder {
             return sqlBuilder.toString();
         }
 
-        @Override
-        public String visitFileTableFunction(FileTableFunctionRelation node, Void context) {
+        private String outputFileTable(Map<String, String> properties) {
             StringBuilder sb = new StringBuilder();
             sb.append(FileTableFunctionRelation.IDENTIFIER);
             sb.append("(");
-            sb.append(new PrintableMap<String, String>(node.getProperties(), "=", true, false, hideCredential));
+            sb.append(new PrintableMap<String, String>(properties, "=", true, false, hideCredential));
             sb.append(")");
             return sb.toString();
+        }
+
+        @Override
+        public String visitFileTableFunction(FileTableFunctionRelation node, Void context) {
+            return outputFileTable(node.getProperties());
         }
 
         @Override
@@ -1100,7 +1105,11 @@ public class AstToStringBuilder {
             if (isImplicit) {
                 return visit(node.getChild(0));
             }
-            return "CAST(" + printWithParentheses(node.getChild(0)) + " AS " + node.getTargetTypeDef().toString() + ")";
+            if (node.getTargetTypeDef() == null) {
+                return "CAST(" + printWithParentheses(node.getChild(0)) + " AS " + node.getType().toString() + ")";
+            } else {
+                return "CAST(" + printWithParentheses(node.getChild(0)) + " AS " + node.getTargetTypeDef().toString() + ")";
+            }
         }
 
         public String visitCompoundPredicate(CompoundPredicate node, Void context) {
@@ -1362,6 +1371,18 @@ public class AstToStringBuilder {
             return strBuilder.toString();
         }
 
+        @Override
+        public String visitDescTableStmt(DescribeStmt stmt, Void context) {
+            if (stmt.isTableFunctionTable()) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("DESC ");
+                sb.append(outputFileTable(stmt.getTableFunctionProperties()));
+                return sb.toString();
+            } else {
+                return stmt.getOrigStmt().originStmt;
+            }
+        }
+
         // ----------------- AST ---------------
         @Override
         public String visitLimitElement(LimitElement node, Void context) {
@@ -1592,7 +1613,7 @@ public class AstToStringBuilder {
             sb.append(")");
             addTableComment(sb, view);
 
-            sb.append(" AS ").append(view.getInlineViewDef()).append(";");
+            sb.append(" AS ").append(view.getInlineViewDefWithoutCredential()).append(";");
             createTableStmt.add(sb.toString());
             return;
         }

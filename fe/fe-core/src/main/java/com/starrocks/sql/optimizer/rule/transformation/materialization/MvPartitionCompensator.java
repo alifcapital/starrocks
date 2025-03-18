@@ -108,6 +108,7 @@ public class MvPartitionCompensator {
             ImmutableSet.<OperatorType>builder()
                     .add(OperatorType.LOGICAL_HIVE_SCAN)
                     .add(OperatorType.LOGICAL_ICEBERG_SCAN)
+                    .add(OperatorType.LOGICAL_PAIMON_SCAN)
                     .build();
 
     public static final ImmutableSet<OperatorType> SUPPORTED_PARTITION_COMPENSATE_SCAN_TYPES =
@@ -125,7 +126,7 @@ public class MvPartitionCompensator {
         if (t == null) {
             return false;
         }
-        if (t.isNativeTableOrMaterializedView() || t.isIcebergTable() || t.isHiveTable()) {
+        if (t.isNativeTableOrMaterializedView() || t.isIcebergTable() || t.isHiveTable() || t.isPaimonTable()) {
             return true;
         }
         return false;
@@ -205,7 +206,7 @@ public class MvPartitionCompensator {
             return null;
         }
         OptExpressionDuplicator duplicator = new OptExpressionDuplicator(mvContext);
-        OptExpression newMvQueryPlan = duplicator.duplicate(compensateMvQueryPlan);
+        OptExpression newMvQueryPlan = duplicator.duplicate(compensateMvQueryPlan, mvContext.getMvColumnRefFactory());
         if (newMvQueryPlan == null) {
             logMVRewrite(mvContext, "Duplicate compensate query plan failed");
             return null;
