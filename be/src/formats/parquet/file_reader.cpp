@@ -213,6 +213,9 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                             // This preserves data for UNION ALL while optimizing anti-join
                             _iceberg_eq_delete_skip_probe = true;
                             _iceberg_eq_delete_row_groups_skipped++;
+                            if (_group_reader_param.stats != nullptr) {
+                                _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
+                            }
                         } else {
                             // Normal runtime filter: filter the entire row group
                             filter = true;
@@ -364,6 +367,9 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                     std::fill(skip_probe_column->get_data().begin(), skip_probe_column->get_data().end(), 1);
                     (*chunk)->append_column(skip_probe_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
                     _iceberg_eq_delete_rows_skipped += row_count;
+                    if (_group_reader_param.stats != nullptr) {
+                        _group_reader_param.stats->iceberg_eq_delete_rows_skipped += row_count;
+                    }
                 }
 
                 _scan_row_count += (*chunk)->num_rows();
@@ -394,13 +400,7 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                         }
 
                         RETURN_IF_ERROR(cur_row_group->prepare());
-                        // propagate per-RG EQ delete metrics to scanner stats for profile exposure
-                        if (_scanner_ctx != nullptr) {
-                            _scanner_ctx->app_stats.iceberg_eq_delete_row_groups_skipped +=
-                                    _iceberg_eq_delete_row_groups_skipped;
-                            _scanner_ctx->app_stats.iceberg_eq_delete_rows_skipped +=
-                                    _iceberg_eq_delete_rows_skipped;
-                        }
+
                     }
                     break;
                 } while (true);
@@ -449,6 +449,5 @@ Status FileReader::_exec_no_materialized_column_scan(ChunkPtr* chunk) {
     return Status::EndOfFile("");
 }
 
-// (removed debug-only runtime filter arrival simulation)
 
 } // namespace starrocks::parquet
