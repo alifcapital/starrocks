@@ -33,12 +33,12 @@ class DatumTuple;
 class ChunkExtraData;
 using ChunkExtraDataPtr = std::shared_ptr<ChunkExtraData>;
 /**
- * ChunkExtraData is an extra data which can be used to extend Chunk and 
- * attach extra infos beside the schema. eg, In Stream MV scenes, 
+ * ChunkExtraData is an extra data which can be used to extend Chunk and
+ * attach extra infos beside the schema. eg, In Stream MV scenes,
  * the hidden `_op_` column can be added in the ChunkExtraData.
  *
  * NOTE: Chunk only offers the set/get methods for ChunkExtraData, extra data
- * callers need implement the Chunk's specific methods , eg, handle `filter` method 
+ * callers need implement the Chunk's specific methods , eg, handle `filter` method
  * for the extra data.
  */
 class ChunkExtraData {
@@ -54,7 +54,8 @@ public:
         SORT_ORDINAL_COLUMN_SLOT_ID = -2,
         HASH_JOIN_BUILD_INDEX_SLOT_ID = -3,
         HASH_JOIN_PROBE_INDEX_SLOT_ID = -4,
-        HASH_AGG_SPILL_HASH_SLOT_ID = -5
+        HASH_AGG_SPILL_HASH_SLOT_ID = -5,
+        EQ_DELETE_BYPASS_SLOT_ID = -6  // Anti-join bypass for Iceberg equality deletes
     };
 
     using ChunkPtr = std::shared_ptr<Chunk>;

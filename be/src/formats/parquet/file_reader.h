@@ -123,6 +123,9 @@ private:
 
     size_t _total_row_count = 0;
     size_t _scan_row_count = 0;
+    // Iceberg EQ delete metrics
+    size_t _iceberg_eq_delete_row_groups_skipped = 0;
+    size_t _iceberg_eq_delete_rows_skipped = 0;
     bool _no_materialized_column_scan = false;
 
     StoragePageCache* _cache = nullptr;
@@ -130,6 +133,8 @@ private:
 
     // not exist column conjuncts eval false, file can be skipped
     bool _is_file_filtered = false;
+    // flag to mark if entire row group should skip hash table probe in EQ delete anti-join
+    bool _iceberg_eq_delete_skip_probe = false;
     HdfsScannerContext* _scanner_ctx = nullptr;
     io::SharedBufferedInputStream* _sb_stream = nullptr;
     GroupReaderParam _group_reader_param;

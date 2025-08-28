@@ -390,6 +390,7 @@ void JoinHashMap<LT, CT, MT>::_search_ht(RuntimeState* state, ChunkPtr* probe_ch
     }
     if (!_probe_state->has_remain) {
         _probe_state->probe_row_count = (*probe_chunk)->num_rows();
+
         _probe_state->active_coroutines = state->query_options().interleaving_group_size;
         // disable adaptively interleaving if the ht may encounter seriously cache misses.
         if (state->query_options().interleaving_group_size > 0 && !_table_items->ht_cache_miss_serious()) {

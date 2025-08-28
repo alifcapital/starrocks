@@ -150,7 +150,7 @@ struct HashTableProbeState {
     Buffer<uint32_t> probe_match_index;
     Buffer<uint8_t> probe_match_filter;
     uint32_t count = 0; // current return values count
-    // the rows of src probe chunk
+        // the rows of src probe chunk
     size_t probe_row_count = 0;
 
     // 0: normal

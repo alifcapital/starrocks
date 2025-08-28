@@ -90,6 +90,7 @@ private:
 
     Status _do_publish_runtime_filters(RuntimeState* state, int64_t limit);
     Status _push_down_in_filter(RuntimeState* state);
+    bool _is_iceberg_equality_delete_join() const;
 
     friend ExecNode;
     // _hash_join_node is used to construct HashJoiner, the reference is sound since
@@ -160,6 +161,9 @@ private:
     RuntimeProfile::Counter* _probe_conjunct_evaluate_timer = nullptr;
     RuntimeProfile::Counter* _other_join_conjunct_evaluate_timer = nullptr;
     RuntimeProfile::Counter* _where_conjunct_evaluate_timer = nullptr;
+    // Iceberg EQ delete optimization metrics
+    RuntimeProfile::Counter* _iceberg_eq_delete_chunks_skipped = nullptr;
+    RuntimeProfile::Counter* _iceberg_eq_delete_rows_skipped = nullptr;
 };
 
 } // namespace starrocks

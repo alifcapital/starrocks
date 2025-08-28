@@ -23,6 +23,7 @@
 #include "column/column_helper.h"
 #include "column/fixed_length_column.h"
 #include "column/vectorized_fwd.h"
+#include "column/column.h"
 #include "exec/hash_joiner.h"
 #include "exec/pipeline/chunk_accumulate_operator.h"
 #include "exec/pipeline/exchange/exchange_source_operator.h"
@@ -181,6 +182,9 @@ Status HashJoinNode::prepare(RuntimeState* state) {
     _build_rows_counter = ADD_COUNTER(_runtime_profile, "BuildRows", TUnit::UNIT);
     _build_buckets_counter = ADD_COUNTER(_runtime_profile, "BuildBuckets", TUnit::UNIT);
     _push_down_expr_num = ADD_COUNTER(_runtime_profile, "PushDownExprNum", TUnit::UNIT);
+    // Iceberg EQ delete optimization metrics
+    _iceberg_eq_delete_chunks_skipped = ADD_COUNTER(_runtime_profile, "IcebergEqDeleteChunksSkipped", TUnit::UNIT);
+    _iceberg_eq_delete_rows_skipped = ADD_COUNTER(_runtime_profile, "IcebergEqDeleteRowsSkipped", TUnit::UNIT);
     _avg_input_probe_chunk_size = ADD_COUNTER(_runtime_profile, "AvgInputProbeChunkSize", TUnit::UNIT);
     _avg_output_chunk_size = ADD_COUNTER(_runtime_profile, "AvgOutputChunkSize", TUnit::UNIT);
     _runtime_profile->add_info_string("JoinType", to_string(_join_type));
@@ -730,7 +734,41 @@ Status HashJoinNode::_probe(RuntimeState* state, ScopedTimer<MonotonicStopWatch>
             }
         }
 
-        TRY_CATCH_BAD_ALLOC(RETURN_IF_ERROR(_ht.probe(state, _key_columns, &_probing_chunk, chunk, &_ht_has_remain)));
+        // Fast path for EQ delete bypass: check if rows can skip hash table probe
+        if (_join_type == TJoinOp::LEFT_ANTI_JOIN && _is_iceberg_equality_delete_join() &&
+            _probing_chunk != nullptr && _probing_chunk->has_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+
+            auto& skip_probe_column = _probing_chunk->get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+            auto* bool_column = down_cast<BoolColumn*>(skip_probe_column.get());
+
+                        // Check if all rows can skip hash table probe
+            bool all_rows_skip_probe = true;
+            for (size_t i = 0; i < bool_column->size() && all_rows_skip_probe; i++) {
+                if (!bool_column->get_data()[i]) {
+                    all_rows_skip_probe = false;
+                }
+            }
+
+            if (all_rows_skip_probe) {
+                // All rows can skip hash table probe - create output directly
+                *chunk = std::make_shared<Chunk>();
+                for (size_t i = 0; i < _probing_chunk->num_columns(); i++) {
+                    if (_probing_chunk->get_slot_id(i) != Chunk::EQ_DELETE_BYPASS_SLOT_ID) {
+                        (*chunk)->append_column(_probing_chunk->get_column_by_index(i), _probing_chunk->get_slot_id(i));
+                    }
+                }
+                // Update metrics
+                COUNTER_UPDATE(_iceberg_eq_delete_chunks_skipped, 1);
+                COUNTER_UPDATE(_iceberg_eq_delete_rows_skipped, bool_column->size());
+                _ht_has_remain = false;
+                _probing_chunk = nullptr;
+            } else {
+                // Some rows need hash table probe - go through normal path
+                TRY_CATCH_BAD_ALLOC(RETURN_IF_ERROR(_ht.probe(state, _key_columns, &_probing_chunk, chunk, &_ht_has_remain)));
+            }
+        } else {
+            TRY_CATCH_BAD_ALLOC(RETURN_IF_ERROR(_ht.probe(state, _key_columns, &_probing_chunk, chunk, &_ht_has_remain)));
+        }
         if (!_ht_has_remain) {
             _probing_chunk = nullptr;
         }
@@ -1009,6 +1047,12 @@ Status HashJoinNode::_create_implicit_local_join_runtime_filters(RuntimeState* s
         desc->_filter_id = implicit_runtime_filter_id_offset + i;
         RETURN_IF_ERROR(_probe_expr_ctxs[i]->clone(state, _pool, &desc->_probe_expr_ctx));
         desc->_runtime_filter.store(nullptr);
+
+        // Check if this is an Iceberg equality delete anti-join
+        if (_join_type == TJoinOp::LEFT_ANTI_JOIN && _is_iceberg_equality_delete_join()) {
+            desc->set_is_iceberg_eq_delete_filter(true);
+        }
+
         child(0)->register_runtime_filter_descriptor(state, desc);
     }
 
@@ -1021,6 +1065,14 @@ Status HashJoinNode::_create_implicit_local_join_runtime_filters(RuntimeState* s
 bool HashJoinNode::can_generate_global_runtime_filter() const {
     return std::any_of(_build_runtime_filters.begin(), _build_runtime_filters.end(),
                        [](const RuntimeFilterBuildDescriptor* rf) { return rf->has_remote_targets(); });
+}
+
+bool HashJoinNode::_is_iceberg_equality_delete_join() const {
+    // Check the proper flag set by frontend
+    if (_hash_join_node.__isset.is_iceberg_equality_delete) {
+        return _hash_join_node.is_iceberg_equality_delete;
+    }
+    return false;
 }
 
 void HashJoinNode::push_down_join_runtime_filter(RuntimeState* state, RuntimeFilterProbeCollector* collector) {

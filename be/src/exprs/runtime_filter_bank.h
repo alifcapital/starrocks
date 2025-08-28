@@ -229,6 +229,9 @@ public:
     void set_has_push_down_to_storage(bool v) { _has_push_down_to_storage = v; }
     bool has_push_down_to_storage() const { return _has_push_down_to_storage; }
 
+    void set_is_iceberg_eq_delete_filter(bool v) { _is_iceberg_eq_delete_filter = v; }
+    bool is_iceberg_eq_delete_filter() const { return _is_iceberg_eq_delete_filter; }
+
 private:
     friend class HashJoinNode;
     friend class hashJoiner;
@@ -254,6 +257,7 @@ private:
     std::shared_ptr<const RuntimeFilter> _shared_runtime_filter = nullptr;
     pipeline::Observable _observable;
     bool _has_push_down_to_storage = false;
+    bool _is_iceberg_eq_delete_filter = false;
 };
 
 // RuntimeFilterProbeCollector::do_evaluate function apply runtime bloom filter to Operators to filter chunk.
