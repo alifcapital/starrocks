@@ -188,6 +188,11 @@ Status HashJoinNode::prepare(RuntimeState* state) {
     _avg_input_probe_chunk_size = ADD_COUNTER(_runtime_profile, "AvgInputProbeChunkSize", TUnit::UNIT);
     _avg_output_chunk_size = ADD_COUNTER(_runtime_profile, "AvgOutputChunkSize", TUnit::UNIT);
     _runtime_profile->add_info_string("JoinType", to_string(_join_type));
+    if (_is_iceberg_equality_delete_join()) {
+        _runtime_profile->add_info_string("EqDeleteAntiJoin", "true");
+        // Indicate that runtime filters for eq-delete were built on probe keys
+        _runtime_profile->add_info_string("EqDeleteRuntimeFilters", std::to_string(_build_runtime_filters.size()));
+    }
 
     RETURN_IF_ERROR(Expr::prepare(_build_expr_ctxs, state));
     RETURN_IF_ERROR(Expr::prepare(_probe_expr_ctxs, state));
