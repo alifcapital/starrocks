@@ -736,10 +736,10 @@ Status HashJoinNode::_probe(RuntimeState* state, ScopedTimer<MonotonicStopWatch>
 
         // Fast path for EQ delete bypass: check if rows can skip hash table probe
         if (_join_type == TJoinOp::LEFT_ANTI_JOIN && _is_iceberg_equality_delete_join() &&
-            _probing_chunk != nullptr && _probing_chunk->has_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+            _probing_chunk != nullptr && _probing_chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
 
             auto& skip_probe_column = _probing_chunk->get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
-            auto* bool_column = down_cast<BoolColumn*>(skip_probe_column.get());
+            auto* bool_column = down_cast<BooleanColumn*>(skip_probe_column.get());
 
                         // Check if all rows can skip hash table probe
             bool all_rows_skip_probe = true;
@@ -751,12 +751,9 @@ Status HashJoinNode::_probe(RuntimeState* state, ScopedTimer<MonotonicStopWatch>
 
             if (all_rows_skip_probe) {
                 // All rows can skip hash table probe - create output directly
-                *chunk = std::make_shared<Chunk>();
-                for (size_t i = 0; i < _probing_chunk->num_columns(); i++) {
-                    if (_probing_chunk->get_slot_id(i) != Chunk::EQ_DELETE_BYPASS_SLOT_ID) {
-                        (*chunk)->append_column(_probing_chunk->get_column_by_index(i), _probing_chunk->get_slot_id(i));
-                    }
-                }
+                // Clone the chunk but remove the bypass column
+                *chunk = _probing_chunk->clone_unique();
+                (*chunk)->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
                 // Update metrics
                 COUNTER_UPDATE(_iceberg_eq_delete_chunks_skipped, 1);
                 COUNTER_UPDATE(_iceberg_eq_delete_rows_skipped, bool_column->size());

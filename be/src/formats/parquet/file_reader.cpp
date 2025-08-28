@@ -25,6 +25,7 @@
 #include "cache/datacache.h"
 #include "column/vectorized_fwd.h"
 #include "column/column.h"
+#include "column/fixed_length_column.h"
 #include "common/compiler_util.h"
 #include "common/config.h"
 #include "common/logging.h"
@@ -355,7 +356,7 @@ Status FileReader::get_next(ChunkPtr* chunk) {
 
                 // Add EQ delete skip probe column if needed
                 if (_iceberg_eq_delete_skip_probe) {
-                    auto skip_probe_column = BoolColumn::create();
+                    auto skip_probe_column = BooleanColumn::create();
                     skip_probe_column->resize(row_count);
                     // Mark all rows in this row group to skip hash table probe (since runtime filter determined they can't match EQ deletes)
                     std::fill(skip_probe_column->get_data().begin(), skip_probe_column->get_data().end(), 1);
