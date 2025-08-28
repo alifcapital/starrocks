@@ -18,6 +18,8 @@
 
 #include <cstring>
 #include <iterator>
+
+#include "column/fixed_length_column.h"
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -423,11 +425,34 @@ Status FileReader::_exec_no_materialized_column_scan(ChunkPtr* chunk) {
             _scanner_ctx->append_or_update_partition_column_to_chunk(chunk, read_size);
             _scanner_ctx->append_or_update_extended_column_to_chunk(chunk, read_size);
         }
+
+        // Add Iceberg EQ delete bypass column if needed
+        if (_iceberg_eq_delete_skip_probe) {
+            LOG(INFO) << "FileReader: Adding bypass column for " << read_size << " rows (no materialized columns)";
+            auto bypass_column = BooleanColumn::create(read_size, 1); // All rows skip probe
+            (*chunk)->append_column(bypass_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+            _iceberg_eq_delete_rows_skipped += read_size;
+        }
+
         _scan_row_count += read_size;
         return Status::OK();
     }
 
     return Status::EndOfFile("");
+}
+
+// Debug method to simulate runtime filter arrival
+Status FileReader::debug_runtime_filter_arrived(int column_id, const RuntimeFilterProbeDescriptor* desc) {
+    LOG(INFO) << "FileReader: DEBUG - Runtime filter arrived for column_id=" << column_id
+              << ", is_iceberg_eq_delete_filter=" << (desc ? desc->is_iceberg_eq_delete_filter() : false);
+
+    if (desc && desc->is_iceberg_eq_delete_filter()) {
+        LOG(INFO) << "FileReader: Setting _iceberg_eq_delete_skip_probe=true due to runtime filter";
+        _iceberg_eq_delete_skip_probe = true;
+        _iceberg_eq_delete_row_groups_skipped++;
+    }
+
+    return Status::OK();
 }
 
 } // namespace starrocks::parquet

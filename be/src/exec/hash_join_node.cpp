@@ -370,6 +370,18 @@ Status HashJoinNode::get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) {
 
     bool tmp_eos = false;
     if (!_probe_eos || _ht_has_remain) {
+        // Debug: Log join type and Iceberg detection
+        LOG(INFO) << "HashJoinNode: Join type=" << _join_type << ", is_iceberg_eq_delete=" << _is_iceberg_equality_delete_join();
+
+        // Check for Iceberg EQ delete bypass (for debugging)
+        if (_join_type == TJoinOp::LEFT_ANTI_JOIN && _is_iceberg_equality_delete_join()) {
+            LOG(INFO) << "HashJoinNode: Processing LEFT_ANTI_JOIN for Iceberg equality delete";
+            // TODO: Check if incoming chunks have bypass column
+            // if (_probing_chunk && _probing_chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+            //     LOG(INFO) << "HashJoinNode: Found bypass column in probe chunk";
+            // }
+        }
+
         RETURN_IF_ERROR(_probe(state, probe_timer, chunk, tmp_eos));
         if (tmp_eos) {
             if (_join_type == TJoinOp::RIGHT_OUTER_JOIN || _join_type == TJoinOp::RIGHT_ANTI_JOIN ||
@@ -1067,8 +1079,11 @@ bool HashJoinNode::can_generate_global_runtime_filter() const {
 bool HashJoinNode::_is_iceberg_equality_delete_join() const {
     // Check the proper flag set by frontend
     if (_hash_join_node.__isset.is_iceberg_equality_delete) {
-        return _hash_join_node.is_iceberg_equality_delete;
+        bool result = _hash_join_node.is_iceberg_equality_delete;
+        LOG(INFO) << "HashJoinNode: is_iceberg_equality_delete flag is SET to " << result;
+        return result;
     }
+    LOG(INFO) << "HashJoinNode: is_iceberg_equality_delete flag is NOT SET";
     return false;
 }
 

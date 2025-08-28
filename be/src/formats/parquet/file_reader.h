@@ -41,6 +41,7 @@ class RowGroup;
 namespace starrocks {
 class RandomAccessFile;
 struct HdfsScannerContext;
+class RuntimeFilterProbeDescriptor;
 class BlockCache;
 class SlotDescriptor;
 
@@ -87,6 +88,15 @@ public:
     size_t row_group_size() const { return _row_group_size; }
 
     const std::vector<std::shared_ptr<GroupReader>>& group_readers() const { return _row_group_readers; }
+
+    // For debugging: simulate runtime filter setting bypass flag
+    void debug_set_iceberg_eq_delete_skip_probe() {
+        LOG(INFO) << "FileReader: DEBUG - Setting _iceberg_eq_delete_skip_probe = true";
+        _iceberg_eq_delete_skip_probe = true;
+    }
+
+    // Debug method to simulate runtime filter arrival
+    Status debug_runtime_filter_arrived(int column_id, const RuntimeFilterProbeDescriptor* desc);
 
 private:
     int _chunk_size;

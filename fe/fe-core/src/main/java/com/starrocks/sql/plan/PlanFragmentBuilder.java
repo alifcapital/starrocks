@@ -968,7 +968,7 @@ public class PlanFragmentBuilder {
 
             tupleDescriptor.computeMemLayout();
 
-            // set unused output columns 
+            // set unused output columns
             setUnUsedOutputColumns(node, scanNode, predicates, referenceTable);
 
             // set isPreAggregation
@@ -2902,6 +2902,10 @@ public class PlanFragmentBuilder {
                     // But we first visit shuffle join then visit broadcast join, so using JoinNodeMap here is safe
                     context.getJoinNodeMap().put(physicalHashJoinOperator, hashJoinNode);
                 }
+
+                // Set Iceberg equality delete flag
+                HashJoinNode hashJoinNode = (HashJoinNode) joinNode;
+                hashJoinNode.setIcebergEqualityDelete(physicalHashJoinOperator.isIcebergEqualityDelete());
             } else if (node instanceof PhysicalMergeJoinOperator) {
                 joinNode = new MergeJoinNode(
                         context.getNextNodeId(),
