@@ -394,6 +394,13 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                         }
 
                         RETURN_IF_ERROR(cur_row_group->prepare());
+                        // propagate per-RG EQ delete metrics to scanner stats for profile exposure
+                        if (_scanner_ctx != nullptr) {
+                            _scanner_ctx->app_stats.iceberg_eq_delete_row_groups_skipped +=
+                                    _iceberg_eq_delete_row_groups_skipped;
+                            _scanner_ctx->app_stats.iceberg_eq_delete_rows_skipped +=
+                                    _iceberg_eq_delete_rows_skipped;
+                        }
                     }
                     break;
                 } while (true);

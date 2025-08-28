@@ -392,10 +392,16 @@ void HdfsScanner::do_update_iceberg_v2_counter(RuntimeProfile* parent_profile, c
             ADD_CHILD_COUNTER(parent_profile, "DeleteFileBuildFilterTime", TUnit::TIME_NS, ICEBERG_TIMER);
     RuntimeProfile::Counter* delete_file_per_scan_counter =
             ADD_CHILD_COUNTER(parent_profile, "DeleteFilesPerScan", TUnit::UNIT, ICEBERG_TIMER);
+    RuntimeProfile::Counter* eq_delete_row_groups_skipped_counter =
+            ADD_CHILD_COUNTER(parent_profile, "EqDeleteProbeBypassedRowGroups", TUnit::UNIT, ICEBERG_TIMER);
+    RuntimeProfile::Counter* eq_delete_rows_skipped_counter =
+            ADD_CHILD_COUNTER(parent_profile, "EqDeleteProbeBypassedRows", TUnit::UNIT, ICEBERG_TIMER);
 
     COUNTER_UPDATE(delete_build_timer, _app_stats.iceberg_delete_file_build_ns);
     COUNTER_UPDATE(delete_file_build_filter_timer, _app_stats.build_rowid_filter_ns);
     COUNTER_UPDATE(delete_file_per_scan_counter, _app_stats.iceberg_delete_files_per_scan);
+    COUNTER_UPDATE(eq_delete_row_groups_skipped_counter, _app_stats.iceberg_eq_delete_row_groups_skipped);
+    COUNTER_UPDATE(eq_delete_rows_skipped_counter, _app_stats.iceberg_eq_delete_rows_skipped);
 }
 
 void HdfsScanner::do_update_deletion_vector_build_counter(RuntimeProfile* parent_profile) {

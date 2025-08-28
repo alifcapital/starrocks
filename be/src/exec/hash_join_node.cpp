@@ -183,8 +183,8 @@ Status HashJoinNode::prepare(RuntimeState* state) {
     _build_buckets_counter = ADD_COUNTER(_runtime_profile, "BuildBuckets", TUnit::UNIT);
     _push_down_expr_num = ADD_COUNTER(_runtime_profile, "PushDownExprNum", TUnit::UNIT);
     // Iceberg EQ delete optimization metrics
-    _iceberg_eq_delete_chunks_skipped = ADD_COUNTER(_runtime_profile, "IcebergEqDeleteChunksSkipped", TUnit::UNIT);
-    _iceberg_eq_delete_rows_skipped = ADD_COUNTER(_runtime_profile, "IcebergEqDeleteRowsSkipped", TUnit::UNIT);
+    _iceberg_eq_delete_chunks_skipped = ADD_COUNTER(_runtime_profile, "EqDeleteProbeBypassedChunks", TUnit::UNIT);
+    _iceberg_eq_delete_rows_skipped = ADD_COUNTER(_runtime_profile, "EqDeleteProbeBypassedRows", TUnit::UNIT);
     _avg_input_probe_chunk_size = ADD_COUNTER(_runtime_profile, "AvgInputProbeChunkSize", TUnit::UNIT);
     _avg_output_chunk_size = ADD_COUNTER(_runtime_profile, "AvgOutputChunkSize", TUnit::UNIT);
     _runtime_profile->add_info_string("JoinType", to_string(_join_type));
