@@ -96,6 +96,7 @@ public class ShowTablesTest {
 
     @Test
     public void testShowTableVerbose() throws Exception {
+        String mysqlTableType = Table.getTableTypeForMysql();
         ctx.setCurrentUserIdentity(UserIdentity.ROOT);
         ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
 
@@ -107,7 +108,7 @@ public class ShowTablesTest {
         Assertions.assertEquals("VIEW", resultSet.getString(1));
         Assertions.assertTrue(resultSet.next());
         Assertions.assertEquals("testTbl", resultSet.getString(0));
-        Assertions.assertEquals("BASE TABLE", resultSet.getString(1));
+        Assertions.assertEquals(mysqlTableType, resultSet.getString(1));
         Assertions.assertFalse(resultSet.next());
     }
 
