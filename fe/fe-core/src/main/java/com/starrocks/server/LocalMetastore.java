@@ -1360,6 +1360,9 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
                 TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentState().getTabletInvertedIndex();
                 PhysicalPartition physicalPartition = partition.getDefaultPhysicalPartition();
                 for (MaterializedIndex index : physicalPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                    if (index == null) {
+                        continue;
+                    }
                     long indexId = index.getId();
                     int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
                     TabletMeta tabletMeta = new TabletMeta(info.getDbId(), info.getTableId(), physicalPartition.getId(),
@@ -1717,6 +1720,9 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
                 // add to inverted index
                 TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentState().getTabletInvertedIndex();
                 for (MaterializedIndex index : physicalPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                    if (index == null) {
+                        continue;
+                    }
                     long indexId = index.getId();
                     int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
                     TabletMeta tabletMeta = new TabletMeta(info.getDbId(), info.getTableId(),
@@ -4634,6 +4640,9 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
             for (PhysicalPartition physicalPartition : oldPartition.getSubPartitions()) {
                 // save old tablets to be removed
                 for (MaterializedIndex index : physicalPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                    if (index == null) {
+                        continue;
+                    }
                     // let HashSet do the deduplicate work
                     oldTablets.addAll(index.getTablets());
                 }
@@ -4993,6 +5002,9 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
         TabletInvertedIndex invertedIndex = GlobalStateMgr.getCurrentState().getTabletInvertedIndex();
         for (PhysicalPartition subPartition : partition.getSubPartitions()) {
             for (MaterializedIndex index : subPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                if (index == null) {
+                    continue;
+                }
                 for (Tablet tablet : index.getTablets()) {
                     long tabletId = tablet.getId();
                     invertedIndex.deleteTablet(tabletId);

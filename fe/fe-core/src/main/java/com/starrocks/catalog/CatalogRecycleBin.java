@@ -946,6 +946,9 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
                 for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
                     long physicalPartitionId = physicalPartition.getId();
                     for (MaterializedIndex index : physicalPartition.getMaterializedIndices(IndexExtState.ALL)) {
+                        if (index == null) {
+                            continue;
+                        }
                         long indexId = index.getId();
                         int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
                         TabletMeta tabletMeta = new TabletMeta(dbId, tableId, physicalPartitionId, indexId, medium,
@@ -1004,6 +1007,9 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
             for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
                 long physicalPartitionId = physicalPartition.getId();
                 for (MaterializedIndex index : physicalPartition.getMaterializedIndices(IndexExtState.ALL)) {
+                    if (index == null) {
+                        continue;
+                    }
                     long indexId = index.getId();
                     int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
                     TabletMeta tabletMeta = new TabletMeta(dbId, tableId, physicalPartitionId, indexId, medium,

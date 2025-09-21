@@ -120,8 +120,15 @@ public class LakeTableHelper {
     static Optional<ShardInfo> getAssociatedShardInfo(PhysicalPartition partition,
                                                       ComputeResource computeResource) throws StarClientException {
         List<MaterializedIndex> allIndices = partition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL);
+        if (allIndices == null) {
+            return Optional.empty();
+        }
+
         final long workerGroupId = computeResource.getWorkerGroupId();
         for (MaterializedIndex materializedIndex : allIndices) {
+            if (materializedIndex == null) {
+                continue;
+            }
             List<Tablet> tablets = materializedIndex.getTablets();
             if (tablets.isEmpty()) {
                 continue;
@@ -175,6 +182,9 @@ public class LakeTableHelper {
         Set<Long> needRemoveShardGroupIdSet = new HashSet<>();
         for (PhysicalPartition subPartition : subPartitions) {
             for (MaterializedIndex index : subPartition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                if (index == null) {
+                    continue;
+                }
                 needRemoveShardGroupIdSet.add(index.getShardGroupId());
             }
         }
