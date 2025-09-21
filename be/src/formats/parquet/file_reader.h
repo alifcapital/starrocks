@@ -31,6 +31,8 @@
 #include "io/shared_buffered_input_stream.h"
 #include "runtime/runtime_state.h"
 #include "storage/runtime_range_pruner.hpp"
+#include "exprs/runtime_filter_bank.h"
+#include "exprs/runtime_filter.h"
 
 namespace tparquet {
 class ColumnMetaData;
@@ -88,6 +90,8 @@ public:
 
     const std::vector<std::shared_ptr<GroupReader>>& group_readers() const { return _row_group_readers; }
 
+    void set_driver_sequence(int32_t driver_sequence) { _driver_sequence = driver_sequence; }
+
 private:
     int _chunk_size;
 
@@ -100,6 +104,7 @@ private:
     // filter row group by conjuncts
     bool _filter_group(const GroupReaderPtr& group_reader);
     StatusOr<bool> _update_rf_and_filter_group(const GroupReaderPtr& group_reader);
+    bool _evaluate_hashjoin_bloom_filters(const GroupReaderPtr& group_reader);
 
     // get row group to read
     // if scan range contain the first byte in the row group, will be read
@@ -136,6 +141,7 @@ private:
     std::shared_ptr<MetaHelper> _meta_helper = nullptr;
     SkipRowsContextPtr _skip_rows_ctx = nullptr;
     std::shared_ptr<RuntimeScanRangePruner> _rf_scan_range_pruner;
+    int32_t _driver_sequence = -1;
 };
 
 } // namespace starrocks::parquet

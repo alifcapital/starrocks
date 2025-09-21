@@ -120,6 +120,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScanProfile* profile) {
     RuntimeProfile::Counter* page_index_filter_group_counter = nullptr;
     RuntimeProfile::Counter* bloom_filter_tried_counter = nullptr;
     RuntimeProfile::Counter* bloom_filter_success_counter = nullptr;
+    RuntimeProfile::Counter* hashjoin_bloom_intersection_tried_counter = nullptr;
+    RuntimeProfile::Counter* hashjoin_bloom_intersection_success_counter = nullptr;
 
     ADD_COUNTER(root, kParquetProfileSectionPrefix, TUnit::NONE);
     request_bytes_read = ADD_CHILD_COUNTER(root, "RequestBytesRead", TUnit::BYTES, kParquetProfileSectionPrefix);
@@ -181,6 +183,10 @@ void HdfsParquetScanner::do_update_counter(HdfsScanProfile* profile) {
     bloom_filter_tried_counter = ADD_CHILD_COUNTER(root, "BloomFilterTriedCounter", TUnit::UNIT, "ReaderFilterCounter");
     bloom_filter_success_counter =
             ADD_CHILD_COUNTER(root, "BloomFilterSuccessCounter", TUnit::UNIT, "ReaderFilterCounter");
+    hashjoin_bloom_intersection_tried_counter =
+            ADD_CHILD_COUNTER(root, "HashjoinBloomIntersectionTriedCounter", TUnit::UNIT, "ReaderFilterCounter");
+    hashjoin_bloom_intersection_success_counter =
+            ADD_CHILD_COUNTER(root, "HashjoinBloomIntersectionSuccessCounter", TUnit::UNIT, "ReaderFilterCounter");
 
     COUNTER_UPDATE(request_bytes_read, _app_stats.request_bytes_read);
     COUNTER_UPDATE(request_bytes_read_uncompressed, _app_stats.request_bytes_read_uncompressed);
@@ -222,6 +228,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScanProfile* profile) {
     COUNTER_UPDATE(page_index_filter_group_counter, _app_stats._optimzation_counter.page_index_filter_group_counter);
     COUNTER_UPDATE(bloom_filter_tried_counter, _app_stats._optimzation_counter.bloom_filter_tried_counter);
     COUNTER_UPDATE(bloom_filter_success_counter, _app_stats._optimzation_counter.bloom_filter_success_counter);
+    COUNTER_UPDATE(hashjoin_bloom_intersection_tried_counter, _app_stats._optimzation_counter.hashjoin_bloom_intersection_tried_counter);
+    COUNTER_UPDATE(hashjoin_bloom_intersection_success_counter, _app_stats._optimzation_counter.hashjoin_bloom_intersection_success_counter);
 
     if (_scanner_ctx.conjuncts_manager != nullptr &&
         _runtime_state->fragment_ctx()->pred_tree_params().enable_show_in_profile) {
@@ -235,6 +243,7 @@ Status HdfsParquetScanner::do_open(RuntimeState* runtime_state) {
     _reader = std::make_shared<parquet::FileReader>(runtime_state->chunk_size(), _file.get(), _file->get_size().value(),
                                                     _scanner_params.datacache_options,
                                                     _shared_buffered_input_stream.get(), _skip_rows_ctx);
+    _reader->set_driver_sequence(_scanner_params.driver_sequence);
     SCOPED_RAW_TIMER(&_app_stats.reader_init_ns);
     RETURN_IF_ERROR(_reader->init(&_scanner_ctx));
     return Status::OK();

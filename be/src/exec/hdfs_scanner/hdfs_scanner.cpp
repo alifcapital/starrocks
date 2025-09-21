@@ -179,6 +179,7 @@ Status HdfsScanner::_build_scanner_context() {
     opts.obj_pool = _runtime_state->obj_pool();
     opts.runtime_filters = _scanner_params.runtime_filter_collector;
     opts.runtime_state = _runtime_state;
+    opts.driver_sequence = _scanner_params.driver_sequence;
     opts.enable_column_expr_predicate = true;
     opts.is_olap_scan = false;
     opts.pred_tree_params = _runtime_state->fragment_ctx()->pred_tree_params();

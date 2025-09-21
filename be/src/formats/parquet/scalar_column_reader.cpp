@@ -440,6 +440,83 @@ StatusOr<bool> RawColumnReader::_row_group_bloom_filter(const std::vector<const 
     return filtered;
 }
 
+StatusOr<bool> RawColumnReader::test_hashjoin_bloom_filter_intersection(const SimdBlockFilter* hashjoin_bf,
+                                                                       const TypeDescriptor& col_type) const {
+    bool filtered = false;
+    if (get_chunk_metadata() == nullptr || hashjoin_bf == nullptr) {
+        return filtered;
+    }
+
+    auto& column_metadata = get_chunk_metadata()->meta_data;
+    bool has_bloom_filter = column_metadata.__isset.bloom_filter_offset;
+    if (!has_bloom_filter) {
+        // No Parquet bloom filter, can't do intersection
+        return filtered = false;
+    } else if (get_column_parquet_field() == nullptr) {
+        return filtered = false;
+    }
+
+    bool applicable = check_type_can_apply_bloom_filter(col_type, *get_column_parquet_field());
+    if (applicable) {
+        int32_t offset = column_metadata.bloom_filter_offset;
+        ParquetBlockSplitBloomFilter parquet_bloom_filter;
+
+        // Load the Parquet bloom filter
+        if (column_metadata.__isset.bloom_filter_length) {
+            RETURN_IF_ERROR(_init_column_bloom_filter(offset, column_metadata.bloom_filter_length, parquet_bloom_filter));
+        } else {
+            RETURN_IF_ERROR(_init_column_bloom_filter(offset, 0, parquet_bloom_filter));
+        }
+
+        // Perform bloom filter intersection
+        bool has_intersection = _intersect_bloom_filters(hashjoin_bf, &parquet_bloom_filter);
+        if (!has_intersection) {
+            // No intersection found - can filter this row group
+            filtered = true;
+        }
+    }
+
+    return filtered;
+}
+
+bool RawColumnReader::_intersect_bloom_filters(const SimdBlockFilter* hashjoin_bf, const BloomFilter* parquet_bf) const {
+    // Both are block-split bloom filters with same constants (BYTES_PER_BLOCK=32, BITS_SET_PER_BLOCK=8)
+    // We can perform a simple compatibility check and direct intersection
+
+    // Get sizes for compatibility check
+    size_t hashjoin_size = hashjoin_bf->get_alloc_size();
+    size_t parquet_size = parquet_bf->num_bytes();
+
+    // Both must have same size for compatible intersection
+    if (hashjoin_size != parquet_size) {
+        return true; // Assume intersection if sizes don't match
+    }
+
+    // Access raw data - both use compatible block-split bloom filter format
+    const uint8_t* hashjoin_data = hashjoin_bf->data();
+    const uint8_t* parquet_data = reinterpret_cast<const uint8_t*>(parquet_bf->data());
+
+    // Perform bitwise AND intersection
+    const uint64_t* hashjoin_words = reinterpret_cast<const uint64_t*>(hashjoin_data);
+    const uint64_t* parquet_words = reinterpret_cast<const uint64_t*>(parquet_data);
+    size_t word_count = hashjoin_size / sizeof(uint64_t);
+
+    for (size_t i = 0; i < word_count; i++) {
+        if ((hashjoin_words[i] & parquet_words[i]) != 0) {
+            return true; // Found intersection
+        }
+    }
+
+    // Handle remaining bytes
+    for (size_t i = word_count * sizeof(uint64_t); i < hashjoin_size; i++) {
+        if ((hashjoin_data[i] & parquet_data[i]) != 0) {
+            return true;
+        }
+    }
+
+    return false; // No intersection found
+}
+
 // ScalarColumnReader
 
 Status ScalarColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {

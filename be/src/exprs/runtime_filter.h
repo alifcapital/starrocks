@@ -180,6 +180,9 @@ public:
         return _log_num_buckets == 0 ? 0 : (1ull << (_log_num_buckets + LOG_BUCKET_BYTE_SIZE));
     }
 
+    // Get raw data pointer for bloom filter intersection
+    const uint8_t* data() const { return reinterpret_cast<const uint8_t*>(_directory); }
+
 private:
     // The number of bits to set in a tiny Bloom filter block
 
@@ -1179,6 +1182,13 @@ public:
 
     void insert_null() { _has_null = true; }
 
+    // Expose raw bloom filter bytes for intersection checks.
+    // Default implementations return nullptr/0 and should be overridden by concrete bloom filters.
+    virtual const uint8_t* bf_data_ptr(size_t partition_index = 0) const { return nullptr; }
+    virtual size_t bf_data_size(size_t partition_index = 0) const { return 0; }
+    // Expose SimdBlockFilter pointer for intersection when available.
+    virtual const SimdBlockFilter* bf_partition_ptr(size_t partition_index = 0) const { return nullptr; }
+
 protected:
     bool _global = false;
     int8_t _join_mode = 0;
@@ -1599,6 +1609,28 @@ private:
     }
 
 private:
+    // Implement raw bloom filter accessors for intersection
+    const uint8_t* bf_data_ptr(size_t partition_index = 0) const override {
+        if (!_hash_partition_bf.empty()) {
+            if (partition_index >= _hash_partition_bf.size()) return nullptr;
+            return _hash_partition_bf[partition_index].data();
+        }
+        return _bf.data();
+    }
+    size_t bf_data_size(size_t partition_index = 0) const override {
+        if (!_hash_partition_bf.empty()) {
+            if (partition_index >= _hash_partition_bf.size()) return 0;
+            return _hash_partition_bf[partition_index].get_alloc_size();
+        }
+        return _bf.get_alloc_size();
+    }
+    const SimdBlockFilter* bf_partition_ptr(size_t partition_index = 0) const override {
+        if (!_hash_partition_bf.empty()) {
+            if (partition_index >= _hash_partition_bf.size()) return nullptr;
+            return &_hash_partition_bf[partition_index];
+        }
+        return &_bf;
+    }
     SimdBlockFilter _bf;
     std::vector<SimdBlockFilter> _hash_partition_bf;
 };
