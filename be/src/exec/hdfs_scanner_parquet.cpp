@@ -235,6 +235,7 @@ Status HdfsParquetScanner::do_open(RuntimeState* runtime_state) {
     _reader = std::make_shared<parquet::FileReader>(runtime_state->chunk_size(), _file.get(), _file->get_size().value(),
                                                     _scanner_params.datacache_options,
                                                     _shared_buffered_input_stream.get(), _skip_rows_ctx);
+    _reader->set_driver_sequence(_scanner_params.driver_sequence);
     SCOPED_RAW_TIMER(&_app_stats.reader_init_ns);
     RETURN_IF_ERROR(_reader->init(&_scanner_ctx));
     return Status::OK();

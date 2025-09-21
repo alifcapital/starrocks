@@ -32,6 +32,7 @@
 #include "formats/parquet/metadata.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
 #include "formats/parquet/utils.h"
+#include "formats/parquet/column_reader.h"
 #include "fs/fs.h"
 #include "gen_cpp/parquet_types.h"
 #include "gutil/casts.h"
@@ -178,11 +179,17 @@ bool FileReader::_filter_group(const GroupReaderPtr& group_reader) {
         if (sparse_range.value()->span_size() == 0) {
             // no rows selected, the whole row group can be filtered
             filtered = true;
+            return filtered;
         } else if (sparse_range.value()->span_size() < group_reader->get_row_group_metadata()->num_rows) {
             // some pages have been filtered
             group_reader->get_range() = sparse_range.value().value();
         }
     }
+
+    if (!filtered && _evaluate_hashjoin_bloom_filters(group_reader)) {
+        filtered = true;
+    }
+
     return filtered;
 }
 
@@ -208,6 +215,59 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                 true, 0));
     }
     return filter;
+}
+
+bool FileReader::_evaluate_hashjoin_bloom_filters(const GroupReaderPtr& group_reader) {
+    if (_scanner_ctx->runtime_filter_collector == nullptr || _scanner_ctx->runtime_filter_collector->size() == 0) {
+        return false;
+    }
+
+    bool filtered = false;
+    for (const auto& item : _scanner_ctx->runtime_filter_collector->descriptors()) {
+        RuntimeFilterProbeDescriptor* rf_desc = item.second;
+        if (rf_desc == nullptr) continue;
+
+        const RuntimeFilter* filter = rf_desc->runtime_filter(_driver_sequence);
+        if (filter == nullptr) continue;
+
+        // We only handle bloom-style membership runtime filters
+        if (filter->type() != RuntimeFilterSerializeType::BLOOM_FILTER) continue;
+
+        // Get column type from probe expression
+        TypeDescriptor col_type = rf_desc->probe_expr_ctx()->root()->type();
+        SlotId slot_id;
+        if (!rf_desc->is_probe_slot_ref(&slot_id)) continue;
+
+        // Find the corresponding column reader
+        auto column_reader = group_reader->get_column_reader(slot_id);
+        if (column_reader == nullptr) continue;
+
+        // Access membership filter and test intersection against Parquet bloom filter.
+        const RuntimeMembershipFilter* membership = filter->get_membership_filter();
+        if (membership == nullptr) continue;
+        if (!membership->can_use_bf()) continue;
+
+        // If runtime filter has multiple partitions, we conservatively keep the row group when any partition intersects.
+        // We can filter only if none of the partitions intersect the Parquet bloom filter.
+        const size_t num_parts = std::max<size_t>(1, membership->num_hash_partitions());
+        bool any_partition_intersects = false;
+        for (size_t p = 0; p < num_parts; ++p) {
+            const SimdBlockFilter* hashjoin_bf = membership->bf_partition_ptr(p);
+            if (hashjoin_bf == nullptr) continue;
+            auto res = column_reader->test_hashjoin_bloom_filter_intersection(hashjoin_bf, col_type);
+            if (res.ok() && !res.value()) {
+                // res.value() == false means intersection exists → cannot filter
+                any_partition_intersects = true;
+                break;
+            }
+        }
+        if (!any_partition_intersects) {
+            filtered = true;
+            break;
+        }
+    }
+
+    return filtered;
 }
 
 void FileReader::_prepare_read_columns(std::unordered_set<std::string>& existed_column_names) {

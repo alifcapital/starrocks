@@ -685,6 +685,7 @@ Status HiveDataSource::_init_scanner(RuntimeState* state) {
     HdfsScannerParams scanner_params;
     RETURN_IF_ERROR(_init_global_dicts(&scanner_params));
     scanner_params.runtime_filter_collector = _runtime_filters;
+    scanner_params.driver_sequence = _driver_sequence;
     scanner_params.scan_range = &scan_range;
     scanner_params.fs = _pool.add(fs.release());
     scanner_params.path = native_file_path;
