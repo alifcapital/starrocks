@@ -298,12 +298,12 @@ public class LakeTableHelper {
         if (path == null) {
             return Optional.empty();
         }
-    
+
         int lastSlashIndex = path.lastIndexOf('/');
         if (lastSlashIndex == -1 || lastSlashIndex == path.length() - 1) {
             return Optional.empty();
         }
-    
+
         String idPart = path.substring(lastSlashIndex + 1);
         try {
             return Optional.of(Long.parseLong(idPart));

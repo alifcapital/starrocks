@@ -430,7 +430,7 @@ public class CatalogRecycleBin extends FrontendDaemon implements Writable {
         // 3. check valid by cluster snapshot
         if (!checkValidDeletionByClusterSnapshot(id)) {
             return true;
-        } 
+        }
         // 4. already expired, sorry.
         if (latency > Config.catalog_trash_expire_second * 1000L) {
             return false;
