@@ -967,7 +967,7 @@ public class PlanFragmentBuilder {
 
             tupleDescriptor.computeMemLayout();
 
-            // set unused output columns 
+            // set unused output columns
             setUnUsedOutputColumns(node, scanNode, predicates, referenceTable);
 
             // set isPreAggregation
@@ -2473,6 +2473,15 @@ public class PlanFragmentBuilder {
             currentExecGroup = lastExecGroup;
 
             PhysicalDistributionOperator distribution = (PhysicalDistributionOperator) optExpr.getOp();
+            // Single-node optimization: avoid creating network Exchange for ROUND_ROBIN only (guarded by session var)
+            boolean isSingleNode = ConnectContext.get() != null
+                    && ConnectContext.get().getAliveExecutionNodesNumber() == 1;
+            DistributionSpec.DistributionType distType = distribution.getDistributionSpec().getType();
+            if (isSingleNode
+                    && ConnectContext.get().getSessionVariable().isCboEnableSingleNodeSkipRoundRobinExchange()
+                    && distType == DistributionSpec.DistributionType.ROUND_ROBIN) {
+                return inputFragment;
+            }
             ExchangeNode exchangeNode = new ExchangeNode(context.getNextNodeId(),
                     inputFragment.getPlanRoot(), distribution.getDistributionSpec().getType());
             currentExecGroup.add(exchangeNode, true);

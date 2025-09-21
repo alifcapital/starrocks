@@ -390,6 +390,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_ENABLE_SINGLE_NODE_PREFER_TWO_STAGE_AGGREGATE =
             "cbo_enable_single_node_prefer_two_stage_aggregate";
 
+    public static final String CBO_ENABLE_SINGLE_NODE_SKIP_ROUND_ROBIN_EXCHANGE =
+            "cbo_enable_single_node_skip_round_robin_exchange";
+
     public static final String CBO_JSON_V2_REWRITE = "cbo_json_v2_rewrite";
     public static final String CBO_JSON_V2_DICT_OPT = "cbo_json_v2_dict_opt";
 
@@ -1744,6 +1747,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = CBO_ENABLE_SINGLE_NODE_PREFER_TWO_STAGE_AGGREGATE, flag = VariableMgr.INVISIBLE)
     private boolean cboEnableSingleNodePreferTwoStageAggregate = true;
+
+    @VarAttr(name = CBO_ENABLE_SINGLE_NODE_SKIP_ROUND_ROBIN_EXCHANGE)
+    private boolean cboEnableSingleNodeSkipRoundRobinExchange = true;
 
     @VariableMgr.VarAttr(name = PARSE_TOKENS_LIMIT)
     private int parseTokensLimit = 3500000;
@@ -4184,6 +4190,16 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public void setCboEnableSingleNodePreferTwoStageAggregate(boolean value) {
         this.cboEnableSingleNodePreferTwoStageAggregate = value;
     }
+
+    public boolean isCboEnableSingleNodeSkipRoundRobinExchange() {
+        return cboEnableSingleNodeSkipRoundRobinExchange;
+    }
+
+    public void setCboEnableSingleNodeSkipRoundRobinExchange(boolean value) {
+        this.cboEnableSingleNodeSkipRoundRobinExchange = value;
+    }
+
+    // broadcast exchange skip removed; keep behavior original
 
     public boolean isCboPushDownDistinctBelowWindow() {
         return this.cboPushDownDistinctBelowWindow;
