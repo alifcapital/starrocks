@@ -113,6 +113,7 @@ public:
 
 private:
     Status _init_column_bloom_filter(int32_t offset, int32_t length, BloomFilter& bloom_filter) const;
+    bool _intersect_bloom_filters(const SimdBlockFilter* hashjoin_bf, const BloomFilter* parquet_bf) const;
 
 protected:
     StatusOr<bool> _row_group_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
@@ -128,6 +129,11 @@ protected:
                                            CompoundNodeType pred_relation, const TypeDescriptor& col_type,
                                            const uint64_t rg_first_row, const uint64_t rg_num_rows) const;
 
+public:
+    StatusOr<bool> test_hashjoin_bloom_filter_intersection(const SimdBlockFilter* hashjoin_bf,
+                                                          const TypeDescriptor& col_type) const override;
+
+protected:
     const ColumnReaderOptions& _opts;
 
     std::unique_ptr<StoredColumnReader> _reader;

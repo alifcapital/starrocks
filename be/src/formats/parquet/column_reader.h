@@ -51,6 +51,7 @@ class ExprContext;
 class NullableColumn;
 class TIcebergSchemaField;
 struct TypeDescriptor;
+class SimdBlockFilter;
 
 namespace parquet {
 struct ParquetField;
@@ -193,6 +194,11 @@ public:
     virtual StatusOr<bool> row_group_bloom_filter(const std::vector<const ColumnPredicate*>& predicates,
                                                   CompoundNodeType pred_relation, const uint64_t rg_first_row,
                                                   const uint64_t rg_num_rows) const {
+        return false;
+    }
+
+    virtual StatusOr<bool> test_hashjoin_bloom_filter_intersection(const SimdBlockFilter* hashjoin_bf,
+                                                                  const TypeDescriptor& col_type) const {
         return false;
     }
 

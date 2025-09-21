@@ -84,6 +84,11 @@ public:
     void get_split_tasks(std::vector<pipeline::ScanSplitContextPtr>* split_tasks) override;
     Status _init_chunk_if_needed(ChunkPtr* chunk, size_t n) override;
 
+    void set_driver_sequence(size_t driver_sequence) {
+        DataSource::set_driver_sequence(driver_sequence);
+        _driver_sequence = driver_sequence;
+    }
+
 private:
     const HiveDataSourceProvider* _provider;
     THdfsScanRange _scan_range;
@@ -176,6 +181,9 @@ private:
     // ======================================
     // The following are profile metrics
     HdfsScanProfile _profile;
+
+    // driver sequence for runtime filter lookup
+    int32_t _driver_sequence = -1;
 };
 
 } // namespace starrocks::connector

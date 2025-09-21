@@ -56,6 +56,8 @@ struct OptimizationCounter {
     int page_index_tried_counter = 0;
     int page_index_filter_group_counter = 0;
     int page_index_success_counter = 0;
+    int hashjoin_bloom_intersection_tried_counter = 0;
+    int hashjoin_bloom_intersection_success_counter = 0;
     OptimizationCounter& operator+=(const OptimizationCounter& counter) {
         bloom_filter_tried_counter += counter.bloom_filter_tried_counter;
         bloom_filter_success_counter += counter.bloom_filter_success_counter;
@@ -64,6 +66,8 @@ struct OptimizationCounter {
         page_index_tried_counter += counter.page_index_tried_counter;
         page_index_filter_group_counter += counter.page_index_filter_group_counter;
         page_index_success_counter += counter.page_index_success_counter;
+        hashjoin_bloom_intersection_tried_counter += counter.hashjoin_bloom_intersection_tried_counter;
+        hashjoin_bloom_intersection_success_counter += counter.hashjoin_bloom_intersection_success_counter;
         return *this;
     }
 };
@@ -205,6 +209,9 @@ struct HdfsScannerParams {
 
     // runtime bloom filter.
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
+
+    // driver sequence for runtime filter lookup
+    int32_t driver_sequence = -1;
 
     std::vector<ExprContext*> all_conjunct_ctxs;
     // all conjuncts except `conjunct_ctxs_by_slot`, like compound predicates
