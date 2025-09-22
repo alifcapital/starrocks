@@ -724,12 +724,12 @@ void RuntimeFilterProbeCollector::do_evaluate(Chunk* chunk, RuntimeMembershipFil
 
     for (auto& kv : seletivity_map) {
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
-        
+
         // Skip Iceberg equality delete filters - they should not apply at chunk level
         if (rf_desc->is_iceberg_eq_delete_filter()) {
             continue;
         }
-        
+
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
         bool skip_topn = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
         if ((skip_topn && rf_desc->is_stream_build_filter()) || filter == nullptr || filter->always_true()) {
@@ -770,6 +770,12 @@ void RuntimeFilterProbeCollector::do_evaluate_partial_chunk(Chunk* partial_chunk
     // without computing each rf's selectivity
     for (auto kv : _descriptors) {
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
+
+        // Skip Iceberg equality delete filters - they should not apply at chunk level
+        if (rf_desc->is_iceberg_eq_delete_filter()) {
+            continue;
+        }
+
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
         if (filter == nullptr || filter->always_true()) {
             continue;
@@ -914,6 +920,12 @@ void RuntimeFilterProbeCollector::update_selectivity(Chunk* chunk, RuntimeMember
     seletivity_map.clear();
     for (auto& kv : _descriptors) {
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
+
+        // Skip Iceberg equality delete filters - they should not apply at chunk level
+        if (rf_desc->is_iceberg_eq_delete_filter()) {
+            continue;
+        }
+
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
         bool should_use = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN &&
                           rf_desc->is_stream_build_filter();
