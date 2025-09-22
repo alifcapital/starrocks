@@ -51,6 +51,9 @@ public class LogicalJoinOperator extends LogicalOperator {
     private boolean hasPushDownJoinOnClause = false;
     private boolean hasDeriveIsNotNullPredicate = false;
 
+    // Flag to mark if this is an Iceberg equality delete anti-join
+    private boolean isIcebergEqualityDelete = false;
+
     // NOTE: we keep the original onPredicate for MV's rewrite to distinguish on-predicates and
     // where-predicates. Take care to pass through original on-predicates when creating a new JoinOperator.
     private ScalarOperator originalOnPredicate;
@@ -102,6 +105,14 @@ public class LogicalJoinOperator extends LogicalOperator {
 
     public void setHasDeriveIsNotNullPredicate(boolean hasDeriveIsNotNullPredicate) {
         this.hasDeriveIsNotNullPredicate = hasDeriveIsNotNullPredicate;
+    }
+
+    public boolean isIcebergEqualityDelete() {
+        return isIcebergEqualityDelete;
+    }
+
+    public void setIcebergEqualityDelete(boolean icebergEqualityDelete) {
+        this.isIcebergEqualityDelete = icebergEqualityDelete;
     }
 
     public JoinOperator getJoinType() {
@@ -277,6 +288,7 @@ public class LogicalJoinOperator extends LogicalOperator {
             builder.skewValues = joinOperator.skewValues;
             builder.hasPushDownJoinOnClause = joinOperator.hasPushDownJoinOnClause;
             builder.hasDeriveIsNotNullPredicate = joinOperator.hasDeriveIsNotNullPredicate;
+            builder.isIcebergEqualityDelete = joinOperator.isIcebergEqualityDelete;
             builder.originalOnPredicate = joinOperator.originalOnPredicate;
             return this;
         }
@@ -318,6 +330,11 @@ public class LogicalJoinOperator extends LogicalOperator {
 
         public Builder setTransformMask(int mask) {
             builder.transformMask = mask;
+            return this;
+        }
+
+        public Builder setIcebergEqualityDelete(boolean icebergEqualityDelete) {
+            builder.isIcebergEqualityDelete = icebergEqualityDelete;
             return this;
         }
     }

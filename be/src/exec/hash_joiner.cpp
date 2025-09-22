@@ -237,6 +237,11 @@ bool HashJoiner::need_input() const {
 }
 
 bool HashJoiner::has_output() const {
+    // Check bypass chunk first
+    if (_bypass_chunk != nullptr) {
+        return true;
+    }
+
     if (_phase == HashJoinPhase::BUILD) {
         return false;
     }
@@ -256,6 +261,32 @@ bool HashJoiner::has_output() const {
 
 Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     DCHECK(chunk && !chunk->is_empty());
+
+    // Handle bypass for Iceberg equality delete anti-joins
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                 _hash_join_node.is_iceberg_equality_delete);
+
+    if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+        const auto& bypass_column = chunk->get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+        const auto* bool_column = down_cast<const BooleanColumn*>(bypass_column.get());
+
+        // Check if all rows can skip hash table probe
+        bool all_rows_bypass = true;
+        for (size_t i = 0; i < bool_column->size() && all_rows_bypass; i++) {
+            if (!bool_column->get_data()[i]) {
+                all_rows_bypass = false;
+            }
+        }
+
+        if (all_rows_bypass) {
+            // All rows bypass hash probe - store chunk for direct output
+            chunk->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+            _bypass_chunk = std::move(chunk);
+            return Status::OK();
+        }
+    }
+
     return _hash_join_prober->push_probe_chunk(state, std::move(chunk));
 }
 
@@ -265,6 +296,14 @@ Status HashJoiner::probe_input_finished(RuntimeState* state) {
 
 StatusOr<ChunkPtr> HashJoiner::pull_chunk(RuntimeState* state) {
     DCHECK(_phase != HashJoinPhase::BUILD);
+
+    // Handle bypass chunk for Iceberg equality delete first
+    if (_bypass_chunk != nullptr) {
+        auto chunk = std::move(_bypass_chunk);
+        _bypass_chunk = nullptr;
+        return chunk;
+    }
+
     return _pull_probe_output_chunk(state);
 }
 
@@ -619,5 +658,6 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
     }
     return Status::OK();
 }
+
 
 } // namespace starrocks

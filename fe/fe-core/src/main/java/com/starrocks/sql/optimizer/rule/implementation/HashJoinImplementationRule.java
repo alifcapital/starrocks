@@ -57,6 +57,9 @@ public class HashJoinImplementationRule extends JoinImplementationRule {
                 joinOperator.getProjection(),
                 joinOperator.getSkewColumn(),
                 joinOperator.getSkewValues());
+
+        // Pass through the Iceberg equality delete flag
+        physicalHashJoin.setIcebergEqualityDelete(joinOperator.isIcebergEqualityDelete());
         OptExpression result = OptExpression.create(physicalHashJoin, input.getInputs());
         return Lists.newArrayList(result);
     }

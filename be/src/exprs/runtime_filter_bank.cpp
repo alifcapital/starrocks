@@ -561,6 +561,7 @@ Status RuntimeFilterProbeDescriptor::init(ObjectPool* pool, const TRuntimeFilter
                                                            desc.filter_type == TRuntimeFilterBuildType::AGG_FILTER);
     _skip_wait = _is_stream_build_filter;
     _is_group_colocate_rf = desc.__isset.build_from_group_execution && desc.build_from_group_execution;
+    _is_iceberg_eq_delete_filter = desc.__isset.is_iceberg_equality_delete && desc.is_iceberg_equality_delete;
 
     bool not_found = true;
     if (desc.__isset.plan_node_id_to_target_expr) {

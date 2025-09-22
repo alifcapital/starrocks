@@ -115,7 +115,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_1) {
     // init
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size](auto vid, const PredicateList& predicates) {
+            [&pred_size](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 return Status::OK();
             },
@@ -130,7 +130,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_1) {
 
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size, &pred_1, &pred_2](auto vid, const PredicateList& predicates) {
+            [&pred_size, &pred_1, &pred_2](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 pred_1 = predicates[0]->debug_string();
                 pred_2 = predicates[1]->debug_string();
@@ -146,7 +146,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_1) {
     _rf.update_min_max<false>(15);
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size, &pred_1, &pred_2](auto vid, const PredicateList& predicates) {
+            [&pred_size, &pred_1, &pred_2](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 pred_1 = predicates[0]->debug_string();
                 pred_2 = predicates[1]->debug_string();
@@ -173,7 +173,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_has_null) {
     // init
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size](auto vid, const PredicateList& predicates) {
+            [&pred_size](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 return Status::OK();
             },
@@ -189,7 +189,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_has_null) {
 
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size, &pred](auto vid, const PredicateList& predicates) {
+            [&pred_size, &pred](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 pred = predicates[0]->debug_string();
                 return Status::OK();
@@ -204,7 +204,7 @@ TEST_F(OlapRuntimeRangePrunerTest, update_has_null) {
     _rf.insert_null();
     ASSERT_OK(pruner.update_range_if_arrived(
             nullptr,
-            [&pred_size, &pred](auto vid, const PredicateList& predicates) {
+            [&pred_size, &pred](auto vid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 pred_size = predicates.size();
                 pred = predicates[0]->debug_string();
                 return Status::OK();

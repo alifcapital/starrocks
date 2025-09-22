@@ -193,7 +193,8 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
                     .setJoinType(JoinOperator.LEFT_ANTI_JOIN)
                     .setJoinHint(HintNode.HINT_JOIN_BROADCAST)
                     .setOnPredicate(onPredicate)
-                    .setOriginalOnPredicate(onPredicate);
+                    .setOriginalOnPredicate(onPredicate)
+                    .setIcebergEqualityDelete(true);
 
             if (i == allIds.size() - 1) {
                 builder.setLimit(limit);

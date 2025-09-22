@@ -766,6 +766,7 @@ struct THashJoinNode {
   56: optional bool late_materialization = false
   57: optional bool enable_partition_hash_join = false
   58: optional bool is_skew_join = false
+  59: optional bool is_iceberg_equality_delete = false
 }
 
 struct TMergeJoinNode {

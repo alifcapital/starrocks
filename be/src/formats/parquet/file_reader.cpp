@@ -18,6 +18,8 @@
 
 #include <cstring>
 #include <iterator>
+
+#include "column/fixed_length_column.h"
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -191,16 +193,31 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
     if (_rf_scan_range_pruner != nullptr) {
         RETURN_IF_ERROR(_rf_scan_range_pruner->update_range_if_arrived(
                 _scanner_ctx->global_dictmaps,
-                [this, &filter, &group_reader](auto cid, const PredicateList& predicates) {
+                [this, &filter, &group_reader](auto cid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                     PredicateCompoundNode<CompoundNodeType::AND> pred_tree;
+
                     for (const auto& pred : predicates) {
                         pred_tree.add_child(PredicateColumnNode{pred});
                     }
+
                     auto real_tree = PredicateTree::create(std::move(pred_tree));
                     auto visitor = PredicateFilterEvaluator{real_tree, group_reader.get(), false, false};
                     auto res = real_tree.visit(visitor);
+
                     if (res.ok() && res->has_value() && res->value().span_size() == 0) {
-                        filter = true;
+                        // Check if this specific runtime filter is for EQ delete bypass
+                        if (desc != nullptr && desc->is_iceberg_eq_delete_filter()) {
+                            // For EQ delete filters: don't filter row group, but mark entire row group for bypass
+                            // This preserves data for UNION ALL while optimizing anti-join
+                            _iceberg_eq_delete_skip_probe = true;
+                            _iceberg_eq_delete_row_groups_skipped++;
+                            if (_group_reader_param.stats != nullptr) {
+                                _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
+                            }
+                        } else {
+                            // Normal runtime filter: filter the entire row group
+                            filter = true;
+                        }
                     }
                     this->_group_reader_param.stats->_optimzation_counter += visitor.counter;
                     return Status::OK();
@@ -209,6 +226,7 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
     }
     return filter;
 }
+
 
 void FileReader::_prepare_read_columns(std::unordered_set<std::string>& existed_column_names) {
     _meta_helper->prepare_read_columns(_scanner_ctx->materialized_columns, _group_reader_param.read_cols,
@@ -338,6 +356,20 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                 RETURN_IF_ERROR(_scanner_ctx->append_or_update_not_existed_columns_to_chunk(chunk, row_count));
                 _scanner_ctx->append_or_update_partition_column_to_chunk(chunk, row_count);
                 _scanner_ctx->append_or_update_extended_column_to_chunk(chunk, row_count);
+
+                // Add EQ delete skip probe column if needed
+                if (_iceberg_eq_delete_skip_probe) {
+                    auto skip_probe_column = BooleanColumn::create();
+                    skip_probe_column->resize(row_count);
+                    // Mark all rows in this row group to skip hash table probe (since runtime filter determined they can't match EQ deletes)
+                    std::fill(skip_probe_column->get_data().begin(), skip_probe_column->get_data().end(), 1);
+                    (*chunk)->append_column(skip_probe_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+                    _iceberg_eq_delete_rows_skipped += row_count;
+                    if (_group_reader_param.stats != nullptr) {
+                        _group_reader_param.stats->iceberg_eq_delete_rows_skipped += row_count;
+                    }
+                }
+
                 _scan_row_count += (*chunk)->num_rows();
             }
             if (status.is_end_of_file()) {
@@ -346,6 +378,8 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                     _row_group_readers[_cur_row_group_idx] = nullptr;
                     _cur_row_group_idx++;
                     if (_cur_row_group_idx < _row_group_size) {
+                        // reset per-row-group bypass flag
+                        _iceberg_eq_delete_skip_probe = false;
                         const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
                         auto ret = _update_rf_and_filter_group(cur_row_group);
                         if (ret.ok() && ret.value()) {
@@ -364,6 +398,7 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                         }
 
                         RETURN_IF_ERROR(cur_row_group->prepare());
+
                     }
                     break;
                 } while (true);
@@ -397,11 +432,20 @@ Status FileReader::_exec_no_materialized_column_scan(ChunkPtr* chunk) {
             _scanner_ctx->append_or_update_partition_column_to_chunk(chunk, read_size);
             _scanner_ctx->append_or_update_extended_column_to_chunk(chunk, read_size);
         }
+
+        // Add Iceberg EQ delete bypass column if needed
+        if (_iceberg_eq_delete_skip_probe) {
+            auto bypass_column = BooleanColumn::create(read_size, 1); // All rows skip probe
+            (*chunk)->append_column(bypass_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+            _iceberg_eq_delete_rows_skipped += read_size;
+        }
+
         _scan_row_count += read_size;
         return Status::OK();
     }
 
     return Status::EndOfFile("");
 }
+
 
 } // namespace starrocks::parquet

@@ -34,6 +34,8 @@ public abstract class PhysicalJoinOperator extends PhysicalOperator {
     protected final ScalarOperator onPredicate;
     protected final String joinHint;
     protected boolean outputRequireHashPartition = true;
+    // Flag to mark if this is an Iceberg equality delete anti-join
+    protected boolean isIcebergEqualityDelete = false;
 
     protected PhysicalJoinOperator(OperatorType operatorType, JoinOperator joinType,
                                    ScalarOperator onPredicate,
@@ -64,6 +66,14 @@ public abstract class PhysicalJoinOperator extends PhysicalOperator {
 
     public String getJoinHint() {
         return joinHint;
+    }
+
+    public boolean isIcebergEqualityDelete() {
+        return isIcebergEqualityDelete;
+    }
+
+    public void setIcebergEqualityDelete(boolean icebergEqualityDelete) {
+        this.isIcebergEqualityDelete = icebergEqualityDelete;
     }
 
     @Override

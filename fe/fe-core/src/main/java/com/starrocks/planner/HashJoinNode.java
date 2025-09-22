@@ -68,6 +68,9 @@ public class HashJoinNode extends JoinNode {
 
     // only set when isSkewJoin = true && shuffle join
     private Map<Integer, Integer> eqJoinConjunctsIndexToRfId;
+
+    // Flag to mark if this is an Iceberg equality delete anti-join
+    private boolean isIcebergEqualityDelete = false;
     public HashJoinNode(PlanNodeId id, PlanNode outer, PlanNode inner, TableRef innerRef,
                         List<Expr> eqJoinConjuncts, List<Expr> otherJoinConjuncts) {
         super("HASH JOIN", id, outer, inner, innerRef, eqJoinConjuncts, otherJoinConjuncts);
@@ -100,6 +103,14 @@ public class HashJoinNode extends JoinNode {
 
     public void setSkewJoinFriend(HashJoinNode skewJoinFriend) {
         this.skewJoinFriend = skewJoinFriend;
+    }
+
+    public boolean isIcebergEqualityDelete() {
+        return isIcebergEqualityDelete;
+    }
+
+    public void setIcebergEqualityDelete(boolean icebergEqualityDelete) {
+        this.isIcebergEqualityDelete = icebergEqualityDelete;
     }
 
     public Map<Integer, Integer> getEqJoinConjunctsIndexToRfId() {
@@ -191,6 +202,9 @@ public class HashJoinNode extends JoinNode {
         }
         if (isSkewJoin) {
             msg.hash_join_node.setIs_skew_join(isSkewJoin);
+        }
+        if (isIcebergEqualityDelete) {
+            msg.hash_join_node.setIs_iceberg_equality_delete(isIcebergEqualityDelete);
         }
     }
 

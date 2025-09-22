@@ -117,6 +117,9 @@ struct HdfsScanStats {
     int64_t page_index_ns = 0;
     int64_t parquet_total_row_groups = 0;
     int64_t parquet_filtered_row_groups = 0;
+    // Iceberg equality delete optimization (exposed in profile)
+    int64_t iceberg_eq_delete_row_groups_skipped = 0;
+    int64_t iceberg_eq_delete_rows_skipped = 0;
 
     // late materialize round-by-round
     int64_t group_min_round_cost = 0;

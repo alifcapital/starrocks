@@ -421,6 +421,7 @@ private:
 
     Status _create_runtime_bloom_filters(RuntimeState* state, int64_t limit);
 
+
 private:
     const THashJoinNode& _hash_join_node;
     ObjectPool* _pool;
@@ -451,6 +452,8 @@ private:
     pipeline::RuntimeMembershipFilters _build_runtime_filters;
     pipeline::OpTRuntimeBloomFilterBuildParams _runtime_bloom_filter_build_params;
     bool _build_runtime_filters_from_planner;
+
+    ChunkPtr _bypass_chunk = nullptr;  // For Iceberg equality delete bypass
 
     bool _is_push_down = false;
 

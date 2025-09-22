@@ -274,7 +274,7 @@ inline Status RuntimeScanRangePruner::_update(const ColumnIdToGlobalDictMap* glo
 
                 ASSIGN_OR_RETURN(auto predicates, _get_predicates(global_dictmaps, i, &pool));
                 if (!predicates.empty()) {
-                    RETURN_IF_ERROR(updater(predicates.front()->column_id(), predicates));
+                    RETURN_IF_ERROR(updater(predicates.front()->column_id(), predicates, _unarrived_runtime_filters[i]));
                 }
                 _arrived_runtime_filters_masks[i] = true;
                 _rf_versions[i] = rf_version;

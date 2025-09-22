@@ -758,7 +758,7 @@ Status SegmentIterator::_get_row_ranges_by_row_ids(std::vector<int64_t>* result_
 Status SegmentIterator::_try_to_update_ranges_by_runtime_filter() {
     return _opts.runtime_range_pruner.update_range_if_arrived(
             _opts.global_dictmaps,
-            [this](auto cid, const PredicateList& predicates) {
+            [this](auto cid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                 const ColumnPredicate* del_pred;
                 auto iter = _del_predicates.find(cid);
                 del_pred = iter != _del_predicates.end() ? &(iter->second) : nullptr;
