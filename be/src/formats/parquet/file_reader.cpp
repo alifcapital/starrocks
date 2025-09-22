@@ -194,6 +194,16 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
         RETURN_IF_ERROR(_rf_scan_range_pruner->update_range_if_arrived(
                 _scanner_ctx->global_dictmaps,
                 [this, &filter, &group_reader](auto cid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
+                    // Skip applying runtime filter for Iceberg equality delete
+                    if (desc != nullptr && desc->is_iceberg_eq_delete_filter()) {
+                        _iceberg_eq_delete_skip_probe = true;
+                        _iceberg_eq_delete_row_groups_skipped++;
+                        if (_group_reader_param.stats != nullptr) {
+                            _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
+                        }
+                        return Status::OK();
+                    }
+
                     PredicateCompoundNode<CompoundNodeType::AND> pred_tree;
 
                     for (const auto& pred : predicates) {
@@ -205,19 +215,8 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     auto res = real_tree.visit(visitor);
 
                     if (res.ok() && res->has_value() && res->value().span_size() == 0) {
-                        // Check if this specific runtime filter is for EQ delete bypass
-                        if (desc != nullptr && desc->is_iceberg_eq_delete_filter()) {
-                            // For EQ delete filters: don't filter row group, but mark entire row group for bypass
-                            // This preserves data for UNION ALL while optimizing anti-join
-                            _iceberg_eq_delete_skip_probe = true;
-                            _iceberg_eq_delete_row_groups_skipped++;
-                            if (_group_reader_param.stats != nullptr) {
-                                _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
-                            }
-                        } else {
-                            // Normal runtime filter: filter the entire row group
-                            filter = true;
-                        }
+                        // Normal runtime filter: filter the entire row group
+                        filter = true;
                     }
                     this->_group_reader_param.stats->_optimzation_counter += visitor.counter;
                     return Status::OK();
