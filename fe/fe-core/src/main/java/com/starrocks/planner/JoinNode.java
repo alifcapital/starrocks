@@ -188,9 +188,11 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
         SessionVariable sessionVariable = ConnectContext.get().getSessionVariable();
         JoinOperator joinOp = getJoinOp();
         PlanNode inner = getChild(1);
-        // Allow LEFT ANTI JOIN for Iceberg equality deletes
+        // Allow LEFT ANTI JOIN for Iceberg equality deletes if optimization is enabled
         if (!joinOp.isInnerJoin() && !joinOp.isLeftSemiJoin() && !joinOp.isRightJoin() && !joinOp.isCrossJoin()) {
-            if (!(joinOp.isLeftAntiJoin() && this instanceof HashJoinNode && ((HashJoinNode) this).isIcebergEqualityDelete())) {
+            boolean enableIcebergOptimization = sessionVariable.getEnableIcebergEqualityDeleteOptimization();
+            if (!(joinOp.isLeftAntiJoin() && this instanceof HashJoinNode &&
+                  ((HashJoinNode) this).isIcebergEqualityDelete() && enableIcebergOptimization)) {
                 return;
             }
         }
@@ -254,7 +256,8 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
                 rf.setBuildExpr(left);
 
                 // Mark if this is an Iceberg equality delete runtime filter
-                if (joinOp.isLeftAntiJoin() && this instanceof HashJoinNode && ((HashJoinNode) this).isIcebergEqualityDelete()) {
+                if (joinOp.isLeftAntiJoin() && this instanceof HashJoinNode &&
+                    ((HashJoinNode) this).isIcebergEqualityDelete() && sessionVariable.getEnableIcebergEqualityDeleteOptimization()) {
                     rf.setIcebergEqualityDelete(true);
                 }
 

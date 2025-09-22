@@ -473,6 +473,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_ICEBERG_COLUMN_STATISTICS = "enable_iceberg_column_statistics";
     public static final String ENABLE_READ_ICEBERG_EQUALITY_DELETE_WITH_PARTITION_EVOLUTION =
             "enable_read_iceberg_equality_delete_with_partition_evolution";
+    public static final String ENABLE_ICEBERG_EQUALITY_DELETE_OPTIMIZATION = "enable_iceberg_equality_delete_optimization";
     public static final String ENABLE_DELTA_LAKE_COLUMN_STATISTICS = "enable_delta_lake_column_statistics";
 
     public static final String ENABLE_QUERY_TRIGGER_ANALYZE = "enable_query_trigger_analyze";
@@ -2600,6 +2601,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_READ_ICEBERG_EQUALITY_DELETE_WITH_PARTITION_EVOLUTION)
     private boolean enableReadIcebergEqDeleteWithPartitionEvolution = false;
+
+    @VarAttr(name = ENABLE_ICEBERG_EQUALITY_DELETE_OPTIMIZATION)
+    private boolean enableIcebergEqualityDeleteOptimization = true;
 
     @VarAttr(name = ENABLE_DELTA_LAKE_COLUMN_STATISTICS)
     private boolean enableDeltaLakeColumnStatistics = false;
@@ -4885,6 +4889,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean getEnableIcebergIdentityColumnOptimize() {
         return enableIcebergIdentityColumnOptimize;
+    }
+
+    public boolean getEnableIcebergEqualityDeleteOptimization() {
+        return enableIcebergEqualityDeleteOptimization;
     }
 
     public boolean getEnablePlanSerializeConcurrently() {
