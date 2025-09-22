@@ -48,6 +48,7 @@ import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.ScanOperatorPredicates;
 import com.starrocks.sql.optimizer.operator.logical.LogicalEsScanOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -486,6 +487,9 @@ public class OptExternalPartitionPruner {
 
     private static void computeMinMaxConjuncts(LogicalScanOperator operator, OptimizerContext context)
             throws AnalysisException {
+        if (operator instanceof LogicalIcebergScanOperator && ((LogicalIcebergScanOperator) operator).isEqDeleteProbeScan()) {
+            return; // Skip min-max for Iceberg EQ-delete probe scans
+        }
         ScanOperatorPredicates scanOperatorPredicates = operator.getScanOperatorPredicates();
         for (ScalarOperator scalarOperator : scanOperatorPredicates.getNonPartitionConjuncts()) {
             if (isSupportedMinMaxConjuncts(operator, scalarOperator)) {
