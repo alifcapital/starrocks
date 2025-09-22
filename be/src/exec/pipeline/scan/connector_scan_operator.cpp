@@ -592,7 +592,20 @@ ConnectorChunkSource::ConnectorChunkSource(ScanOperator* op, RuntimeProfile* run
           _runtime_bloom_filters(op->runtime_bloom_filters()),
           _enable_adaptive_io_tasks(enable_adaptive_io_tasks) {
     _conjunct_ctxs = scan_node->conjunct_ctxs();
-    _conjunct_ctxs.insert(_conjunct_ctxs.end(), _runtime_in_filters.begin(), _runtime_in_filters.end());
+    // If this scan has Iceberg EQ-delete runtime bloom filters, skip adding
+    // runtime IN filters entirely to avoid turning them into predicate_tree min/max.
+    bool skip_runtime_in_filters = false;
+    if (_runtime_bloom_filters != nullptr) {
+        for (const auto& kv : _runtime_bloom_filters->descriptors()) {
+            if (kv.second != nullptr && kv.second->is_iceberg_eq_delete_filter()) {
+                skip_runtime_in_filters = true;
+                break;
+            }
+        }
+    }
+    if (!skip_runtime_in_filters) {
+        _conjunct_ctxs.insert(_conjunct_ctxs.end(), _runtime_in_filters.begin(), _runtime_in_filters.end());
+    }
     auto* scan_morsel = (ScanMorsel*)_morsel.get();
     TScanRange* scan_range = scan_morsel->get_scan_range();
     ScanSplitContext* split_context = scan_morsel->get_split_context();
