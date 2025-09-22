@@ -101,7 +101,7 @@ public class RuntimeFilterDescription {
     private int skew_shuffle_filter_id = -1;
 
     private RuntimeFilterType type;
-    
+
     // Flag to mark if this is an Iceberg equality delete runtime filter
     private boolean isIcebergEqualityDelete = false;
 
