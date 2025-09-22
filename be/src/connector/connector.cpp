@@ -84,6 +84,12 @@ Status DataSource::parse_runtime_filters(RuntimeState* state) {
     for (const auto& item : _runtime_filters->descriptors()) {
         RuntimeFilterProbeDescriptor* probe = item.second;
         DCHECK(runtime_membership_filter_eval_context.driver_sequence != -1);
+
+        // Skip Iceberg equality delete filters - they should not become conjuncts
+        if (probe->is_iceberg_eq_delete_filter()) {
+            continue;
+        }
+
         const RuntimeFilter* filter = probe->runtime_filter(runtime_membership_filter_eval_context.driver_sequence);
         if (filter == nullptr) continue;
         SlotId slot_id;
