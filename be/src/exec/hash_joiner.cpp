@@ -569,6 +569,15 @@ Status HashJoiner::_process_where_conjunct(ChunkPtr* chunk) {
 
 Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
+    
+    // Skip creating IN filters for Iceberg equality delete - we only need bloom/bitset filters
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                 _hash_join_node.is_iceberg_equality_delete);
+    if (is_iceberg_eq_delete) {
+        return Status::OK();
+    }
+    
     size_t ht_row_count = get_ht_row_count();
 
     // Use FE session variable if set, otherwise fall back to BE config
