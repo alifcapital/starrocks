@@ -149,6 +149,9 @@ struct HashJoinProbeMetrics {
     RuntimeProfile::Counter* output_build_column_timer = nullptr;
     RuntimeProfile::Counter* probe_counter = nullptr;
     RuntimeProfile::Counter* partition_probe_overhead = nullptr;
+    // Iceberg equality delete bypass metrics
+    RuntimeProfile::Counter* iceberg_eq_delete_bypassed_chunks = nullptr;
+    RuntimeProfile::Counter* iceberg_eq_delete_bypassed_rows = nullptr;
 
     void prepare(RuntimeProfile* runtime_profile);
 };

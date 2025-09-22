@@ -46,6 +46,9 @@ void HashJoinProbeMetrics::prepare(RuntimeProfile* runtime_profile) {
     where_conjunct_evaluate_timer = ADD_TIMER(runtime_profile, "WhereConjunctEvaluateTime");
     probe_counter = ADD_COUNTER(runtime_profile, "probeCount", TUnit::UNIT);
     partition_probe_overhead = ADD_TIMER(runtime_profile, "PartitionProbeOverhead");
+    // Iceberg equality delete bypass metrics
+    iceberg_eq_delete_bypassed_chunks = ADD_COUNTER(runtime_profile, "IcebergEqDeleteBypassedChunks", TUnit::UNIT);
+    iceberg_eq_delete_bypassed_rows = ADD_COUNTER(runtime_profile, "IcebergEqDeleteBypassedRows", TUnit::UNIT);
 }
 
 void HashJoinBuildMetrics::prepare(RuntimeProfile* runtime_profile) {
@@ -281,8 +284,14 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
 
         if (all_rows_bypass) {
             // All rows bypass hash probe - store chunk for direct output
+            size_t bypassed_rows = chunk->num_rows();
             chunk->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
             _bypass_chunk = std::move(chunk);
+
+            // Update bypass metrics
+            COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
+            COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
+
             return Status::OK();
         }
     }
