@@ -485,10 +485,35 @@ Status HiveDataSource::_decompose_conjunct_ctxs(RuntimeState* state) {
 Status HiveDataSource::_setup_all_conjunct_ctxs(RuntimeState* state) {
     // clone conjunct from _min_max_conjunct_ctxs & _conjunct_ctxs
     // then we will generate PredicateTree based on _all_conjunct_ctxs
+    // Build set of slots referenced by Iceberg EQ-delete RF so we can exclude only those min/max predicates
+    std::unordered_set<SlotId> eq_delete_slots;
+    if (_runtime_filters != nullptr) {
+        const auto& descs = _runtime_filters->descriptors();
+        for (const auto& kv : descs) {
+            RuntimeFilterProbeDescriptor* d = kv.second;
+            if (d != nullptr && d->is_iceberg_eq_delete_filter()) {
+                SlotId sid;
+                if (d->is_probe_slot_ref(&sid)) {
+                    eq_delete_slots.insert(sid);
+                }
+            }
+        }
+    }
+
     std::vector<ExprContext*> cloned_conjunct_ctxs;
     RETURN_IF_ERROR(Expr::clone_if_not_exists(state, &_pool, _min_max_conjunct_ctxs, &cloned_conjunct_ctxs));
     for (auto* ctx : cloned_conjunct_ctxs) {
-        _all_conjunct_ctxs.emplace_back(ctx);
+        bool skip = false;
+        if (!eq_delete_slots.empty()) {
+            std::vector<SlotId> slot_ids;
+            ctx->root()->get_slot_ids(&slot_ids);
+            for (auto sid : slot_ids) {
+                if (eq_delete_slots.count(sid)) { skip = true; break; }
+            }
+        }
+        if (!skip) {
+            _all_conjunct_ctxs.emplace_back(ctx);
+        }
     }
 
     cloned_conjunct_ctxs.clear();
