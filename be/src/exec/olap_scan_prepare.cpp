@@ -376,7 +376,10 @@ Status ChunkPredicateBuilder<E, Type>::_build_bitset_in_predicates(PredicateComp
         // Skip EQ-delete RFs - they should NOT be added to predicate tree even if arrived
         // Keep them in unarrived_runtime_filters() so they reach FileReader for bypass
         if (desc->is_iceberg_eq_delete_filter()) {
-            VLOG(1) << "EQDELETE ScanConjunctsManager: Skipping EQ-delete RF from predicate tree, filter_id=" << desc->filter_id();
+            const auto* rf = desc->runtime_filter(_opts.driver_sequence);
+            bool is_arrived = (rf != nullptr);
+            VLOG(1) << "EQDELETE ScanConjunctsManager: Skipping EQ-delete RF from predicate tree, filter_id=" << desc->filter_id()
+                    << ", is_arrived=" << is_arrived << ", rf_type=" << (rf ? static_cast<int>(rf->type()) : -1);
             continue;
         }
 
@@ -779,8 +782,12 @@ Status ChunkPredicateBuilder<E, Type>::normalize_join_runtime_filter(const SlotD
         if (!desc->is_probe_slot_ref(&slot_id) || slot_id != slot.id()) continue;
 
         // runtime filter existed and does not have null.
-        if (rf == nullptr || rf->get_in_filter() != nullptr) {
+        // ALSO: force EQ-delete RFs into unarrived for FileReader bypass, even if arrived
+        if (rf == nullptr || rf->get_in_filter() != nullptr || desc->is_iceberg_eq_delete_filter()) {
             rt_ranger_params.add_unarrived_rf(desc, &slot, _opts.driver_sequence);
+            if (desc->is_iceberg_eq_delete_filter()) {
+                VLOG(1) << "EQDELETE ScanConjunctsManager: Force adding EQ-delete RF to unarrived, filter_id=" << desc->filter_id();
+            }
             continue;
         }
 
