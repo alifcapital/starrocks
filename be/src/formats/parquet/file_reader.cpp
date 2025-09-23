@@ -368,21 +368,20 @@ Status FileReader::get_next(ChunkPtr* chunk) {
         // Check runtime filters for current row group BEFORE reading data
         const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
         VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group for initial check, row_group_idx=" << _cur_row_group_idx;
-            auto ret = _update_rf_and_filter_group(cur_row_group);
-            if (ret.ok() && ret.value()) {
-                // row group is filtered by runtime filter - skip to next
-                _group_reader_param.stats->parquet_filtered_row_groups += 1;
-                _cur_row_group_idx++;
-                return get_next(chunk); // Recurse to try next row group
-            } else if (ret.status().is_end_of_file()) {
-                // If rf is always false, skip all remaining row groups
-                _group_reader_param.stats->parquet_filtered_row_groups += (_row_group_size - _cur_row_group_idx);
-                for (size_t i = _cur_row_group_idx; i < _row_group_size; i++) {
-                    _row_group_readers[i] = nullptr;
-                }
-                _cur_row_group_idx = _row_group_size;
-                return Status::EndOfFile("");
+        auto ret = _update_rf_and_filter_group(cur_row_group);
+        if (ret.ok() && ret.value()) {
+            // row group is filtered by runtime filter - skip to next
+            _group_reader_param.stats->parquet_filtered_row_groups += 1;
+            _cur_row_group_idx++;
+            return get_next(chunk); // Recurse to try next row group
+        } else if (ret.status().is_end_of_file()) {
+            // If rf is always false, skip all remaining row groups
+            _group_reader_param.stats->parquet_filtered_row_groups += (_row_group_size - _cur_row_group_idx);
+            for (size_t i = _cur_row_group_idx; i < _row_group_size; i++) {
+                _row_group_readers[i] = nullptr;
             }
+            _cur_row_group_idx = _row_group_size;
+            return Status::EndOfFile("");
         }
 
         size_t row_count = _chunk_size;
