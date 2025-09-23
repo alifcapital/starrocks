@@ -180,6 +180,17 @@ Status HdfsScanner::_build_scanner_context() {
     opts.obj_pool = _runtime_state->obj_pool();
     opts.runtime_filters = _scanner_params.runtime_filter_collector;
     opts.runtime_state = _runtime_state;
+
+    // Debug runtime filter collector
+    VLOG(1) << "EQDELETE HDFSScanner: runtime_filter_collector=" << (opts.runtime_filters != nullptr);
+    if (opts.runtime_filters != nullptr) {
+        VLOG(1) << "EQDELETE HDFSScanner: runtime_filter_collector->descriptors().size()=" << opts.runtime_filters->descriptors().size();
+        for (const auto& kv : opts.runtime_filters->descriptors()) {
+            const auto* desc = kv.second;
+            VLOG(1) << "EQDELETE HDFSScanner: RF in collector, filter_id=" << (desc ? desc->filter_id() : -1)
+                    << ", is_eq_delete=" << (desc && desc->is_iceberg_eq_delete_filter() ? "true" : "false");
+        }
+    }
     opts.enable_column_expr_predicate = true;
     opts.is_olap_scan = false;
     opts.pred_tree_params = _runtime_state->fragment_ctx()->pred_tree_params();

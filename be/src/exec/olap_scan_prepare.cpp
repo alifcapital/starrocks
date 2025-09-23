@@ -373,6 +373,13 @@ Status ChunkPredicateBuilder<E, Type>::_build_bitset_in_predicates(PredicateComp
             continue;
         }
 
+        // Skip EQ-delete RFs - they should NOT be added to predicate tree even if arrived
+        // Keep them in unarrived_runtime_filters() so they reach FileReader for bypass
+        if (desc->is_iceberg_eq_delete_filter()) {
+            VLOG(1) << "EQDELETE ScanConjunctsManager: Skipping EQ-delete RF from predicate tree, filter_id=" << desc->filter_id();
+            continue;
+        }
+
         // The un-arrived runtime filter will not be added to the predicate tree,
         // but will be added to `RuntimeFilterPredicates` by `get_runtime_filter_predicates`.
         const auto* rf = desc->runtime_filter(_opts.driver_sequence);
@@ -1356,6 +1363,13 @@ StatusOr<RuntimeFilterPredicates> ScanConjunctsManager::get_runtime_filter_predi
     RuntimeFilterPredicates predicates(_opts.driver_sequence);
     for (const auto& it : _opts.runtime_filters->descriptors()) {
         RuntimeFilterProbeDescriptor* desc = it.second;
+
+        // Skip ONLY EQ-delete RFs from predicate conversion - keep them for FileReader bypass
+        if (desc && desc->is_iceberg_eq_delete_filter()) {
+            VLOG(1) << "EQDELETE ScanConjunctsManager: Skipping EQ-delete RF predicate conversion, filter_id=" << desc->filter_id();
+            continue;
+        }
+
         SlotId slot_id;
         if (!desc->is_probe_slot_ref(&slot_id)) {
             continue;
