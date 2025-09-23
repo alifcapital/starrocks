@@ -202,19 +202,10 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     VLOG(1) << "EQDELETE FileReader: lambda called, desc=" << (desc != nullptr)
                             << ", filter_id=" << (desc ? desc->filter_id() : -1)
                             << ", is_eq_delete=" << (desc ? desc->is_iceberg_eq_delete_filter() : false);
-                    // Skip applying runtime filter for Iceberg equality delete
-                    if (desc != nullptr && desc->is_iceberg_eq_delete_filter()) {
-                        _iceberg_eq_delete_skip_probe = true;
-                        _iceberg_eq_delete_row_groups_skipped++;
-                        if (_group_reader_param.stats != nullptr) {
-                            _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
-                        }
-                        VLOG(1) << "EQDELETE FileReader: bypassed row group, filter_id=" << desc->filter_id();
-                        return Status::OK();
-                    }
+                    // For Iceberg equality delete: apply RF normally, but set bypass flag instead of filtering
+                    bool is_eq_delete = (desc != nullptr && desc->is_iceberg_eq_delete_filter());
 
                     PredicateCompoundNode<CompoundNodeType::AND> pred_tree;
-
                     for (const auto& pred : predicates) {
                         pred_tree.add_child(PredicateColumnNode{pred});
                     }
@@ -223,9 +214,25 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     auto visitor = PredicateFilterEvaluator{real_tree, group_reader.get(), false, false};
                     auto res = real_tree.visit(visitor);
 
-                    if (res.ok() && res->has_value() && res->value().span_size() == 0) {
-                        // Normal runtime filter: filter the entire row group
-                        filter = true;
+                    if (is_eq_delete) {
+                        // For EQ-delete: if RF would filter row group, it means row group doesn't intersect
+                        // with delete files, so we can bypass hash join for this entire row group
+                        if (res.ok() && res->has_value() && res->value().span_size() == 0) {
+                            _iceberg_eq_delete_skip_probe = true;
+                            _iceberg_eq_delete_row_groups_skipped++;
+                            if (_group_reader_param.stats != nullptr) {
+                                _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
+                            }
+                            VLOG(1) << "EQDELETE FileReader: row group bypassed (RF would filter), filter_id=" << desc->filter_id();
+                        } else {
+                            VLOG(1) << "EQDELETE FileReader: row group NOT bypassed (RF wouldn't filter), filter_id=" << desc->filter_id();
+                        }
+                        // Don't set filter=true for EQ-delete - we handle it via bypass mechanism
+                    } else {
+                        // Normal runtime filter: filter the entire row group if RF matches
+                        if (res.ok() && res->has_value() && res->value().span_size() == 0) {
+                            filter = true;
+                        }
                     }
                     this->_group_reader_param.stats->_optimzation_counter += visitor.counter;
                     return Status::OK();
@@ -355,10 +362,12 @@ Status FileReader::get_next(ChunkPtr* chunk) {
     }
 
     if (_cur_row_group_idx < _row_group_size) {
+        // Reset bypass flag for each row group
+        _iceberg_eq_delete_skip_probe = false;
+
         // Check runtime filters for current row group BEFORE reading data
-        if (!_iceberg_eq_delete_skip_probe) { // Only check once per row group
-            const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
-            VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group for initial check, row_group_idx=" << _cur_row_group_idx;
+        const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
+        VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group for initial check, row_group_idx=" << _cur_row_group_idx;
             auto ret = _update_rf_and_filter_group(cur_row_group);
             if (ret.ok() && ret.value()) {
                 // row group is filtered by runtime filter - skip to next
