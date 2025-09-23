@@ -80,8 +80,12 @@ Status FileReader::init(HdfsScannerContext* ctx) {
         return Status::OK();
     }
 
+    VLOG(1) << "EQDELETE FileReader: init() called, scanner_ctx->rf_scan_range_pruner=" << (_scanner_ctx->rf_scan_range_pruner != nullptr);
     if (_scanner_ctx->rf_scan_range_pruner != nullptr) {
         _rf_scan_range_pruner = std::make_shared<RuntimeScanRangePruner>(*_scanner_ctx->rf_scan_range_pruner);
+        VLOG(1) << "EQDELETE FileReader: Created _rf_scan_range_pruner, ptr=" << _rf_scan_range_pruner.get();
+    } else {
+        VLOG(1) << "EQDELETE FileReader: rf_scan_range_pruner is NULL, no RF processing!";
     }
     RETURN_IF_ERROR(_init_group_readers());
     return Status::OK();
@@ -351,6 +355,27 @@ Status FileReader::get_next(ChunkPtr* chunk) {
     }
 
     if (_cur_row_group_idx < _row_group_size) {
+        // Check runtime filters for current row group BEFORE reading data
+        if (!_iceberg_eq_delete_skip_probe) { // Only check once per row group
+            const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
+            VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group for initial check, row_group_idx=" << _cur_row_group_idx;
+            auto ret = _update_rf_and_filter_group(cur_row_group);
+            if (ret.ok() && ret.value()) {
+                // row group is filtered by runtime filter - skip to next
+                _group_reader_param.stats->parquet_filtered_row_groups += 1;
+                _cur_row_group_idx++;
+                return get_next(chunk); // Recurse to try next row group
+            } else if (ret.status().is_end_of_file()) {
+                // If rf is always false, skip all remaining row groups
+                _group_reader_param.stats->parquet_filtered_row_groups += (_row_group_size - _cur_row_group_idx);
+                for (size_t i = _cur_row_group_idx; i < _row_group_size; i++) {
+                    _row_group_readers[i] = nullptr;
+                }
+                _cur_row_group_idx = _row_group_size;
+                return Status::EndOfFile("");
+            }
+        }
+
         size_t row_count = _chunk_size;
         Status status;
         try {
@@ -388,28 +413,9 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                     _row_group_readers[_cur_row_group_idx] = nullptr;
                     _cur_row_group_idx++;
                     if (_cur_row_group_idx < _row_group_size) {
-                        // reset per-row-group bypass flag
+                        // reset per-row-group bypass flag for next row group
                         _iceberg_eq_delete_skip_probe = false;
-                        const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
-                        VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group, row_group_idx=" << _cur_row_group_idx;
-                        auto ret = _update_rf_and_filter_group(cur_row_group);
-                        if (ret.ok() && ret.value()) {
-                            // row group is filtered by runtime filter
-                            _group_reader_param.stats->parquet_filtered_row_groups += 1;
-                            continue;
-                        } else if (ret.status().is_end_of_file()) {
-                            // If rf is always false, will return eof
-                            _group_reader_param.stats->parquet_filtered_row_groups +=
-                                    (_row_group_size - _cur_row_group_idx);
-                            _row_group_readers.assign(_row_group_readers.size(), nullptr);
-                            _cur_row_group_idx = _row_group_size;
-                            break;
-                        } else {
-                            // do nothing, ignore the error code
-                        }
-
-                        RETURN_IF_ERROR(cur_row_group->prepare());
-
+                        RETURN_IF_ERROR(_row_group_readers[_cur_row_group_idx]->prepare());
                     }
                     break;
                 } while (true);

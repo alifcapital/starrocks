@@ -209,6 +209,7 @@ Status HdfsScanner::_build_scanner_context() {
     }
     ctx.rf_scan_range_pruner = opts.obj_pool->add(
             new RuntimeScanRangePruner(predicate_parser, unarrived_rfs));
+    VLOG(1) << "EQDELETE HDFSScanner: Created RuntimeScanRangePruner, ptr=" << ctx.rf_scan_range_pruner;
 
     ctx.update_return_count_columns();
     if (ctx.scan_range->__isset.record_count && ctx.scan_range->delete_files.empty()) {

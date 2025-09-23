@@ -270,7 +270,7 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
                                  _hash_join_node.is_iceberg_equality_delete);
     if (is_iceberg_eq_delete) {
-        VLOG(1) << "EQDELETE HashJoiner: join detected, chunk_rows=" << chunk->num_rows();
+        // VLOG(1) << "EQDELETE HashJoiner: join detected, chunk_rows=" << chunk->num_rows();
     }
 
     if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {

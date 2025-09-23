@@ -235,12 +235,15 @@ Status HdfsParquetScanner::do_open(RuntimeState* runtime_state) {
     _reader = std::make_shared<parquet::FileReader>(runtime_state->chunk_size(), _file.get(), _file->get_size().value(),
                                                     _scanner_params.datacache_options,
                                                     _shared_buffered_input_stream.get(), _skip_rows_ctx);
+    VLOG(1) << "EQDELETE HdfsParquetScanner: FileReader created, ptr=" << _reader.get();
     SCOPED_RAW_TIMER(&_app_stats.reader_init_ns);
+    VLOG(1) << "EQDELETE HdfsParquetScanner: About to init FileReader, _scanner_ctx.rf_scan_range_pruner=" << (_scanner_ctx.rf_scan_range_pruner != nullptr);
     RETURN_IF_ERROR(_reader->init(&_scanner_ctx));
     return Status::OK();
 }
 
 Status HdfsParquetScanner::do_get_next(RuntimeState* runtime_state, ChunkPtr* chunk) {
+    VLOG(1) << "EQDELETE HdfsParquetScanner: do_get_next() calling _reader->get_next(), reader_ptr=" << _reader.get();
     Status status = _reader->get_next(chunk);
     return status;
 }
