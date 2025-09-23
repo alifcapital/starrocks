@@ -189,8 +189,15 @@ Status HdfsScanner::_build_scanner_context() {
             opts.obj_pool->add(new ConnectorPredicateParser(&_scanner_params.tuple_desc->decoded_slots()));
     ASSIGN_OR_RETURN(ctx.predicate_tree,
                      ctx.conjuncts_manager->get_predicate_tree(predicate_parser, ctx.predicate_free_pool));
+    auto unarrived_rfs = ctx.conjuncts_manager->unarrived_runtime_filters();
+    VLOG(1) << "EQDELETE HDFSScanner: unarrived_runtime_filters count=" << unarrived_rfs.unarrived_runtime_filters.size();
+    for (size_t i = 0; i < unarrived_rfs.unarrived_runtime_filters.size(); i++) {
+        const auto* desc = unarrived_rfs.unarrived_runtime_filters[i];
+        VLOG(1) << "EQDELETE HDFSScanner: unarrived RF[" << i << "], filter_id=" << (desc ? desc->filter_id() : -1)
+                << ", is_eq_delete=" << (desc && desc->is_iceberg_eq_delete_filter() ? "true" : "false");
+    }
     ctx.rf_scan_range_pruner = opts.obj_pool->add(
-            new RuntimeScanRangePruner(predicate_parser, ctx.conjuncts_manager->unarrived_runtime_filters()));
+            new RuntimeScanRangePruner(predicate_parser, unarrived_rfs));
 
     ctx.update_return_count_columns();
     if (ctx.scan_range->__isset.record_count && ctx.scan_range->delete_files.empty()) {

@@ -338,6 +338,10 @@ Status FileReader::_init_group_readers() {
 }
 
 Status FileReader::get_next(ChunkPtr* chunk) {
+    VLOG(1) << "EQDELETE FileReader: get_next() called, _is_file_filtered=" << _is_file_filtered
+            << ", _no_materialized_column_scan=" << _no_materialized_column_scan
+            << ", _cur_row_group_idx=" << _cur_row_group_idx << ", _row_group_size=" << _row_group_size;
+
     if (_is_file_filtered) {
         return Status::EndOfFile("");
     }
@@ -387,6 +391,7 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                         // reset per-row-group bypass flag
                         _iceberg_eq_delete_skip_probe = false;
                         const auto& cur_row_group = _row_group_readers[_cur_row_group_idx];
+                        VLOG(1) << "EQDELETE FileReader: About to call _update_rf_and_filter_group, row_group_idx=" << _cur_row_group_idx;
                         auto ret = _update_rf_and_filter_group(cur_row_group);
                         if (ret.ok() && ret.value()) {
                             // row group is filtered by runtime filter
