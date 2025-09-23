@@ -201,7 +201,19 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                 [this, &filter, &group_reader](auto cid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
                     VLOG(1) << "EQDELETE FileReader: lambda called, desc=" << (desc != nullptr)
                             << ", filter_id=" << (desc ? desc->filter_id() : -1)
-                            << ", is_eq_delete=" << (desc ? desc->is_iceberg_eq_delete_filter() : false);
+                            << ", is_eq_delete=" << (desc ? desc->is_iceberg_eq_delete_filter() : false)
+                            << ", predicates_size=" << predicates.size();
+
+                    // Debug: check what type of RF we have
+                    if (desc != nullptr) {
+                        const RuntimeFilter* rf = desc->runtime_filter(0); // driver_sequence = 0
+                        if (rf) {
+                            VLOG(1) << "EQDELETE FileReader: RF type info, filter_id=" << desc->filter_id()
+                                    << ", has_in_filter=" << (rf->get_in_filter() != nullptr)
+                                    << ", has_min_max_filter=" << (rf->get_min_max_filter() != nullptr)
+                                    << ", has_membership_filter=" << (rf->get_membership_filter() != nullptr);
+                        }
+                    }
                     // For Iceberg equality delete: apply RF normally, but set bypass flag instead of filtering
                     bool is_eq_delete = (desc != nullptr && desc->is_iceberg_eq_delete_filter());
 
@@ -215,17 +227,16 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     auto res = real_tree.visit(visitor);
 
                     if (is_eq_delete) {
-                        // For EQ-delete: if RF would filter row group, it means row group doesn't intersect
-                        // with delete files, so we can bypass hash join for this entire row group
+                        // For EQ-delete: if RF would filter row group, set bypass flag but DON'T filter
                         if (res.ok() && res->has_value() && res->value().span_size() == 0) {
                             _iceberg_eq_delete_skip_probe = true;
                             _iceberg_eq_delete_row_groups_skipped++;
                             if (_group_reader_param.stats != nullptr) {
                                 _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
                             }
-                            VLOG(1) << "EQDELETE FileReader: row group bypassed (RF would filter), filter_id=" << desc->filter_id();
+                            VLOG(1) << "EQDELETE FileReader: row group bypassed (ALL levels filtered), filter_id=" << desc->filter_id();
                         } else {
-                            VLOG(1) << "EQDELETE FileReader: row group NOT bypassed (RF wouldn't filter), filter_id=" << desc->filter_id();
+                            VLOG(1) << "EQDELETE FileReader: row group NOT bypassed (some levels didn't filter), filter_id=" << desc->filter_id();
                         }
                         // Don't set filter=true for EQ-delete - we handle it via bypass mechanism
                     } else {
