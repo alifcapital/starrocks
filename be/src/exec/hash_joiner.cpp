@@ -288,32 +288,18 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     }
 
     if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
-        const auto& bypass_column = chunk->get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
-        const auto* bool_column = down_cast<const BooleanColumn*>(bypass_column.get());
+        // If bypass column exists, it means ALL rows in this chunk should bypass
+        // FileReader only adds bypass column when entire row group bypasses
+        size_t bypassed_rows = chunk->num_rows();
+        chunk->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+        _bypass_chunk = std::move(chunk);
 
-        // Check if all rows can skip hash table probe
-        bool all_rows_bypass = true;
-        for (size_t i = 0; i < bool_column->size() && all_rows_bypass; i++) {
-            if (!bool_column->get_data()[i]) {
-                all_rows_bypass = false;
-            }
-        }
+        // Update bypass metrics
+        COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
+        COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
 
-        if (all_rows_bypass) {
-            // All rows bypass hash probe - store chunk for direct output
-            size_t bypassed_rows = chunk->num_rows();
-            chunk->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
-            _bypass_chunk = std::move(chunk);
-
-            // Update bypass metrics
-            COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
-            COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
-
-            VLOG(1) << "EQDELETE HashJoiner: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
-            return Status::OK();
-        } else {
-            VLOG(1) << "EQDELETE HashJoiner: bypass column found but NOT all rows bypass";
-        }
+        VLOG(1) << "EQDELETE HashJoiner: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
+        return Status::OK();
     }
 
     return _hash_join_prober->push_probe_chunk(state, std::move(chunk));

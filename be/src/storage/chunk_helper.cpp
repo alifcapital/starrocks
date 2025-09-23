@@ -466,6 +466,13 @@ void ChunkHelper::reorder_chunk(const std::vector<SlotDescriptor*>& slots, Chunk
         auto slot_id = slot->id();
         reordered_chunk.append_column(original_chunk.get_column_by_slot_id(slot_id), slot_id);
     }
+
+    // Preserve EQ_DELETE_BYPASS_SLOT_ID for Iceberg equality delete optimization
+    if (original_chunk.is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+        auto bypass_col = original_chunk.get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+        reordered_chunk.append_column(bypass_col, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+    }
+
     original_chunk.swap_chunk(reordered_chunk);
 }
 
