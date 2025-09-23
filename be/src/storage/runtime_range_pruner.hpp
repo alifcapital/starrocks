@@ -65,10 +65,10 @@ struct RuntimeColumnPredicateBuilder {
             RangeType& range = full_range;
             range.set_index_filter_only(true);
 
-            const RuntimeFilter* rf = desc->runtime_filter(driver_sequence);
+        const RuntimeFilter* rf = desc->runtime_filter(driver_sequence);
 
-            // process agg in runtime-filter
-            auto* in_filter = rf->get_in_filter();
+        // process agg in runtime-filter
+        auto* in_filter = rf->get_in_filter();
             if (in_filter) {
                 if constexpr (ltype == TYPE_VARCHAR) {
                     auto cid = parser->column_id(*slot);
@@ -80,22 +80,22 @@ struct RuntimeColumnPredicateBuilder {
                 }
             }
 
-            // applied global-dict optimized column
-            auto* minmax = rf->get_min_max_filter();
-            if (minmax) {
-                if constexpr (ltype == TYPE_VARCHAR) {
-                    auto cid = parser->column_id(*slot);
-                    if (auto iter = global_dictmaps->find(cid); iter != global_dictmaps->end()) {
-                        build_minmax_range<RangeType, limit_type, LowCardDictType, GlobalDictCodeDecoder>(
-                                range, minmax, pool, iter->second);
-                    } else {
-                        build_minmax_range<RangeType, limit_type, mapping_type, DummyDecoder>(range, minmax, pool,
-                                                                                              nullptr);
-                    }
+        // applied global-dict optimized column
+        auto* minmax = rf->get_min_max_filter();
+        if (minmax) {
+            if constexpr (ltype == TYPE_VARCHAR) {
+                auto cid = parser->column_id(*slot);
+                if (auto iter = global_dictmaps->find(cid); iter != global_dictmaps->end()) {
+                    build_minmax_range<RangeType, limit_type, LowCardDictType, GlobalDictCodeDecoder>(
+                            range, minmax, pool, iter->second);
                 } else {
-                    build_minmax_range<RangeType, limit_type, mapping_type, DummyDecoder>(range, minmax, pool, nullptr);
+                    build_minmax_range<RangeType, limit_type, mapping_type, DummyDecoder>(range, minmax, pool,
+                                                                                          nullptr);
                 }
+            } else {
+                build_minmax_range<RangeType, limit_type, mapping_type, DummyDecoder>(range, minmax, pool, nullptr);
             }
+        }
 
             std::vector<OlapCondition> filters;
             range.to_olap_filter(filters);

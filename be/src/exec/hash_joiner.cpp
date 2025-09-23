@@ -660,11 +660,23 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
         MutableRuntimeFilterPtr filter = nullptr;
         auto multi_partitioned = rf_desc->layout().pipeline_level_multi_partitioned();
         multi_partitioned |= rf_desc->num_colocate_partition() > 0;
+
+        bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                     _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                     _hash_join_node.is_iceberg_equality_delete);
+
+        VLOG(1) << "EQDELETE HashJoiner: _create_runtime_bloom_filters for RF[" << expr_order << "]"
+                << ", is_iceberg_eq_delete=" << is_iceberg_eq_delete
+                << ", multi_partitioned=" << multi_partitioned
+                << ", columns_empty=" << (columns.empty() || columns[0] == nullptr || columns[0]->empty())
+                << ", ht_row_count=" << ht_row_count;
+
         if (multi_partitioned) {
             LogicalType build_type = rf_desc->build_expr_type();
             filter = std::shared_ptr<RuntimeFilter>(
                     RuntimeFilterHelper::create_runtime_bloom_filter(nullptr, build_type, rf_desc->join_mode()));
             if (filter == nullptr) {
+                VLOG(1) << "EQDELETE HashJoiner: create_runtime_bloom_filter returned nullptr! Creating EMPTY param.";
                 _runtime_bloom_filter_build_params.emplace_back();
                 continue;
             }

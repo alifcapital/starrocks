@@ -129,6 +129,16 @@ Status PartialRuntimeFilterMerger::merge_singleton_local_bloom_filters() {
             _enable_join_runtime_bitset_filter && is_version_v3 && row_count <= _global_rf_limit &&
             join_mode == TRuntimeFilterBuildJoinMode::BORADCAST && _partial_bloom_filter_build_params.size() == 1;
 
+    VLOG(1) << "EQDELETE RuntimeFilterMerger: BitsetFilter conditions check, row_count=" << row_count
+            << ", _enable_join_runtime_bitset_filter=" << _enable_join_runtime_bitset_filter
+            << ", is_version_v3=" << is_version_v3
+            << ", row_count_le_global_limit=" << (row_count <= _global_rf_limit)
+            << ", _global_rf_limit=" << _global_rf_limit
+            << ", join_mode_broadcast=" << (join_mode == TRuntimeFilterBuildJoinMode::BORADCAST)
+            << ", single_partition=" << (_partial_bloom_filter_build_params.size() == 1)
+            << ", params_size=" << _partial_bloom_filter_build_params.size()
+            << ", maybe_use_bitset_filter=" << maybe_use_bitset_filter;
+
     const auto& num_bloom_filters = _bloom_filter_descriptors.size();
     // all params must have the same size as num_bloom_filters
     DCHECK(std::ranges::all_of(_partial_bloom_filter_build_params, [&num_bloom_filters](auto& opt_params) {
@@ -146,12 +156,17 @@ Status PartialRuntimeFilterMerger::merge_singleton_local_bloom_filters() {
 
         const LogicalType build_type = desc->build_expr_type();
         RuntimeFilter* rf = nullptr;
-        if (maybe_use_bitset_filter && _partial_bloom_filter_build_params[0][i].has_value()) {
+        bool has_param_value = maybe_use_bitset_filter && _partial_bloom_filter_build_params[0][i].has_value();
+        if (has_param_value) {
             const auto& param = _partial_bloom_filter_build_params[0][i].value();
             rf = RuntimeFilterHelper::create_join_runtime_filter(_pool, build_type, desc->join_mode(), param,
                                                                  kHashJoinKeyColumnOffset, row_count);
+            VLOG(1) << "EQDELETE RuntimeFilterMerger: Created BitsetFilter for filter[" << i << "]";
         } else {
             rf = RuntimeFilterHelper::create_runtime_bloom_filter(_pool, build_type, desc->join_mode());
+            VLOG(1) << "EQDELETE RuntimeFilterMerger: Created BloomFilter for filter[" << i
+                    << "], maybe_use_bitset_filter=" << maybe_use_bitset_filter
+                    << ", has_param_value=" << (maybe_use_bitset_filter ? _partial_bloom_filter_build_params[0][i].has_value() : false);
         }
         if (rf == nullptr) continue;
 

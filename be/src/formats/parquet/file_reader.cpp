@@ -223,7 +223,9 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     }
 
                     auto real_tree = PredicateTree::create(std::move(pred_tree));
-                    auto visitor = PredicateFilterEvaluator{real_tree, group_reader.get(), false, false};
+                    auto visitor = PredicateFilterEvaluator{real_tree, group_reader.get(),
+                                                             _scanner_ctx->parquet_page_index_enable,
+                                                             _scanner_ctx->parquet_bloom_filter_enable};
                     auto res = real_tree.visit(visitor);
 
                     if (is_eq_delete) {
