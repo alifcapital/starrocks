@@ -17,6 +17,8 @@ package com.starrocks.planner;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.Expr;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import com.starrocks.analysis.SortInfo;
 import com.starrocks.connector.BucketProperty;
 import com.starrocks.qe.ConnectContext;
@@ -50,6 +52,8 @@ import static com.starrocks.planner.JoinNode.DistributionMode.SHUFFLE_HASH_BUCKE
 // but comparing to thrift definition, this class has some handy methods and
 // `toExplainString()` for explaining sql
 public class RuntimeFilterDescription {
+    private static final Logger LOG = LogManager.getLogger(RuntimeFilterDescription.class);
+
     public enum RuntimeFilterType {
         TOPN_FILTER,
         JOIN_FILTER,
