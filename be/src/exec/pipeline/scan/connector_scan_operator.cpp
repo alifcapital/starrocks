@@ -598,7 +598,7 @@ ConnectorChunkSource::ConnectorChunkSource(ScanOperator* op, RuntimeProfile* run
     if (_runtime_bloom_filters != nullptr) {
         for (const auto& kv : _runtime_bloom_filters->descriptors()) {
             if (kv.second != nullptr && kv.second->is_iceberg_eq_delete_filter()) {
-                LOG(INFO) << "ConnectorScanOperator: Found EQ-delete RF, id=" << kv.first << ", skipping IN filters";
+                VLOG(1) << "EQDELETE ConnectorScanOperator: Found RF, id=" << kv.first << ", skipping IN filters";
                 skip_runtime_in_filters = true;
                 break;
             }

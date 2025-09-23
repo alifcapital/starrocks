@@ -270,7 +270,7 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
                                  _hash_join_node.is_iceberg_equality_delete);
     if (is_iceberg_eq_delete) {
-        LOG(INFO) << "HashJoiner::push_chunk: Iceberg EQ-delete join detected, chunk_rows=" << chunk->num_rows();
+        VLOG(1) << "EQDELETE HashJoiner: join detected, chunk_rows=" << chunk->num_rows();
     }
 
     if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
@@ -295,10 +295,10 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
             COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
             COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
 
-            LOG(INFO) << "HashJoiner::push_chunk: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
+            VLOG(1) << "EQDELETE HashJoiner: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
             return Status::OK();
         } else {
-            LOG(INFO) << "HashJoiner::push_chunk: EQ-delete bypass column found but NOT all rows bypass";
+            VLOG(1) << "EQDELETE HashJoiner: bypass column found but NOT all rows bypass";
         }
     }
 

@@ -491,7 +491,7 @@ Status HiveDataSource::_setup_all_conjunct_ctxs(RuntimeState* state) {
         for (const auto& kv : _runtime_filters->descriptors()) {
             if (kv.second != nullptr && kv.second->is_iceberg_eq_delete_filter()) {
                 has_eq_delete_rf = true;
-                LOG(INFO) << "HiveDataSource: Found EQ-delete RF, id=" << kv.first << ", skipping all conjuncts";
+                VLOG(1) << "EQDELETE HiveDataSource: Found RF, id=" << kv.first << ", skipping all conjuncts";
                 break;
             }
         }

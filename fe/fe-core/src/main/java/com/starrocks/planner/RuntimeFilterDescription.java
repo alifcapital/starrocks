@@ -206,7 +206,7 @@ public class RuntimeFilterDescription {
     public void setIcebergEqualityDelete(boolean icebergEqualityDelete) {
         this.isIcebergEqualityDelete = icebergEqualityDelete;
         if (icebergEqualityDelete) {
-            LOG.info("RuntimeFilterDescription: Set EQ-delete flag, filter_id={}", filterId);
+            LOG.info("EQDELETE RuntimeFilterDescription: Set flag, filter_id={}", filterId);
         }
     }
 

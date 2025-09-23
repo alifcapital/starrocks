@@ -563,7 +563,7 @@ Status RuntimeFilterProbeDescriptor::init(ObjectPool* pool, const TRuntimeFilter
     _is_group_colocate_rf = desc.__isset.build_from_group_execution && desc.build_from_group_execution;
     _is_iceberg_eq_delete_filter = desc.__isset.is_iceberg_equality_delete && desc.is_iceberg_equality_delete;
     if (_is_iceberg_eq_delete_filter) {
-        LOG(INFO) << "RuntimeFilterProbeDescriptor: Iceberg EQ-delete filter initialized, id=" << _filter_id;
+        VLOG(1) << "EQDELETE RuntimeFilterProbeDescriptor: initialized, id=" << _filter_id;
     }
 
     bool not_found = true;
