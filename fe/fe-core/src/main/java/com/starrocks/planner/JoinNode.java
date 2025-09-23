@@ -409,7 +409,10 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
     public boolean pushDownRuntimeFilters(RuntimeFilterPushDownContext context, Expr probeExpr,
                                           List<Expr> partitionByExprs) {
         RuntimeFilterDescription description = context.getDescription();
+        LOG.info("EQDELETE JoinNode: pushDownRuntimeFilters called, filter_id={}", description.getFilterId());
+
         if (!canPushDownRuntimeFilter()) {
+            LOG.info("EQDELETE JoinNode: canPushDownRuntimeFilter=false, filter_id={}", description.getFilterId());
             return false;
         }
 

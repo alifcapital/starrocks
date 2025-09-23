@@ -190,10 +190,14 @@ bool FileReader::_filter_group(const GroupReaderPtr& group_reader) {
 
 StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& group_reader) {
     bool filter = false;
+    VLOG(1) << "EQDELETE FileReader: _update_rf_and_filter_group called, _rf_scan_range_pruner=" << (_rf_scan_range_pruner != nullptr);
     if (_rf_scan_range_pruner != nullptr) {
         RETURN_IF_ERROR(_rf_scan_range_pruner->update_range_if_arrived(
                 _scanner_ctx->global_dictmaps,
                 [this, &filter, &group_reader](auto cid, const PredicateList& predicates, const RuntimeFilterProbeDescriptor* desc) {
+                    VLOG(1) << "EQDELETE FileReader: lambda called, desc=" << (desc != nullptr)
+                            << ", filter_id=" << (desc ? desc->filter_id() : -1)
+                            << ", is_eq_delete=" << (desc ? desc->is_iceberg_eq_delete_filter() : false);
                     // Skip applying runtime filter for Iceberg equality delete
                     if (desc != nullptr && desc->is_iceberg_eq_delete_filter()) {
                         _iceberg_eq_delete_skip_probe = true;
