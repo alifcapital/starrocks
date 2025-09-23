@@ -271,7 +271,20 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
                                  _hash_join_node.is_iceberg_equality_delete);
     if (is_iceberg_eq_delete) {
         VLOG(1) << "EQDELETE HashJoiner: EQ-delete join detected, chunk_rows=" << chunk->num_rows()
-                << ", has_bypass_column=" << chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+                << ", chunk_columns=" << chunk->num_columns()
+                << ", has_bypass_column=" << chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)
+                << ", bypass_slot_id=" << Chunk::EQ_DELETE_BYPASS_SLOT_ID
+                << ", slot_map_size=" << chunk->get_slot_id_to_index_map().size();
+        // Log all slot IDs in chunk for debugging
+        std::string slot_ids = "slot_ids=[";
+        bool first = true;
+        for (const auto& [slot_id, index] : chunk->get_slot_id_to_index_map()) {
+            if (!first) slot_ids += ",";
+            slot_ids += std::to_string(slot_id);
+            first = false;
+        }
+        slot_ids += "]";
+        VLOG(1) << "EQDELETE HashJoiner: " << slot_ids;
     }
 
     if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {

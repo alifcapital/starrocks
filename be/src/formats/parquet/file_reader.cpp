@@ -402,6 +402,9 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                         _group_reader_param.stats->iceberg_eq_delete_rows_skipped += row_count;
                     }
                     VLOG(1) << "EQDELETE FileReader: Added bypass column, row_count=" << row_count
+                              << ", slot_id=" << Chunk::EQ_DELETE_BYPASS_SLOT_ID
+                              << ", chunk_columns=" << (*chunk)->num_columns()
+                              << ", has_bypass_after_add=" << (*chunk)->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)
                               << ", total_skipped=" << _iceberg_eq_delete_rows_skipped;
                 }
 
