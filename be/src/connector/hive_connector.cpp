@@ -501,9 +501,12 @@ Status HiveDataSource::_setup_all_conjunct_ctxs(RuntimeState* state) {
     }
 
     cloned_conjunct_ctxs.clear();
-    RETURN_IF_ERROR(Expr::clone_if_not_exists(state, &_pool, _conjunct_ctxs, &cloned_conjunct_ctxs));
-    for (auto* ctx : cloned_conjunct_ctxs) {
-        _all_conjunct_ctxs.emplace_back(ctx);
+    // Skip adding ANY conjuncts if EQ-delete RF is present - need to read all data for bypass
+    if (!has_eq_delete_rf) {
+        RETURN_IF_ERROR(Expr::clone_if_not_exists(state, &_pool, _conjunct_ctxs, &cloned_conjunct_ctxs));
+        for (auto* ctx : cloned_conjunct_ctxs) {
+            _all_conjunct_ctxs.emplace_back(ctx);
+        }
     }
     return Status::OK();
 }
