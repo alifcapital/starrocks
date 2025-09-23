@@ -489,7 +489,11 @@ Status HiveDataSource::_setup_all_conjunct_ctxs(RuntimeState* state) {
     bool has_eq_delete_rf = false;
     if (_runtime_filters != nullptr) {
         for (const auto& kv : _runtime_filters->descriptors()) {
-            if (kv.second != nullptr && kv.second->is_iceberg_eq_delete_filter()) { has_eq_delete_rf = true; break; }
+            if (kv.second != nullptr && kv.second->is_iceberg_eq_delete_filter()) {
+                has_eq_delete_rf = true;
+                LOG(INFO) << "HiveDataSource: Found EQ-delete RF, id=" << kv.first << ", skipping all conjuncts";
+                break;
+            }
         }
     }
     std::vector<ExprContext*> cloned_conjunct_ctxs;

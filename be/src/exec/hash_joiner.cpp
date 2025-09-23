@@ -269,6 +269,9 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
                                  _hash_join_node.is_iceberg_equality_delete);
+    if (is_iceberg_eq_delete) {
+        LOG(INFO) << "HashJoiner::push_chunk: Iceberg EQ-delete join detected, chunk_rows=" << chunk->num_rows();
+    }
 
     if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
         const auto& bypass_column = chunk->get_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
@@ -292,7 +295,10 @@ Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
             COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
             COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
 
+            LOG(INFO) << "HashJoiner::push_chunk: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
             return Status::OK();
+        } else {
+            LOG(INFO) << "HashJoiner::push_chunk: EQ-delete bypass column found but NOT all rows bypass";
         }
     }
 
@@ -569,7 +575,7 @@ Status HashJoiner::_process_where_conjunct(ChunkPtr* chunk) {
 
 Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
-    
+
     // Skip creating IN filters for Iceberg equality delete - we only need bloom/bitset filters
     bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
@@ -577,7 +583,7 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     if (is_iceberg_eq_delete) {
         return Status::OK();
     }
-    
+
     size_t ht_row_count = get_ht_row_count();
 
     // Use FE session variable if set, otherwise fall back to BE config

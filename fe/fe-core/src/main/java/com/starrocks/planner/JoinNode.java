@@ -425,6 +425,8 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
             // For Iceberg equality delete: force pushdown to scan nodes, don't keep at join level
             if (description.isIcebergEqualityDelete()) {
                 PlanNode child = getChild(0);
+                LOG.info("JoinNode.pushDownRuntimeFilters: Force pushdown EQ-delete RF, filter_id={}, child_id={}",
+                         description.getFilterId(), child.id.asInt());
                 description.addProbeExpr(child.id.asInt(), probeExpr);
                 description.addPartitionByExprsIfNeeded(child.id.asInt(), probeExpr, partitionByExprs);
                 child.probeRuntimeFilters.add(description);

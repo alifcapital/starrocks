@@ -201,6 +201,7 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                         if (_group_reader_param.stats != nullptr) {
                             _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
                         }
+                        LOG(INFO) << "FileReader: EQ-delete RF bypassed row group, filter_id=" << desc->filter_id();
                         return Status::OK();
                     }
 
@@ -367,6 +368,8 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                     if (_group_reader_param.stats != nullptr) {
                         _group_reader_param.stats->iceberg_eq_delete_rows_skipped += row_count;
                     }
+                    LOG(INFO) << "FileReader::get_next: Added bypass column, row_count=" << row_count
+                              << ", total_skipped=" << _iceberg_eq_delete_rows_skipped;
                 }
 
                 _scan_row_count += (*chunk)->num_rows();
@@ -437,6 +440,8 @@ Status FileReader::_exec_no_materialized_column_scan(ChunkPtr* chunk) {
             auto bypass_column = BooleanColumn::create(read_size, 1); // All rows skip probe
             (*chunk)->append_column(bypass_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
             _iceberg_eq_delete_rows_skipped += read_size;
+            LOG(INFO) << "FileReader::_exec_no_materialized_column_scan: Added bypass column, read_size=" << read_size
+                      << ", total_skipped=" << _iceberg_eq_delete_rows_skipped;
         }
 
         _scan_row_count += read_size;

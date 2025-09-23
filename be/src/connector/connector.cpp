@@ -87,6 +87,7 @@ Status DataSource::parse_runtime_filters(RuntimeState* state) {
 
         // Skip Iceberg equality delete filters - they should not become conjuncts
         if (probe->is_iceberg_eq_delete_filter()) {
+            LOG(INFO) << "DataSource::parse_runtime_filters: Skipping EQ-delete RF, id=" << probe->filter_id();
             continue;
         }
 
