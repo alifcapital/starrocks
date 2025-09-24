@@ -2901,9 +2901,10 @@ public class PlanFragmentBuilder {
                     context.getJoinNodeMap().put(physicalHashJoinOperator, hashJoinNode);
                 }
 
-                // Set Iceberg equality delete flag
+                // Set Iceberg equality delete flag - only if optimization is enabled
                 HashJoinNode hashJoinNode = (HashJoinNode) joinNode;
-                hashJoinNode.setIcebergEqualityDelete(physicalHashJoinOperator.isIcebergEqualityDelete());
+                boolean enableOptimization = context.getConnectContext().getSessionVariable().getEnableIcebergEqualityDeleteOptimization();
+                hashJoinNode.setIcebergEqualityDelete(physicalHashJoinOperator.isIcebergEqualityDelete() && enableOptimization);
             } else if (node instanceof PhysicalMergeJoinOperator) {
                 joinNode = new MergeJoinNode(
                         context.getNextNodeId(),
