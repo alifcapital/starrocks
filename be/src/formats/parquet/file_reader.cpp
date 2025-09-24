@@ -288,7 +288,7 @@ bool FileReader::_should_bypass_eq_delete_for_row_group(const GroupReaderPtr& gr
 
     try {
         auto visitor = PredicateFilterEvaluator{*_eq_delete_predicate_tree, group_reader.get(),
-                                                _scanner_ctx->parquet_page_index_enable,
+                                                false,
                                                 _scanner_ctx->parquet_bloom_filter_enable};
         auto res = _eq_delete_predicate_tree->visit(visitor);
 
