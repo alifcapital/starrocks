@@ -366,13 +366,11 @@ Status HashJoiner::create_runtime_filters(RuntimeState* state) {
     uint64_t runtime_join_filter_pushdown_limit = runtime_bloom_filter_row_limit();
     size_t ht_row_count = _hash_join_builder->hash_table_row_count();
 
-    // Check if this is Iceberg EQ-delete join
-    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
-                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
-                                 _hash_join_node.is_iceberg_equality_delete);
+    // Create EQ-delete InRuntimeFilters for marked runtime filters
+    bool has_eq_delete_filters = std::any_of(_build_runtime_filters.begin(), _build_runtime_filters.end(),
+                                             [](const auto* rf_desc) { return rf_desc->is_iceberg_eq_delete_filter(); });
 
-    if (is_iceberg_eq_delete) {
-        // For Iceberg EQ-delete: create InRuntimeFilter (not ExprContext) for precise bypass
+    if (has_eq_delete_filters) {
         VLOG(1) << "EQDELETE HashJoiner: Creating InRuntimeFilter for EQ-delete, ht_row_count=" << ht_row_count;
         RETURN_IF_ERROR(_create_in_runtime_filters_for_eq_delete(state));
     }
@@ -670,6 +668,11 @@ Status HashJoiner::_create_in_runtime_filters_for_eq_delete(RuntimeState* state)
     _hash_join_builder->visitHt([&hash_tables](JoinHashTable* ht) { hash_tables.emplace_back(ht); });
 
     for (auto* rf_desc : _build_runtime_filters) {
+        // Only process RuntimeFilterBuildDescriptors marked as EQ-delete
+        if (!rf_desc->is_iceberg_eq_delete_filter()) {
+            continue;
+        }
+
         // Create InRuntimeFilter instead of bloom/bitset for precise filtering
         LogicalType build_type = rf_desc->build_expr_type();
 

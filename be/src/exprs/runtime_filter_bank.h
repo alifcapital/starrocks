@@ -111,8 +111,10 @@ public:
     bool has_consumer() const { return _has_consumer; }
     const std::vector<TNetworkAddress>& merge_nodes() const { return _merge_nodes; }
 
-    // Access to target scan node IDs (for EQ-delete delivery)
+    // Access to target scan node IDs (for EQ-delete delivery)  
     const std::map<int32_t, TExpr>& get_plan_node_id_to_target_expr() const { return _plan_node_id_to_target_expr; }
+    
+    bool is_iceberg_eq_delete_filter() const { return _is_iceberg_eq_delete_filter; }
 
     TRuntimeFilterBuildType::type type() const { return _runtime_filter_type; }
 
@@ -171,6 +173,7 @@ private:
 
     bool _is_broad_cast_in_skew = false;
     int32_t _skew_shuffle_filter_id = -1;
+    bool _is_iceberg_eq_delete_filter = false;
 
     TRuntimeFilterBuildType::type _runtime_filter_type;
 
