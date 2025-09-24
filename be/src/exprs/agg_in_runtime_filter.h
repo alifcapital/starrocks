@@ -150,6 +150,16 @@ public:
     }
 
     void insert_null() { _has_null = true; }
+    
+    // Add insert() method for compatibility with FilterIniter
+    void insert(const CppType& value) {
+        ScopedPtr ptr;
+        if (_values.Read(&ptr) != 0) {
+            return;
+        }
+        HashSet& set = const_cast<HashSet&>(*ptr);
+        set.emplace(value);
+    }
 
     void merge(const RuntimeFilter* rf) override {
         {
