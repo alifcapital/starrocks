@@ -150,7 +150,7 @@ public:
     }
 
     void insert_null() { _has_null = true; }
-    
+
     // Add insert() method for compatibility with FilterIniter
     void insert(const CppType& value) {
         ScopedPtr ptr;
