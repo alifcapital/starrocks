@@ -635,9 +635,15 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
     for (auto* rf_desc : _build_runtime_filters) {
         rf_desc->set_is_pipeline(true);
         // skip if it does not have consumer.
-        if (!rf_desc->has_consumer()) {
+        bool has_consumer = rf_desc->has_consumer();
+        if (!has_consumer) {
+            VLOG(1) << "EQDELETE HashJoiner: RF[" << rf_desc->build_expr_order() << "] has NO CONSUMER, filter_id=" << rf_desc->filter_id()
+                    << " - creating empty param (will build BloomFilter)";
             _runtime_bloom_filter_build_params.emplace_back();
             continue;
+        } else {
+            VLOG(1) << "EQDELETE HashJoiner: RF[" << rf_desc->build_expr_order() << "] has CONSUMER, filter_id=" << rf_desc->filter_id()
+                    << " - will attempt BitsetFilter";
         }
         if (!rf_desc->has_remote_targets() && ht_row_count > limit) {
             _runtime_bloom_filter_build_params.emplace_back();

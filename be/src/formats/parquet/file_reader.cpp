@@ -223,22 +223,25 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
                     }
 
                     auto real_tree = PredicateTree::create(std::move(pred_tree));
+                    // For EQ-delete: disable page index to get row-group level filtering only
+                    bool enable_page_index = is_eq_delete ? false : _scanner_ctx->parquet_page_index_enable;
                     auto visitor = PredicateFilterEvaluator{real_tree, group_reader.get(),
-                                                             _scanner_ctx->parquet_page_index_enable,
+                                                             enable_page_index,
                                                              _scanner_ctx->parquet_bloom_filter_enable};
                     auto res = real_tree.visit(visitor);
 
                     if (is_eq_delete) {
-                        // For EQ-delete: if RF would filter row group, set bypass flag but DON'T filter
+                        // For EQ-delete: bypass only if RF completely filters row group (no match with delete files)
                         if (res.ok() && res->has_value() && res->value().span_size() == 0) {
                             _iceberg_eq_delete_skip_probe = true;
                             _iceberg_eq_delete_row_groups_skipped++;
                             if (_group_reader_param.stats != nullptr) {
                                 _group_reader_param.stats->iceberg_eq_delete_row_groups_skipped++;
                             }
-                            VLOG(1) << "EQDELETE FileReader: row group bypassed (ALL levels filtered), filter_id=" << desc->filter_id();
+                            VLOG(1) << "EQDELETE FileReader: row group bypassed (no match), filter_id=" << desc->filter_id();
                         } else {
-                            VLOG(1) << "EQDELETE FileReader: row group NOT bypassed (some levels didn't filter), filter_id=" << desc->filter_id();
+                            VLOG(1) << "EQDELETE FileReader: row group NOT bypassed (potential match), filter_id=" << desc->filter_id()
+                                    << ", span_size=" << (res.ok() && res->has_value() ? res->value().span_size() : -1);
                         }
                         // Don't set filter=true for EQ-delete - we handle it via bypass mechanism
                     } else {

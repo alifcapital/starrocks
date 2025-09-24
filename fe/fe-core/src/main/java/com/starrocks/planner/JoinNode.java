@@ -265,8 +265,12 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
 
                 RuntimeFilterPushDownContext rfPushDownCxt =
                         new RuntimeFilterPushDownContext(rf, descTbl, execGroupSets);
+                LOG.info("EQDELETE JoinNode: Attempting to push RF to child[0], filter_id={}, child_id={}, isEqDelete={}",
+                         rf.getFilterId(), getChild(0).id.asInt(), rf.isIcebergEqualityDelete());
                 if (getChild(0).pushDownRuntimeFilters(rfPushDownCxt, right, probePartitionByExprs)) {
                     buildRuntimeFilters.add(rf);
+                    LOG.info("EQDELETE JoinNode: RF push down SUCCESS, adding to buildRuntimeFilters, filter_id={}",
+                             rf.getFilterId());
                     // record i->rf in eqJoinConjunctsIndexToRf for skew shuffle join
                     if (this instanceof HashJoinNode) {
                         HashJoinNode hashJoinNode = (HashJoinNode) this;
@@ -274,6 +278,9 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
                             hashJoinNode.getEqJoinConjunctsIndexToRfId().put(i, rf.getFilterId());
                         }
                     }
+                } else {
+                    LOG.info("EQDELETE JoinNode: RF push down FAILED, child[0] rejected RF, filter_id={}",
+                             rf.getFilterId());
                 }
             } else {
                 // For cross-join, the filter could only be pushed down to left side when
