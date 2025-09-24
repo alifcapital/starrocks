@@ -23,12 +23,18 @@
 #include <vector>
 
 #include "cache/datacache.h"
+#include "column/type_traits.h"
 #include "column/vectorized_fwd.h"
 #include "common/compiler_util.h"
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "exec/hdfs_scanner.h"
+#include "exec/olap_common.h"
+#include "exec/olap_utils.h"
+#include "types/logical_type_infra.h"
+#include "storage/runtime_range_pruner.hpp"
+#include "connector/connector_chunk_sink.h"
 #include "formats/parquet/metadata.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
 #include "formats/parquet/utils.h"
@@ -82,6 +88,9 @@ Status FileReader::init(HdfsScannerContext* ctx) {
         _rf_scan_range_pruner = std::make_shared<RuntimeScanRangePruner>(*_scanner_ctx->rf_scan_range_pruner);
     }
     RETURN_IF_ERROR(_init_group_readers());
+
+    _init_eq_delete_predicates();
+
     return Status::OK();
 }
 
@@ -210,6 +219,94 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
     return filter;
 }
 
+void FileReader::_init_eq_delete_predicates() {
+    if (_scanner_ctx->eq_delete_markers.empty()) return;
+
+    try {
+        // Create ConnectorPredicateParser once
+        ConnectorPredicateParser parser(&_scanner_ctx->slot_descs);
+
+        for (auto* probe_descriptor : _scanner_ctx->eq_delete_markers) {
+            if (probe_descriptor == nullptr) continue;
+
+            auto* rf = probe_descriptor->runtime_filter(0); // driver_sequence = 0
+            if (rf == nullptr || rf->type() != RuntimeFilterSerializeType::EQ_DELETE_MARKER) continue;
+
+            auto* in_filter = rf->get_in_filter();
+            if (in_filter == nullptr || in_filter->size() == 0) {
+                VLOG(1) << "EQDELETE FileReader: Empty EQ-delete filter, skipping optimization";
+                return;
+            }
+
+            // Get SlotDescriptor from probe expression
+            ExprContext* probe_expr_ctx = probe_descriptor->probe_expr_ctx();
+            if (!probe_expr_ctx || !probe_expr_ctx->root()->is_slotref()) continue;
+
+            auto* slot_ref = down_cast<ColumnRef*>(probe_expr_ctx->root());
+            SlotDescriptor* slot = nullptr;
+
+            // Find SlotDescriptor by slot_id
+            SlotId slot_id = slot_ref->slot_id();
+            for (const auto& col_info : _scanner_ctx->materialized_columns) {
+                if (col_info.slot_id() == slot_id) {
+                    slot = col_info.slot_desc;
+                    break;
+                }
+            }
+            if (slot == nullptr) continue;
+
+            // Use EXISTING RuntimeColumnPredicateBuilder via type_dispatch
+            LogicalType slot_type = slot->type().type;
+            auto predicates_result = type_dispatch_predicate<StatusOr<std::vector<const ColumnPredicate*>>>(
+                slot_type, false,
+                detail::RuntimeColumnPredicateBuilder(),
+                _scanner_ctx->global_dictmaps, &parser,
+                probe_descriptor, slot, /*driver_sequence=*/0, &_eq_delete_marker_pool);
+
+            if (predicates_result.ok()) {
+                auto predicates = predicates_result.value();
+                _eq_delete_predicates.insert(_eq_delete_predicates.end(), predicates.begin(), predicates.end());
+            }
+        }
+
+        if (!_eq_delete_predicates.empty()) {
+            // Create PredicateTree once
+            PredicateCompoundNode<CompoundNodeType::AND> pred_tree;
+            for (const auto& pred : _eq_delete_predicates) {
+                pred_tree.add_child(PredicateColumnNode{pred});
+            }
+            _eq_delete_predicate_tree = PredicateTree::create(std::move(pred_tree));
+            VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size() << " EQ-delete predicates";
+        }
+
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "EQDELETE FileReader: Failed to initialize EQ-delete predicates: " << e.what();
+        _eq_delete_predicates.clear();
+        _eq_delete_predicate_tree.reset();
+    }
+}
+
+bool FileReader::_should_bypass_eq_delete_for_row_group(const GroupReaderPtr& group_reader) {
+    if (_eq_delete_predicate_tree == nullptr) return false;
+
+    try {
+        auto visitor = PredicateFilterEvaluator{_eq_delete_predicate_tree.get(), group_reader.get(),
+                                                _scanner_ctx->parquet_page_index_enable,
+                                                _scanner_ctx->parquet_bloom_filter_enable};
+        auto res = _eq_delete_predicate_tree->visit(visitor);
+
+        if (res.ok() && res.value().has_value() && res.value()->span_size() == 0) {
+            // No intersection with delete file values - safe to bypass!
+            _iceberg_eq_delete_row_groups_skipped++;
+            return true;
+        }
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+
 void FileReader::_prepare_read_columns(std::unordered_set<std::string>& existed_column_names) {
     _meta_helper->prepare_read_columns(_scanner_ctx->materialized_columns, _group_reader_param.read_cols,
                                        existed_column_names);
@@ -247,6 +344,8 @@ Status FileReader::_collect_row_group_io(std::shared_ptr<GroupReader>& group_rea
 
 Status FileReader::_init_group_readers() {
     const HdfsScannerContext& fd_scanner_ctx = *_scanner_ctx;
+
+    _init_eq_delete_predicates();
 
     // _group_reader_param is used by all group readers
     _group_reader_param.conjunct_ctxs_by_slot = fd_scanner_ctx.conjunct_ctxs_by_slot;
@@ -295,6 +394,12 @@ Status FileReader::_init_group_readers() {
             continue;
         }
 
+        bool bypass_decision = _should_bypass_eq_delete_for_row_group(row_group_reader);
+        _row_group_bypass_decisions.push_back(bypass_decision);
+
+        VLOG(1) << "EQDELETE FileReader: Row group " << i
+                << " bypass decision (static): " << bypass_decision;
+
         _row_group_readers.emplace_back(row_group_reader);
         int64_t num_rows = _file_metadata->t_metadata().row_groups[i].num_rows;
         // for skip rows which already deleted
@@ -325,6 +430,10 @@ Status FileReader::get_next(ChunkPtr* chunk) {
     }
 
     if (_cur_row_group_idx < _row_group_size) {
+        // Use pre-computed bypass decision for current row group (computed in _init_group_readers)
+        bool should_bypass_eq_delete = (_cur_row_group_idx < _row_group_bypass_decisions.size()) ?
+                                        _row_group_bypass_decisions[_cur_row_group_idx] : false;
+
         size_t row_count = _chunk_size;
         Status status;
         try {
@@ -338,6 +447,14 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                 RETURN_IF_ERROR(_scanner_ctx->append_or_update_not_existed_columns_to_chunk(chunk, row_count));
                 _scanner_ctx->append_or_update_partition_column_to_chunk(chunk, row_count);
                 _scanner_ctx->append_or_update_extended_column_to_chunk(chunk, row_count);
+
+                // Add column for bypass EQ-delete
+                if (should_bypass_eq_delete) {
+                    auto bypass_column = BooleanColumn::create(row_count, 1);
+                    (*chunk)->append_column(bypass_column, Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+                    _iceberg_eq_delete_rows_skipped += row_count;
+                }
+
                 _scan_row_count += (*chunk)->num_rows();
             }
             if (status.is_end_of_file()) {
@@ -359,8 +476,6 @@ Status FileReader::get_next(ChunkPtr* chunk) {
                             _row_group_readers.assign(_row_group_readers.size(), nullptr);
                             _cur_row_group_idx = _row_group_size;
                             break;
-                        } else {
-                            // do nothing, ignore the error code
                         }
 
                         RETURN_IF_ERROR(cur_row_group->prepare());

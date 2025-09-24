@@ -79,15 +79,18 @@ public:
     using HashSet = typename detail::LHashSet<Type>::LType;
     using ScopedPtr = typename butil::DoublyBufferedData<HashSet>::ScopedPtr;
 
-    RuntimeFilterSerializeType type() const override { return RuntimeFilterSerializeType::IN_FILTER; }
+    RuntimeFilterSerializeType type() const override {
+        return _is_eq_delete_marker ? RuntimeFilterSerializeType::EQ_DELETE_MARKER : RuntimeFilterSerializeType::IN_FILTER;
+    }
 
     InRuntimeFilter() = default;
+    explicit InRuntimeFilter(bool is_eq_delete_marker) : _is_eq_delete_marker(is_eq_delete_marker) {}
     ~InRuntimeFilter() override = default;
     const RuntimeFilter* get_in_filter() const override { return this; }
     const RuntimeFilter* get_min_max_filter() const override { return nullptr; }
 
     InRuntimeFilter* create_empty(ObjectPool* pool) override {
-        auto* p = pool->add(new InRuntimeFilter());
+        auto* p = pool->add(new InRuntimeFilter(_is_eq_delete_marker));
         return p;
     }
 
@@ -150,6 +153,16 @@ public:
     }
 
     void insert_null() { _has_null = true; }
+
+    // Add insert() method for compatibility with FilterIniter
+    void insert(const CppType& value) {
+        // Use Modify() for thread-safe mutation instead of const_cast
+        auto update = [&](auto& dst) {
+            dst.emplace(value);
+            return true;
+        };
+        _values.Modify(update);
+    }
 
     void merge(const RuntimeFilter* rf) override {
         {
@@ -292,6 +305,7 @@ public:
 
 private:
     bool _is_not_in = false;
+    bool _is_eq_delete_marker = false;
     mutable butil::DoublyBufferedData<HashSet> _values;
 };
 

@@ -155,6 +155,7 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
         icebergDataFileWithDeleteScanOp.setMORParam(IcebergMORParams.DATA_FILE_WITH_EQ_DELETE);
         icebergDataFileWithDeleteScanOp.setTableFullMORParams(icebergTableFullMorParams);
         icebergDataFileWithDeleteScanOp.setFromEqDeleteRewriteRule(true);
+        icebergDataFileWithDeleteScanOp.setEqDeleteProbeScan(true);
         OptExpression optExpression = OptExpression.create(icebergDataFileWithDeleteScanOp);
 
         for (int i = 0; i < allIds.size(); i++) {
@@ -193,7 +194,8 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
                     .setJoinType(JoinOperator.LEFT_ANTI_JOIN)
                     .setJoinHint(HintNode.HINT_JOIN_BROADCAST)
                     .setOnPredicate(onPredicate)
-                    .setOriginalOnPredicate(onPredicate);
+                    .setOriginalOnPredicate(onPredicate)
+                    .setIcebergEqualityDelete(true);
 
             if (i == allIds.size() - 1) {
                 builder.setLimit(limit);
@@ -354,6 +356,10 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
         // build new table's predicate
         ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(originToNewCols);
         ScalarOperator newPredicate = rewriter.rewrite(scanOperator.getPredicate());
+
+        // Clear predicate for EQ-delete probe scan to avoid min-max pruning from delete stats
+        // This method builds the probe side, so always clear to prevent stats-based pruning
+        // newPredicate = null;
 
         // we shouldn't push down limit to scan node in this pattern.
         LogicalIcebergScanOperator newOp =  new LogicalIcebergScanOperator(withDeleteIcebergTable, newColRefToColBuilder.build(),

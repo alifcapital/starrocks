@@ -91,6 +91,16 @@ RuntimeFilter* RuntimeFilterHelper::create_agg_runtime_in_filter(ObjectPool* poo
     });
 }
 
+RuntimeFilter* RuntimeFilterHelper::create_eq_delete_runtime_filter(ObjectPool* pool, LogicalType type, int8_t join_mode) {
+    return scalar_type_dispatch(type, [pool]<LogicalType ltype>() -> RuntimeFilter* {
+        auto rf = new InRuntimeFilter<ltype>(true);  // true = is_eq_delete_marker
+        if (pool != nullptr) {
+            return pool->add(rf);
+        }
+        return rf;
+    });
+}
+
 RuntimeFilter* RuntimeFilterHelper::create_runtime_bitset_filter(ObjectPool* pool, LogicalType type, int8_t join_mode) {
     RuntimeFilter* filter =
             type_dispatch_bitset_filter(type, static_cast<RuntimeFilter*>(nullptr), [&]<LogicalType LT>() {
@@ -460,6 +470,12 @@ Status RuntimeFilterHelper::fill_runtime_filter(const ColumnPtr& column, Logical
     case RuntimeFilterSerializeType::EMPTY_FILTER:
         return type_dispatch_filter(type, Status::OK(), FilterIniter<ComposedRuntimeEmptyFilter, false>(), column,
                                     column_offset, filter, eq_null);
+    case RuntimeFilterSerializeType::IN_FILTER:
+        return type_dispatch_filter(type, Status::OK(), FilterIniter<InRuntimeFilter, false>(), column,
+                                    column_offset, filter, eq_null);
+    case RuntimeFilterSerializeType::EQ_DELETE_MARKER:
+        return type_dispatch_filter(type, Status::OK(), FilterIniter<InRuntimeFilter, false>(), column,
+                                    column_offset, filter, eq_null);
     case RuntimeFilterSerializeType::NONE:
     default:
         return Status::NotSupported("unsupported build runtime filter: " + filter->debug_string());
@@ -545,6 +561,11 @@ Status RuntimeFilterBuildDescriptor::init(ObjectPool* pool, const TRuntimeFilter
         _skew_shuffle_filter_id = desc.skew_shuffle_filter_id;
     }
 
+    // Store target scan node IDs for EQ-delete delivery
+    if (desc.__isset.plan_node_id_to_target_expr) {
+        _plan_node_id_to_target_expr = desc.plan_node_id_to_target_expr;
+    }
+
     WithLayoutMixin::init(desc);
     RETURN_IF_ERROR(Expr::create_expr_tree(pool, desc.build_expr, &_build_expr_ctx, state));
     return Status::OK();
@@ -561,6 +582,7 @@ Status RuntimeFilterProbeDescriptor::init(ObjectPool* pool, const TRuntimeFilter
                                                            desc.filter_type == TRuntimeFilterBuildType::AGG_FILTER);
     _skip_wait = _is_stream_build_filter;
     _is_group_colocate_rf = desc.__isset.build_from_group_execution && desc.build_from_group_execution;
+    _is_iceberg_eq_delete_filter = desc.__isset.is_iceberg_equality_delete && desc.is_iceberg_equality_delete;
 
     bool not_found = true;
     if (desc.__isset.plan_node_id_to_target_expr) {

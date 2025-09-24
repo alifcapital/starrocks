@@ -39,7 +39,13 @@ class RowGroup;
 } // namespace tparquet
 
 namespace starrocks {
+
+class ColumnPredicate;
+class PredicateTree;
+using PredicateList = std::vector<const ColumnPredicate*>;
+class ObjectPool;
 class RandomAccessFile;
+class RuntimeFilterProbeDescriptor;
 struct HdfsScannerContext;
 class BlockCache;
 class SlotDescriptor;
@@ -101,6 +107,10 @@ private:
     bool _filter_group(const GroupReaderPtr& group_reader);
     StatusOr<bool> _update_rf_and_filter_group(const GroupReaderPtr& group_reader);
 
+    // check if row group should bypass EQ-delete hash join probe
+    void _init_eq_delete_predicates();
+    bool _should_bypass_eq_delete_for_row_group(const GroupReaderPtr& group_reader);
+
     // get row group to read
     // if scan range contain the first byte in the row group, will be read
     // TODO: later modify the larger block should be read
@@ -123,6 +133,9 @@ private:
 
     size_t _total_row_count = 0;
     size_t _scan_row_count = 0;
+    // Iceberg EQ delete metrics
+    size_t _iceberg_eq_delete_row_groups_skipped = 0;
+    size_t _iceberg_eq_delete_rows_skipped = 0;
     bool _no_materialized_column_scan = false;
 
     StoragePageCache* _cache = nullptr;
@@ -130,6 +143,14 @@ private:
 
     // not exist column conjuncts eval false, file can be skipped
     bool _is_file_filtered = false;
+    // flag to mark if entire row group should skip hash table probe in EQ delete anti-join
+    bool _iceberg_eq_delete_skip_probe = false;
+    // bypass decisions for each row group (computed once in _init_group_readers)
+    std::vector<bool> _row_group_bypass_decisions;
+    // prepared EQ-delete predicates (initialized once in _init_eq_delete_predicates)
+    PredicateList _eq_delete_predicates;
+    std::unique_ptr<PredicateTree> _eq_delete_predicate_tree;
+    ObjectPool _eq_delete_marker_pool;
     HdfsScannerContext* _scanner_ctx = nullptr;
     io::SharedBufferedInputStream* _sb_stream = nullptr;
     GroupReaderParam _group_reader_param;

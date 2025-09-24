@@ -20,6 +20,10 @@
 #include "exec/hdfs_scanner.h"
 #include "hive_chunk_sink.h"
 
+namespace starrocks {
+class RuntimeFilter;
+}
+
 namespace starrocks::connector {
 
 class HiveConnector final : public Connector {
@@ -83,6 +87,7 @@ public:
 
     void get_split_tasks(std::vector<pipeline::ScanSplitContextPtr>* split_tasks) override;
     Status _init_chunk_if_needed(ChunkPtr* chunk, size_t n) override;
+
 
 private:
     const HiveDataSourceProvider* _provider;

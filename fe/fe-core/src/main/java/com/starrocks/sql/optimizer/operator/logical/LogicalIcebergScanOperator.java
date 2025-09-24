@@ -50,6 +50,8 @@ public class LogicalIcebergScanOperator extends LogicalScanOperator {
     // Marking this split scan node type after IcebergEqualityDeleteRewriteRule rewriting.
     private IcebergMORParams morParam = IcebergMORParams.EMPTY;
 
+    private boolean isEqDeleteProbeScan = false;
+
     public LogicalIcebergScanOperator(Table table,
                                       Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
                                       Map<Column, ColumnRefOperator> columnMetaToColRefMap,
@@ -130,6 +132,14 @@ public class LogicalIcebergScanOperator extends LogicalScanOperator {
         this.hasUnknownColumn = hasUnknownColumn;
     }
 
+    public boolean isEqDeleteProbeScan() {
+        return isEqDeleteProbeScan;
+    }
+
+    public void setEqDeleteProbeScan(boolean isEqDeleteProbeScan) {
+        this.isEqDeleteProbeScan = isEqDeleteProbeScan;
+    }
+
     @Override
     public <R, C> R accept(OperatorVisitor<R, C> visitor, C context) {
         return visitor.visitLogicalIcebergScan(this, context);
@@ -149,6 +159,7 @@ public class LogicalIcebergScanOperator extends LogicalScanOperator {
             builder.predicates = scanOperator.predicates.clone();
             builder.morParam = scanOperator.morParam;
             builder.tableFullMORParams = scanOperator.tableFullMORParams;
+            builder.isEqDeleteProbeScan = scanOperator.isEqDeleteProbeScan;
             return this;
         }
     }

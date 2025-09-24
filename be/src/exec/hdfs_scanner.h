@@ -33,6 +33,8 @@
 namespace starrocks {
 
 class RuntimeFilterProbeCollector;
+class RuntimeFilter;
+class RuntimeFilterProbeDescriptor;
 
 struct HdfsSplitContext : public pipeline::ScanSplitContext {
     size_t split_start = 0;
@@ -117,6 +119,9 @@ struct HdfsScanStats {
     int64_t page_index_ns = 0;
     int64_t parquet_total_row_groups = 0;
     int64_t parquet_filtered_row_groups = 0;
+    // Iceberg equality delete optimization (exposed in profile)
+    int64_t iceberg_eq_delete_row_groups_skipped = 0;
+    int64_t iceberg_eq_delete_rows_skipped = 0;
 
     // late materialize round-by-round
     int64_t group_min_round_cost = 0;
@@ -205,6 +210,9 @@ struct HdfsScannerParams {
 
     // runtime bloom filter.
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
+
+    // EQ-delete markers for Iceberg equality delete bypass
+    std::vector<RuntimeFilterProbeDescriptor*> eq_delete_markers;
 
     std::vector<ExprContext*> all_conjunct_ctxs;
     // all conjuncts except `conjunct_ctxs_by_slot`, like compound predicates
@@ -336,6 +344,9 @@ struct HdfsScannerContext {
 
     // runtime filters.
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
+
+    // EQ-delete markers for Iceberg equality delete bypass
+    std::vector<RuntimeFilterProbeDescriptor*> eq_delete_markers;
 
     std::vector<std::string>* hive_column_names = nullptr;
 

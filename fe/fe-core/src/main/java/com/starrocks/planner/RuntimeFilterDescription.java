@@ -102,6 +102,9 @@ public class RuntimeFilterDescription {
 
     private RuntimeFilterType type;
 
+    // Flag to mark if this is an Iceberg equality delete runtime filter
+    private boolean isIcebergEqualityDelete = false;
+
     int numInstances;
     int numDriversPerInstance;
     private List<Integer> bucketSeqToInstance = Lists.newArrayList();
@@ -190,6 +193,14 @@ public class RuntimeFilterDescription {
 
     public void setSkew_shuffle_filter_id(int skew_shuffle_filter_id) {
         this.skew_shuffle_filter_id = skew_shuffle_filter_id;
+    }
+
+    public boolean isIcebergEqualityDelete() {
+        return isIcebergEqualityDelete;
+    }
+
+    public void setIcebergEqualityDelete(boolean icebergEqualityDelete) {
+        this.isIcebergEqualityDelete = icebergEqualityDelete;
     }
 
     private void inferBoradCastJoinInSkew() {
@@ -649,6 +660,8 @@ public class RuntimeFilterDescription {
         if (isBroadCastInSkew) {
             t.setSkew_shuffle_filter_id(skew_shuffle_filter_id);
         }
+
+        t.setIs_iceberg_equality_delete(isIcebergEqualityDelete);
 
         return t;
     }

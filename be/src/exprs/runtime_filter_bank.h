@@ -69,6 +69,7 @@ public:
     static RuntimeFilter* create_runtime_bloom_filter(ObjectPool* pool, LogicalType type, int8_t join_mode);
     static RuntimeFilter* create_runtime_bitset_filter(ObjectPool* pool, LogicalType type, int8_t join_mode);
     static RuntimeFilter* create_agg_runtime_in_filter(ObjectPool* pool, LogicalType type, int8_t join_mode);
+    static RuntimeFilter* create_eq_delete_runtime_filter(ObjectPool* pool, LogicalType type, int8_t join_mode);
     static RuntimeFilter* transmit_to_runtime_empty_filter(ObjectPool* pool, RuntimeFilter* rf);
     static RuntimeFilter* create_runtime_filter(ObjectPool* pool, RuntimeFilterSerializeType rf_type, LogicalType ltype,
                                                 int8_t join_mode);
@@ -109,6 +110,9 @@ public:
     bool has_remote_targets() const { return _has_remote_targets; }
     bool has_consumer() const { return _has_consumer; }
     const std::vector<TNetworkAddress>& merge_nodes() const { return _merge_nodes; }
+
+    // Access to target scan node IDs (for EQ-delete delivery)
+    const std::map<int32_t, TExpr>& get_plan_node_id_to_target_expr() const { return _plan_node_id_to_target_expr; }
 
     TRuntimeFilterBuildType::type type() const { return _runtime_filter_type; }
 
@@ -157,6 +161,10 @@ private:
     std::unordered_set<TUniqueId> _broadcast_grf_senders;
     std::vector<TRuntimeFilterDestination> _broadcast_grf_destinations;
     std::vector<TNetworkAddress> _merge_nodes;
+
+    // Target scan node IDs to target expressions (for EQ-delete delivery)
+    std::map<int32_t, TExpr> _plan_node_id_to_target_expr;
+
     RuntimeFilter* _runtime_filter = nullptr;
     bool _is_pipeline = false;
     size_t _num_colocate_partition = 0;
@@ -229,6 +237,9 @@ public:
     void set_has_push_down_to_storage(bool v) { _has_push_down_to_storage = v; }
     bool has_push_down_to_storage() const { return _has_push_down_to_storage; }
 
+    void set_is_iceberg_eq_delete_filter(bool v) { _is_iceberg_eq_delete_filter = v; }
+    bool is_iceberg_eq_delete_filter() const { return _is_iceberg_eq_delete_filter; }
+
 private:
     friend class HashJoinNode;
     friend class hashJoiner;
@@ -254,6 +265,7 @@ private:
     std::shared_ptr<const RuntimeFilter> _shared_runtime_filter = nullptr;
     pipeline::Observable _observable;
     bool _has_push_down_to_storage = false;
+    bool _is_iceberg_eq_delete_filter = false;
 };
 
 // RuntimeFilterProbeCollector::do_evaluate function apply runtime bloom filter to Operators to filter chunk.

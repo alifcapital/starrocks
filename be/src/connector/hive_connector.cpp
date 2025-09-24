@@ -26,6 +26,7 @@
 #include "exec/hdfs_scanner_text.h"
 #include "exec/jni_scanner.h"
 #include "exprs/expr.h"
+#include "exprs/runtime_filter.h"
 #include "storage/chunk_helper.h"
 
 namespace starrocks::connector {
@@ -685,6 +686,14 @@ Status HiveDataSource::_init_scanner(RuntimeState* state) {
     HdfsScannerParams scanner_params;
     RETURN_IF_ERROR(_init_global_dicts(&scanner_params));
     scanner_params.runtime_filter_collector = _runtime_filters;
+
+    // Extract EQ-delete markers directly from RuntimeState (delivered by HashJoiner)
+    TPlanNodeId plan_node_id = _provider->_scan_node->id();
+    const auto* eq_markers = state->get_eq_delete_markers(plan_node_id);
+    if (eq_markers != nullptr) {
+        scanner_params.eq_delete_markers = *eq_markers;
+        VLOG(1) << "EQDELETE HiveConnector: Found EQ-delete markers for scan_node_id=" << plan_node_id;
+    }
     scanner_params.scan_range = &scan_range;
     scanner_params.fs = _pool.add(fs.release());
     scanner_params.path = native_file_path;

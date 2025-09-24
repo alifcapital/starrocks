@@ -14,6 +14,7 @@
 
 #include "exprs/runtime_filter.h"
 
+#include "exprs/agg_in_runtime_filter.h"
 #include "types/logical_type_infra.h"
 #include "util/compression/stream_compression.h"
 
@@ -607,5 +608,11 @@ APPLY_FOR_ALL_SCALAR_TYPE(InstantiateRuntimeFilter)
 
 APPLY_FOR_BITSET_FILTER_SUPPORTED_TYPE(InstantiateRuntimeBitsetFilter)
 #undef InstantiateRuntimeBitsetFilter
+
+#define InstantiateInRuntimeFilter(LT)  \
+    template class InRuntimeFilter<LT>;
+
+APPLY_FOR_ALL_SCALAR_TYPE(InstantiateInRuntimeFilter)
+#undef InstantiateInRuntimeFilter
 
 } // namespace starrocks

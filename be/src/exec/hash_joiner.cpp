@@ -18,6 +18,8 @@
 
 #include <memory>
 
+#include "exec/hdfs_scanner.h"
+
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
 #include "common/config.h"
@@ -29,6 +31,7 @@
 #include "exprs/column_ref.h"
 #include "exprs/expr.h"
 #include "exprs/runtime_filter.h"
+#include "exprs/runtime_filter_bank.h"
 #include "gen_cpp/Metrics_types.h"
 #include "pipeline/hashjoin/hash_joiner_fwd.h"
 #include "runtime/current_thread.h"
@@ -46,6 +49,9 @@ void HashJoinProbeMetrics::prepare(RuntimeProfile* runtime_profile) {
     where_conjunct_evaluate_timer = ADD_TIMER(runtime_profile, "WhereConjunctEvaluateTime");
     probe_counter = ADD_COUNTER(runtime_profile, "probeCount", TUnit::UNIT);
     partition_probe_overhead = ADD_TIMER(runtime_profile, "PartitionProbeOverhead");
+    // Iceberg equality delete bypass metrics
+    iceberg_eq_delete_bypassed_chunks = ADD_COUNTER(runtime_profile, "IcebergEqDeleteBypassedChunks", TUnit::UNIT);
+    iceberg_eq_delete_bypassed_rows = ADD_COUNTER(runtime_profile, "IcebergEqDeleteBypassedRows", TUnit::UNIT);
 }
 
 void HashJoinBuildMetrics::prepare(RuntimeProfile* runtime_profile) {
@@ -237,6 +243,11 @@ bool HashJoiner::need_input() const {
 }
 
 bool HashJoiner::has_output() const {
+    // Check bypass chunk first
+    if (_bypass_chunk != nullptr) {
+        return true;
+    }
+
     if (_phase == HashJoinPhase::BUILD) {
         return false;
     }
@@ -256,6 +267,44 @@ bool HashJoiner::has_output() const {
 
 Status HashJoiner::push_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     DCHECK(chunk && !chunk->is_empty());
+
+    // Handle bypass for Iceberg equality delete anti-joins
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                 _hash_join_node.is_iceberg_equality_delete);
+    if (is_iceberg_eq_delete) {
+        VLOG(1) << "EQDELETE HashJoiner: EQ-delete join detected, chunk_rows=" << chunk->num_rows()
+                << ", chunk_columns=" << chunk->num_columns()
+                << ", has_bypass_column=" << chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)
+                << ", bypass_slot_id=" << Chunk::EQ_DELETE_BYPASS_SLOT_ID
+                << ", slot_map_size=" << chunk->get_slot_id_to_index_map().size();
+        // Log all slot IDs in chunk for debugging
+        std::string slot_ids = "slot_ids=[";
+        bool first = true;
+        for (const auto& [slot_id, index] : chunk->get_slot_id_to_index_map()) {
+            if (!first) slot_ids += ",";
+            slot_ids += std::to_string(slot_id);
+            first = false;
+        }
+        slot_ids += "]";
+        VLOG(1) << "EQDELETE HashJoiner: " << slot_ids;
+    }
+
+    if (is_iceberg_eq_delete && chunk->is_slot_exist(Chunk::EQ_DELETE_BYPASS_SLOT_ID)) {
+        // If bypass column exists, it means ALL rows in this chunk should bypass
+        // FileReader only adds bypass column when entire row group bypasses
+        size_t bypassed_rows = chunk->num_rows();
+        chunk->remove_column_by_slot_id(Chunk::EQ_DELETE_BYPASS_SLOT_ID);
+        _bypass_chunk = std::move(chunk);
+
+        // Update bypass metrics
+        COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_chunks, 1);
+        COUNTER_UPDATE(probe_metrics().iceberg_eq_delete_bypassed_rows, bypassed_rows);
+
+        VLOG(1) << "EQDELETE HashJoiner: ALL ROWS BYPASSED! bypassed_rows=" << bypassed_rows;
+        return Status::OK();
+    }
+
     return _hash_join_prober->push_probe_chunk(state, std::move(chunk));
 }
 
@@ -265,6 +314,14 @@ Status HashJoiner::probe_input_finished(RuntimeState* state) {
 
 StatusOr<ChunkPtr> HashJoiner::pull_chunk(RuntimeState* state) {
     DCHECK(_phase != HashJoinPhase::BUILD);
+
+    // Handle bypass chunk for Iceberg equality delete first
+    if (_bypass_chunk != nullptr) {
+        auto chunk = std::move(_bypass_chunk);
+        _bypass_chunk = nullptr;
+        return chunk;
+    }
+
     return _pull_probe_output_chunk(state);
 }
 
@@ -308,6 +365,17 @@ Status HashJoiner::create_runtime_filters(RuntimeState* state) {
 
     uint64_t runtime_join_filter_pushdown_limit = runtime_bloom_filter_row_limit();
     size_t ht_row_count = _hash_join_builder->hash_table_row_count();
+
+    // Check if this is Iceberg EQ-delete join
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                 _hash_join_node.is_iceberg_equality_delete);
+
+    if (is_iceberg_eq_delete) {
+        // For Iceberg EQ-delete: create InRuntimeFilter (not ExprContext) for precise bypass
+        VLOG(1) << "EQDELETE HashJoiner: Creating InRuntimeFilter for EQ-delete, ht_row_count=" << ht_row_count;
+        RETURN_IF_ERROR(_create_in_runtime_filters_for_eq_delete(state));
+    }
 
     if (_is_push_down) {
         if (_probe_node_type == TPlanNodeType::EXCHANGE_NODE && _build_node_type == TPlanNodeType::EXCHANGE_NODE) {
@@ -521,6 +589,17 @@ Status HashJoiner::_process_where_conjunct(ChunkPtr* chunk) {
 
 Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
+
+    // For EQ-delete: skip OLD ExprContext IN filter creation - we use new InRuntimeFilter instead
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                  _hash_join_node.is_iceberg_equality_delete);
+
+    if (is_iceberg_eq_delete) {
+        VLOG(1) << "EQDELETE HashJoiner: Skipping OLD ExprContext IN filter creation for EQ-delete";
+        return Status::OK(); // Skip old IN filter creation for EQ-delete
+    }
+
     size_t ht_row_count = get_ht_row_count();
 
     // Use FE session variable if set, otherwise fall back to BE config
@@ -567,6 +646,87 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     return Status::OK();
 }
 
+Status HashJoiner::_create_in_runtime_filters_for_eq_delete(RuntimeState* state) {
+    SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
+
+    if (_build_runtime_filters.empty()) {
+        return Status::OK();
+    }
+
+    size_t ht_row_count = get_ht_row_count();
+    uint64_t global_rf_limit = runtime_bloom_filter_row_limit(); // Use global RF limit (1M by default)
+
+    VLOG(1) << "EQDELETE HashJoiner: _create_in_runtime_filters_for_eq_delete, ht_row_count=" << ht_row_count
+            << ", build_runtime_filters_size=" << _build_runtime_filters.size()
+            << ", global_rf_limit=" << global_rf_limit;
+
+    if (ht_row_count > global_rf_limit) {
+        VLOG(1) << "EQDELETE HashJoiner: EQ-delete build size too large (" << ht_row_count
+                << " > " << global_rf_limit << "), falling back to regular bloom filters";
+        return Status::OK();
+    }
+
+    std::vector<JoinHashTable*> hash_tables;
+    _hash_join_builder->visitHt([&hash_tables](JoinHashTable* ht) { hash_tables.emplace_back(ht); });
+
+    for (auto* rf_desc : _build_runtime_filters) {
+        // Create InRuntimeFilter instead of bloom/bitset for precise filtering
+        LogicalType build_type = rf_desc->build_expr_type();
+
+        // Create EQ-delete RuntimeFilter using RuntimeFilterHelper
+        RuntimeFilter* in_rf = RuntimeFilterHelper::create_eq_delete_runtime_filter(_pool, build_type, rf_desc->join_mode());
+        if (in_rf == nullptr) {
+            VLOG(1) << "EQDELETE HashJoiner: Failed to create InRuntimeFilter for filter_id=" << rf_desc->filter_id();
+            continue;
+        }
+
+        // Fill InRuntimeFilter with actual values from hash tables
+        for (auto* ht : hash_tables) {
+            size_t expr_order = rf_desc->build_expr_order();
+            ColumnPtr column = ht->get_key_columns()[expr_order];
+
+            RETURN_IF_ERROR(RuntimeFilterHelper::fill_runtime_filter(column, build_type, in_rf,
+                                                                   kHashJoinKeyColumnOffset, false));
+        }
+
+        // DO NOT set in normal RF system - deliver directly to HiveDataSource via RuntimeState!
+        // rf_desc->set_runtime_filter(in_rf);  // Skip normal RF delivery
+
+        // Create RuntimeFilterProbeDescriptor for EQ-delete delivery to target scan nodes
+        int32_t filter_id = rf_desc->filter_id();
+        const auto& target_nodes = rf_desc->get_plan_node_id_to_target_expr();
+
+        if (target_nodes.empty()) {
+            VLOG(1) << "EQDELETE HashJoiner: No target scan nodes for filter_id=" << filter_id;
+            continue;
+        }
+
+        size_t expr_order = rf_desc->build_expr_order();
+        ExprContext* probe_expr = _probe_expr_ctxs[expr_order];
+
+        // Deliver probe descriptor to each target scan node
+        for (const auto& [scan_node_id, target_expr] : target_nodes) {
+            // Create RuntimeFilterProbeDescriptor with all metadata and filter
+            // Use same fragment pool as HashJoiner (probe side is in same fragment)
+            auto* probe_descriptor = _pool->add(new RuntimeFilterProbeDescriptor());
+            RETURN_IF_ERROR(probe_descriptor->init(filter_id, probe_expr));
+            probe_descriptor->set_runtime_filter(in_rf);
+
+            std::vector<RuntimeFilterProbeDescriptor*> markers = {probe_descriptor};
+            state->set_eq_delete_markers(scan_node_id, std::move(markers));
+
+            VLOG(1) << "EQDELETE HashJoiner: Delivered EQ-delete marker to scan_node_id=" << scan_node_id
+                    << " (filter_id=" << filter_id << ")";
+        }
+
+        VLOG(1) << "EQDELETE HashJoiner: Created InRuntimeFilter for filter_id=" << rf_desc->filter_id()
+                << ", build_type=" << logical_type_to_string(build_type)
+                << ", ht_row_count=" << ht_row_count;
+    }
+
+    return Status::OK();
+}
+
 Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t limit) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
     size_t ht_row_count = get_ht_row_count();
@@ -575,6 +735,18 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
 
     for (auto* rf_desc : _build_runtime_filters) {
         rf_desc->set_is_pipeline(true);
+
+        // Skip EQ-delete RFs - they use direct delivery via RuntimeState, not bloom filters
+        bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                     _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                     _hash_join_node.is_iceberg_equality_delete);
+        if (is_iceberg_eq_delete) {
+            VLOG(1) << "EQDELETE HashJoiner: Skipping bloom filter creation for EQ-delete RF[" << rf_desc->build_expr_order()
+                    << "], filter_id=" << rf_desc->filter_id() << " - using direct delivery";
+            _runtime_bloom_filter_build_params.emplace_back();
+            continue;
+        }
+
         // skip if it does not have consumer.
         if (!rf_desc->has_consumer()) {
             _runtime_bloom_filter_build_params.emplace_back();
@@ -619,5 +791,6 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
     }
     return Status::OK();
 }
+
 
 } // namespace starrocks

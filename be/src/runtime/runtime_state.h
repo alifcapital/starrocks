@@ -78,6 +78,8 @@ class RowDescriptor;
 class RuntimeFilterPort;
 class QueryStatistics;
 class QueryStatisticsRecvr;
+class RuntimeFilter;
+class RuntimeFilterProbeDescriptor;
 using BroadcastJoinRightOffsprings = std::unordered_set<int32_t>;
 namespace pipeline {
 class QueryContext;
@@ -569,6 +571,16 @@ public:
 
     DebugActionMgr& debug_action_mgr() { return _debug_action_mgr; }
 
+    // EQ-delete markers management
+    void set_eq_delete_markers(int32_t scan_node_id, std::vector<RuntimeFilterProbeDescriptor*>&& markers) {
+        _eq_delete_markers[scan_node_id] = std::move(markers);
+    }
+
+    const std::vector<RuntimeFilterProbeDescriptor*>* get_eq_delete_markers(int32_t scan_node_id) const {
+        auto it = _eq_delete_markers.find(scan_node_id);
+        return (it != _eq_delete_markers.end()) ? &it->second : nullptr;
+    }
+
 private:
     // Set per-query state.
     void _init(const TUniqueId& fragment_instance_id, const TQueryOptions& query_options,
@@ -695,6 +707,9 @@ private:
     RuntimeState(const RuntimeState&) = delete;
 
     RuntimeFilterPort* _runtime_filter_port = nullptr;
+
+    // EQ-delete markers for Iceberg equality delete optimization
+    std::map<int32_t, std::vector<RuntimeFilterProbeDescriptor*>> _eq_delete_markers; // Key by scan_node_id
 
     GlobalDictMaps _query_global_dicts;
     GlobalDictMaps _load_global_dicts;

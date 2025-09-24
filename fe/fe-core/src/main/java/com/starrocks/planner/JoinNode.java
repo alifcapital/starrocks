@@ -188,8 +188,13 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
         SessionVariable sessionVariable = ConnectContext.get().getSessionVariable();
         JoinOperator joinOp = getJoinOp();
         PlanNode inner = getChild(1);
+        // Allow LEFT ANTI JOIN for Iceberg equality deletes if optimization is enabled
         if (!joinOp.isInnerJoin() && !joinOp.isLeftSemiJoin() && !joinOp.isRightJoin() && !joinOp.isCrossJoin()) {
-            return;
+            boolean enableIcebergOptimization = sessionVariable.getEnableIcebergEqualityDeleteOptimization();
+            if (!(joinOp.isLeftAntiJoin() && this instanceof HashJoinNode &&
+                  ((HashJoinNode) this).isIcebergEqualityDelete() && enableIcebergOptimization)) {
+                return;
+            }
         }
 
         if (distrMode.equals(DistributionMode.PARTITIONED) || distrMode.equals(DistributionMode.SHUFFLE_HASH_BUCKET)) {
@@ -249,6 +254,13 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
                 // push down rf to left child node, and build it only when it
                 // can be accepted by left child node.
                 rf.setBuildExpr(left);
+
+                // Mark if this is an Iceberg equality delete runtime filter
+                if (joinOp.isLeftAntiJoin() && this instanceof HashJoinNode &&
+                    ((HashJoinNode) this).isIcebergEqualityDelete() && sessionVariable.getEnableIcebergEqualityDeleteOptimization()) {
+                    rf.setIcebergEqualityDelete(true);
+                }
+
                 RuntimeFilterPushDownContext rfPushDownCxt =
                         new RuntimeFilterPushDownContext(rf, descTbl, execGroupSets);
                 if (getChild(0).pushDownRuntimeFilters(rfPushDownCxt, right, probePartitionByExprs)) {
@@ -395,6 +407,7 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
     public boolean pushDownRuntimeFilters(RuntimeFilterPushDownContext context, Expr probeExpr,
                                           List<Expr> partitionByExprs) {
         RuntimeFilterDescription description = context.getDescription();
+
         if (!canPushDownRuntimeFilter()) {
             return false;
         }
@@ -410,8 +423,18 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
                 return true;
             }
 
+            // For Iceberg equality delete: force pushdown to scan nodes, don't keep at join level
+            if (description.isIcebergEqualityDelete()) {
+                PlanNode child = getChild(0);
+                description.addProbeExpr(child.id.asInt(), probeExpr);
+                description.addPartitionByExprsIfNeeded(child.id.asInt(), probeExpr, partitionByExprs);
+                child.probeRuntimeFilters.add(description);
+                return true;
+            }
+
             // use runtime filter at this level if rf can not be pushed down to children.
-            if (description.canProbeUse(this, context)) {
+            // BUT: for Iceberg equality delete, never use fallback on join - must reach scan for bypass!
+            if (!description.isIcebergEqualityDelete() && description.canProbeUse(this, context)) {
                 description.addProbeExpr(id.asInt(), probeExpr);
                 description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr, partitionByExprs);
                 probeRuntimeFilters.add(description);

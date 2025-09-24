@@ -50,6 +50,7 @@ enum class RuntimeFilterSerializeType : uint8_t {
     BLOOM_FILTER = 2,
     BITSET_FILTER = 3,
     IN_FILTER = 4,
+    EQ_DELETE_MARKER = 5,  // Special marker for Iceberg equality delete bypass
     UNKNOWN_FILTER,
 };
 static_assert(sizeof(RF_VERSION_V3) == sizeof(RF_VERSION));
