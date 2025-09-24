@@ -363,6 +363,17 @@ Status HashJoiner::create_runtime_filters(RuntimeState* state) {
     uint64_t runtime_join_filter_pushdown_limit = runtime_bloom_filter_row_limit();
     size_t ht_row_count = _hash_join_builder->hash_table_row_count();
 
+    // Check if this is Iceberg EQ-delete join
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                 _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                 _hash_join_node.is_iceberg_equality_delete);
+
+    if (is_iceberg_eq_delete) {
+        // For Iceberg EQ-delete: create InRuntimeFilter (not ExprContext) for precise bypass
+        VLOG(1) << "EQDELETE HashJoiner: Creating InRuntimeFilter for EQ-delete, ht_row_count=" << ht_row_count;
+        RETURN_IF_ERROR(_create_in_runtime_filters_for_eq_delete(state));
+    }
+
     if (_is_push_down) {
         if (_probe_node_type == TPlanNodeType::EXCHANGE_NODE && _build_node_type == TPlanNodeType::EXCHANGE_NODE) {
             _is_push_down = false;
@@ -626,6 +637,62 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     return Status::OK();
 }
 
+Status HashJoiner::_create_in_runtime_filters_for_eq_delete(RuntimeState* state) {
+    SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
+
+    if (_build_runtime_filters.empty()) {
+        return Status::OK();
+    }
+
+    size_t ht_row_count = get_ht_row_count();
+    uint64_t global_rf_limit = runtime_bloom_filter_row_limit(); // Use global RF limit (1M by default)
+
+    VLOG(1) << "EQDELETE HashJoiner: _create_in_runtime_filters_for_eq_delete, ht_row_count=" << ht_row_count
+            << ", build_runtime_filters_size=" << _build_runtime_filters.size()
+            << ", global_rf_limit=" << global_rf_limit;
+
+    // Check size limit - if too many rows, fallback to regular bloom filters
+    if (ht_row_count > global_rf_limit) {
+        VLOG(1) << "EQDELETE HashJoiner: EQ-delete build size too large (" << ht_row_count
+                << " > " << global_rf_limit << "), falling back to regular bloom filters";
+        // Don't create IN filters - let the regular bloom filter path handle it
+        return Status::OK();
+    }
+
+    std::vector<JoinHashTable*> hash_tables;
+    _hash_join_builder->visitHt([&hash_tables](JoinHashTable* ht) { hash_tables.emplace_back(ht); });
+
+    for (auto* rf_desc : _build_runtime_filters) {
+        // Create InRuntimeFilter instead of bloom/bitset for precise filtering
+        LogicalType build_type = rf_desc->build_expr_type();
+
+        // Create InRuntimeFilter using RuntimeFilterHelper
+        RuntimeFilter* in_rf = RuntimeFilterHelper::create_agg_runtime_in_filter(_pool, build_type, rf_desc->join_mode());
+        if (in_rf == nullptr) {
+            VLOG(1) << "EQDELETE HashJoiner: Failed to create InRuntimeFilter for filter_id=" << rf_desc->filter_id();
+            continue;
+        }
+
+        // Fill InRuntimeFilter with actual values from hash tables
+        for (auto* ht : hash_tables) {
+            size_t expr_order = rf_desc->build_expr_order();
+            ColumnPtr column = ht->get_key_columns()[expr_order];
+
+            RETURN_IF_ERROR(RuntimeFilterHelper::fill_runtime_filter(column, build_type, in_rf,
+                                                                   kHashJoinKeyColumnOffset, false));
+        }
+
+        // Set the filter in build descriptor
+        rf_desc->set_runtime_filter(in_rf);
+
+        VLOG(1) << "EQDELETE HashJoiner: Created InRuntimeFilter for filter_id=" << rf_desc->filter_id()
+                << ", build_type=" << logical_type_to_string(build_type)
+                << ", ht_row_count=" << ht_row_count;
+    }
+
+    return Status::OK();
+}
+
 Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t limit) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
     size_t ht_row_count = get_ht_row_count();
@@ -634,6 +701,15 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
 
     for (auto* rf_desc : _build_runtime_filters) {
         rf_desc->set_is_pipeline(true);
+
+        // Skip if RF is already created (e.g., by EQ-delete IN filter creation)
+        if (rf_desc->runtime_filter() != nullptr) {
+            VLOG(1) << "EQDELETE HashJoiner: RF[" << rf_desc->build_expr_order() << "] already has RuntimeFilter, filter_id=" << rf_desc->filter_id()
+                    << " - skipping bloom filter creation";
+            _runtime_bloom_filter_build_params.emplace_back();
+            continue;
+        }
+
         // skip if it does not have consumer.
         bool has_consumer = rf_desc->has_consumer();
         if (!has_consumer) {

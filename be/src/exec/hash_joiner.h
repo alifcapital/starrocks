@@ -422,6 +422,8 @@ private:
 
     Status _create_runtime_in_filters(RuntimeState* state);
 
+    Status _create_in_runtime_filters_for_eq_delete(RuntimeState* state);
+
     Status _create_runtime_bloom_filters(RuntimeState* state, int64_t limit);
 
 
