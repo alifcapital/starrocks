@@ -16,6 +16,7 @@
 
 #include <glog/logging.h>
 
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <unordered_set>
@@ -222,6 +223,7 @@ StatusOr<bool> FileReader::_update_rf_and_filter_group(const GroupReaderPtr& gro
 void FileReader::_init_eq_delete_predicates() {
     if (_scanner_ctx->eq_delete_markers.empty()) return;
 
+    auto start_time = std::chrono::steady_clock::now();
     try {
         // Create ConnectorPredicateParser once
         ConnectorPredicateParser parser(&_scanner_ctx->slot_descs);
@@ -253,6 +255,7 @@ void FileReader::_init_eq_delete_predicates() {
             if (slot == nullptr) continue;
 
             // Use EXISTING RuntimeColumnPredicateBuilder via type_dispatch
+            auto predicate_build_start = std::chrono::steady_clock::now();
             LogicalType slot_type = slot->type().type;
             auto predicates_result = type_dispatch_predicate<StatusOr<std::vector<const ColumnPredicate*>>>(
                 slot_type, false,
@@ -263,12 +266,19 @@ void FileReader::_init_eq_delete_predicates() {
             if (predicates_result.ok()) {
                 auto predicates = predicates_result.value();
                 _eq_delete_predicates.insert(_eq_delete_predicates.end(), predicates.begin(), predicates.end());
+
+                auto predicate_build_end = std::chrono::steady_clock::now();
+                auto predicate_build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    predicate_build_end - predicate_build_start).count();
+                VLOG(1) << "EQDELETE FileReader: Built " << predicates.size() << " predicates in "
+                        << predicate_build_duration << "ms";
             }
         }
 
         if (!_eq_delete_predicates.empty()) {
             // Create PredicateTree with AND root and OR child for early exit
             // If ANY delete predicate matches, we cannot bypass
+            auto tree_build_start = std::chrono::steady_clock::now();
             PredicateCompoundNode<CompoundNodeType::AND> root_tree;
             PredicateCompoundNode<CompoundNodeType::OR> or_tree;
             for (const auto& pred : _eq_delete_predicates) {
@@ -276,7 +286,17 @@ void FileReader::_init_eq_delete_predicates() {
             }
             root_tree.add_child(std::move(or_tree));
             _eq_delete_predicate_tree = std::make_unique<PredicateTree>(PredicateTree::create(std::move(root_tree)));
-            VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size() << " EQ-delete predicates";
+
+            auto tree_build_end = std::chrono::steady_clock::now();
+            auto tree_build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                tree_build_end - tree_build_start).count();
+            VLOG(1) << "EQDELETE FileReader: Built predicate tree in " << tree_build_duration << "ms";
+
+            auto total_end = std::chrono::steady_clock::now();
+            auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                total_end - start_time).count();
+            VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size()
+                    << " EQ-delete predicates in total " << total_duration << "ms";
         }
 
     } catch (const std::exception& e) {
@@ -289,18 +309,42 @@ void FileReader::_init_eq_delete_predicates() {
 bool FileReader::_should_bypass_eq_delete_for_row_group(const GroupReaderPtr& group_reader) {
     if (_eq_delete_predicate_tree == nullptr) return false;
 
+    auto eval_start = std::chrono::steady_clock::now();
     try {
         auto visitor = PredicateFilterEvaluator{*_eq_delete_predicate_tree, group_reader.get(),
                                                 false,
                                                 _scanner_ctx->parquet_bloom_filter_enable};
-        auto res = _eq_delete_predicate_tree->visit(visitor);
 
+        // For EQ delete bypass: only use ROWGROUP_ZONEMAP and BLOOM_FILTER, skip expensive PAGE_INDEX_ZONEMAP
+        constexpr auto eq_delete_evaluator = static_cast<PredicateFilterEvaluator::Evaluator>(
+                PredicateFilterEvaluator::ROWGROUP_ZONEMAP | PredicateFilterEvaluator::BLOOM_FILTER);
+
+        auto filter_eval_start = std::chrono::steady_clock::now();
+        auto res = _eq_delete_predicate_tree->visit(visitor, eq_delete_evaluator);
+        auto filter_eval_end = std::chrono::steady_clock::now();
+
+        auto filter_eval_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            filter_eval_end - filter_eval_start).count();
+
+        bool can_bypass = false;
         if (res.ok() && res.value().has_value() && res.value()->span_size() == 0) {
             // No intersection with delete file values - safe to bypass!
             _iceberg_eq_delete_row_groups_skipped++;
-            return true;
+            can_bypass = true;
         }
-        return false;
+
+        auto eval_end = std::chrono::steady_clock::now();
+        auto eval_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            eval_end - eval_start).count();
+
+        VLOG(1) << "EQDELETE FileReader: Row group filter eval took " << filter_eval_duration
+                << "us, total " << eval_duration << "us, can_bypass=" << can_bypass
+                << ", counters [stats=" << visitor.counter.statistics_tried_counter
+                << "/" << visitor.counter.statistics_success_counter
+                << ", bloom=" << visitor.counter.bloom_filter_tried_counter
+                << "/" << visitor.counter.bloom_filter_success_counter << "]";
+
+        return can_bypass;
     } catch (...) {
         return false;
     }
