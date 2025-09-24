@@ -624,7 +624,15 @@ Status RuntimeFilterProbeDescriptor::prepare(RuntimeState* state, RuntimeProfile
         RETURN_IF_ERROR(partition_by_expr->prepare(state));
     }
     _open_timestamp = UnixMillis();
-    _latency_timer = ADD_COUNTER(p, strings::Substitute("JoinRuntimeFilter/$0/latency", _filter_id), TUnit::TIME_NS);
+    // Create appropriate profile counter name based on filter type
+    std::string counter_name;
+    const RuntimeFilter* rf = _runtime_filter.load();
+    if (rf != nullptr && rf->type() == RuntimeFilterSerializeType::EQ_DELETE_MARKER) {
+        counter_name = strings::Substitute("EQDeleteMarker/$0/latency", _filter_id);
+    } else {
+        counter_name = strings::Substitute("JoinRuntimeFilter/$0/latency", _filter_id);
+    }
+    _latency_timer = ADD_COUNTER(p, counter_name, TUnit::TIME_NS);
     // not set yet.
     _latency_timer->set((int64_t)(-1));
     return Status::OK();

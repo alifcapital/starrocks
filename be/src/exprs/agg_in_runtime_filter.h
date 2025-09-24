@@ -203,7 +203,11 @@ public:
 
     std::string debug_string() const override {
         std::stringstream ss;
-        ss << "InRuntimeFilter(";
+        if (_is_eq_delete_marker) {
+            ss << "EQDeleteMarker(";
+        } else {
+            ss << "InRuntimeFilter(";
+        }
         ss << "is_not_in = " << _is_not_in << " ";
         ss << "type = " << Type << " ";
         ss << "has_null = " << _has_null << " ";
