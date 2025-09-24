@@ -268,7 +268,7 @@ void FileReader::_init_eq_delete_predicates() {
 
         if (!_eq_delete_predicates.empty()) {
             // Create PredicateTree once
-            PredicateCompoundNode<CompoundNodeType::AND> pred_tree;
+            PredicateCompoundNode<CompoundNodeType::OR> pred_tree;
             for (const auto& pred : _eq_delete_predicates) {
                 pred_tree.add_child(PredicateColumnNode{pred});
             }
