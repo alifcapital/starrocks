@@ -153,12 +153,12 @@ public:
 
     // Add insert() method for compatibility with FilterIniter
     void insert(const CppType& value) {
-        ScopedPtr ptr;
-        if (_values.Read(&ptr) != 0) {
-            return;
-        }
-        HashSet& set = const_cast<HashSet&>(*ptr);
-        set.emplace(value);
+        // Use Modify() for thread-safe mutation instead of const_cast
+        auto update = [&](auto& dst) {
+            dst.emplace(value);
+            return true;
+        };
+        _values.Modify(update);
     }
 
     void merge(const RuntimeFilter* rf) override {
