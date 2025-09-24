@@ -233,10 +233,7 @@ void FileReader::_init_eq_delete_predicates() {
             if (rf == nullptr || rf->type() != RuntimeFilterSerializeType::EQ_DELETE_MARKER) continue;
 
             auto* in_filter = rf->get_in_filter();
-            if (in_filter == nullptr || in_filter->size() == 0) {
-                VLOG(1) << "EQDELETE FileReader: Empty EQ-delete filter, skipping optimization";
-                return;
-            }
+            if (in_filter == nullptr) continue;
 
             // Get SlotDescriptor from probe expression
             ExprContext* probe_expr_ctx = probe_descriptor->probe_expr_ctx();
@@ -275,7 +272,7 @@ void FileReader::_init_eq_delete_predicates() {
             for (const auto& pred : _eq_delete_predicates) {
                 pred_tree.add_child(PredicateColumnNode{pred});
             }
-            _eq_delete_predicate_tree = PredicateTree::create(std::move(pred_tree));
+            _eq_delete_predicate_tree = std::make_unique<PredicateTree>(PredicateTree::create(std::move(pred_tree)));
             VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size() << " EQ-delete predicates";
         }
 
@@ -290,7 +287,7 @@ bool FileReader::_should_bypass_eq_delete_for_row_group(const GroupReaderPtr& gr
     if (_eq_delete_predicate_tree == nullptr) return false;
 
     try {
-        auto visitor = PredicateFilterEvaluator{_eq_delete_predicate_tree.get(), group_reader.get(),
+        auto visitor = PredicateFilterEvaluator{*_eq_delete_predicate_tree, group_reader.get(),
                                                 _scanner_ctx->parquet_page_index_enable,
                                                 _scanner_ctx->parquet_bloom_filter_enable};
         auto res = _eq_delete_predicate_tree->visit(visitor);
