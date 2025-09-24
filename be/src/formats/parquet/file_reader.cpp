@@ -267,12 +267,15 @@ void FileReader::_init_eq_delete_predicates() {
         }
 
         if (!_eq_delete_predicates.empty()) {
-            // Create PredicateTree once
-            PredicateCompoundNode<CompoundNodeType::OR> pred_tree;
+            // Create PredicateTree with AND root and OR child for early exit
+            // If ANY delete predicate matches, we cannot bypass
+            PredicateCompoundNode<CompoundNodeType::AND> root_tree;
+            PredicateCompoundNode<CompoundNodeType::OR> or_tree;
             for (const auto& pred : _eq_delete_predicates) {
-                pred_tree.add_child(PredicateColumnNode{pred});
+                or_tree.add_child(PredicateColumnNode{pred});
             }
-            _eq_delete_predicate_tree = std::make_unique<PredicateTree>(PredicateTree::create(std::move(pred_tree)));
+            root_tree.add_child(std::move(or_tree));
+            _eq_delete_predicate_tree = std::make_unique<PredicateTree>(PredicateTree::create(std::move(root_tree)));
             VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size() << " EQ-delete predicates";
         }
 
