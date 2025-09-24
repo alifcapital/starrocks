@@ -460,6 +460,9 @@ Status RuntimeFilterHelper::fill_runtime_filter(const ColumnPtr& column, Logical
     case RuntimeFilterSerializeType::EMPTY_FILTER:
         return type_dispatch_filter(type, Status::OK(), FilterIniter<ComposedRuntimeEmptyFilter, false>(), column,
                                     column_offset, filter, eq_null);
+    case RuntimeFilterSerializeType::IN_FILTER:
+        return type_dispatch_filter(type, Status::OK(), FilterIniter<InRuntimeFilter, false>(), column,
+                                    column_offset, filter, eq_null);
     case RuntimeFilterSerializeType::NONE:
     default:
         return Status::NotSupported("unsupported build runtime filter: " + filter->debug_string());

@@ -587,9 +587,15 @@ Status HashJoiner::_process_where_conjunct(ChunkPtr* chunk) {
 Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
 
-    // For Iceberg equality delete, we DO want IN filters - they're more precise than bloom filters
-    // and can provide more precise row group bypass. Our centralized fix in ScanConjunctsManager
-    // prevents them from becoming conjuncts/min-max ranges.
+    // For EQ-delete: skip OLD ExprContext IN filter creation - we use new InRuntimeFilter instead
+    bool is_iceberg_eq_delete = (_hash_join_node.join_op == TJoinOp::LEFT_ANTI_JOIN &&
+                                  _hash_join_node.__isset.is_iceberg_equality_delete &&
+                                  _hash_join_node.is_iceberg_equality_delete);
+
+    if (is_iceberg_eq_delete) {
+        VLOG(1) << "EQDELETE HashJoiner: Skipping OLD ExprContext IN filter creation for EQ-delete";
+        return Status::OK(); // Skip old IN filter creation for EQ-delete
+    }
 
     size_t ht_row_count = get_ht_row_count();
 
