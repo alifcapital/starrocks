@@ -39,6 +39,14 @@
 #include "formats/parquet/metadata.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
 #include "formats/parquet/utils.h"
+#include "formats/parquet/scalar_column_reader.h"
+#include "formats/parquet/parquet_block_split_bloom_filter.h"
+#include "exprs/runtime_filter.h"
+#include "exprs/agg_in_runtime_filter.h"
+#include "types/logical_type_infra.h"
+#include "common/object_pool.h"
+#include "util/thrift_util.h"
+#include <cstdint>
 #include "fs/fs.h"
 #include "gen_cpp/parquet_types.h"
 #include "gutil/casts.h"
@@ -224,130 +232,275 @@ void FileReader::_init_eq_delete_predicates() {
     if (_scanner_ctx->eq_delete_markers.empty()) return;
 
     auto start_time = std::chrono::steady_clock::now();
-    try {
-        // Create ConnectorPredicateParser once
-        ConnectorPredicateParser parser(&_scanner_ctx->slot_descs);
+    size_t total_delete_values = 0;
 
-        for (auto* probe_descriptor : _scanner_ctx->eq_delete_markers) {
-            if (probe_descriptor == nullptr) continue;
+    // Count total delete values for logging
+    for (auto* probe_descriptor : _scanner_ctx->eq_delete_markers) {
+        if (probe_descriptor == nullptr) continue;
 
-            auto* rf = probe_descriptor->runtime_filter(0); // driver_sequence = 0
-            if (rf == nullptr || rf->type() != RuntimeFilterSerializeType::EQ_DELETE_MARKER) continue;
+        auto* rf = probe_descriptor->runtime_filter(0);
+        if (rf == nullptr || rf->type() != RuntimeFilterSerializeType::EQ_DELETE_MARKER) continue;
 
-            auto* in_filter = rf->get_in_filter();
-            if (in_filter == nullptr) continue;
-
-            // Get SlotDescriptor from probe expression
-            ExprContext* probe_expr_ctx = probe_descriptor->probe_expr_ctx();
-            if (!probe_expr_ctx || !probe_expr_ctx->root()->is_slotref()) continue;
-
-            auto* slot_ref = down_cast<ColumnRef*>(probe_expr_ctx->root());
-            SlotDescriptor* slot = nullptr;
-
-            // Find SlotDescriptor by slot_id
-            SlotId slot_id = slot_ref->slot_id();
-            for (const auto& col_info : _scanner_ctx->materialized_columns) {
-                if (col_info.slot_id() == slot_id) {
-                    slot = col_info.slot_desc;
-                    break;
-                }
-            }
-            if (slot == nullptr) continue;
-
-            // Use EXISTING RuntimeColumnPredicateBuilder via type_dispatch
-            auto predicate_build_start = std::chrono::steady_clock::now();
-            LogicalType slot_type = slot->type().type;
-            auto predicates_result = type_dispatch_predicate<StatusOr<std::vector<const ColumnPredicate*>>>(
-                slot_type, false,
-                detail::RuntimeColumnPredicateBuilder(),
-                _scanner_ctx->global_dictmaps, &parser,
-                probe_descriptor, slot, /*driver_sequence=*/0, &_eq_delete_marker_pool);
-
-            if (predicates_result.ok()) {
-                auto predicates = predicates_result.value();
-                _eq_delete_predicates.insert(_eq_delete_predicates.end(), predicates.begin(), predicates.end());
-
-                auto predicate_build_end = std::chrono::steady_clock::now();
-                auto predicate_build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    predicate_build_end - predicate_build_start).count();
-                VLOG(1) << "EQDELETE FileReader: Built " << predicates.size() << " predicates in "
-                        << predicate_build_duration << "ms";
-            }
+        auto* in_filter = rf->get_in_filter();
+        if (in_filter) {
+            auto* abstract_filter = down_cast<const AbstractInRuntimeFilter*>(in_filter);
+            total_delete_values += abstract_filter->size();
         }
-
-        if (!_eq_delete_predicates.empty()) {
-            // Create PredicateTree with AND root and OR child for early exit
-            // If ANY delete predicate matches, we cannot bypass
-            auto tree_build_start = std::chrono::steady_clock::now();
-            PredicateCompoundNode<CompoundNodeType::AND> root_tree;
-            PredicateCompoundNode<CompoundNodeType::OR> or_tree;
-            for (const auto& pred : _eq_delete_predicates) {
-                or_tree.add_child(PredicateColumnNode{pred});
-            }
-            root_tree.add_child(std::move(or_tree));
-            _eq_delete_predicate_tree = std::make_unique<PredicateTree>(PredicateTree::create(std::move(root_tree)));
-
-            auto tree_build_end = std::chrono::steady_clock::now();
-            auto tree_build_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                tree_build_end - tree_build_start).count();
-            VLOG(1) << "EQDELETE FileReader: Built predicate tree in " << tree_build_duration << "ms";
-
-            auto total_end = std::chrono::steady_clock::now();
-            auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                total_end - start_time).count();
-            VLOG(1) << "EQDELETE FileReader: Initialized " << _eq_delete_predicates.size()
-                    << " EQ-delete predicates in total " << total_duration << "ms";
-        }
-
-    } catch (const std::exception& e) {
-        LOG(WARNING) << "EQDELETE FileReader: Failed to initialize EQ-delete predicates: " << e.what();
-        _eq_delete_predicates.clear();
-        _eq_delete_predicate_tree.reset();
     }
+
+    auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time).count();
+
+    VLOG(1) << "EQDELETE FileReader: Found " << _scanner_ctx->eq_delete_markers.size()
+            << " EQ-delete markers with " << total_delete_values << " total delete values in "
+            << total_duration << "ms (direct approach - no predicate conversion)";
 }
 
 bool FileReader::_should_bypass_eq_delete_for_row_group(const GroupReaderPtr& group_reader) {
-    if (_eq_delete_predicate_tree == nullptr) return false;
+    if (_scanner_ctx->eq_delete_markers.empty()) return false;
 
     auto eval_start = std::chrono::steady_clock::now();
     try {
-        auto visitor = PredicateFilterEvaluator{*_eq_delete_predicate_tree, group_reader.get(),
-                                                false,
-                                                _scanner_ctx->parquet_bloom_filter_enable};
-
-        // For EQ delete bypass: only use ROWGROUP_ZONEMAP and BLOOM_FILTER, skip expensive PAGE_INDEX_ZONEMAP
-        constexpr auto eq_delete_evaluator = static_cast<PredicateFilterEvaluator::Evaluator>(
-                PredicateFilterEvaluator::ROWGROUP_ZONEMAP | PredicateFilterEvaluator::BLOOM_FILTER);
-
-        auto filter_eval_start = std::chrono::steady_clock::now();
-        auto res = _eq_delete_predicate_tree->visit(visitor, eq_delete_evaluator);
-        auto filter_eval_end = std::chrono::steady_clock::now();
-
-        auto filter_eval_duration = std::chrono::duration_cast<std::chrono::microseconds>(
-            filter_eval_end - filter_eval_start).count();
-
-        bool can_bypass = false;
-        if (res.ok() && res.value().has_value() && res.value()->span_size() == 0) {
-            // No intersection with delete file values - safe to bypass!
-            _iceberg_eq_delete_row_groups_skipped++;
-            can_bypass = true;
-        }
+        // Use direct approach instead of complex predicate system
+        bool can_bypass = _should_bypass_eq_delete_direct(group_reader);
 
         auto eval_end = std::chrono::steady_clock::now();
         auto eval_duration = std::chrono::duration_cast<std::chrono::microseconds>(
             eval_end - eval_start).count();
 
-        VLOG(1) << "EQDELETE FileReader: Row group filter eval took " << filter_eval_duration
-                << "us, total " << eval_duration << "us, can_bypass=" << can_bypass
-                << ", counters [stats=" << visitor.counter.statistics_tried_counter
-                << "/" << visitor.counter.statistics_success_counter
-                << ", bloom=" << visitor.counter.bloom_filter_tried_counter
-                << "/" << visitor.counter.bloom_filter_success_counter << "]";
+        if (can_bypass) {
+            _iceberg_eq_delete_row_groups_skipped++;
+        }
+
+        VLOG(1) << "EQDELETE FileReader: Direct row group eval took " << eval_duration
+                << "us, can_bypass=" << can_bypass;
 
         return can_bypass;
     } catch (...) {
         return false;
     }
+}
+
+bool FileReader::_should_bypass_eq_delete_direct(const GroupReaderPtr& group_reader) {
+    auto direct_start = std::chrono::steady_clock::now();
+
+    for (auto* probe_descriptor : _scanner_ctx->eq_delete_markers) {
+        if (probe_descriptor == nullptr) continue;
+
+        auto* rf = probe_descriptor->runtime_filter(0); // driver_sequence = 0
+        if (rf == nullptr || rf->type() != RuntimeFilterSerializeType::EQ_DELETE_MARKER) continue;
+
+        auto* in_filter = rf->get_in_filter();
+        if (in_filter == nullptr) continue;
+
+        // Get SlotDescriptor from probe expression
+        ExprContext* probe_expr_ctx = probe_descriptor->probe_expr_ctx();
+        if (!probe_expr_ctx || !probe_expr_ctx->root()->is_slotref()) continue;
+
+        auto* slot_ref = down_cast<ColumnRef*>(probe_expr_ctx->root());
+        SlotDescriptor* slot = nullptr;
+
+        // Find SlotDescriptor by slot_id
+        SlotId slot_id = slot_ref->slot_id();
+        for (const auto& col_info : _scanner_ctx->materialized_columns) {
+            if (col_info.slot_id() == slot_id) {
+                slot = col_info.slot_desc;
+                break;
+            }
+        }
+        if (slot == nullptr) continue;
+
+        // Get column reader and metadata
+        auto* column_reader = group_reader->get_column_reader(slot_id);
+        if (column_reader == nullptr) continue;
+
+        auto* chunk_metadata = column_reader->get_chunk_metadata();
+        if (chunk_metadata == nullptr) continue;
+
+        auto stats_start = std::chrono::steady_clock::now();
+
+        // Check min/max statistics first (fastest check)
+        if (!_check_eq_delete_minmax_direct(in_filter, chunk_metadata, slot->type().type)) {
+            auto stats_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - stats_start).count();
+            VLOG(1) << "EQDELETE FileReader: MinMax check found intersection in " << stats_duration << "us - cannot bypass";
+            return false; // Values overlap with row group range - cannot bypass
+        }
+
+        auto stats_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - stats_start).count();
+
+        // Check bloom filter if available and enabled
+        if (_scanner_ctx->parquet_bloom_filter_enable &&
+            chunk_metadata->meta_data.__isset.bloom_filter_offset) {
+
+            auto bloom_start = std::chrono::steady_clock::now();
+            if (!_check_eq_delete_bloom_filter_direct(in_filter, column_reader, slot->type().type)) {
+                auto bloom_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - bloom_start).count();
+                VLOG(1) << "EQDELETE FileReader: Bloom filter found potential match in " << bloom_duration
+                        << "us (after " << stats_duration << "us stats) - cannot bypass";
+                return false; // Bloom filter found potential matches - cannot bypass
+            }
+            auto bloom_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - bloom_start).count();
+            VLOG(1) << "EQDELETE FileReader: Bloom filter passed in " << bloom_duration
+                    << "us (after " << stats_duration << "us stats)";
+        } else {
+            VLOG(1) << "EQDELETE FileReader: MinMax passed in " << stats_duration
+                    << "us, bloom filter not available/enabled";
+        }
+    }
+
+    auto direct_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - direct_start).count();
+    VLOG(1) << "EQDELETE FileReader: Direct check completed in " << direct_duration << "us - safe to bypass";
+
+    return true; // All checks passed - safe to bypass
+}
+
+bool FileReader::_check_eq_delete_minmax_direct(const RuntimeFilter* in_filter,
+                                                const tparquet::ColumnChunk* chunk_metadata,
+                                                LogicalType column_type) {
+    if (!chunk_metadata->meta_data.__isset.statistics) {
+        VLOG(2) << "EQDELETE FileReader: No statistics available - allowing bloom filter check";
+        return true; // No statistics available - allow bloom filter check
+    }
+
+    const auto& stats = chunk_metadata->meta_data.statistics;
+    if (!stats.__isset.min_value || !stats.__isset.max_value) {
+        VLOG(2) << "EQDELETE FileReader: No min/max values - allowing bloom filter check";
+        return true; // No min/max values - allow bloom filter check
+    }
+
+    // For now, let bloom filter do the heavy lifting
+    // MinMax optimization can be added later for specific common types
+    VLOG(2) << "EQDELETE FileReader: MinMax check skipped for type " << column_type
+            << " - deferring to bloom filter";
+    return true;
+}
+
+bool FileReader::_check_eq_delete_bloom_filter_direct(const RuntimeFilter* in_filter,
+                                                     const ColumnReader* column_reader,
+                                                     LogicalType column_type) {
+    try {
+        auto* chunk_metadata = column_reader->get_chunk_metadata();
+        if (!chunk_metadata || !chunk_metadata->meta_data.__isset.bloom_filter_offset) {
+            VLOG(2) << "EQDELETE FileReader: No bloom filter available";
+            return true; // No bloom filter - assume no intersection
+        }
+
+        // Initialize bloom filter manually (copying logic from RawColumnReader::_init_column_bloom_filter)
+        starrocks::ParquetBlockSplitBloomFilter bloom_filter;
+        int32_t offset = chunk_metadata->meta_data.bloom_filter_offset;
+        int32_t length = chunk_metadata->meta_data.__isset.bloom_filter_length
+                        ? chunk_metadata->meta_data.bloom_filter_length : 0;
+
+        // Initialize bloom filter from parquet file data
+        auto init_status = _init_parquet_bloom_filter(offset, length, chunk_metadata, &bloom_filter);
+        if (!init_status.ok()) {
+            VLOG(1) << "EQDELETE FileReader: Failed to init bloom filter: " << init_status.message();
+            return true; // Failed to init - assume no intersection
+        }
+
+        // Use type dispatch to check values against bloom filter
+        return type_dispatch_basic(column_type, [&]<LogicalType LT>() -> bool {
+            return _check_bloom_filter_values<LT>(in_filter, &bloom_filter);
+        });
+
+    } catch (const std::exception& e) {
+        VLOG(1) << "EQDELETE FileReader: Bloom filter check failed: " << e.what();
+        return true; // Error - assume no intersection to be safe
+    }
+}
+
+Status FileReader::_init_parquet_bloom_filter(int32_t offset, int32_t length, 
+                                              const tparquet::ColumnChunk* chunk_metadata,
+                                              starrocks::ParquetBlockSplitBloomFilter* bloom_filter) {
+    // Copy logic from RawColumnReader::_init_column_bloom_filter
+    const uint32_t SBBF_HEADER_SIZE_ESTIMATE = 32;
+    
+    std::vector<char> bloom_filter_data;
+    tparquet::BloomFilterHeader header;
+    uint32_t header_len = SBBF_HEADER_SIZE_ESTIMATE;
+    
+    if (length > 0) {
+        bloom_filter_data.resize(length + 1);
+        RETURN_IF_ERROR(_file->read_at_fully(offset, bloom_filter_data.data(), length));
+    } else {
+        // if length is not set, read the header first;
+        bloom_filter_data.reserve(header_len);
+        RETURN_IF_ERROR(_file->read_at_fully(offset, bloom_filter_data.data(), header_len));
+    }
+
+    RETURN_IF_ERROR(deserialize_thrift_msg(reinterpret_cast<const uint8_t*>(bloom_filter_data.data()), 
+                                          &header_len, TProtocolType::COMPACT, &header));
+    if (length == 0) {
+        bloom_filter_data.resize(header_len + header.numBytes + 1);
+        RETURN_IF_ERROR(_file->read_at_fully(offset + header_len, 
+                                           bloom_filter_data.data() + header_len, header.numBytes));
+    }
+    
+    // Set null flag
+    if (chunk_metadata->meta_data.__isset.statistics &&
+        chunk_metadata->meta_data.statistics.__isset.null_count) {
+        if (chunk_metadata->meta_data.statistics.null_count > 0) {
+            bloom_filter_data.back() = 1;
+        } else {
+            bloom_filter_data.back() = 0;
+        }
+    } else {
+        // Conservative: assume nulls can exist
+        bloom_filter_data.back() = 1;
+    }
+
+    return bloom_filter->init(bloom_filter_data.data() + header_len, header.numBytes + 1, 
+                             Hasher::HashStrategy::XXHASH64, 0);
+}
+
+template<LogicalType LT>
+bool FileReader::_check_bloom_filter_values(const RuntimeFilter* in_filter, 
+                                            starrocks::ParquetBlockSplitBloomFilter* bloom_filter) {
+    using CppType = RunTimeCppType<LT>;
+
+    // Cast to typed runtime filter
+    auto* typed_filter = down_cast<const InRuntimeFilter<LT>*>(in_filter);
+    if (!typed_filter) {
+        VLOG(1) << "EQDELETE FileReader: Failed to cast to typed InRuntimeFilter";
+        return true; // Cast failed - assume no intersection
+    }
+
+    // Get all values from the filter
+    ObjectPool temp_pool;
+    auto value_set = typed_filter->get_set(&temp_pool);
+
+    VLOG(2) << "EQDELETE FileReader: Checking " << value_set.size() << " delete values against bloom filter";
+
+    // Check each value against bloom filter with early exit
+    size_t values_checked = 0;
+    for (const auto& delete_value : value_set) {
+        values_checked++;
+
+        bool might_contain = false;
+        if constexpr (IsSlice<CppType>) {
+            // For string types
+            might_contain = bloom_filter->test_bytes(delete_value.data, delete_value.size);
+        } else {
+            // For numeric types
+            might_contain = bloom_filter->test_bytes(reinterpret_cast<const char*>(&delete_value),
+                                                   sizeof(delete_value));
+        }
+
+        if (might_contain) {
+            VLOG(2) << "EQDELETE FileReader: Bloom filter found potential match after checking "
+                    << values_checked << "/" << value_set.size() << " values - early exit";
+            return false; // Found potential match - cannot bypass!
+        }
+    }
+
+    VLOG(2) << "EQDELETE FileReader: Checked all " << value_set.size()
+            << " values, no bloom filter matches - safe to bypass";
+    return true; // No matches found - safe to bypass
 }
 
 

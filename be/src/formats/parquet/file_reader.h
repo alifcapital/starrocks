@@ -46,6 +46,7 @@ using PredicateList = std::vector<const ColumnPredicate*>;
 class ObjectPool;
 class RandomAccessFile;
 class RuntimeFilterProbeDescriptor;
+class RuntimeInFilter;
 struct HdfsScannerContext;
 class BlockCache;
 class SlotDescriptor;
@@ -55,9 +56,11 @@ class SharedBufferedInputStream;
 } // namespace io
 namespace parquet {
 struct ParquetField;
+class ColumnReader;
 } // namespace parquet
 struct TypeDescriptor;
 class ObjectCache;
+class ParquetBlockSplitBloomFilter;
 
 } // namespace starrocks
 
@@ -110,6 +113,23 @@ private:
     // check if row group should bypass EQ-delete hash join probe
     void _init_eq_delete_predicates();
     bool _should_bypass_eq_delete_for_row_group(const GroupReaderPtr& group_reader);
+
+    // direct EQ-delete bypass implementation (bypasses predicate conversion)
+    bool _should_bypass_eq_delete_direct(const GroupReaderPtr& group_reader);
+    bool _check_eq_delete_minmax_direct(const RuntimeFilter* in_filter, 
+                                       const tparquet::ColumnChunk* chunk_metadata,
+                                       LogicalType column_type);
+    bool _check_eq_delete_bloom_filter_direct(const RuntimeFilter* in_filter,
+                                              const ColumnReader* column_reader,
+                                              LogicalType column_type);
+
+    Status _init_parquet_bloom_filter(int32_t offset, int32_t length,
+                                      const tparquet::ColumnChunk* chunk_metadata,
+                                      starrocks::ParquetBlockSplitBloomFilter* bloom_filter);
+
+    template<LogicalType LT>
+    bool _check_bloom_filter_values(const RuntimeFilter* in_filter, 
+                                    starrocks::ParquetBlockSplitBloomFilter* bloom_filter);
 
     // get row group to read
     // if scan range contain the first byte in the row group, will be read
