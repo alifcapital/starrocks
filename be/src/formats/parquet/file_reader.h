@@ -116,7 +116,7 @@ private:
 
     // direct EQ-delete bypass implementation (bypasses predicate conversion)
     bool _should_bypass_eq_delete_direct(const GroupReaderPtr& group_reader);
-    bool _check_eq_delete_minmax_direct(const RuntimeFilter* in_filter, 
+    bool _check_eq_delete_minmax_direct(const RuntimeFilter* in_filter,
                                        const tparquet::ColumnChunk* chunk_metadata,
                                        LogicalType column_type);
     bool _check_eq_delete_bloom_filter_direct(const RuntimeFilter* in_filter,
@@ -128,7 +128,7 @@ private:
                                       starrocks::ParquetBlockSplitBloomFilter* bloom_filter);
 
     template<LogicalType LT>
-    bool _check_bloom_filter_values(const RuntimeFilter* in_filter, 
+    bool _check_bloom_filter_values(const RuntimeFilter* in_filter,
                                     starrocks::ParquetBlockSplitBloomFilter* bloom_filter);
 
     // get row group to read
