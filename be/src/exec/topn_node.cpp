@@ -33,6 +33,7 @@
 #include "exec/pipeline/sort/spillable_partition_sort_sink_operator.h"
 #include "exec/pipeline/source_operator.h"
 #include "exec/pipeline/spill_process_channel.h"
+#include "common/logging.h"
 #include "gutil/casts.h"
 #include "runtime/current_thread.h"
 
@@ -394,6 +395,16 @@ pipeline::OpFactories TopNNode::decompose_to_pipeline(pipeline::PipelineBuilderC
     bool enable_parallel_merge = _tnode.sort_node.__isset.enable_parallel_merge &&
                                  _tnode.sort_node.enable_parallel_merge &&
                                  !_sort_exec_exprs.lhs_ordering_expr_ctxs().empty();
+
+    LOG(INFO) << "TopNNode::decompose_to_pipeline plan_node_id=" << id()
+              << " __isset.enable_parallel_merge=" << _tnode.sort_node.__isset.enable_parallel_merge
+              << " enable_parallel_merge_value=" << _tnode.sort_node.enable_parallel_merge
+              << " ordering_exprs_count=" << _sort_exec_exprs.lhs_ordering_expr_ctxs().size()
+              << " need_merge=" << need_merge
+              << " enable_parallel_merge=" << enable_parallel_merge;
+
+    // TODO: remove after debugging - force enable parallel merge
+    enable_parallel_merge = true;
 
     OpFactories operators_source_with_sort;
 
