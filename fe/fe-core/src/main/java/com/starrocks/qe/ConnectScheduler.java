@@ -37,17 +37,20 @@ package com.starrocks.qe;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.common.CloseableLock;
 import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.util.LogUtil;
 import com.starrocks.http.HttpConnectContext;
+import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.mysql.MysqlProto;
 import com.starrocks.mysql.NegotiateState;
 import com.starrocks.mysql.nio.NConnectContext;
 import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.privilege.PrivilegeType;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Authorizer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -56,6 +59,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TimerTask;
 import java.util.UUID;
@@ -71,6 +75,7 @@ public class ConnectScheduler {
     private final AtomicInteger numberConnection;
     private final AtomicInteger nextConnectionId;
 
+    // mysql connectContext/ http connectContext/ arrowFlight connextContext all stored in connectionMap
     private final Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
     private final Map<String, AtomicInteger> connCountByUser = Maps.newConcurrentMap();
     private final ReentrantLock connStatsLock = new ReentrantLock();
@@ -173,6 +178,58 @@ public class ConnectScheduler {
         }
     }
 
+    public Pair<Boolean, String> onUserChanged(ConnectContext ctx, String oldQualifiedUser, String newQualifiedUser) {
+        if (Objects.equals(oldQualifiedUser, newQualifiedUser)) {
+            return new Pair<>(true, null);
+        }
+
+        if (newQualifiedUser == null) {
+            return new Pair<>(false, "new qualifiedUser is null");
+        }
+
+        try {
+            connStatsLock.lock();
+            AtomicInteger newCounter = connCountByUser.computeIfAbsent(newQualifiedUser, k -> new AtomicInteger(0));
+            int currentNewCount = newCounter.get();
+            long currentUserMaxConn = GlobalStateMgr.getCurrentState().getAuthenticationMgr().getMaxConn(newQualifiedUser);
+
+            if (currentNewCount >= currentUserMaxConn) {
+                int totalConn = connCountByUser.values().stream().mapToInt(AtomicInteger::get).sum();
+                String userErrMsg = "Reach user-level(qualifiedUser: " + newQualifiedUser
+                        + ", currUserIdentity: " + ctx.getCurrentUserIdentity() + ") connection limit, "
+                        + "currentUserMaxConn=" + currentUserMaxConn + ", connectionMap.size="
+                        + connectionMap.size() + ", connByUser.totConn=" + totalConn
+                        + ", user.currConn=" + currentNewCount;
+                LOG.info("{}, details: connectionId={}, connByUser={}", userErrMsg, ctx.getConnectionId(), connCountByUser);
+                return new Pair<>(false, userErrMsg);
+            }
+
+            newCounter.incrementAndGet();
+
+            if (oldQualifiedUser != null) {
+                AtomicInteger oldCounter = connCountByUser.get(oldQualifiedUser);
+                if (oldCounter != null) {
+                    int oldCountAfterDecrement = oldCounter.decrementAndGet();
+                    if (oldCountAfterDecrement < 0) {
+                        LOG.warn("Negative connection count detected for user {} during user change of connection {}",
+                                oldQualifiedUser, ctx.getConnectionId());
+                        oldCounter.set(0);
+                        oldCountAfterDecrement = 0;
+                    }
+                    if (oldCountAfterDecrement == 0) {
+                        connCountByUser.remove(oldQualifiedUser, oldCounter);
+                    }
+                } else {
+                    LOG.warn("Missing connection counter for user {} during user change of connection {}",
+                            oldQualifiedUser, ctx.getConnectionId());
+                }
+            }
+            return new Pair<>(true, null);
+        } finally {
+            connStatsLock.unlock();
+        }
+    }
+
     public void unregisterConnection(ConnectContext ctx) {
         boolean removed;
         try {
@@ -182,7 +239,9 @@ public class ConnectScheduler {
                 numberConnection.decrementAndGet();
                 AtomicInteger conns = connCountByUser.get(ctx.getQualifiedUser());
                 if (conns != null) {
-                    conns.decrementAndGet();
+                    if (conns.decrementAndGet() <= 0) {
+                        connCountByUser.remove(ctx.getQualifiedUser());
+                    }
                 }
                 LOG.info("Connection closed. remote={}, connectionId={}, qualifiedUser={}, user.currConn={}",
                         ctx.getMysqlChannel().getRemoteHostPortString(), ctx.getConnectionId(),
@@ -218,7 +277,7 @@ public class ConnectScheduler {
     public int getConnectionNum() {
         return numberConnection.get();
     }
-    
+
     public Map<String, AtomicInteger> getUserConnectionMap() {
         return connCountByUser;
     }
@@ -241,7 +300,9 @@ public class ConnectScheduler {
             }
 
             // Check whether it's the connection for the specified user.
-            if (forUser != null && !ctx.getQualifiedUser().equals(forUser)) {
+            if ((forUser != null && !ctx.getQualifiedUser().equals(forUser)) ||
+                    (Config.authorization_enable_admin_user_protection &&
+                            ctx.getQualifiedUser().equals(AuthenticationMgr.ROOT_USER))) {
                 continue;
             }
 
@@ -321,4 +382,24 @@ public class ConnectScheduler {
             }
         }
     }
+
+    public void printAllRunningQuery() {
+        connectionMap.values().stream().forEach(ctx -> {
+            if (ctx.getCommand() == MysqlCommand.COM_QUERY || ctx.getCommand() == MysqlCommand.COM_STMT_EXECUTE ||
+                    ctx.getCommand() == MysqlCommand.COM_STMT_PREPARE) {
+                if (ctx.getExecutor() != null && ctx.getExecutor().getParsedStmt() != null &&
+                        ctx.getExecutor().getParsedStmt().getOrigStmt() != null) {
+                    long threadId = ctx.getCurrentThreadId();
+                    long theadAllocatedBytes = 0;
+                    if (threadId != 0) {
+                        theadAllocatedBytes = ConnectProcessor.getThreadAllocatedBytes(threadId) -
+                                ctx.getCurrentThreadAllocatedMemory();
+                    }
+                    LOG.warn("FE ShutDown! Running Query:{},  QueryFEAllocatedMemory: {}",
+                            ctx.getExecutor().getParsedStmt().getOrigStmt().getOrigStmt(), theadAllocatedBytes);
+                }
+            }
+        });
+    }
+
 }

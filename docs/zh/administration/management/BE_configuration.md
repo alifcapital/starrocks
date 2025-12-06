@@ -3,11 +3,11 @@ displayed_sidebar: docs
 keywords: ['Canshu']
 ---
 
-import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.md'
+import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.mdx'
 
-import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.md'
+import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.mdx'
 
-import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.md'
+import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.mdx'
 
 # BE 配置项
 
@@ -1176,6 +1176,15 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 描述：是否为 Primary Key 表开启 Size-tiered Compaction 策略。`true` 代表开启。`false` 代表关闭。
 - 引入版本：存算分离集群自 v3.2.4, v3.1.10 起生效，存算一体集群自 v3.2.5, v3.1.10 起生效
 
+##### enable_strict_delvec_crc_check
+
+- 默认值：true
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：当enable_strict_delvec_crc_check设置为true后，我们会对delete vector的crc32进行严格检查，如果不一致，将返回失败。
+- 引入版本：-
+
 ##### size_tiered_min_level_size
 
 - 默认值：131072
@@ -1726,7 +1735,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 类型：Int
 - 单位：MB
 - 是否动态：是
-- 描述：The maximum size of a JSON file that can be streamed into StarRocks.
+- 描述：流式导入单个 JSON 文件大小的上限。
 - 引入版本：-
 
 ##### streaming_load_rpc_max_alive_time_sec
@@ -1735,7 +1744,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 类型：Int
 - 单位：Seconds
 - 是否动态：否
-- 描述：流式导入单个 JSON 文件大小的上限。
+- 描述：Stream Load 的 RPC 超时时长。
 - 引入版本：-
 
 ##### write_buffer_size
@@ -3246,7 +3255,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 
 - 默认值：0
 - 类型：Int
-- 单位：GB
+- 单位：Bytes
 - 是否动态：是
 - 描述：JIT 编译的 LRU 缓存大小。如果设置为大于 0，则表示实际的缓存大小。如果设置为小于或等于 0，系统将自适应设置缓存大小，使用的公式为 `jit_lru_cache_size = min(mem_limit*0.01, 1GB)` （节点的 `mem_limit` 必须大于或等于 16 GB）。
 - 引入版本：-
@@ -3377,7 +3386,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 默认值：false（v3.1）true（v3.2.3 起）
 - 类型：Boolean
 - 单位：-
-- 是否动态：是
+- 是否动态：否
 - 描述：存算分离模式下是否使用 Data Cache。`true` 表示启用该功能，`false` 表示禁用。自 v3.2.3 起，默认值由 `false` 调整为 `true`。
 - 引入版本：v3.1
 
@@ -3541,6 +3550,24 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 是否动态：否
 - 配置项描述: `object_storage_request_timeout_ms` 的别名。详细信息请参考配置项 [object_storage_request_timeout_ms](#object_storage_request_timeout_ms)。
 - 引入版本: v3.3.9
+
+##### starlet_filesystem_instance_cache_capacity
+
+- 默认值：10000
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 配置项描述: starlet filesystem 实例的缓存容量。
+- 引入版本: v3.2.16, v3.3.11, v3.4.1
+
+##### starlet_filesystem_instance_cache_ttl_sec
+
+- 默认值：86400
+- 类型：Int
+- 单位：秒
+- 是否动态：是
+- 配置项描述: starlet filesystem 实例缓存的过期时间。
+- 引入版本: v3.3.15, 3.4.5
 
 ##### lake_compaction_stream_buffer_size_bytes
 
@@ -3897,11 +3924,11 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 
 ##### datacache_mem_size
 
-- 默认值：10%
+- 默认值：0
 - 类型：String
 - 单位：-
-- 是否动态：否
-- 描述：内存缓存数据量的上限，可设为比例上限（如 `10%`）或物理上限（如 `10G`, `21474836480` 等）。默认值为 `10%`。推荐将该参数值最低设置成 10 GB。
+- 是否动态：是
+- 描述：内存缓存数据量的上限，可设为比例上限（如 `10%`）或物理上限（如 `10G`, `21474836480` 等）。
 - 引入版本：-
 
 ##### datacache_disk_size
@@ -3909,7 +3936,7 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 默认值：0
 - 类型：String
 - 单位：-
-- 是否动态：否
+- 是否动态：是
 - 描述：单个磁盘缓存数据量的上限，可设为比例上限（如 `80%`）或物理上限（如 `2T`, `500G` 等）。举例：在 `datacache_disk_path` 中配置了 2 个磁盘，并设置 `datacache_disk_size` 参数值为 `21474836480`，即 20 GB，那么最多可缓存 40 GB 的磁盘数据。默认值为 `0`，即仅使用内存作为缓存介质，不使用磁盘。
 - 引入版本：-
 
@@ -5232,3 +5259,12 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - 是否动态：否
 - 描述：bitmap 函数输入值的最大长度。
 - 引入版本：-
+
+##### report_exec_rpc_request_retry_num
+
+- 默认值：10
+- 类型: Int
+- 单位：-
+- 是否动态：是
+- 描述：用于向 FE 汇报执行状态的 RPC 请求的重试次数。默认值为 10，意味着如果该 RPC 请求失败（仅限于 fragment instance 的 finish RPC），将最多重试 10 次。该请求对于导入任务（load job）非常重要，如果某个 fragment instance 的完成状态报告失败，整个导入任务将会一直挂起，直到超时。
+-引入版本：-

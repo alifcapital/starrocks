@@ -44,6 +44,8 @@ import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,6 +69,7 @@ public class HudiTable extends Table implements HiveMetaStoreTable {
     private static final String JSON_KEY_HUDI_PROPERTIES = "hudiProperties";
 
     public static final String HUDI_TABLE_TYPE = "hudi.table.type";
+    public static final String HUDI_HMS_TABLE_TYPE = "hudi.hms.table.type";
     public static final String HUDI_BASE_PATH = "hudi.table.base.path";
     public static final String HUDI_TABLE_SERDE_LIB = "hudi.table.serde.lib";
     public static final String HUDI_TABLE_INPUT_FOAMT = "hudi.table.input.format";
@@ -291,7 +294,8 @@ public class HudiTable extends Table implements HiveMetaStoreTable {
         }
 
         if (tableType == HudiTableType.MOR) {
-            tHudiTable.setInstant_time(lastInstant == null ? "" : lastInstant.getTimestamp());
+            tHudiTable.setInstant_time(lastInstant == null ? "" :
+                    Collections.max(Arrays.asList(lastInstant.requestedTime(), lastInstant.getCompletionTime())));
         }
 
         tHudiTable.setHive_column_names(hudiProperties.get(HUDI_TABLE_COLUMN_NAMES));
@@ -316,6 +320,11 @@ public class HudiTable extends Table implements HiveMetaStoreTable {
     @Override
     public boolean isSupported() {
         return true;
+    }
+
+    @Override
+    public boolean isHMSExternalTable() {
+        return hudiProperties.get(HUDI_HMS_TABLE_TYPE).equals("EXTERNAL_TABLE");
     }
 
     @Override

@@ -216,8 +216,21 @@ public class InsertAnalyzer {
                         String missingKeyColumns = String.join(",", requiredKeyColumns);
                         ErrorReport.reportSemanticException(ErrorCode.ERR_MISSING_KEY_COLUMNS, missingKeyColumns);
                     }
-                    if (targetColumns.size() < olapTable.getBaseSchemaWithoutGeneratedColumn().size()) {
+                    if (targetColumns.size() < olapTable.getBaseSchemaWithoutGeneratedColumn().size() && 
+                            session.getSessionVariable().isEnableInsertPartialUpdate()) {
                         insertStmt.setUsePartialUpdate();
+                        // mark if partial update for auto increment column if and only if:
+                        // 1. There is auto increment defined in base schema
+                        // 2. targetColumns does not contain auto increment column
+                        // 3. auto increment column is not key column
+                        if (olapTable.hasAutoIncrementColumn() &&
+                                !targetColumns.stream().anyMatch(col -> col.isAutoIncrement())) {
+                            Column autoIncrementColumn =
+                                        table.getBaseSchema().stream().filter(Column::isAutoIncrement).findFirst().get();
+                            if (!autoIncrementColumn.isKey()) {
+                                insertStmt.setAutoIncrementPartialUpdate();
+                            }
+                        }
                     }
                 }
             }

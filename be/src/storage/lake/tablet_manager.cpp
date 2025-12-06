@@ -184,6 +184,8 @@ Status TabletManager::create_tablet(const TCreateTabletReq& req) {
     auto compress_type = req.__isset.compression_type ? req.compression_type : TCompressionType::LZ4_FRAME;
     RETURN_IF_ERROR(
             convert_t_schema_to_pb_schema(req.tablet_schema, compress_type, tablet_metadata_pb->mutable_schema()));
+    auto compession_level = req.__isset.compression_level ? req.compression_level : -1;
+    tablet_metadata_pb->mutable_schema()->set_compression_level(compession_level);
     if (req.create_schema_file) {
         RETURN_IF_ERROR(create_schema_file(req.tablet_id, tablet_metadata_pb->schema()));
     }
@@ -295,16 +297,20 @@ TabletMetadataPtr TabletManager::get_latest_cached_tablet_metadata(int64_t table
 }
 
 StatusOr<TabletMetadataPtr> TabletManager::get_tablet_metadata(int64_t tablet_id, int64_t version, bool fill_cache) {
-    if (version <= kInitialVersion) {
-        // Handle tablet initial metadata
-        auto initial_metadata = get_tablet_metadata(tablet_initial_metadata_location(tablet_id), fill_cache);
-        if (initial_metadata.ok()) {
-            auto tablet_metadata = std::make_shared<TabletMetadata>(*initial_metadata.value());
-            tablet_metadata->set_id(tablet_id);
-            return tablet_metadata;
-        }
+    auto tablet_metadata_or = get_tablet_metadata(tablet_metadata_location(tablet_id, version), fill_cache);
+    if (!tablet_metadata_or.status().is_not_found() || version > kInitialVersion) {
+        return tablet_metadata_or;
     }
-    return get_tablet_metadata(tablet_metadata_location(tablet_id, version), fill_cache);
+
+    // Handle tablet initial metadata
+    auto initial_metadata_or = get_tablet_metadata(tablet_initial_metadata_location(tablet_id), fill_cache);
+    if (!initial_metadata_or.ok()) {
+        return tablet_metadata_or;
+    }
+
+    auto tablet_metadata = std::make_shared<TabletMetadata>(*initial_metadata_or.value());
+    tablet_metadata->set_id(tablet_id);
+    return tablet_metadata;
 }
 
 StatusOr<TabletMetadataPtr> TabletManager::get_tablet_metadata(const string& path, bool fill_cache) {

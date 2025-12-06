@@ -52,6 +52,7 @@ import com.starrocks.alter.OlapTableAlterJobV2Builder;
 import com.starrocks.alter.OptimizeJobV2Builder;
 import com.starrocks.analysis.DescriptorTable.ReferencedPartitionInfo;
 import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.LiteralExpr;
 import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.SlotId;
 import com.starrocks.analysis.SlotRef;
@@ -1021,6 +1022,24 @@ public class OlapTable extends Table {
     }
 
     public Status doAfterRestore(MvRestoreContext mvRestoreContext) throws DdlException {
+        // check table's partition existence, otherwise return error
+        for (PhysicalPartition partition : getAllPhysicalPartitions()) {
+            long physicalPartitionId = partition.getParentId();
+            if (partitionInfo.getDataProperty(physicalPartitionId) == null) {
+                LOG.warn("physical partition id {} has no data property in table:{}", physicalPartitionId, name);
+                throw new DdlException("physical partition id " + physicalPartitionId
+                        + " has no data property: " + name);
+            }
+            for (MaterializedIndex index : partition
+                    .getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                for (Tablet tablet : index.getTablets()) {
+                    if (tablet == null) {
+                        throw new DdlException("tablet is null in table: " + name);
+                    }
+                }
+            }
+        }
+
         if (relatedMaterializedViews == null || relatedMaterializedViews.isEmpty()) {
             return Status.OK;
         }
@@ -1224,6 +1243,10 @@ public class OlapTable extends Table {
             if (partitionName.startsWith(ExpressionRangePartitionInfo.SHADOW_PARTITION_PREFIX)) {
                 continue;
             }
+            // ensure partitionName is in nameToPartition
+            if (!nameToPartition.containsKey(partitionName)) {
+                continue;
+            }
             rangePartitionMap.put(partitionName, rangePartitionInfo.getRange(partitionId));
         }
         return rangePartitionMap;
@@ -1246,20 +1269,31 @@ public class OlapTable extends Table {
             if (partitionName.startsWith(ExpressionRangePartitionInfo.SHADOW_PARTITION_PREFIX)) {
                 continue;
             }
+            if (!nameToPartition.containsKey(partitionName)) {
+                continue;
+            }
             // one item
-            List<String> singleValues = listPartitionInfo.getIdToValues().get(partitionId);
-            if (singleValues != null) {
+            List<LiteralExpr> literalValues = listPartitionInfo.getLiteralExprValues().get(partitionId);
+            if (CollectionUtils.isNotEmpty(literalValues)) {
                 List<List<String>> cellValue = Lists.newArrayList();
                 // for one item(single value), treat it as multi values.
-                for (String val : singleValues) {
-                    cellValue.add(Lists.newArrayList(val));
+                for (LiteralExpr val : literalValues) {
+                    cellValue.add(Lists.newArrayList(val.getStringValue()));
                 }
                 partitionItems.put(partitionName, new PListCell(cellValue));
             }
 
             // multi items
-            List<List<String>> multiValues = listPartitionInfo.getIdToMultiValues().get(partitionId);
-            if (multiValues != null) {
+            List<List<LiteralExpr>> multiExprValues = listPartitionInfo.getMultiLiteralExprValues().get(partitionId);
+            if (CollectionUtils.isNotEmpty(multiExprValues)) {
+                List<List<String>> multiValues = Lists.newArrayList();
+                for (List<LiteralExpr> exprValues : multiExprValues) {
+                    List<String> values = Lists.newArrayList();
+                    for (LiteralExpr literalExpr : exprValues) {
+                        values.add(literalExpr.getStringValue());
+                    }
+                    multiValues.add(values);
+                }
                 partitionItems.put(partitionName, new PListCell(multiValues));
             }
         }
@@ -1306,22 +1340,24 @@ public class OlapTable extends Table {
      * Infer the distribution info based on partitions and cluster status
      */
     public void inferDistribution(DistributionInfo info) throws DdlException {
-        if (info.getBucketNum() == 0) {
-            if (info.getType() == DistributionInfo.DistributionInfoType.HASH) {
-                // infer bucket num
+        if (info.getType() == DistributionInfo.DistributionInfoType.HASH) {
+            // infer bucket num
+            if (info.getBucketNum() == 0) {
                 int numBucket = CatalogUtils.calAvgBucketNumOfRecentPartitions(this,
                         5, Config.enable_auto_tablet_distribution);
                 info.setBucketNum(numBucket);
-            } else if (info.getType() == DistributionInfo.DistributionInfoType.RANDOM) {
-                // prior to use user set mutable bucket num
-                long numBucket = getMutableBucketNum();
-                if (numBucket <= 0) {
-                    numBucket = CatalogUtils.calPhysicalPartitionBucketNum();
-                }
-                info.setBucketNum((int) numBucket);
-            } else {
-                throw new DdlException("Unknown distribution info type: " + info.getType());
             }
+        } else if (info.getType() == DistributionInfo.DistributionInfoType.RANDOM) {
+            // prior to use user set mutable bucket num
+            long numBucket = getMutableBucketNum();
+            if (numBucket > 0) {
+                info.setBucketNum((int) numBucket);
+            } else if (info.getBucketNum() == 0) {
+                numBucket = CatalogUtils.calPhysicalPartitionBucketNum();
+                info.setBucketNum((int) numBucket);
+            }
+        } else {
+            throw new DdlException("Unknown distribution info type: " + info.getType());
         }
     }
 
@@ -3679,5 +3715,14 @@ public class OlapTable extends Table {
 
     public void updateLastCollectProfileTime() {
         this.lastCollectProfileTime = System.currentTimeMillis();
+    }
+
+    // only used for LakeTable and LakeMaterializedView
+    public List<Long> getShardGroupIds() {
+        List<Long> shardGroupIds = new ArrayList<>();
+        for (Partition p : getAllPartitions()) {
+            shardGroupIds.add(p.getShardGroupId());
+        }
+        return shardGroupIds;
     }
 }

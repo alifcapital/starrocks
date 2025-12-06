@@ -38,6 +38,7 @@ import com.starrocks.StarRocksFE;
 import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.Replica;
 import com.starrocks.qe.scheduler.slot.QueryQueueOptions;
+import com.starrocks.statistic.sample.NDVEstimator;
 
 public class Config extends ConfigBase {
 
@@ -171,6 +172,9 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true)
     public static long slow_lock_log_every_ms = 3000L;
+
+    @ConfField(mutable = true)
+    public static boolean slow_lock_print_stack = true;
 
     @ConfField
     public static String custom_config_dir = "/conf";
@@ -392,8 +396,7 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "task run ttl")
     public static int task_runs_ttl_second = 7 * 24 * 3600;     // 7 day
 
-    @Deprecated
-    @ConfField(mutable = true, comment = "[DEPRECATED as enable_task_history_archive] max number of task run history. ")
+    @ConfField(mutable = true, comment = "max number of task run history. ")
     public static int task_runs_max_history_number = 10000;
 
     @ConfField(mutable = true, comment = "Minimum schedule interval of a task")
@@ -404,6 +407,9 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true, comment = "Whether enable the task history archive feature")
     public static boolean enable_task_history_archive = true;
+
+    @ConfField(mutable = true)
+    public static boolean enable_task_run_fe_evaluation = true;
 
     /**
      * The max keep time of some kind of jobs.
@@ -1045,6 +1051,8 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static int prepared_transaction_default_timeout_second = 86400; // 1day
 
+    @ConfField(mutable = true)
+    public static int finish_transaction_default_lock_timeout_ms = 1000; // 1000ms
     /**
      * Max load timeout applicable to all type of load except for stream load and lake compaction
      */
@@ -1313,7 +1321,7 @@ public class Config extends ConfigBase {
      * whether backup materialized views in backing databases. If not, will skip backing materialized views.
      */
     @ConfField(mutable = true)
-    public static boolean enable_backup_materialized_view = true;
+    public static boolean enable_backup_materialized_view = false;
 
     /**
      * Whether to display all task runs or only the newest task run in ShowMaterializedViews command to be
@@ -1387,7 +1395,7 @@ public class Config extends ConfigBase {
      * true to enable collect proc cpu profile
      */
     @ConfField(mutable = true, comment = "true to enable collect proc cpu profile")
-    public static boolean proc_profile_cpu_enable = true;
+    public static boolean proc_profile_cpu_enable = false;
 
     /**
      * The number of seconds between proc profile collections
@@ -1423,6 +1431,14 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true, comment = "The interval of create partition batch, to avoid too frequent")
     public static long mv_create_partition_batch_interval_ms = 1000;
+
+    @ConfField(mutable = true, comment = "Whether to prefer string type for fixed length varchar column " +
+            "in materialized view creation/ctas")
+    public static boolean transform_type_prefer_string_for_varchar = false;
+
+    @ConfField(mutable = true, comment = "Whether to enable automatic repairing of materialized views " +
+            "that are broken due to base table schema changes")
+    public static boolean enable_mv_automatic_repairing_for_broken_base_tables = true;
 
     /**
      * The number of query retries.
@@ -1705,6 +1721,10 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static int report_queue_size = 100;
 
+    @ConfField(mutable = true, comment = "Whether to enable the collection of tablet numbers"
+            + " for each disk in the 'SHOW PROC /BACKENDS/{id}' command")
+    public static boolean enable_collect_tablet_num_in_show_proc_backend_disk_path = true;
+
     /**
      * If set to true, metric collector will be run as a daemon timer to collect metrics at fix interval
      */
@@ -1953,6 +1973,9 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long max_planner_scalar_rewrite_num = 100000;
 
+    @ConfField(mutable = true, comment = "The max depth that scalar operator optimization can be applied")
+    public static int max_scalar_operator_optimize_depth = 256;
+
     /**
      * statistic collect flag
      */
@@ -2044,7 +2067,7 @@ public class Config extends ConfigBase {
      * The size of the thread-pool which will be used to refresh statistic caches
      */
     @ConfField
-    public static int statistic_cache_thread_pool_size = 10;
+    public static int statistic_cache_thread_pool_size = 5;
 
     @ConfField
     public static int slot_manager_response_thread_pool_size = 16;
@@ -2060,6 +2083,9 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static long statistic_update_interval_sec = 24L * 60L * 60L;
+
+    @ConfField(mutable = true)
+    public static boolean enable_statistic_cache_refresh_after_write = false;
 
     @ConfField(mutable = true)
     public static long statistic_collect_too_many_version_sleep = 600000; // 10min
@@ -2126,9 +2152,16 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long statistic_sample_collect_rows = 200000;
 
+    @ConfField(mutable = true, comment = "The NDV estimator: DUJ1/GEE/LINEAR/POLYNOMIAL")
+    public static String statistics_sample_ndv_estimator =
+            NDVEstimator.NDVEstimatorDesc.defaultConfig().name();
+
     @ConfField(mutable = true, comment = "If changed ratio of a table/partition is larger than this threshold, " +
             "we would use sample statistics instead of full statistics")
     public static double statistic_sample_collect_ratio_threshold_of_first_load = 0.1;
+
+    @ConfField(mutable = true, comment = "Synchronously load statistics for testing purpose")
+    public static boolean enable_sync_statistics_load = false;
 
     /**
      * default bucket size of histogram statistics
@@ -2527,7 +2560,8 @@ public class Config extends ConfigBase {
     /**
      * empty shard group clean threshold (by create time).
      */
-    @ConfField
+    @ConfField(mutable = true, comment = "protection time for FE to clean unused tablet groups in shared-data mode," +
+            " tablet groups created newer than this time period will not be cleaned.")
     public static long shard_group_clean_threshold_sec = 3600L;
 
     /**
@@ -3143,6 +3177,13 @@ public class Config extends ConfigBase {
     public static boolean mv_auto_analyze_async = true;
 
     /**
+     * Creator-based: record the creator(user) of MV, refresh the MV with same user
+     * Root-based: always use the ROOT to refresh the MV
+     */
+    @ConfField(mutable = true, comment = "Whether to use the creator-based authorization or root for MV refresh")
+    public static boolean mv_use_creator_based_authorization = true;
+
+    /**
      * To prevent the external catalog from displaying too many entries in the grantsTo system table,
      * you can use this variable to ignore the entries in the external catalog
      */
@@ -3347,4 +3388,18 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static int max_get_partitions_meta_result_count = 100000;
+
+    /**
+     * The size of the thread pool for deploy serialization.
+     * If set to -1, it means same as cpu core number.
+     */
+    @ConfField
+    public static int deploy_serialization_thread_pool_size = -1;
+
+    /**
+     * The size of the queue for deploy serialization thread pool.
+     * If set to -1, it means same as cpu core number * 2.
+     */
+    @ConfField
+    public static int deploy_serialization_queue_size = -1;
 }

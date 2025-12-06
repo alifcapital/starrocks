@@ -35,12 +35,12 @@ void BinaryColumnBase<T>::check_or_die() const {
     CHECK_EQ(_bytes.size(), _offsets.back());
     size_t size = this->size();
     for (size_t i = 0; i < size; i++) {
-        CHECK_GE(_offsets[i + 1], _offsets[i]);
+        DCHECK_GE(_offsets[i + 1], _offsets[i]);
     }
     if (_slices_cache) {
         for (size_t i = 0; i < size; i++) {
-            CHECK_EQ(_slices[i].data, get_slice(i).data);
-            CHECK_EQ(_slices[i].size, get_slice(i).size);
+            DCHECK_EQ(_slices[i].data, get_slice(i).data);
+            DCHECK_EQ(_slices[i].size, get_slice(i).size);
         }
     }
 }
@@ -130,6 +130,11 @@ StatusOr<ColumnPtr> BinaryColumnBase<T>::replicate(const Buffer<uint32_t>& offse
         auto bytes_size = _offsets[i + 1] - _offsets[i];
         total_size += bytes_size * (offsets[i + 1] - offsets[i]);
     }
+
+    if (total_size >= Column::MAX_CAPACITY_LIMIT) {
+        return Status::InternalError("replicated column size will exceed the limit");
+    }
+
     dest_bytes.resize(total_size);
     dest_offsets.resize(dest_offsets.size() + offsets.back());
 
@@ -141,13 +146,6 @@ StatusOr<ColumnPtr> BinaryColumnBase<T>::replicate(const Buffer<uint32_t>& offse
             pos += bytes_size;
             dest_offsets[j + 1] = pos;
         }
-    }
-
-    auto ret = dest->upgrade_if_overflow();
-    if (!ret.ok()) {
-        return ret.status();
-    } else if (ret.value() != nullptr) {
-        return ret.value();
     }
 
     return dest;
@@ -664,8 +662,10 @@ std::string BinaryColumnBase<T>::raw_item_value(size_t idx) const {
     return s;
 }
 
+// find first overflow point in offsets[start,end)
+// return the first overflow point or end if not found
 size_t find_first_overflow_point(const BinaryColumnBase<uint32_t>::Offsets& offsets, size_t start, size_t end) {
-    for (size_t i = start; i < end; i++) {
+    for (size_t i = start; i < end - 1; i++) {
         if (offsets[i] > offsets[i + 1]) {
             return i + 1;
         }

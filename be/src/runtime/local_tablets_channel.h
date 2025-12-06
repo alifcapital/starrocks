@@ -163,6 +163,10 @@ private:
         std::shared_ptr<WriteContext> _context;
     };
 
+    DeltaWriterOptions _build_delta_writer_options(const PTabletWriterOpenRequest& params,
+                                                   const PTabletWithPartition& tablet, int32_t schema_hash,
+                                                   const std::vector<SlotDescriptor*>* index_slots);
+
     Status _open_all_writers(const PTabletWriterOpenRequest& params);
 
     StatusOr<std::shared_ptr<WriteContext>> _create_write_context(Chunk* chunk,
@@ -217,9 +221,6 @@ private:
     // After the partition is created during data loading, there are some tablets of the new partitions on this node,
     // so a TabletsChannel needs to be created, such that _is_incremental_channel=true
     bool _is_incremental_channel = false;
-
-    mutable bthread::Mutex _status_lock;
-    Status _status = Status::OK();
 
     std::map<string, string> _column_to_expr_value;
 

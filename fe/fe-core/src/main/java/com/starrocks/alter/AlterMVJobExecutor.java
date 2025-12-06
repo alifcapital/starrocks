@@ -16,10 +16,15 @@ package com.starrocks.alter;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.IntLiteral;
+import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.StringLiteral;
 import com.starrocks.analysis.TableName;
+import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
+import com.starrocks.catalog.KeysType;
+import com.starrocks.catalog.MaterializedIndexMeta;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvId;
 import com.starrocks.catalog.MvPlanContext;
@@ -48,6 +53,7 @@ import com.starrocks.scheduler.Task;
 import com.starrocks.scheduler.TaskBuilder;
 import com.starrocks.scheduler.TaskManager;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.analyzer.SetStmtAnalyzer;
 import com.starrocks.sql.ast.AlterMaterializedViewStatusClause;
@@ -70,6 +76,7 @@ import com.starrocks.warehouse.Warehouse;
 import org.apache.commons.lang3.StringUtils;
 import org.threeten.extra.PeriodDuration;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -195,11 +202,22 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
             }
         }
 
-        if (!properties.isEmpty()) {
-            if (propClone.containsKey(PropertyAnalyzer.PROPERTIES_COLOCATE_WITH)) {
+        if (properties.containsKey(PropertyAnalyzer.PROPERTIES_COLOCATE_WITH)) {
+            // TODO: when support shared-nothing mode, must check PROPERTIES_LABELS_LOCATION
+            if (RunMode.isSharedNothingMode()) {
                 throw new SemanticException("Modify failed because unsupported properties: " +
-                        "colocate group is not supported for materialized view");
+                        "colocate_with is not supported for materialized view in shared-nothing cluster.");
             }
+            try {
+                String colocateGroup = PropertyAnalyzer.analyzeColocate(properties);
+                GlobalStateMgr.getCurrentState().getColocateTableIndex()
+                        .modifyTableColocate(db, materializedView, colocateGroup, false, null);
+            } catch (DdlException e) {
+                throw new AlterJobException(e.getMessage(), e);
+            }
+        }
+
+        if (!properties.isEmpty()) {
             // analyze properties
             List<SetListItem> setListItems = Lists.newArrayList();
             for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -461,7 +479,6 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
                 TaskBuilder.getMvTaskName(materializedView.getId()));
         if (currentTask != null) {
             currentTask.setDefinition(materializedView.getTaskDefinition());
-            currentTask.setPostRun(TaskBuilder.getAnalyzeMVStmt(materializedView.getName()));
         }
     }
 
@@ -589,4 +606,71 @@ public class AlterMVJobExecutor extends AlterJobExecutor {
             }
         }
     }
+
+    /**
+     * Check related synchronous materialized views before modified columns, throw exceptions
+     * if modified columns affect the related rollup/synchronous mvs.
+     */
+    public static void checkModifiedColumWithMaterializedViews(OlapTable olapTable,
+                                                               Set<String> modifiedColumns) throws DdlException {
+        if (modifiedColumns == null || modifiedColumns.isEmpty()) {
+            return;
+        }
+
+        // If there is synchronized materialized view referring the column, throw exception.
+        if (olapTable.getIndexNameToId().size() > 1) {
+            Map<Long, MaterializedIndexMeta> metaMap = olapTable.getIndexIdToMeta();
+            for (Map.Entry<Long, MaterializedIndexMeta> entry : metaMap.entrySet()) {
+                Long id = entry.getKey();
+                if (id == olapTable.getBaseIndexId()) {
+                    continue;
+                }
+                MaterializedIndexMeta meta = entry.getValue();
+                List<Column> schema = meta.getSchema();
+                String indexName = olapTable.getIndexNameById(id);
+                // ignore agg_keys type because it's like duplicated without agg functions
+                boolean hasAggregateFunction = olapTable.getKeysType() != KeysType.AGG_KEYS &&
+                        schema.stream().anyMatch(x -> x.isAggregated());
+                if (hasAggregateFunction) {
+                    for (Column rollupCol : schema) {
+                        String colName = rollupCol.getName();
+                        if (modifiedColumns.contains(colName)) {
+                            throw new DdlException(String.format("Can not drop/modify the column %s, " +
+                                    "because the column is used in the related rollup %s, " +
+                                    "please drop the rollup index first.", colName, indexName));
+                        }
+                        if (rollupCol.getRefColumns() != null) {
+                            for (SlotRef refColumn : rollupCol.getRefColumns()) {
+                                String refColName = refColumn.getColumnName();
+                                if (modifiedColumns.contains(refColName)) {
+                                    String defineExprSql = rollupCol.getDefineExpr() == null ? "" :
+                                            rollupCol.getDefineExpr().toSql();
+                                    throw new DdlException(String.format("Can not drop/modify the column %s, " +
+                                                    "because the column is used in the related rollup %s " +
+                                                    "with the define expr:%s, please drop the rollup index first.",
+                                            refColName, indexName, defineExprSql));
+                                }
+                            }
+                        }
+                    }
+                }
+                if (meta.getWhereClause() != null) {
+                    Expr whereExpr = meta.getWhereClause();
+                    List<SlotRef> whereSlots = new ArrayList<>();
+                    whereExpr.collect(SlotRef.class, whereSlots);
+                    for (SlotRef refColumn : whereSlots) {
+                        String colName = refColumn.getColumnName();
+                        if (modifiedColumns.contains(colName)) {
+                            String whereExprSql = whereExpr.toSql();
+                            throw new DdlException(String.format("Can not drop/modify the column %s, " +
+                                            "because the column is used in the related rollup %s " +
+                                            "with the where expr:%s, please drop the rollup index first.",
+                                    colName, indexName, whereExprSql));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

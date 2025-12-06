@@ -116,11 +116,12 @@ uint8_t* encode_string_lz4(const void* data, size_t size, uint8_t* buff, int enc
         throw std::runtime_error(
                 fmt::format("The input size for compression should be less than {}", LZ4_MAX_INPUT_SIZE));
     }
-    uint64_t encode_size =
+    auto encode_size =
             LZ4_compress_fast(reinterpret_cast<const char*>(data), reinterpret_cast<char*>(buff + sizeof(uint64_t)),
                               size, LZ4_compressBound(size), std::max(1, std::abs(encode_level / 10000) % 100));
     if (encode_size <= 0) {
-        throw std::runtime_error("lz4 compress error.");
+        throw std::runtime_error(
+                fmt::format("lz4 compress failed: raw size = {}, compressed get encode size = {}.", size, encode_size));
     }
     buff = write_little_endian_64(encode_size, buff);
 
@@ -133,10 +134,12 @@ uint8_t* encode_string_lz4(const void* data, size_t size, uint8_t* buff, int enc
 const uint8_t* decode_string_lz4(const uint8_t* buff, void* target, size_t size) {
     uint64_t encode_size = 0;
     buff = read_little_endian_64(buff, &encode_size);
-    uint64_t decode_size = LZ4_decompress_safe(reinterpret_cast<const char*>(buff), reinterpret_cast<char*>(target),
-                                               encode_size, size);
+    auto decode_size = LZ4_decompress_safe(reinterpret_cast<const char*>(buff), reinterpret_cast<char*>(target),
+                                           encode_size, size);
     if (decode_size <= 0) {
-        throw std::runtime_error("lz4 decompress error.");
+        throw std::runtime_error(fmt::format(
+                "lz4 decompress failed: encode size = {}, raw size = {}, decompressed get decode size = {}.",
+                encode_size, size, decode_size));
     }
     if (size != decode_size) {
         throw std::runtime_error(
@@ -151,7 +154,9 @@ template <typename T, bool sorted>
 class FixedLengthColumnSerde {
 public:
     static int64_t max_serialized_size(const FixedLengthColumnBase<T>& column, const int encode_level) {
-        uint32_t size = sizeof(T) * column.size();
+        // NOTE that `serialize` and `deserialize` will store and load the size as uint32_t.
+        // If you use `serialize` and `deserialize`, please make sure that the size of the column is less than 2^32.
+        int64_t size = sizeof(T) * column.size();
         if (EncodeContext::enable_encode_integer(encode_level) && size >= ENCODE_SIZE_LIMIT) {
             return sizeof(uint32_t) + sizeof(uint64_t) +
                    std::max((int64_t)size, (int64_t)streamvbyte_max_compressedbytes(upper_int32(size)));
@@ -226,7 +231,8 @@ public:
         } else {
             buff = write_little_endian_64(bytes_size, buff);
         }
-        if (EncodeContext::enable_encode_string(encode_level) && bytes_size >= ENCODE_SIZE_LIMIT) {
+        if (EncodeContext::enable_encode_string(encode_level) && bytes_size >= ENCODE_SIZE_LIMIT &&
+            bytes_size <= LZ4_MAX_INPUT_SIZE) {
             buff = encode_string_lz4(bytes.data(), bytes_size, buff, encode_level);
         } else {
             buff = write_raw(bytes.data(), bytes_size, buff);
@@ -260,7 +266,8 @@ public:
             buff = read_little_endian_64(buff, &bytes_size);
         }
         column->get_bytes().resize(bytes_size);
-        if (EncodeContext::enable_encode_string(encode_level) && bytes_size >= ENCODE_SIZE_LIMIT) {
+        if (EncodeContext::enable_encode_string(encode_level) && bytes_size >= ENCODE_SIZE_LIMIT &&
+            bytes_size <= LZ4_MAX_INPUT_SIZE) {
             buff = decode_string_lz4(buff, column->get_bytes().data(), bytes_size);
         } else {
             buff = read_raw(buff, column->get_bytes().data(), bytes_size);
@@ -363,7 +370,6 @@ public:
         uint32_t num_objects = 0;
         buff = read_little_endian_32(buff, &actual_version);
         buff = read_little_endian_32(buff, &num_objects);
-        CHECK_EQ(actual_version, kJsonMetaDefaultFormatVersion) << "Only format_version=1 is supported";
 
         column->reset_column();
         std::vector<JsonValue>& pool = column->get_pool();

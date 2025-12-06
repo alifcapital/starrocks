@@ -2,13 +2,13 @@
 displayed_sidebar: docs
 ---
 
-import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.md'
+import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.mdx'
 
-import CNConfigMethod from '../../_assets/commonMarkdown/CN_config_method.md'
+import CNConfigMethod from '../../_assets/commonMarkdown/CN_config_method.mdx'
 
-import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.md'
+import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.mdx'
 
-import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.md'
+import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.mdx'
 
 # BE Configuration
 
@@ -1209,6 +1209,15 @@ curl http://<BE_IP>:<BE_HTTP_PORT>/varz
 - Is mutable: No
 - Description: Whether to enable the Size-tiered Compaction policy for Primary Key tables. `true` indicates the Size-tiered Compaction strategy is enabled, and `false` indicates it is disabled.
 - Introduced in: This item takes effect for shared-data clusters from v3.2.4 and v3.1.10 onwards, and for shared-nothing clusters from v3.2.5 and v3.1.10 onwards.
+
+##### enable_strict_delvec_crc_check
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: When enable_strict_delvec_crc_check is set to true, we will perform a strict CRC32 check on the delete vector, and if a mismatch is detected, a failure will be returned.
+- Introduced in: -
 
 ##### size_tiered_min_level_size
 
@@ -3287,7 +3296,7 @@ When this value is set to less than `0`, the system uses the product of its abso
 
 - Default: 0
 - Type: Int
-- Unit: GB
+- Unit: Bytes
 - Is mutable: Yes
 - Description: The LRU cache size for JIT compilation. It represents the actual size of the cache if it is set to greater than 0. If it is set to less than or equal to 0, the system will adaptively set the cache using the formula `jit_lru_cache_size = min(mem_limit*0.01, 1GB)` (while `mem_limit` of the node must be greater or equal to 16 GB).
 - Introduced in: -
@@ -3418,7 +3427,7 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Default: false in v3.1 and true from v3.2.3
 - Type: Boolean
 - Unit: -
-- Is mutable: Yes
+- Is mutable: No
 - Description: Whether to enable Data Cache in a shared-data cluster. `true` indicates enabling this feature and `false` indicates disabling it. The default value is set from `false` to `true` from v3.2.3 onwards.
 - Introduced in: v3.1
 
@@ -3582,6 +3591,24 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Is mutable: No
 - Description: An alias of `object_storage_request_timeout_ms`. Refer to [object_storage_request_timeout_ms](#object_storage_request_timeout_ms) for details.
 - Introduced in: v3.3.9
+
+##### starlet_filesystem_instance_cache_capacity
+
+- Default: 10000
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The cache capacity of starlet filesystem instances.
+- Introduced in: v3.2.16, v3.3.11, v3.4.1
+
+##### starlet_filesystem_instance_cache_ttl_sec
+
+- Default: 86400
+- Type: Int
+- Unit: Seconds
+- Is mutable: Yes
+- Description: The cache expiration time of starlet filesystem instances.
+- Introduced in: v3.3.15, 3.4.5
 
 ##### lake_compaction_stream_buffer_size_bytes
 
@@ -3938,11 +3965,11 @@ When this value is set to less than `0`, the system uses the product of its abso
 
 ##### datacache_mem_size
 
-- Default: 10%
+- Default: 0
 - Type: String
 - Unit: -
-- Is mutable: No
-- Description: The maximum amount of data that can be cached in memory. You can set it as a percentage (for example, `10%`) or a physical limit (for example, `10G`, `21474836480`). It is recommended to set the value of this parameter to at least 10 GB.
+- Is mutable: Yes
+- Description: The maximum amount of data that can be cached in memory. You can set it as a percentage (for example, `10%`) or a physical limit (for example, `10G`, `21474836480`).
 - Introduced in: -
 
 ##### datacache_disk_size
@@ -3950,7 +3977,7 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Default: 0
 - Type: String
 - Unit: -
-- Is mutable: No
+- Is mutable: Yes
 - Description: The maximum amount of data that can be cached on a single disk. You can set it as a percentage (for example, `80%`) or a physical limit (for example, `2T`, `500G`). For example, if you configure two disk paths for the `datacache_disk_path` parameter and set the value of the `datacache_disk_size` parameter as `21474836480` (20 GB), a maximum of 40 GB data can be cached on these two disks. The default value is `0`, which indicates that only memory is used to cache data.
 - Introduced in: -
 
@@ -5239,4 +5266,13 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Unit: Bytes
 - Is mutable: No
 - Description: The maximum length of input values for bitmap functions.
+- Introduced in: -
+
+##### report_exec_rpc_request_retry_num
+
+- Default: 10
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The retry times of rpc request to report exec rpc request to FE. The default value is 10, which means that the rpc request will be retried 10 times if it fails only if it's fragment instatnce finish rpc. Report exec rpc request is important for load job, if one fragment instance finish report failed, the load job will be hang until timeout.
 - Introduced in: -

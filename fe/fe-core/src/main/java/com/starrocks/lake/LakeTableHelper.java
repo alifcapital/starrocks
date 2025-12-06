@@ -43,8 +43,12 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 
 public class LakeTableHelper {
@@ -173,6 +177,28 @@ public class LakeTableHelper {
     }
 
     /**
+     * delete `partition`'s all shard group meta (shards meta included) from starmanager
+     */
+    static void deleteShardGroupMeta(Partition partition) {
+        Collection<PhysicalPartition> subPartitions = partition.getSubPartitions();
+        // use Set to avoid duplicate shard group id
+        Set<Long> needRemoveShardGroupIdSet = new HashSet<>();
+        for (PhysicalPartition subPartition : subPartitions) {
+            // TODO backport notion:
+            // From v3.4, each MaterializedIndex will have its own shard group id,
+            // so we should gather by calling `index.getShardGroupId()`
+            // Right now (V3.3), it's fine to use subPartition's getShardGroupId()
+            needRemoveShardGroupIdSet.add(subPartition.getShardGroupId());
+        }
+        if (!needRemoveShardGroupIdSet.isEmpty()) {
+            StarOSAgent starOSAgent = GlobalStateMgr.getCurrentState().getStarOSAgent();
+            starOSAgent.deleteShardGroup(new ArrayList<>(needRemoveShardGroupIdSet));
+            LOG.debug("Deleted shard group related to partition {}, group ids: {}", partition.getId(),
+                    needRemoveShardGroupIdSet);
+        }
+    }
+
+    /**
      * Check if a directory is shared by multiple partitions.
      * If {@code path} ends with {@code partitionId}, it is considered exclusive to the
      * partition, otherwise it is considered shared.
@@ -186,6 +212,23 @@ public class LakeTableHelper {
     }
 
     /**
+     * For version compatibility reason, check if column unique id is valid, and if finding any we should restore
+     * column unique id
+     *
+     * @param table the table to restore column unique id
+     */
+    public static void restoreColumnUniqueIdIfNeeded(OlapTable table) {
+        for (MaterializedIndexMeta indexMeta : table.getIndexIdToMeta().values()) {
+            List<Column> indexMetaSchema = indexMeta.getSchema();
+            // check and restore column unique id for each schema
+            if (restoreColumnUniqueId(indexMetaSchema)) {
+                LOG.info("Column unique ids in table {} with index {} have been restored, columns size: {}",
+                        table.getName(), indexMeta.getIndexId(), indexMetaSchema.size());
+            }
+        }
+    }
+
+    /**
      * For tables created in the old version of StarRocks cluster, the column unique id is generated on BE and
      * is not saved in FE catalog. For these tables, we want to be able to record their column unique id in the
      * catalog after the upgrade, and the column unique id recorded must be consistent with the one on BE.
@@ -193,22 +236,21 @@ public class LakeTableHelper {
      * each column as their unique id, so here we just need to follow the same algorithm to calculate the unique
      * id of each column.
      *
-     * @param table the table to restore column unique id
-     * @return the max column unique id
+     * @param indexMetaSchema the columns to restore column unique id
+     * @return true if the column unique id is restored, false otherwise
      */
-    public static int restoreColumnUniqueId(OlapTable table) {
-        int maxId = 0;
-        for (MaterializedIndexMeta indexMeta : table.getIndexIdToMeta().values()) {
-            final int columnCount = indexMeta.getSchema().size();
-            maxId = Math.max(maxId, columnCount - 1);
-            for (int i = 0; i < columnCount; i++) {
-                Column col = indexMeta.getSchema().get(i);
-                Preconditions.checkState(col.getUniqueId() <= 0, col.getUniqueId());
-                col.setUniqueId(i);
-            }
+    public static boolean restoreColumnUniqueId(List<Column> indexMetaSchema) {
+        // unique id should have a integer value greater than or equal to 0
+        boolean hasInvalidUniqueId = indexMetaSchema.stream().anyMatch(column -> column.getUniqueId() < 0);
+        if (!hasInvalidUniqueId) {
+            return false;
         }
-        return maxId;
-    } 
+        for (int i = 0; i < indexMetaSchema.size(); i++) {
+            Column col = indexMetaSchema.get(i);
+            col.setUniqueId(i);
+        }
+        return true;
+    }
 
     public static boolean supportCombinedTxnLog(long dbId, List<Long> tableIdList,
                                                 TransactionState.LoadJobSourceType sourceType) {

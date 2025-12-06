@@ -637,7 +637,7 @@ public class SetTest extends PlanTestBase {
                 "  |      [11, DOUBLE, true]\n" +
                 "  |  child exprs:\n" +
                 "  |      [10: cast, DOUBLE, true]\n" +
-                "  |      [3: cast, DOUBLE, true]\n");
+                "  |      [12: cast, DOUBLE, true]");
 
         sql = "(select 1 limit 1) UNION ALL select 2;";
         plan = getVerboseExplain(sql);
@@ -653,25 +653,23 @@ public class SetTest extends PlanTestBase {
                 " all select 2 union all select * from (values (3)) t";
         plan = getVerboseExplain(sql);
 
-        assertContains(plan, "  0:UNION\n" +
-                "  |  output exprs:\n" +
+        assertContains(plan, "|  output exprs:\n" +
                 "  |      [13, VARCHAR(32), true]\n" +
                 "  |  child exprs:\n" +
                 "  |      [1: k1, VARCHAR, true]\n" +
                 "  |      [12: cast, VARCHAR(32), false]\n" +
-                "  |      [7: cast, VARCHAR(32), true]\n");
+                "  |      [14: k1, VARCHAR(32), true]\n");
 
         sql = "select k1 from db1.tbl6 union all select 1 union" +
                 " all select 2 union all select * from (values (3)) t";
         plan = getVerboseExplain(sql);
 
-        assertContains(plan, "  0:UNION\n" +
-                "  |  output exprs:\n" +
+        assertContains(plan, "  |  output exprs:\n" +
                 "  |      [13, VARCHAR(32), true]\n" +
                 "  |  child exprs:\n" +
                 "  |      [1: k1, VARCHAR, true]\n" +
                 "  |      [12: cast, VARCHAR(32), false]\n" +
-                "  |      [7: cast, VARCHAR(32), true]\n");
+                "  |      [14: k1, VARCHAR(32), true]");
 
         sql = "select 1 union all select 2 union all select * from (values (1)) t;";
         plan = getVerboseExplain(sql);
@@ -809,5 +807,43 @@ public class SetTest extends PlanTestBase {
                 "HAVING SUM(varchar_value) > 0 and id + 2 > 5;";
         plan = getFragmentPlan(sql);
         assertContains(plan, "CAST(5: varchar_value AS DOUBLE) > 0.0, 1: id > 3");
+    }
+
+    @Test
+    public void testStruct() throws Exception {
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
+        String sql = "with input as ("
+                + "select struct([1, 2, 3], [4, 5, 6]) as s "
+                + "union all "
+                + "select struct([5, 6, 7], [6, 7]) as s"
+                + ") select s, s.col1 from input;";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "constant exprs: \n"
+                + "         row([1,2,3], [4,5,6]) | row([1,2,3], [4,5,6]).col1[true]\n"
+                + "         row([5,6,7], [6,7]) | row([5,6,7], [6,7]).col1[true]");
+    }
+
+    @Test
+    public void testUnionMulNull() throws Exception {
+        String sql = "WITH\n" +
+                "`CTE_0` AS (\n" +
+                "    SELECT \"table\" AS `TABLE_NAME`\n" +
+                "),\n" +
+                "`CTE_1` AS (\n" +
+                "    SELECT `TABLE_NAME` AS `TABLE_NAME`\n" +
+                "    FROM `CTE_0`\n" +
+                "    LIMIT 2147483646\n" +
+                ")\n" +
+                "SELECT `TABLE_NAME` FROM `CTE_1`\n" +
+                "    UNION ALL (SELECT NULL)\n" +
+                "    UNION ALL (SELECT NULL)\n" +
+                "    UNION ALL (SELECT NULL)";
+        final String plan = getCostExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "  |  output exprs:\n" +
+                "  |      [14, VARCHAR, true]\n" +
+                "  |  child exprs:\n" +
+                "  |      [4: TABLE_NAME, VARCHAR, false]\n" +
+                "  |      [17: TABLE_NAME, VARCHAR, true]");
     }
 }

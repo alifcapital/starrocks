@@ -25,7 +25,7 @@ import com.starrocks.catalog.ColumnAccessPath;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.catalog.Partition;
+import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.FeConstants;
 import com.starrocks.qe.SessionVariable;
@@ -116,6 +116,8 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
     private final Map<Integer, List<CallOperator>> stringAggregateExpressions = Maps.newHashMap();
 
+    private final Map<Integer, Integer> tableFunctionDependencies = Maps.newHashMap();
+
     private final Map<Integer, ScalarOperator> stringRefToDefineExprMap = Maps.newHashMap();
 
     // string column use counter, 0 meanings decoded immediately after it was generated.
@@ -179,6 +181,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                     }
                 }
             }
+        });
+
+        this.tableFunctionDependencies.forEach((k, v) -> {
+            dependencyStringIds.computeIfAbsent(v, x -> Sets.newHashSet()).add(k);
         });
         // build relation groups. The same closure is built into the same group
         // eg:
@@ -369,6 +375,16 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     }
 
     @Override
+    public DecodeInfo visitPhysicalCTEAnchor(OptExpression optExpression, DecodeInfo context) {
+        return context.createOutputInfo();
+    }
+
+    @Override
+    public DecodeInfo visitPhysicalNoCTE(OptExpression optExpression, DecodeInfo context) {
+        return context.createOutputInfo();
+    }
+
+    @Override
     public DecodeInfo visitPhysicalLimit(OptExpression optExpression, DecodeInfo context) {
         return context.createOutputInfo();
     }
@@ -401,11 +417,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         if (!result.inputStringColumns.containsAny(onColumns)) {
             return result;
         }
+        onColumns.getStream().forEach(c -> disableRewriteStringColumns.union(c));
         result.outputStringColumns.clear();
         result.inputStringColumns.getStream().forEach(c -> {
-            if (onColumns.contains(c)) {
-                disableRewriteStringColumns.union(c);
-            } else {
+            if (!onColumns.contains(c)) {
                 result.outputStringColumns.union(c);
             }
         });
@@ -458,7 +473,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 info.outputStringColumns.union(key.getId());
                 stringRefToDefineExprMap.putIfAbsent(key.getId(), value);
                 expressionStringRefCounter.put(key.getId(), 1);
-            } else if (aggregate.getType().isLocal() || aggregate.getType().isDistinctLocal()) {
+            } else if (aggregate.getType().isLocal() || aggregate.getType().isDistinct()) {
                 // count/count distinct, need output dict-set in 1st stage
                 info.outputStringColumns.union(key.getId());
             }
@@ -514,6 +529,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 stringRefToDefineExprMap.put(unnestOutput.getId(), unnestInput);
                 expressionStringRefCounter.put(unnestOutput.getId(), 1);
                 info.outputStringColumns.union(unnestOutput);
+                tableFunctionDependencies.put(unnestInput.getId(), unnestOutput.getId());
             }
         }
         return info;
@@ -531,8 +547,8 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     public DecodeInfo visitPhysicalOlapScan(OptExpression optExpression, DecodeInfo context) {
         PhysicalOlapScanOperator scan = optExpression.getOp().cast();
         OlapTable table = (OlapTable) scan.getTable();
-        long version = table.getPartitions().stream().map(Partition::getVisibleVersionTime).max(Long::compareTo)
-                .orElse(0L);
+        long version = table.getPartitions().stream().flatMap(p -> p.getSubPartitions().stream()).map(
+                PhysicalPartition::getVisibleVersionTime).max(Long::compareTo).orElse(0L);
 
         if ((table.getKeysType().equals(KeysType.PRIMARY_KEYS))) {
             return DecodeInfo.EMPTY;
@@ -667,9 +683,8 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                     stringRefToDefineExprMap.put(key.getId(), value);
                     expressionStringRefCounter.putIfAbsent(key.getId(), 0);
                     info.outputStringColumns.union(key.getId());
-                } else {
-                    info.usedStringColumns.union(c);
                 }
+                info.usedStringColumns.union(c);
             });
             matchChildren.union(dictExpressionCollector.matchChildren);
         }

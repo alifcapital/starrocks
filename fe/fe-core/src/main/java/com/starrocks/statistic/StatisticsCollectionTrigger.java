@@ -51,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.starrocks.catalog.ExpressionRangePartitionInfo.SHADOW_PARTITION_PREFIX;
 import static com.starrocks.statistic.StatsConstants.AnalyzeType.SAMPLE;
 
 /**
@@ -145,27 +146,45 @@ public class StatisticsCollectionTrigger {
         }
 
         if (dmlType == DmlType.INSERT_OVERWRITE && analyzeType == null) {
-            // update the partition id of existing statistics
+            executeOverWrite();
+            waitFinish();
+        } else if (analyzeType != null) {
+            // collect
+            executeCollect();
+            waitFinish();
+        }
+    }
+
+    private void executeOverWrite() {
+        // update the partition id of existing statistics
+        Runnable task = () -> {
+            isRunning.set(true);
             ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
             try (ConnectContext.ScopeGuard guard = statsConnectCtx.bindScope()) {
                 for (int i = 0; i < overwriteJobStats.getSourcePartitionIds().size(); i++) {
                     long sourcePartitionId = overwriteJobStats.getSourcePartitionIds().get(i);
                     long targetPartitionId = overwriteJobStats.getTargetPartitionIds().get(i);
+                    if (table.getPartition(targetPartitionId) == null ||
+                            table.getPartition(targetPartitionId).getName().startsWith(SHADOW_PARTITION_PREFIX)) {
+                        continue;
+                    }
                     StatisticExecutor.overwritePartitionStatistics(
-                            statsConnectCtx, db.getId(), table.getId(), sourcePartitionId, targetPartitionId);
+                            statsConnectCtx, db.getId(), table.getId(), sourcePartitionId,
+                            targetPartitionId);
                 }
             } catch (Exception e) {
                 LOG.warn("overwrite partition stats failed table={} partitions={}",
                         table.getId(), overwriteJobStats.getTargetPartitionIds(), e);
             }
-        } else if (analyzeType != null) {
-            // collect
-            execute();
-            waitFinish();
+        };
+        try {
+            future = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAnalyzeTaskThreadPool().submit(task);
+        } catch (Throwable e) {
+            LOG.error("failed to submit statistic overwrite job", e);
         }
     }
 
-    private void execute() {
+    private void executeCollect() {
         Map<String, String> properties = Maps.newHashMap();
         if (SAMPLE == analyzeType) {
             properties = StatsConstants.buildInitStatsProp();
@@ -173,8 +192,10 @@ public class StatisticsCollectionTrigger {
         AnalyzeStatus analyzeStatus = new NativeAnalyzeStatus(GlobalStateMgr.getCurrentState().getNextId(),
                 db.getId(), table.getId(), null, analyzeType,
                 StatsConstants.ScheduleType.ONCE, properties, LocalDateTime.now());
-        analyzeStatus.setStatus(StatsConstants.ScheduleStatus.PENDING);
+        analyzeStatus.setStatus(StatsConstants.ScheduleStatus.FAILED);
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
+        analyzeStatus.setStatus(StatsConstants.ScheduleStatus.PENDING);
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().replayAddAnalyzeStatus(analyzeStatus);
 
         try {
             future = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAnalyzeTaskThreadPool()
@@ -198,7 +219,6 @@ public class StatisticsCollectionTrigger {
                     });
         } catch (Throwable e) {
             LOG.error("failed to submit statistic collect job", e);
-            return;
         }
     }
 
@@ -248,8 +268,14 @@ public class StatisticsCollectionTrigger {
                 PartitionCommitInfo partitionCommitInfo = entry.getValue();
                 if (partitionCommitInfo.getVersion() == Partition.PARTITION_INIT_VERSION + 1) {
                     PhysicalPartition physicalPartition = table.getPhysicalPartition(physicalPartitionId);
-                    Partition partition = table.getPartition(physicalPartition.getParentId());
-                    partitionIds.add(partition.getId());
+                    long partitionId = table.getPartition(physicalPartition.getParentId()).getId();
+                    if (table.isNativeTableOrMaterializedView()) {
+                        OlapTable olapTable = (OlapTable) table;
+                        if (olapTable.isTempPartition(partitionId)) {
+                            continue;
+                        }
+                    }
+                    partitionIds.add(partitionId);
                 }
             }
         } finally {

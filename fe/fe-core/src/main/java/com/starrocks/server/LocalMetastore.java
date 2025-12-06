@@ -356,33 +356,55 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
                 }
 
                 OlapTable olapTable = (OlapTable) table;
-                long tableId = olapTable.getId();
-                for (PhysicalPartition partition : olapTable.getAllPhysicalPartitions()) {
-                    long physicalPartitionId = partition.getId();
-                    TStorageMedium medium = olapTable.getPartitionInfo().getDataProperty(
-                            partition.getParentId()).getStorageMedium();
-                    for (MaterializedIndex index : partition
-                            .getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
-                        if (index == null) {
-                            continue;
-                        }
-                        long indexId = index.getId();
-                        int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
-                        TabletMeta tabletMeta = new TabletMeta(dbId, tableId, physicalPartitionId,
-                                indexId, schemaHash, medium, table.isCloudNativeTableOrMaterializedView());
-                        for (Tablet tablet : index.getTablets()) {
-                            long tabletId = tablet.getId();
-                            invertedIndex.addTablet(tabletId, tabletMeta);
-                            if (table.isOlapTableOrMaterializedView()) {
-                                for (Replica replica : ((LocalTablet) tablet).getImmutableReplicas()) {
-                                    invertedIndex.addReplica(tabletId, replica);
-                                }
-                            }
-                        }
-                    } // end for indices
-                } // end for partitions
+                if (olapTable.isMaterializedView()) {
+                    // For mv, this may throw exception in mv backup/restore case, we should catch it and set mv to inactive
+                    MaterializedView mv = (MaterializedView) olapTable;
+                    try {
+                        recreateOlapTableTabletInvertIndex(dbId, mv, invertedIndex);
+                    } catch (Exception e) {
+                        LOG.error("recreate inverted index for metadata table {} failed", mv.getName(), e);
+                        mv.setInactiveAndReason(MaterializedViewExceptions.inactiveReasonForMetadataTableRestoreCorrupted(
+                                mv.getName()));
+                    }
+                } else {
+                    recreateOlapTableTabletInvertIndex(dbId, olapTable, invertedIndex);
+                }
             } // end for tables
         } // end for dbs
+    }
+
+    private void recreateOlapTableTabletInvertIndex(long dbId,
+                                                    OlapTable olapTable,
+                                                    TabletInvertedIndex invertedIndex) {
+        long tableId = olapTable.getId();
+        for (PhysicalPartition partition : olapTable.getAllPhysicalPartitions()) {
+            long physicalPartitionId = partition.getId();
+            TStorageMedium medium = olapTable.getPartitionInfo().getDataProperty(
+                    partition.getParentId()).getStorageMedium();
+            for (MaterializedIndex index : partition
+                    .getMaterializedIndices(MaterializedIndex.IndexExtState.ALL)) {
+                if (index == null) {
+                    continue;
+                }
+                long indexId = index.getId();
+                int schemaHash = olapTable.getSchemaHashByIndexId(indexId);
+                TabletMeta tabletMeta = new TabletMeta(dbId, tableId, physicalPartitionId,
+                        indexId, schemaHash, medium, olapTable.isCloudNativeTableOrMaterializedView());
+                for (Tablet tablet : index.getTablets()) {
+                    long tabletId = tablet.getId();
+                    invertedIndex.addTablet(tabletId, tabletMeta);
+                    if (olapTable.isOlapTableOrMaterializedView()) {
+                        for (Replica replica : ((LocalTablet) tablet).getImmutableReplicas()) {
+                            invertedIndex.addReplica(tabletId, replica);
+                        }
+                    }
+                }
+            } // end for indices
+        } // end for partitions
+    }
+
+    public void createDb(String dbName) throws DdlException, AlreadyExistsException {
+        createDb(dbName, new HashMap<>());
     }
 
     @Override
@@ -2495,17 +2517,29 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
         List<Long> chosenBackendIds = systemInfoService.getNodeSelector()
                 .seqChooseBackendIds(replicationNum, true, true, locReq);
-        if (!CollectionUtils.isEmpty(chosenBackendIds)) {
-            return chosenBackendIds;
-        } else if (replicationNum > 1) {
-            List<Long> backendIds = systemInfoService.getBackendIds(true);
-            throw new DdlException(
-                    String.format("Table replication num should be less than or equal to the number of available BE nodes. "
-                            + "You can change this default by setting the replication_num table properties. "
-                            + "Current alive backend is [%s]. ", Joiner.on(",").join(backendIds)));
-        } else {
-            throw new DdlException("No alive nodes");
+        if (CollectionUtils.isEmpty(chosenBackendIds)) {
+            StringBuffer sb = new StringBuffer();
+            List<Backend> availableBes = systemInfoService.getAvailableBackends();
+            List<Long> availableBeIds = availableBes.stream().filter(b -> !b.checkDiskExceedLimitForCreate()).map(Backend::getId)
+                    .collect(Collectors.toList());
+            sb.append(String.format("Table replication num should be less than or equal to the number of available backends. "
+                    + "You can change this default by setting the replication_num table properties. "
+                    + "Current available backends: [%s]", Joiner.on(",").join(availableBeIds)));
+
+            List<Long> decommissionedBeIds = systemInfoService.getDecommissionedBackendIds();
+            if (!decommissionedBeIds.isEmpty()) {
+                sb.append(String.format(", decommissioned backends: [%s]", Joiner.on(",").join(decommissionedBeIds)));
+            }
+
+            List<Long> noDiskSpaceBeIds = availableBes.stream().filter(b -> b.checkDiskExceedLimitForCreate()).map(Backend::getId)
+                    .collect(Collectors.toList());
+            if (!noDiskSpaceBeIds.isEmpty()) {
+                sb.append(String.format(", backends without enough disk space: [%s]", Joiner.on(",").join(noDiskSpaceBeIds)));
+            }
+
+            throw new DdlException(sb.toString());
         }
+        return chosenBackendIds;
     }
 
     // Drop table
@@ -3295,6 +3329,7 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
 
         boolean isNonPartitioned = partitionInfo.isUnPartitioned();
         DataProperty dataProperty = PropertyAnalyzer.analyzeMVDataProperty(materializedView, properties);
+        String colocateGroup = properties.get(PropertyAnalyzer.PROPERTIES_COLOCATE_WITH);
         PropertyAnalyzer.analyzeMVProperties(db, materializedView, properties, isNonPartitioned);
         try {
             Set<Long> tabletIdSet = new HashSet<>();
@@ -3321,6 +3356,11 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
                         stmt.getQueryStatement(), stmt.getBaseTableInfos());
                 LOG.info("Generate mv {} partition exprs: {}", mvName, partitionExprMaps);
                 materializedView.setPartitionExprMaps(partitionExprMaps);
+            }
+
+            // shared-data mv's colocation info must be updated after tablet creation
+            if (StringUtils.isNotEmpty(colocateGroup)) {
+                colocateTableIndex.addTableToGroup(db, materializedView, colocateGroup, true /* expectLakeTable */);
             }
 
             GlobalStateMgr.getCurrentState().getMaterializedViewMgr().prepareMaintenanceWork(stmt, materializedView);
@@ -5346,7 +5386,7 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
 
     @Override
     public void handleMVRepair(Database db, Table table, List<MVRepairHandler.PartitionRepairInfo> partitionRepairInfos) {
-        MVMetaVersionRepairer.repairBaseTableVersionChanges(db, table, partitionRepairInfos);
+        MVMetaVersionRepairer.repairBaseTableVersionChanges(table, partitionRepairInfos);
     }
 
     @Override

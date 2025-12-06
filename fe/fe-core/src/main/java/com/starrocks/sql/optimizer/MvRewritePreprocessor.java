@@ -48,6 +48,8 @@ import com.starrocks.common.profile.Timer;
 import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
@@ -230,7 +232,6 @@ public class MvRewritePreprocessor {
         // config
         logMVPrepare(connectContext, "---------------------------------");
         logMVPrepare(connectContext, "Materialized View Config Params: ");
-        logMVPrepare(connectContext, "  analyze_mv: {}", sessionVariable.getAnalyzeForMV());
         logMVPrepare(connectContext, "  query_excluding_mv_names: {}", sessionVariable.getQueryExcludingMVNames());
         logMVPrepare(connectContext, "  query_including_mv_names: {}", sessionVariable.getQueryIncludingMVNames());
         logMVPrepare(connectContext, "  cbo_materialized_view_rewrite_rule_output_limit: {}",
@@ -263,6 +264,10 @@ public class MvRewritePreprocessor {
             // means there is no plan with view
             return;
         }
+        Set<String> viewNames = viewScans.stream()
+                .map(op -> op.getTable().getName()).collect(Collectors.toSet());
+        logMVPrepare(connectContext, "[ViewBasedRewrite] There are {} view scan operators in the query plan",
+                viewNames);
         // optimize logical plan with view
         OptExpression optimizedPlan = MvUtils.optimizeViewPlan(
                 logicalPlanWithView, connectContext, requiredColumns, columnRefFactory);
@@ -295,9 +300,13 @@ public class MvRewritePreprocessor {
 
             // add a projection to make predicate push-down rules work.
             Projection projection = viewScanOperator.getProjection();
-            LogicalProjectOperator projectOperator = new LogicalProjectOperator(projection.getColumnRefMap());
-            OptExpression projectionExpr = OptExpression.create(projectOperator, viewScanExpr);
-            return projectionExpr;
+            if (projection != null) {
+                LogicalProjectOperator projectOperator = new LogicalProjectOperator(projection.getColumnRefMap());
+                OptExpression projectionExpr = OptExpression.create(projectOperator, viewScanExpr);
+                return projectionExpr;
+            } else {
+                return viewScanExpr;
+            }
         } else {
             for (OptExpression input : logicalTree.getInputs()) {
                 OptExpression newInput = extractLogicalPlanWithView(input, viewScans);
@@ -311,13 +320,19 @@ public class MvRewritePreprocessor {
     }
 
     private static MaterializedView copyOnlyMaterializedView(MaterializedView mv) {
-        // TODO: add read lock?
         // Query will not lock dbs in the optimizer stage, so use a shallow copy of mv to avoid
         // metadata race for different operations.
         // Ensure to re-optimize if the mv's version has changed after the optimization.
-        MaterializedView copiedMV = new MaterializedView();
-        mv.copyOnlyForQuery(copiedMV);
-        return copiedMV;
+        Locker locker = new Locker();
+        Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(mv.getDbId());
+        locker.lockTableWithIntensiveDbLock(db, mv.getId(), LockType.READ);
+        try {
+            MaterializedView copiedMV = new MaterializedView();
+            mv.copyOnlyForQuery(copiedMV);
+            return copiedMV;
+        } finally {
+            locker.unLockTableWithIntensiveDbLock(db, mv.getId(), LockType.READ);
+        }
     }
 
     @VisibleForTesting
@@ -815,9 +830,22 @@ public class MvRewritePreprocessor {
         // If query tables are set which means use related mv for non lock optimization,
         // copy mv's metadata into a ready-only object.
         MaterializedView copiedMV = (context.getQueryTables() != null) ? copyOnlyMaterializedView(mv) : mv;
+        return buildMaterializationContext(context, copiedMV, mvPlanContext, mvPartialPartitionPredicates, mvUpdateInfo,
+                baseTables, intersectingTables, mvPlan, level);
+    }
+
+    private static MaterializationContext buildMaterializationContext(OptimizerContext context,
+                                                                      MaterializedView mv,
+                                                                      MvPlanContext mvPlanContext,
+                                                                     ScalarOperator mvPartialPartitionPredicates,
+                                                                      MvUpdateInfo mvUpdateInfo,
+                                                                      List<Table> baseTables,
+                                                                      List<Table> intersectingTables,
+                                                                      OptExpression mvPlan,
+                                                                      int level) {
         List<ColumnRefOperator> mvOutputColumns = mvPlanContext.getOutputColumns();
         MaterializationContext materializationContext =
-                new MaterializationContext(context, copiedMV, mvPlan, context.getColumnRefFactory(),
+                new MaterializationContext(context, mv, mvPlan, context.getColumnRefFactory(),
                         mvPlanContext.getRefFactory(), baseTables, intersectingTables,
                         mvPartialPartitionPredicates, mvUpdateInfo, mvOutputColumns, level);
         // generate scan mv plan here to reuse it in rule applications
@@ -826,7 +854,7 @@ public class MvRewritePreprocessor {
         materializationContext.setScanMvOperator(scanMvOp);
         // should keep the sequence of schema
         List<ColumnRefOperator> scanMvOutputColumns = Lists.newArrayList();
-        for (Column column : copiedMV.getOrderedOutputColumns()) {
+        for (Column column : mv.getOrderedOutputColumns()) {
             scanMvOutputColumns.add(scanMvOp.getColumnReference(column));
         }
         Preconditions.checkState(mvOutputColumns.size() == scanMvOutputColumns.size());
@@ -842,7 +870,6 @@ public class MvRewritePreprocessor {
             outputMapping.put(mvOutputColumns.get(i), scanMvOutputColumns.get(i));
         }
         materializationContext.setOutputMapping(outputMapping);
-
         return materializationContext;
     }
 

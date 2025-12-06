@@ -25,6 +25,7 @@
 #include "column/chunk.h"
 #include "common/closure_guard.h"
 #include "common/compiler_util.h"
+#include "common/config.h"
 #include "common/statusor.h"
 #include "exec/tablet_info.h"
 #include "gen_cpp/internal_service.pb.h"
@@ -37,6 +38,7 @@
 #include "serde/protobuf_serde.h"
 #include "service/backend_options.h"
 #include "storage/lake/async_delta_writer.h"
+#include "storage/lake/delta_writer.h"
 #include "storage/lake/delta_writer_finish_mode.h"
 #include "storage/memtable.h"
 #include "storage/storage_engine.h"
@@ -113,11 +115,23 @@ private:
             }
         }
 
-        void add_finished_tablet(int64_t tablet_id) {
+        void add_finished_tablet(int64_t tablet_id, const lake::DeltaWriter* delta_writer) {
             std::lock_guard l(_mtx);
             auto info = _response->add_tablet_vec();
             info->set_tablet_id(tablet_id);
             info->set_schema_hash(0); // required field
+            const auto* dict_valid_info = delta_writer->global_dict_columns_valid_info();
+            const auto* writer_global_dicts = delta_writer->global_dict_map();
+            if (dict_valid_info == nullptr || !config::lake_enable_report_lowcardinality_info) return;
+            for (const auto& item : *dict_valid_info) {
+                if (item.second && writer_global_dicts != nullptr &&
+                    writer_global_dicts->find(item.first) != writer_global_dicts->end()) {
+                    info->add_valid_dict_cache_columns(item.first);
+                    info->add_valid_dict_collected_version(writer_global_dicts->at(item.first).version);
+                } else {
+                    info->add_invalid_dict_cache_columns(item.first);
+                }
+            }
         }
 
         void add_txn_log(const TxnLogPtr& txn_log) {
@@ -366,18 +380,22 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
         }
         total_row_num += size;
         int64_t tablet_id = tablet_ids[row_indexes[from]];
-        auto& dw = _delta_writers[tablet_id];
-        if (dw == nullptr) {
-            LOG(WARNING) << "LakeTabletsChannel txn_id: " << _txn_id << " load_id: " << print_id(request.id())
-                         << " not found tablet_id: " << tablet_id;
-            response->mutable_status()->set_status_code(TStatusCode::INTERNAL_ERROR);
-            response->mutable_status()->add_error_msgs(
-                    fmt::format("Failed to add_chunk since tablet_id {} not exists, txn_id: {}, load_id: {}", tablet_id,
-                                _txn_id, print_id(request.id())));
-            return;
+        auto delta_writer_iter = _delta_writers.find(tablet_id);
+        if (delta_writer_iter == _delta_writers.end()) {
+            // SHOULD NEVER HAPPEN! The check is already done in _create_write_context() when chunk != nullptr.
+            auto msg = fmt::format(
+                    "Failed to add chunk because the DeltaWriter for the tablet is not found, txn_id: "
+                    "{}, load_id: {}, tablet_id: {}",
+                    _txn_id, print_id(request.id()), tablet_id);
+            LOG(WARNING) << msg;
+            context->update_status(Status::InternalError(msg));
+            count_down_latch.count_down(channel_size - i);
+            // DO NOT return!!!
+            break;
         }
 
         // back pressure OlapTableSink since there are too many memtables need to flush
+        auto& dw = delta_writer_iter->second;
         while (dw->queueing_memtable_num() >= config::max_queueing_memtable_per_tablet) {
             if (watch.elapsed_time() / 1000000 > request.timeout_ms()) {
                 LOG(INFO) << "LakeTabletsChannel txn_id: " << _txn_id << " load_id: " << print_id(request.id())
@@ -428,15 +446,16 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
                     count_down_latch.count_down();
                     continue;
                 }
-                dw->finish(_finish_mode, [&, id = tablet_id](StatusOr<TxnLogPtr> res) {
+                dw->finish(_finish_mode, [&, id = tablet_id, self = dw.get()](StatusOr<TxnLogPtr> res) {
                     if (!res.ok()) {
                         context->update_status(res.status());
                         LOG(ERROR) << "Fail to finish tablet " << id << ": " << res.status();
                     } else if (_finish_mode == lake::DeltaWriterFinishMode::kWriteTxnLog) {
-                        context->add_finished_tablet(id);
+                        context->add_finished_tablet(id, self->delta_writer());
                         VLOG(5) << "Finished tablet " << id;
                     } else if (_finish_mode == lake::DeltaWriterFinishMode::kDontWriteTxnLog) {
-                        context->add_finished_tablet(id);
+                        context->add_finished_tablet(id, self->delta_writer());
+
                         context->add_txn_log(res.value());
                         VLOG(5) << "Finished tablet " << id;
                     } else {
@@ -463,7 +482,18 @@ void LakeTabletsChannel::add_chunk(Chunk* chunk, const PTabletWriterAddChunkRequ
 
     std::set<long> immutable_tablet_ids;
     for (auto tablet_id : request.tablet_ids()) {
-        auto& writer = _delta_writers[tablet_id];
+        auto writer_iter = _delta_writers.find(tablet_id);
+        if (writer_iter == _delta_writers.end()) {
+            LOG(WARNING) << "LakeTabletsChannel txn_id: " << _txn_id << " load_id: " << print_id(request.id())
+                         << " not found tablet_id: " << tablet_id;
+            response->mutable_status()->set_status_code(TStatusCode::INTERNAL_ERROR);
+            response->mutable_status()->add_error_msgs(
+                    fmt::format("Failed to add_chunk since tablet_id {} not exists, txn_id: {}, load_id: {}", tablet_id,
+                                _txn_id, print_id(request.id())));
+            return;
+        }
+
+        auto& writer = writer_iter->second;
         if (writer->is_immutable() && immutable_tablet_ids.count(tablet_id) == 0) {
             response->add_immutable_tablet_ids(tablet_id);
             response->add_immutable_partition_ids(writer->partition_id());
@@ -622,6 +652,7 @@ Status LakeTabletsChannel::_create_delta_writers(const PTabletWriterOpenRequest&
                                               .set_schema_id(schema_id)
                                               .set_partial_update_mode(params.partial_update_mode())
                                               .set_column_to_expr_value(&_column_to_expr_value)
+                                              .set_global_dicts(&_global_dicts)
                                               .build());
         _delta_writers.emplace(tablet.tablet_id(), std::move(writer));
         tablet_ids.emplace_back(tablet.tablet_id());
@@ -679,8 +710,17 @@ StatusOr<std::unique_ptr<LakeTabletsChannel::WriteContext>> LakeTabletsChannel::
     auto tablet_ids_size = request.tablet_ids_size();
     // compute row indexes for each channel
     for (uint32_t i = 0; i < tablet_ids_size; ++i) {
-        uint32_t channel_index = _tablet_id_to_sorted_indexes[tablet_ids[i]];
-        channel_row_idx_start_points[channel_index]++;
+        auto tablet_id = tablet_ids[i];
+        auto it = _tablet_id_to_sorted_indexes.find(tablet_id);
+        if (UNLIKELY(it == _tablet_id_to_sorted_indexes.end())) {
+            auto msg = fmt::format(
+                    "Failed in _create_write_context because the channel for the tablet is not found, txn_id: "
+                    "{}, load_id: {}, tablet_id: {}",
+                    _txn_id, print_id(request.id()), tablet_id);
+            LOG(WARNING) << msg;
+            return Status::InternalError(msg);
+        }
+        channel_row_idx_start_points[it->second]++;
     }
 
     // NOTE: we make the last item equal with number of rows of this chunk
@@ -690,11 +730,9 @@ StatusOr<std::unique_ptr<LakeTabletsChannel::WriteContext>> LakeTabletsChannel::
 
     for (int i = tablet_ids_size - 1; i >= 0; --i) {
         const auto& tablet_id = tablet_ids[i];
-        auto it = _tablet_id_to_sorted_indexes.find(tablet_id);
-        if (UNLIKELY(it == _tablet_id_to_sorted_indexes.end())) {
-            return Status::InternalError("invalid tablet id");
-        }
-        uint32_t channel_index = it->second;
+        // Already checked in previous loop, so use DCHECK here just in case.
+        DCHECK(_tablet_id_to_sorted_indexes.find(tablet_id) != _tablet_id_to_sorted_indexes.end());
+        uint32_t channel_index = _tablet_id_to_sorted_indexes[tablet_id];
         row_indexes[channel_row_idx_start_points[channel_index] - 1] = i;
         channel_row_idx_start_points[channel_index]--;
     }

@@ -386,6 +386,8 @@ public:
     Status breakpoint_check();
     Status compaction_random(MemTracker* mem_tracker);
 
+    bool rowset_check_file_existence() const;
+
 private:
     friend class Tablet;
     friend class PrimaryIndex;
@@ -520,6 +522,7 @@ private:
                                           vector<std::pair<uint32_t, DelVectorPtr>>* delvecs);
 
     bool _check_status_msg(std::string_view msg);
+    bool _retry_times_limit();
     bool _is_retryable(Status& status);
     bool _is_breakpoint(Status& status);
 
@@ -584,6 +587,7 @@ private:
     std::atomic<double> _pk_index_write_amp_score{0.0};
 
     std::atomic<bool> _apply_schedule{false};
+    size_t _apply_failed_time = 0;
 };
 
 } // namespace starrocks

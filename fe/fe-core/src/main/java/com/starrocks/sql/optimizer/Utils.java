@@ -298,6 +298,15 @@ public class Utils {
             return null;
         }
 
+        // for and predicate, filter redundant true
+        if (type == CompoundPredicateOperator.CompoundType.AND) {
+            link = link.stream()
+                    .filter(so -> !ConstantOperator.TRUE.equals(so))
+                    .collect(Collectors.toCollection(Lists::newLinkedList));
+            if (link.isEmpty()) {
+                return ConstantOperator.TRUE;
+            }
+        }
         if (link.size() == 1) {
             return link.get(0);
         }
@@ -768,8 +777,11 @@ public class Utils {
         return false;
     }
 
-    // without distinct function, the common distinctCols is an empty list.
-    public static Optional<List<ColumnRefOperator>> extractCommonDistinctCols(Collection<CallOperator> aggCallOperators) {
+    // 1. without distinct function, the common distinctCols is an empty list.
+    // 2. If has some distinct function, but distinct columns are not exactly same, ruturn Optional.empty
+    // 3. If has some distinct function and distinct columns are exactly same or only one distinct function, return Optional.of(distinctCols)
+    public static Optional<List<ColumnRefOperator>> extractCommonDistinctCols(
+            Collection<CallOperator> aggCallOperators) {
         Set<ColumnRefOperator> distinctChildren = Sets.newHashSet();
         for (CallOperator callOperator : aggCallOperators) {
             if (callOperator.isDistinct()) {
@@ -786,17 +798,46 @@ public class Utils {
         return Optional.of(Lists.newArrayList(distinctChildren));
     }
 
-    public static boolean hasNonDeterministicFunc(ScalarOperator operator) {
-        for (ScalarOperator child : operator.getChildren()) {
-            if (child instanceof CallOperator) {
-                CallOperator call = (CallOperator) child;
-                String fnName = call.getFnName();
-                if (FunctionSet.nonDeterministicFunctions.contains(fnName)) {
-                    return true;
+    // like select array_agg(distinct LO_REVENUE), count(distinct LO_REVENUE) will return true
+    public static Boolean hasMultipleDistinctFuncShareSameDistinctColumns(Collection<CallOperator> aggCallOperators) {
+        List<CallOperator> distinctFuncs =
+                aggCallOperators.stream().filter(CallOperator::isDistinct).collect(Collectors.toList());
+        if (distinctFuncs.size() <= 1) {
+            return false;
+        }
+        Set<ColumnRefOperator> distinctChildren = Sets.newHashSet();
+        for (CallOperator callOperator : aggCallOperators) {
+            if (distinctChildren.isEmpty()) {
+                distinctChildren = Sets.newHashSet(callOperator.getColumnRefs());
+            } else {
+                Set<ColumnRefOperator> nextDistinctChildren = Sets.newHashSet(callOperator.getColumnRefs());
+                if (!SetUtils.isEqualSet(distinctChildren, nextDistinctChildren)) {
+                    return false;
                 }
             }
+        }
 
+        return true;
+    }
+
+    public static boolean hasNonDeterministicFunc(ScalarOperator operator) {
+        if (hasNonDeterministicFuncImpl(operator)) {
+            return true;
+        }
+
+        for (ScalarOperator child : operator.getChildren()) {
             if (hasNonDeterministicFunc(child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasNonDeterministicFuncImpl(ScalarOperator operator) {
+        if (operator instanceof CallOperator) {
+            CallOperator call = (CallOperator) operator;
+            String fnName = call.getFnName();
+            if (FunctionSet.nonDeterministicFunctions.contains(fnName)) {
                 return true;
             }
         }
@@ -837,19 +878,10 @@ public class Utils {
         if (newProjectionMap == null || newProjectionMap.isEmpty()) {
             return input;
         }
-        Operator newOp = input.getOp();
-        if (newOp.getProjection() == null || newOp.getProjection().getColumnRefMap().isEmpty()) {
-            newOp.setProjection(new Projection(newProjectionMap));
-        } else {
-            // merge two projections
-            ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(newOp.getProjection().getColumnRefMap());
-            Map<ColumnRefOperator, ScalarOperator> resultMap = Maps.newHashMap();
-            for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : newProjectionMap.entrySet()) {
-                ScalarOperator result = rewriter.rewrite(entry.getValue());
-                resultMap.put(entry.getKey(), result);
-            }
-            newOp.setProjection(new Projection(resultMap));
-        }
+        Operator inputOp = input.getOp();
+        // merge two projections
+        Projection newProjection = new Projection(mergeWithProject(newProjectionMap, inputOp.getProjection()));
+        inputOp.setProjection(newProjection);
         return input;
     }
 
@@ -890,6 +922,38 @@ public class Utils {
             return;
         }
         op.resetOpRuleMask(ruleMask);
+    }
+
+    /**
+     * Merge projection1 -> projection2, use projection1's output as the final output.
+     */
+    public static Projection mergeWithProject(Projection projection1,
+                                              Projection projection2) {
+
+        if (projection1 == null || projection1.getColumnRefMap() == null) {
+            return projection1;
+        }
+        return new Projection(mergeWithProject(projection1.getColumnRefMap(), projection2));
+    }
+
+    /**
+     * Merge input mapping with projection's mapping, return a new mapping based on the existed projection.
+     */
+    public static Map<ColumnRefOperator, ScalarOperator> mergeWithProject(Map<ColumnRefOperator, ScalarOperator> input,
+                                                                          Projection projection) {
+        if (input == null || input.isEmpty()) {
+            return input;
+        }
+        if (projection == null || projection.getColumnRefMap() == null) {
+            return input;
+        }
+        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(projection.getColumnRefMap());
+        Map<ColumnRefOperator, ScalarOperator> resultMap = Maps.newHashMap();
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : input.entrySet()) {
+            ScalarOperator result = rewriter.rewrite(entry.getValue());
+            resultMap.put(entry.getKey(), result);
+        }
+        return resultMap;
     }
 
     /**

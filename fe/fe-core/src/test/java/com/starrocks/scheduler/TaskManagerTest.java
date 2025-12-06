@@ -67,6 +67,7 @@ public class TaskManagerTest {
     private static StarRocksAssert starRocksAssert;
     private static final ExecuteOption DEFAULT_MERGE_OPTION = makeExecuteOption(true, false);
     private static final ExecuteOption DEFAULT_NO_MERGE_OPTION = makeExecuteOption(false, false);
+    private final TaskRunScheduler taskRunScheduler = new TaskRunScheduler();
 
     @Before
     public void setUp() {
@@ -227,7 +228,7 @@ public class TaskManagerTest {
     @Test
     public void testTaskRunMergePriorityFirst() {
 
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
 
@@ -263,7 +264,7 @@ public class TaskManagerTest {
     @Test
     public void testTaskRunMergePriorityFirst2() {
 
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
 
@@ -300,7 +301,7 @@ public class TaskManagerTest {
     @Test
     public void testTaskRunMergeTimeFirst() {
 
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
 
@@ -337,7 +338,7 @@ public class TaskManagerTest {
     @Test
     public void testTaskRunMergeTimeFirst2() {
 
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
 
@@ -374,7 +375,7 @@ public class TaskManagerTest {
     @Test
     public void testTaskRunNotMerge() {
 
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
 
@@ -493,7 +494,7 @@ public class TaskManagerTest {
     @Test
     public void testForceGC() {
         Config.enable_task_history_archive = false;
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         for (int i = 0; i < 100; i++) {
             TaskRunStatus taskRunStatus = new TaskRunStatus();
             taskRunStatus.setQueryId("test" + i);
@@ -509,7 +510,7 @@ public class TaskManagerTest {
 
     @Test
     public void testForceGC2() {
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         for (int i = 0; i < 10; i++) {
             TaskRunStatus taskRunStatus = new TaskRunStatus();
             taskRunStatus.setQueryId("test" + i);
@@ -565,7 +566,7 @@ public class TaskManagerTest {
 
     @Test
     public void testTaskRunMergeRedundant1() {
-        TaskRunManager taskRunManager = new TaskRunManager();
+        TaskRunManager taskRunManager = new TaskRunManager(taskRunScheduler);
         Task task = new Task("test");
         task.setDefinition("select 1");
         long taskId = 1;
@@ -817,5 +818,44 @@ public class TaskManagerTest {
         taskRun.getStatus().setPriority(0);
         TaskRunStatus taskRunStatus = taskRun.getStatus();
         Assert.assertEquals(taskRunStatus.getDefinition(), "select 1");
+    }
+
+    @Test
+    public void replayCreateTaskRunHandlesNullStatusGracefully() {
+        TaskManager taskManager = new TaskManager();
+        taskManager.replayCreateTaskRun(null);
+        // No exception should be thrown, and no log entry should indicate a failure.
+    }
+
+    @Test
+    public void replayCreateTaskRunHandlesInvalidState() {
+        TaskManager taskManager = new TaskManager();
+        TaskRunStatus invalidStatus = new TaskRunStatus();
+        invalidStatus.setState(null);
+        invalidStatus.setTaskName("invalidTask");
+        taskManager.replayCreateTaskRun(invalidStatus);
+        // No exception should be thrown, and no log entry should indicate a failure.
+    }
+
+    @Test
+    public void replayCreateTaskRunSkipsExpiredFinishedTaskRun() {
+        TaskManager taskManager = new TaskManager();
+        TaskRunStatus expiredStatus = new TaskRunStatus();
+        expiredStatus.setState(Constants.TaskRunState.SUCCESS);
+        expiredStatus.setTaskName("expiredTask");
+        expiredStatus.setExpireTime(System.currentTimeMillis() - 1000);
+        taskManager.replayCreateTaskRun(expiredStatus);
+        // The expired task run should be skipped without errors.
+    }
+
+    @Test
+    public void replayCreateTaskRunProcessesValidPendingTaskRun() {
+        TaskManager taskManager = new TaskManager();
+        TaskRunStatus validStatus = new TaskRunStatus();
+        validStatus.setState(Constants.TaskRunState.PENDING);
+        validStatus.setTaskName("validTask");
+        validStatus.setExpireTime(System.currentTimeMillis() + 100000);
+        taskManager.replayCreateTaskRun(validStatus);
+        // The valid task run should be processed without errors.
     }
 }

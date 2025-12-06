@@ -86,7 +86,6 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import javax.management.Attribute;
 import javax.management.AttributeList;
@@ -194,6 +193,10 @@ public final class MetricRepo {
     public static Histogram HISTO_JOURNAL_WRITE_BYTES;
     public static Histogram HISTO_SHORTCIRCUIT_RPC_LATENCY;
     public static Histogram HISTO_DEPLOY_PLAN_FRAGMENTS_LATENCY;
+
+    public static Histogram HISTO_TXN_WAIT_FOR_PUBLISH_LATENCY;
+    public static Histogram HISTO_TXN_FINISH_PUBLISH_LATENCY;
+    public static Histogram HISTO_TXN_PUBLISH_TOTAL_LATENCY;
 
     // following metrics will be updated by metric calculator
     public static GaugeMetricImpl<Double> GAUGE_QUERY_PER_SECOND;
@@ -452,6 +455,15 @@ public final class MetricRepo {
         GAUGE_SAFE_MODE.setValue(0);
         STARROCKS_METRIC_REGISTER.addMetric(GAUGE_SAFE_MODE);
 
+        GaugeMetric<Long> totalTabletCount = new GaugeMetric<Long>(
+                "tablet_count", MetricUnit.NOUNIT, "total tablet count") {
+            @Override
+            public Long getValue() {
+                return GlobalStateMgr.getCurrentState().getTabletInvertedIndex().getTabletCount();
+            }
+        };
+        STARROCKS_METRIC_REGISTER.addMetric(totalTabletCount);
+
         // 2. counter
         COUNTER_REQUEST_ALL = new LongCounterMetric("request_total", MetricUnit.REQUESTS, "total request");
         STARROCKS_METRIC_REGISTER.addMetric(COUNTER_REQUEST_ALL);
@@ -592,6 +604,13 @@ public final class MetricRepo {
         HISTO_SHORTCIRCUIT_RPC_LATENCY = METRIC_REGISTER.histogram(MetricRegistry.name("shortcircuit", "latency", "ms"));
         HISTO_DEPLOY_PLAN_FRAGMENTS_LATENCY = METRIC_REGISTER.histogram(
                 MetricRegistry.name("deploy_plan_fragments", "latency", "ms"));
+
+        HISTO_TXN_WAIT_FOR_PUBLISH_LATENCY = METRIC_REGISTER.histogram(
+                MetricRegistry.name("txn", "wait_for_publish", "latency", "ms"));
+        HISTO_TXN_FINISH_PUBLISH_LATENCY = METRIC_REGISTER.histogram(
+                MetricRegistry.name("txn", "finish_publish", "latency", "ms"));
+        HISTO_TXN_PUBLISH_TOTAL_LATENCY = METRIC_REGISTER.histogram(
+                MetricRegistry.name("txn", "publish_total", "latency", "ms"));
 
         // init system metrics
         initSystemMetrics();
@@ -759,6 +778,8 @@ public final class MetricRepo {
                 Collectors.groupingBy(RoutineLoadJob::getWarehouseId)
         );
 
+        List<GaugeMetricImpl<Long>> routineLoadLags = new ArrayList<>();
+
         // get all partitions offset in a batch api
         for (Map.Entry<Long, List<RoutineLoadJob>> entry : kafkaJobsMp.entrySet()) {
             long warehouseId = entry.getKey();
@@ -789,8 +810,6 @@ public final class MetricRepo {
                 LOG.warn("get batch offsets failed", e);
                 return;
             }
-
-            List<GaugeMetricImpl<Long>> routineLoadLags = new ArrayList<>();
 
             for (int i = 0; i < kafkaJobs.size(); i++) {
                 KafkaRoutineLoadJob kJob = (KafkaRoutineLoadJob) kafkaJobs.get(i);
@@ -824,9 +843,9 @@ public final class MetricRepo {
                     routineLoadLags.add(metric);
                 }
             }
-
-            GAUGE_ROUTINE_LOAD_LAGS = routineLoadLags;
         }
+
+        GAUGE_ROUTINE_LOAD_LAGS = routineLoadLags;
     }
 
     public static synchronized String getMetric(MetricVisitor visitor, MetricsAction.RequestParams requestParams) {
@@ -880,8 +899,8 @@ public final class MetricRepo {
         HttpMetricRegistry.getInstance().visit(visitor);
 
 
-        //collect connections for per user
-        collectUserConnMetrics(visitor);
+        // collect connection metrics
+        collectConnectionMetrics(visitor, requestParams.isCollectUserConnMetrics());
 
         // collect runnning txns of per db
         collectDbRunningTxnMetrics(visitor);
@@ -1011,19 +1030,21 @@ public final class MetricRepo {
         }
     }
 
-    // collect connections of per user
-    private static void collectUserConnMetrics(MetricVisitor visitor) {
-
-        Map<String, AtomicInteger> userConnectionMap = ExecuteEnv.getInstance().getScheduler().getUserConnectionMap();
-
-        userConnectionMap.forEach((username, connValue) -> {
-            GaugeMetricImpl<Integer> metricConnect =
-                    new GaugeMetricImpl<>("connection_total", MetricUnit.CONNECTIONS,
-                        "total connection");
-            metricConnect.addLabel(new MetricLabel("user", username));
-            metricConnect.setValue(connValue.get());
-            visitor.visit(metricConnect);
-        });
+    private static void collectConnectionMetrics(MetricVisitor visitor, boolean collectUserConnMetrics) {
+        if (collectUserConnMetrics) {
+            ExecuteEnv.getInstance().getScheduler().getUserConnectionMap().forEach((user, count) -> {
+                GaugeMetricImpl<Integer> metric = new GaugeMetricImpl<>("connection_total",
+                        MetricUnit.CONNECTIONS, "total connection");
+                metric.addLabel(new MetricLabel("user", user));
+                metric.setValue(count.get());
+                visitor.visit(metric);
+            });
+        } else {
+            GaugeMetricImpl<Integer> metric = new GaugeMetricImpl<>("connection_total",
+                    MetricUnit.CONNECTIONS, "total connections");
+            metric.setValue(ExecuteEnv.getInstance().getScheduler().getConnectionNum());
+            visitor.visit(metric);
+        }
     }
 
     // collect runnning txns of per db

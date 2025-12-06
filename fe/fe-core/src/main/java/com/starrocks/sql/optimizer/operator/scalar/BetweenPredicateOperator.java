@@ -28,12 +28,14 @@ public class BetweenPredicateOperator extends PredicateOperator {
         super(OperatorType.BETWEEN, arguments);
         this.notBetween = notBetween;
         Preconditions.checkState(arguments.length == 3);
+        this.incrDepth(arguments);
     }
 
     public BetweenPredicateOperator(boolean notBetween, List<ScalarOperator> arguments) {
         super(OperatorType.BETWEEN, arguments);
         this.notBetween = notBetween;
         Preconditions.checkState(arguments != null && arguments.size() == 3);
+        this.incrDepth(arguments);
     }
 
     public boolean isNotBetween() {
@@ -91,5 +93,14 @@ public class BetweenPredicateOperator extends PredicateOperator {
     @Override
     public int hashCode() {
         return Objects.hash(super.hashCode(), notBetween);
+    }
+
+    @Override
+    public boolean equivalent(Object obj) {
+        if (!super.equivalent(obj)) {
+            return false;
+        }
+        BetweenPredicateOperator that = (BetweenPredicateOperator) obj;
+        return notBetween == that.notBetween;
     }
 }

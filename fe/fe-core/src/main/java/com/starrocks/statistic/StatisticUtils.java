@@ -94,11 +94,13 @@ public class StatisticUtils {
         // So we must disable report query status from BE to FE
         context.getSessionVariable().setEnableProfile(false);
         context.getSessionVariable().setEnableLoadProfile(false);
+        context.getSessionVariable().setBigQueryProfileThreshold("0s");
         context.getSessionVariable().setParallelExecInstanceNum(1);
         context.getSessionVariable().setQueryTimeoutS((int) Config.statistic_collect_query_timeout);
         context.getSessionVariable().setEnablePipelineEngine(true);
         context.getSessionVariable().setCboCteReuse(true);
         context.getSessionVariable().setCboCTERuseRatio(0);
+        context.getSessionVariable().setEnablePlanSerializeConcurrently(false);
 
         WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
         Warehouse warehouse = manager.getBackgroundWarehouse();
@@ -186,6 +188,7 @@ public class StatisticUtils {
 
         // check database
         if (db == null) {
+            LOG.warn("Statistics database {} not found", StatsConstants.STATISTICS_DB_NAME);
             return false;
         }
 
@@ -193,6 +196,7 @@ public class StatisticUtils {
             // check table
             Table table = db.getTable(tableName);
             if (table == null) {
+                LOG.warn("Statistics table {} not found in database {}", tableName, db.getFullName());
                 return false;
             }
             if (table.isCloudNativeTableOrMaterializedView()) {
@@ -203,6 +207,8 @@ public class StatisticUtils {
             for (Partition partition : table.getPartitions()) {
                 if (partition.getBaseIndex().getTablets().stream()
                         .anyMatch(t -> ((LocalTablet) t).getNormalReplicaBackendIds().isEmpty())) {
+                    LOG.warn("Statistics table {} partition {} has tablets without normal replicas", 
+                            tableName, partition.getName());
                     return false;
                 }
             }

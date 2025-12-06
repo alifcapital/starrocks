@@ -48,11 +48,11 @@ under the License.
         <jackson.version>2.15.2</jackson.version>
         <spark.version>3.5.5</spark.version>
         <tomcat.version>8.5.70</tomcat.version>
-        <parquet.version>1.14.0</parquet.version>
+        <parquet.version>1.15.2</parquet.version>
         <hadoop.version>3.4.1</hadoop.version>
         <gcs.connector.version>hadoop3-2.2.26</gcs.connector.version>
         <skip.plugin>false</skip.plugin>
-        <hudi.version>0.15.0</hudi.version>
+        <hudi.version>1.0.2</hudi.version>
         <hive-apache.version>3.1.2-22</hive-apache.version>
         <dlf-metastore-client.version>0.2.14</dlf-metastore-client.version>
         <sonar.organization>starrocks</sonar.organization>
@@ -63,17 +63,27 @@ under the License.
         <kafka-clients.version>3.4.0</kafka-clients.version>
         <arrow.version>18.0.0</arrow.version>
         <grpc.version>1.63.0</grpc.version>
-        <io.netty.version>4.1.118.Final</io.netty.version>
+        <io.netty.version>4.1.128.Final</io.netty.version>
         <puppycrawl.version>10.21.1</puppycrawl.version>
         <aws-v2-sdk.version>2.29.52</aws-v2-sdk.version>
         <avro.version>1.11.4</avro.version>
         <dnsjava.version>3.6.3</dnsjava.version>
         <nimbusds.version>9.37.2</nimbusds.version>
         <protobuf-java.version>3.25.5</protobuf-java.version>
-        <paimon.version>1.0.1</paimon.version>
+        <paimon.version>1.2.0</paimon.version>
         <delta-kernel.version>4.0.0rc1</delta-kernel.version>
         <iceberg.version>1.7.1</iceberg.version>
-        <staros.version>3.3.2</staros.version>
+        <staros.version>3.3.4</staros.version>
+        <!-- hadoop-azure requires no more than jetty10+ -->
+        <!-- https://stackoverflow.com/questions/66713254/spark-wasb-and-jetty-11 -->
+        <jetty.version>9.4.57.v20241219</jetty.version>
+        <byteman.version>4.0.24</byteman.version>
+        <!-- azure native sdk -->
+        <azure.version>1.2.34</azure.version>
+        <fastutil.version>8.5.15</fastutil.version>
+        <commons-beanutils.version>1.11.0</commons-beanutils.version>
+        <hbase.version>2.6.2</hbase.version>
+        <lz4-java.version>1.8.1</lz4-java.version>
     </properties>
 
     <profiles>
@@ -255,7 +265,7 @@ under the License.
             <dependency>
                 <groupId>org.apache.httpcomponents.client5</groupId>
                 <artifactId>httpclient5</artifactId>
-                <version>5.4.1</version>
+                <version>5.4.3</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/commons-validator/commons-validator -->
@@ -644,10 +654,16 @@ under the License.
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java</artifactId>
                     </exclusion>
+                    <!-- https://nvd.nist.gov/vuln/detail/CVE-2025-12183 -->
+                    <exclusion>
+                        <artifactId>lz4-java</artifactId>
+                        <groupId>org.lz4</groupId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.apache.spark/spark-launcher_2.12 -->
+            <!-- spark load required -->
             <dependency>
                 <groupId>org.apache.spark</groupId>
                 <artifactId>spark-launcher_2.12</artifactId>
@@ -738,6 +754,18 @@ under the License.
                         <artifactId>reload4j</artifactId>
                     </exclusion>
                 </exclusions>
+            </dependency>
+
+            <dependency>
+                <groupId>commons-beanutils</groupId>
+                <artifactId>commons-beanutils</artifactId>
+                <version>${commons-beanutils.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-hdfs</artifactId>
+                <version>${hadoop.version}</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.apache.parquet/parquet-hadoop -->
@@ -881,6 +909,10 @@ under the License.
                         <groupId>org.jdom</groupId>
                         <artifactId>jdom2</artifactId>
                     </exclusion>
+                    <exclusion>
+                        <groupId>org.ini4j</groupId>
+                        <artifactId>ini4j</artifactId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
@@ -944,6 +976,43 @@ under the License.
                     <exclusion>
                         <groupId>org.apache.zookeeper</groupId>
                         <artifactId>zookeeper</artifactId>
+                    </exclusion>
+                    <!-- https://nvd.nist.gov/vuln/detail/CVE-2025-12183 -->
+                    <exclusion>
+                        <groupId>org.lz4</groupId>
+                        <artifactId>lz4-java</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-client</artifactId>
+                <version>${hbase.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.apache.hbase.thirdparty</groupId>
+                        <artifactId>hbase-shaded-jetty</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>org.apache.hbase.thirdparty</groupId>
+                        <artifactId>hbase-shaded-netty</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-server</artifactId>
+                <version>${hbase.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.apache.hbase</groupId>
+                        <artifactId>hbase-http</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>org.apache.hbase.thirdparty</groupId>
+                        <artifactId>hbase-shaded-netty</artifactId>
                     </exclusion>
                 </exclusions>
             </dependency>
@@ -1069,6 +1138,15 @@ under the License.
                         <groupId>org.codehaus.jackson</groupId>
                         <artifactId>jackson-mapper-asl</artifactId>
                     </exclusion>
+                    <exclusion>
+                        <groupId>org.ini4j</groupId>
+                        <artifactId>ini4j</artifactId>
+                    </exclusion>
+                    <!-- https://nvd.nist.gov/vuln/detail/CVE-2025-12183 -->
+                    <exclusion>
+                        <groupId>org.lz4</groupId>
+                        <artifactId>lz4-pure-java</artifactId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
@@ -1095,6 +1173,13 @@ under the License.
                 <groupId>org.apache.paimon</groupId>
                 <artifactId>paimon-bundle</artifactId>
                 <version>${paimon.version}</version>
+                <!-- https://nvd.nist.gov/vuln/detail/CVE-2025-12183 -->
+                <exclusions>
+                    <exclusion>
+                        <artifactId>lz4-java</artifactId>
+                        <groupId>org.lz4</groupId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
@@ -1199,6 +1284,48 @@ under the License.
                 <version>1.1.10.5</version>
             </dependency>
 
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-client</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-io</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-webapp</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-servlet</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-util</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-util-ajax</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
             <!-- https://mvnrepository.com/artifact/org.apache.ranger/ranger-plugins-common -->
             <dependency>
                 <groupId>org.apache.ranger</groupId>
@@ -1206,24 +1333,12 @@ under the License.
                 <version>2.5.0</version>
                 <exclusions>
                     <exclusion>
-                        <groupId>com.amazonaws</groupId>
-                        <artifactId>aws-java-sdk-bundle</artifactId>
-                    </exclusion>
-                    <exclusion>
                         <groupId>org.elasticsearch</groupId>
                         <artifactId>*</artifactId>
                     </exclusion>
                     <exclusion>
                         <groupId>org.elasticsearch.client</groupId>
                         <artifactId>*</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <groupId>org.eclipse.jetty</groupId>
-                        <artifactId>jetty-client</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <artifactId>elasticsearch</artifactId>
-                        <groupId>org.elasticsearch</groupId>
                     </exclusion>
                     <exclusion>
                         <groupId>com.nimbusds</groupId>
@@ -1244,6 +1359,14 @@ under the License.
                     </exclusion>
                 </exclusions>
             </dependency>
+
+            <!-- https://mvnrepository.com/artifact/at.yawk.lz4/lz4-java -->
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4-java.version}</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 

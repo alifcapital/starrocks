@@ -1608,16 +1608,16 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
     public void testOneTabletDistinctAgg() throws Exception {
         String sql = "select sum(id), group_concat(distinct name) from skew_table where id = 1 group by id";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "2:AGGREGATE (update finalize)\n" +
-                "  |  output: sum(3: sum), group_concat(2: name, ',')\n" +
-                "  |  group by: 1: id\n" +
-                "  |  \n" +
-                "  1:AGGREGATE (update serialize)\n" +
-                "  |  output: sum(1: id)\n" +
-                "  |  group by: 1: id, 2: name\n" +
-                "  |  \n" +
-                "  0:OlapScanNode\n" +
-                "     TABLE: skew_table");
+        assertContains(plan, "2:AGGREGATE (update serialize)\n"
+                + "  |  STREAMING\n"
+                + "  |  output: sum(3: sum), group_concat(2: name, ',')\n"
+                + "  |  group by: 1: id\n"
+                + "  |  \n"
+                + "  1:AGGREGATE (update serialize)\n"
+                + "  |  output: sum(1: id)\n"
+                + "  |  group by: 1: id, 2: name\n"
+                + "  |  \n"
+                + "  0:OlapScanNode");
 
         sql = "select n_name,count(distinct n_regionkey,n_name) from nation group by n_name";
         plan = getFragmentPlan(sql);
@@ -1658,5 +1658,51 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 "  |  group by: 2: N_NAME, 3: N_REGIONKEY\n" +
                 "  |  \n" +
                 "  0:OlapScanNode");
+    }
+
+    @Test
+    public void testLocalGroupConcatDistinct() throws Exception {
+        String sql = "select * from ("
+                + "select v1, count(distinct v2) c1, group_concat(distinct v2 SEPARATOR ',') "
+                + "from colocate_t0 group by v1 ) t left join colocate_t1 on v1 = v4 ";
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
+        connectContext.getSessionVariable().disableJoinReorder();
+        connectContext.getSessionVariable().setBroadcastRowCountLimit(0);
+        String plan = getFragmentPlan(sql);
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
+        connectContext.getSessionVariable().enableJoinReorder();
+        connectContext.getSessionVariable().setBroadcastRowCountLimit(15000000);
+        assertContains(plan, "2:AGGREGATE (update finalize)\n"
+                + "  |  output: count(2: v2), group_concat(CAST(2: v2 AS VARCHAR), ',')\n"
+                + "  |  group by: 1: v1");
+    }
+
+    @Test
+    public void testWindowsPartitionDerive1() throws Exception {
+        String sql = "SELECT *, LAG(t1d) OVER (PARTITION BY t1a, t1b ORDER BY t1c) "
+                + "FROM (SELECT t1a, t1b, t1c, t1d, ROW_NUMBER() OVER (PARTITION BY t1a, t1b, t1c ORDER BY t1d) rn "
+                + "      FROM test_all_type) x;";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "  3:SORT\n"
+                + "  |  order by: <slot 1> 1: t1a ASC, <slot 2> 2: t1b ASC, <slot 3> 3: t1c ASC\n"
+                + "  |  analytic partition by: 1: t1a, 2: t1b\n"
+                + "  |  offset: 0\n"
+                + "  |  \n"
+                + "  2:ANALYTIC");
+    }
+
+    @Test
+    public void testWindowsPartitionDerive2() throws Exception {
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
+        String sql = "SELECT *, ROW_NUMBER() OVER (PARTITION BY t1a, t1b, t1c) "
+                + "FROM (SELECT t1a, t1b, t1c, t1d, LAG(t1d) OVER (PARTITION BY t1a, t1b ORDER BY t1c) "
+                + "      FROM test_all_type) x; ";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "  3:ANALYTIC\n"
+                + "  |  functions: [, row_number(), ]\n"
+                + "  |  partition by: 1: t1a, 2: t1b, 3: t1c\n"
+                + "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n"
+                + "  |  \n"
+                + "  2:ANALYTIC");
     }
 }

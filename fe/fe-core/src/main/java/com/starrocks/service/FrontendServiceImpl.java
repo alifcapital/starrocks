@@ -75,6 +75,7 @@ import com.starrocks.catalog.system.sys.SysFeLocks;
 import com.starrocks.catalog.system.sys.SysFeMemoryUsage;
 import com.starrocks.catalog.system.sys.SysObjectDependencies;
 import com.starrocks.cluster.ClusterNamespace;
+import com.starrocks.common.AlreadyExistsException;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.AuthenticationException;
 import com.starrocks.common.CaseSensibility;
@@ -108,13 +109,11 @@ import com.starrocks.leader.LeaderImpl;
 import com.starrocks.load.EtlJobType;
 import com.starrocks.load.loadv2.LoadJob;
 import com.starrocks.load.loadv2.LoadMgr;
-import com.starrocks.load.loadv2.ManualLoadTxnCommitAttachment;
 import com.starrocks.load.pipe.Pipe;
 import com.starrocks.load.pipe.PipeFileRecord;
 import com.starrocks.load.pipe.PipeId;
 import com.starrocks.load.pipe.PipeManager;
 import com.starrocks.load.pipe.filelist.RepoAccessor;
-import com.starrocks.load.routineload.RLTaskTxnCommitAttachment;
 import com.starrocks.load.routineload.RoutineLoadJob;
 import com.starrocks.load.routineload.RoutineLoadMgr;
 import com.starrocks.load.streamload.StreamLoadInfo;
@@ -1209,7 +1208,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         return result;
     }
 
-    private long loadTxnBeginImpl(TLoadTxnBeginRequest request, String clientIp) throws UserException {
+    private long loadTxnBeginImpl(TLoadTxnBeginRequest request, String clientIp) throws Exception {
         checkPasswordAndLoadPriv(request.getUser(), request.getPasswd(), request.getDb(),
                 request.getTbl(), request.getUser_ip());
 
@@ -1260,7 +1259,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
                 request.getUser(), request.getUser_ip(), timeoutSecond * 1000, resp, false, warehouseId);
         if (!resp.stateOK()) {
             LOG.warn(resp.msg);
-            throw new UserException(resp.msg);
+            throw resp.getException();
         }
 
         StreamLoadTask task = streamLoadManager.getTaskByLabel(request.getLabel());
@@ -1364,33 +1363,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         if (null == tbl) {
             return;
         }
-        StreamLoadTask streamLoadtask = GlobalStateMgr.getCurrentState().getStreamLoadMgr().
-                getSyncSteamLoadTaskByTxnId(request.getTxnId());
-
-        switch (request.txnCommitAttachment.getLoadType()) {
-            case ROUTINE_LOAD:
-                if (!(attachment instanceof RLTaskTxnCommitAttachment)) {
-                    break;
-                }
-
-                if (streamLoadtask != null) {
-                    streamLoadtask.setLoadState(attachment, "");
-                }
-
-                break;
-            case MANUAL_LOAD:
-                if (!(attachment instanceof ManualLoadTxnCommitAttachment)) {
-                    break;
-                }
-
-                if (streamLoadtask != null) {
-                    streamLoadtask.setLoadState(attachment, "");
-                }
-
-                break;
-            default:
-                break;
-        }
+        GlobalStateMgr.getCurrentState().getStreamLoadMgr().setSyncStreamLoadState(request.getTxnId(), attachment, "");
     }
 
     @Override
@@ -1485,7 +1458,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
                 TabletCommitInfo.fromThrift(request.getCommitInfos()),
                 TabletFailInfo.fromThrift(request.getFailInfos()),
                 attachment);
-
+        GlobalStateMgr.getCurrentState().getStreamLoadMgr().setSyncStreamLoadState(request.getTxnId(), attachment, "");
     }
 
     @Override
@@ -1539,43 +1512,13 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             throw new MetaNotFoundException("db " + dbName + " does not exist");
         }
         long dbId = db.getId();
+        TxnCommitAttachment attachment = TxnCommitAttachment.fromThrift(request.getTxnCommitAttachment());
         GlobalStateMgr.getCurrentState().getGlobalTransactionMgr().abortTransaction(dbId, request.getTxnId(),
                 request.isSetReason() ? request.getReason() : "system cancel",
                 TabletCommitInfo.fromThrift(request.getCommitInfos()),
-                TabletFailInfo.fromThrift(request.getFailInfos()),
-                TxnCommitAttachment.fromThrift(request.getTxnCommitAttachment()));
-
-        TxnCommitAttachment attachment = TxnCommitAttachment.fromThrift(request.txnCommitAttachment);
-        StreamLoadTask streamLoadtask = GlobalStateMgr.getCurrentState().getStreamLoadMgr().
-                getSyncSteamLoadTaskByTxnId(request.getTxnId());
-
-        switch (request.txnCommitAttachment.getLoadType()) {
-            case ROUTINE_LOAD:
-                if (!(attachment instanceof RLTaskTxnCommitAttachment)) {
-                    break;
-                }
-                RLTaskTxnCommitAttachment routineAttachment = (RLTaskTxnCommitAttachment) attachment;
-
-                if (streamLoadtask != null) {
-                    streamLoadtask.setLoadState(routineAttachment, request.getReason());
-
-                }
-
-                break;
-            case MANUAL_LOAD:
-                if (!(attachment instanceof ManualLoadTxnCommitAttachment)) {
-                    break;
-                }
-                ManualLoadTxnCommitAttachment streamAttachment = (ManualLoadTxnCommitAttachment) attachment;
-
-                if (streamLoadtask != null) {
-                    streamLoadtask.setLoadState(streamAttachment, request.getReason());
-                }
-
-                break;
-            default:
-                break;
-        }
+                TabletFailInfo.fromThrift(request.getFailInfos()), attachment);
+        GlobalStateMgr.getCurrentState().getStreamLoadMgr()
+                .setSyncStreamLoadState(request.getTxnId(), attachment, request.getReason());
     }
 
     @Override
@@ -1664,8 +1607,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
 
             Coordinator coord = getCoordinatorFactory().createSyncStreamLoadScheduler(planner, getClientAddr());
             streamLoadTask.setCoordinator(coord);
-
-            QeProcessorImpl.INSTANCE.registerQuery(streamLoadInfo.getId(), coord);
+            try {
+                QeProcessorImpl.INSTANCE.registerQuery(streamLoadInfo.getId(), coord);
+            } catch (AlreadyExistsException e) {
+                LOG.info("receive duplicate stream load put request: {}", request.getLoadId());
+            }
 
             plan.query_options.setLoad_job_type(TLoadJobType.STREAM_LOAD);
             // add table indexes to transaction state
@@ -2226,24 +2172,35 @@ public class FrontendServiceImpl implements FrontendService.Iface {
                 olapTable.lockCreatePartition(partitionName);
             }
 
+            // if the txn is already create partition failed, we should not create partition again
+            // because create partition failed will cause the txn to be aborted
+            if (txnState.getIsCreatePartitionFailed()) {
+                throw new UserException("automatic create partition failed. error: txn " + request.getTxn_id() +
+                        " already create partition failed");
+            }
+
+            boolean willCreateNewPartition =
+                    CatalogUtils.checkIfNewPartitionExists(olapTable, creatingPartitionNames);
+
             // ingestion is top priority, if schema change or rollup is running, cancel it
             try {
-                if (olapTable.getState() == OlapTable.OlapTableState.ROLLUP) {
+                String errMsg = "Alter job conflicts with partition creation, for more details please check "
+                        + "https://docs.starrocks.io/docs/faq/Others#how-can-i-prevent-expression-partition-conflicts"
+                        + "-caused-by-concurrent-execution-of-loading-tasks-and-partition-creation-tasks";
+                if (olapTable.getState() == OlapTable.OlapTableState.ROLLUP && willCreateNewPartition) {
                     LOG.info("cancel rollup for automatic create partition txn_id={}", request.getTxn_id());
                     state.getLocalMetastore().cancelAlter(
                             new CancelAlterTableStmt(
                                     ShowAlterStmt.AlterType.ROLLUP,
-                                    new TableName(db.getFullName(), olapTable.getName())),
-                            "conflict with expression partition");
+                                    new TableName(db.getFullName(), olapTable.getName())), errMsg);
                 }
 
-                if (olapTable.getState() == OlapTable.OlapTableState.SCHEMA_CHANGE) {
+                if (olapTable.getState() == OlapTable.OlapTableState.SCHEMA_CHANGE && willCreateNewPartition) {
                     LOG.info("cancel schema change for automatic create partition txn_id={}", request.getTxn_id());
                     state.getLocalMetastore().cancelAlter(
                             new CancelAlterTableStmt(
                                     ShowAlterStmt.AlterType.COLUMN,
-                                    new TableName(db.getFullName(), olapTable.getName())),
-                            "conflict with expression partition");
+                                    new TableName(db.getFullName(), olapTable.getName())), errMsg);
                 }
             } catch (Exception e) {
                 LOG.warn("cancel schema change or rollup failed. error: {}", e.getMessage());
@@ -2265,6 +2222,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             errorStatus.setError_msgs(Lists.newArrayList(
                     String.format("automatic create partition failed. error:%s", e.getMessage())));
             result.setStatus(errorStatus);
+            txnState.setIsCreatePartitionFailed(true);
             return result;
         } finally {
             for (String partitionName : creatingPartitionNames) {
@@ -2305,7 +2263,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         TStatus errorStatus = new TStatus(RUNTIME_ERROR);
         for (String partitionName : partitionColNames) {
             // get partition info from snapshot
-            TOlapTablePartition tPartition = txnState.getPartitionNameToTPartition().get(partitionName);
+            TOlapTablePartition tPartition = txnState.getPartitionNameToTPartition(olapTable.getId()).get(partitionName);
             if (tPartition != null) {
                 partitions.add(tPartition);
                 for (TOlapTableIndexTablets index : tPartition.getIndexes()) {
@@ -2444,7 +2402,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             tPartition.setNum_buckets(index.getTablets().size());
         }
         partitions.add(tPartition);
-        txnState.getPartitionNameToTPartition().put(partition.getName(), tPartition);
+        txnState.getPartitionNameToTPartition(olapTable.getId()).put(partition.getName(), tPartition);
     }
 
     @Override

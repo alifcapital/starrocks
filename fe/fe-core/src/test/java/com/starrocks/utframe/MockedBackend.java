@@ -131,10 +131,12 @@ import mockit.Mock;
 import mockit.MockUp;
 import org.apache.commons.lang3.NotImplementedException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -242,6 +244,10 @@ public class MockedBackend {
         return starletPort;
     }
 
+    public MockBeThriftClient getMockBeThriftClient() {
+        return thriftClient;
+    }
+
     private static class MockHeatBeatClient extends HeartbeatService.Client {
         private final int brpcPort;
         private final int beThriftPort;
@@ -260,6 +266,7 @@ public class MockedBackend {
         public THeartbeatResult heartbeat(TMasterInfo masterInfo) {
             TBackendInfo backendInfo = new TBackendInfo(beThriftPort, httpPort);
             backendInfo.setBrpc_port(brpcPort);
+            backendInfo.setStarlet_port(starletPort);
             return new THeartbeatResult(new TStatus(TStatusCode.OK), backendInfo);
         }
 
@@ -276,12 +283,15 @@ public class MockedBackend {
         }
     }
 
-    private static class MockBeThriftClient extends BackendService.Client {
+    public static class MockBeThriftClient extends BackendService.Client {
         // task queue to save all agent tasks coming from Frontend
         private final BlockingQueue<TAgentTaskRequest> taskQueue = Queues.newLinkedBlockingQueue();
         private final TBackend tBackend;
         private long reportVersion = 0;
         private final LeaderImpl master = new LeaderImpl();
+
+        private volatile boolean captureAgentTask = false;
+        private final ConcurrentLinkedQueue<TAgentTaskRequest> capturedAgentTasks = new ConcurrentLinkedQueue<>();
 
         public MockBeThriftClient(MockedBackend backend) {
             super(null);
@@ -332,7 +342,22 @@ public class MockedBackend {
         @Override
         public TAgentResult submit_tasks(List<TAgentTaskRequest> tasks) {
             taskQueue.addAll(tasks);
+            if (captureAgentTask) {
+                capturedAgentTasks.addAll(tasks);
+            }
             return new TAgentResult(new TStatus(TStatusCode.OK));
+        }
+
+        public void setCaptureAgentTask(boolean captureAgentTask) {
+            this.captureAgentTask = captureAgentTask;
+        }
+
+        public List<TAgentTaskRequest> getCapturedAgentTasks() {
+            return new ArrayList<>(capturedAgentTasks);
+        }
+
+        public void clearCapturedAgentTasks() {
+            capturedAgentTasks.clear();
         }
 
         @Override
@@ -530,7 +555,11 @@ public class MockedBackend {
         }
     }
 
-    private static class MockLakeService implements LakeService {
+    public static class MockLakeService implements LakeService {
+
+        private final ConcurrentLinkedQueue<PublishLogVersionBatchRequest> publishLogVersionBatchRequests =
+                new ConcurrentLinkedQueue<>();
+
         @Override
         public Future<PublishVersionResponse> publishVersion(PublishVersionRequest request) {
             return CompletableFuture.completedFuture(null);
@@ -578,7 +607,12 @@ public class MockedBackend {
 
         @Override
         public Future<PublishLogVersionResponse> publishLogVersionBatch(PublishLogVersionBatchRequest request) {
+            publishLogVersionBatchRequests.add(request);
             return CompletableFuture.completedFuture(null);
+        }
+
+        public PublishLogVersionBatchRequest pollPublishLogVersionBatchRequests() {
+            return publishLogVersionBatchRequests.poll();
         }
 
         @Override

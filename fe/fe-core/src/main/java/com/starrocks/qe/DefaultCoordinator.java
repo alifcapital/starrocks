@@ -555,7 +555,7 @@ public class DefaultCoordinator extends Coordinator {
             schedule.tryScheduleNextTurn(fragmentInstanceId);
         } catch (Exception e) {
             LOG.warn("schedule fragment:{} next internal error:", DebugUtil.printId(fragmentInstanceId), e);
-            cancel(PPlanFragmentCancelReason.INTERNAL_ERROR, e.getMessage());
+            cancel(PPlanFragmentCancelReason.INTERNAL_ERROR, FeConstants.SCHEDULE_FRAGMENT_ERROR + e.getMessage());
             return Status.internalError(e.getMessage());
         }
         return Status.OK;
@@ -889,6 +889,11 @@ public class DefaultCoordinator extends Coordinator {
     public void cancel(PPlanFragmentCancelReason reason, String message) {
         lock();
         try {
+            // All results have been obtained. The query has ended. Ignore this error.
+            if (returnedAllResults) {
+                cancelInternal(PPlanFragmentCancelReason.QUERY_FINISHED);
+                return;
+            }
             if (!queryStatus.ok()) {
                 // we can't cancel twice
                 return;
@@ -902,10 +907,10 @@ public class DefaultCoordinator extends Coordinator {
             try {
                 // Disable count down profileDoneSignal for collect all backend's profile
                 // but if backend has crashed, we need count down profileDoneSignal since it will not report by itself
-                if (message.equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
+                if (message.equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR) ||
+                        message.startsWith(FeConstants.SCHEDULE_FRAGMENT_ERROR)) {
                     queryProfile.finishAllInstances(Status.OK);
-                    LOG.info("count down profileDoneSignal since backend has crashed, query id: {}",
-                            DebugUtil.printId(jobSpec.getQueryId()));
+
                 }
             } finally {
                 unlock();
@@ -977,63 +982,31 @@ public class DefaultCoordinator extends Coordinator {
         // The exec status would affect query schedule, so it must be updated no matter what exceptions happen.
         // Otherwise, the query might hang until timeout
         if (!execState.updateExecStatus(params)) {
+            LOG.info("duplicate report fragment exec status, query id: {}, instance id: {}, backend id: {}, " +
+                            "status: {}, exec state: {}",
+                    DebugUtil.printId(jobSpec.getQueryId()),
+                    DebugUtil.printId(params.getFragment_instance_id()),
+                    params.getBackend_id(), params.status, execState.getState());
             return;
         }
 
-        String instanceId = DebugUtil.printId(params.getFragment_instance_id());
+        final String instanceId = DebugUtil.printId(params.getFragment_instance_id());
+        final boolean isDone = params.isDone();
         // Create a CompletableFuture chain for handling updates
-        CompletableFuture<Void> future = CompletableFuture.completedFuture(null)
+        final CompletableFuture<Void> future = CompletableFuture.completedFuture(null)
                 .thenRun(() -> {
                     try {
-                        queryProfile.updateProfile(execState, params);
-                        execState.updateRunningProfile(params);
+                        updateRuntimeProfile(params, execState, instanceId);
                     } catch (Throwable e) {
-                        LOG.warn("update profile failed {}", instanceId, e);
+                        LOG.warn("update runtime profile failed {}", instanceId, e);
                     }
                 })
                 .thenRun(() -> {
-                    try {
-                        lock();
-                        queryProfile.updateLoadChannelProfile(params);
-                    } catch (Throwable e) {
-                        LOG.warn("update load channel profile failed {}", instanceId, e);
-                    } finally {
-                        unlock();
+                    // update load info if it's a isDone rpc
+                    if (isDone && execState.isFinished()) {
+                        updateFinishInstance(params, execState, instanceId);
                     }
                 })
-                .thenRun(() -> {
-                    Status status = new Status(params.status);
-                    if (!(returnedAllResults && status.isCancelled()) && !status.ok()) {
-                        ConnectContext ctx = connectContext;
-                        if (ctx != null) {
-                            ctx.setErrorCodeOnce(status.getErrorCodeString());
-                        }
-                        LOG.warn("exec state report failed status={}, query_id={}, instance_id={}, backend_id={}",
-                                status, DebugUtil.printId(jobSpec.getQueryId()),
-                                DebugUtil.printId(params.getFragment_instance_id()),
-                                params.getBackend_id());
-                        updateStatus(status, params.getFragment_instance_id());
-                    }
-                })
-                .thenRun(() -> {
-                    if (execState.isFinished()) {
-                        try {
-                            lock();
-                            queryProfile.updateLoadInformation(execState, params);
-                        } catch (Throwable e) {
-                            LOG.warn("update load information failed {}", instanceId, e);
-                        } finally {
-                            unlock();
-                        }
-                    }
-                })
-                .thenRun(() -> {
-                    // NOTE: it's critical for query execution, and must be put after the profile update
-                    if (execState.isFinished()) {
-                        queryProfile.finishInstance(params.getFragment_instance_id());
-                    }
-                })
-                .thenRun(() -> updateJobProgress(params))
                 .handle((result, ex) -> {
                     // all block are independent, continue the execution no matter what exception happen
                     if (ex != null) {
@@ -1048,6 +1021,77 @@ public class DefaultCoordinator extends Coordinator {
         } catch (Exception e) {
             LOG.warn("Error occurred during updateFragmentExecStatus {}", instanceId, e);
         }
+    }
+
+    /**
+     * Update runtime profile and load profile no matter the input params is a finish or runtime profile
+     */
+    private void updateRuntimeProfile(TReportExecStatusParams params,
+                                      FragmentInstanceExecState execState,
+                                      String instanceId) {
+        // update profile
+        try {
+            queryProfile.updateProfile(execState, params);
+            execState.updateRunningProfile(params);
+        } catch (Throwable e) {
+            LOG.warn("update profile failed {}", instanceId, e);
+        }
+
+        // update load profile
+        try {
+            lock();
+            queryProfile.updateLoadChannelProfile(params);
+        } catch (Throwable e) {
+            LOG.warn("update load channel profile failed {}", instanceId, e);
+        } finally {
+            unlock();
+        }
+
+        // update job progress
+        try {
+            updateJobProgress(params);
+        } catch (Throwable e) {
+            LOG.warn("update job progress failed {}", instanceId, e);
+        }
+
+        // update status
+        Status status = new Status(params.status);
+        if (!(returnedAllResults && status.isCancelled()) && !status.ok()) {
+            ConnectContext ctx = connectContext;
+            if (ctx != null) {
+                ctx.setErrorCodeOnce(status.getErrorCodeString());
+            }
+            LOG.warn("exec state report failed status={}, query_id={}, instance_id={}, backend_id={}",
+                    status, DebugUtil.printId(jobSpec.getQueryId()),
+                    DebugUtil.printId(params.getFragment_instance_id()),
+                    params.getBackend_id());
+            updateStatus(status, params.getFragment_instance_id());
+        }
+    }
+
+    /**
+     * Update the instance only if the instance is finished.
+     */
+    private void updateFinishInstance(TReportExecStatusParams params,
+                                      FragmentInstanceExecState execState,
+                                      String instanceId) {
+        // For DML jobs, finishInstance is ensured to be called only after instance finished and should not be
+        // called repeatedly. Otherwise, it will cause commit with wrong commit info.
+        if (jobSpec.isLoadType() && execState.getState().isFinished() && queryProfile.isFinished()) {
+            throw new RuntimeException(String.format("updateFinishInstance called after fragment is finished:%s, query_id:%s",
+                    instanceId, DebugUtil.printId(params.getQuery_id())));
+        }
+        try {
+            lock();
+            queryProfile.updateLoadInformation(execState, params);
+        } catch (Throwable e) {
+            LOG.warn("update load information failed {}", instanceId, e);
+        } finally {
+            unlock();
+        }
+
+        // NOTE: it's critical for query execution, and must be put after the profile update
+        queryProfile.finishInstance(params.getFragment_instance_id());
     }
 
     @Override

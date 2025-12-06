@@ -20,6 +20,7 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.Operator;
@@ -88,7 +89,8 @@ public class StatisticsCalcUtils {
      * Only return the statistics if all columns and all partitions have the required statistics, otherwise return null
      */
     public static Map<Long, Statistics> getPartitionStatistics(Operator node, OlapTable table,
-                                                               Map<ColumnRefOperator, Column> columns) {
+                                                               Map<ColumnRefOperator, Column> columns,
+                                                               Statistics.Builder statistics) {
 
         // 1. only FULL statistics has partition-level info
         BasicStatsMeta basicStatsMeta =
@@ -124,6 +126,16 @@ public class StatisticsCalcUtils {
                 String columnName = columnNames.get(i);
                 ColumnStatistic columnStatistic = entry.getValue().get(i);
                 ColumnRefOperator ref = columnNameMap.get(columnName);
+                if (ConnectContext.get().getSessionVariable().isCboUseHistogramEvaluateListPartition()) {
+                    // fill histogram if exists
+                    ColumnStatistic originColStats = statistics.getColumnStatistics(ref);
+                    if (originColStats != null) {
+                        Histogram histogram = originColStats.getHistogram();
+                        if (histogram != null) {
+                            columnStatistic = ColumnStatistic.buildFrom(columnStatistic).setHistogram(histogram).build();
+                        }
+                    }   
+                }
                 builder.addColumnStatistic(ref, columnStatistic);
             }
             long partitionRow = partitionRows.get(entry.getKey());
@@ -161,7 +173,12 @@ public class StatisticsCalcUtils {
             LocalDateTime updateDatetime = StatisticUtils.getPartitionLastUpdateTime(partition);
             if (tableStatistic.isEmpty()) {
                 partitionRowCount = partition.getRowCount();
-                if (updateDatetime.isAfter(lastWorkTimestamp)) {
+                // tablet stats collection is async on both FE and BE.  Each BE and leader FE synchronize every 5 minutes by default.
+                // That is, BE collects all tablet information in the BE node's cache every 5 minutes, and then FE accesses
+                // all BE nodes every 5 minutes to obtain tablet information. There is a situation where FE sends a tablet stats
+                // retrieval request before BE has collected tablet stats for its local node, resulting in tablet row count of 0.
+                // To prevent the occasional occurrence of cardinality being 0 in tables after overwrite, an adaptation has been made here.
+                if (updateDatetime.isAfter(lastWorkTimestamp) || partitionRowCount == 0) {
                     partitionRowCount += deltaRows;
                 }
             } else {
@@ -206,8 +223,8 @@ public class StatisticsCalcUtils {
             }
 
             // attempt use updateRows from basicStatsMeta to adjust estimated row counts
-            if (StatsConstants.AnalyzeType.SAMPLE == analyzeType
-                    && basicStatsMeta.getUpdateTime().isAfter(lastWorkTimestamp)) {
+            if (StatsConstants.AnalyzeType.SAMPLE == analyzeType &&
+                    (basicStatsMeta.getUpdateTime().isAfter(lastWorkTimestamp) || rowCount == 0)) {
                 long statsRowCount = Math.max(basicStatsMeta.getUpdateRows() / table.getPartitions().size(), 1)
                         * selectedPartitions.size();
                 if (statsRowCount > rowCount) {

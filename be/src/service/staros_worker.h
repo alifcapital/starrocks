@@ -84,8 +84,10 @@ private:
     struct CacheValue {
         std::weak_ptr<std::string> key;
         std::shared_ptr<FileSystem> fs;
+        int64_t created_time_sec;
 
-        CacheValue(const std::weak_ptr<std::string>& key, const std::shared_ptr<FileSystem>& fs) : key(key), fs(fs) {}
+        CacheValue(const std::weak_ptr<std::string>& key, const std::shared_ptr<FileSystem>& fs)
+                : key(key), fs(fs), created_time_sec(MonotonicSeconds()) {}
     };
 
     // This function can be made static perfectly. The only reason to make it `virtual`
@@ -118,6 +120,8 @@ private:
 
 private:
     mutable std::shared_mutex _mtx;
+    std::shared_mutex _cache_mtx;
+    std::mutex _fs_cache_key_reset_mtx; // Protects fs_cache_key reset operations
     std::unordered_map<ShardId, ShardInfoDetails> _shards;
     std::unique_ptr<Cache> _fs_cache;
 };

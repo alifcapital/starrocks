@@ -87,7 +87,7 @@ public class TaskManager implements MemoryTrackable {
 
     // include PENDING/RUNNING taskRun;
     private final TaskRunManager taskRunManager;
-    private final TaskRunScheduler taskRunScheduler;
+    private final TaskRunScheduler taskRunScheduler = new TaskRunScheduler();
 
     // The periodScheduler is used to generate the corresponding TaskRun on time for the Periodical Task.
     // This scheduler can use the time wheel to optimize later.
@@ -107,9 +107,8 @@ public class TaskManager implements MemoryTrackable {
         idToTaskMap = Maps.newConcurrentMap();
         nameToTaskMap = Maps.newConcurrentMap();
         periodFutureMap = Maps.newConcurrentMap();
-        taskRunManager = new TaskRunManager();
+        taskRunManager = new TaskRunManager(taskRunScheduler);
         taskLock = new QueryableReentrantLock(true);
-        taskRunScheduler = taskRunManager.getTaskRunScheduler();
     }
 
     public void start() {
@@ -377,7 +376,7 @@ public class TaskManager implements MemoryTrackable {
                     }
                     periodFutureMap.remove(task.getId());
                 }
-                if (!killTask(task.getName(), false)) {
+                if (!killTask(task.getName(), true)) {
                     LOG.warn("kill task failed: {}", task.getName());
                 }
                 idToTaskMap.remove(task.getId());
@@ -688,6 +687,22 @@ public class TaskManager implements MemoryTrackable {
     }
 
     public void replayCreateTaskRun(TaskRunStatus status) {
+        try {
+            doReplayCreateTaskRun(status);
+        } catch (Exception e) {
+            LOG.warn("replay create task run failed, status: {}, error: {}", status, e.getMessage());
+            // The task run will be replayed in FE restart, If the replay fails, it will cause FE restart failed.
+            // It's fine to discard the task run since it's only task's history records and can be retried later.
+        }
+    }
+
+    private void doReplayCreateTaskRun(TaskRunStatus status) {
+        // NOTE: If current FE is downgraded from a higher version and TaskRunStatus#State is new added which is not defined
+        // in current version, status.getState() will be null.
+        if (status == null || status.getState() == null || Strings.isNullOrEmpty(status.getTaskName())) {
+            LOG.warn("replayCreateTaskRun: status is null or taskId is invalid, status: {}", status);
+            return;
+        }
         if (status.getState().isFinishState() && System.currentTimeMillis() > status.getExpireTime()) {
             return;
         }
@@ -862,8 +877,8 @@ public class TaskManager implements MemoryTrackable {
         dropTasks(taskIdToDelete, true);
     }
 
-    public void removeExpiredTaskRuns() {
-        taskRunManager.getTaskRunHistory().vacuum();
+    public void removeExpiredTaskRuns(boolean archiveHistory) {
+        taskRunManager.getTaskRunHistory().vacuum(archiveHistory);
     }
 
     @Override

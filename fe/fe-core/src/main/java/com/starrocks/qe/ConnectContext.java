@@ -35,12 +35,12 @@
 package com.starrocks.qe;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.StringLiteral;
-import com.starrocks.analysis.VariableExpr;
 import com.starrocks.authentication.UserProperty;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.DdlException;
@@ -102,6 +102,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.net.ssl.SSLContext;
 
 // When one client connect in, we create a connection context for it.
@@ -188,8 +189,6 @@ public class ConnectContext {
     // Cache thread info for this connection.
     protected ThreadInfo threadInfo;
 
-    // GlobalStateMgr: put globalStateMgr here is convenient for unit test,
-    // because globalStateMgr is singleton, hard to mock
     protected GlobalStateMgr globalStateMgr;
     protected boolean isSend;
 
@@ -251,6 +250,11 @@ public class ConnectContext {
     // lifecycle instead of per materialized view.
     private QueryMaterializationContext queryMVContext;
 
+    private AtomicLong currentThreadAllocatedMemory = new AtomicLong(0);
+
+    // thread id is the thread who created this ConnectContext's id
+    private AtomicLong currentThreadId = null;
+
     public StmtExecutor getExecutor() {
         return executor;
     }
@@ -290,13 +294,15 @@ public class ConnectContext {
     }
 
     public ConnectContext(SocketChannel channel, SSLContext sslContext) {
+        // `globalStateMgr` is used in many cases, so we should explicitly make sure it is not null
+        globalStateMgr = GlobalStateMgr.getCurrentState();
         closed = false;
         state = new QueryState();
         returnRows = 0;
         serverCapability = MysqlCapability.DEFAULT_CAPABILITY;
         isKilled = false;
         serializer = MysqlSerializer.newInstance();
-        sessionVariable = GlobalStateMgr.getCurrentState().getVariableMgr().newSessionVariable();
+        sessionVariable = globalStateMgr.getVariableMgr().newSessionVariable();
         userVariables = new ConcurrentHashMap<>();
         command = MysqlCommand.COM_SLEEP;
         queryDetail = null;
@@ -390,6 +396,7 @@ public class ConnectContext {
     }
 
     public void setGlobalStateMgr(GlobalStateMgr globalStateMgr) {
+        Preconditions.checkState(globalStateMgr != null);
         this.globalStateMgr = globalStateMgr;
     }
 
@@ -421,9 +428,9 @@ public class ConnectContext {
         try {
             Set<Long> defaultRoleIds;
             if (GlobalVariable.isActivateAllRolesOnLogin()) {
-                defaultRoleIds = GlobalStateMgr.getCurrentState().getAuthorizationMgr().getRoleIdsByUser(user);
+                defaultRoleIds = globalStateMgr.getAuthorizationMgr().getRoleIdsByUser(user);
             } else {
-                defaultRoleIds = GlobalStateMgr.getCurrentState().getAuthorizationMgr().getDefaultRoleIdsByUser(user);
+                defaultRoleIds = globalStateMgr.getAuthorizationMgr().getDefaultRoleIdsByUser(user);
             }
             this.currentRoleIds = defaultRoleIds;
         } catch (PrivilegeException e) {
@@ -436,8 +443,8 @@ public class ConnectContext {
     }
 
     public void modifySystemVariable(SystemVariable setVar, boolean onlySetSessionVar) throws DdlException {
-        GlobalStateMgr.getCurrentState().getVariableMgr().setSystemVariable(sessionVariable, setVar, onlySetSessionVar);
-        if (!SetType.GLOBAL.equals(setVar.getType()) && GlobalStateMgr.getCurrentState().getVariableMgr()
+        globalStateMgr.getVariableMgr().setSystemVariable(sessionVariable, setVar, onlySetSessionVar);
+        if (!SetType.GLOBAL.equals(setVar.getType()) && globalStateMgr.getVariableMgr()
                 .shouldForwardToLeader(setVar.getVariable())) {
             modifiedSessionVariables.put(setVar.getVariable(), setVar);
         }
@@ -533,7 +540,7 @@ public class ConnectContext {
     }
 
     public void resetSessionVariable() {
-        this.sessionVariable = GlobalStateMgr.getCurrentState().getVariableMgr().newSessionVariable();
+        this.sessionVariable = globalStateMgr.getVariableMgr().newSessionVariable();
         modifiedSessionVariables.clear();
     }
 
@@ -567,6 +574,14 @@ public class ConnectContext {
 
     public MysqlCommand getCommand() {
         return command;
+    }
+
+    public String getCommandStr() {
+        if (command == null) {
+            return "MySQL.UNKNOWN";
+        } else {
+            return "MySQL." + command;
+        }
     }
 
     public void setCommand(MysqlCommand command) {
@@ -1107,7 +1122,7 @@ public class ConnectContext {
     // Change current catalog of this session, and reset current database.
     // We can support "use 'catalog <catalog_name>'" from mysql client or "use catalog <catalog_name>" from jdbc.
     public void changeCatalog(String newCatalogName) throws DdlException {
-        CatalogMgr catalogMgr = GlobalStateMgr.getCurrentState().getCatalogMgr();
+        CatalogMgr catalogMgr = globalStateMgr.getCatalogMgr();
         if (!catalogMgr.catalogExists(newCatalogName)) {
             ErrorReport.reportDdlException(ErrorCode.ERR_BAD_CATALOG_ERROR, newCatalogName);
         }
@@ -1129,8 +1144,8 @@ public class ConnectContext {
     // For "CATALOG.DB", we change the current catalog database.
     // For "DB", we keep the current catalog and change the current database.
     public void changeCatalogDb(String identifier) throws DdlException {
-        CatalogMgr catalogMgr = GlobalStateMgr.getCurrentState().getCatalogMgr();
-        MetadataMgr metadataMgr = GlobalStateMgr.getCurrentState().getMetadataMgr();
+        CatalogMgr catalogMgr = globalStateMgr.getCatalogMgr();
+        MetadataMgr metadataMgr = globalStateMgr.getMetadataMgr();
 
         String dbName;
 
@@ -1183,7 +1198,7 @@ public class ConnectContext {
         if (sessionId == null) {
             return;
         }
-        if (!GlobalStateMgr.getCurrentState().getTemporaryTableMgr().sessionExists(sessionId)) {
+        if (!globalStateMgr.getTemporaryTableMgr().sessionExists(sessionId)) {
             return;
         }
         LOG.debug("clean temporary table on session {}", sessionId);
@@ -1206,37 +1221,25 @@ public class ConnectContext {
             // set session variables
             Map<String, String> sessionVariables = userProperty.getSessionVariables();
             for (Map.Entry<String, String> entry : sessionVariables.entrySet()) {
-                String currentValue = GlobalStateMgr.getCurrentState().getVariableMgr().getValue(
-                        sessionVariable, new VariableExpr(entry.getKey()));
-                if (!currentValue.equalsIgnoreCase(
-                        GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultValue(entry.getKey()))) {
-                    // If the current session variable is not default value, we should respect it.
-                    continue;
-                }
                 SystemVariable variable = new SystemVariable(entry.getKey(), new StringLiteral(entry.getValue()));
-                modifySystemVariable(variable, true);
+                globalStateMgr.getVariableMgr().setSystemVariable(sessionVariable, variable, true);
             }
 
             // set catalog and database
-            boolean dbHasBeenSetByUser = !getCurrentCatalog().equals(
-                    GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultValue(SessionVariable.CATALOG))
-                    || !getDatabase().isEmpty();
-            if (!dbHasBeenSetByUser) {
-                String catalog = userProperty.getCatalog();
-                String database = userProperty.getDatabase();
-                if (catalog.equals(UserProperty.CATALOG_DEFAULT_VALUE)) {
-                    if (!database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
-                        changeCatalogDb(userProperty.getCatalogDbName());
-                    }
-                } else {
-                    if (database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
-                        changeCatalog(catalog);
-                    } else {
-                        changeCatalogDb(userProperty.getCatalogDbName());
-                    }
-                    SystemVariable variable = new SystemVariable(SessionVariable.CATALOG, new StringLiteral(catalog));
-                    modifySystemVariable(variable, true);
+            String catalog = userProperty.getCatalog();
+            String database = userProperty.getDatabase();
+            if (catalog.equals(UserProperty.CATALOG_DEFAULT_VALUE)) {
+                if (!database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
+                    changeCatalogDb(userProperty.getCatalogDbName());
                 }
+            } else {
+                if (database.equals(UserProperty.DATABASE_DEFAULT_VALUE)) {
+                    changeCatalog(catalog);
+                } else {
+                    changeCatalogDb(userProperty.getCatalogDbName());
+                }
+                SystemVariable variable = new SystemVariable(SessionVariable.CATALOG, new StringLiteral(catalog));
+                globalStateMgr.getVariableMgr().setSystemVariable(sessionVariable, variable, true);
             }
         } catch (Exception e) {
             LOG.warn("set session env failed: ", e);
@@ -1325,5 +1328,24 @@ public class ConnectContext {
             }
             return row;
         }
+    }
+
+    public long getCurrentThreadAllocatedMemory() {
+        return currentThreadAllocatedMemory.get();
+    }
+
+    public void setCurrentThreadAllocatedMemory(long currentThreadAllocatedMemory) {
+        this.currentThreadAllocatedMemory.set(currentThreadAllocatedMemory);
+    }
+
+    public long getCurrentThreadId() {
+        if (currentThreadId == null) {
+            return 0;
+        }
+        return currentThreadId.get();
+    }
+
+    public void setCurrentThreadId(long currentThreadId) {
+        this.currentThreadId = new AtomicLong(currentThreadId);
     }
 }

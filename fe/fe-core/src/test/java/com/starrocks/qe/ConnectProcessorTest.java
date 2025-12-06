@@ -52,9 +52,12 @@ import com.starrocks.privilege.PrivilegeBuiltinConstants;
 import com.starrocks.proto.PQueryStatistics;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.DDLTestBase;
+import com.starrocks.sql.ast.PrepareStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.sql.common.AuditEncryptionChecker;
+import com.starrocks.thrift.TMasterOpRequest;
+import com.starrocks.thrift.TMasterOpResult;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
@@ -65,11 +68,13 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
 import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class ConnectProcessorTest extends DDLTestBase {
@@ -626,5 +631,63 @@ public class ConnectProcessorTest extends DDLTestBase {
         Assert.assertFalse(Strings.isNullOrEmpty(QueryDetailQueue.getQueryDetailsAfterTime(0).get(0).getSql()));
     }
 
+    @Test
+    public void testProxyExecuteUserIdentityIsNull() throws Exception {
+        TMasterOpRequest request = new TMasterOpRequest();
+        request.setCatalog("default");
+        request.setDb("testDb1");
+        request.setUser("root");
+        request.setSql("select 1");
+        request.setModified_variables_sql("set query_timeout = 10");
+        request.setQueryId(UUIDUtil.genTUniqueId());
+        request.setSession_id(UUID.randomUUID().toString());
+        request.setIsLastStmt(true);
 
+        ConnectContext context = new ConnectContext();
+        ConnectProcessor processor = new ConnectProcessor(context);
+        new mockit.MockUp<StmtExecutor>() {
+            @mockit.Mock
+            public void execute() {}
+            @mockit.Mock
+            public PQueryStatistics getQueryStatisticsForAuditLog() {
+                return null;
+            }
+        };
+
+        TMasterOpResult result = processor.proxyExecute(request);
+        Assertions.assertNotNull(result);
+        Assertions.assertTrue(context.getState().isError());
+    }
+
+    @Test
+    public void testStmtExecute() throws Exception {
+        int stmtId = 1;
+        MysqlSerializer serializer = MysqlSerializer.newInstance();
+        serializer.writeInt1(MysqlCommand.COM_STMT_EXECUTE.getCommandCode());
+        serializer.writeInt4(stmtId);
+        serializer.writeInt1(0); // flags
+        serializer.writeInt4(0); // flags
+        ByteBuffer packet = serializer.toByteBuffer();
+
+        ConnectContext ctx = initMockContext(mockChannel(packet), GlobalStateMgr.getCurrentState());
+
+        String sql = "PREPARE stmt1 FROM select * from testDb1.testTable1";
+        PrepareStmt stmt = (PrepareStmt) UtFrameUtils.parseStmtWithNewParser(sql, ctx);
+        ctx.putPreparedStmt(String.valueOf(stmtId), new PrepareStmtContext(stmt, ctx, null));
+
+        ConnectProcessor processor = new ConnectProcessor(ctx);
+        // Mock statement executor
+        // Create mock for StmtExecutor using MockUp instead of @Mocked parameter
+        new MockUp<StmtExecutor>() {
+            @Mock
+            public PQueryStatistics getQueryStatisticsForAuditLog() {
+                return statistics;
+            }
+        };
+
+        processor.processOnce();
+
+        Assertions.assertEquals(MysqlCommand.COM_STMT_EXECUTE, myContext.getCommand());
+        Assertions.assertTrue(ctx.getState().isQuery());
+    }
 }

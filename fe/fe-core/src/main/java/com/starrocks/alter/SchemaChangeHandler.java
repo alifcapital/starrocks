@@ -45,13 +45,13 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.analysis.BloomFilterIndexUtil;
 import com.starrocks.analysis.ColumnPosition;
-import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.binlog.BinlogConfig;
 import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.ArrayType;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ColumnId;
+import com.starrocks.catalog.ColumnType;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Index;
 import com.starrocks.catalog.KeysType;
@@ -82,6 +82,7 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.FeConstants;
+import com.starrocks.common.MaterializedViewExceptions;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.NotImplementedException;
 import com.starrocks.common.UserException;
@@ -775,6 +776,7 @@ public class SchemaChangeHandler extends AlterHandler {
 
         // retain old column name
         modColumn.setName(oriColumn.getName());
+        modColumn.setColumnId(oriColumn.getColumnId());
         modColumn.setUniqueId(oriColumn.getUniqueId());
 
         if (!oriColumn.isGeneratedColumn() && modColumn.isGeneratedColumn()) {
@@ -890,6 +892,27 @@ public class SchemaChangeHandler extends AlterHandler {
                 || oriColumn.getType().isDecimalOfAnyVersion()) {
             fastSchemaEvolution = false;
         }
+
+        if (!ColumnType.canReuseZonemapIndex(oriColumn.getType(), modColumn.getType())) {
+            return false;
+        }
+
+        // Check whether manually created indexes support fast schema evolution. The rules are as follows:
+        // 1. The index can be reused after type conversion, and BE has made necessary changes,
+        //    such as casting new type values to old type values before querying the index.
+        // 2. The index cannot be reused, and BE has made changes to skip it during queries.
+        // Currently, BLOOMFILTER and NGRAMBF indexes use rule 2 to support fast schema evolution. BE-side changes
+        // for other indexes are not yet ready, so fast schema change is temporarily disabled for them. This feature
+        // will be gradually enabled for these indexes once BE support is in place.
+        List<Index> existedIndexes = olapTable.getIndexes();
+        for (Index index : existedIndexes) {
+            if (index.getColumns().contains(oriColumn.getColumnId())) {
+                if (index.getIndexType() != IndexDef.IndexType.NGRAMBF) {
+                    return false;
+                }
+            }
+        }
+
         return fastSchemaEvolution;
     }
 
@@ -1655,7 +1678,10 @@ public class SchemaChangeHandler extends AlterHandler {
         for (Column partitionCol : partitionColumns) {
             String colName = partitionCol.getName();
             Optional<Column> col = alterSchema.stream().filter(c -> c.nameEquals(colName, true)).findFirst();
-            if (col.isPresent() && !col.get().equals(partitionCol)) {
+            // NOTE: partition column in partition info maybe changed(eg: str2date partition table), use original
+            // table schema instead.
+            Column refPartitionCol = olapTable.getColumn(partitionCol.getName());
+            if (col.isPresent() && !col.get().equals(refPartitionCol)) {
                 throw new DdlException("Can not modify partition column[" + colName + "]. index["
                         + olapTable.getIndexNameById(alterIndexId) + "]");
             }
@@ -1872,7 +1898,7 @@ public class SchemaChangeHandler extends AlterHandler {
                 DropColumnClause dropColumnClause = (DropColumnClause) alterClause;
                 // check relative mvs with the modified column
                 Set<String> modifiedColumns = Set.of(dropColumnClause.getColName());
-                checkModifiedColumWithMaterializedViews(olapTable, modifiedColumns);
+                AlterMVJobExecutor.checkModifiedColumWithMaterializedViews(olapTable, modifiedColumns);
 
                 // drop column and drop indexes on this column
                 fastSchemaEvolution &=
@@ -1883,7 +1909,7 @@ public class SchemaChangeHandler extends AlterHandler {
 
                 // check relative mvs with the modified column
                 Set<String> modifiedColumns = Set.of(modifyColumnClause.getColumn().getName());
-                checkModifiedColumWithMaterializedViews(olapTable, modifiedColumns);
+                AlterMVJobExecutor.checkModifiedColumWithMaterializedViews(olapTable, modifiedColumns);
 
                 // modify column
                 fastSchemaEvolution &= processModifyColumn(modifyColumnClause, olapTable, indexSchemaMap);
@@ -1898,7 +1924,7 @@ public class SchemaChangeHandler extends AlterHandler {
                 }
                 AddFieldClause addFieldClause = (AddFieldClause) alterClause;
                 modifyFieldColumns = Set.of(addFieldClause.getColName());
-                checkModifiedColumWithMaterializedViews(olapTable, modifyFieldColumns);
+                AlterMVJobExecutor.checkModifiedColumWithMaterializedViews(olapTable, modifyFieldColumns);
                 int id = colUniqueIdSupplier.getAsInt();
                 processAddField((AddFieldClause) alterClause, olapTable, indexSchemaMap, id, newIndexes);
             } else if (alterClause instanceof DropFieldClause) {
@@ -1912,7 +1938,7 @@ public class SchemaChangeHandler extends AlterHandler {
                 }
                 DropFieldClause dropFieldClause = (DropFieldClause) alterClause;
                 modifyFieldColumns = Set.of(dropFieldClause.getColName());
-                checkModifiedColumWithMaterializedViews(olapTable, modifyFieldColumns);
+                AlterMVJobExecutor.checkModifiedColumWithMaterializedViews(olapTable, modifyFieldColumns);
                 processDropField((DropFieldClause) alterClause, olapTable, indexSchemaMap, newIndexes);
             } else if (alterClause instanceof ReorderColumnsClause) {
                 // reorder column
@@ -1923,10 +1949,17 @@ public class SchemaChangeHandler extends AlterHandler {
                     List<Integer> sortKeyUniqueIds = new ArrayList<>();
                     processModifySortKeyColumn((ReorderColumnsClause) alterClause, olapTable, indexSchemaMap, sortKeyIdxes,
                             sortKeyUniqueIds);
+
+                    // If optimized olap table contains related mvs, set those mv state to inactive.
+                    AlterMVJobExecutor.inactiveRelatedMaterializedView(olapTable,
+                            MaterializedViewExceptions.inactiveReasonForBaseTableReorderColumns(olapTable.getName()), false);
                     return createJobForProcessModifySortKeyColumn(db.getId(), olapTable, indexSchemaMap, sortKeyIdxes,
                             sortKeyUniqueIds);
                 } else {
                     processReorderColumn((ReorderColumnsClause) alterClause, olapTable, indexSchemaMap);
+                    // If optimized olap table contains related mvs, set those mv state to inactive.
+                    AlterMVJobExecutor.inactiveRelatedMaterializedView(olapTable,
+                            MaterializedViewExceptions.inactiveReasonForBaseTableReorderColumns(olapTable.getName()), false);
                 }
             } else if (alterClause instanceof ModifyTablePropertiesClause) {
                 // modify table properties
@@ -1960,68 +1993,6 @@ public class SchemaChangeHandler extends AlterHandler {
             return null;
         } else {
             return createFastSchemaEvolutionJobInSharedDataMode(schemaChangeData);
-        }
-    }
-
-    /**
-     * Check related synchronous materialized views before modified columns, throw exceptions
-     * if modified columns affect the related rollup/synchronous mvs.
-     */
-    public void checkModifiedColumWithMaterializedViews(OlapTable olapTable,
-                                                        Set<String> modifiedColumns) throws DdlException {
-        if (modifiedColumns == null || modifiedColumns.isEmpty()) {
-            return;
-        }
-
-        // If there is synchronized materialized view referring the column, throw exception.
-        if (olapTable.getIndexNameToId().size() > 1) {
-            Map<Long, MaterializedIndexMeta> metaMap = olapTable.getIndexIdToMeta();
-            for (Map.Entry<Long, MaterializedIndexMeta> entry : metaMap.entrySet()) {
-                Long id = entry.getKey();
-                if (id == olapTable.getBaseIndexId()) {
-                    continue;
-                }
-                MaterializedIndexMeta meta = entry.getValue();
-                List<Column> schema = meta.getSchema();
-                // ignore agg_keys type because it's like duplicated without agg functions
-                boolean hasAggregateFunction = olapTable.getKeysType() != KeysType.AGG_KEYS &&
-                        schema.stream().anyMatch(x -> x.isAggregated());
-                if (hasAggregateFunction) {
-                    for (Column rollupCol : schema) {
-                        if (modifiedColumns.contains(rollupCol.getName())) {
-                            throw new DdlException(String.format("Can not drop/modify the column %s, " +
-                                            "because the column is used in the related rollup %s, " +
-                                            "please drop the rollup index first.",
-                                    rollupCol.getName(), olapTable.getIndexNameById(meta.getIndexId())));
-                        }
-                        if (rollupCol.getRefColumns() != null) {
-                            for (SlotRef refColumn : rollupCol.getRefColumns()) {
-                                if (modifiedColumns.contains(refColumn.getColumnName())) {
-                                    throw new DdlException(String.format("Can not drop/modify the column %s, " +
-                                                    "because the column is used in the related rollup %s " +
-                                                    "with the define expr:%s, please drop the rollup index first.",
-                                            rollupCol.getName(), olapTable.getIndexNameById(meta.getIndexId()),
-                                            rollupCol.getDefineExpr().toSql()));
-                                }
-                            }
-                        }
-                    }
-                }
-                if (meta.getWhereClause() != null) {
-                    Expr whereExpr = meta.getWhereClause();
-                    List<SlotRef> whereSlots = new ArrayList<>();
-                    whereExpr.collect(SlotRef.class, whereSlots);
-                    for (SlotRef refColumn : whereSlots) {
-                        if (modifiedColumns.contains(refColumn.getColumnName())) {
-                            throw new DdlException(String.format("Can not drop/modify the column %s, " +
-                                            "because the column is used in the related rollup %s " +
-                                            "with the where expr:%s, please drop the rollup index first.",
-                                    refColumn.getColumn().getName(), olapTable.getIndexNameById(meta.getIndexId()),
-                                    meta.getWhereClause().toSql()));
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -2955,6 +2926,8 @@ public class SchemaChangeHandler extends AlterHandler {
                     .setSortKeyIndexes(schemaChangeData.getSortKeyIdxes())
                     .setSortKeyUniqueIds(schemaChangeData.getSortKeyUniqueIds())
                     .setIndexes(schemaChangeData.getIndexes())
+                    .setCompressionType(schemaChangeData.getTable().getCompressionType())
+                    .setCompressionLevel(schemaChangeData.getTable().getCompressionLevel())
                     .build();
             job.setIndexTabletSchema(indexId, indexName, schemaInfo);
         }

@@ -188,6 +188,7 @@ import com.starrocks.qe.JournalObservable;
 import com.starrocks.qe.QueryStatisticsInfo;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.ShowExecutor;
+import com.starrocks.qe.SimpleScheduler;
 import com.starrocks.qe.VariableMgr;
 import com.starrocks.qe.scheduler.slot.GlobalSlotProvider;
 import com.starrocks.qe.scheduler.slot.LocalSlotProvider;
@@ -242,9 +243,9 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -1443,6 +1444,7 @@ public class GlobalStateMgr {
 
         // The memory tracker should be placed at the end
         memoryUsageTracker.start();
+        SimpleScheduler.startAutoUpdate();
     }
 
     private void transferToNonLeader(FrontendNodeType newType) {
@@ -1715,7 +1717,7 @@ public class GlobalStateMgr {
         LOG.info("start save image to {}. is ckpt: {}", curFile.getAbsolutePath(), GlobalStateMgr.isCheckpointThread());
 
         long saveImageStartTime = System.currentTimeMillis();
-        try (OutputStream outputStream = Files.newOutputStream(curFile.toPath())) {
+        try (FileOutputStream outputStream = new FileOutputStream(curFile)) {
             imageWriter.setOutputStream(outputStream);
             try {
                 saveHeader(imageWriter.getDataOutputStream());
@@ -1755,6 +1757,9 @@ public class GlobalStateMgr {
                 LOG.error("Save meta block failed ", e);
                 throw new IOException("Save meta block failed ", e);
             }
+
+            imageWriter.getDataOutputStream().flush();
+            outputStream.getChannel().force(true);
 
             imageWriter.saveChecksum();
 
@@ -2591,7 +2596,7 @@ public class GlobalStateMgr {
             LOG.warn("task manager clean expire tasks failed", t);
         }
         try {
-            taskManager.removeExpiredTaskRuns();
+            taskManager.removeExpiredTaskRuns(false);
         } catch (Throwable t) {
             LOG.warn("task manager clean expire task runs history failed", t);
         }
@@ -2604,7 +2609,7 @@ public class GlobalStateMgr {
             LOG.warn("task manager clean expire tasks failed", t);
         }
         try {
-            taskManager.removeExpiredTaskRuns();
+            taskManager.removeExpiredTaskRuns(true);
         } catch (Throwable t) {
             LOG.warn("task manager clean expire task runs history failed", t);
         }

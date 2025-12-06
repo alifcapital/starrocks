@@ -99,6 +99,9 @@ Status Spiller::flush(RuntimeState* state, MemGuard&& guard) {
 template <class TaskExecutor, class MemGuard>
 StatusOr<ChunkPtr> Spiller::restore(RuntimeState* state, MemGuard&& guard) {
     RETURN_IF_ERROR(task_status());
+    if (is_cancel()) {
+        return Status::Cancelled("cancelled by pipeline");
+    }
 
     ASSIGN_OR_RETURN(auto chunk, _reader->restore<TaskExecutor>(state, guard));
     chunk->check_or_die();
@@ -160,7 +163,8 @@ Status RawSpillerWriter::flush(RuntimeState* state, MemGuard&& guard) {
         DCHECK(has_pending_data());
         //
         if (!yield_ctx.task_context_data.has_value()) {
-            yield_ctx.task_context_data = SpillIOTaskContextPtr(std::make_shared<FlushContext>());
+            yield_ctx.task_context_data =
+                    SpillIOTaskContextPtr(std::make_shared<FlushContext>(_spiller->shared_from_this()));
         }
         auto defer = CancelableDefer([&]() {
             {
@@ -226,6 +230,9 @@ Status SpillerReader::trigger_restore(RuntimeState* state, MemGuard&& guard) {
             DEFER_GUARD_END(guard);
             {
                 auto defer = CancelableDefer([&]() { _running_restore_tasks--; });
+                if (_spiller->is_cancel() || !_spiller->task_status().ok()) {
+                    return;
+                }
                 Status res;
                 SerdeContext serd_ctx;
                 if (!yield_ctx.task_context_data.has_value()) {
@@ -332,7 +339,8 @@ Status PartitionedSpillerWriter::flush(RuntimeState* state, bool is_final_flush,
         yield_ctx.time_spent_ns = 0;
         yield_ctx.need_yield = false;
         if (!yield_ctx.task_context_data.has_value()) {
-            yield_ctx.task_context_data = SpillIOTaskContextPtr(std::make_shared<PartitionedFlushContext>());
+            yield_ctx.task_context_data =
+                    SpillIOTaskContextPtr(std::make_shared<PartitionedFlushContext>(_spiller->shared_from_this()));
         }
         _spiller->update_spilled_task_status(
                 yieldable_flush_task(yield_ctx, splitting_partitions, spilling_partitions));

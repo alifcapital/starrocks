@@ -14,11 +14,13 @@
 
 package com.starrocks.sql.plan;
 
+import com.starrocks.catalog.View;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.common.profile.Tracers;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.common.QueryDebugOptions;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
@@ -26,6 +28,7 @@ import com.starrocks.sql.optimizer.base.CTEProperty;
 import com.starrocks.sql.optimizer.dump.QueryDumpInfo;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.transformation.JoinAssociativityRule;
+import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Mock;
@@ -763,17 +766,16 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
 
     @Test
     public void testNestedViewWithCTE() throws Exception {
-
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/nested_view_with_cte"),
                         null, TExplainLevel.NORMAL);
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("  524:Project\n" +
-                "  |  <slot 8449> : 8449: count\n" +
-                "  |  limit: 100"));
-        Assert.assertTrue(replayPair.second, replayPair.second.contains("  523:AGGREGATE (merge finalize)\n" +
-                "  |  output: count(8449: count)\n" +
-                "  |  group by: 24: mock_038, 15: mock_003, 108: mock_109, 4: mock_005, 2: mock_110, 2532: case\n" +
-                "  |  limit: 100"));
+        PlanTestBase.assertContains(replayPair.second, "Project\n" +
+                "  |  <slot 7368> : 7368: count\n" +
+                "  |  limit: 100");
+        PlanTestBase.assertContains(replayPair.second, "AGGREGATE (merge finalize)\n" +
+                "  |  output: count(7368: count)\n" +
+                "  |  group by: 24: mock_038, 15: mock_003, 108: mock_109, 4: mock_005, 2: mock_110, 2134: case\n" +
+                "  |  limit: 100");
     }
 
     @Test
@@ -1021,5 +1023,83 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
                 "  |  group by: \n" +
                 "  |  \n" +
                 "  25:EXCHANGE"));
+    }
+
+    @Test
+    public void testUnionWithEmptyInput() throws Exception {
+        String dumpString = getDumpInfoFromFile("query_dump/union_with_empty_input");
+        QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
+        Pair<QueryDumpInfo, String> replayPair = getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(),
+                TExplainLevel.NORMAL);
+        Assert.assertTrue(replayPair.second, replayPair.second.contains("0:EMPTYSET"));
+    }
+
+    @Test
+    public void testLowCardinalityWithCte() throws Exception {
+        try {
+            FeConstants.USE_MOCK_DICT_MANAGER = true;
+            String dumpString = getDumpInfoFromFile("query_dump/low_cardinality_with_cte");
+            QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
+            Pair<QueryDumpInfo, String> replayPair = getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(),
+                    TExplainLevel.NORMAL);
+            Assert.assertTrue(replayPair.second.contains("  37:HASH JOIN\n"
+                    + "  |  join op: RIGHT OUTER JOIN (BUCKET_SHUFFLE(S))\n"
+                    + "  |  colocate: false, reason: \n"
+                    + "  |  equal join conjunct: 555: coalesce = 130: mock_011\n"
+                    + "  |  equal join conjunct: 556: coalesce = 131: mock_007\n"
+                    + "  |  equal join conjunct: 558: coalesce = 133: mock_046\n"
+                    + "  |  equal join conjunct: 559: coalesce = 134: mock_050\n"
+                    + "  |  \n"
+                    + "  |----36:AGGREGATE (merge finalize)\n"
+                    + "  |    |  group by: 130: mock_011, 131: mock_007, 133: mock_046, 134: mock_050\n"
+                    + "  |    |  \n"
+                    + "  |    35:EXCHANGE"));
+        } finally {
+            FeConstants.USE_MOCK_DICT_MANAGER = false;
+        }
+    }
+
+    @Test
+    public void testUnnestLowCardinalityOptimization() throws Exception {
+        try {
+            FeConstants.USE_MOCK_DICT_MANAGER = true;
+            String dumpString = getDumpInfoFromFile("query_dump/unnest_low_cardinality_optimization");
+            QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
+            Pair<QueryDumpInfo, String> replayPair = getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(),
+                    TExplainLevel.NORMAL);
+            String plan = replayPair.second;
+            Assert.assertTrue(plan, plan.contains("  30:Project\n" +
+                    "  |  <slot 113> : 113: mock_field_111\n" +
+                    "  |  <slot 278> : lower(142: jl_str)\n" +
+                    "  |  \n" +
+                    "  29:TableValueFunction\n" +
+                    "  |  tableFunctionName: unnest\n" +
+                    "  |  columns: [unnest]\n" +
+                    "  |  returnTypes: [VARCHAR(65533)]"));
+        } finally {
+            FeConstants.USE_MOCK_DICT_MANAGER = false;
+        }
+    }
+
+    @Test
+    public void testViewBasedRewrite1() throws Exception {
+        String fileContent = getDumpInfoFromFile("query_dump/view_based_rewrite1");
+        QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(fileContent);
+        SessionVariable sessionVariable = queryDumpInfo.getSessionVariable();
+        QueryDebugOptions debugOptions = new QueryDebugOptions();
+        debugOptions.setEnableQueryTraceLog(true);
+        sessionVariable.setQueryDebugOptions(debugOptions.toString());
+        new MockUp<MVTransformerContext>() {
+            /**
+             * {@link com.starrocks.sql.optimizer.transformer.MVTransformerContext#isEnableViewBasedMVRewrite(View)} ()}
+             */
+            @Mock
+            public boolean isEnableViewBasedMVRewrite(View view) {
+                return true;
+            }
+        };
+        Pair<QueryDumpInfo, String> replayPair = getCostPlanFragment(fileContent, sessionVariable);
+        String plan = replayPair.second;
+        PlanTestBase.assertContains(plan, "single_mv_ads_biz_customer_combine_td_for_task_2y");
     }
 }

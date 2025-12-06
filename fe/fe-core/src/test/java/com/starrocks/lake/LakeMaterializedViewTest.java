@@ -23,12 +23,14 @@ import com.staros.proto.FileStoreInfo;
 import com.staros.proto.FileStoreType;
 import com.staros.proto.S3FileStoreInfo;
 import com.starrocks.catalog.AggregateType;
+import com.starrocks.catalog.ColocateTableIndex;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.DataProperty;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.HashDistributionInfo;
 import com.starrocks.catalog.KeysType;
+import com.starrocks.catalog.ListPartitionInfo;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.MaterializedView;
@@ -37,7 +39,9 @@ import com.starrocks.catalog.MaterializedView.RefreshType;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.PartitionKey;
+import com.starrocks.catalog.PartitionType;
 import com.starrocks.catalog.RangePartitionInfo;
+import com.starrocks.catalog.RecyclePartitionInfo;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.TableProperty;
 import com.starrocks.catalog.Tablet;
@@ -449,5 +453,65 @@ public class LakeMaterializedViewTest {
         // Test
         Assert.assertFalse(mv.isEnableFillDataCache(partition1));
         Assert.assertTrue(mv.isEnableFillDataCache(partition2));
+    }
+
+    @Test
+    public void testBuildRecyclePartitionInfo() {
+        long dbId = 1L;
+        long mvId = 2L;
+        long partitionId = 3L;
+        Partition partition = new Partition(partitionId, "p0", null, null);
+
+        // range partition
+        PartitionInfo rangePartitionInfo = new RangePartitionInfo(Lists.newArrayList());
+        rangePartitionInfo.setIsInMemory(partitionId, true);
+        LakeMaterializedView mv1 =
+                new LakeMaterializedView(mvId, dbId, "mv1", null, null, rangePartitionInfo, null, null);
+
+        RecyclePartitionInfo recyclePartitionInfo = mv1.buildRecyclePartitionInfo(dbId, partition);
+        Assert.assertTrue(recyclePartitionInfo instanceof RecycleLakeRangePartitionInfo);
+
+        // un-partitioned
+        PartitionInfo singlePartitionInfo = new PartitionInfo(PartitionType.UNPARTITIONED);
+        singlePartitionInfo.setIsInMemory(partitionId, true);
+        LakeMaterializedView mv2 =
+                new LakeMaterializedView(mvId, dbId, "mv1", null, null, singlePartitionInfo, null, null);
+        recyclePartitionInfo = mv2.buildRecyclePartitionInfo(dbId, partition);
+        Assert.assertTrue(recyclePartitionInfo instanceof RecycleLakeUnPartitionInfo);
+
+        // list partition
+        PartitionInfo listPartitionInfo = new ListPartitionInfo(PartitionType.LIST, Lists.newArrayList());
+        listPartitionInfo.setIsInMemory(partitionId, true);
+        LakeMaterializedView mv3 =
+                new LakeMaterializedView(mvId, dbId, "mv1", null, null, listPartitionInfo, null, null);
+        recyclePartitionInfo = mv3.buildRecyclePartitionInfo(dbId, partition);
+        Assert.assertTrue(recyclePartitionInfo instanceof RecycleLakeListPartitionInfo);
+    }
+
+    @Test
+    public void testMaterializedViewColocation() throws Exception {
+        starRocksAssert.withMaterializedView("create materialized view mv6\n" +
+                "distributed by hash(k2) buckets 3\n" +
+                "PROPERTIES(\n" +
+                "   'colocate_with' = 'aaa'\n" +
+                ")\n" +
+                "refresh async\n" +
+                "as select k2, sum(k3) as total from base_table group by k2;");
+
+        Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(DB);
+        MaterializedView mv =
+                (MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "mv6");
+        Assert.assertTrue(mv.isCloudNativeMaterializedView());
+        ColocateTableIndex index = GlobalStateMgr.getCurrentState().getColocateTableIndex();
+        Assert.assertTrue(index.isLakeColocateTable(mv.getId()));
+
+        String alterMvSql = "alter materialized view mv6 set ('colocate_with'='');";
+        StatementBase statement = SqlParser.parseSingleStatement(alterMvSql, connectContext.getSessionVariable().getSqlMode());
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, statement);
+        stmtExecutor.execute();
+        Assert.assertFalse(index.isLakeColocateTable(mv.getId()));
+
+        starRocksAssert.dropMaterializedView("mv6");
+        Assert.assertNull(GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "mv6"));
     }
 }

@@ -273,8 +273,8 @@ public class PaimonMetadata implements ConnectorMetadata {
         PaimonTable paimonTable = (PaimonTable) table;
         long latestSnapshotId = -1L;
         try {
-            if (paimonTable.getNativeTable().latestSnapshotId().isPresent()) {
-                latestSnapshotId = paimonTable.getNativeTable().latestSnapshotId().getAsLong();
+            if (paimonTable.getNativeTable().latestSnapshot().isPresent()) {
+                latestSnapshotId = paimonTable.getNativeTable().latestSnapshot().get().id();
             }
         } catch (Exception e) {
             // System table does not have snapshotId, ignore it.
@@ -286,9 +286,15 @@ public class PaimonMetadata implements ConnectorMetadata {
             ReadBuilder readBuilder = paimonTable.getNativeTable().newReadBuilder();
             int[] projected = fieldNames.stream().mapToInt(name -> (paimonTable.getFieldNames().indexOf(name))).toArray();
             List<Predicate> predicates = extractPredicates(paimonTable, predicate);
-            InnerTableScan scan = (InnerTableScan) readBuilder.withFilter(predicates).withProjection(projected).newScan();
+            boolean pruneManifestsByLimit = limit != -1 && limit < Integer.MAX_VALUE
+                    && onlyHasPartitionPredicate(table, predicate);
+            readBuilder = readBuilder.withFilter(predicates).withProjection(projected);
+            if (pruneManifestsByLimit) {
+                readBuilder = readBuilder.withLimit((int) limit);
+            }
+            InnerTableScan scan = (InnerTableScan) readBuilder.newScan();
             PaimonMetricRegistry paimonMetricRegistry = new PaimonMetricRegistry();
-            List<Split> splits = scan.withMetricsRegistry(paimonMetricRegistry).plan().splits();
+            List<Split> splits = scan.withMetricRegistry(paimonMetricRegistry).plan().splits();
             traceScanMetrics(paimonMetricRegistry, splits, ((PaimonTable) table).getTableName(), predicates);
 
             PaimonSplitsInfo paimonSplitsInfo = new PaimonSplitsInfo(predicates, splits);
@@ -636,5 +642,36 @@ public class PaimonMetadata implements ConnectorMetadata {
         } else {
             LOG.warn("Current catalog {} does not support cache.", catalogName);
         }
+    }
+
+    public static boolean onlyHasPartitionPredicate(Table table, ScalarOperator predicate) {
+        if (predicate == null) {
+            return true;
+        }
+
+        List<ScalarOperator> scalarOperators = Utils.extractConjuncts(predicate);
+
+        List<String> predicateColumns = new ArrayList<>();
+        for (ScalarOperator operator : scalarOperators) {
+            String columnName = null;
+            if (operator.getChild(0) instanceof ColumnRefOperator) {
+                columnName = ((ColumnRefOperator) operator.getChild(0)).getName();
+            }
+
+            if (columnName == null || columnName.isEmpty()) {
+                return false;
+            }
+
+            predicateColumns.add(columnName);
+        }
+
+        List<String> partitionColNames = table.getPartitionColumnNames();
+        for (String columnName : predicateColumns) {
+            if (!partitionColNames.contains(columnName)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

@@ -16,6 +16,7 @@ package com.starrocks.sql.analyzer;
 
 import com.google.common.base.Joiner;
 import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.Parameter;
 import com.starrocks.analysis.ParseNode;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.TableName;
@@ -326,7 +327,7 @@ public class AstToSQLBuilder {
             sqlBuilder.append("(");
 
             List<String> childSql = Optional.ofNullable(node.getChildExpressions())
-                    .orElse(Collections.emptyList()).stream().map(this::visit).collect(toList());
+                    .orElse(node.getFunctionParams().exprs()).stream().map(this::visit).collect(toList());
             sqlBuilder.append(Joiner.on(",").join(childSql));
 
             sqlBuilder.append(")");
@@ -415,6 +416,14 @@ public class AstToSQLBuilder {
             }
             sb.append("}");
             return sb.toString();
+        }
+
+        @Override
+        public String visitParameterExpr(Parameter node, Void context) {
+            if (node.getExpr() == null) {
+                return super.visitParameterExpr(node, context);
+            }
+            return visit(node.getExpr(), context);
         }
 
     }

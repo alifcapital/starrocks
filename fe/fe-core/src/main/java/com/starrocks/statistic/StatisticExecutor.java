@@ -14,15 +14,13 @@
 
 package com.starrocks.statistic;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.InternalCatalog;
-import com.starrocks.catalog.OlapTable;
-import com.starrocks.catalog.Partition;
+import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AuditLog;
@@ -261,9 +259,8 @@ public class StatisticExecutor {
                     table.getName());
         }
 
-        OlapTable olapTable = (OlapTable) table;
-        long version = olapTable.getPartitions().stream().map(Partition::getVisibleVersionTime)
-                .max(Long::compareTo).orElse(0L);
+        long version = table.getPartitions().stream().flatMap(p -> p.getSubPartitions().stream()).map(
+                PhysicalPartition::getVisibleVersionTime).max(Long::compareTo).orElse(0L);
         String columnName = MetaUtils.getColumnNameByColumnId(dbId, tableId, columnId);
         String catalogName = InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME;
         String sql = "select cast(" + StatsConstants.STATISTIC_DICT_VERSION + " as Int), " +
@@ -475,14 +472,11 @@ public class StatisticExecutor {
                                                     long targetPartition) {
         List<String> sqlList =
                 FullStatisticsCollectJob.buildOverwritePartitionSQL(tableId, sourcePartition, targetPartition);
-        Preconditions.checkState(sqlList.size() == 2);
 
         // copy
         executeDML(context, sqlList.get(0));
 
-        // delete
-        executeDML(context, sqlList.get(1));
-
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().recordDropPartition(sourcePartition);
         // NOTE: why don't we refresh the statistics cache ?
         // OVERWRITE will create a new partition and delete the existing one, so next time when consulting the stats
         // cache, it would get a cache-miss so reload the cache. and also the cache of deleted partition would be

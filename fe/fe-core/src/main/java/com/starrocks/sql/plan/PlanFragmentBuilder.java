@@ -103,6 +103,7 @@ import com.starrocks.planner.OdpsScanNode;
 import com.starrocks.planner.OlapScanNode;
 import com.starrocks.planner.OlapTableSink;
 import com.starrocks.planner.PaimonScanNode;
+import com.starrocks.planner.PartitionIdGenerator;
 import com.starrocks.planner.PlanFragment;
 import com.starrocks.planner.PlanNode;
 import com.starrocks.planner.ProjectNode;
@@ -123,6 +124,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
 import com.starrocks.server.RunMode;
 import com.starrocks.service.FrontendOptions;
+import com.starrocks.sql.analyzer.AnalyzerUtils;
 import com.starrocks.sql.analyzer.DecimalV3FunctionAnalyzer;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.AssertNumRowsElement;
@@ -1184,6 +1186,8 @@ public class PlanFragmentBuilder {
 
             prepareContextSlots(node, context, tupleDescriptor);
 
+            PartitionIdGenerator partitionIdGenerator = context.getDescTbl().getTablePartitionIdGenerator(referenceTable);
+
             DeltaLakeScanNode deltaLakeScanNode =
                     new DeltaLakeScanNode(context.getNextNodeId(), tupleDescriptor, "DeltaLakeScanNode");
             deltaLakeScanNode.computeStatistics(optExpression.getStatistics());
@@ -1253,7 +1257,7 @@ public class PlanFragmentBuilder {
                     paimonScanNode.getConjuncts()
                             .add(ScalarOperatorToExpr.buildExecExpression(predicate, formatterContext));
                 }
-                paimonScanNode.setupScanRangeLocations(tupleDescriptor, node.getPredicate());
+                paimonScanNode.setupScanRangeLocations(tupleDescriptor, node.getPredicate(), node.getLimit());
                 HDFSScanNodePredicates scanNodePredicates = paimonScanNode.getScanNodePredicates();
                 prepareCommonExpr(scanNodePredicates, node.getScanOperatorPredicates(), context);
                 prepareMinMaxExpr(scanNodePredicates, node.getScanOperatorPredicates(), context, referenceTable);
@@ -1830,6 +1834,7 @@ public class PlanFragmentBuilder {
             }
             tupleDescriptor.computeMemLayout();
 
+            final int dstSlotCount = tupleDescriptor.getSlots().size();
             if (valuesOperator.getRows().isEmpty()) {
                 EmptySetNode emptyNode = new EmptySetNode(context.getNextNodeId(),
                         Lists.newArrayList(tupleDescriptor.getId()));
@@ -1846,6 +1851,12 @@ public class PlanFragmentBuilder {
 
                 List<List<Expr>> consts = new ArrayList<>();
                 for (List<ScalarOperator> row : valuesOperator.getRows()) {
+                    if (row.size() != dstSlotCount) {
+                        throw new StarRocksPlannerException(
+                                String.format("The number of columns in each row of values %s must be equal to the number of " +
+                                        "slots %s", row.size(), dstSlotCount),
+                                INTERNAL_ERROR);
+                    }
                     List<Expr> exprRow = new ArrayList<>();
                     for (ScalarOperator field : row) {
                         exprRow.add(ScalarOperatorToExpr.buildExecExpression(
@@ -2046,6 +2057,7 @@ public class PlanFragmentBuilder {
                 AggregateFunction aggrFn = (AggregateFunction) aggExpr.getFn();
                 Type intermediateType = aggrFn.getIntermediateType() != null ?
                         aggrFn.getIntermediateType() : aggrFn.getReturnType();
+                intermediateType = AnalyzerUtils.replaceNullType2Boolean(intermediateType);
                 intermediateSlotDesc.setType(intermediateType);
                 intermediateSlotDesc.setIsNullable(aggrFn.isNullable());
                 intermediateSlotDesc.setIsMaterialized(true);
@@ -2530,7 +2542,8 @@ public class PlanFragmentBuilder {
         }
 
         private List<Expr> extractConjuncts(ScalarOperator predicate, ExecPlan context) {
-            return Utils.extractConjuncts(predicate).stream()
+            return Utils.extractConjuncts(predicate).stream().sorted((l, r) ->
+                            Boolean.compare(r.isJoinDerived(), l.isJoinDerived()))
                     .map(e -> ScalarOperatorToExpr.buildExecExpression(e,
                             new ScalarOperatorToExpr.FormatterContext(context.getColRefToExpr())))
                     .collect(Collectors.toList());
@@ -2758,7 +2771,7 @@ public class PlanFragmentBuilder {
                 } else if (!leftExecGroup.isDisableColocateGroup() &&
                         (distributionMode.equals(JoinNode.DistributionMode.BROADCAST) ||
                                 (distributionMode.equals(JoinNode.DistributionMode.LOCAL_HASH_BUCKET) &&
-                                        !joinOperator.isRightJoin()))) {
+                                        !joinOperator.isRightJoin() && !joinOperator.isFullOuterJoin()))) {
                     // case 1: broadcast join
                     // case 2: local bucket shuffle (no-right) join
                     // do nothing

@@ -3,11 +3,13 @@ displayed_sidebar: docs
 keywords: ['Canshu']
 ---
 
-import FEConfigMethod from '../../_assets/commonMarkdown/FE_config_method.md'
+import FEConfigMethod from '../../_assets/commonMarkdown/FE_config_method.mdx'
 
-import AdminSetFrontendNote from '../../_assets/commonMarkdown/FE_config_note.md'
+import AdminSetFrontendNote from '../../_assets/commonMarkdown/FE_config_note.mdx'
 
-import StaticFEConfigNote from '../../_assets/commonMarkdown/StaticFE_config_note.md'
+import StaticFEConfigNote from '../../_assets/commonMarkdown/StaticFE_config_note.mdx'
+
+import EditionSpecificFEItem from '../../_assets/commonMarkdown/Edition_Specific_FE_Item.mdx'
 
 # FE 配置项
 
@@ -775,7 +777,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 引入版本：-
 -->
 
-##### ignore_unknown_log_id
+##### metadata_ignore_unknown_operation_type
 
 - 默认值：false
 - 类型：Boolean
@@ -1024,6 +1026,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述：是否收集查询的 Profile 信息。设置为 `true` 时，系统会收集查询的 Profile。设置为 `false` 时，系统不会收集查询的 profile。
 - 引入版本：-
 
+##### profile_info_format
+
+- 默认值：default
+- 类型：String
+- 单位：-
+- 是否动态：是
+- 描述：系统输出 Profile 的格式。有效值：`default` 和 `json`。设置为 `default` 时，Profile 为默认格式。设置为 `json` 时，系统输出 JSON 格式 Profile。
+- 引入版本：V2.5
+
 ##### enable_background_refresh_connector_metadata
 
 - 默认值：true in v3.0 and later and false in v2.5
@@ -1214,7 +1225,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ##### enable_backup_materialized_view
 
-- 默认值：true
+- 默认值：false
 - 类型：Boolean
 - 单位：-
 - 是否动态：是
@@ -2186,6 +2197,24 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述：Routine Load 导入作业的任一导入任务消费延迟，即正在消费的消息时间戳与当前时间的差值超过该阈值，且数据源中存在未被消费的消息，则导入作业置为 UNSTABLE 状态。
 - 引入版本：-
 
+##### enable_routine_load_lag_metrics
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：是否收集 Routine Load Partition Offset Lag 的指标。请注意，将此项目设置为 `true` 会调用 Kafka API 来获取 Partition 的最新 Offset。
+- 引入版本：-
+
+##### min_routine_load_lag_for_metrics
+
+- 默认值：10000
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 描述：要在监控指标中显示的 Routine Load 任务的最小 Offset Lag。Offset Lag 大于此值的 Routine Load 任务将显示在指标中。
+- 引入版本：-
+
 ##### max_tolerable_backend_down_num
 
 - 默认值：0
@@ -2832,27 +2861,6 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 - 引入版本：-
 
-<!--
-##### shard_group_clean_threshold_sec
-
-- 默认值：3600
-- 类型：Long
-- 单位：Seconds
-- 是否动态：否
-- 描述：
-- 引入版本：-
--->
-
-<!--
-##### star_mgr_meta_sync_interval_sec
-
-- 默认值：600
-- 类型：Long
-- 单位：Seconds
-- 是否动态：否
-- 描述：
-- 引入版本：-
--->
 
 ##### cloud_native_meta_port
 
@@ -3207,6 +3215,33 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 描述：系统用于判断存算分离集群中 Worker 之间 Tablet 分布平衡的阈值，不平衡因子的计算公式为 `f = (MAX(tablets) - MIN(tablets)) / AVERAGE(tablets)`。如果该因子大于 `lake_balance_tablets_threshold`，则会触发节点间 Tablet 调度。此配置项仅在 `lake_enable_balance_tablets_between_workers` 设为 `true`时生效。
 - 引入版本：v3.3.4
 
+##### shard_group_clean_threshold_sec
+
+- 默认值：3600
+- 类型：Long
+- 单位：秒
+- 是否动态：是
+- 描述：存算分离集群中，FE 清理未使用的 Tablet 和 Shard Group 的时间阈值。在此时间阈值内创建的 Tablet 和 Shard Group 不会被自动清理。
+- 引入版本：-
+
+##### star_mgr_meta_sync_interval_sec
+
+- 默认值：600
+- 类型：Long
+- 单位：秒
+- 是否动态：否
+- 描述：存算分离集群下 FE 与 StarMgr 定期同步元数据的时间间隔。
+- 引入版本：-
+
+##### meta_sync_force_delete_shard_meta
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：是否允许直接删除存算分离集群元数据，不清理远程存储上对应的数据。建议只在存算分离集群中待清理 Shard 数量过多，导致 FE 节点 JVM 内存压力过大的情况下将此项设为 `true`。注意，开启此功能会导致元数据被清理的 Shard 对应在远程存储上的数据文件无法被自动清理。
+- 引入版本：v3.2.10, v3.3.3
+
 ### 其他
 
 ##### tmp_dir
@@ -3546,15 +3581,6 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 单位：-
 - 是否动态：否
 - 描述：小文件的根目录。
-- 引入版本：-
-
-##### enable_auth_check
-
-- 默认值：true
-- 类型：Boolean
-- 单位：-
-- 是否动态：否
-- 描述：是否开启鉴权检查功能。取值范围：`TRUE` 和 `FALSE`。`TRUE` 表示开启该功能。`FALSE`表示关闭该功能。
 - 引入版本：-
 
 <!--
@@ -4393,17 +4419,6 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 -->
 
 <!--
-##### profile_info_format
-
-- 默认值：default
-- 类型：String
-- 单位：-
-- 是否动态：是
-- 描述：
-- 引入版本：-
--->
-
-<!--
 ##### ignore_invalid_privilege_authentications
 
 - 默认值：false
@@ -4936,7 +4951,7 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 默认值：8
 - 类型：Int
 - 单位：-
-- 是否动态：是
+- 是否动态：否
 - 描述：访问 JDBC Catalog 时，JDBC Connection Pool 的容量上限。
 - 引入版本：-
 
@@ -4945,7 +4960,7 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 默认值：1
 - 类型：Int
 - 单位：-
-- 是否动态：是
+- 是否动态：否
 - 描述：访问 JDBC Catalog 时，JDBC Connection Pool 中处于 idle 状态的连接最低数量。
 - 引入版本：-
 
@@ -4954,7 +4969,7 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 默认值：600000
 - 类型：Int
 - 单位：Milliseconds
-- 是否动态：是
+- 是否动态：否
 - 描述：访问 JDBC Catalog 时，连接建立的超时时长。超过参数取值时间的连接被认为是 idle 状态。
 - 引入版本：-
 
@@ -4977,3 +4992,93 @@ Compaction Score 代表了一个表分区是否值得进行 Compaction 的评分
 - 描述：
 - 引入版本：-
 -->
+
+##### mv_refresh_fail_on_filter_data
+- 默认值：true
+- 类型：布尔值
+- 单位：-
+- 是否动态：是
+- 描述：当物化视图刷新过程中存在被过滤的数据时，刷新会失败（默认值为 true）。如果设置为 false，则会忽略被过滤的数据并返回刷新成功。
+- 引入版本：-
+
+##### mv_create_partition_batch_interval_ms
+- 默认值：1000
+- 类型：布尔值
+- 单位：ms
+- 是否动态：是
+- 描述：在物化视图刷新时，如果需要一次性创建多个分区，系统将每 64 个分区划分为一个批次进行创建。为了降低因频繁创建导致失败的风险，系统在不同批次之间设置了默认的间隔时间（单位为毫秒），用于控制创建频率。
+- 引入版本：v3.3
+
+##### max_mv_refresh_failure_retry_times
+- 默认值：1
+- 类型：整数
+- 单位：-
+- 是否动态：是
+- 描述：物化视图刷新失败时的最大重试次数。
+- 引入版本：v3.3.0
+
+##### max_mv_refresh_try_lock_failure_retry_times
+- 默认值：3
+- 类型：整数
+- 单位：-
+- 是否动态：是
+- 描述：物化视图刷新过程中尝试加锁失败时的最大重试次数。
+- 引入版本：v3.3.0
+
+##### mv_refresh_try_lock_timeout_ms
+- 默认值：30000
+- 类型：整数
+- 单位：ms
+- 是否动态：是
+- 描述：物化视图刷新尝试获取基表或物化视图数据库锁的默认超时时间（单位为毫秒）。
+- 引入版本：v3.3.0
+
+##### enable_mv_refresh_collect_profile
+- 默认值：false
+- 类型：布尔值
+- 单位：-
+- 是否动态：是
+- 描述：是否为所有物化视图默认启用刷新时的 Profile 信息收集。
+- 引入版本：v3.3.0
+
+##### max_mv_task_run_meta_message_values_length
+- 默认值：16
+- 类型：整数
+- 单位：-
+- 是否动态：是
+- 描述：控制物化视图任务运行时附加信息中 set/map 类型字段值的最大长度，避免占用过多元数据内存。
+- 引入版本：v3.3.0
+
+##### max_mv_check_base_table_change_retry_times
+- 默认值：10
+- 类型：整数
+- 单位：-
+- 是否动态：是
+- 描述：刷新物化视图时，检测基表变更的最大重试次数。
+- 引入版本：v3.3.0
+
+##### mv_refresh_default_planner_optimize_timeout
+- 默认值：30000
+- 类型：整数
+- 单位：ms
+- 是否动态：是
+- 描述：刷新物化视图时优化器规划阶段的默认超时时间（单位为毫秒），默认 30 秒。
+- 引入版本：v3.3.0
+
+##### enable_mv_refresh_query_rewrite
+- 默认值：false
+- 类型：布尔值
+- 单位：-
+- 是否动态：是
+- 描述：是否开启物化视图刷新时的查询改写功能，从而可以使用重写后的物化视图代替原始基表以提升性能。
+- 引入版本：v3.3.0
+
+##### mv_create_partition_batch_interval_ms
+- 默认值：1000
+- 类型：布尔值
+- 单位：ms
+- 是否动态：是
+- 描述：在物化视图刷新时，如果需要一次性创建多个分区，系统将每 64 个分区划分为一个批次进行创建。为了降低因频繁创建导致失败的风险，系统在不同批次之间设置了默认的间隔时间（单位为毫秒），用于控制创建频率。
+- 引入版本：v3.3.0
+
+<EditionSpecificFEItem />

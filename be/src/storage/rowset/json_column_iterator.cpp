@@ -214,7 +214,9 @@ Status JsonFlatColumnIterator::next_batch(size_t* n, Column* dst) {
 
     // 2. Read flat column
     auto read = [&](ColumnIterator* iter, Column* column) { return iter->next_batch(n, column); };
-    return _read(json_column, read);
+    auto ret = _read(json_column, read);
+    dst->check_or_die();
+    return ret;
 }
 
 Status JsonFlatColumnIterator::next_batch(const SparseRange<>& range, Column* dst) {
@@ -238,7 +240,9 @@ Status JsonFlatColumnIterator::next_batch(const SparseRange<>& range, Column* ds
 
     // 2. Read flat column
     auto read = [&](ColumnIterator* iter, Column* column) { return iter->next_batch(range, column); };
-    return _read(json_column, read);
+    auto ret = _read(json_column, read);
+    dst->check_or_die();
+    return ret;
 }
 
 Status JsonFlatColumnIterator::fetch_values_by_rowid(const rowid_t* rowids, size_t size, Column* values) {
@@ -258,7 +262,9 @@ Status JsonFlatColumnIterator::fetch_values_by_rowid(const rowid_t* rowids, size
     // 2. Read flat column
     auto read = [&](ColumnIterator* iter, Column* column) { return iter->fetch_values_by_rowid(rowids, size, column); };
 
-    return _read(json_column, read);
+    auto ret = _read(json_column, read);
+    values->check_or_die();
+    return ret;
 }
 
 Status JsonFlatColumnIterator::seek_to_first() {
@@ -387,7 +393,8 @@ Status JsonDynamicFlatIterator::_dynamic_flat(Column* output, FUNC read_fn) {
     // 2. flat
     _flattener->flatten(proxy.get());
     auto result = _flattener->mutable_result();
-    json_data->set_flat_columns(_target_paths, _target_types, result);
+    json_data->set_flat_columns(_target_paths, _target_types, std::move(result));
+    output->check_or_die();
     return Status::OK();
 }
 
@@ -453,6 +460,9 @@ public:
                                                     SparseRange<>* row_ranges) override;
 
     [[nodiscard]] Status fetch_values_by_rowid(const rowid_t* rowids, size_t size, Column* values) override;
+
+    StatusOr<std::vector<std::pair<int64_t, int64_t>>> get_io_range_vec(const SparseRange<>& range,
+                                                                        Column* dst) override;
 
 private:
     template <typename FUNC>
@@ -537,7 +547,9 @@ Status JsonMergeIterator::next_batch(size_t* n, Column* dst) {
     }
 
     auto func = [&](ColumnIterator* iter, Column* column) { return iter->next_batch(n, column); };
-    return _merge(json_column, func);
+    auto ret = _merge(json_column, func);
+    dst->check_or_die();
+    return ret;
 }
 
 Status JsonMergeIterator::next_batch(const SparseRange<>& range, Column* dst) {
@@ -560,7 +572,9 @@ Status JsonMergeIterator::next_batch(const SparseRange<>& range, Column* dst) {
     }
 
     auto func = [&](ColumnIterator* iter, Column* column) { return iter->next_batch(range, column); };
-    return _merge(json_column, func);
+    auto ret = _merge(json_column, func);
+    dst->check_or_die();
+    return ret;
 }
 
 Status JsonMergeIterator::fetch_values_by_rowid(const rowid_t* rowids, size_t size, Column* dst) {
@@ -583,7 +597,9 @@ Status JsonMergeIterator::fetch_values_by_rowid(const rowid_t* rowids, size_t si
     }
 
     auto func = [&](ColumnIterator* iter, Column* column) { return iter->fetch_values_by_rowid(rowids, size, column); };
-    return _merge(json_column, func);
+    auto ret = _merge(json_column, func);
+    dst->check_or_die();
+    return ret;
 }
 
 Status JsonMergeIterator::seek_to_first() {
@@ -612,6 +628,21 @@ Status JsonMergeIterator::get_row_ranges_by_zone_map(const std::vector<const Col
                                                      const ColumnPredicate* del_predicate, SparseRange<>* row_ranges) {
     row_ranges->add({0, static_cast<rowid_t>(_reader->num_rows())});
     return Status::OK();
+}
+
+StatusOr<std::vector<std::pair<int64_t, int64_t>>> JsonMergeIterator::get_io_range_vec(const SparseRange<>& range,
+                                                                                       Column* dst) {
+    std::vector<std::pair<int64_t, int64_t>> res;
+    if (_null_iter != nullptr) {
+        ASSIGN_OR_RETURN(auto vec, _null_iter->get_io_range_vec(range, dst));
+        res.insert(res.end(), vec.begin(), vec.end());
+    }
+
+    for (size_t i = 0; i < _all_iter.size(); i++) {
+        ASSIGN_OR_RETURN(auto vec, _all_iter[i]->get_io_range_vec(range, dst));
+        res.insert(res.end(), vec.begin(), vec.end());
+    }
+    return res;
 }
 
 StatusOr<std::unique_ptr<ColumnIterator>> create_json_flat_iterator(

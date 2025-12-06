@@ -1,5 +1,6 @@
 ---
 displayed_sidebar: docs
+keywords: ['session variable']
 ---
 
 # System variables
@@ -298,6 +299,12 @@ Used for MySQL client compatibility. No practical usage.
 * **Default**: true
 * **Introduced in**: v2.5.13, v3.0.7, v3.1.4, v3.2.0, v3.3.0
 
+### enable_cbo_based_mv_rewrite
+
+* **Description**: Whether to enable materialized view rewrite in CBO phase which can maximize the likelihood of successful query rewriting (e.g., when the join order differs between materialized views and queries), but it will increase the execution time of the optimizer phase.
+* **Default**: true
+* **Introduced in**: v3.5.5, v4.0.1
+
 ### follower_query_forward_mode
 
 * **Description**: Specifies to which FE nodes the query statements are routed.
@@ -413,6 +420,12 @@ Default value: `true`.
 * **Description**: Whether to enable resource group-level [query queue](../administration/management/resource_management/query_queues.md).
 * **Default**: false, which means this feature is disabled.
 * **Introduced in**: v3.1.4
+
+### enable_insert_partial_update
+
+* **Description**: Whether to enable Partial Update for INSERT statements on Primary Key tables. When this item is set to `true` (default), if an INSERT statement specifies only a subset of columns (fewer than the number of all non-generated columns in the table), the system performs a Partial Update to update only the specified columns while preserving existing values in other columns. When set to `false`, the system uses default values for unspecified columns instead of preserving existing values. This feature is particularly useful for updating specific columns in Primary Key tables without affecting other column values.
+* **Default**: true
+* **Introduced in**: v3.3.20, v3.4.9, v3.5.8, v4.0.2
 
 ### enable_iceberg_metadata_cache
 
@@ -537,7 +550,7 @@ Used to enable the strict mode when loading data using the INSERT statement. The
 ### enable_scan_datacache
 
 * **Description**: Specifies whether to enable the Data Cache feature. After this feature is enabled, StarRocks caches hot data read from external storage systems into blocks, which accelerates queries and analysis. For more information, see [Data Cache](../data_source/data_cache.md). In versions prior to 3.2, this variable was named as `enable_scan_block_cache`.
-* **Default**: false
+* **Default**: true 
 * **Introduced in**: v2.5
 
 ### populate_datacache_mode
@@ -810,10 +823,14 @@ Used for compatibility with MySQL JDBC versions 8.0.16 and above. No practical u
 
 ### pipeline_dop
 
-* **Description**: The parallelism of a pipeline instance, which is used to adjust the query concurrency. Default value: 0, indicating the system automatically adjusts the parallelism of each pipeline instance. You can also set this variable to a value greater than 0. Generally, set the value to half the number of physical CPU cores.
+* **Description**: The parallelism of a pipeline instance, which is used to adjust the query concurrency. Default value: 0, indicating the system automatically adjusts the parallelism of each pipeline instance. This variable also controls the parallelism of loading jobs on OLAP tables. You can also set this variable to a value greater than 0. Generally, set the value to half the number of physical CPU cores. From v3.0 onwards, StarRocks adaptively adjusts this variable based on query parallelism.
 
-  From v3.0 onwards, StarRocks adaptively adjusts this variable based on query parallelism.
+* **Default**: 0
+* **Data type**: Int
 
+### pipeline_sink_dop
+
+* **Description**: The parallelism of sink for loading data into Iceberg tables and Hive tables, and unloading data using INSERT INTO FILES(). It is used to adjust the concurrency of these loading jobs. Default value: 0, indicating the system automatically adjusts the parallelism. You can also set this variable to a value greater than 0.
 * **Default**: 0
 * **Data type**: Int
 
@@ -1096,3 +1113,45 @@ The StarRocks version. Cannot be changed.
 * **Description**: Used to specify how columns are matched when StarRocks reads ORC files from Hive. The default value is `false`, which means columns in ORC files are read based on their ordinal positions in the Hive table definition. If this variable is set to `true`, columns are read based on their names.
 * **Default**: false
 * **Introduced in**: v3.1.10
+
+### enable_phased_scheduler
+
+* **Description**: Whether to enable multi-phased scheduling. When multi-phased scheduling is enabled, it will schedule fragments according to their dependencies. For example, the system will first schedule the fragment on the build side of a Shuffle Join, and then the fragment on the probe side (Note that, unlike stage-by-stage scheduling, phased scheduling is still under the MPP execution mode). Enabling multi-phased scheduling can significantly reduce memory usage for a large number of UNION ALL queries.
+* **Default**: false
+* **Introduced in**: v3.3
+
+### phased_scheduler_max_concurrency
+
+* **Description**: The concurrency for phased scheduler scheduling leaf node fragments. For example, the default value means that, in a large number of UNION ALL Scan queries, at most two scan fragments are allowed to be scheduled at the same time.
+* **Default**: 2
+* **Introduced in**: v3.3
+
+### enable_wait_dependent_event
+
+* **Description**: Whether Pipeline waits for a dependent operator to finish execution before continuing within the same fragment. For example, in a left join query, when this feature is enabled, the probe-side operator waits for the build-side operator to finish before it starts executing. Enabling this feature can reduce memory usage, but may increase the query latency. However, for queries reused in CTE, enabling this feature may increase memory usage.
+* **Default**: false
+* **Introduced in**: v3.3
+
+### enable_topn_runtime_filter
+
+* **Description**: Whether to enable TopN Runtime Filter. If this feature is enabled, a runtime filter will be dynamically constructed for ORDER BY LIMIT queries and pushed down to the scan for filtering.
+* **Default**: true
+* **Introduced in**: v3.3
+
+### enable_partition_hash_join
+
+* **Description**: Whether to enable adaptive Partition Hash Join.
+* **Default**: true
+* **Introduced in**: v3.4
+
+### spill_enable_direct_io
+
+* **Description**: Whether to skip Page Cache when reading or writing files for Spilling. If this feature is enabled, Spilling will use direct I/O mode to read or write files directly. Direct I/O mode can reduce the impact on the OS Page Cache, but it may cause increases in disk read/write time.
+* **Default**: false
+* **Introduced in**: v3.4
+
+### spill_enable_compaction
+
+* **Description**: Whether to enable Compaction for small files from Spilling. When this feature is enabled, it reduces memory usage for aggregation and sorting.
+* **Default**: true
+* **Introduced in**: v3.4

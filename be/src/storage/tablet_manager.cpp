@@ -112,11 +112,22 @@ Status TabletManager::_add_tablet_unlocked(const TabletSharedPtr& new_tablet, bo
         int64_t new_time = 0;
         int64_t old_version = 0;
         int64_t new_version = 0;
+        bool old_file_existence = true;
+        bool new_file_existence = true;
         if (new_tablet->updates() != nullptr) {
             old_time = old_tablet->updates()->max_rowset_creation_time();
             new_time = new_tablet->updates()->max_rowset_creation_time();
             old_version = old_tablet->updates()->max_version();
             new_version = new_tablet->updates()->max_version();
+            // Currently, we only perform file existence checks on Primary Key tables
+            // to determine tablet priority. This is because prior to version 3.2,
+            // the tablet priority evaluation logic was unstable and could lead to
+            // accidental garbage collection (GC) of data files during multiple BE restarts.
+            // Therefore, we've implemented file existence checks here specifically to bypass
+            // tablets whose data files might have been incorrectly GC'd. As for non-PK tables,
+            // since they don't carry this risk, we can safely ignore them for now.
+            old_file_existence = old_tablet->updates()->rowset_check_file_existence();
+            new_file_existence = new_tablet->updates()->rowset_check_file_existence();
         } else {
             old_tablet->obtain_header_rdlock();
             auto old_rowset = old_tablet->rowset_with_max_version();
@@ -127,11 +138,21 @@ Status TabletManager::_add_tablet_unlocked(const TabletSharedPtr& new_tablet, bo
             new_version = (new_rowset == nullptr) ? -1 : new_rowset->end_version();
             old_tablet->release_header_lock();
         }
-        bool replace_old = (new_version > old_version) || (new_version == old_version && new_time > old_time) ||
-                           // use for migration of primary key empty tablet
-                           (new_tablet->updates() != nullptr && old_version == 1 && new_version == 1);
 
-        if (replace_old) {
+        auto replace_old_fn = [&]() {
+            // Tablet with guaranteed data file existence is prioritized for adoption.
+            if (old_file_existence && !new_file_existence) {
+                return false;
+            } else if (!old_file_existence && new_file_existence) {
+                return true;
+            } else {
+                return (new_version > old_version) || (new_version == old_version && new_time > old_time) ||
+                       // use for migration of primary key empty tablet
+                       (new_tablet->updates() != nullptr && old_version == 1 && new_version == 1);
+            }
+        };
+
+        if (replace_old_fn()) {
             RETURN_IF_ERROR(_drop_tablet_unlocked(old_tablet->tablet_id(), kMoveFilesToTrash));
             RETURN_IF_ERROR(_update_tablet_map_and_partition_info(new_tablet));
             LOG(INFO) << "Added duplicated tablet. tablet_id=" << new_tablet->tablet_id()
@@ -423,11 +444,7 @@ Status TabletManager::drop_tablet(TTabletId tablet_id, TabletDropFlag flag) {
             // to 'RUNNING' from 'SHUTDOWN'.
             std::unique_lock l(dropped_tablet->get_header_lock());
             (void)dropped_tablet->set_tablet_state(TABLET_SHUTDOWN);
-        }
-
-        // Remove tablet meta from storage, crash the program if failed.
-        if (auto st = _remove_tablet_meta(dropped_tablet); !st.ok()) {
-            LOG(FATAL) << "Fail to remove tablet meta: " << st;
+            dropped_tablet->save_meta();
         }
 
         // Remove the tablet directory in background to avoid holding the lock of tablet map shard for long.
@@ -816,8 +833,8 @@ TabletSharedPtr TabletManager::find_best_tablet_to_do_update_compaction(DataDir*
     int64_t highest_score = 0;
     TabletSharedPtr best_tablet;
     for (const auto& tablets_shard : _tablets_shards) {
-        std::shared_lock rlock(tablets_shard.lock);
-        for (const auto& [tablet_id, tablet_ptr] : tablets_shard.tablet_map) {
+        std::vector<TabletSharedPtr> all_tablets_by_shard = _get_all_tablets_from_shard(tablets_shard);
+        for (const auto& tablet_ptr : all_tablets_by_shard) {
             if (tablet_ptr->keys_type() != PRIMARY_KEYS) {
                 continue;
             }
@@ -998,13 +1015,19 @@ Status TabletManager::report_all_tablets_info(std::map<TTabletId, TTablet>* tabl
     StarRocksMetrics::instance()->report_all_tablets_requests_total.increment(1);
 
     size_t max_tablet_rowset_num = 0;
+    TTabletId max_tablet_id = 0;
     for (const auto& tablets_shard : _tablets_shards) {
         std::vector<TabletSharedPtr> all_tablets_by_shard = _get_all_tablets_from_shard(tablets_shard);
         for (const auto& tablet_ptr : all_tablets_by_shard) {
             TTablet t_tablet;
             TTabletInfo tablet_info;
             tablet_ptr->build_tablet_report_info(&tablet_info);
-            max_tablet_rowset_num = std::max(max_tablet_rowset_num, tablet_ptr->version_count());
+
+            size_t current_rowset_num = tablet_ptr->version_count();
+            if (current_rowset_num > max_tablet_rowset_num) {
+                max_tablet_rowset_num = current_rowset_num;
+                max_tablet_id = tablet_ptr->tablet_id();
+            }
             // find expired transaction corresponding to this tablet
             TabletInfo tinfo(tablet_ptr->tablet_id(), tablet_ptr->schema_hash(), tablet_ptr->tablet_uid());
             auto find = expire_txn_map.find(tinfo);
@@ -1020,7 +1043,7 @@ Status TabletManager::report_all_tablets_info(std::map<TTabletId, TTablet>* tabl
         }
     }
     LOG(INFO) << "Report all " << tablets_info->size()
-              << " tablets info. max_tablet_rowset_num:" << max_tablet_rowset_num;
+              << " tablets info. max_tablet_rowset_num:" << max_tablet_rowset_num << " tablet_id:" << max_tablet_id;
     StarRocksMetrics::instance()->max_tablet_rowset_num.set_value(max_tablet_rowset_num);
     return Status::OK();
 }
@@ -1637,7 +1660,7 @@ void TabletManager::get_tablets_basic_infos(int64_t table_id, int64_t partition_
         for (auto& shard : _tablets_shards) {
             std::vector<TabletSharedPtr> all_tablets_by_shard = _get_all_tablets_from_shard(shard);
             for (auto& tablet : all_tablets_by_shard) {
-                auto table_id_in_meta = tablet->tablet_meta()->table_id();
+                auto table_id_in_meta = tablet->belonged_table_id();
                 if ((table_id == -1 || table_id_in_meta == table_id) &&
                     (authorized_table_ids == nullptr ||
                      authorized_table_ids->find(table_id_in_meta) != authorized_table_ids->end())) {

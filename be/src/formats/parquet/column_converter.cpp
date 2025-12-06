@@ -131,7 +131,7 @@ public:
         auto& src_null_data = src_nullable_column->null_column()->get_data();
         auto& dst_null_data = dst_nullable_column->null_column()->get_data();
 
-        size_t size = src_column->size();
+        size_t size = dst_null_data.size();
         memcpy(dst_null_data.data(), src_null_data.data(), size);
         convert_int_to_int<SourceType, DestType>(src_data.data(), dst_data.data(), size);
         dst_nullable_column->set_has_null(src_nullable_column->has_null());
@@ -371,6 +371,9 @@ Status ColumnConverterFactory::create_converter(const ParquetField& field, const
             break;
         case LogicalType::TYPE_BIGINT:
             *converter = std::make_unique<NumericToNumericConverter<int32_t, int64_t>>();
+            break;
+        case LogicalType::TYPE_DOUBLE:
+            *converter = std::make_unique<NumericToNumericConverter<int32_t, double>>();
             break;
         case LogicalType::TYPE_DATE:
             *converter = std::make_unique<Int32ToDateConverter>();

@@ -148,7 +148,7 @@ Status ParquetPositionDeleteBuilder::build(
     scanner_ctx->timezone = timezone;
     scanner_ctx->stats = scan_stats.get();
     scanner_ctx->slot_descs = slot_descriptors;
-    scanner_ctx->iceberg_schema = &iceberg_schema;
+    scanner_ctx->lake_schema = &iceberg_schema;
     scanner_ctx->materialized_columns = std::move(columns);
     scanner_ctx->scan_range = &scan_range;
     scanner_ctx->lazy_column_coalesce_counter = &_lazy_column_coalesce_counter;
@@ -369,7 +369,7 @@ Status ParquetEqualityDeleteBuilder::build(const std::string& timezone, const st
     scanner_ctx->timezone = timezone;
     scanner_ctx->stats = scan_stats.get();
     scanner_ctx->slot_descs = delete_column_tuple_desc->slots();
-    scanner_ctx->iceberg_schema = iceberg_equal_delete_schema;
+    scanner_ctx->lake_schema = iceberg_equal_delete_schema;
     scanner_ctx->materialized_columns = std::move(columns);
     scanner_ctx->scan_range = &scan_range;
     scanner_ctx->lazy_column_coalesce_counter = &_lazy_column_coalesce_counter;

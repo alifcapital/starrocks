@@ -45,9 +45,16 @@ public abstract class ScalarOperator implements Cloneable {
 
     protected boolean isCorrelated = false;
 
+    protected boolean isJoinDerived = false;
+
     private List<String> hints = Collections.emptyList();
 
     private boolean isIndexOnlyFilter = false;
+
+    // 1. depth is scalar operator's nested depth, it starts from 0(eg: ColumnRefOperator/ConstantOperator), incr +1 for each
+    // child nested; if it contains multi children, the max depth of children will be added to this operator's depth.
+    // 2. depth is marked to avoid infinite loop in some cases.
+    protected int depth = 0;
 
     public ScalarOperator(OperatorType opType, Type type) {
         this.opType = requireNonNull(opType, "opType is null");
@@ -143,6 +150,39 @@ public abstract class ScalarOperator implements Cloneable {
 
     @Override
     public abstract boolean equals(Object other);
+
+    public int getDepth() {
+        return depth;
+    }
+
+    /**
+     * Incr depth for this operator: this.depth = 1 + max(depth of children)
+     */
+    public void incrDepth(List<ScalarOperator> args) {
+        // always add 1 for self
+        this.depth += 1;
+        if (args == null) {
+            return;
+        }
+        this.depth += args.stream().map(arg -> arg.getDepth()).max(Integer::compareTo).orElse(0);
+    }
+
+    /**
+     * Incr depth for this operator: this.depth = 1 + max(depth of children)
+     */
+    public void incrDepth(ScalarOperator... args) {
+        // always add 1 for self
+        this.depth += 1;
+
+        if (args == null) {
+            return;
+        }
+        int ans = 0;
+        for (ScalarOperator arg : args) {
+            ans = Math.max(ans, arg.getDepth());
+        }
+        this.depth += ans;
+    }
 
     /**
      * equivalent means logical equals, but may physical different, such as with different id
@@ -253,6 +293,14 @@ public abstract class ScalarOperator implements Cloneable {
 
     public void setCorrelated(boolean correlated) {
         isCorrelated = correlated;
+    }
+
+    public boolean isJoinDerived() {
+        return isJoinDerived;
+    }
+
+    public void setJoinDerived(boolean isJoinDerived) {
+        this.isJoinDerived = isJoinDerived;
     }
 
     // whether ScalarOperator are equals without id

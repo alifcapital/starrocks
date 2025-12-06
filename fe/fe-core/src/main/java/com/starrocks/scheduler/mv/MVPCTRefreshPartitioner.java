@@ -24,6 +24,7 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.Config;
 import com.starrocks.common.util.concurrent.lock.LockTimeoutException;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
@@ -34,6 +35,7 @@ import com.starrocks.scheduler.TableSnapshotInfo;
 import com.starrocks.scheduler.TaskRunContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.AlterTableClauseAnalyzer;
+import com.starrocks.sql.analyzer.MaterializedViewAnalyzer;
 import com.starrocks.sql.ast.DropPartitionClause;
 import com.starrocks.sql.common.DmlException;
 import org.apache.logging.log4j.Logger;
@@ -41,6 +43,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static com.starrocks.catalog.MvRefreshArbiter.getMvBaseTableUpdateInfo;
 import static com.starrocks.catalog.MvRefreshArbiter.needsToRefreshTable;
@@ -50,6 +53,8 @@ import static com.starrocks.catalog.MvRefreshArbiter.needsToRefreshTable;
  * refresh.
  */
 public abstract class MVPCTRefreshPartitioner {
+    protected static final int CREATE_PARTITION_BATCH_SIZE = 64;
+
     protected final MvTaskRunContext mvContext;
     protected final TaskRunContext context;
     protected final Database db;
@@ -132,7 +137,9 @@ public abstract class MVPCTRefreshPartitioner {
      * Check whether the base table is supported partition refresh or not.
      */
     public static boolean isPartitionRefreshSupported(Table baseTable) {
-        return ConnectorPartitionTraits.isSupportPCTRefresh(baseTable.getType());
+        // An external table is not supported to refresh by partition.
+        return ConnectorPartitionTraits.isSupportPCTRefresh(baseTable.getType()) &&
+                !MaterializedViewAnalyzer.isExternalTableFromResource(baseTable);
     }
 
     /**
@@ -223,7 +230,7 @@ public abstract class MVPCTRefreshPartitioner {
             if (tableColumnMap.containsKey(snapshotTable)) {
                 continue;
             }
-            if (needsToRefreshTable(mv, snapshotTable, false)) {
+            if (needsToRefreshTable(mv, snapshotInfo.getBaseTableInfo(), snapshotTable, false)) {
                 return true;
             }
         }
@@ -242,17 +249,18 @@ public abstract class MVPCTRefreshPartitioner {
             if (!isPartitionRefreshSupported(snapshotTable)) {
                 return true;
             }
-            if (needsToRefreshTable(mv, snapshotTable, false)) {
+            if (needsToRefreshTable(mv, snapshotInfo.getBaseTableInfo(), snapshotTable, false)) {
                 return true;
             }
         }
         return false;
     }
 
-    protected void dropPartition(Database db, MaterializedView materializedView, String mvPartitionName) {
+    public void dropPartition(Database db, MaterializedView materializedView, String mvPartitionName) {
         String dropPartitionName = materializedView.getPartition(mvPartitionName).getName();
         Locker locker = new Locker();
-        if (!locker.lockDatabaseAndCheckExist(db, materializedView, LockType.WRITE)) {
+        if (!locker.tryLockTableWithIntensiveDbLock(db, materializedView.getId(), LockType.WRITE,
+                Config.mv_refresh_try_lock_timeout_ms, TimeUnit.MILLISECONDS)) {
             logger.warn("Fail to lock database {} in drop partition for mv refresh {}", db.getFullName(),
                     materializedView.getName());
             throw new DmlException("drop partition failed. database:" + db.getFullName() + " not exist");

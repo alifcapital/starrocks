@@ -43,6 +43,8 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.common.Config;
+import com.starrocks.common.ErrorCode;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.UserException;
 import com.starrocks.common.util.FrontendDaemon;
@@ -98,7 +100,9 @@ public class PublishVersionDaemon extends FrontendDaemon {
 
     private ThreadPoolExecutor lakeTaskExecutor;
     private ThreadPoolExecutor deleteTxnLogExecutor;
-    private Set<Long> publishingLakeTransactions;
+
+    @VisibleForTesting
+    protected Set<Long> publishingLakeTransactions;
 
     @VisibleForTesting
     protected Set<Long> publishingLakeTransactionsBatchTableId;
@@ -328,8 +332,21 @@ public class PublishVersionDaemon extends FrontendDaemon {
             }
 
             if (shouldFinishTxn) {
-                globalTransactionMgr.finishTransaction(transactionState.getDbId(), transactionState.getTransactionId(),
-                        publishErrorReplicaIds);
+                try {
+                    // Attempt to finish the transaction with a lock timeout. If it fails, it will be retried in the next cycle.
+                    // This approach prevents blocking subsequent transactions due to the current one.
+                    globalTransactionMgr.finishTransaction(transactionState.getDbId(),
+                            transactionState.getTransactionId(), publishErrorReplicaIds,
+                            Config.finish_transaction_default_lock_timeout_ms);
+                } catch (ErrorReportException exception) {
+                    if (exception.getErrorCode() == ErrorCode.ERR_LOCK_ERROR) {
+                        LOG.warn("Fail to get lock to finish transaction {}, error: {}. Will retry later",
+                                transactionState.getTransactionId(), exception.getMessage());
+                        continue;
+                    } else {
+                        throw exception;
+                    }
+                }
                 if (transactionState.getTransactionStatus() != TransactionStatus.VISIBLE) {
                     transactionState.updateSendTaskTime();
                     LOG.debug("publish version for transaction {} failed, has {} error replicas during publish",
@@ -379,11 +396,12 @@ public class PublishVersionDaemon extends FrontendDaemon {
             if (!publishingTransactions.contains(txnId)) { // the set did not already contain the specified element
                 Set<Long> publishingLakeTransactionsBatchTableId = getPublishingLakeTransactionsBatchTableId();
                 // When the `enable_lake_batch_publish_version` switch is just set to false,
-                // it is possible that the result of publish task has not been returned,
+                // it is possible that the result of publish task
+                // sent by `publishVersionForLakeTableBatch` has not been returned,
                 // we need to wait for the result to return if the same table is involved.
                 if (!txnState.getTableIdList().stream()
                         .allMatch(id -> !publishingLakeTransactionsBatchTableId.contains(id))) {
-                    LOG.info(
+                    LOG.debug(
                             "maybe enable_lake_batch_publish_version is set to false just now, txn {} will be published later",
                             txnState.getTransactionId());
                     continue;
@@ -397,20 +415,49 @@ public class PublishVersionDaemon extends FrontendDaemon {
 
     void publishVersionForLakeTableBatch(List<TransactionStateBatch> readyTransactionStatesBatch) {
         Set<Long> publishingLakeTransactionsBatchTableId = getPublishingLakeTransactionsBatchTableId();
+        Set<Long> publishingTransactions = getPublishingLakeTransactions();
         for (TransactionStateBatch txnStateBatch : readyTransactionStatesBatch) {
             if (txnStateBatch.size() == 1) {
                 // there are two situations:
                 // 1. the transactionState in txnStateBatch is with multi-tables
                 // 2. only one transactionState with the table committed in the interval of publish.
                 TransactionState state = txnStateBatch.transactionStates.get(0);
+                if (publishingTransactions.contains(state.getTransactionId())) {
+                    // When the `enable_lake_batch_publish_version` switch is just set to true,
+                    // it is possible that the result of publish task
+                    // sent by `publishVersionForLakeTable` has not been returned,
+                    // we need to wait for the result to return if the same txn is involved.
+                    continue;
+                }
                 List<Long> tableIdList = state.getTableIdList();
-                if (publishingLakeTransactionsBatchTableId.addAll(tableIdList)) {
+                if (tableIdList.stream().noneMatch(publishingLakeTransactionsBatchTableId::contains)) {
+                    publishingLakeTransactionsBatchTableId.addAll(tableIdList);
                     CompletableFuture<Void> future = publishLakeTransactionAsync(state);
-                    future.thenRun(() -> publishingLakeTransactionsBatchTableId.removeAll(tableIdList));
+                    future.thenRun(() -> tableIdList.forEach(publishingLakeTransactionsBatchTableId::remove));
                 }
             } else {
                 long tableId = txnStateBatch.getTableId();
-                if (publishingLakeTransactionsBatchTableId.add(tableId)) {
+                if (!publishingLakeTransactionsBatchTableId.contains(tableId)) {
+                    // When the `enable_lake_batch_publish_version` switch is just set to true,
+                    // it is possible that the result of publish task
+                    // sent by `publishVersionForLakeTable` has not been returned,
+                    // we need to wait for the result to return if the same txn is involved.
+                    boolean needWait = false;
+                    for (TransactionState txnState : txnStateBatch.transactionStates) {
+                        if (publishingTransactions.contains(txnState.getTransactionId())) {
+                            LOG.debug(
+                                    "maybe enable_lake_batch_publish_version is set to true just now, " +
+                                            "txn {} will be published later",
+                                    txnState.getTransactionId());
+                            needWait = true;
+                            break;
+                        }
+                    }
+                    if (needWait) {
+                        continue;
+                    }
+                    publishingLakeTransactionsBatchTableId.add(tableId);
+
                     CompletableFuture<Void> future = publishLakeTransactionBatchAsync(txnStateBatch);
                     future.thenRun(() -> publishingLakeTransactionsBatchTableId.remove(tableId));
                 }
@@ -470,7 +517,9 @@ public class PublishVersionDaemon extends FrontendDaemon {
         final List<Long> versions = publishVersionData.getCommitVersions();
         final List<TxnInfoPB> txnInfos = publishVersionData.getTxnInfos();
 
-        Map<Long, Set<Tablet>> shadowTabletsMap = new HashMap<>();
+        //  Record which transactions can be published in a batch for each shadow index.
+        //  The mapping is shadow index id -> ShadowIndexTxnBatch
+        Map<Long, ShadowIndexTxnBatch> shadowIndexTxnBatches = null;
         Set<Tablet> normalTablets = null;
         long warehouseId = WarehouseManager.DEFAULT_WAREHOUSE_ID;
 
@@ -490,8 +539,11 @@ public class PublishVersionDaemon extends FrontendDaemon {
                 LOG.info("partition is null in publish partition batch");
                 return true;
             }
-            if (partition.getVisibleVersion() + 1 != versions.get(0)) {
-                LOG.error("publish partition batch partition.getVisibleVersion() + 1 != version.get(0)" + " "
+
+            // this can happen when the table is doing schema change
+            if (partition.getVisibleVersion() + 1 != versions.get(0) && publishVersionData.getTransactionStates().get(0).
+                    getSourceType() != TransactionState.LoadJobSourceType.REPLICATION) {
+                LOG.debug("publish partition batch partition.getVisibleVersion() + 1 != version.get(0)" + " "
                         + partition.getId() + " " + partition.getVisibleVersion() + " " + versions.get(0));
                 return false;
             }
@@ -501,18 +553,22 @@ public class PublishVersionDaemon extends FrontendDaemon {
                 warehouseId = txnState.getWarehouseId();
                 List<MaterializedIndex> indexes = txnState.getPartitionLoadedTblIndexes(table.getId(), partition);
                 for (MaterializedIndex index : indexes) {
-                    if (!index.visibleForTransaction(txnState.getTransactionId())) {
-                        LOG.info("Ignored index {} for transaction {}", table.getIndexNameById(index.getId()),
-                                txnState.getTransactionId());
-                        continue;
-                    }
                     if (index.getState() == MaterializedIndex.IndexState.SHADOW) {
-                        if (shadowTabletsMap.containsKey(versions.get(i))) {
-                            shadowTabletsMap.get(versions.get(i)).addAll(index.getTablets());
-                        } else {
-                            Set<Tablet> tabletsNew = new HashSet<>(index.getTablets());
-                            shadowTabletsMap.put(versions.get(i), tabletsNew);
+                        // sanity check. should not happen
+                        if (!index.visibleForTransaction(txnState.getTransactionId())) {
+                            LOG.warn("Ignore shadow index included in the transaction but not visible, " +
+                                    "partitionId: {}, partitionName: {}, txnId: {}, indexId: {}, indexName: {}",
+                                    partition.getId(), partition.getName(), txnState.getTransactionId(),
+                                    index.getId(), table.getIndexNameById(index.getId()));
+                            continue;
                         }
+                        if (shadowIndexTxnBatches == null) {
+                            shadowIndexTxnBatches = new HashMap<>();
+                        }
+                        ShadowIndexTxnBatch txnBatch =
+                                shadowIndexTxnBatches.computeIfAbsent(index.getId(),
+                                        id -> new ShadowIndexTxnBatch(index.getTablets()));
+                        txnBatch.txnIds.add(txnState.getTransactionId());
                     } else {
                         normalTablets = (normalTablets == null) ? Sets.newHashSet() : normalTablets;
                         normalTablets.addAll(index.getTablets());
@@ -527,13 +583,30 @@ public class PublishVersionDaemon extends FrontendDaemon {
         long endVersion = versions.get(versions.size() - 1);
 
         try {
-            for (Map.Entry<Long, Set<Tablet>> item : shadowTabletsMap.entrySet()) {
-                int index = versions.indexOf(item.getKey());
-                List<Tablet> publishShadowTablets = new ArrayList<>(item.getValue());
-                Utils.publishLogVersionBatch(publishShadowTablets,
-                        txnInfos.subList(index, txnInfos.size()).stream().map(i -> i.txnId)
-                                .collect(Collectors.toList()),
-                        versions.subList(index, versions.size()), warehouseId);
+            if (shadowIndexTxnBatches != null) {
+                for (ShadowIndexTxnBatch txnBatch : shadowIndexTxnBatches.values()) {
+                    List<Tablet> shadowIndexTablets = txnBatch.tablets;
+                    if (shadowIndexTablets.isEmpty()) {
+                        continue;
+                    }
+                    List<TxnInfoPB> txnInfoList = txnInfos;
+                    List<Long> versionList = versions;
+                    if (txnBatch.txnIds.size() != transactionStates.size()) {
+                        txnInfoList = new ArrayList<>(txnBatch.txnIds.size());
+                        versionList = new ArrayList<>(txnBatch.txnIds.size());
+                        for (int i = 0; i < transactionStates.size(); i++) {
+                            TransactionState txnState = transactionStates.get(i);
+                            if (txnBatch.txnIds.contains(txnState.getTransactionId())) {
+                                txnInfoList.add(txnInfos.get(i));
+                                versionList.add(versions.get(i));
+                            }
+                        }
+                    }
+                    Utils.publishLogVersionBatch(
+                            shadowIndexTablets,
+                            txnInfoList.stream().map(i -> i.txnId).collect(Collectors.toList()),
+                            versionList, warehouseId);
+                }
             }
             if (CollectionUtils.isNotEmpty(normalTablets)) {
                 Map<Long, Double> compactionScores = new HashMap<>();
@@ -795,6 +868,18 @@ public class PublishVersionDaemon extends FrontendDaemon {
             LOG.error("Fail to publish partition {} of txn {}: {}", partitionCommitInfo.getPartitionId(),
                     txnId, e.getMessage());
             return false;
+        }
+    }
+
+    // Transactions that can be published in a batch for a partition of a shadow index
+    private static class ShadowIndexTxnBatch {
+        // the txn ids that include the shadow index
+        Set<Long> txnIds = new HashSet<>();
+        // the tablets in one partition of the shadow index
+        List<Tablet> tablets = new ArrayList<>();
+
+        public ShadowIndexTxnBatch(List<Tablet> tablets) {
+            this.tablets.addAll(tablets);
         }
     }
 }

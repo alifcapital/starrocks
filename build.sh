@@ -271,6 +271,11 @@ else
     done
 fi
 
+if [[ "${BUILD_TYPE}" == "ASAN" && "${WITH_GCOV}" == "ON" ]]; then
+    echo "Error: ASAN and gcov cannot be enabled at the same time. Please disable one of them."
+    exit 1
+fi
+
 if [[ ${HELP} -eq 1 ]]; then
     usage
     exit
@@ -509,8 +514,8 @@ if [ ${BUILD_BE} -eq 1 ]; then
 
     install -d ${STARROCKS_OUTPUT}/be/bin  \
                ${STARROCKS_OUTPUT}/be/conf \
-               ${STARROCKS_OUTPUT}/be/lib/hadoop-lib \
-               ${STARROCKS_OUTPUT}/be/www  \
+               ${STARROCKS_OUTPUT}/be/lib/hadoop \
+               ${STARROCKS_OUTPUT}/be/www
 
     cp -r -p ${STARROCKS_HOME}/be/output/bin/* ${STARROCKS_OUTPUT}/be/bin/
     cp -r -p ${STARROCKS_HOME}/be/output/conf/be.conf ${STARROCKS_OUTPUT}/be/conf/
@@ -544,8 +549,10 @@ if [ ${BUILD_BE} -eq 1 ]; then
     cp -r -p ${STARROCKS_HOME}/be/output/www/* ${STARROCKS_OUTPUT}/be/www/
 
     if [ "${BUILD_JAVA_EXT}" == "ON" ]; then
-        cp -r -p ${STARROCKS_THIRDPARTY}/installed/hadoop/lib/native ${STARROCKS_OUTPUT}/be/lib/hadoop-lib/
-        cp -r -p ${STARROCKS_HOME}/java-extensions/hadoop-lib/target/hadoop-lib ${STARROCKS_OUTPUT}/be/lib/hadoop-lib/
+        # note that conf files will not be overwritten when doing upgrade.
+        # so we have to preserve directory structure to avoid upgrade incompatibility.
+        cp -r -p ${STARROCKS_THIRDPARTY}/installed/hadoop/lib/native ${STARROCKS_OUTPUT}/be/lib/hadoop/native
+        cp -r -p ${STARROCKS_HOME}/java-extensions/hadoop-lib/target/hadoop-lib ${STARROCKS_OUTPUT}/be/lib/hadoop/common
         cp -r -p ${STARROCKS_HOME}/java-extensions/jdbc-bridge/target/starrocks-jdbc-bridge-jar-with-dependencies.jar ${STARROCKS_OUTPUT}/be/lib/jni-packages
         cp -r -p ${STARROCKS_HOME}/java-extensions/udf-extensions/target/udf-extensions-jar-with-dependencies.jar ${STARROCKS_OUTPUT}/be/lib/jni-packages
         cp -r -p ${STARROCKS_HOME}/java-extensions/java-utils/target/starrocks-java-utils.jar ${STARROCKS_OUTPUT}/be/lib/jni-packages

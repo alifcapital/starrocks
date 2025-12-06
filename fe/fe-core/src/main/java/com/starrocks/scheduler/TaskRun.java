@@ -18,8 +18,10 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.StringLiteral;
+import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.Table;
@@ -28,6 +30,8 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.load.loadv2.InsertLoadJob;
+import com.starrocks.privilege.PrivilegeBuiltinConstants;
+import com.starrocks.privilege.PrivilegeException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryState;
 import com.starrocks.qe.StmtExecutor;
@@ -52,6 +56,8 @@ public class TaskRun implements Comparable<TaskRun> {
 
     private static final Logger LOG = LogManager.getLogger(TaskRun.class);
 
+    // NOTE: ALL task run properties should be defined here, and the associated properties configuration below should be
+    // added carefully.
     public static final String MV_ID = "mvId";
     public static final String PARTITION_START = "PARTITION_START";
     public static final String PARTITION_END = "PARTITION_END";
@@ -59,12 +65,32 @@ public class TaskRun implements Comparable<TaskRun> {
     public static final String PARTITION_VALUES = "PARTITION_VALUES";
     public static final String FORCE = "FORCE";
     public static final String START_TASK_RUN_ID = "START_TASK_RUN_ID";
-    // All properties that can be set in TaskRun
-    public static final Set<String> TASK_RUN_PROPERTIES = ImmutableSet.of(
-            MV_ID, PARTITION_START, PARTITION_END, FORCE, START_TASK_RUN_ID, PARTITION_VALUES, PROPERTIES_WAREHOUSE);
-
     // Only used in FE's UT
     public static final String IS_TEST = "__IS_TEST__";
+
+    // TODO: Refactor this for better extensibility later by using a class rather than a map.
+    // MV's task run can be generated from the last task run, those properties are not allowed to be copied from one task run
+    // to another and must be only set specifically for each run but cannot be extended from the last task run.
+    // eg: `FORCE` is only allowed to set in the first task run and cannot be copied into the following task run.
+    public static final Set<String> MV_UNCOPYABLE_PROPERTIES = ImmutableSet.of(
+            PARTITION_START, PARTITION_END, PARTITION_VALUES);
+    // If there are many pending mv task runs, we can merge some of them by comparing the properties, those properties that are
+    // used to check equality of task runs and we can ignore the other properties.
+    // eg:
+    // - `FORCE` is used to check equality of task runs because the refresh partitions are different for each task run.
+    // - `PROPERTIES_WAREHOUSE`/`START_TASK_RUN_ID` is no need to check equality of task runs because they will not affect
+    //  the task run's result.
+    public static final Set<String> MV_COMPARABLE_PROPERTIES = ImmutableSet.of(
+            MV_ID, PARTITION_START, PARTITION_END, PARTITION_VALUES, FORCE);
+    // Properties that can be set in TaskRun which are used to distinguish other noisy properties from users' defined properties.
+    // and will ignore other properties in the task run history.
+    // This should be only used in the task run history table and should not used for checking task run's real properties
+    // because this is not a complete list of task run properties.
+    public static final Set<String> RESERVED_HISTORY_TASK_RUN_PROPERTIES = ImmutableSet.of(
+            MV_ID, PARTITION_START, PARTITION_END, FORCE, START_TASK_RUN_ID, PARTITION_VALUES, PROPERTIES_WAREHOUSE, IS_TEST);
+
+    public static final int INVALID_TASK_PROGRESS = -1;
+
     private boolean isKilled = false;
 
     @SerializedName("taskId")
@@ -91,7 +117,7 @@ public class TaskRun implements Comparable<TaskRun> {
 
     private ExecuteOption executeOption;
 
-    TaskRun() {
+    public TaskRun() {
         future = new CompletableFuture<>();
         taskRunId = UUIDUtil.genUUID().toString();
     }
@@ -215,13 +241,6 @@ public class TaskRun implements Comparable<TaskRun> {
         context.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
         context.setCurrentCatalog(task.getCatalogName());
         context.setDatabase(task.getDbName());
-        context.setQualifiedUser(status.getUser());
-        if (status.getUserIdentity() != null) {
-            context.setCurrentUserIdentity(status.getUserIdentity());
-        } else {
-            context.setCurrentUserIdentity(UserIdentity.createAnalyzedUserIdentWithIp(status.getUser(), "%"));
-        }
-        context.setCurrentRoleIds(context.getCurrentUserIdentity());
         context.getState().reset();
         context.setQueryId(UUID.fromString(status.getQueryId()));
         context.setIsLastStmt(true);
@@ -230,7 +249,40 @@ public class TaskRun implements Comparable<TaskRun> {
         // NOTE: Ensure the thread local connect context is always the same with the newest ConnectContext.
         // NOTE: Ensure this thread local is removed after this method to avoid memory leak in JVM.
         context.setThreadLocalInfo();
+        // NOTE: The switchUser might depend on the thread-local context if it's LDAP user
+        switchUser(context);
         return context;
+    }
+
+    /**
+     * Creator-based: record the creator(user) of MV, refresh the MV with same user
+     * - It's suitable for most scenarios, especially for the sql needs proper user
+     * Root-based: always use the ROOT to refresh the MV
+     * - It's suitable for LDAP-based authorization system, which lacks a proper user for authorization
+     */
+    private void switchUser(ConnectContext context) {
+        if (!Config.mv_use_creator_based_authorization) {
+            context.setQualifiedUser(AuthenticationMgr.ROOT_USER);
+            context.setCurrentUserIdentity(UserIdentity.ROOT);
+            context.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
+        } else {
+            context.setQualifiedUser(status.getUser());
+            if (status.getUserIdentity() != null) {
+                context.setCurrentUserIdentity(status.getUserIdentity());
+            } else {
+                context.setCurrentUserIdentity(UserIdentity.createAnalyzedUserIdentWithIp(status.getUser(), "%"));
+            }
+            // For internal task runs (e.g., MV refresh), always activate all roles of the task user
+            // to avoid relying on session default roles which may be empty (causing privilege errors).
+            try {
+                context.setCurrentRoleIds(GlobalStateMgr.getCurrentState().getAuthorizationMgr()
+                        .getRoleIdsByUser(context.getCurrentUserIdentity()));
+            } catch (PrivilegeException e) {
+                LOG.warn("TaskRun {} set role failed", taskRunId, e);
+                // Fallback to previous behavior if fetching roles fails
+                context.setCurrentRoleIds(context.getCurrentUserIdentity());
+            }
+        }
     }
 
     public boolean executeTaskRun() throws Exception {
@@ -246,9 +298,15 @@ public class TaskRun implements Comparable<TaskRun> {
         Map<String, String> newProperties = refreshTaskProperties(runCtx);
         properties.putAll(newProperties);
         Map<String, String> taskRunContextProperties = Maps.newHashMap();
-        for (String key : properties.keySet()) {
+        for (Map.Entry<String, String> entry : properties.entrySet()) {
+            String key = entry.getKey();
+            // if task contains session properties, we should remove the prefix
+            if (key.startsWith(PropertyAnalyzer.PROPERTIES_MATERIALIZED_VIEW_SESSION_PREFIX)) {
+                key = key.substring(PropertyAnalyzer.PROPERTIES_MATERIALIZED_VIEW_SESSION_PREFIX.length());
+            }
+            String value = entry.getValue();
             try {
-                runCtx.modifySystemVariable(new SystemVariable(key, new StringLiteral(properties.get(key))), true);
+                runCtx.modifySystemVariable(new SystemVariable(key, new StringLiteral(value)), true);
             } catch (DdlException e) {
                 // not session variable
                 taskRunContextProperties.put(key, properties.get(key));

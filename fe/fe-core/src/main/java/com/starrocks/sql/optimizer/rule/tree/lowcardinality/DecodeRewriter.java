@@ -101,7 +101,7 @@ public class DecodeRewriter extends OptExpressionVisitor<OptExpression, ColumnRe
             OptExpression child = optExpression.inputAt(i);
 
             DecodeInfo childDecodeInfo = context.operatorDecodeInfo.getOrDefault(child.getOp(), DecodeInfo.EMPTY);
-            child = rewriteImpl(child, childFragmentUsedDictExpr);
+            child = rewriteImpl(child, childFragmentUsedDictExpr.clone());
             if (decodeInfo.decodeStringColumns.isIntersect(childDecodeInfo.outputStringColumns)) {
                 // if child's output dict column required decode, insert decode node
                 child = insertDecodeNode(child, childDecodeInfo.outputStringColumns, decodeInfo.decodeStringColumns);
@@ -309,12 +309,16 @@ public class DecodeRewriter extends OptExpressionVisitor<OptExpression, ColumnRe
                 }
 
                 inputStringRefs.union(fnOutputs.get(i));
-                fnInputs.set(i, context.stringRefToDictRefMap.getOrDefault(fnInputs.get(i), fnInputs.get(i)));
-                fnOutputs.set(i, context.stringRefToDictRefMap.getOrDefault(fnOutputs.get(i), fnOutputs.get(i)));
+                ColumnRefOperator input = context.stringRefToDictRefMap.getOrDefault(fnInputs.get(i), fnInputs.get(i));
+                ColumnRefOperator output = context.stringRefToDictRefMap.getOrDefault(fnOutputs.get(i), fnOutputs.get(i));
+                fnInputs.set(i, input);
+                fnOutputs.set(i, output);
+                fragmentUseDictExprs.union(input);
             }
             function = (TableFunction) Expr.getBuiltinFunction(FunctionSet.UNNEST,
                     fnInputs.stream().map(ScalarOperator::getType).toArray(Type[]::new), function.getArgNames(),
                     Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+            function.setIsLeftJoin(tableFunc.getFn().isLeftJoin());
         }
 
         ScalarOperator predicate = rewritePredicate(tableFunc.getPredicate(), inputStringRefs);

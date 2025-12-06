@@ -67,18 +67,16 @@ public class QueryTransformer {
     private final ConnectContext session;
     private final List<ColumnRefOperator> correlation = new ArrayList<>();
     private final CTETransformerContext cteContext;
-    private final boolean inlineView;
     private final MVTransformerContext mvTransformerContext;
     public static final String GROUPING_ID = "GROUPING_ID";
     public static final String GROUPING = "GROUPING";
 
     public QueryTransformer(ColumnRefFactory columnRefFactory, ConnectContext session,
-                            CTETransformerContext cteContext, boolean inlineView,
+                            CTETransformerContext cteContext,
                             MVTransformerContext mvTransformerContext) {
         this.columnRefFactory = columnRefFactory;
         this.session = session;
         this.cteContext = cteContext;
-        this.inlineView = inlineView;
         this.mvTransformerContext = mvTransformerContext;
     }
 
@@ -168,7 +166,7 @@ public class QueryTransformer {
     private OptExprBuilder planFrom(Relation node, CTETransformerContext cteContext) {
         TransformerContext transformerContext = new TransformerContext(
                 columnRefFactory, session, new ExpressionMapping(new Scope(RelationId.anonymous(), new RelationFields())),
-                cteContext, inlineView, mvTransformerContext);
+                cteContext, mvTransformerContext);
         return new RelationTransformer(transformerContext).visit(node).getRootBuilder();
     }
 
@@ -590,6 +588,13 @@ public class QueryTransformer {
 
             LogicalRepeatOperator repeatOperator =
                     new LogicalRepeatOperator(repeatOutput, repeatColumnRefList, groupingIds);
+
+            // constant group-by column in grouping-set should not propagate upwards, since repeat operator
+            // would output NULL values for this constant group-by column and projection operator upon
+            // aggregate operator would substitute this values with constant values mistakenly, so NULL values
+            // is eliminated.
+            groupByColumnRefs.forEach(groupByCol ->
+                    groupingTranslations.getColumnRefToConstOperators().remove(groupByCol));
             subOpt = new OptExprBuilder(repeatOperator, Lists.newArrayList(subOpt), groupingTranslations);
         }
 

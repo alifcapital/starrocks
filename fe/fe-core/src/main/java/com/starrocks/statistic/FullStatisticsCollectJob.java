@@ -89,9 +89,6 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
                     "   partition_name, row_count, data_size, ndv, null_count, max, min, update_time \n" +
                     "FROM " + TABLE_NAME + "\n" +
                     "WHERE `table_id`=$tableId AND `partition_id`=$sourcePartitionId";
-    private static final String DELETE_PARTITION_TEMPLATE =
-            "DELETE FROM " + TABLE_NAME + "\n" +
-                    "WHERE `table_id`=$tableId AND `partition_id`=$sourcePartitionId";
 
     private final List<Long> partitionIdList;
 
@@ -146,6 +143,9 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
             } catch (Exception e) {
                 failedNum++;
                 LOG.warn("collect statistics task failed in job: {}, {}", this, sql, e);
+                if (e.getMessage().contains("USER_CANCEL")) {
+                    throw e;
+                }
 
                 double failureRatio = 1.0 * failedNum / collectSQLList.size();
                 if (collectSQLList.size() < 100) {
@@ -359,11 +359,6 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
         {
             StringWriter sw = new StringWriter();
             DEFAULT_VELOCITY_ENGINE.evaluate(context, sw, "", OVERWRITE_PARTITION_TEMPLATE);
-            result.add(sw.toString());
-        }
-        {
-            StringWriter sw = new StringWriter();
-            DEFAULT_VELOCITY_ENGINE.evaluate(context, sw, "", DELETE_PARTITION_TEMPLATE);
             result.add(sw.toString());
         }
         return result;

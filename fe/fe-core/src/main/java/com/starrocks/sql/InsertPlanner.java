@@ -380,6 +380,9 @@ public class InsertPlanner {
                         nullExprInAutoIncrement, enableAutomaticPartition, session.getCurrentWarehouseId());
                 if (insertStmt.usePartialUpdate()) {
                     ((OlapTableSink) dataSink).setPartialUpdateMode(TPartialUpdateMode.AUTO_MODE);
+                    if (insertStmt.autoIncrementPartialUpdate()) {
+                        ((OlapTableSink) dataSink).setMissAutoIncrementColumn();
+                    }
                 }
                 if (olapTable.getAutomaticBucketSize() > 0) {
                     ((OlapTableSink) dataSink).setAutomaticBucketSize(olapTable.getAutomaticBucketSize());
@@ -908,7 +911,7 @@ public class InsertPlanner {
             return new PhysicalPropertySet();
         }
 
-        List<Column> columns = table.getFullSchema();
+        List<Column> columns = outputFullSchema;
         Preconditions.checkState(columns.size() == outputColumns.size(),
                 "outputColumn's size must equal with table's column size");
 

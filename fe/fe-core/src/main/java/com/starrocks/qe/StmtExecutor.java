@@ -83,6 +83,7 @@ import com.starrocks.common.util.ProfileManager;
 import com.starrocks.common.util.ProfilingExecPlan;
 import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.RuntimeProfileParser;
+import com.starrocks.common.util.SqlUtils;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.common.util.concurrent.lock.LockType;
@@ -283,7 +284,7 @@ public class StmtExecutor {
     private List<StmtExecutor> subStmtExecutors;
     private Optional<Boolean> isForwardToLeaderOpt = Optional.empty();
     private HttpResultSender httpResultSender;
-    private PrepareStmtContext prepareStmtContext;
+    private PrepareStmtContext prepareStmtContext = null;
     private boolean isInternalStmt = false;
 
     public StmtExecutor(ConnectContext ctx, StatementBase parsedStmt) {
@@ -476,6 +477,26 @@ public class StmtExecutor {
         return parsedStmt;
     }
 
+    public String getPreparedStmtId() {
+        // For EXECUTE, either `parsedStmt` is an `ExecuteStmt`, or `prepareStmtContext` has already been set.
+        // Initially, `parsedStmt` is an `ExecuteStmt`. After it matches the corresponding `PrepareStmt`, `parsedStmt` is replaced
+        // with a `QueryStatement`, while `prepareStmtContext` stores the associated `PrepareStmt` information.
+        if (parsedStmt != null && parsedStmt instanceof ExecuteStmt) {
+            ExecuteStmt executeStmt = (ExecuteStmt) parsedStmt;
+            return executeStmt.getStmtName();
+        }
+        if (prepareStmtContext != null) {
+            return prepareStmtContext.getStmt().getName();
+        }
+
+        // For PREPARE.
+        if (parsedStmt != null && parsedStmt instanceof PrepareStmt) {
+            PrepareStmt prepareStmt = (PrepareStmt) parsedStmt;
+            return prepareStmt.getName();
+        }
+        return null;
+    }
+
     // Execute one statement.
     // Exception:
     //  IOException: talk with client failed.
@@ -483,6 +504,7 @@ public class StmtExecutor {
         long beginTimeInNanoSecond = TimeUtils.getStartTime();
         context.setStmtId(STMT_ID_GENERATOR.incrementAndGet());
         context.setIsForward(false);
+        context.setCurrentThreadId(Thread.currentThread().getId());
 
         // set execution id.
         // Try to use query id as execution id when execute first time.
@@ -501,7 +523,7 @@ public class StmtExecutor {
             WarehouseIdleChecker.increaseRunningSQL(originWarehouseId);
         }
         try {
-            context.getState().setIsQuery(parsedStmt instanceof QueryStatement);
+            context.getState().setIsQuery(context.isQueryStmt(parsedStmt));
             if (parsedStmt.isExistQueryScopeHint()) {
                 processQueryScopeHint();
             }
@@ -986,7 +1008,19 @@ public class StmtExecutor {
         }
     }
 
+    /**
+     * Try to process profile async without exception.
+     */
     private boolean tryProcessProfileAsync(ExecPlan plan, int retryIndex) {
+        try {
+            return processProfileAsync(plan, retryIndex);
+        } catch (Exception e) {
+            LOG.warn("process profile async failed", e);
+            return false;
+        }
+    }
+
+    private boolean processProfileAsync(ExecPlan plan, int retryIndex) {
         if (coord == null) {
             return false;
         }
@@ -2120,22 +2154,27 @@ public class StmtExecutor {
         try {
             handleDMLStmt(execPlan, stmt);
         } catch (Throwable t) {
-            LOG.warn("DML statement(" + originStmt.originStmt + ") process failed.", t);
+            LOG.warn("DML statement({}) process failed.", originStmt.originStmt, t);
             throw t;
         } finally {
             boolean isAsync = false;
-            if (context.isProfileEnabled()) {
-                isAsync = tryProcessProfileAsync(execPlan, 0);
-                if (parsedStmt.isExplain() &&
-                        StatementBase.ExplainLevel.ANALYZE.equals(parsedStmt.getExplainLevel())) {
-                    handleExplainStmt(ExplainAnalyzer.analyze(ProfilingExecPlan.buildFrom(execPlan), profile, null));
+            try {
+                if (context.isProfileEnabled()) {
+                    isAsync = tryProcessProfileAsync(execPlan, 0);
+                    if (parsedStmt.isExplain() &&
+                            StatementBase.ExplainLevel.ANALYZE.equals(parsedStmt.getExplainLevel())) {
+                        handleExplainStmt(ExplainAnalyzer.analyze(ProfilingExecPlan.buildFrom(execPlan), profile, null));
+                    }
                 }
-            }
-            if (isAsync) {
-                QeProcessorImpl.INSTANCE.monitorQuery(context.getExecutionId(), System.currentTimeMillis() +
-                        context.getSessionVariable().getProfileTimeout() * 1000L);
-            } else {
-                QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
+            } catch (Exception e) {
+                LOG.warn("Failed to process profile async", e);
+            } finally {
+                if (isAsync) {
+                    QeProcessorImpl.INSTANCE.monitorQuery(context.getExecutionId(), System.currentTimeMillis() +
+                            context.getSessionVariable().getProfileTimeout() * 1000L);
+                } else {
+                    QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
+                }
             }
         }
     }
@@ -2595,7 +2634,6 @@ public class StmtExecutor {
                 GlobalStateMgr.getCurrentState().getOperationListenerBus()
                         .onDMLStmtJobTransactionFinish(txnState, database, targetTable, dmlType);
             }
-            recordExecStatsIntoContext();
         }
 
         String errMsg = "";
@@ -2727,14 +2765,18 @@ public class StmtExecutor {
             }
             coord.getExecStatus().setInternalErrorStatus(e.getMessage());
         } finally {
-            if (context.isProfileEnabled()) {
-                tryProcessProfileAsync(plan, 0);
-                QeProcessorImpl.INSTANCE.monitorQuery(context.getExecutionId(), System.currentTimeMillis() +
-                        context.getSessionVariable().getProfileTimeout() * 1000L);
-            } else {
-                QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
+            try {
+                if (context.isProfileEnabled()) {
+                    tryProcessProfileAsync(plan, 0);
+                    QeProcessorImpl.INSTANCE.monitorQuery(context.getExecutionId(), System.currentTimeMillis() +
+                            context.getSessionVariable().getProfileTimeout() * 1000L);
+                } else {
+                    QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
+                }
+                recordExecStatsIntoContext();
+            } catch (Exception e) {
+                LOG.warn("Failed to unregister query", e);
             }
-            recordExecStatsIntoContext();
         }
     }
 
@@ -2765,7 +2807,9 @@ public class StmtExecutor {
                 context.getQualifiedUser(),
                 Optional.ofNullable(context.getResourceGroup()).map(TWorkGroup::getName).orElse(""),
                 context.getCurrentWarehouseName(),
-                context.getCurrentCatalog());
+                context.getCurrentCatalog(),
+                context.getCommandStr(),
+                getPreparedStmtId());
         context.setQueryDetail(queryDetail);
         // copy queryDetail, cause some properties can be changed in future
         QueryDetailQueue.addQueryDetail(queryDetail.copy());
@@ -2786,6 +2830,9 @@ public class StmtExecutor {
 
         long endTime = System.currentTimeMillis();
         long elapseMs = endTime - ctx.getStartTime();
+        long queryFeMemory =
+                ConnectProcessor.getThreadAllocatedBytes(Thread.currentThread().getId()) -
+                        ctx.getCurrentThreadAllocatedMemory();
 
         if (ctx.getState().getStateType() == QueryState.MysqlStateType.ERR) {
             queryDetail.setState(QueryDetail.QueryMemState.FAILED);
@@ -2795,6 +2842,7 @@ public class StmtExecutor {
         }
         queryDetail.setEndTime(endTime);
         queryDetail.setLatency(elapseMs);
+        queryDetail.setQueryFeMemory(queryFeMemory);
         long pendingTime = ctx.getAuditEventBuilder().build().pendingTimeMs;
         pendingTime = pendingTime < 0 ? 0 : pendingTime;
         queryDetail.setPendingTime(pendingTime);
@@ -2821,8 +2869,15 @@ public class StmtExecutor {
         QueryDetailQueue.addQueryDetail(queryDetail);
     }
 
-    private boolean shouldMarkIdleCheck(StatementBase parsedStmt) {
+    protected boolean shouldMarkIdleCheck(StatementBase parsedStmt) {
+        boolean isPreQuerySQL = false;
+        try {
+            isPreQuerySQL = SqlUtils.isPreQuerySQL(parsedStmt);
+        } catch (Exception e) {
+            LOG.warn("check isPreQuerySQL failed", e);
+        }
         return !isInternalStmt
+                && !isPreQuerySQL
                 && !(parsedStmt instanceof ShowStmt)
                 && !(parsedStmt instanceof AdminSetConfigStmt);
     }

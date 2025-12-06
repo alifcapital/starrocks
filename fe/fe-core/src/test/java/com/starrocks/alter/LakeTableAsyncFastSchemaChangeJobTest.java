@@ -22,15 +22,26 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.ScalarType;
+import com.starrocks.catalog.SchemaInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.lake.LakeTable;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.rpc.ThriftConnectionPool;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.CreateDbStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
+import com.starrocks.thrift.TAgentTaskRequest;
+import com.starrocks.thrift.TCompressionType;
+import com.starrocks.thrift.TTabletMetaInfo;
+import com.starrocks.thrift.TTabletSchema;
+import com.starrocks.thrift.TTaskType;
+import com.starrocks.thrift.TUpdateTabletMetaInfoReq;
+import com.starrocks.utframe.MockGenericPool;
+import com.starrocks.utframe.MockedBackend;
+import com.starrocks.utframe.MockedBackend.MockBeThriftClient;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -38,7 +49,10 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class LakeTableAsyncFastSchemaChangeJobTest {
     private static ConnectContext connectContext;
@@ -68,26 +82,31 @@ public class LakeTableAsyncFastSchemaChangeJobTest {
         GlobalStateMgr.getCurrentState().getLocalMetastore().alterTable(connectContext, stmt);
     }
 
-    private LakeTableAsyncFastSchemaChangeJob getAlterJob(Table table) {
+    private AlterJobV2 getAlterJob(Table table, boolean expectFastSchemaEvolution) {
         AlterJobMgr alterJobMgr = GlobalStateMgr.getCurrentState().getAlterJobMgr();
         List<AlterJobV2> jobs = alterJobMgr.getSchemaChangeHandler().getUnfinishedAlterJobV2ByTableId(table.getId());
         Assert.assertEquals(1, jobs.size());
         AlterJobV2 alterJob = jobs.get(0);
-        Assert.assertTrue(alterJob instanceof LakeTableAsyncFastSchemaChangeJob);
-        return (LakeTableAsyncFastSchemaChangeJob) alterJob;
-    }
-
-    private LakeTableAsyncFastSchemaChangeJob removeAlterJob(Table table) {
-        LakeTableAsyncFastSchemaChangeJob job = getAlterJob(table);
-        AlterHandler handler = GlobalStateMgr.getCurrentState().getAlterJobMgr().getSchemaChangeHandler();
-        handler.alterJobsV2.remove(job.getJobId());
-        return job;
+        Assert.assertEquals(expectFastSchemaEvolution, alterJob instanceof LakeTableAsyncFastSchemaChangeJob);
+        return alterJob;
     }
 
     private AlterJobV2 mustAlterTable(Table table, String sql) throws Exception {
         alterTable(connectContext, sql);
-        AlterJobV2 alterJob = getAlterJob(table);
+        AlterJobV2 alterJob = getAlterJob(table, true);
         alterJob.run();
+        Assert.assertEquals(AlterJobV2.JobState.FINISHED, alterJob.getJobState());
+        return alterJob;
+    }
+
+    private AlterJobV2 executeAlterAndWaitFinish(Table table, String sql, boolean expectFastSchemaEvolution) throws Exception {
+        alterTable(connectContext, sql);
+        AlterJobV2 alterJob = getAlterJob(table, expectFastSchemaEvolution);
+        alterJob.run();
+        while (alterJob.getJobState() != AlterJobV2.JobState.FINISHED) {
+            alterJob.run();
+            Thread.sleep(100);
+        }
         Assert.assertEquals(AlterJobV2.JobState.FINISHED, alterJob.getJobState());
         return alterJob;
     }
@@ -263,15 +282,18 @@ public class LakeTableAsyncFastSchemaChangeJobTest {
     @Test
     public void testModifyColumnType() throws Exception {
         LakeTable table = createTable(connectContext, "CREATE TABLE t_modify_type" +
-                "(c0 INT, c1 INT, c2 VARCHAR(5), c3 DATE)" +
+                "(c0 INT, c1 INT, c2 FLOAT, c3 DATE, c4 VARCHAR(10))" +
                 "DUPLICATE KEY(c0) DISTRIBUTED BY HASH(c0) " +
                 "BUCKETS 1 PROPERTIES('fast_schema_evolution'='true')");
         long oldSchemaId = table.getIndexIdToMeta().get(table.getBaseIndexId()).getSchemaId();
+
+        // zonemap index can be reused
         {
-            mustAlterTable(table, "ALTER TABLE t_modify_type MODIFY COLUMN c1 BIGINT, MODIFY COLUMN c2 VARCHAR(10)," +
-                    "MODIFY COLUMN c3 DATETIME");
+            String alterSql = "ALTER TABLE t_modify_type MODIFY COLUMN c1 BIGINT, MODIFY COLUMN c2 DOUBLE, " +
+                            "MODIFY COLUMN c3 DATETIME, MODIFY COLUMN c4 VARCHAR(20)";
+            executeAlterAndWaitFinish(table, alterSql, true);
             List<Column> columns = table.getBaseSchema();
-            Assert.assertEquals(4, columns.size());
+            Assert.assertEquals(5, columns.size());
 
             Assert.assertEquals("c0", columns.get(0).getName());
             Assert.assertEquals(0, columns.get(0).getUniqueId());
@@ -283,15 +305,120 @@ public class LakeTableAsyncFastSchemaChangeJobTest {
 
             Assert.assertEquals("c2", columns.get(2).getName());
             Assert.assertEquals(2, columns.get(2).getUniqueId());
-            Assert.assertEquals(PrimitiveType.VARCHAR, columns.get(2).getType().getPrimitiveType());
-            Assert.assertEquals(10, ((ScalarType) columns.get(2).getType()).getLength());
+            Assert.assertEquals(ScalarType.DOUBLE, columns.get(2).getType());
 
             Assert.assertEquals("c3", columns.get(3).getName());
             Assert.assertEquals(3, columns.get(3).getUniqueId());
             Assert.assertEquals(ScalarType.DATETIME, columns.get(3).getType());
 
+            Assert.assertEquals("c4", columns.get(4).getName());
+            Assert.assertEquals(4, columns.get(4).getUniqueId());
+            Assert.assertEquals(PrimitiveType.VARCHAR, columns.get(4).getType().getPrimitiveType());
+            Assert.assertEquals(20, ((ScalarType) columns.get(4).getType()).getLength());
+
             Assert.assertTrue(table.getIndexIdToMeta().get(table.getBaseIndexId()).getSchemaId() > oldSchemaId);
             Assert.assertEquals(OlapTable.OlapTableState.NORMAL, table.getState());
+        }
+
+        // zonemap index can not be reused
+        {
+            executeAlterAndWaitFinish(table, "ALTER TABLE t_modify_type MODIFY COLUMN c3 DATE", false);
+            Assert.assertEquals(ScalarType.DATE, table.getBaseSchema().get(3).getType());
+
+            executeAlterAndWaitFinish(table, "ALTER TABLE t_modify_type MODIFY COLUMN c4 INT", false);
+            Assert.assertEquals(ScalarType.INT, table.getBaseSchema().get(4).getType());
+        }
+    }
+
+    @Test
+    public void testModifyColumnTypeWithManuallyCreatedIndex() throws Exception {
+        LakeTable table = createTable(connectContext, "CREATE TABLE t_modify_index_type " +
+                "(c0 INT, c1 INT, c2 INT, INDEX idx1 (c1) USING BITMAP) " +
+                "DUPLICATE KEY(c0) DISTRIBUTED BY HASH(c0) BUCKETS 1 " +
+                "PROPERTIES( 'fast_schema_evolution'='true', 'bloom_filter_columns' = 'c2') ");
+
+        // bitmap index can not use fast schema evolution
+        {
+            String alterSql = "ALTER TABLE t_modify_index_type MODIFY COLUMN c1 BIGINT";
+            executeAlterAndWaitFinish(table, alterSql, false);
+        }
+
+        // bloomfilter index can use fast schema evolution
+        {
+            String alterSql = "ALTER TABLE t_modify_index_type MODIFY COLUMN c2 BIGINT";
+            executeAlterAndWaitFinish(table, alterSql, true);
+        }
+    }
+
+    @Test
+    public void testCompressionSettings() throws Exception {
+        // Create a table with zstd compression and level 9
+        LakeTable table = createTable(connectContext,
+                "CREATE TABLE t_compression_test(c0 INT) DUPLICATE KEY(c0) DISTRIBUTED BY HASH(c0) " +
+                "BUCKETS 1 PROPERTIES('fast_schema_evolution'='true', 'compression'='zstd(9)')");
+        
+        Assert.assertEquals(TCompressionType.ZSTD, table.getCompressionType());
+        Assert.assertEquals(9, table.getCompressionLevel());
+        
+        List<MockBeThriftClient> thriftClients = ((MockGenericPool<?>) ThriftConnectionPool.backendPool).getAllBackends()
+                .stream().map(MockedBackend::getMockBeThriftClient).collect(Collectors.toList());
+        Assert.assertFalse(thriftClients.isEmpty());
+        thriftClients.forEach(client -> client.setCaptureAgentTask(true));
+        try {
+            String alterSql = "ALTER TABLE t_compression_test ADD COLUMN c1 BIGINT";
+            AlterJobV2 alterJob = executeAlterAndWaitFinish(table, alterSql, true);
+            Assert.assertTrue(alterJob instanceof LakeTableAsyncFastSchemaChangeJob);
+            LakeTableAsyncFastSchemaChangeJob job = (LakeTableAsyncFastSchemaChangeJob) alterJob;
+            List<SchemaInfo> schemaInfos = job.getSchemaInfoList();
+            Assert.assertEquals(1, schemaInfos.size());
+            Assert.assertEquals(TCompressionType.ZSTD, schemaInfos.get(0).getCompressionType());
+            Assert.assertEquals(9, schemaInfos.get(0).getCompressionLevel());
+
+            // Get all tablet IDs from the table
+            Set<Long> tableTabletIds = new HashSet<>();
+            for (Partition partition : table.getPartitions()) {
+                for (com.starrocks.catalog.PhysicalPartition physicalPartition : partition.getSubPartitions()) {
+                    com.starrocks.catalog.MaterializedIndex index = physicalPartition.getIndex(table.getBaseIndexId());
+                    if (index != null) {
+                        for (com.starrocks.catalog.Tablet tablet : index.getTablets()) {
+                            tableTabletIds.add(tablet.getId());
+                        }
+                    }
+                }
+            }
+            Assert.assertEquals(1, tableTabletIds.size());
+
+            // 1. get all TAgentTask by using MockBeThriftClient::getCapturedAgentTasks
+            List<TAgentTaskRequest> allTasks = thriftClients.stream()
+                    .flatMap(client -> client.getCapturedAgentTasks().stream())
+                    .collect(Collectors.toList());
+
+            // 2. get all tasks related to fast schema evolution for table t_compression_test
+            // Fast schema evolution uses UPDATE_TABLET_META_INFO task type
+            List<TAgentTaskRequest> fastSchemaEvolutionTasks = allTasks.stream()
+                    .filter(task -> task.getTask_type() == TTaskType.UPDATE_TABLET_META_INFO)
+                    .filter(task -> task.isSetUpdate_tablet_meta_info_req())
+                    .collect(Collectors.toList());
+
+            // 3. get TTabletSchema from agent task, filter by tablet IDs belonging to the table
+            List<TTabletSchema> tabletSchemas = fastSchemaEvolutionTasks.stream()
+                    .map(TAgentTaskRequest::getUpdate_tablet_meta_info_req)
+                    .map(TUpdateTabletMetaInfoReq::getTabletMetaInfos)
+                    .flatMap(List::stream)
+                    .filter(metaInfo -> tableTabletIds.contains(metaInfo.getTablet_id()))
+                    .filter(TTabletMetaInfo::isSetTablet_schema)
+                    .map(TTabletMetaInfo::getTablet_schema)
+                    .collect(Collectors.toList());
+
+            Assert.assertEquals(1, tabletSchemas.size());
+
+            // 4. verify the compression type and level in TTabletSchema is correct
+            TTabletSchema tabletSchema = tabletSchemas.get(0);
+            Assert.assertEquals(TCompressionType.ZSTD, tabletSchema.getCompression_type());
+            Assert.assertEquals(9, tabletSchema.getCompression_level());
+        } finally {
+            thriftClients.forEach(client -> client.setCaptureAgentTask(false));
+            thriftClients.forEach(MockBeThriftClient::clearCapturedAgentTasks);
         }
     }
 }

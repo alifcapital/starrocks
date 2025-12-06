@@ -56,6 +56,8 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.ColumnSeparator;
 import com.starrocks.sql.ast.CreateRoutineLoadStmt;
 import com.starrocks.sql.ast.PartitionNames;
+import com.starrocks.sql.parser.AstBuilder;
+import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TResourceInfo;
 import com.starrocks.transaction.GlobalTransactionMgr;
@@ -376,6 +378,8 @@ public class KafkaRoutineLoadJobTest {
         jobProperties.put("enclose", "'");
         jobProperties.put("escape", "\\");
         jobProperties.put("timezone", "Asia/Shanghai");
+        jobProperties.put("max_filter_ratio", "0");
+        jobProperties.put("max_error_number", "10");
         createRoutineLoadStmt.checkJobProperties();
 
         RoutineLoadDesc routineLoadDesc = new RoutineLoadDesc(columnSeparator, null, null, null, partitionNames);
@@ -404,6 +408,9 @@ public class KafkaRoutineLoadJobTest {
                 table.isOlapOrCloudNativeTable();
                 minTimes = 0;
                 result = true;
+                globalStateMgr.getSqlParser();
+                minTimes = 0;
+                result = new SqlParser(AstBuilder.getInstance());
             }
         };
 
@@ -416,7 +423,7 @@ public class KafkaRoutineLoadJobTest {
         };
 
         String createSQL = "CREATE ROUTINE LOAD db1.job1 ON table1 " +
-                "PROPERTIES('format' = 'csv', 'trim_space' = 'true') " +
+                "PROPERTIES('format' = 'csv', 'trim_space' = 'true', 'max_filter_ratio' = '0', 'max_error_number' = '10') " +
                 "FROM KAFKA('kafka_broker_list' = 'http://127.0.0.1:8080','kafka_topic' = 'topic1');";
         KafkaRoutineLoadJob job = KafkaRoutineLoadJob.fromCreateStmt(createRoutineLoadStmt);
         job.setOrigStmt(new OriginStatement(createSQL, 0));
@@ -431,6 +438,8 @@ public class KafkaRoutineLoadJobTest {
         Assert.assertTrue(newJob.isTrimspace());
         Assert.assertEquals((byte) "'".charAt(0), newJob.getEnclose());
         Assert.assertEquals((byte) "\\".charAt(0), newJob.getEscape());
+        Assert.assertEquals(0, newJob.getMaxFilterRatio(), 0.01);
+        Assert.assertEquals(10, newJob.maxErrorNum);
     }
 
     @Test
@@ -472,6 +481,9 @@ public class KafkaRoutineLoadJobTest {
                 table.isOlapOrCloudNativeTable();
                 minTimes = 0;
                 result = true;
+                globalStateMgr.getSqlParser();
+                minTimes = 0;
+                result = new SqlParser(AstBuilder.getInstance());
             }
         };
 
@@ -567,5 +579,50 @@ public class KafkaRoutineLoadJobTest {
             KafkaRoutineLoadJob kafkaRoutineLoadJob = KafkaRoutineLoadJob.fromCreateStmt(createRoutineLoadStmt);
             Assert.assertTrue(kafkaRoutineLoadJob.isPauseOnFatalParseError());
         }
+    }
+
+    @Test
+    public void testGetSourceLagString() {
+        RoutineLoadJob job = new KafkaRoutineLoadJob(1L, "routine_load", 1L, 1L, "127.0.0.1:9020", "topic1");
+        // check empty value
+        String progressJsonStr = null;
+        String sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("null"));
+
+        progressJsonStr = "{\"0\":\"100\"}";
+        Map<Integer, Long> latestPartitionOffsets = null;
+        Deencapsulation.setField(job, "latestPartitionOffsets", latestPartitionOffsets);
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("null"));
+
+        progressJsonStr = "{\"0\":null}";
+        latestPartitionOffsets = Maps.newHashMap();
+        latestPartitionOffsets.put(0, 200L);
+        Deencapsulation.setField(job, "latestPartitionOffsets", latestPartitionOffsets);
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("{}"));
+
+        progressJsonStr = "{\"0\":\"" + KafkaProgress.OFFSET_ZERO + "\"}";
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("{}"));
+
+        progressJsonStr = "{\"0\":\"XXX\"}";
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("{}"));
+
+        progressJsonStr = "{\"0\":\"100\"}";
+        latestPartitionOffsets = Maps.newHashMap();
+        latestPartitionOffsets.put(0, 200L);
+        Deencapsulation.setField(job, "latestPartitionOffsets", latestPartitionOffsets);
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("\"0\":\"100\""));
+
+        //check  progress > latestPartitionOffsets
+        progressJsonStr = "{\"0\":\"200\"}";
+        latestPartitionOffsets.put(0, 100L);
+        Deencapsulation.setField(job, "latestPartitionOffsets", latestPartitionOffsets);
+        sourceLagString = job.getSourceLagString(progressJsonStr);
+        Assert.assertTrue(sourceLagString.contains("\"0\":\"0\""));
+
     }
 }

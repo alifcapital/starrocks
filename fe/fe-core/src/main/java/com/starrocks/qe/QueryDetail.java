@@ -87,12 +87,18 @@ public class QueryDetail implements Serializable {
     private String digest;
     private String catalog;
 
+    private String command = "";
+    private String preparedStmtId;
+
+    private long queryFeMemory = 0;
+
     public QueryDetail() {
     }
 
     public QueryDetail(String queryId, boolean isQuery, int connId, String remoteIP,
                        long startTime, long endTime, long latency, QueryMemState state,
-                       String database, String sql, String user, String resourceGroupName, String catalog) {
+                       String database, String sql, String user, String resourceGroupName, String catalog,
+                       String command, String preparedStmtId) {
         this.queryId = queryId;
         this.isQuery = isQuery;
         this.connId = connId;
@@ -114,14 +120,17 @@ public class QueryDetail implements Serializable {
         this.sql = sql;
         this.user = user;
         this.catalog = catalog;
+        this.command = command;
+        this.preparedStmtId = preparedStmtId;
     }
 
     public QueryDetail(String queryId, boolean isQuery, int connId, String remoteIP,
                         long startTime, long endTime, long latency, QueryMemState state,
                         String database, String sql, String user, String resourceGroupName,
-                        String warehouse, String catalog) {
+                        String warehouse, String catalog,
+                       String command, String preparedStmtId) {
         this(queryId, isQuery, connId, remoteIP, startTime, endTime, latency,
-                state, database, sql, user, resourceGroupName, catalog);
+                state, database, sql, user, resourceGroupName, catalog, command, preparedStmtId);
         this.warehouse = warehouse;
     }
 
@@ -152,6 +161,9 @@ public class QueryDetail implements Serializable {
         queryDetail.digest = this.digest;
         queryDetail.resourceGroupName = this.resourceGroupName;
         queryDetail.catalog = this.catalog;
+        queryDetail.queryFeMemory = this.queryFeMemory;
+        queryDetail.command = this.command;
+        queryDetail.preparedStmtId = this.preparedStmtId;
         return queryDetail;
     }
 
@@ -365,5 +377,13 @@ public class QueryDetail implements Serializable {
 
     public void setCatalog(String catalog) {
         this.catalog = catalog;
+    }
+
+    public void setQueryFeMemory(long queryFeMemory) {
+        this.queryFeMemory = queryFeMemory;
+    }
+
+    public long getQueryFeMemory() {
+        return queryFeMemory;
     }
 }

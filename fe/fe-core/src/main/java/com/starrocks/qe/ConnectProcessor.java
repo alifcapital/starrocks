@@ -38,6 +38,7 @@ import com.google.common.base.Strings;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.LiteralExpr;
 import com.starrocks.analysis.NullLiteral;
+import com.starrocks.authentication.UserProperty;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Table;
@@ -49,6 +50,7 @@ import com.starrocks.common.profile.Timer;
 import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.AuditStatisticsUtil;
 import com.starrocks.common.util.LogUtil;
+import com.starrocks.common.util.SqlCredentialRedactor;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
@@ -91,6 +93,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.AsynchronousCloseException;
@@ -180,6 +184,24 @@ public class ConnectProcessor {
         ctx.resetSessionVariable();
     }
 
+    public static long getThreadAllocatedBytes(long threadId) {
+        try {
+            ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
+            if (threadMXBean instanceof com.sun.management.ThreadMXBean) {
+                com.sun.management.ThreadMXBean casted = (com.sun.management.ThreadMXBean) threadMXBean;
+                if (casted.isThreadAllocatedMemorySupported() && casted.isThreadAllocatedMemoryEnabled()) {
+                    long allocatedBytes = casted.getThreadAllocatedBytes(threadId);
+                    if (allocatedBytes != -1) {
+                        return allocatedBytes;
+                    }
+                }
+            }
+            return 0;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     public void auditAfterExec(String origStmt, StatementBase parsedStmt, PQueryStatistics statistics) {
         // slow query
         long endTime = System.currentTimeMillis();
@@ -199,7 +221,9 @@ public class ConnectProcessor {
                 .setReturnRows(ctx.getReturnRows())
                 .setStmtId(ctx.getStmtId())
                 .setIsForwardToLeader(isForwardToLeader)
-                .setQueryId(ctx.getQueryId() == null ? "NaN" : ctx.getQueryId().toString());
+                .setQueryId(ctx.getQueryId() == null ? "NaN" : ctx.getQueryId().toString())
+                .setCommand(ctx.getCommandStr())
+                .setPreparedStmtId(executor == null ? null : executor.getPreparedStmtId());
 
         if (ctx.getState().isQuery()) {
             MetricRepo.COUNTER_QUERY_ALL.increase(1L);
@@ -238,11 +262,14 @@ public class ConnectProcessor {
             ctx.getAuditEventBuilder().setIsQuery(false);
         }
 
-        // Build Digest for SELECT/INSERT/UPDATE/DELETE
+        // Build Digest and queryFeMemory for SELECT/INSERT/UPDATE/DELETE
         if (ctx.getState().isQuery() || parsedStmt instanceof DmlStmt) {
             if (Config.enable_sql_digest || ctx.getSessionVariable().isEnableSQLDigest()) {
                 ctx.getAuditEventBuilder().setDigest(computeStatementDigest(parsedStmt));
             }
+            long threadAllocatedMemory =
+                    getThreadAllocatedBytes(Thread.currentThread().getId()) - ctx.getCurrentThreadAllocatedMemory();
+            ctx.getAuditEventBuilder().setQueryFeMemory(threadAllocatedMemory);
         }
 
         ctx.getAuditEventBuilder().setFeIp(FrontendOptions.getLocalHostAddress());
@@ -252,7 +279,8 @@ public class ConnectProcessor {
             ctx.getAuditEventBuilder().setStmt(AstToSQLBuilder.toSQLOrDefault(parsedStmt, origStmt));
         } else if (parsedStmt == null) {
             // invalid sql, record the original statement to avoid audit log can't replay
-            ctx.getAuditEventBuilder().setStmt(origStmt);
+            // but redact sensitive credentials first
+            ctx.getAuditEventBuilder().setStmt(SqlCredentialRedactor.redact(origStmt));
         } else {
             ctx.getAuditEventBuilder().setStmt(LogUtil.removeLineSeparator(origStmt));
         }
@@ -280,6 +308,9 @@ public class ConnectProcessor {
     // process COM_QUERY statement,
     protected void handleQuery() {
         MetricRepo.COUNTER_REQUEST_ALL.increase(1L);
+        long beginMemory = getThreadAllocatedBytes(Thread.currentThread().getId());
+        ctx.setCurrentThreadAllocatedMemory(beginMemory);
+
         // convert statement to Java string
         String originStmt = null;
         byte[] bytes = packetBuf.array();
@@ -482,6 +513,7 @@ public class ConnectProcessor {
         packetBuf.get(nullBitmap);
         try {
             ctx.setQueryId(UUIDUtil.genUUID());
+            ctx.setExecutionId(UUIDUtil.toTUniqueId(ctx.getQueryId()));
 
             // new_params_bind_flag
             if (packetBuf.hasRemaining() && (int) packetBuf.get() != 0) {
@@ -504,20 +536,39 @@ public class ConnectProcessor {
             ExecuteStmt executeStmt = new ExecuteStmt(String.valueOf(stmtId), exprs);
             // audit will affect performance
             boolean enableAudit = ctx.getSessionVariable().isAuditExecuteStmt();
-            String originStmt = enableAudit ? executeStmt.toSql() : "/* omit */";
+            String originStmt = executeStmt.toSql();
             executeStmt.setOrigStmt(new OriginStatement(originStmt, 0));
-
-            executor = new StmtExecutor(ctx, executeStmt);
-            ctx.setExecutor(executor);
 
             boolean isQuery = ctx.isQueryStmt(executeStmt);
             ctx.getState().setIsQuery(isQuery);
+
+            if (isQuery) {
+                // for query stmt, we should register and init tracer.
+                Tracers.register(ctx);
+                Tracers.init(ctx, executeStmt.getTraceMode(), executeStmt.getTraceModule());
+                // set original statement to original query
+                PrepareStmtContext prepareStmtContext = ctx.getPreparedStmt(executeStmt.getStmtName());
+                if (prepareStmtContext != null) {
+                    if (prepareStmtContext.getStmt().getInnerStmt() instanceof QueryStatement) {
+                        PrepareStmt prepareStmt = prepareStmtContext.getStmt();
+                        StatementBase deparameterizedStmt = prepareStmt.assignValues(executeStmt.getParamsExpr());
+                        originStmt = AstToSQLBuilder.toSQL(deparameterizedStmt);
+                        executeStmt.setOrigStmt(new OriginStatement(originStmt, 0));
+                    }
+                }
+            }
+
+            executor = new StmtExecutor(ctx, executeStmt);
+            ctx.setExecutor(executor);
 
             if (enableAudit && isQuery) {
                 executor.addRunningQueryDetail(executeStmt);
                 executor.execute();
                 executor.addFinishedQueryDetail();
             } else {
+                // Clear query detail. Otherwise, after collecting the profile, it will be mistakenly added to ctx.queryDetail,
+                // which still belongs to the previous query.
+                ctx.setQueryDetail(null);
                 executor.execute();
             }
 
@@ -668,7 +719,8 @@ public class ConnectProcessor {
         channel.sendAndFlush(packet);
 
         // only change lastQueryId when current command is COM_QUERY
-        if (ctx.getCommand() == MysqlCommand.COM_QUERY) {
+        MysqlCommand cmd = ctx.getCommand();
+        if (cmd == MysqlCommand.COM_QUERY || cmd == MysqlCommand.COM_STMT_PREPARE || cmd == MysqlCommand.COM_STMT_EXECUTE) {
             ctx.setLastQueryId(ctx.queryId);
             ctx.setQueryId(null);
         }
@@ -714,11 +766,27 @@ public class ConnectProcessor {
             ctx.setCurrentUserIdentity(currentUserIdentity);
         }
 
+        if (ctx.getCurrentUserIdentity() == null) {
+            TMasterOpResult result = new TMasterOpResult();
+            ctx.getState().setError(
+                    "Missing current user identity. You need to upgrade this Frontend to the same version as Leader Frontend.");
+            result.setMaxJournalId(GlobalStateMgr.getCurrentState().getMaxJournalId());
+            result.setPacket(getResultPacket());
+            return result;
+        }
+
         if (request.isSetUser_roles()) {
             List<Long> roleIds = request.getUser_roles().getRole_id_list();
             ctx.setCurrentRoleIds(new HashSet<>(roleIds));
         } else {
             ctx.setCurrentRoleIds(new HashSet<>());
+        }
+
+        UserIdentity userIdentity = ctx.getCurrentUserIdentity();
+        if (!userIdentity.isEphemeral()) {
+            UserProperty userProperty = GlobalStateMgr.getCurrentState().getAuthenticationMgr()
+                    .getUserProperty(ctx.getCurrentUserIdentity().getUser());
+            ctx.updateByUserProperty(userProperty);
         }
 
         // after https://github.com/StarRocks/starrocks/pull/43162, we support temporary tables.
@@ -790,18 +858,6 @@ public class ConnectProcessor {
         }
 
         ctx.setThreadLocalInfo();
-
-        if (ctx.getCurrentUserIdentity() == null) {
-            // if we upgrade Master FE first, the request from old FE does not set "current_user_ident".
-            // so ctx.getCurrentUserIdentity() will get null, and causing NullPointerException after using it.
-            // return error directly.
-            TMasterOpResult result = new TMasterOpResult();
-            ctx.getState().setError(
-                    "Missing current user identity. You need to upgrade this Frontend to the same version as Leader Frontend.");
-            result.setMaxJournalId(GlobalStateMgr.getCurrentState().getMaxJournalId());
-            result.setPacket(getResultPacket());
-            return result;
-        }
 
         StmtExecutor executor = null;
         try {

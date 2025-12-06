@@ -2,7 +2,7 @@
 displayed_sidebar: docs
 ---
 
-# SHOW RUNNING QUERIES
+# `SHOW RUNNING QUERIES`
 
 ## 説明
 
@@ -10,7 +10,7 @@ displayed_sidebar: docs
 
 :::tip
 
-この操作には特権は必要ありません。
+クエリキューは設定が必要です。デフォルトでは無効になっています。詳しくは[クエリキューのドキュメント](../../../../administration/management/resource_management/query_queues.md)をご覧ください。
 
 :::
 
@@ -22,13 +22,13 @@ SHOW RUNNING QUERIES
 
 ## 戻り値
 
-- `QueryId`: クエリのID。
-- `ResourceGroupId`: クエリがヒットしたリソースグループのID。ユーザー定義のリソースグループにヒットしなかった場合は "-" と表示されます。
+- `QueryId`: クエリの ID。
+- `ResourceGroupId`: クエリがヒットしたリソースグループの ID。ユーザー定義のリソースグループにヒットしなかった場合は "-" と表示されます。
 - `StartTime`: クエリの開始時間。
-- `PendingTimeout`: キュー内で保留中のクエリがタイムアウトする時間。
+- `PendingTimeout`: PENDING クエリがキューでタイムアウトする時間。
 - `QueryTimeout`: クエリがタイムアウトする時間。
-- `State`: クエリのキュー状態で、「PENDING」はキュー内にあることを示し、「RUNNING」は現在実行中であることを示します。
-- `Slots`: クエリが要求した論理リソース量で、現在は `1` に固定されています。
+- `State`: クエリのキュー状態。"PENDING" はキューにあることを示し、"RUNNING" は現在実行中であることを示します。
+- `Slots`: クエリが要求した論理リソースの量で、現在は `1` に固定されています。
 - `Frontend`: クエリを開始した FE ノード。
 - `FeStartTime`: クエリを開始した FE ノードの開始時間。
 

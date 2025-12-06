@@ -956,6 +956,7 @@ public class UtFrameUtils {
         String replaySql = initMockEnv(connectContext, replayDumpInfo);
         replaySql = LogUtil.removeLineSeparator(replaySql);
         Map<String, Database> dbs = null;
+
         try {
             StatementBase statementBase;
             try (Timer st = Tracers.watchScope("Parse")) {
@@ -1323,8 +1324,6 @@ public class UtFrameUtils {
 
             // Disable text based rewrite by default.
             connectContext.getSessionVariable().setEnableMaterializedViewTextMatchRewrite(false);
-            // disable mv analyze stats in FE UTs
-            connectContext.getSessionVariable().setAnalyzeForMv("");
         }
 
         new MockUp<PlanTestBase>() {

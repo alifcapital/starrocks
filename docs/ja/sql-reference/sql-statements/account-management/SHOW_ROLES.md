@@ -4,11 +4,11 @@ displayed_sidebar: docs
 
 # SHOW ROLES
 
-import UserManagementPriv from '../../../_assets/commonMarkdown/userManagementPriv.md'
+import UserManagementPriv from '../../../_assets/commonMarkdown/userManagementPriv.mdx'
 
 ## 説明
 
-システム内のすべてのロールを表示します。特定のロールの権限を表示するには、`SHOW GRANTS FOR ROLE <role_name>;` を使用します。詳細については、[SHOW GRANTS](SHOW_GRANTS.md) を参照してください。
+システム内のすべてのロールを表示します。特定のロールの権限を表示するには、`SHOW GRANTS FOR ROLE <role_name>;` を使用します。詳細については、 [SHOW GRANTS](SHOW_GRANTS.md) を参照してください。
 
 このコマンドは v3.0 からサポートされています。
 

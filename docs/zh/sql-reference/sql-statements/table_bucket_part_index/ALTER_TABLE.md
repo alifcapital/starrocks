@@ -13,12 +13,13 @@ displayed_sidebar: docs
 - [修改表注释](#修改表的注释31-版本起)
 - [修改分区（增删分区和修改分区属性）](#操作-partition-相关语法)
 - [修改分桶方式和分桶数量](#修改分桶方式和分桶数量自-32-版本起)
-- [修改列（增删列和修改列顺序）](#修改列增删列和修改列顺序)
+- [修改列（增删列和修改列顺序和注释）](#修改列添加删除列改变列的顺序或注释)
 - [创建或删除 rollup index](#操作-rollup-index-语法)
 - [修改 bitmap index](#bitmap-index-修改)
 - [修改表的属性](#修改表的属性)
 - [对表进行原子替换](#swap-将两个表原子替换)
-- [手动执行 compaction 合并表数据](#手动-compaction31-版本起)
+- [手动执行 Compaction 合并表数据](#手动-compaction31-版本起)
+- [删除主键索引](#删除主键索引-339-版本起))
 
 :::tip
 该操作需要有对应表的 ALTER 权限。
@@ -33,22 +34,22 @@ ALTER TABLE [<db_name>.]<tbl_name>
 alter_clause1[, alter_clause2, ...]
 ```
 
-其中 **alter_clause** 分为 rename、comment、partition、bucket、column、rollup index、bitmap index、table property、swap、compaction 相关修改操作：
+`alter_clause`可以包含以下操作：重命名、注释、分区、分桶、列、汇总索引、Bitmap索引、表属性、交换和 Compaction。
 
 - rename: 修改表名、rollup index 名、partition 名或列名（从 3.3.2 版本开始支持）。
 - comment: 修改表的注释。**从 3.1 版本开始支持。**
 - partition: 修改分区属性，删除分区，增加分区。
 - bucket：修改分桶方式和分桶数量。
-- column: 增加列，删除列，调整列顺序，修改列类型。*
+- column: 增加列，删除列，调整列顺序，修改列类型以及注释。
 - rollup index: 创建或删除 rollup index。
 - bitmap index: 修改 bitmap index。
 - swap: 原子替换两张表。
 - compaction: 对指定表或分区手动执行 Compaction（数据版本合并）。**从 3.1 版本开始支持。**
+- drop persistent index: 存算分离下删除主键索引。**从 3.3.9 版本开始支持。**
 
 ## 使用限制和注意事项
 
 - partition、column 和 rollup index <!--是否包含compaction，bucket和column/rollupindex可以在一起吗-->这些操作不能同时出现在一条 `ALTER TABLE` 语句中。
-- 当前还不支持修改列注释。
 - 每张表仅支持一个进行中的 Schema Change 操作。不能对同一张表同时执行两条 Schema Change 命令。
 - bucket、column、rollup index <!--是否包含compaction和fast schema evolution-->是异步操作，命令提交成功后会立即返回一个成功消息，您可以使用 [SHOW ALTER TABLE](SHOW_ALTER.md) 语句查看操作的进度。如果需要取消正在进行的操作，则您可以使用 [CANCEL ALTER TABLE](SHOW_ALTER.md)。
 - rename、comment、partition、bitmap index 和 swap 是同步操作，命令返回表示执行完毕。
@@ -105,11 +106,7 @@ RENAME COLUMN <old_col_name> [ TO ] <new_col_name>
 ALTER TABLE [<db_name>.]<tbl_name> COMMENT = "<new table comment>";
 ```
 
-:::tip
-当前还不支持修改列注释。
-:::
-
-### 操作 partition 相关语法
+### 修改分区
 
 #### 增加分区 (ADD PARTITION(S))
 
@@ -389,7 +386,7 @@ INSERT INTO details (event_time, event_type, user_id, device_code, channel) VALU
   ALTER TABLE details DISTRIBUTED BY HASH(user_id, event_time) BUCKETS 10;
   ```
 
-### 修改列（增删列和修改列顺序）
+### 修改列（添加/删除列，改变列的顺序或注释）
 
 下文中的 index 为物化索引。建表成功后表为 base 表 (base index)，基于 base 表可 [创建 rollup index](#创建-rollup-index-add-rollup)。
 
@@ -469,16 +466,18 @@ DROP COLUMN column_name
 1. 不能删除分区列。
 2. 如果是从 base index 中删除列，则如果 rollup index 中包含该列，也会被删除。
 
-#### 修改指定 index 的列类型以及列位置 (MODIFY COLUMN)
+#### 修改列类型、位置、注释和其他属性
 
 语法：
 
 ```sql
 ALTER TABLE [<db_name>.]<tbl_name>
-MODIFY COLUMN column_name column_type [KEY | agg_type] [NULL | NOT NULL] [DEFAULT "default_value"]
-[AFTER column_name|FIRST]
-[FROM rollup_index_name]
-[PROPERTIES ("key"="value", ...)]
+MODIFY COLUMN <column_name> 
+[ column_type [ KEY | agg_type ] ] [ NULL | NOT NULL ] 
+[ DEFAULT "<default_value>"] [ COMMENT "<new_column_comment>" ]
+[ AFTER <column_name> | FIRST ]
+[ FROM rollup_index_name ]
+[ PROPERTIES ("key"="value", ...) ]
 ```
 
 注意：
@@ -498,6 +497,25 @@ MODIFY COLUMN column_name column_type [KEY | agg_type] [NULL | NOT NULL] [DEFAUL
     DATE 转换成 DATETIME(时分秒自动补零，例如: `2019-12-09` &lt;--&gt; `2019-12-09 00:00:00`)
     - FLOAT 转换成 DOUBLE。
     - INT 转换成 DATE (如果 INT 类型数据不合法则转换失败，原始数据不变。)
+
+6. 不支持从NULL转换为NOT NULL。
+7. 您可以在单个 MODIFY COLUMN 子句中修改多个属性。但某些属性的组合不支持。
+
+#### 重新排序指定索引的列
+
+语法：
+
+```sql
+ALTER TABLE [<db_name>.]<tbl_name>
+ORDER BY (column_name1, column_name2, ...)
+[FROM rollup_index_name]
+[PROPERTIES ("key"="value", ...)]
+```
+
+注意：
+
+- 索引中的所有列必须写出。
+- 值列列在键列之后。
 
 #### 修改排序键
 
@@ -598,11 +616,11 @@ field_desc ::= <field_type> [ AFTER <prior_field_name> | FIRST ]
 
 :::note
 
-- 目前仅支持存算一体集群。
-- 对应表必须开启 `fast_schema_evolution`。
-- 不支持向 MAP 类型中的 STRUCT 增删字段。
-- 新增字段不支持指定默认值，Nullable 等属性。默认为 Nullable，默认值为 null。
-- 使用该功能后，不支持直接将集群降级至不具备该功能的版本。
+- 目前，此功能仅在存算一体集群中支持。
+- 表必须启用`fast_schema_evolution`属性。
+- 不支持在 STRUCT 类型中修改一个 MAP 子字段的 Value 类型，不管该 Value 类型是 ARRAY、STRUCT 还是 MAP。
+- 新添加的字段不能有默认值或可空等属性。它们默认为可空，默认值为null。
+- 使用此功能后，不允许直接降级集群到不支持此功能的版本。
 
 :::
 
@@ -724,20 +742,19 @@ SET ("key" = "value")
 
 参数说明：
 
-- `key` 表示表属性的名称，`value` 表示该表属性的配置。
+`key` 表示表属性的名称，`value` 表示该表属性的配置。
 
-- 支持修改如下表属性：
-  - `replication_num`
-  - `default.replication_num`
-  - `storage_cooldown_ttl`
-  - `storage_cooldown_time`
-  - [动态分区相关属性 properties](../../../table_design/data_distribution/dynamic_partitioning.md)，比如 `dynamic_partition.enable`
-  - `enable_persistent_index`
-  - `bloom_filter_columns`
-  - `colocate_with`
-  - `bucket_size`（自 3.2 版本支持）
-  - `base_compaction_forbidden_time_ranges`（自 v3.2.13 版本支持）
+支持修改如下表属性：
 
+- `replication_num`
+- `default.replication_num`
+- `default.storage_medium`
+- 动态分区相关属性
+- `enable_persistent_index`
+- `bloom_filter_columns`
+- `colocate_with`
+- `bucket_size`（从3.2起支持）
+- `base_compaction_forbidden_time_ranges`（从v3.2.13起支持）
 
 :::note
 
@@ -755,16 +772,16 @@ ALTER TABLE [<db_name>.]<tbl_name>
 SWAP WITH <tbl_name>;
 ```
 
-### 手动 Compaction（3.1 版本起）
+### 手动 Compaction（从3.1起）
 
-StarRocks 通过 Compaction 机制将导入的不同数据版本进行合并，将小文件合并成大文件，有效提升了查询性能。
+StarRocks使用 Compaction 机制来合并已加载数据的不同版本。此功能可以将小文件合并为大文件，从而有效提高查询性能。
 
 3.1 版本之前，支持通过两种方式来做 Compaction：
 
-- 系统自动在后台执行 Compaction。Compaction 的粒度是 BE 级，由后台自动执行，用户无法控制具体的数据库或者表。
-- 用户通过 HTTP 接口指定 Tablet 来执行 Compaction。
+- 系统自动 Compaction ：在BE级别后台执行 Compaction 。用户不能指定数据库或表进行 Compaction 。
+- 用户可以通过调用 HTTP 接口执行 Compaction 。
 
-3.1 版本之后，增加了一个 SQL 接口，用户可以通过执行 SQL 命令来手动进行 Compaction，可以指定表、单个或多个分区进行 Compaction。
+从 v3.1 起，StarRocks提供了一个SQL接口，用户可以通过运行SQL命令手动执行 Compaction 。他们可以选择特定的表或分区进行 Compaction。这提供了对 Compaction 过程的更多灵活性和控制。
 
 存算分离集群自 v3.3.0 起支持该功能。
 
@@ -774,24 +791,43 @@ StarRocks 通过 Compaction 机制将导入的不同数据版本进行合并，�
 
 语法：
 
-```sql
--- 对整张表做 compaction。
+```SQL
+ALTER TABLE <tbl_name> [ BASE | CUMULATIVE ] COMPACT [ <partition_name> | ( <partition1_name> [, <partition2_name> ...] ) ]
+```
+
+即：
+
+```SQL
+-- 对整个表执行 Compaction。
 ALTER TABLE <tbl_name> COMPACT
 
--- 指定一个分区进行 compaction。
+-- 对单个分区执行 Compaction。
 ALTER TABLE <tbl_name> COMPACT <partition_name>
 
--- 指定多个分区进行 compaction。
+-- 对多个分区执行 Compaction。
 ALTER TABLE <tbl_name> COMPACT (<partition1_name>[,<partition2_name>,...])
 
--- 对多个分区进行 cumulative compaction。
+-- 执行增量 Compaction。
 ALTER TABLE <tbl_name> CUMULATIVE COMPACT (<partition1_name>[,<partition2_name>,...])
 
--- 对多个分区进行 base compaction。
+-- 执行 Base Compaction。
 ALTER TABLE <tbl_name> BASE COMPACT (<partition1_name>[,<partition2_name>,...])
 ```
 
-执行完 Compaction 后，您可以通过查询 `information_schema` 数据库下的 `be_compactions` 表来查看 Compaction 后的数据版本变化 （`SELECT * FROM information_schema.be_compactions;`）。
+`information_schema`数据库中的`be_compactions`表记录 Compaction 结果。可以运行`SELECT * FROM information_schema.be_compactions;`查询 Compaction 后的数据版本。
+
+### 删除主键索引 (3.3.9 版本起)
+
+语法：
+
+```sql
+ALTER TABLE [<db_name>.]<tbl_name>
+DROP PERSISTENT INDEX ON TABLETS(<tablet_id>[, <tablet_id>, ...]);
+```
+
+> **说明**
+>
+> 只支持在存算分离集群中删除 CLOUD_NATIVE 类型的主键索引
 
 ## 示例
 
@@ -1168,7 +1204,13 @@ ALTER TABLE <tbl_name> BASE COMPACT (<partition1_name>[,<partition2_name>,...])
         );
     ```
 
-### Rename
+3. 修改表的存储介质属性。
+
+     ```sql
+     ALTER TABLE example_db.my_table SET("default.storage_medium"="SSD");
+     ```
+
+### 重命名
 
 1. 将表 `table1` 的名称修改为 `table2`。
 
@@ -1240,6 +1282,14 @@ ALTER TABLE compaction_test COMPACT (p202302,p203303);
 ALTER TABLE compaction_test CUMULATIVE COMPACT (p202302,p203303);
 
 ALTER TABLE compaction_test BASE COMPACT (p202302,p203303);
+```
+
+### 删除主键索引
+
+删除 `db1.test_tbl` 中 Tablet `100` 和 `101` 的主键索引 。
+
+```sql
+ALTER TABLE db1.test_tbl DROP PERSISTENT INDEX ON TABLETS (100, 101);
 ```
 
 ## 相关参考

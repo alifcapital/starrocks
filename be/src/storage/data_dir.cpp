@@ -269,8 +269,8 @@ std::string DataDir::get_root_path_from_schema_hash_path_in_trash(const std::str
             .string();
 }
 
-// TODO(ygl): deal with rowsets and tablets when load failed
-Status DataDir::load() {
+// [NOTICE] we must ensure that all tablets are either properly loaded or handled within load().
+void DataDir::load() {
     // load tablet
     // create tablet from tablet meta and add it to tablet mgr
     int64_t load_tablet_start = MonotonicMillis();
@@ -296,27 +296,8 @@ Status DataDir::load() {
         }
         return true;
     };
-    Status load_tablet_status =
-            TabletMetaManager::walk_until_timeout(_kv_store, load_tablet_func, config::load_tablet_timeout_seconds);
-    if (load_tablet_status.is_time_out()) {
-        LOG(WARNING) << "load tablets from rocksdb timeout, try to compact meta and retry. path: " << _path;
-        Status s = _kv_store->compact();
-        if (!s.ok()) {
-            LOG(ERROR) << "data dir " << _path << " compact meta before load failed";
-            return s;
-        }
-        for (auto tablet_id : tablet_ids) {
-            Status s = _tablet_manager->drop_tablet(tablet_id, kKeepMetaAndFiles);
-            if (!s.ok()) {
-                LOG(ERROR) << "data dir " << _path << " drop_tablet failed: " << s.message();
-                return s;
-            }
-        }
-        LOG(WARNING) << "compact meta finished, retry load tablets from rocksdb. path: " << _path;
-        tablet_ids.clear();
-        failed_tablet_ids.clear();
-        load_tablet_status = TabletMetaManager::walk(_kv_store, load_tablet_func);
-    }
+    Status load_tablet_status = TabletMetaManager::walk_with_compact_on_timeout(_kv_store, load_tablet_func,
+                                                                                config::load_tablet_timeout_seconds);
 
     if (failed_tablet_ids.size() != 0) {
         LOG(ERROR) << "load tablets from header failed"
@@ -352,8 +333,8 @@ Status DataDir::load() {
             tablet->tablet_meta()->to_meta_pb(&tablet_meta_pb);
             Status s = TabletMetaManager::save(this, tablet_meta_pb);
             if (!s.ok()) {
+                // Only print log, do not return error. We can handle it later.
                 LOG(ERROR) << "data dir " << _path << " save tablet meta failed: " << s.message();
-                return s;
             }
         }
     }
@@ -402,8 +383,7 @@ Status DataDir::load() {
                 rowset_meta->set_skip_tablet_schema(true);
             }
             Status commit_txn_status = _txn_manager->commit_txn(
-                    _kv_store, rowset_meta->partition_id(), rowset_meta->txn_id(), rowset_meta->tablet_id(),
-                    rowset_meta->tablet_schema_hash(), rowset_meta->tablet_uid(), rowset_meta->load_id(), rowset, true);
+                    tablet, rowset_meta->partition_id(), rowset_meta->txn_id(), rowset_meta->load_id(), rowset, true);
             if (!commit_txn_status.ok() && !commit_txn_status.is_already_exist()) {
                 LOG(WARNING) << "Fail to add committed rowset=" << rowset_meta->rowset_id()
                              << " tablet=" << rowset_meta->tablet_id() << " txn_id: " << rowset_meta->txn_id();
@@ -468,8 +448,6 @@ Status DataDir::load() {
             LOG(WARNING) << "Fail to finish loading rowsets, tablet id=" << tablet_id << ", status: " << st.to_string();
         }
     }
-
-    return Status::OK();
 }
 
 // gc unused tablet schemahash dir
@@ -726,8 +704,9 @@ void DataDir::perform_path_scan() {
                     std::string tablet_schema_hash_path = tablet_id_path + "/" + schema_hash;
                     _all_tablet_schemahash_paths.insert(tablet_schema_hash_path);
                     std::set<std::string> rowset_files;
+                    std::set<std::string> inverted_dirs;
 
-                    ret = fs::list_dirs_files(_fs.get(), tablet_schema_hash_path, nullptr, &rowset_files);
+                    ret = fs::list_dirs_files(_fs.get(), tablet_schema_hash_path, &inverted_dirs, &rowset_files);
                     if (!ret.ok()) {
                         LOG(WARNING) << "fail to walk dir. [path=" << tablet_schema_hash_path << "] error["
                                      << ret.to_string() << "]";
@@ -739,6 +718,12 @@ void DataDir::perform_path_scan() {
                             _all_check_dcg_files.insert(rowset_file_path);
                         } else {
                             _all_check_paths.insert(rowset_file_path);
+                        }
+                    }
+                    for (const auto& inverted_dir : inverted_dirs) {
+                        std::string inverted_index_path = tablet_schema_hash_path + "/" + inverted_dir;
+                        if (inverted_index_path.ends_with(".ivt")) {
+                            _all_check_paths.insert(inverted_index_path);
                         }
                     }
                 }

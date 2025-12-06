@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.mysql.security;
 
 import com.google.common.base.Strings;
@@ -24,6 +23,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.Hashtable;
 import javax.naming.Context;
 import javax.naming.NamingEnumeration;
+import javax.naming.PartialResultException;
 import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
 import javax.naming.directory.SearchControls;
@@ -97,13 +97,15 @@ public class LdapSecurity {
             ctx = new InitialDirContext(env);
             SearchControls sc = new SearchControls();
             sc.setSearchScope(SearchControls.SUBTREE_SCOPE);
-            String searchFilter = "(" + Config.authentication_ldap_simple_user_search_attr + "=" + user + ")";
+            // Escapes special characters in user input to prevent LDAP injection
+            String safeUser = escapeLdapValue(user);
+            String searchFilter = "(" + Config.authentication_ldap_simple_user_search_attr + "=" + safeUser + ")";
             NamingEnumeration<SearchResult> results = ctx.search(baseDN, searchFilter, sc);
 
             String userDN = null;
             int matched = 0;
-            for (; ; ) {
-                if (results.hasMore()) {
+            try {
+                while (results.hasMore()) {
                     matched++;
                     if (matched > 1) {
                         LOG.warn("searched more than one entry from ldap server for user {}", user);
@@ -112,9 +114,9 @@ public class LdapSecurity {
 
                     SearchResult result = results.next();
                     userDN = result.getNameInNamespace();
-                } else {
-                    break;
                 }
+            } catch (PartialResultException e) {
+                LOG.warn("ldap search partial result exception", e);
             }
 
             if (matched != 1) {
@@ -148,5 +150,19 @@ public class LdapSecurity {
             }
         }
         return src;
+    }
+
+    public static String escapeLdapValue(String value) {
+        if (value == null) {
+            return null;
+        }
+
+        value = value.replace("\\", "\\5c");
+        value = value.replace("*", "\\2a");
+        value = value.replace("(", "\\28");
+        value = value.replace(")", "\\29");
+        value = value.replace("|", "\\7c");
+        value = value.replace("\\u0000", "\\00");
+        return value;
     }
 }

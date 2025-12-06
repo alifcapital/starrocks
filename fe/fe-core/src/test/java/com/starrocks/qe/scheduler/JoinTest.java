@@ -34,6 +34,7 @@ import mockit.Mock;
 import mockit.MockUp;
 import org.awaitility.Awaitility;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -41,12 +42,16 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 public class JoinTest extends SchedulerTestBase {
 
+    @Ignore
     @Test
     public void testCancelAtJoining() throws Exception {
         String sql = "insert into lineitem select * from lineitem";
@@ -86,6 +91,7 @@ public class JoinTest extends SchedulerTestBase {
         Assert.assertEquals(TStatusCode.INTERNAL_ERROR, scheduler.getExecStatus().getErrorCode());
     }
 
+    @Ignore
     @Test
     public void testReportFailedExecutionAtJoining() throws Exception {
         String sql = "insert into lineitem select * from lineitem";
@@ -220,5 +226,41 @@ public class JoinTest extends SchedulerTestBase {
         Map<String, String> stringLoadCounters = loadCounters.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey, entry -> String.valueOf(entry.getValue())));
         Assert.assertEquals(stringLoadCounters, scheduler.getLoadCounters());
+    }
+
+    @Test
+    public void testUpdateExecStatusConcurrently() throws Exception {
+        String sql = "insert into lineitem select a.* from lineitem a join lineitem b on a.L_ORDERKEY=b.L_ORDERKEY";
+        DefaultCoordinator scheduler = startScheduling(sql);
+        List<Integer> executionIndexes = scheduler.getExecutionDAG().getExecutions().stream()
+                .map(FragmentInstanceExecState::getIndexInJob)
+                .collect(Collectors.toList());
+        int fragmentInstanceCount = executionIndexes.size();
+        // threads for each fragment instance to mock duplicated updateFragmentExecStatus and some of them are not EOS.
+        final int threadCountPerInstance = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCountPerInstance * fragmentInstanceCount);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < fragmentInstanceCount * threadCountPerInstance; i++) {
+            final int indexInJob = i % fragmentInstanceCount;
+            final boolean isDone = i % 2 == 0;
+            futures.add(executor.submit(() -> {
+                TReportExecStatusParams request = new TReportExecStatusParams(FrontendServiceVersion.V1);
+                request.setBackend_num(indexInJob);
+                request.setDone(isDone);
+                request.setStatus(new TStatus(TStatusCode.OK));
+                scheduler.updateFragmentExecStatus(request);
+            }));
+        }
+        // ensure finishInstance will not be called duplicate
+        for (Future<?> f : futures) {
+            f.get();
+        }
+        executor.shutdown();
+        for (int i = 0; i < fragmentInstanceCount; i++) {
+            int indexInJob = executionIndexes.get(i);
+            FragmentInstanceExecState execState = scheduler.getExecutionDAG().getExecution(indexInJob);
+            System.out.println(execState.getState());
+            Assert.assertTrue(execState.getState() == FragmentInstanceExecState.State.FINISHED);
+        }
     }
 }

@@ -2,11 +2,13 @@
 displayed_sidebar: docs
 ---
 
-import FEConfigMethod from '../../_assets/commonMarkdown/FE_config_method.md'
+import FEConfigMethod from '../../_assets/commonMarkdown/FE_config_method.mdx'
 
-import AdminSetFrontendNote from '../../_assets/commonMarkdown/FE_config_note.md'
+import AdminSetFrontendNote from '../../_assets/commonMarkdown/FE_config_note.mdx'
 
-import StaticFEConfigNote from '../../_assets/commonMarkdown/StaticFE_config_note.md'
+import StaticFEConfigNote from '../../_assets/commonMarkdown/StaticFE_config_note.mdx'
+
+import EditionSpecificFEItem from '../../_assets/commonMarkdown/Edition_Specific_FE_Item.mdx'
 
 # FE Configuration
 
@@ -783,7 +785,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Introduced in: -
 -->
 
-##### ignore_unknown_log_id
+##### metadata_ignore_unknown_operation_type
 
 - Default: false
 - Type: Boolean
@@ -1032,6 +1034,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description: Whether to collect the profile of a query. If this parameter is set to `TRUE`, the system collects the profile of the query. If this parameter is set to `FALSE`, the system does not collect the profile of the query.
 - Introduced in: -
 
+##### profile_info_format
+
+- Default: default
+- Type: String
+- Unit: -
+- Is mutable: Yes
+- Description: The format of the Profile output by the system. Valid values: `default` and `json`. When set to `default`, Profile is of the default format. When set to `json`, the system outputs Profile in JSON format.
+- Introduced in: v2.5
+
 ##### enable_background_refresh_connector_metadata
 
 - Default: true in v3.0 and later and false in v2.5
@@ -1222,7 +1233,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ##### enable_backup_materialized_view
 
-- Default: true
+- Default: false
 - Type: Boolean
 - Unit: -
 - Is mutable: Yes
@@ -1982,6 +1993,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description: The minimum timeout duration allowed for a load job. This limit applies to all types of load jobs.
 - Introduced in: -
 
+##### finish_transaction_default_lock_timeout_ms
+
+- Default: 1000
+- Type: Int
+- Unit: MilliSeconds
+- Is mutable: Yes
+- Description: The default timeout for acquiring the db and table lock during finishing transaction.
+- Introduced in: v4.0.0, v3.5.8
+
 ##### spark_dpp_version
 
 - Default: 1.0.0
@@ -2192,6 +2212,24 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Unit: Seconds
 - Is mutable: Yes
 - Description: Routine Load job is set to the UNSTABLE state if any task within the Routine Load job lags. To be specific, the difference between the timestamp of the message being consumed and the current time exceeds this threshold, and unconsumed messages exist in the data source.
+- Introduced in: -
+
+##### enable_routine_load_lag_metrics
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether to collect Routine Load Kafka partition offset lag metrics. Please note that set this item to `true` will call the Kafka API to get the partition's latest offset.
+- Introduced in: -
+
+##### min_routine_load_lag_for_metrics
+
+- Default: 10000
+- Type: INT
+- Unit: -
+- Is mutable: Yes
+- Description: The minimum offset lag of Routine Load jobs to be shown in monitoring metrics. Routine Load jobs whose offset lags are greater than this value will be displayed in the metrics.
 - Introduced in: -
 
 ##### max_tolerable_backend_down_num
@@ -2839,27 +2877,6 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 - Introduced in: -
 
-<!--
-##### shard_group_clean_threshold_sec
-
-- Default: 3600
-- Type: Long
-- Unit: Seconds
-- Is mutable: No
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### star_mgr_meta_sync_interval_sec
-
-- Default: 600
-- Type: Long
-- Unit: Seconds
-- Is mutable: No
-- Description:
-- Introduced in: -
--->
 
 ##### cloud_native_meta_port
 
@@ -3210,6 +3227,33 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description: The threshold the system used to judge the tablet balance among workers in a shared-data cluster, The imbalance factor is calculated as `f = (MAX(tablets) - MIN(tablets)) / AVERAGE(tablets)`. If the factor is greater than `lake_balance_tablets_threshold`, a tablet balance will be triggered. This item takes effect only when `lake_enable_balance_tablets_between_workers` is set to `true`.
 - Introduced in: v3.3.4
 
+##### shard_group_clean_threshold_sec
+
+- Default: 3600
+- Type: Long
+- Unit: Seconds
+- Is mutable: Yes
+- Description: The time before FE cleans the unused tablet and shard groups in a shared-data cluster. Tablets and shard groups created within this threshold will not be cleaned.
+- Introduced in: -
+
+##### star_mgr_meta_sync_interval_sec
+
+- Default: 600
+- Type: Long
+- Unit: Seconds
+- Is mutable: No
+- Description: The interval at which FE runs the periodical metadata synchronization with StarMgr in a shared-data cluster.
+- Introduced in: -
+
+##### meta_sync_force_delete_shard_meta
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether to allow deleting the metadata of the shared-data cluster directly, bypassing cleaning the remote storage files. It is recommended to set this item to `true` only when there is an excessive number of shards to be cleaned, which leads to extreme memory pressure on the FE JVM. Note that the data files belonging to the shards or tablets cannot be automatically cleaned after this feature is enabled.
+- Introduced in: v3.2.10, v3.3.3
+
 ### Other
 
 ##### tmp_dir
@@ -3493,6 +3537,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description: The maximum number of jobs that can wait in a report queue. The report is about disk, task, and tablet information of BEs. If too many report jobs are piling up in a queue, OOM will occur.
 - Introduced in: -
 
+##### enable_collect_tablet_num_in_show_proc_backend_disk_path
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether to enable the collection of tablet numbers for each disk in the `SHOW PROC /BACKENDS/{id}` command
+- Introduced in: v4.0.1, v3.5.8
+
 ##### enable_metric_calculator
 
 - Default: true
@@ -3549,15 +3602,6 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Unit: -
 - Is mutable: No
 - Description: The root directory of small files.
-- Introduced in: -
-
-##### enable_auth_check
-
-- Default: true
-- Type: Boolean
-- Unit: -
-- Is mutable: No
-- Description: Specifies whether to enable the authentication check feature. Valid values: `TRUE` and `FALSE`. `TRUE` specifies to enable this feature, and `FALSE` specifies to disable this feature.
 - Introduced in: -
 
 <!--
@@ -4950,7 +4994,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Default: 8
 - Type: Int
 - Unit: -
-- Is mutable: Yes
+- Is mutable: No
 - Description: The maximum capacity of the JDBC connection pool for accessing JDBC catalogs.
 - Introduced in: -
 
@@ -4959,7 +5003,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Default: 1
 - Type: Int
 - Unit: -
-- Is mutable: Yes
+- Is mutable: No
 - Description: The minimum number of idle connections in the JDBC connection pool for accessing JDBC catalogs.
 - Introduced in: -
 
@@ -4968,7 +5012,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Default: 600000
 - Type: Int
 - Unit: Milliseconds
-- Is mutable: Yes
+- Is mutable: No
 - Description: The maximum amount of time after which a connection for accessing a JDBC catalog times out. Timed-out connections are considered idle.
 - Introduced in: -
 
@@ -4991,3 +5035,96 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description:
 - Introduced in: -
 -->
+
+##### mv_refresh_fail_on_filter_data
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Mv refresh fails if there is filtered data in refreshing, true by default, otherwise return success by ignoring the filtered data.
+- Introduced in: -
+
+##### mv_create_partition_batch_interval_ms
+
+- Default: 1000
+- Type: Int
+- Unit: ms
+- Is mutable: Yes
+- Description: During materialized view refresh, if multiple partitions need to be created in bulk, the system divides them into batches of 64 partitions each. To reduce the risk of failures caused by frequent partition creation, a default interval (in milliseconds) is set between each batch to control the creation frequency.
+- Introduced in: v3.3
+
+##### max_mv_refresh_failure_retry_times
+
+- Default: 1
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum retry times when materialized view fails to refresh.
+- Introduced in: v3.3.0
+
+##### max_mv_refresh_try_lock_failure_retry_times
+
+- Default: 3
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum retry times of try lock when materialized view fails to refresh.
+- Introduced in: v3.3.0
+
+
+##### mv_refresh_try_lock_timeout_ms
+
+- Default: 30000
+- Type: Int
+- Unit: Milliseconds
+- Is mutable: Yes
+- Description: The default try lock timeout for materialized view refresh to try the DB lock of its base table/materialized view.
+- Introduced in: v3.3.0
+
+##### enable_mv_refresh_collect_profile
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether to enable profile in refreshing materialized view by default for all materialized views.
+- Introduced in: v3.3.0
+
+##### max_mv_task_run_meta_message_values_length
+
+- Default: 16
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum length for the "extra message" values (in set or map) in materialized view task run. You can set this item to avoid occupying too much meta memory.
+- Introduced in: v3.3.0
+
+##### max_mv_check_base_table_change_retry_times
+
+- Default: 10
+- Type: -
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum retry times for detecting base table change when refreshing materialized views.
+- Introduced in: v3.3.0
+
+##### mv_refresh_default_planner_optimize_timeout
+
+- Default: 30000
+- Type: -
+- Unit: -
+- Is mutable: Yes
+- Description: The default timeout for the planning phase of the optimizer when refresh materialized views.
+- Introduced in: v3.3.0
+
+##### enable_mv_refresh_query_rewrite
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether to enable rewrite query during materialized view refresh so that the query can use the rewritten mv directly rather than the base table to improve query performance.
+- Introduced in: v3.3
+
+<EditionSpecificFEItem />

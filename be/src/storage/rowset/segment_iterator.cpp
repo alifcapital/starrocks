@@ -1129,8 +1129,18 @@ Status SegmentIterator::_do_get_next(Chunk* result, vector<rowid_t>* rowid) {
         if (buf_size <= 0) {
             buf_size = 1048576; // 1MB
         }
-        for (auto& [cid, stream] : _column_files) {
-            ASSIGN_OR_RETURN(auto vec, _column_iterators[cid]->get_io_range_vec(_scan_range));
+        _context->_read_chunk->reset();
+        Chunk* chunk = _context->_read_chunk.get();
+        size_t column_index = 0;
+        for (size_t cid = 0; cid < _column_iterators.size(); ++cid) {
+            if (_column_iterators[cid] == nullptr) {
+                continue;
+            }
+            ColumnPtr& col = chunk->get_column_by_index(column_index++);
+            if (!_scan_range.empty()) {
+                RETURN_IF_ERROR(_column_iterators[cid]->seek_to_ordinal(_scan_range.begin()));
+            }
+            ASSIGN_OR_RETURN(auto vec, _column_iterators[cid]->get_io_range_vec(_scan_range, col.get()));
             for (auto e : vec) {
                 // if buf_size is 1MB, offset is 123, and size is 2MB
                 // after calculation, offset will be 0, and size will be 2MB+123
@@ -1138,7 +1148,7 @@ Status SegmentIterator::_do_get_next(Chunk* result, vector<rowid_t>* rowid) {
                 size_t size = e.second + (e.first % buf_size);
                 while (size > 0) {
                     size_t cur_size = std::min(buf_size, size);
-                    RETURN_IF_ERROR(stream->touch_cache(offset, cur_size));
+                    RETURN_IF_ERROR(_column_files[cid]->touch_cache(offset, cur_size));
                     offset += cur_size;
                     size -= cur_size;
                 }
@@ -1224,6 +1234,8 @@ Status SegmentIterator::_do_get_next(Chunk* result, vector<rowid_t>* rowid) {
     if (chunk_size > 0 && chunk->delete_state() != DEL_NOT_SATISFIED && !_opts.delete_predicates.empty()) {
         SCOPED_RAW_TIMER(&_opts.stats->del_filter_ns);
         size_t old_sz = chunk->num_rows();
+        // NOTE: risk of using _selection.data() without initialization
+        // if the delete_predicates do nothing to the selection.
         RETURN_IF_ERROR(_opts.delete_predicates.evaluate(chunk, _selection.data()));
         size_t deletes = SIMD::count_nonzero(_selection.data(), old_sz);
         if (deletes == old_sz) {
@@ -1624,6 +1636,10 @@ Status SegmentIterator::_init_context() {
             }
         }
 
+        if (_opts.lake_io_opts.cache_file_only) {
+            // CACHE SELECT disable late materialization
+            _late_materialization_ratio = 0;
+        }
         if (_late_materialization_ratio <= 0) {
             // late materialization been disabled.
             RETURN_IF_ERROR(_build_context<false>(&_context_list[0]));
@@ -2194,6 +2210,10 @@ ChunkIteratorPtr new_segment_iterator(const std::shared_ptr<Segment>& segment, c
     if (options.pred_tree.empty() || options.pred_tree.num_columns() >= schema.num_fields()) {
         return std::make_shared<SegmentIterator>(segment, schema, options);
     } else {
+        // CACHE SELECT disable late materialization
+        if (options.lake_io_opts.cache_file_only) {
+            return new_projection_iterator(schema, std::make_shared<SegmentIterator>(segment, schema, options));
+        }
         Schema ordered_schema = reorder_schema(schema, options.pred_tree);
         auto seg_iter = std::make_shared<SegmentIterator>(segment, ordered_schema, options);
         return new_projection_iterator(schema, seg_iter);

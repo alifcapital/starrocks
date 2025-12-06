@@ -43,11 +43,25 @@
         <jni-connector.version>1.0.0</jni-connector.version>
         <hadoop-ext.version>1.0.0</hadoop-ext.version>
         <java-utils.version>1.0.0</java-utils.version>
-        <io.netty.version>4.1.118.Final</io.netty.version>
+        <io.netty.version>4.1.128.Final</io.netty.version>
         <protobuf-java.version>3.25.5</protobuf-java.version>
         <nimbusds.version>9.37.2</nimbusds.version>
         <commons-io.version>2.14.0</commons-io.version>
         <gcs.connector.version>hadoop3-2.2.26</gcs.connector.version>
+        <slf4j.version>1.7.36</slf4j.version>
+        <arrow.version>17.0.0</arrow.version>
+        <jackson.version>2.19.1</jackson.version>
+        <guava.version>32.0.1-jre</guava.version>
+        <!-- hadoop-azure requires no more than jetty10+ -->
+        <!-- https://stackoverflow.com/questions/66713254/spark-wasb-and-jetty-11 -->
+        <jetty.version>9.4.57.v20241219</jetty.version>
+        <parquet.version>1.15.2</parquet.version>
+        <airlift.version>0.27</airlift.version>
+        <avro.version>1.11.4</avro.version>
+        <luben.zstd.jni.version>1.5.4-2</luben.zstd.jni.version>
+        <kryo.version>4.0.2</kryo.version>
+        <commons-beanutils.version>1.11.0</commons-beanutils.version>
+        <lz4-java.version>1.8.1</lz4-java.version>
     </properties>
 
     <dependencyManagement>
@@ -123,6 +137,10 @@
                         <artifactId>zookeeper</artifactId>
                     </exclusion>
                     <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                    <exclusion>
                         <groupId>org.apache.avro</groupId>
                         <artifactId>avro</artifactId>
                     </exclusion>
@@ -146,6 +164,13 @@
                     </exclusion>
                 </exclusions>
             </dependency>
+
+            <dependency>
+                <groupId>commons-beanutils</groupId>
+                <artifactId>commons-beanutils</artifactId>
+                <version>${commons-beanutils.version}</version>
+            </dependency>
+
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-hdfs-client</artifactId>
@@ -175,6 +200,10 @@
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java</artifactId>
                     </exclusion>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
@@ -182,6 +211,12 @@
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-kms</artifactId>
                 <version>${hadoop.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
@@ -194,18 +229,36 @@
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-hdfs-httpfs</artifactId>
                 <version>${hadoop.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-nfs</artifactId>
                 <version>${hadoop.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-hdfs-nfs</artifactId>
                 <version>${hadoop.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
@@ -266,6 +319,14 @@
             </dependency>
             <!-- hive -->
 
+            <!--slf4j-->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+            <!--slf4j-->
+
             <!--log4j 2-->
             <dependency>
                 <groupId>org.apache.logging.log4j</groupId>
@@ -275,6 +336,11 @@
             <dependency>
                 <groupId>org.apache.logging.log4j</groupId>
                 <artifactId>log4j-core</artifactId>
+                <version>${log4j2.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-slf4j-impl</artifactId>
                 <version>${log4j2.version}</version>
             </dependency>
             <!--log4j 2-->
@@ -287,6 +353,133 @@
                 <scope>test</scope>
             </dependency>
             <!-- junit -->
+            <!-- jackson -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <!-- jackson -->
+
+            <!-- apache arrow -->
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-vector</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-memory-netty</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-compression</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
+            <!-- apache arrow -->
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>${guava.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-client</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-io</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-webapp</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-servlet</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-util</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-util-ajax</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-hadoop-bundle</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.parquet</groupId>
+                <artifactId>parquet-avro</artifactId>
+                <version>${parquet.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>aircompressor</artifactId>
+                <version>${airlift.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.github.luben</groupId>
+                <artifactId>zstd-jni</artifactId>
+                <version>${luben.zstd.jni.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.esotericsoftware</groupId>
+                <artifactId>kryo-shaded</artifactId>
+                <version>${kryo.version}</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/at.yawk.lz4/lz4-java -->
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4-java.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 

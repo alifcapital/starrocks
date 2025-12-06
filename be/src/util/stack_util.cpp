@@ -19,8 +19,13 @@
 
 #include <cxxabi.h>
 #include <dirent.h>
+#include <fmt/core.h>
 #include <fmt/format.h>
+#include <fmt/ostream.h>
 #include <sys/syscall.h>
+
+#include <thread>
+#include <tuple>
 
 #include "common/config.h"
 #include "gutil/strings/join.h"
@@ -47,6 +52,7 @@ std::string get_stack_trace() {
 }
 
 struct StackTraceTask {
+    std::thread::id id;
     static constexpr int kMaxStackDepth = 64;
     void* addrs[kMaxStackDepth];
     int depth{0};
@@ -91,6 +97,7 @@ struct StackTraceTaskHash {
 void get_stack_trace_sighandler(int signum, siginfo_t* siginfo, void* ucontext) {
     auto task = reinterpret_cast<StackTraceTask*>(siginfo->si_value.sival_ptr);
     task->depth = google::glog_internal_namespace_::GetStackTrace(task->addrs, StackTraceTask::kMaxStackDepth, 2);
+    task->id = std::this_thread::get_id();
     task->done = true;
 }
 
@@ -146,8 +153,7 @@ std::string get_stack_trace_for_thread(int tid, int timeout_ms) {
             return msg;
         }
     }
-    std::string ret = "Stack trace tid: " + std::to_string(tid) + "\n" + task.to_string();
-    LOG(INFO) << ret;
+    std::string ret = fmt::format("Stack trace tid: {} cid:{} \n{}", tid, task.id, task.to_string());
     return ret;
 }
 
@@ -326,10 +332,10 @@ void __wrap___cxa_throw(void* thrown_exception, std::type_info* info, void (*des
 #elif defined(__GNUC__)
 void __wrap___cxa_throw(void* thrown_exception, void* info, void (*dest)(void*)) {
 #endif
+    // to avoid recursively throwing std::bad_alloc exception when check memory limit in memory tracker.
+    SCOPED_SET_CATCHED(false);
     auto print_level = ExceptionStackContext::get_instance()->get_level();
     if (print_level != 0) {
-        // to avoid recursively throwing std::bad_alloc exception when check memory limit in memory tracker.
-        SCOPED_SET_CATCHED(false);
         string exception_name = ExceptionStackContext::get_exception_name((void*)info);
         if ((print_level == 1 && ExceptionStackContext::get_instance()->prefix_in_white_list(exception_name)) ||
             print_level == -1 ||

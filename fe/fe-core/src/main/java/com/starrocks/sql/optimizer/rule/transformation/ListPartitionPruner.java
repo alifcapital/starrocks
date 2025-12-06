@@ -425,8 +425,10 @@ public class ListPartitionPruner implements PartitionPruner {
             return null;
         }
 
-        // Fold constants
         ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();
+        // implicit cast
+        result = rewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_TYPE_CAST_RULE);
+        // fold constant
         result = rewriter.rewrite(result, ScalarOperatorRewriter.FOLD_CONSTANT_RULES);
         return result;
     }
@@ -470,7 +472,7 @@ public class ListPartitionPruner implements PartitionPruner {
     private static LiteralExpr castLiteralExpr(LiteralExpr literalExpr, Type type) {
         LiteralExpr result = null;
         String value = literalExpr.getStringValue();
-        if (literalExpr.getType() == Type.DATE && type.isNumericType()) {
+        if (literalExpr.getType().isDate() && type.isNumericType()) {
             value = String.valueOf(literalExpr.getLongValue() / 1000000);
         }
         try {

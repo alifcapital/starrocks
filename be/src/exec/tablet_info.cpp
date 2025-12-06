@@ -551,15 +551,22 @@ Status OlapTablePartitionParam::remove_partitions(const std::vector<int64_t>& pa
         if (part->in_keys.empty()) {
             auto& part_ids = _partitions_map[&part->end_key];
             part_ids.erase(std::remove(part_ids.begin(), part_ids.end(), id), part_ids.end());
+            if (part_ids.empty()) {
+                _partitions_map.erase(&part->end_key);
+            }
         } else {
             for (auto& in_key : part->in_keys) {
                 auto& part_ids = _partitions_map[&in_key];
                 part_ids.erase(std::remove(part_ids.begin(), part_ids.end(), id), part_ids.end());
+                if (part_ids.empty()) {
+                    _partitions_map.erase(&in_key);
+                }
             }
         }
 
         _partitions.erase(it);
     }
+    LOG_IF(INFO, _partitions.empty()) << "Empty partitions for db:" << db_id() << ", table_id:" << table_id();
 
     return Status::OK();
 }
@@ -714,6 +721,13 @@ Status OlapTablePartitionParam::find_tablets(Chunk* chunk, std::vector<OlapTable
         auto& part_ids = _partitions_map.begin()->second;
         for (size_t i = 0; i < num_rows; ++i) {
             if ((*selection)[i]) {
+                if (_partitions.empty()) {
+                    // Don't know the reason yet, just defensive coding not crashing the process and possibly for further investigation
+                    LOG(WARNING) << "empty partition for selection[i=" << i << "]=" << (*selection)[i]
+                                 << ", db=" << db_id() << ", table_id=" << table_id();
+                    return Status::InternalError(
+                            fmt::format("empty partitions for db={}, table={}", db_id(), table_id()));
+                }
                 (*partitions)[i] = _partitions[part_ids[(*indexes)[i] % _partitions.size()]];
                 (*indexes)[i] = (*indexes)[i] % (*partitions)[i]->num_buckets;
             }
@@ -738,6 +752,19 @@ void OlapTablePartitionParam::_compute_hashes(Chunk* chunk, std::vector<uint32_t
             (*indexes)[i] = r++;
         }
     }
+}
+
+Status OlapTablePartitionParam::test_add_partitions(OlapTablePartition* partition) {
+    _partitions[partition->id] = partition;
+    std::vector<int64_t> part_ids{partition->id};
+    if (partition->in_keys.empty()) {
+        _partitions_map[&(partition->end_key)] = part_ids;
+    } else {
+        for (auto& in_key : partition->in_keys) {
+            _partitions_map[&in_key] = part_ids;
+        }
+    }
+    return Status::OK();
 }
 
 } // namespace starrocks

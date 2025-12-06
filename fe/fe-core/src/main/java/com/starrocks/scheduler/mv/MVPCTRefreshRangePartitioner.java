@@ -74,7 +74,6 @@ import static com.starrocks.sql.common.SyncPartitionUtils.createRange;
 import static com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils.getStr2DateExpr;
 
 public final class MVPCTRefreshRangePartitioner extends MVPCTRefreshPartitioner {
-    private static final int CREATE_PARTITION_BATCH_SIZE = 64;
     private final Logger logger;
 
     public MVPCTRefreshRangePartitioner(MvTaskRunContext mvContext,
@@ -195,7 +194,8 @@ public final class MVPCTRefreshRangePartitioner extends MVPCTRefreshPartitioner 
         Set<String> mvRangePartitionNames = getMVPartitionNamesWithTTL(mv, mvRefreshParams, partitionTTLNumber, isAutoRefresh);
         logger.info("Get partition names by range with partition limit, start: {}, end: {}, force:{}, " +
                         "partitionTTLNumber: {}, isAutoRefresh: {}, mvRangePartitionNames: {}, isRefreshMvBaseOnNonRefTables:{}",
-                start, end, force, partitionTTLNumber, isAutoRefresh, mvRangePartitionNames, isRefreshMvBaseOnNonRefTables);
+                mv.getName(), start, end, force, partitionTTLNumber, isAutoRefresh, mvRangePartitionNames,
+                isRefreshMvBaseOnNonRefTables);
 
         // check non-ref base tables or force refresh
         if (force || isRefreshMvBaseOnNonRefTables) {

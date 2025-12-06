@@ -4,9 +4,7 @@ displayed_sidebar: docs
 
 # SUBMIT TASK
 
-## Description
-
-Submits an ETL statement as an asynchronous task.
+SUBMIT TASK submits an ETL statement as an asynchronous task.
 
 You can use this statement to:
 
@@ -31,7 +29,20 @@ SUBMIT TASK <task_name>
 [PROPERTIES(<"key" = "value"[, ...]>)]
 AS <etl_statement>
 ```
+## PROPERTIES
 
+You can add `session.` with session variables to change the Task running connect context configurations.
+
+
+For example, the following statement submits a task named `test_task` with session properties which enables query profile and increase query timeout:
+```SQL
+SUBMIT TASK test_task
+PROPERTIES (
+    "session.enable_profile" = "true",
+    "session.query_timeout" = "10000"
+)
+AS insert into t2 select * from t1;
+```
 ## Parameters
 
 | **Parameter**      | **Required** | **Description**                                                                                     |
@@ -116,4 +127,15 @@ INSERT OVERWRITE insert_wiki_edit
     SELECT dt, user_id, count(*) 
     FROM source_wiki_edit 
     GROUP BY dt, user_id;
+```
+
+Example 6: Create a task with custom session properties:
+
+```SQL
+SUBMIT TASK test_task
+PROPERTIES (
+    "session.enable_profile" = "true",
+    "session.query_timeout" = "10000"
+)
+AS insert into t2 select * from t1;
 ```

@@ -566,10 +566,14 @@ CONF_Int32(update_memory_limit_percent, "60");
 // Disable metadata cache when metadata_cache_memory_limit_percent <= 0.
 CONF_mInt32(metadata_cache_memory_limit_percent, "30"); // 30%
 
-// if `enable_retry_apply`, it apply failed due to some tolerable error(e.g. memory exceed limit)
-// the failed apply task will retry after `retry_apply_interval_second`
+// If enable_retry_apply is set to true, the system will attempt retries when apply fails.
+// Retry scenarios for apply operations include the following cases:
+//   1. ​Retry indefinitely for explicitly retryable errors (e.g., memory limits)
+// ​  2. No retry for explicitly non-retryable errors (e.g., Corruption) → Directly enter error state
+// ​  3. Retry until timeout: If still failing after timeout duration → Enter error state
 CONF_mBool(enable_retry_apply, "true");
 CONF_mInt32(retry_apply_interval_second, "30");
+CONF_mInt32(retry_apply_timeout_second, "7200");
 
 // Update interval of tablet stat cache.
 CONF_mInt32(tablet_stat_cache_update_interval_second, "300");
@@ -589,6 +593,10 @@ CONF_mInt32(thrift_rpc_timeout_ms, "5000");
 CONF_Bool(thrift_rpc_strict_mode, "true");
 // rpc max string body size. 0 means unlimited
 CONF_Int32(thrift_rpc_max_body_size, "0");
+
+// Maximum valid time for a thrift rpc connection. Just be consistent with FE's thrift_client_timeout_ms.
+// The connection will be closed if it has existed in the connection pool for longer than this value.
+CONF_Int32(thrift_rpc_connection_max_valid_time_ms, "5000");
 
 // txn commit rpc timeout
 CONF_mInt32(txn_commit_rpc_timeout_ms, "60000");
@@ -783,6 +791,10 @@ CONF_mBool(enable_bitmap_union_disk_format_with_set, "false");
 
 // pipeline poller timeout guard
 CONF_mInt64(pipeline_poller_timeout_guard_ms, "-1");
+// pipeline fragment prepare timeout guard
+CONF_mInt64(pipeline_prepare_timeout_guard_ms, "-1");
+// whether to enable large column detection in the pipeline execution framework.
+CONF_mBool(pipeline_enable_large_column_checker, "false");
 
 // The number of scan threads pipeline engine.
 CONF_Int64(pipeline_scan_thread_pool_thread_num, "0");
@@ -974,6 +986,8 @@ CONF_Int64(rpc_connect_timeout_ms, "30000");
 CONF_Int32(max_batch_publish_latency_ms, "100");
 
 // Config for opentelemetry tracing.
+// Valid example: jaeger_endpoint = localhost:14268
+// Invalid example: jaeger_endpoint = http://localhost:14268
 CONF_String(jaeger_endpoint, "");
 
 // Config for query debug trace
@@ -987,7 +1001,8 @@ CONF_String(starlet_cache_dir, "");
 // Cache backend check interval (in seconds), for async write sync check and ttl clean, e.t.c.
 CONF_Int32(starlet_cache_check_interval, "900");
 // Cache backend cache evictor interval (in seconds)
-CONF_mInt32(starlet_cache_evict_interval, "60");
+// not used any more, set to 2^31-1
+CONF_mInt32(starlet_cache_evict_interval, "2147483647");
 // Cache will start evict cache files if free space belows this value(percentage)
 CONF_mDouble(starlet_cache_evict_low_water, "0.1");
 // Cache will stop evict cache files if free space is above this value(percentage)
@@ -1001,7 +1016,7 @@ CONF_mInt32(starlet_cache_evict_throughput_mb, "200");
 // Buffer size in starlet fs buffer stream, size <= 0 means not use buffer stream.
 // Only support in S3/HDFS currently.
 CONF_mInt32(starlet_fs_stream_buffer_size_bytes, "1048576");
-CONF_mBool(starlet_use_star_cache, "true");
+CONF_Bool(starlet_use_star_cache, "true");
 CONF_Bool(starlet_star_cache_async_init, "true");
 CONF_mInt32(starlet_star_cache_mem_size_percent, "0");
 CONF_mInt64(starlet_star_cache_mem_size_bytes, "134217728");
@@ -1026,6 +1041,7 @@ CONF_mInt32(starlet_fslib_s3client_connect_timeout_ms, "1000");
 CONF_Alias(object_storage_request_timeout_ms, starlet_fslib_s3client_request_timeout_ms);
 CONF_mInt32(starlet_delete_files_max_key_in_batch, "1000");
 CONF_mInt32(starlet_filesystem_instance_cache_capacity, "10000");
+CONF_mInt32(starlet_filesystem_instance_cache_ttl_sec, "86400");
 #endif
 
 CONF_mInt64(lake_metadata_cache_limit, /*2GB=*/"2147483648");
@@ -1053,6 +1069,7 @@ CONF_mInt64(lake_pk_compaction_min_input_segments, "5");
 CONF_mInt32(lake_pk_preload_memory_limit_percent, "30");
 CONF_mInt32(lake_pk_index_sst_min_compaction_versions, "2");
 CONF_mInt32(lake_pk_index_sst_max_compaction_versions, "100");
+CONF_mBool(enable_strict_delvec_crc_check, "false");
 // When the ratio of cumulative level to base level is greater than this config, use base merge.
 CONF_mDouble(lake_pk_index_cumulative_base_compaction_ratio, "0.1");
 CONF_Int32(lake_pk_index_block_cache_limit_percent, "10");
@@ -1112,6 +1129,11 @@ CONF_Int64(spill_read_buffer_min_bytes, "1048576");
 CONF_mInt64(mem_limited_chunk_queue_block_size, "8388608");
 
 CONF_Int32(internal_service_query_rpc_thread_num, "-1");
+// The retry times of rpc request to report exec rpc request to FE. The default value is 10,
+// which means that the rpc request will be retried 10 times if it fails if it's fragment instatnce finish rpc.
+// Report exec rpc request is important for load job, if one fragment instance finish report failed,
+// the load job will be hang until timeout.
+CONF_mInt32(report_exec_rpc_request_retry_num, "10");
 
 /*
  * When compile with ENABLE_STATUS_FAILED, every use of RETURN_INJECT has probability of 1/cardinality_of_inject
@@ -1249,6 +1271,8 @@ CONF_mBool(enable_pindex_rebuild_in_compaction, "true");
 // enable read pindex by page
 CONF_mBool(enable_pindex_read_by_page, "true");
 
+// check need to rebuild pindex or not
+CONF_mBool(enable_rebuild_pindex_check, "true");
 // Used by query cache, cache entries are evicted when it exceeds its capacity(500MB in default)
 CONF_Int64(query_cache_capacity, "536870912");
 
@@ -1339,6 +1363,11 @@ CONF_mBool(dump_metrics_with_bvar, "true");
 
 CONF_mBool(enable_drop_tablet_if_unfinished_txn, "true");
 
+// Used for compatibility.
+// Once the grayscale upgrade is complete, it can be set to true.
+// Once enabled, it can reduce the frequency of low-cardinality dictionary collection.
+CONF_mBool(lake_enable_report_lowcardinality_info, "false");
+
 // 0 means no limit
 CONF_Int32(lake_service_max_concurrency, "0");
 
@@ -1363,6 +1392,18 @@ CONF_mBool(enable_compaction_flat_json, "true");
 
 // direct read flat json
 CONF_mBool(enable_lazy_dynamic_flat_json, "true");
+
+// enable flat json remain filter
+CONF_mBool(enable_json_flat_remain_filter, "true");
+
+// enable flat complex type (/array/object/hyper type), diables for save storage
+CONF_mBool(enable_json_flat_complex_type, "false");
+
+// flat json use dict-encoding
+CONF_mBool(json_flat_use_dict_encoding, "true");
+
+// if disable flat complex type, check complex type rate in hyper-type column
+CONF_mDouble(json_flat_complex_type_factor, "0.3");
 
 // extract flat json column when row_num * null_factor > null_row_num
 CONF_mDouble(json_flat_null_factor, "0.3");
@@ -1434,7 +1475,10 @@ CONF_mBool(enable_core_file_size_optimization, "true");
 // 9. wg_driver_executor
 // use commas to separate:
 // * means release all above
-CONF_mString(try_release_resource_before_core_dump, "data_cache");
+// TODO(zhangqiang)
+// can not set data_cache right now because release datacache may cause BE hang
+// https://github.com/StarRocks/starrocks/issues/59226
+CONF_mString(try_release_resource_before_core_dump, "");
 
 // When upgrade thrift to 0.20.0, the MaxMessageSize member defines the maximum size of a (received) message, in bytes.
 // The default value is represented by a constant named DEFAULT_MAX_MESSAGE_SIZE, whose value is 100 * 1024 * 1024 bytes.

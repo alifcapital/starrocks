@@ -135,11 +135,10 @@ Status ColumnReader::_init(ColumnMetaPB* meta, const TabletColumn* column) {
     if (_column_type == TYPE_JSON && meta->has_json_meta()) {
         // TODO(mofei) store format_version in ColumnReader
         const JsonMetaPB& json_meta = meta->json_meta();
-        CHECK_EQ(kJsonMetaDefaultFormatVersion, json_meta.format_version()) << "Only format_version=1 is supported";
         _is_flat_json = json_meta.is_flat();
         _has_remain = json_meta.has_remain();
 
-        if (json_meta.has_remain_filter()) {
+        if (json_meta.has_remain_filter() && config::enable_json_flat_remain_filter) {
             DCHECK(_has_remain);
             DCHECK(!json_meta.remain_filter().empty());
             RETURN_IF_ERROR(BloomFilter::create(BLOCK_BLOOM_FILTER, &_remain_filter));
@@ -374,6 +373,10 @@ Status ColumnReader::_parse_zone_map(LogicalType type, const ZoneMapPB& zm, Zone
     detail->set_has_null(zm.has_null());
 
     if (zm.has_not_null()) {
+        if (UNLIKELY(!zm.has_min() || !zm.has_max())) {
+            LOG(ERROR) << "Corrupted zone map protobuf detected: " << zm.ShortDebugString();
+            return Status::Corruption("Corrupted zone map data: missing min or max values");
+        }
         RETURN_IF_ERROR(datum_from_string(type_info.get(), &(detail->min_value()), zm.min(), nullptr));
         RETURN_IF_ERROR(datum_from_string(type_info.get(), &(detail->max_value()), zm.max(), nullptr));
     }
@@ -860,7 +863,7 @@ StatusOr<std::unique_ptr<ColumnIterator>> ColumnReader::_new_json_iterator(Colum
                 }
 
                 if (_remain_filter != nullptr &&
-                    !_remain_filter->test_bytes(target_leafs[i]->path().data(), target_leafs[i]->path().size())) {
+                    !_remain_filter->test_bytes(target_leafs[k]->path().data(), target_leafs[k]->path().size())) {
                     need_remain = false;
                 } else {
                     need_remain = true;

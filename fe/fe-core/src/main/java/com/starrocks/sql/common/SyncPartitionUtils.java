@@ -213,44 +213,59 @@ public class SyncPartitionUtils {
         if (!functionCallExpr.getFnName().getFunction().equalsIgnoreCase(FunctionSet.DATE_TRUNC)) {
             throw new SemanticException("Do not support function: %s", functionCallExpr.getFnName().getFunction());
         }
+        Preconditions.checkState(baseRange.lowerEndpoint().getTypes().size() == 1);
 
         String granularity = ((StringLiteral) functionCallExpr.getChild(0)).getValue().toLowerCase();
         // assume expr partition must be DateLiteral and only one partition
         LiteralExpr lowerExpr = baseRange.lowerEndpoint().getKeys().get(0);
         LiteralExpr upperExpr = baseRange.upperEndpoint().getKeys().get(0);
-        Preconditions.checkArgument(lowerExpr instanceof DateLiteral);
-        DateLiteral lowerDate = (DateLiteral) lowerExpr;
-        LocalDateTime lowerDateTime = lowerDate.toLocalDateTime();
-        LocalDateTime truncLowerDateTime = getLowerDateTime(lowerDateTime, granularity);
 
-        DateLiteral upperDate;
-        LocalDateTime truncUpperDateTime;
-        if (upperExpr instanceof MaxLiteral) {
-            upperDate = new DateLiteral(Type.DATE, true);
-            truncUpperDateTime = upperDate.toLocalDateTime();
-        } else {
-            upperDate = (DateLiteral) upperExpr;
-            truncUpperDateTime = getUpperDateTime(upperDate.toLocalDateTime(), granularity);
-        }
-
-        Preconditions.checkState(baseRange.lowerEndpoint().getTypes().size() == 1);
         PrimitiveType partitionType = baseRange.lowerEndpoint().getTypes().get(0);
-
         PartitionKey lowerPartitionKey = new PartitionKey();
         PartitionKey upperPartitionKey = new PartitionKey();
         try {
-            if (partitionType == PrimitiveType.DATE) {
-                lowerPartitionKey.pushColumn(new DateLiteral(truncLowerDateTime, Type.DATE), partitionType);
-                upperPartitionKey.pushColumn(new DateLiteral(truncUpperDateTime, Type.DATE), partitionType);
-            } else {
-                lowerPartitionKey.pushColumn(new DateLiteral(truncLowerDateTime, Type.DATETIME), partitionType);
-                upperPartitionKey.pushColumn(new DateLiteral(truncUpperDateTime, Type.DATETIME), partitionType);
-            }
+            DateLiteral lowerDate = transferDateLiteral(lowerExpr, granularity, true);
+            DateLiteral upperDate = transferDateLiteral(upperExpr, granularity, false);
+            lowerPartitionKey.pushColumn(lowerDate, partitionType);
+            upperPartitionKey.pushColumn(upperDate, partitionType);
         } catch (AnalysisException e) {
             throw new SemanticException("Convert partition with date_trunc expression to date failed, lower:%s, upper:%s",
-                    truncLowerDateTime, truncUpperDateTime);
+                    lowerExpr, upperExpr);
         }
         return Range.closedOpen(lowerPartitionKey, upperPartitionKey);
+    }
+
+    /**
+     * Transfer date literal to the lower or upper key of the partition range.
+     * @param literalExpr: the date literal to be transferred
+     * @param granularity: the granularity of the partition, such as "day", "month", etc.
+     * @param isLowerKey: if true, transfer to the lower key of the partition range,
+     * @return the transferred date literal
+     * @throws AnalysisException: if the literalExpr is not a date or datetime type,
+     */
+    private static DateLiteral transferDateLiteral(LiteralExpr literalExpr,
+                                                   String granularity,
+                                                   boolean isLowerKey) throws AnalysisException {
+        if (literalExpr == null) {
+            return null;
+        }
+        if (literalExpr.getType() != Type.DATE && literalExpr.getType() != Type.DATETIME) {
+            throw new SemanticException("Do not support date_trunc for type: %s", literalExpr.getType());
+        }
+        DateLiteral dateLiteral = (DateLiteral) literalExpr;
+        if (dateLiteral.isMinValue()) {
+            return dateLiteral;
+        } else if (literalExpr instanceof MaxLiteral) {
+            return dateLiteral;
+        }
+        LocalDateTime dateTime = dateLiteral.toLocalDateTime();
+        LocalDateTime localDateTime;
+        if (isLowerKey) {
+            localDateTime = getLowerDateTime(dateTime, granularity);
+        } else {
+            localDateTime = getUpperDateTime(dateTime, granularity);
+        }
+        return new DateLiteral(localDateTime, literalExpr.getType());
     }
 
     /**
@@ -312,25 +327,26 @@ public class SyncPartitionUtils {
 
         Collections.sort(srcRanges, PRangeCellPlus::compareTo);
         Collections.sort(dstRanges, PRangeCellPlus::compareTo);
-
+        List<PartitionKey> lowerPoints = dstRanges.stream().map(
+                dstRange -> dstRange.getCell().getRange().lowerEndpoint()).collect(Collectors.toList());
+        List<PartitionKey> upperPoints = dstRanges.stream().map(
+                dstRange -> dstRange.getCell().getRange().upperEndpoint()).collect(Collectors.toList());
         for (PRangeCellPlus srcRange : srcRanges) {
-            int mid = Collections.binarySearch(dstRanges, srcRange);
-            if (mid < 0) {
-                continue;
-            }
+            PartitionKey lower = srcRange.getCell().getRange().lowerEndpoint();
+            PartitionKey upper = srcRange.getCell().getRange().upperEndpoint();
+
+            // For an interval [l, r], if there exists another interval [li, ri] that intersects with it, this interval
+            // must satisfy l ≤ ri and r ≥ li. Therefore, if there exists a pos_a such that for all k < pos_a,
+            // ri[k] < l, and there exists a pos_b such that for all k > pos_b, li[k] > r, then all intervals between
+            // pos_a and pos_b might potentially intersect with the interval [l, r].
+            int posA = PartitionKey.findLastLessEqualInOrderedList(lower, upperPoints);
+            int posB = PartitionKey.findLastLessEqualInOrderedList(upper, lowerPoints);
+
             Set<String> addedSet = result.get(srcRange.getPartitionName());
-            addedSet.add(dstRanges.get(mid).getPartitionName());
-
-            int lower = mid - 1;
-            while (lower >= 0 && dstRanges.get(lower).isIntersected(srcRange)) {
-                addedSet.add(dstRanges.get(lower).getPartitionName());
-                lower--;
-            }
-
-            int higher = mid + 1;
-            while (higher < dstRanges.size() && dstRanges.get(higher).isIntersected(srcRange)) {
-                addedSet.add(dstRanges.get(higher).getPartitionName());
-                higher++;
+            for (int i = posA; i <= posB; ++i) {
+                if (dstRanges.get(i).isIntersected(srcRange)) {
+                    addedSet.add(dstRanges.get(i).getPartitionName());
+                }
             }
         }
         return result;
@@ -468,27 +484,30 @@ public class SyncPartitionUtils {
                 }
                 break;
             case MONTH:
-                if (upperDateTime.with(TemporalAdjusters.firstDayOfMonth()).equals(upperDateTime)) {
+                LocalDateTime monthStart = upperDateTime.with(TemporalAdjusters.firstDayOfMonth()).with(LocalTime.MIDNIGHT);
+                if (monthStart.equals(upperDateTime)) {
                     truncUpperDateTime = upperDateTime;
                 } else {
-                    truncUpperDateTime = upperDateTime.plusMonths(1).with(TemporalAdjusters.firstDayOfMonth());
+                    truncUpperDateTime = monthStart.plusMonths(1);
                 }
                 break;
             case QUARTER:
-                if (upperDateTime.with(upperDateTime.getMonth().firstMonthOfQuarter())
-                        .with(TemporalAdjusters.firstDayOfMonth()).equals(upperDateTime)) {
+                LocalDateTime quarterStart = upperDateTime
+                        .with(upperDateTime.getMonth().firstMonthOfQuarter())
+                        .with(TemporalAdjusters.firstDayOfMonth())
+                        .with(LocalTime.MIDNIGHT);
+                if (quarterStart.equals(upperDateTime)) {
                     truncUpperDateTime = upperDateTime;
                 } else {
-                    LocalDateTime nextDateTime = upperDateTime.plusMonths(3);
-                    truncUpperDateTime = nextDateTime.with(nextDateTime.getMonth().firstMonthOfQuarter())
-                            .with(TemporalAdjusters.firstDayOfMonth());
+                    truncUpperDateTime = quarterStart.plusMonths(3);
                 }
                 break;
             case YEAR:
-                if (upperDateTime.with(TemporalAdjusters.firstDayOfYear()).equals(upperDateTime)) {
+                LocalDateTime yearStart = upperDateTime.with(TemporalAdjusters.firstDayOfYear()).with(LocalTime.MIDNIGHT);
+                if (yearStart.equals(upperDateTime)) {
                     truncUpperDateTime = upperDateTime;
                 } else {
-                    truncUpperDateTime = upperDateTime.plusYears(1).with(TemporalAdjusters.firstDayOfYear());
+                    truncUpperDateTime = yearStart.plusYears(1);
                 }
                 break;
             default:
@@ -518,15 +537,17 @@ public class SyncPartitionUtils {
                 truncUpperDateTime = upperDateTime.plusWeeks(1).with(LocalTime.MIN);
                 break;
             case MONTH:
-                truncUpperDateTime = upperDateTime.plusMonths(1).with(TemporalAdjusters.firstDayOfMonth());
+                truncUpperDateTime = upperDateTime.plusMonths(1).with(TemporalAdjusters.firstDayOfMonth())
+                        .with(LocalTime.MIDNIGHT);
                 break;
             case QUARTER:
                 LocalDateTime nextDateTime = upperDateTime.plusMonths(3);
                 truncUpperDateTime = nextDateTime.with(nextDateTime.getMonth().firstMonthOfQuarter())
-                        .with(TemporalAdjusters.firstDayOfMonth());
+                        .with(TemporalAdjusters.firstDayOfMonth()).with(LocalTime.MIDNIGHT);
                 break;
             case YEAR:
-                truncUpperDateTime = upperDateTime.plusYears(1).with(TemporalAdjusters.firstDayOfYear());
+                truncUpperDateTime = upperDateTime.plusYears(1).with(TemporalAdjusters.firstDayOfYear())
+                        .with(LocalTime.MIDNIGHT);
                 break;
             default:
                 throw new SemanticException("Do not support date_trunc format string:{}", granularity);
@@ -554,14 +575,15 @@ public class SyncPartitionUtils {
                 truncLowerDateTime = lowerDateTime.with(DayOfWeek.MONDAY).truncatedTo(ChronoUnit.DAYS);
                 break;
             case MONTH:
-                truncLowerDateTime = lowerDateTime.with(TemporalAdjusters.firstDayOfMonth());
+                truncLowerDateTime = lowerDateTime.with(TemporalAdjusters.firstDayOfMonth()).with(LocalTime.MIDNIGHT);
                 break;
             case QUARTER:
                 truncLowerDateTime = lowerDateTime.with(lowerDateTime.getMonth().firstMonthOfQuarter())
-                        .with(TemporalAdjusters.firstDayOfMonth());
+                        .with(TemporalAdjusters.firstDayOfMonth())
+                        .with(LocalTime.MIDNIGHT);
                 break;
             case YEAR:
-                truncLowerDateTime = lowerDateTime.with(TemporalAdjusters.firstDayOfYear());
+                truncLowerDateTime = lowerDateTime.with(TemporalAdjusters.firstDayOfYear()).with(LocalTime.MIDNIGHT);
                 break;
             default:
                 throw new SemanticException("Do not support in date_trunc format string:" + granularity);
