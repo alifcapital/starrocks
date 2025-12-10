@@ -390,6 +390,75 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
     }
 
+    /**
+     * Returns information about all cached tables.
+     */
+    public List<IcebergCachedTableInfo> getCachedTablesInfo() {
+        List<IcebergCachedTableInfo> result = Lists.newArrayList();
+        List<IcebergTableName> identifiers = Lists.newArrayList(tables.asMap().keySet());
+
+        for (IcebergTableName identifier : identifiers) {
+            IcebergTableName icebergTableName = new IcebergTableName(identifier.dbName, identifier.tableName);
+            Table table = tables.getIfPresent(identifier);
+            Long snapshotId = null;
+            if (table != null && table.currentSnapshot() != null) {
+                snapshotId = table.currentSnapshot().snapshotId();
+            }
+            result.add(new IcebergCachedTableInfo(
+                    identifier.dbName,
+                    identifier.tableName,
+                    snapshotId,
+                    tableLatestAccessTime.get(icebergTableName),
+                    tableLatestRefreshTime.get(icebergTableName),
+                    tableLatestSnapshotTime.get(icebergTableName)
+            ));
+        }
+        return result;
+    }
+
+    public static class IcebergCachedTableInfo {
+        private final String dbName;
+        private final String tableName;
+        private final Long snapshotId;
+        private final Long latestAccessTime;
+        private final Long latestRefreshTime;
+        private final Long latestSnapshotTime;
+
+        public IcebergCachedTableInfo(String dbName, String tableName, Long snapshotId,
+                                       Long latestAccessTime, Long latestRefreshTime, Long latestSnapshotTime) {
+            this.dbName = dbName;
+            this.tableName = tableName;
+            this.snapshotId = snapshotId;
+            this.latestAccessTime = latestAccessTime;
+            this.latestRefreshTime = latestRefreshTime;
+            this.latestSnapshotTime = latestSnapshotTime;
+        }
+
+        public String getDbName() {
+            return dbName;
+        }
+
+        public String getTableName() {
+            return tableName;
+        }
+
+        public Long getSnapshotId() {
+            return snapshotId;
+        }
+
+        public Long getLatestAccessTime() {
+            return latestAccessTime;
+        }
+
+        public Long getLatestRefreshTime() {
+            return latestRefreshTime;
+        }
+
+        public Long getLatestSnapshotTime() {
+            return latestSnapshotTime;
+        }
+    }
+
     public void invalidateCacheWithoutTable(IcebergTableName icebergTableName) {
         partitionNames.invalidate(icebergTableName);
     }
