@@ -76,6 +76,8 @@ import com.starrocks.http.rest.GetSmallFileAction;
 import com.starrocks.http.rest.GetStreamLoadState;
 import com.starrocks.http.rest.HealthAction;
 import com.starrocks.http.rest.HttpSSLContextLoader;
+import com.starrocks.http.rest.IcebergCacheInfoAction;
+import com.starrocks.http.rest.IcebergRefreshTableAction;
 import com.starrocks.http.rest.IdleAction;
 import com.starrocks.http.rest.LoadAction;
 import com.starrocks.http.rest.MemoryUsageAction;
@@ -277,6 +279,10 @@ public class HttpServer {
         com.starrocks.http.rest.v2.TableSchemaAction.registerAction(controller);
         TablePartitionAction.registerAction(controller);
         TableQueryPlanAction.registerAction(controller);
+
+        // iceberg cache
+        IcebergCacheInfoAction.registerAction(controller);
+        IcebergRefreshTableAction.registerAction(controller);
 
         BootstrapFinishAction.registerAction(controller);
 

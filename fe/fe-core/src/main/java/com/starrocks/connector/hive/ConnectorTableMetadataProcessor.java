@@ -84,6 +84,11 @@ public class ConnectorTableMetadataProcessor extends FrontendDaemon {
         cachingIcebergCatalogs.remove(catalogName);
     }
 
+    /** Returns registered caching Iceberg catalogs for cache inspection. */
+    public Map<String, IcebergCatalog> getCachingIcebergCatalogs() {
+        return cachingIcebergCatalogs;
+    }
+
     public void registerPaimonCatalog(String catalogName, CachingPaimonCatalog paimonCatalog) {
         LOG.info("register to caching paimon catalog on {} in the ConnectorTableMetadataProcessor", catalogName);
         cachingPaimonCatalogs.put(catalogName, paimonCatalog);
