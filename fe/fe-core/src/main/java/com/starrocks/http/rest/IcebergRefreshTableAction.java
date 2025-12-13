@@ -91,7 +91,7 @@ public class IcebergRefreshTableAction extends RestBaseAction {
         cachingCatalog.refreshTable(dbName, tableName, Executors.newSingleThreadExecutor());
 
         RestBaseResult result = new RestBaseResult();
-        result.addResultEntry("message", "Refresh triggered for " + catalogName + "." + dbName + "." + tableName);
+        result.message = "Refresh triggered for " + catalogName + "." + dbName + "." + tableName;
         sendResult(request, response, result);
     }
 }
