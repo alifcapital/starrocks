@@ -2169,6 +2169,11 @@ static const char* skip_trailing_spaces(const char* begin, const char* end, cons
     if (UNLIKELY(begin == nullptr)) {
         return begin;
     }
+    // Nothing to trim when the slice is empty. Avoids walking backwards from
+    // end - 1, which would underflow when begin == end.
+    if (begin == end) {
+        return end;
+    }
     auto p = end;
 #if defined(__SSE2__)
     if constexpr (simd_optimization && trim_single && !trim_utf8) {
@@ -2269,7 +2274,7 @@ struct AdaptiveTrimFunction {
         const auto num_rows = src->size();
         raw::make_room(&dst_offsets, num_rows + 1);
         dst_offsets[0] = 0;
-        dst_bytes.reserve(dst_bytes.size());
+        dst_bytes.reserve(src->get_bytes().size());
 
         size_t i = 0;
         const auto sample_num = std::min(num_rows, 100ul);
