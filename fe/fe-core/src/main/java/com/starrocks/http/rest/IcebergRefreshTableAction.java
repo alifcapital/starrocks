@@ -24,6 +24,8 @@ import com.starrocks.http.IllegalArgException;
 import com.starrocks.server.GlobalStateMgr;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -35,6 +37,7 @@ import java.util.concurrent.Executors;
  *   POST /api/iceberg/refresh_table?catalog=xxx&db=yyy&table=zzz
  */
 public class IcebergRefreshTableAction extends RestBaseAction {
+    private static final Logger LOG = LogManager.getLogger(IcebergRefreshTableAction.class);
     private static final String CATALOG_PARAM = "catalog";
     private static final String DB_PARAM = "db";
     private static final String TABLE_PARAM = "table";
@@ -88,6 +91,7 @@ public class IcebergRefreshTableAction extends RestBaseAction {
         }
 
         CachingIcebergCatalog cachingCatalog = (CachingIcebergCatalog) catalog;
+        LOG.info("Refresh table request received for {}.{}.{}", catalogName, dbName, tableName);
         cachingCatalog.refreshTable(dbName, tableName, Executors.newSingleThreadExecutor());
 
         RestBaseResult result = new RestBaseResult();
