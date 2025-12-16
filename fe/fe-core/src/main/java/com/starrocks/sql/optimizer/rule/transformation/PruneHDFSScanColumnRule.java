@@ -32,6 +32,8 @@ import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -44,6 +46,8 @@ import java.util.stream.Collectors;
 import static java.util.function.UnaryOperator.identity;
 
 public class PruneHDFSScanColumnRule extends TransformationRule {
+    private static final Logger LOG = LogManager.getLogger(PruneHDFSScanColumnRule.class);
+
     public static final PruneHDFSScanColumnRule HIVE_SCAN = new PruneHDFSScanColumnRule(OperatorType.LOGICAL_HIVE_SCAN);
     public static final PruneHDFSScanColumnRule ICEBERG_SCAN =
             new PruneHDFSScanColumnRule(OperatorType.LOGICAL_ICEBERG_SCAN);
@@ -72,6 +76,12 @@ public class PruneHDFSScanColumnRule extends TransformationRule {
         LogicalScanOperator scanOperator = (LogicalScanOperator) input.getOp();
         ColumnRefSet requiredOutputColumns = context.getTaskContext().getRequiredColumns();
 
+        LOG.info("PRUNE_DEBUG: table={}, colRefToColumnMetaMap={}, requiredOutputColumns={}, projection={}",
+                scanOperator.getTable().getName(),
+                scanOperator.getColRefToColumnMetaMap().keySet(),
+                requiredOutputColumns,
+                scanOperator.getProjection());
+
         Set<ColumnRefOperator> scanColumns =
                 scanOperator.getColRefToColumnMetaMap().keySet().stream().filter(requiredOutputColumns::contains)
                         .collect(Collectors.toSet());
@@ -86,6 +96,8 @@ public class PruneHDFSScanColumnRule extends TransformationRule {
                 }
             }
         }
+
+        LOG.info("PRUNE_DEBUG: table={}, scanColumns after={}", scanOperator.getTable().getName(), scanColumns);
 
         checkPartitionColumnType(scanOperator, scanColumns, context);
 
