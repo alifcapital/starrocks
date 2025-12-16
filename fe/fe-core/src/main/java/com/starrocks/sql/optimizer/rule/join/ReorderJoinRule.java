@@ -346,11 +346,21 @@ public class ReorderJoinRule extends Rule {
             }
             Preconditions.checkState(optExpression.getStatistics() != null);
             Statistics newStats = Statistics.buildFrom(optExpression.getStatistics()).build();
+
+            // Calculate columns used in projection expressions (e.g., columns inside CAST)
+            // These columns must be preserved in statistics even if not in output columns,
+            // because they're needed when computing statistics for the expressions
+            ColumnRefSet usedInExpressions = new ColumnRefSet();
+            for (ScalarOperator expr : newOutputProjections.values()) {
+                usedInExpressions.union(expr.getUsedColumns());
+            }
+
             Iterator<Map.Entry<ColumnRefOperator, ColumnStatistic>>
                     iterator = newStats.getColumnStatistics().entrySet().iterator();
             while (iterator.hasNext()) {
                 Map.Entry<ColumnRefOperator, ColumnStatistic> columnStatistic = iterator.next();
-                if (!newCols.contains(columnStatistic.getKey())) {
+                if (!newCols.contains(columnStatistic.getKey()) &&
+                        !usedInExpressions.contains(columnStatistic.getKey())) {
                     iterator.remove();
                 }
             }

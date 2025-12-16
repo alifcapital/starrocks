@@ -70,6 +70,8 @@ import com.starrocks.http.rest.GetLogFileAction;
 import com.starrocks.http.rest.GetSmallFileAction;
 import com.starrocks.http.rest.GetStreamLoadState;
 import com.starrocks.http.rest.HealthAction;
+import com.starrocks.http.rest.IcebergCacheInfoAction;
+import com.starrocks.http.rest.IcebergRefreshTableAction;
 import com.starrocks.http.rest.IdleAction;
 import com.starrocks.http.rest.LoadAction;
 import com.starrocks.http.rest.MetaReplayerCheckAction;
@@ -216,6 +218,10 @@ public class HttpServer {
         TableRowCountAction.registerAction(controller);
         TableSchemaAction.registerAction(controller);
         TableQueryPlanAction.registerAction(controller);
+
+        // iceberg cache
+        IcebergCacheInfoAction.registerAction(controller);
+        IcebergRefreshTableAction.registerAction(controller);
 
         BootstrapFinishAction.registerAction(controller);
     }

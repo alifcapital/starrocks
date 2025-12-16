@@ -177,6 +177,7 @@ struct HdfsScannerParams {
 
     const TupleDescriptor* tuple_desc = nullptr;
 
+
     // columns read from file
     std::vector<SlotDescriptor*> materialize_slots;
     std::vector<int> materialize_index_in_chunk;
@@ -244,7 +245,7 @@ struct HdfsScannerContext {
         return case_sensitive ? name : boost::algorithm::to_lower_copy(name);
     }
 
-    const TupleDescriptor* tuple_desc = nullptr;
+    std::vector<SlotDescriptor*> slot_descs;
     std::unordered_map<SlotId, std::vector<ExprContext*>> conjunct_ctxs_by_slot;
 
     // materialized column read from parquet file

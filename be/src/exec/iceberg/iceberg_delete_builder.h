@@ -45,7 +45,7 @@ public:
     ~PositionDeleteBuilder() override = default;
 
     virtual Status build(const std::string& timezone, const std::string& file_path, int64_t file_length,
-                         std::set<int64_t>* need_skip_rowids) = 0;
+                         std::set<int64_t>* need_skip_rowids, RuntimeState* state) = 0;
 };
 
 class EqualityDeleteBuilder : public DeleteBuilder {
@@ -98,7 +98,7 @@ public:
     ~ORCPositionDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& delete_file_path, int64_t file_length,
-                 std::set<int64_t>* need_skip_rowids) override;
+                 std::set<int64_t>* need_skip_rowids, RuntimeState* state) override;
 
 private:
     std::string _datafile_path;
@@ -111,10 +111,11 @@ public:
     ~ParquetPositionDeleteBuilder() override = default;
 
     Status build(const std::string& timezone, const std::string& delete_file_path, int64_t file_length,
-                 std::set<int64_t>* need_skip_rowids) override;
+                 std::set<int64_t>* need_skip_rowids, RuntimeState* state) override;
 
 private:
     std::string _datafile_path;
+    std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
 };
 
 class IcebergDeleteBuilder {
@@ -132,7 +133,7 @@ public:
                      std::shared_ptr<DefaultMORProcessor> mor_processor) const {
         if (delete_file.file_content == TIcebergFileContent::POSITION_DELETES) {
             return ORCPositionDeleteBuilder(_fs, _datacache_options, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids);
+                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids, state);
         } else if (delete_file.file_content == TIcebergFileContent::EQUALITY_DELETES) {
             return ORCEqualityDeleteBuilder(_fs, _datacache_options, _datafile_path)
                     .build(timezone, delete_file.full_path, delete_file.length, std::move(mor_processor),
@@ -150,7 +151,7 @@ public:
                          std::shared_ptr<DefaultMORProcessor> mor_processor) const {
         if (delete_file.file_content == TIcebergFileContent::POSITION_DELETES) {
             return ParquetPositionDeleteBuilder(_fs, _datacache_options, _datafile_path)
-                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids);
+                    .build(timezone, delete_file.full_path, delete_file.length, _need_skip_rowids, state);
         } else if (delete_file.file_content == TIcebergFileContent::EQUALITY_DELETES) {
             return ParquetEqualityDeleteBuilder(_fs, _datacache_options, _datafile_path)
                     .build(timezone, delete_file.full_path, delete_file.length, std::move(mor_processor),

@@ -113,11 +113,21 @@ public class LakeTableHelper {
 
     static Optional<ShardInfo> getAssociatedShardInfo(PhysicalPartition partition, long warehouseId) throws StarClientException {
         List<MaterializedIndex> allIndices = partition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL);
+        if (allIndices == null) {
+            return Optional.empty();
+        }
+
         for (MaterializedIndex materializedIndex : allIndices) {
+            // Add null check for materializedIndex
+            if (materializedIndex == null) {
+                continue;
+            }
+
             List<Tablet> tablets = materializedIndex.getTablets();
             if (tablets.isEmpty()) {
                 continue;
             }
+
             LakeTablet tablet = (LakeTablet) tablets.get(0);
             try {
                 if (GlobalStateMgr.isCheckpointThread()) {
@@ -126,9 +136,8 @@ public class LakeTableHelper {
                 WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
                 long workerGroupId = warehouseManager.selectWorkerGroupByWarehouseId(warehouseId)
                         .orElse(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
-                ShardInfo shardInfo = GlobalStateMgr.getCurrentState().getStarOSAgent().getShardInfo(tablet.getShardId(),
-                        workerGroupId);
-
+                ShardInfo shardInfo = GlobalStateMgr.getCurrentState().getStarOSAgent()
+                        .getShardInfo(tablet.getShardId(), workerGroupId);
                 return Optional.of(shardInfo);
             } catch (StarClientException e) {
                 if (e.getCode() != StatusCode.NOT_EXIST) {
@@ -139,7 +148,6 @@ public class LakeTableHelper {
         }
         return Optional.empty();
     }
-
     static boolean removePartitionDirectory(Partition partition, long warehouseId) throws StarClientException {
         boolean ret = true;
         for (PhysicalPartition subPartition : partition.getSubPartitions()) {

@@ -91,7 +91,7 @@ import java.util.regex.Pattern;
 /**
  * Implementation of FileIO that adds metadata content caching features.
  */
-public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
+public class IcebergCachingFileIO implements FileIO, HadoopConfigurable, Closeable {
     private static final Logger LOG = LogManager.getLogger(IcebergCachingFileIO.class);
     private static final int BUFFER_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
     private static final long CACHE_MAX_ENTRY_SIZE = Config.iceberg_metadata_cache_max_entry_size;
