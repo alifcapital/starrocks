@@ -77,16 +77,6 @@ public class PruneHDFSScanColumnRule extends TransformationRule {
                         .collect(Collectors.toSet());
         scanColumns.addAll(Utils.extractColumnRef(scanOperator.getPredicate()));
 
-        // Add columns used in projection expressions (e.g., columns inside CAST for implicit type conversion in JOINs)
-        if (scanOperator.getProjection() != null) {
-            ColumnRefSet projectionUsedColumns = scanOperator.getProjection().getUsedColumns();
-            for (ColumnRefOperator colRef : scanOperator.getColRefToColumnMetaMap().keySet()) {
-                if (projectionUsedColumns.contains(colRef.getId())) {
-                    scanColumns.add(colRef);
-                }
-            }
-        }
-
         checkPartitionColumnType(scanOperator, scanColumns, context);
 
         // make sure there is at least one materialized column in new output columns.
