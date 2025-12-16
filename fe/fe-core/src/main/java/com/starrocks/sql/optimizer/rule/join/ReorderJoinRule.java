@@ -347,12 +347,25 @@ public class ReorderJoinRule extends Rule {
             Preconditions.checkState(optExpression.getStatistics() != null);
             Statistics newStats = Statistics.buildFrom(optExpression.getStatistics()).build();
 
-            // Calculate columns used in projection expressions (e.g., columns inside CAST)
-            // These columns must be preserved in statistics even if not in output columns,
-            // because they're needed when computing statistics for the expressions
-            ColumnRefSet usedInExpressions = new ColumnRefSet();
+            // Calculate columns that must be preserved in statistics:
+            // 1. Columns used in projection expressions (e.g., columns inside CAST)
+            // 2. Columns used in predicates (WHERE conditions, JOIN conditions)
+            // These columns must be preserved even if not in output columns,
+            // because they're needed when computing statistics for expressions/predicates
+            ColumnRefSet usedColumns = new ColumnRefSet();
             for (ScalarOperator expr : newOutputProjections.values()) {
-                usedInExpressions.union(expr.getUsedColumns());
+                usedColumns.union(expr.getUsedColumns());
+            }
+            // Preserve columns used in filter predicates
+            if (operator.getPredicate() != null) {
+                usedColumns.union(operator.getPredicate().getUsedColumns());
+            }
+            // Preserve columns used in join ON predicates
+            if (operator instanceof LogicalJoinOperator) {
+                LogicalJoinOperator joinOp = (LogicalJoinOperator) operator;
+                if (joinOp.getOnPredicate() != null) {
+                    usedColumns.union(joinOp.getOnPredicate().getUsedColumns());
+                }
             }
 
             Iterator<Map.Entry<ColumnRefOperator, ColumnStatistic>>
@@ -360,7 +373,7 @@ public class ReorderJoinRule extends Rule {
             while (iterator.hasNext()) {
                 Map.Entry<ColumnRefOperator, ColumnStatistic> columnStatistic = iterator.next();
                 if (!newCols.contains(columnStatistic.getKey()) &&
-                        !usedInExpressions.contains(columnStatistic.getKey())) {
+                        !usedColumns.contains(columnStatistic.getKey())) {
                     iterator.remove();
                 }
             }
