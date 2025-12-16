@@ -367,14 +367,34 @@ public class ReorderJoinRule extends Rule {
             }
             Preconditions.checkState(optExpression.getStatistics() != null);
             Statistics newStats = Statistics.buildFrom(optExpression.getStatistics()).build();
+
+            // Calculate columns used in projection expressions (e.g., columns inside CAST)
+            // These columns must be preserved in statistics even if not in output columns,
+            // because they're needed when computing statistics for the expressions
+            ColumnRefSet usedInExpressions = new ColumnRefSet();
+            for (ScalarOperator expr : newOutputProjections.values()) {
+                usedInExpressions.union(expr.getUsedColumns());
+            }
+
+            LOG.info("[DEBUG-STATS] deriveNewOptExpression:");
+            LOG.info("[DEBUG-STATS]   newOutputProjections: {}", newOutputProjections);
+            LOG.info("[DEBUG-STATS]   newCols (output): {}", newCols);
+            LOG.info("[DEBUG-STATS]   usedInExpressions: {}", usedInExpressions);
+            LOG.info("[DEBUG-STATS]   original stats columns: {}",
+                    ColumnRefOperator.toString(newStats.getColumnStatistics().keySet()));
+
             Iterator<Map.Entry<ColumnRefOperator, ColumnStatistic>>
                     iterator = newStats.getColumnStatistics().entrySet().iterator();
             while (iterator.hasNext()) {
                 Map.Entry<ColumnRefOperator, ColumnStatistic> columnStatistic = iterator.next();
-                if (!newCols.contains(columnStatistic.getKey())) {
+                if (!newCols.contains(columnStatistic.getKey()) &&
+                        !usedInExpressions.contains(columnStatistic.getKey())) {
+                    LOG.info("[DEBUG-STATS]   REMOVING col: {}", columnStatistic.getKey());
                     iterator.remove();
                 }
             }
+            LOG.info("[DEBUG-STATS]   final stats columns: {}",
+                    ColumnRefOperator.toString(newStats.getColumnStatistics().keySet()));
 
             Operator.Builder builder = OperatorBuilderFactory.build(operator);
             Operator newOp = builder.withOperator(operator)
