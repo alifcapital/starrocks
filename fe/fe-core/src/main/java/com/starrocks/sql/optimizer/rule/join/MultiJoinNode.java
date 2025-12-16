@@ -25,6 +25,9 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -35,6 +38,8 @@ import java.util.Map;
  * This class represents a set of inner joins that can be executed in any order.
  */
 public class MultiJoinNode {
+    private static final Logger LOG = LogManager.getLogger(MultiJoinNode.class);
+
     // Atom: A child of the Multi join. This could be a table or some
     // other operator like a group by or a full outer join.
     private final LinkedHashSet<OptExpression> atoms;
@@ -79,6 +84,18 @@ public class MultiJoinNode {
         Map<ColumnRefOperator, ScalarOperator> proMap = new HashMap<>();
 
         flattenJoinNode(node, atoms, predicates, proMap);
+
+        LOG.info("[DEBUG-STATS] MultiJoinNode.toMultiJoinNode completed:");
+        LOG.info("[DEBUG-STATS]   atoms count: {}", atoms.size());
+        LOG.info("[DEBUG-STATS]   predicates: {}", predicates);
+        for (ScalarOperator pred : predicates) {
+            LOG.info("[DEBUG-STATS]   predicate usedColumns: {}", pred.getUsedColumns());
+        }
+        LOG.info("[DEBUG-STATS]   expressionMap: {}", proMap);
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : proMap.entrySet()) {
+            LOG.info("[DEBUG-STATS]   expressionMap entry: {} -> {} (usedCols: {})",
+                    entry.getKey(), entry.getValue(), entry.getValue().getUsedColumns());
+        }
 
         return new MultiJoinNode(atoms, predicates, proMap);
     }

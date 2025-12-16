@@ -79,6 +79,11 @@ public class ExpressionStatisticCalculator {
 
         @Override
         public ColumnStatistic visitVariableReference(ColumnRefOperator operator, Void context) {
+            // If the column is not in statistics (e.g., when a column was transformed through
+            // a Project for type coercion in JOINs), return unknown statistics instead of throwing
+            if (!inputStatistics.getColumnStatistics().containsKey(operator)) {
+                return ColumnStatistic.unknown();
+            }
             return inputStatistics.getColumnStatistic(operator);
         }
 

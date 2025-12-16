@@ -46,6 +46,9 @@ import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -57,6 +60,8 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class ReorderJoinRule extends Rule {
+    private static final Logger LOG = LogManager.getLogger(ReorderJoinRule.class);
+
     public ReorderJoinRule() {
         super(RuleType.TF_MULTI_JOIN_ORDER, Pattern.create(OperatorType.PATTERN));
     }
@@ -321,6 +326,23 @@ public class ReorderJoinRule extends Rule {
 
             OptExpression joinOpt = OptExpression.create(joinOperator, Lists.newArrayList(left, right));
             joinOpt.deriveLogicalPropertyItself();
+
+            // DEBUG: Log join info before statistics calculation
+            LOG.info("[DEBUG-STATS] ReorderJoinRule.OutputColumnsPrune.visitLogicalJoin - before stats calc");
+            LOG.info("[DEBUG-STATS]   Join onPredicate: {}", joinOperator.getOnPredicate());
+            if (joinOperator.getOnPredicate() != null) {
+                LOG.info("[DEBUG-STATS]   onPredicate usedColumns: {}", joinOperator.getOnPredicate().getUsedColumns());
+            }
+            LOG.info("[DEBUG-STATS]   Left child outputColumns: {}", left.getOutputColumns());
+            LOG.info("[DEBUG-STATS]   Right child outputColumns: {}", right.getOutputColumns());
+            if (left.getStatistics() != null) {
+                LOG.info("[DEBUG-STATS]   Left child stats columns: {}",
+                        left.getStatistics().getColumnStatistics().keySet());
+            }
+            if (right.getStatistics() != null) {
+                LOG.info("[DEBUG-STATS]   Right child stats columns: {}",
+                        right.getStatistics().getColumnStatistics().keySet());
+            }
 
             ExpressionContext expressionContext = new ExpressionContext(joinOpt);
             StatisticsCalculator statisticsCalculator = new StatisticsCalculator(

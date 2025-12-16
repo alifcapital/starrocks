@@ -20,7 +20,10 @@ import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -29,6 +32,8 @@ import java.util.Objects;
 import static java.lang.Double.NaN;
 
 public class Statistics {
+    private static final Logger LOG = LogManager.getLogger(Statistics.class);
+
     private final double outputRowCount;
     private final Map<ColumnRefOperator, ColumnStatistic> columnStatistics;
     // This flag set true if get table row count from GlobalStateMgr LE 1
@@ -88,6 +93,13 @@ public class Statistics {
 
     public ColumnStatistic getColumnStatistic(ColumnRefOperator column) {
         if (columnStatistics.get(column) == null) {
+            // DEBUG: Log callstack to understand who is requesting missing column
+            LOG.error("[DEBUG-STATS] Missing column statistic requested!");
+            LOG.error("[DEBUG-STATS]   Requested column: {} (id={})", column, column.getId());
+            LOG.error("[DEBUG-STATS]   Available columns: {}", ColumnRefOperator.toString(columnStatistics.keySet()));
+            LOG.error("[DEBUG-STATS]   Callstack:\n{}",
+                    Arrays.toString(Thread.currentThread().getStackTrace())
+                            .replace(", ", "\n    "));
             throw new StarRocksPlannerException(ErrorType.INTERNAL_ERROR,
                     "only found column statistics: %s, but missing statistic of col: %s.",
                     ColumnRefOperator.toString(columnStatistics.keySet()), column);
