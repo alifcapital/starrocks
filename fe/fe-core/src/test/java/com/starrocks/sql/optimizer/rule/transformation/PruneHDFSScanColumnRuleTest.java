@@ -24,10 +24,12 @@ import com.starrocks.catalog.Type;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
+import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalHudiScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOdpsScanOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.task.TaskContext;
@@ -318,5 +320,60 @@ public class PruneHDFSScanColumnRuleTest {
         Map<ColumnRefOperator, Column> transferMap = scanOperator.getColRefToColumnMetaMap();
         Assert.assertEquals(transferMap.size(), 1);
         Assert.assertEquals(transferMap.get(intColumnOperator).getName(), "id");
+    }
+
+    @Test
+    public void transformIcebergWithProjectionCast(@Mocked IcebergTable table,
+                                                   @Mocked OptimizerContext context,
+                                                   @Mocked TaskContext taskContext) {
+        // Test case: scan operator has a Projection with CAST expression
+        // This simulates implicit type conversion in JOIN conditions (e.g., INT to BIGINT)
+        // The source column used inside CAST should be preserved in colRefToColumnMetaMap
+
+        // Create scan operator with two columns: id (INT) and name (STRING)
+        LogicalIcebergScanOperator scanOp = new LogicalIcebergScanOperator(table,
+                scanColumnMap, Maps.newHashMap(), -1, null);
+
+        // Create a CAST expression: CAST(id AS BIGINT) -> stored in column ref 10
+        ColumnRefOperator castResultColumn = new ColumnRefOperator(10, Type.BIGINT, "cast", true);
+        CastOperator castOperator = new CastOperator(Type.BIGINT, intColumnOperator);
+
+        // Set projection with CAST expression on the scan operator
+        Map<ColumnRefOperator, com.starrocks.sql.optimizer.operator.scalar.ScalarOperator> projectionMap = new HashMap<>();
+        projectionMap.put(castResultColumn, castOperator);
+        scanOp.setProjection(new Projection(projectionMap));
+
+        OptExpression scan = new OptExpression(scanOp);
+
+        List<TaskContext> taskContextList = new ArrayList<>();
+        taskContextList.add(taskContext);
+
+        // Required output is only the CAST result column, not the source column
+        ColumnRefSet requiredOutputColumns = new ColumnRefSet(new ArrayList<>(
+                Collections.singleton(castResultColumn)));
+
+        new Expectations() {
+            {
+                context.getTaskContext();
+                minTimes = 0;
+                result = taskContextList;
+
+                taskContext.getRequiredColumns();
+                minTimes = 0;
+                result = requiredOutputColumns;
+
+                context.getSessionVariable().isEnableCountStarOptimization();
+                result = true;
+            }
+        };
+
+        List<OptExpression> list = icebergRule.transform(scan, context);
+        LogicalIcebergScanOperator resultOp = (LogicalIcebergScanOperator) list.get(0).getOp();
+        Map<ColumnRefOperator, Column> transferMap = resultOp.getColRefToColumnMetaMap();
+
+        // The source column (intColumnOperator/id) should be preserved because it's used in Projection
+        Assert.assertTrue("Source column used in CAST should be preserved",
+                transferMap.containsKey(intColumnOperator));
+        Assert.assertEquals("id", transferMap.get(intColumnOperator).getName());
     }
 }
