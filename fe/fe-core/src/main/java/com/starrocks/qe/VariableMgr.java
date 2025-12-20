@@ -246,6 +246,14 @@ public class VariableMgr {
         }
     }
 
+    private void handleSetCnGroup(ConnectContext connectContext, SessionVariable sessionVariable, Field field, Object value)
+            throws DdlException {
+        setParsedValue(sessionVariable, field, value);
+        // After SET cngroup, reset compute resource so that the next query
+        // will acquire a new compute resource with the new CNGroup
+        connectContext.resetComputeResource();
+    }
+
     private Object parseValue(Class<?> type, String varName, String raw) throws DdlException {
         String v = VariableVarConverters.convert(varName, raw);
         try {
@@ -361,6 +369,8 @@ public class VariableMgr {
         // set session variable
         if (SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(attr.name()) && connectContext != null) {
             handleSetWarehouse(connectContext, sessionVariable, ctx.getField(), parsedVal);
+        } else if (SessionVariable.CNGROUP_NAME.equalsIgnoreCase(attr.name()) && connectContext != null) {
+            handleSetCnGroup(connectContext, sessionVariable, ctx.getField(), parsedVal);
         } else {
             setParsedValue(sessionVariable, ctx.getField(), parsedVal);
         }

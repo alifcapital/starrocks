@@ -99,6 +99,8 @@ public class SetExecutor {
                     SystemVariable systemVariable = (SystemVariable) var;
                     if (SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
                         handleSetWarehouse(systemVariable);
+                    } else if (SessionVariable.CNGROUP_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
+                        handleSetCnGroup(systemVariable);
                     } else {
                         setVariablesOfAllType(var);
                     }
@@ -133,5 +135,12 @@ public class SetExecutor {
         } else {
             ctx.resetComputeResource();
         }
+    }
+
+    private void handleSetCnGroup(SystemVariable var) throws DdlException {
+        setVariablesOfAllType(var);
+        // After SET cngroup, reset compute resource so that the next query
+        // will acquire a new compute resource with the new CNGroup
+        ctx.resetComputeResource();
     }
 }
