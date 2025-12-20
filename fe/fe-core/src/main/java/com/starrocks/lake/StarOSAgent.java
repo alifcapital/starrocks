@@ -894,7 +894,15 @@ public class StarOSAgent {
                 LOG.info("[CNGROUP_DEBUG] getWorkersByWorkerGroup: groupId={}, workers from StarMgr: count={}, workerIds={}",
                         detailInfo.getGroupId(), workers.size(),
                         workers.stream().map(w -> w.getWorkerId() + "@" + w.getIpPort()).collect(Collectors.toList()));
-                workers.forEach(x -> getOrUpdateNodeIdByWorkerInfo(x).ifPresent(nodeIds::add));
+                for (WorkerInfo worker : workers) {
+                    Optional<Long> nodeId = getOrUpdateNodeIdByWorkerInfo(worker);
+                    if (nodeId.isPresent()) {
+                        nodeIds.add(nodeId.get());
+                    } else {
+                        LOG.warn("[CNGROUP_DEBUG] getWorkersByWorkerGroup: SKIPPED worker {} - could not resolve to nodeId",
+                                worker.getWorkerId() + "@" + worker.getIpPort());
+                    }
+                }
             }
             LOG.info("[CNGROUP_DEBUG] getWorkersByWorkerGroup: final nodeIds={}", nodeIds);
             return nodeIds;
