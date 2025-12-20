@@ -90,11 +90,7 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
             // getAllComputeNodeIds already filters by computeResource.getCnGroupName() at WarehouseComputeResourceProvider
-            LOG.info("[CNGROUP_DEBUG] DefaultSharedDataWorkerProvider: computeResource={}, cnGroupName={}",
-                    computeResource, computeResource != null ? computeResource.getCnGroupName() : "null");
             final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
-            LOG.info("[CNGROUP_DEBUG] DefaultSharedDataWorkerProvider: got {} computeNodeIds: {}",
-                    computeNodeIds.size(), computeNodeIds);
             computeNodeIds.forEach(nodeId -> builder.put(nodeId,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();

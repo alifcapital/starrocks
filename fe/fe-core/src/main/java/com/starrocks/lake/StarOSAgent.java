@@ -355,17 +355,14 @@ public class StarOSAgent {
      * @param workerGroupId
      */
     public void addWorker(long nodeId, String workerIpPort, long workerGroupId) {
-        LOG.info("[CNGROUP_DEBUG] addWorker: START nodeId={}, workerIpPort={}, workerGroupId={}",
-                nodeId, workerIpPort, workerGroupId);
         prepare();
         try (LockCloseable lock = new LockCloseable(rwLock.writeLock())) {
             if (serviceId.equals("")) {
-                LOG.warn("[CNGROUP_DEBUG] When addWorker serviceId is empty");
+                LOG.warn("When addWorker serviceId is empty");
                 return;
             }
 
             if (workerToId.containsKey(workerIpPort)) {
-                LOG.info("[CNGROUP_DEBUG] addWorker: workerIpPort={} already in workerToId map, skipping", workerIpPort);
                 return;
             }
 
@@ -374,7 +371,7 @@ public class StarOSAgent {
                 workerId = client.addWorker(serviceId, workerIpPort, workerGroupId);
             } catch (StarClientException e) {
                 if (e.getCode() != StatusCode.ALREADY_EXIST) {
-                    LOG.warn("[CNGROUP_DEBUG] Failed to addWorker. Error: {}", e.getMessage());
+                    LOG.warn("Failed to addWorker. Error: {}", e.getMessage());
                     return;
                 } else {
                     // get workerId from starMgr
@@ -382,18 +379,16 @@ public class StarOSAgent {
                         WorkerInfo workerInfo = client.getWorkerInfo(serviceId, workerIpPort);
                         workerId = workerInfo.getWorkerId();
                     } catch (StarClientException e2) {
-                        LOG.warn("[CNGROUP_DEBUG] Failed to get getWorkerInfo. Error: {}", e2.getMessage());
+                        LOG.warn("Failed to get getWorkerInfo. Error: {}", e2.getMessage());
                         return;
                     }
-                    LOG.info("[CNGROUP_DEBUG] worker {} already added in starMgr", workerId);
+                    LOG.info("worker {} already added in starMgr", workerId);
                 }
             }
             tryRemovePreviousWorker(nodeId);
             workerToId.put(workerIpPort, workerId);
             workerToNode.put(workerId, nodeId);
-            LOG.info("[CNGROUP_DEBUG] addWorker: SUCCESS workerId={}, nodeId={}, workerIpPort={}," +
-                    " workerToNode size={}, workerToId size={}",
-                    workerId, nodeId, workerIpPort, workerToNode.size(), workerToId.size());
+            LOG.info("add worker {} success, nodeId is {}", workerId, nodeId);
         }
     }
 
@@ -414,11 +409,9 @@ public class StarOSAgent {
     }
 
     public void removeWorker(String workerIpPort, long workerGroupId) throws DdlException {
-        LOG.info("[CNGROUP_DEBUG] removeWorker: START workerIpPort={}, workerGroupId={}", workerIpPort, workerGroupId);
         prepare();
 
         long workerId = getWorker(workerIpPort);
-        LOG.info("[CNGROUP_DEBUG] removeWorker: resolved workerId={} for workerIpPort={}", workerId, workerIpPort);
 
         try {
             client.removeWorker(serviceId, workerId, workerGroupId);
@@ -429,7 +422,6 @@ public class StarOSAgent {
             if (e.getCode() != StatusCode.NOT_EXIST) {
                 throw new DdlException("Failed to remove worker. error: " + e.getMessage());
             }
-            LOG.info("[CNGROUP_DEBUG] removeWorker: worker already removed from StarMgr (NOT_EXIST)");
         }
 
         removeWorkerFromMap(workerId, workerIpPort);
@@ -437,30 +429,21 @@ public class StarOSAgent {
 
     public void removeWorkerFromMap(long workerId, String workerIpPort) {
         try (LockCloseable lock = new LockCloseable(rwLock.writeLock())) {
-            Long removedNodeId = workerToNode.remove(workerId);
+            workerToNode.remove(workerId);
             workerToId.remove(workerIpPort);
-            LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap: workerId={}, workerIpPort={}," +
-                    " removedNodeId={}, workerToNode size={}, workerToId size={}",
-                    workerId, workerIpPort, removedNodeId, workerToNode.size(), workerToId.size());
         }
 
-        LOG.info("[CNGROUP_DEBUG] remove worker {} success from StarMgr", workerIpPort);
+        LOG.info("remove worker {} success from StarMgr", workerIpPort);
     }
 
     public void removeWorkerFromMap(String workerIpPort) {
         try (LockCloseable lock = new LockCloseable(rwLock.writeLock())) {
             Long workerId = workerToId.remove(workerIpPort);
             if (workerId != null) {
-                Long removedNodeId = workerToNode.remove(workerId);
-                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={}," +
-                        " workerId={}, removedNodeId={}, workerToNode size={}, workerToId size={}",
-                        workerIpPort, workerId, removedNodeId, workerToNode.size(), workerToId.size());
-            } else {
-                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={} not found",
-                        workerIpPort);
+                workerToNode.remove(workerId);
             }
         }
-        LOG.info("[CNGROUP_DEBUG] remove worker {} success from StarMgr", workerIpPort);
+        LOG.info("remove worker {} success from StarMgr", workerIpPort);
     }
 
     /**
@@ -697,12 +680,9 @@ public class StarOSAgent {
     private Optional<Long> getNodeIdByHostStarletPort(String host, int starletPort) {
         long nodeId = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
                 .getBackendIdWithStarletPort(host, starletPort);
-        LOG.info("[CNGROUP_DEBUG] getNodeIdByHostStarletPort: host={}, starletPort={}, backendId lookup result={}",
-                host, starletPort, nodeId);
         if (nodeId == -1L) {
             nodeId = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
                 .getComputeNodeIdWithStarletPort(host, starletPort);
-            LOG.info("[CNGROUP_DEBUG] getNodeIdByHostStarletPort: computeNodeId lookup result={}", nodeId);
         }
         return nodeId == -1 ? Optional.empty() : Optional.of(nodeId);
     }
@@ -710,13 +690,9 @@ public class StarOSAgent {
     private Optional<Long> getNodeIdByHostHeartbeatPort(String host, int heartbeatPort) {
         ComputeNode node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
                 .getBackendWithHeartbeatPort(host, heartbeatPort);
-        LOG.info("[CNGROUP_DEBUG] getNodeIdByHostHeartbeatPort: host={}, heartbeatPort={}, backend lookup result={}",
-                host, heartbeatPort, node != null ? node.getId() : "null");
         if (node == null) {
             node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().
                     getComputeNodeWithHeartbeatPort(host, heartbeatPort);
-            LOG.info("[CNGROUP_DEBUG] getNodeIdByHostHeartbeatPort: computeNode lookup result={}",
-                    node != null ? node.getId() : "null");
         }
         return node == null ? Optional.empty() : Optional.of(node.getId());
     }
@@ -727,12 +703,8 @@ public class StarOSAgent {
             // get the backend id directly from workerToBackend
             Long beId = workerToNode.get(workerId);
             if (beId != null) {
-                LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: workerId={} found in workerToNode map, nodeId={}",
-                        workerId, beId);
                 return Optional.of(beId);
             }
-            LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: workerId={} NOT in workerToNode," +
-                    " current map size={}, keys={}", workerId, workerToNode.size(), workerToNode.keySet());
         }
         String workerAddr = info.getIpPort();
         String[] hostPorts = workerAddr.split(":");
@@ -741,13 +713,12 @@ public class StarOSAgent {
         try {
             starletPort = Integer.parseInt(hostPorts[1]);
         } catch (NumberFormatException ex) {
-            LOG.warn("[CNGROUP_DEBUG] Malformed worker address info:" + workerAddr);
+            LOG.warn("Malformed worker address info:" + workerAddr);
             return Optional.empty();
         }
-        LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: looking up node by host={}, starletPort={}", host, starletPort);
         Optional<Long> result = getNodeIdByHostStarletPort(host, starletPort);
         if (!result.isPresent()) {
-            LOG.info("[CNGROUP_DEBUG] can't find backendId with starletPort for {}, try using be_heartbeat_port to search again",
+            LOG.info("can't find backendId with starletPort for {}, try using be_heartbeat_port to search again",
                     workerAddr);
             // FIXME: workaround fix of missing starletPort due to Backend::write() missing the field during
             //  saveImage(). Refer to: https://starrocks.atlassian.net/browse/SR-16340
@@ -756,11 +727,9 @@ public class StarOSAgent {
                 try {
                     heartbeatPort = Integer.parseInt(info.getWorkerPropertiesMap().get("be_heartbeat_port"));
                 } catch (NumberFormatException ex) {
-                    LOG.warn("[CNGROUP_DEBUG] Malformed be_heartbeat_port for worker:" + workerAddr);
+                    LOG.warn("Malformed be_heartbeat_port for worker:" + workerAddr);
                     return Optional.empty();
                 }
-                LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: trying heartbeat port lookup, host={}, heartbeatPort={}",
-                        host, heartbeatPort);
                 result = getNodeIdByHostHeartbeatPort(host, heartbeatPort);
             }
         }
@@ -768,12 +737,9 @@ public class StarOSAgent {
             try (LockCloseable ignored = new LockCloseable(rwLock.writeLock())) {
                 workerToId.put(workerAddr, workerId);
                 workerToNode.put(workerId, result.get());
-                LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: updated maps, workerAddr={}, workerId={}, nodeId={}",
-                        workerAddr, workerId, result.get());
             }
         } else {
-            LOG.warn("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: FAILED to find nodeId for workerId={}, workerAddr={}",
-                    workerId, workerAddr);
+            LOG.warn("Failed to find nodeId for workerId={}, workerAddr={}", workerId, workerAddr);
         }
         return result;
     }
@@ -887,24 +853,17 @@ public class StarOSAgent {
         try {
             List<WorkerGroupDetailInfo> workerGroupDetailInfos = client.
                     listWorkerGroup(serviceId, Collections.singletonList(workerGroupId), true);
-            LOG.info("[CNGROUP_DEBUG] getWorkersByWorkerGroup: workerGroupId={}, workerGroupDetailInfos count={}",
-                    workerGroupId, workerGroupDetailInfos.size());
             for (WorkerGroupDetailInfo detailInfo : workerGroupDetailInfos) {
-                List<WorkerInfo> workers = detailInfo.getWorkersInfoList();
-                LOG.info("[CNGROUP_DEBUG] getWorkersByWorkerGroup: groupId={}, workers from StarMgr: count={}, workerIds={}",
-                        detailInfo.getGroupId(), workers.size(),
-                        workers.stream().map(w -> w.getWorkerId() + "@" + w.getIpPort()).collect(Collectors.toList()));
-                for (WorkerInfo worker : workers) {
+                for (WorkerInfo worker : detailInfo.getWorkersInfoList()) {
                     Optional<Long> nodeId = getOrUpdateNodeIdByWorkerInfo(worker);
                     if (nodeId.isPresent()) {
                         nodeIds.add(nodeId.get());
                     } else {
-                        LOG.warn("[CNGROUP_DEBUG] getWorkersByWorkerGroup: SKIPPED worker {} - could not resolve to nodeId",
+                        LOG.warn("getWorkersByWorkerGroup: skipped worker {} - could not resolve to nodeId",
                                 worker.getWorkerId() + "@" + worker.getIpPort());
                     }
                 }
             }
-            LOG.info("[CNGROUP_DEBUG] getWorkersByWorkerGroup: final nodeIds={}", nodeIds);
             return nodeIds;
         } catch (StarClientException e) {
             throw new StarRocksException("Failed to get workers by group id. error: " + e.getMessage());
