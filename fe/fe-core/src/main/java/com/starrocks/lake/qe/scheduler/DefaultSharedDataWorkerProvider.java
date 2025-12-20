@@ -45,6 +45,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import static com.starrocks.qe.WorkerProviderHelper.filterByCnGroup;
 import static com.starrocks.qe.WorkerProviderHelper.getNextWorker;
 
 /**
@@ -94,15 +95,8 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
 
-            // Filter by CnGroup - always filter when group name is specified
-            final boolean shouldFilterByGroup = cnGroupName != null && !cnGroupName.isEmpty();
-            if (shouldFilterByGroup) {
-                idToComputeNode = ImmutableMap.copyOf(
-                        idToComputeNode.entrySet().stream()
-                                .filter(e -> cnGroupName.equals(e.getValue().getCnGroupName()))
-                                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
-                LOG.info("Filtered compute nodes by cnGroup '{}': {} nodes", cnGroupName, idToComputeNode.size());
-            }
+            // Filter by CnGroup using common helper
+            idToComputeNode = filterByCnGroup(idToComputeNode, cnGroupName);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug("idToComputeNode: {}, cnGroupName: {}", idToComputeNode, cnGroupName);

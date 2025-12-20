@@ -244,6 +244,9 @@ public class CnGroupMgr implements Writable {
             group.addNode(op.getNodeId());
             nodeToGroup.put(op.getNodeId(), op.getGroupName());
 
+            // Also update ComputeNode's cnGroupName to keep in sync
+            updateComputeNodeGroup(op.getNodeId(), op.getGroupName());
+
             LOG.info("Replayed add node {} to CnGroup: {}", op.getNodeId(), op.getGroupName());
         } finally {
             lock.writeLock().unlock();
@@ -303,6 +306,9 @@ public class CnGroupMgr implements Writable {
             }
             nodeToGroup.put(op.getNodeId(), CnGroup.DEFAULT_GROUP_NAME);
 
+            // Also update ComputeNode's cnGroupName to keep in sync
+            updateComputeNodeGroup(op.getNodeId(), CnGroup.DEFAULT_GROUP_NAME);
+
             LOG.info("Replayed remove node {} from CnGroup: {}", op.getNodeId(), op.getGroupName());
         } finally {
             lock.writeLock().unlock();
@@ -324,6 +330,93 @@ public class CnGroupMgr implements Writable {
                 }
             }
             LOG.info("Handled dropped node {} from CnGroup: {}", nodeId, groupName);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Handle a new node being added to the system.
+     * Registers the node with its cnGroupName in CnGroupMgr without logging to EditLog.
+     * Called when a compute node is added to the cluster.
+     */
+    public void handleNodeAdded(long nodeId, String cnGroupName) {
+        lock.writeLock().lock();
+        try {
+            String groupName = (cnGroupName == null || cnGroupName.isEmpty())
+                    ? CnGroup.DEFAULT_GROUP_NAME : cnGroupName;
+
+            // Get or create group (without logging - this is internal sync)
+            CnGroup group = nameToGroup.get(groupName);
+            if (group == null) {
+                // For non-default groups, they should already exist
+                // Fall back to default group
+                groupName = CnGroup.DEFAULT_GROUP_NAME;
+                group = nameToGroup.get(groupName);
+            }
+
+            if (group != null) {
+                group.addNode(nodeId);
+                nodeToGroup.put(nodeId, groupName);
+                LOG.info("Registered new node {} with CnGroup: {}", nodeId, groupName);
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Sync CnGroupMgr with existing compute nodes.
+     * This should be called during startup after all nodes are loaded.
+     */
+    public void syncWithExistingNodes() {
+        SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+        lock.writeLock().lock();
+        try {
+            // Sync compute nodes
+            for (ComputeNode node : systemInfo.getIdComputeNode().values()) {
+                String groupName = node.getCnGroupName();
+                if (groupName == null || groupName.isEmpty()) {
+                    groupName = CnGroup.DEFAULT_GROUP_NAME;
+                }
+
+                // Get or create group
+                CnGroup group = nameToGroup.get(groupName);
+                if (group == null) {
+                    // Create the group if it doesn't exist
+                    long id = GlobalStateMgr.getCurrentState().getNextId();
+                    group = new CnGroup(id, groupName, "Auto-created during sync");
+                    idToGroup.put(id, group);
+                    nameToGroup.put(groupName, group);
+                    LOG.info("Auto-created CnGroup during sync: {}", groupName);
+                }
+
+                group.addNode(node.getId());
+                nodeToGroup.put(node.getId(), groupName);
+            }
+
+            // Sync backends (in SHARED_DATA mode, backends are also treated as compute nodes)
+            for (ComputeNode node : systemInfo.getIdToBackend().values()) {
+                String groupName = node.getCnGroupName();
+                if (groupName == null || groupName.isEmpty()) {
+                    groupName = CnGroup.DEFAULT_GROUP_NAME;
+                }
+
+                CnGroup group = nameToGroup.get(groupName);
+                if (group == null) {
+                    long id = GlobalStateMgr.getCurrentState().getNextId();
+                    group = new CnGroup(id, groupName, "Auto-created during sync");
+                    idToGroup.put(id, group);
+                    nameToGroup.put(groupName, group);
+                    LOG.info("Auto-created CnGroup during sync: {}", groupName);
+                }
+
+                group.addNode(node.getId());
+                nodeToGroup.put(node.getId(), groupName);
+            }
+
+            LOG.info("Synced CnGroupMgr with {} compute nodes and {} backends",
+                    systemInfo.getIdComputeNode().size(), systemInfo.getIdToBackend().size());
         } finally {
             lock.writeLock().unlock();
         }

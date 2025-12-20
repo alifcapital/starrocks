@@ -17,8 +17,15 @@ package com.starrocks.qe;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.util.Map;
+import java.util.stream.Collectors;
 
 public class WorkerProviderHelper {
+    private static final Logger LOG = LogManager.getLogger(WorkerProviderHelper.class);
+
     public interface NextWorkerIndexSupplier {
         int getAsInt(ComputeResource computeResource);
     }
@@ -34,5 +41,32 @@ public class WorkerProviderHelper {
             index = -index;
         }
         return workers.values().asList().get(index);
+    }
+
+    /**
+     * Filter compute nodes by CnGroup name.
+     *
+     * @param nodes the input map of node ID to ComputeNode
+     * @param cnGroupName the CnGroup name to filter by
+     * @return a new ImmutableMap containing only nodes that belong to the specified group
+     */
+    public static <C extends ComputeNode> ImmutableMap<Long, C> filterByCnGroup(
+            ImmutableMap<Long, C> nodes, String cnGroupName) {
+        // If cnGroupName is null or empty, return original map (no filtering)
+        if (cnGroupName == null || cnGroupName.isEmpty()) {
+            return nodes;
+        }
+
+        ImmutableMap<Long, C> filtered = ImmutableMap.copyOf(
+                nodes.entrySet().stream()
+                        .filter(e -> cnGroupName.equals(e.getValue().getCnGroupName()))
+                        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Filtered compute nodes by cnGroup '{}': {} -> {} nodes",
+                    cnGroupName, nodes.size(), filtered.size());
+        }
+
+        return filtered;
     }
 }

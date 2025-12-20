@@ -18,6 +18,7 @@ import com.google.common.collect.Sets;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.persist.gson.GsonPostProcessable;
 import com.starrocks.persist.gson.GsonUtils;
 
 import java.io.DataInput;
@@ -36,7 +37,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * Each CN belongs to exactly one CnGroup.
  * Queries can be routed to specific CnGroups using the session variable 'cngroup'.
  */
-public class CnGroup implements Writable {
+public class CnGroup implements Writable, GsonPostProcessable {
 
     public static final String DEFAULT_GROUP_NAME = "default";
 
@@ -55,8 +56,8 @@ public class CnGroup implements Writable {
     @SerializedName("createTime")
     private final long createTime;
 
-    // Not serialized - runtime lock
-    private final transient ReadWriteLock lock = new ReentrantReadWriteLock();
+    // Not serialized - runtime lock, initialized lazily after deserialization
+    private transient ReadWriteLock lock;
 
     public CnGroup(long id, String name) {
         this(id, name, "");
@@ -68,6 +69,29 @@ public class CnGroup implements Writable {
         this.comment = comment;
         this.nodeIds = Sets.newConcurrentHashSet();
         this.createTime = System.currentTimeMillis();
+        this.lock = new ReentrantReadWriteLock();
+    }
+
+    /**
+     * Get the lock, initializing it if necessary (after deserialization).
+     */
+    private ReadWriteLock getLock() {
+        if (lock == null) {
+            synchronized (this) {
+                if (lock == null) {
+                    lock = new ReentrantReadWriteLock();
+                }
+            }
+        }
+        return lock;
+    }
+
+    @Override
+    public void gsonPostProcess() {
+        // Initialize lock after GSON deserialization
+        if (lock == null) {
+            lock = new ReentrantReadWriteLock();
+        }
     }
 
     public long getId() {
@@ -105,11 +129,11 @@ public class CnGroup implements Writable {
      * @return true if the node was added, false if it was already in the group
      */
     public boolean addNode(long nodeId) {
-        lock.writeLock().lock();
+        getLock().writeLock().lock();
         try {
             return nodeIds.add(nodeId);
         } finally {
-            lock.writeLock().unlock();
+            getLock().writeLock().unlock();
         }
     }
 
@@ -119,11 +143,11 @@ public class CnGroup implements Writable {
      * @return true if the node was removed, false if it was not in the group
      */
     public boolean removeNode(long nodeId) {
-        lock.writeLock().lock();
+        getLock().writeLock().lock();
         try {
             return nodeIds.remove(nodeId);
         } finally {
-            lock.writeLock().unlock();
+            getLock().writeLock().unlock();
         }
     }
 
@@ -133,11 +157,11 @@ public class CnGroup implements Writable {
      * @return true if the node is in this group
      */
     public boolean containsNode(long nodeId) {
-        lock.readLock().lock();
+        getLock().readLock().lock();
         try {
             return nodeIds.contains(nodeId);
         } finally {
-            lock.readLock().unlock();
+            getLock().readLock().unlock();
         }
     }
 
@@ -146,11 +170,11 @@ public class CnGroup implements Writable {
      * @return an unmodifiable set of node IDs
      */
     public Set<Long> getNodeIds() {
-        lock.readLock().lock();
+        getLock().readLock().lock();
         try {
             return Collections.unmodifiableSet(Sets.newHashSet(nodeIds));
         } finally {
-            lock.readLock().unlock();
+            getLock().readLock().unlock();
         }
     }
 
@@ -159,11 +183,11 @@ public class CnGroup implements Writable {
      * @return the node count
      */
     public int getNodeCount() {
-        lock.readLock().lock();
+        getLock().readLock().lock();
         try {
             return nodeIds.size();
         } finally {
-            lock.readLock().unlock();
+            getLock().readLock().unlock();
         }
     }
 
