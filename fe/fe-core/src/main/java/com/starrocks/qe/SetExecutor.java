@@ -40,14 +40,14 @@ import com.starrocks.common.DdlException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.sql.analyzer.SetStmtAnalyzer;
-import com.starrocks.warehouse.cngroup.CnGroup;
-import com.starrocks.warehouse.cngroup.CnGroupMgr;
 import com.starrocks.sql.ast.SetListItem;
 import com.starrocks.sql.ast.SetPassVar;
 import com.starrocks.sql.ast.SetStmt;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.sql.ast.UserRef;
 import com.starrocks.sql.ast.UserVariable;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
