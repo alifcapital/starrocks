@@ -111,7 +111,7 @@ public class CnGroupMgrTest {
                 minTimes = 0;
 
                 systemInfoService.getIdToBackend();
-                result = new HashMap<>();
+                result = ImmutableMap.of();
                 minTimes = 0;
             }
         };

@@ -598,7 +598,10 @@ public class CnGroupMgr implements Writable {
      * Operation class for node add/remove persistence.
      */
     public static class CnGroupNodeOp implements Writable {
+        @com.google.gson.annotations.SerializedName("nodeId")
         private long nodeId;
+
+        @com.google.gson.annotations.SerializedName("groupName")
         private String groupName;
 
         public CnGroupNodeOp() {
