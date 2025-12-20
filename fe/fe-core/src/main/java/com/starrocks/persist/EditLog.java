@@ -1620,29 +1620,23 @@ public class EditLog {
         logJsonObject(OperationType.OP_UPDATE_HISTORICAL_NODE, log, applier);
     }
 
-    // CnGroup operations
+    // CnGroup operations - no replay callbacks, replay happens via case in loadJournal()
     public void logCreateCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
-        logJsonObject(OperationType.OP_CREATE_CN_GROUP, group,
-                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
-                        .replayCreateGroup((com.starrocks.warehouse.cngroup.CnGroup) wal));
+        logJsonObject(OperationType.OP_CREATE_CN_GROUP, group);
     }
 
     public void logDropCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
-        logJsonObject(OperationType.OP_DROP_CN_GROUP, group,
-                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
-                        .replayDropGroup((com.starrocks.warehouse.cngroup.CnGroup) wal));
+        logJsonObject(OperationType.OP_DROP_CN_GROUP, group);
     }
 
     public void logAddNodeToCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
-        logJsonObject(OperationType.OP_ADD_NODE_TO_CN_GROUP, op,
-                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
-                        .replayAddNodeToGroup((com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp) wal));
+        // No replay callback - replay happens via case in loadJournal()
+        logJsonObject(OperationType.OP_ADD_NODE_TO_CN_GROUP, op);
     }
 
     public void logRemoveNodeFromCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
-        logJsonObject(OperationType.OP_REMOVE_NODE_FROM_CN_GROUP, op,
-                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
-                        .replayRemoveNodeFromGroup((com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp) wal));
+        // No replay callback - replay happens via case in loadJournal()
+        logJsonObject(OperationType.OP_REMOVE_NODE_FROM_CN_GROUP, op);
     }
 
     public void logAddFrontend(Frontend fe, WALApplier applier) {
