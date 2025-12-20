@@ -68,7 +68,9 @@ while true; do
 done
 
 # ================== conf section =======================
-export STARROCKS_HOME=`cd "$curdir/.."; pwd`
+if [ -z "$STARROCKS_HOME" ]; then
+    export STARROCKS_HOME=`cd "$curdir/.."; pwd`
+fi
 source $STARROCKS_HOME/bin/common.sh
 
 export_shared_envvars
