@@ -15,7 +15,7 @@
 package com.starrocks.warehouse.cngroup;
 
 import com.google.common.collect.ImmutableMap;
-import com.starrocks.authentication.AuthenticationMgr;
+import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
@@ -66,7 +66,7 @@ public class CnGroupIntegrationTest extends StarRocksTestBase {
         };
 
         starRocksAssert = new StarRocksAssert(UtFrameUtils.initCtxForNewPrivilege(
-                AuthenticationMgr.ROOT_USER));
+                UserIdentity.ROOT));
 
         cnGroupMgr = GlobalStateMgr.getCurrentState().getCnGroupMgr();
         systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
