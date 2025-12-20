@@ -61,6 +61,10 @@ public class CnGroupMgr implements Writable {
 
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
+    // Local ID counter for group creation during replay (to avoid EditLog access)
+    private final java.util.concurrent.atomic.AtomicLong localIdCounter =
+            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+
     public CnGroupMgr() {
         // Initialize with default group
         initDefaultGroup();
@@ -73,6 +77,14 @@ public class CnGroupMgr implements Writable {
             nameToGroup.put(defaultGroup.getName(), defaultGroup);
             LOG.info("Initialized default CnGroup");
         }
+    }
+
+    /**
+     * Generate a local group ID without accessing EditLog.
+     * Used during replay when GlobalStateMgr.getNextId() cannot be called.
+     */
+    private long generateLocalGroupId() {
+        return localIdCounter.getAndIncrement();
     }
 
     /**
@@ -232,10 +244,10 @@ public class CnGroupMgr implements Writable {
                 }
             }
 
-            // Get or create group
+            // Get or create group (use local ID generation during replay to avoid EditLog access)
             CnGroup group = nameToGroup.get(op.getGroupName());
             if (group == null) {
-                long id = GlobalStateMgr.getCurrentState().getNextId();
+                long id = generateLocalGroupId();
                 group = new CnGroup(id, op.getGroupName(), "Auto-created group");
                 idToGroup.put(id, group);
                 nameToGroup.put(op.getGroupName(), group);
@@ -346,11 +358,11 @@ public class CnGroupMgr implements Writable {
             String groupName = (cnGroupName == null || cnGroupName.isEmpty())
                     ? CnGroup.DEFAULT_GROUP_NAME : cnGroupName;
 
-            // Get or create group (without logging - this is internal sync)
+            // Get or create group (use local ID generation to avoid EditLog access during replay)
             CnGroup group = nameToGroup.get(groupName);
             if (group == null) {
                 // Create the group if it doesn't exist
-                long id = GlobalStateMgr.getCurrentState().getNextId();
+                long id = generateLocalGroupId();
                 group = new CnGroup(id, groupName, "Auto-created group");
                 idToGroup.put(id, group);
                 nameToGroup.put(groupName, group);
