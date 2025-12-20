@@ -47,24 +47,30 @@ public class WorkerProviderHelper {
      * Filter compute nodes by CnGroup name.
      *
      * @param nodes the input map of node ID to ComputeNode
-     * @param cnGroupName the CnGroup name to filter by
+     * @param cnGroupName the CnGroup name to filter by. If null or empty, uses "default" group.
      * @return a new ImmutableMap containing only nodes that belong to the specified group
      */
     public static <C extends ComputeNode> ImmutableMap<Long, C> filterByCnGroup(
             ImmutableMap<Long, C> nodes, String cnGroupName) {
-        // If cnGroupName is null or empty, return original map (no filtering)
-        if (cnGroupName == null || cnGroupName.isEmpty()) {
-            return nodes;
-        }
+        // If cnGroupName is null or empty, use default group
+        String effectiveGroupName = (cnGroupName == null || cnGroupName.isEmpty())
+                ? "default" : cnGroupName;
 
         ImmutableMap<Long, C> filtered = ImmutableMap.copyOf(
                 nodes.entrySet().stream()
-                        .filter(e -> cnGroupName.equals(e.getValue().getCnGroupName()))
+                        .filter(e -> {
+                            String nodeGroup = e.getValue().getCnGroupName();
+                            // Treat null/empty cnGroupName on node as "default"
+                            if (nodeGroup == null || nodeGroup.isEmpty()) {
+                                nodeGroup = "default";
+                            }
+                            return effectiveGroupName.equals(nodeGroup);
+                        })
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
 
         if (LOG.isDebugEnabled()) {
             LOG.debug("Filtered compute nodes by cnGroup '{}': {} -> {} nodes",
-                    cnGroupName, nodes.size(), filtered.size());
+                    effectiveGroupName, nodes.size(), filtered.size());
         }
 
         return filtered;
