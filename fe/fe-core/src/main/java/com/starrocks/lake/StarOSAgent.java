@@ -355,7 +355,8 @@ public class StarOSAgent {
      * @param workerGroupId
      */
     public void addWorker(long nodeId, String workerIpPort, long workerGroupId) {
-        LOG.info("[CNGROUP_DEBUG] addWorker: START nodeId={}, workerIpPort={}, workerGroupId={}", nodeId, workerIpPort, workerGroupId);
+        LOG.info("[CNGROUP_DEBUG] addWorker: START nodeId={}, workerIpPort={}, workerGroupId={}",
+                nodeId, workerIpPort, workerGroupId);
         prepare();
         try (LockCloseable lock = new LockCloseable(rwLock.writeLock())) {
             if (serviceId.equals("")) {
@@ -390,7 +391,8 @@ public class StarOSAgent {
             tryRemovePreviousWorker(nodeId);
             workerToId.put(workerIpPort, workerId);
             workerToNode.put(workerId, nodeId);
-            LOG.info("[CNGROUP_DEBUG] addWorker: SUCCESS workerId={}, nodeId={}, workerIpPort={}, workerToNode size={}, workerToId size={}",
+            LOG.info("[CNGROUP_DEBUG] addWorker: SUCCESS workerId={}, nodeId={}, workerIpPort={}," +
+                    " workerToNode size={}, workerToId size={}",
                     workerId, nodeId, workerIpPort, workerToNode.size(), workerToId.size());
         }
     }
@@ -437,7 +439,8 @@ public class StarOSAgent {
         try (LockCloseable lock = new LockCloseable(rwLock.writeLock())) {
             Long removedNodeId = workerToNode.remove(workerId);
             workerToId.remove(workerIpPort);
-            LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap: workerId={}, workerIpPort={}, removedNodeId={}, workerToNode size={}, workerToId size={}",
+            LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap: workerId={}, workerIpPort={}," +
+                    " removedNodeId={}, workerToNode size={}, workerToId size={}",
                     workerId, workerIpPort, removedNodeId, workerToNode.size(), workerToId.size());
         }
 
@@ -449,10 +452,12 @@ public class StarOSAgent {
             Long workerId = workerToId.remove(workerIpPort);
             if (workerId != null) {
                 Long removedNodeId = workerToNode.remove(workerId);
-                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={}, workerId={}, removedNodeId={}, workerToNode size={}, workerToId size={}",
+                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={}," +
+                        " workerId={}, removedNodeId={}, workerToNode size={}, workerToId size={}",
                         workerIpPort, workerId, removedNodeId, workerToNode.size(), workerToId.size());
             } else {
-                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={} not found in workerToId map", workerIpPort);
+                LOG.info("[CNGROUP_DEBUG] removeWorkerFromMap(byIpPort): workerIpPort={} not found",
+                        workerIpPort);
             }
         }
         LOG.info("[CNGROUP_DEBUG] remove worker {} success from StarMgr", workerIpPort);
@@ -726,8 +731,8 @@ public class StarOSAgent {
                         workerId, beId);
                 return Optional.of(beId);
             }
-            LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: workerId={} NOT in workerToNode map, current map size={}, keys={}",
-                    workerId, workerToNode.size(), workerToNode.keySet());
+            LOG.info("[CNGROUP_DEBUG] getOrUpdateNodeIdByWorkerInfo: workerId={} NOT in workerToNode," +
+                    " current map size={}, keys={}", workerId, workerToNode.size(), workerToNode.keySet());
         }
         String workerAddr = info.getIpPort();
         String[] hostPorts = workerAddr.split(":");

@@ -126,7 +126,8 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
                             ComputeNode node = systemInfoService.getBackendOrComputeNode(nodeId);
                             boolean matches = node != null && matchesCnGroup(node, effectiveCnGroupName);
                             if (!matches) {
-                                LOG.info("[CNGROUP_DEBUG] getAllComputeNodeIds: filtering out nodeId={}, node={}, nodeCnGroup={}, effectiveCnGroup={}",
+                                LOG.info("[CNGROUP_DEBUG] getAllComputeNodeIds: filtering out " +
+                                        "nodeId={}, node={}, nodeCnGroup={}, effectiveCnGroup={}",
                                         nodeId, node != null ? node.getHost() : "null",
                                         node != null ? node.getCnGroupName() : "null", effectiveCnGroupName);
                             }
