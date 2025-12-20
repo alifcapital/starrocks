@@ -123,12 +123,14 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
                 SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
 
                 // Log all known nodes for debugging
-                LOG.info("[CNGROUP_DEBUG] getAllComputeNodeIds: SystemInfoService knows about: backends={}, computeNodes={}",
+                LOG.info("[CNGROUP_DEBUG] getAllComputeNodeIds: backends={}, computeNodes={}",
                         systemInfoService.getBackends().stream()
-                                .map(b -> b.getId() + "@" + b.getHost() + ":" + b.getStarletPort() + "[" + b.getCnGroupName() + "]")
+                                .map(b -> b.getId() + "@" + b.getHost() + ":" + b.getStarletPort()
+                                        + "[" + b.getCnGroupName() + "]")
                                 .collect(Collectors.toList()),
                         systemInfoService.getComputeNodes().stream()
-                                .map(cn -> cn.getId() + "@" + cn.getHost() + ":" + cn.getStarletPort() + "[" + cn.getCnGroupName() + "]")
+                                .map(cn -> cn.getId() + "@" + cn.getHost() + ":" + cn.getStarletPort()
+                                        + "[" + cn.getCnGroupName() + "]")
                                 .collect(Collectors.toList()));
                 List<Long> filteredIds = allNodeIds.stream()
                         .filter(nodeId -> {
