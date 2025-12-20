@@ -1305,6 +1305,12 @@ public class GlobalStateMgr {
             initDefaultWarehouse();
         }
 
+        // Sync CnGroupMgr with existing compute nodes.
+        // This ensures nodes that existed before CNGroup feature was added are properly registered.
+        if (cnGroupMgr != null) {
+            cnGroupMgr.syncWithExistingNodes();
+        }
+
         // set this after replay thread stopped. to avoid replay thread modify them.
         isReady.set(false);
 
@@ -1575,6 +1581,12 @@ public class GlobalStateMgr {
         if (!isDefaultWarehouseCreated) {
             // A brand-new cluster was up for the first time, the follower/observer node initializes its default warehouse here.
             initDefaultWarehouse();
+        }
+
+        // Sync CnGroupMgr with existing compute nodes.
+        // This ensures nodes that existed before CNGroup feature was added are properly registered.
+        if (cnGroupMgr != null) {
+            cnGroupMgr.syncWithExistingNodes();
         }
 
         // transfer from INIT/UNKNOWN to OBSERVER/FOLLOWER
