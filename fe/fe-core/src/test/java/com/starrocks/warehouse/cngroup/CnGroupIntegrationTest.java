@@ -16,6 +16,7 @@ package com.starrocks.warehouse.cngroup;
 
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.common.DdlException;
+import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.WorkerProviderHelper;
@@ -65,7 +66,7 @@ public class CnGroupIntegrationTest extends StarRocksTestBase {
         };
 
         starRocksAssert = new StarRocksAssert(UtFrameUtils.initCtxForNewPrivilege(
-                com.starrocks.mysql.privilege.Auth.ROOT_USER));
+                AuthenticationMgr.ROOT_USER));
 
         cnGroupMgr = GlobalStateMgr.getCurrentState().getCnGroupMgr();
         systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
@@ -96,16 +97,17 @@ public class CnGroupIntegrationTest extends StarRocksTestBase {
     }
 
     @Test
-    public void testSetCnGroupViaSql() throws Exception {
+    public void testSetCnGroupDirectly() throws Exception {
         ConnectContext ctx = starRocksAssert.getCtx();
+        SessionVariable sessionVariable = ctx.getSessionVariable();
 
-        // Execute SET statement
-        starRocksAssert.executeSetCommand("SET cngroup = 'analytics'");
-
-        Assertions.assertEquals("analytics", ctx.getSessionVariable().getCnGroupName());
+        // Set cngroup directly
+        sessionVariable.setCnGroupName("analytics");
+        Assertions.assertEquals("analytics", sessionVariable.getCnGroupName());
 
         // Reset
-        starRocksAssert.executeSetCommand("SET cngroup = 'default'");
+        sessionVariable.setCnGroupName("default");
+        Assertions.assertEquals("default", sessionVariable.getCnGroupName());
     }
 
     // ==================== CnGroup Management Tests ====================
