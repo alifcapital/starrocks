@@ -76,8 +76,14 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
         }
 
         if (!isResourceAvailable(computeResource)) {
-            LOG.warn("No alive compute nodes in warehouse '{}' for cngroup '{}'",
-                    warehouse.getName(), cnGroupName);
+            String effectiveCnGroup = CnGroup.getEffectiveName(cnGroupName);
+            if (!CnGroup.DEFAULT_GROUP_NAME.equals(effectiveCnGroup)) {
+                // User specified a custom cngroup that has no available nodes
+                throw ErrorReportException.report(ErrorCode.ERR_WAREHOUSE_UNAVAILABLE,
+                        String.format("%s (cngroup '%s' has no available compute nodes)",
+                                warehouse.getName(), effectiveCnGroup));
+            }
+            LOG.warn("No alive compute nodes in warehouse '{}'", warehouse.getName());
             return Optional.empty();
         }
         return Optional.of(computeResource);

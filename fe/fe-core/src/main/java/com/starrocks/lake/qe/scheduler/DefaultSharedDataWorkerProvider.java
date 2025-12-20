@@ -32,6 +32,7 @@ import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroup;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -224,8 +225,14 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     }
 
     private void reportWorkerNotFoundException(long workerId) throws NonRecoverableException {
-        throw new NonRecoverableException(
-                FeConstants.getNodeNotFoundError(true) + " nodeId: " + workerId + " " + computeNodesToString(false));
+        String cnGroupName = CnGroup.getEffectiveName(computeResource.getCnGroupName());
+        String errorMsg;
+        if (!CnGroup.DEFAULT_GROUP_NAME.equals(cnGroupName) && id2ComputeNode.isEmpty()) {
+            errorMsg = String.format("CNGroup '%s' has no available compute nodes", cnGroupName);
+        } else {
+            errorMsg = FeConstants.getNodeNotFoundError(true) + " nodeId: " + workerId + " " + computeNodesToString(false);
+        }
+        throw new NonRecoverableException(errorMsg);
     }
 
     @Override
