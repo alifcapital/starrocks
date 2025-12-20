@@ -16,6 +16,7 @@ package com.starrocks.qe;
 
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.warehouse.cngroup.CnGroup;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -52,18 +53,12 @@ public class WorkerProviderHelper {
      */
     public static <C extends ComputeNode> ImmutableMap<Long, C> filterByCnGroup(
             ImmutableMap<Long, C> nodes, String cnGroupName) {
-        // If cnGroupName is null or empty, use default group
-        String effectiveGroupName = (cnGroupName == null || cnGroupName.isEmpty())
-                ? "default" : cnGroupName;
+        String effectiveGroupName = CnGroup.getEffectiveName(cnGroupName);
 
         ImmutableMap<Long, C> filtered = ImmutableMap.copyOf(
                 nodes.entrySet().stream()
                         .filter(e -> {
-                            String nodeGroup = e.getValue().getCnGroupName();
-                            // Treat null/empty cnGroupName on node as "default"
-                            if (nodeGroup == null || nodeGroup.isEmpty()) {
-                                nodeGroup = "default";
-                            }
+                            String nodeGroup = CnGroup.getEffectiveName(e.getValue().getCnGroupName());
                             return effectiveGroupName.equals(nodeGroup);
                         })
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));

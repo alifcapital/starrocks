@@ -41,6 +41,17 @@ public class CnGroup implements Writable, GsonPostProcessable {
 
     public static final String DEFAULT_GROUP_NAME = "default";
 
+    /**
+     * Get effective CNGroup name, treating null/empty as "default".
+     * This is the single source of truth for null/empty → default conversion.
+     */
+    public static String getEffectiveName(String cnGroupName) {
+        if (cnGroupName == null || cnGroupName.isEmpty()) {
+            return DEFAULT_GROUP_NAME;
+        }
+        return cnGroupName;
+    }
+
     @SerializedName("id")
     private final long id;
 

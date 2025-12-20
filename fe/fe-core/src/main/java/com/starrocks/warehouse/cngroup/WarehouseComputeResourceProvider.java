@@ -111,7 +111,7 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
             // Filter by CNGroup (null/empty treated as "default", only "*" skips filtering)
             String cnGroupName = computeResource.getCnGroupName();
             if (shouldFilterByCnGroup(cnGroupName)) {
-                String effectiveCnGroupName = getEffectiveCnGroupName(cnGroupName);
+                String effectiveCnGroupName = CnGroup.getEffectiveName(cnGroupName);
                 SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
 
                 List<Long> filteredIds = allNodeIds.stream()
@@ -155,25 +155,11 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
     }
 
     /**
-     * Get effective CNGroup name, treating null/empty as "default".
-     */
-    private String getEffectiveCnGroupName(String cnGroupName) {
-        if (cnGroupName == null || cnGroupName.isEmpty()) {
-            return CnGroup.DEFAULT_GROUP_NAME;
-        }
-        return cnGroupName;
-    }
-
-    /**
      * Check if a compute node matches the specified CNGroup.
      * Nodes with null/empty cnGroupName are considered to be in "default" group.
      */
     private boolean matchesCnGroup(ComputeNode node, String cnGroupName) {
-        String nodeGroup = node.getCnGroupName();
-        // Treat null/empty as "default"
-        if (nodeGroup == null || nodeGroup.isEmpty()) {
-            nodeGroup = CnGroup.DEFAULT_GROUP_NAME;
-        }
+        String nodeGroup = CnGroup.getEffectiveName(node.getCnGroupName());
         return cnGroupName.equals(nodeGroup);
     }
 }
