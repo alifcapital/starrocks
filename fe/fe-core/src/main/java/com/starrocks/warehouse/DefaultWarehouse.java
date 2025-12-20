@@ -28,6 +28,7 @@ import com.starrocks.sql.ast.warehouse.cngroup.DropCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.EnableDisableCnGroupStmt;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.CnGroupMgr;
 
 import java.util.ArrayList;
@@ -88,11 +89,21 @@ public class DefaultWarehouse extends Warehouse {
 
     @Override
     public List<String> getWarehouseInfo() {
+        // Get actual node count using ALL_GROUPS to include all CNGroups
+        long nodeCount = 0;
+        try {
+            CnGroupComputeResource allGroupsResource = CnGroupComputeResource.forSystemTask(getId());
+            nodeCount = GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                    .getAllComputeNodeIds(allGroupsResource).size();
+        } catch (Exception e) {
+            // Ignore errors, return 0
+        }
+
         return Lists.newArrayList(
                 String.valueOf(getId()),
                 getName(),
                 "AVAILABLE",
-                String.valueOf(0L),
+                String.valueOf(nodeCount),
                 String.valueOf(1L),
                 String.valueOf(1L),
                 String.valueOf(1L),

@@ -113,6 +113,7 @@ import com.starrocks.thrift.TTabletLocation;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.thrift.TWriteQuorumType;
 import com.starrocks.transaction.TransactionState;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -864,9 +865,12 @@ public class OlapTableSink extends DataSink {
         if (RunMode.isSharedDataMode()) {
             // NOTE: shared-nothing workerProvider.allowUsingBackupNode() == false, so don't bother to create it
             WorkerProvider.Factory workerProviderFactory = new DefaultSharedDataWorkerProvider.Factory();
+            // Use ALL_GROUPS for shard owner access - shards can be on any node regardless of CNGroup.
+            // CNGroup filtering applies to compute/scan, but write coordination must reach shard owners.
+            ComputeResource allGroupsResource = CnGroupComputeResource.forSystemTask(computeResource.getWarehouseId());
             WorkerProvider workerProvider = workerProviderFactory.captureAvailableWorkers(
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo(), false, 0,
-                    SessionVariableConstants.ComputationFragmentSchedulingPolicy.ALL_NODES, computeResource);
+                    SessionVariableConstants.ComputationFragmentSchedulingPolicy.ALL_NODES, allGroupsResource);
             if (workerProvider.allowUsingBackupNode()) {
                 for (TTabletLocation location : locationParam.getTablets()) {
                     Map<Long, Long> replacePair = new HashMap<>();
