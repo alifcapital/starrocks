@@ -14,6 +14,7 @@
 
 package com.starrocks.warehouse.cngroup;
 
+import com.google.common.collect.ImmutableMap;
 import com.starrocks.common.DdlException;
 import com.starrocks.persist.EditLog;
 import com.starrocks.server.GlobalStateMgr;
@@ -27,8 +28,6 @@ import mockit.Mocked;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import com.google.common.collect.ImmutableMap;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
