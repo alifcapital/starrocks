@@ -98,10 +98,19 @@ public class DefaultWorkerProvider implements WorkerProvider {
                                      boolean preferComputeNode, int numUsedComputeNodes,
                                      ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
                                      ComputeResource computeResource) {
+            return captureAvailableWorkers(systemInfoService, preferComputeNode, numUsedComputeNodes,
+                    computationFragmentSchedulingPolicy, computeResource, null);
+        }
+
+        @Override
+        public DefaultWorkerProvider captureAvailableWorkers(SystemInfoService systemInfoService,
+                                     boolean preferComputeNode, int numUsedComputeNodes,
+                                     ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
+                                     ComputeResource computeResource, String cnGroupName) {
 
             ImmutableMap<Long, ComputeNode> idToComputeNode =
-                    buildComputeNodeInfo(systemInfoService, numUsedComputeNodes, 
-                                         computationFragmentSchedulingPolicy, computeResource);
+                    buildComputeNodeInfo(systemInfoService, numUsedComputeNodes,
+                                         computationFragmentSchedulingPolicy, computeResource, cnGroupName);
 
             ImmutableMap<Long, ComputeNode> idToBackend = ImmutableMap.copyOf(systemInfoService.getIdToBackend());
 
@@ -113,7 +122,7 @@ public class DefaultWorkerProvider implements WorkerProvider {
                     LOG.debug("backend: {}-{}-{}", backendID, backend.getHost(), backend.getBePort());
                 }
 
-                LOG.debug("idToComputeNode: {}", idToComputeNode);
+                LOG.debug("idToComputeNode: {}, cnGroupName: {}", idToComputeNode, cnGroupName);
             }
 
             return new DefaultWorkerProvider(idToBackend, idToComputeNode,
@@ -364,7 +373,8 @@ public class DefaultWorkerProvider implements WorkerProvider {
     private static ImmutableMap<Long, ComputeNode> buildComputeNodeInfo(SystemInfoService systemInfoService,
                                   int numUsedComputeNodes,
                                   ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
-                                  ComputeResource computeResource) {
+                                  ComputeResource computeResource,
+                                  String cnGroupName) {
         //define Node Pool
         Map<Long, ComputeNode> computeNodes = new HashMap<>();
 
@@ -373,6 +383,18 @@ public class DefaultWorkerProvider implements WorkerProvider {
                 = ImmutableMap.copyOf(systemInfoService.getIdComputeNode());
         ImmutableMap<Long, ComputeNode> idToBackend
                 = ImmutableMap.copyOf(systemInfoService.getIdToBackend());
+
+        // Filter by CnGroup - always filter when group name is specified
+        final boolean shouldFilterByGroup = cnGroupName != null && !cnGroupName.isEmpty();
+
+        if (shouldFilterByGroup) {
+            // Filter compute nodes by cnGroupName
+            idToComputeNode = ImmutableMap.copyOf(
+                    idToComputeNode.entrySet().stream()
+                            .filter(e -> cnGroupName.equals(e.getValue().getCnGroupName()))
+                            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+            LOG.info("Filtered compute nodes by cnGroup '{}': {} nodes", cnGroupName, idToComputeNode.size());
+        }
 
         //add CN and BE to Node Pool
         if (numUsedComputeNodes <= 0) {

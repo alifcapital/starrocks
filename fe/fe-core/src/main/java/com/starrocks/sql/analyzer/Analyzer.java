@@ -126,6 +126,7 @@ import com.starrocks.sql.ast.ShowAuthenticationStmt;
 import com.starrocks.sql.ast.ShowBackupStmt;
 import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowCatalogsStmt;
+import com.starrocks.sql.ast.ShowCnGroupsStmt;
 import com.starrocks.sql.ast.ShowCreateDbStmt;
 import com.starrocks.sql.ast.ShowDataCacheRulesStmt;
 import com.starrocks.sql.ast.ShowDictionaryStmt;
@@ -1139,6 +1140,11 @@ public class Analyzer {
 
         @Override
         public Void visitShowClusterStatement(ShowClustersStmt statement, ConnectContext context) {
+            return null;
+        }
+
+        @Override
+        public Void visitShowCnGroupsStatement(ShowCnGroupsStmt statement, ConnectContext context) {
             return null;
         }
 

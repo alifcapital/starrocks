@@ -39,12 +39,27 @@ public interface WorkerProvider {
          * @param preferComputeNode                   Whether to prefer using compute nodes over backend nodes.
          * @param numUsedComputeNodes                 The maximum number of used compute nodes.
          * @param computationFragmentSchedulingPolicy The schedule policy of backend and compute nodes.
+         * @param computeResource                     The compute resource.
          */
         WorkerProvider captureAvailableWorkers(SystemInfoService systemInfoService,
                                                boolean preferComputeNode,
                                                int numUsedComputeNodes,
                                                ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
                                                ComputeResource computeResource);
+
+        /**
+         * Capture available workers with CnGroup filtering.
+         * @param cnGroupName The name of the CnGroup to filter workers. If null or "default", no filtering is applied.
+         */
+        default WorkerProvider captureAvailableWorkers(SystemInfoService systemInfoService,
+                                                       boolean preferComputeNode,
+                                                       int numUsedComputeNodes,
+                                                       ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
+                                                       ComputeResource computeResource,
+                                                       String cnGroupName) {
+            return captureAvailableWorkers(systemInfoService, preferComputeNode, numUsedComputeNodes,
+                    computationFragmentSchedulingPolicy, computeResource);
+        }
     }
 
     /**

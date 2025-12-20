@@ -475,6 +475,8 @@ public class GlobalStateMgr {
 
     private final WarehouseManager warehouseMgr;
 
+    private final com.starrocks.warehouse.cngroup.CnGroupMgr cnGroupMgr;
+
     private final HistoricalNodeMgr historicalNodeMgr;
 
     private final ConfigRefreshDaemon configRefreshDaemon;
@@ -760,6 +762,7 @@ public class GlobalStateMgr {
         this.localMetastore = new LocalMetastore(this, recycleBin, colocateTableIndex);
         this.temporaryTableMgr = new TemporaryTableMgr();
         this.warehouseMgr = new WarehouseManager();
+        this.cnGroupMgr = new com.starrocks.warehouse.cngroup.CnGroupMgr();
         this.historicalNodeMgr = new HistoricalNodeMgr();
         this.connectorMgr = new ConnectorMgr();
         this.connectorTblMetaInfoMgr = new ConnectorTblMetaInfoMgr();
@@ -1040,6 +1043,10 @@ public class GlobalStateMgr {
 
     public WarehouseManager getWarehouseMgr() {
         return warehouseMgr;
+    }
+
+    public com.starrocks.warehouse.cngroup.CnGroupMgr getCnGroupMgr() {
+        return cnGroupMgr;
     }
 
     public HistoricalNodeMgr getHistoricalNodeMgr() {

@@ -346,6 +346,7 @@ statement
     | enableCNGroupStatement
     | disableCNGroupStatement
     | alterCNGroupStatement
+    | showCnGroupsStatement
 
     // Transaction Statement
     | beginStatement
@@ -2269,6 +2270,10 @@ disableCNGroupStatement
 
 alterCNGroupStatement
     : ALTER WAREHOUSE warehouseName=identifierOrString MODIFY CNGROUP cngroupName=identifierOrString modifyPropertiesClause
+    ;
+
+showCnGroupsStatement
+    : SHOW CNGROUPS
     ;
 
 // ------------------------------------------- Transaction Statement ---------------------------------------------------

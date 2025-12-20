@@ -1598,6 +1598,31 @@ public class EditLog {
         logJsonObject(OperationType.OP_UPDATE_HISTORICAL_NODE, log, applier);
     }
 
+    // CnGroup operations
+    public void logCreateCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
+        logJsonObject(OperationType.OP_CREATE_CN_GROUP, group,
+                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                        .replayCreateGroup((com.starrocks.warehouse.cngroup.CnGroup) wal));
+    }
+
+    public void logDropCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
+        logJsonObject(OperationType.OP_DROP_CN_GROUP, group,
+                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                        .replayDropGroup((com.starrocks.warehouse.cngroup.CnGroup) wal));
+    }
+
+    public void logAddNodeToCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
+        logJsonObject(OperationType.OP_ADD_NODE_TO_CN_GROUP, op,
+                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                        .replayAddNodeToGroup((com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp) wal));
+    }
+
+    public void logRemoveNodeFromCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
+        logJsonObject(OperationType.OP_REMOVE_NODE_FROM_CN_GROUP, op,
+                wal -> GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                        .replayRemoveNodeFromGroup((com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp) wal));
+    }
+
     public void logAddFrontend(Frontend fe, WALApplier applier) {
         logJsonObject(OperationType.OP_ADD_FRONTEND_V2, fe, applier);
     }

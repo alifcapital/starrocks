@@ -74,6 +74,18 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
                 int numUsedComputeNodes,
                 ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
                 ComputeResource computeResource) {
+            return captureAvailableWorkers(systemInfoService, preferComputeNode, numUsedComputeNodes,
+                    computationFragmentSchedulingPolicy, computeResource, null);
+        }
+
+        @Override
+        public DefaultSharedDataWorkerProvider captureAvailableWorkers(
+                SystemInfoService systemInfoService,
+                boolean preferComputeNode,
+                int numUsedComputeNodes,
+                ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
+                ComputeResource computeResource,
+                String cnGroupName) {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
@@ -81,8 +93,19 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
             computeNodeIds.forEach(nodeId -> builder.put(nodeId,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
+
+            // Filter by CnGroup - always filter when group name is specified
+            final boolean shouldFilterByGroup = cnGroupName != null && !cnGroupName.isEmpty();
+            if (shouldFilterByGroup) {
+                idToComputeNode = ImmutableMap.copyOf(
+                        idToComputeNode.entrySet().stream()
+                                .filter(e -> cnGroupName.equals(e.getValue().getCnGroupName()))
+                                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+                LOG.info("Filtered compute nodes by cnGroup '{}': {} nodes", cnGroupName, idToComputeNode.size());
+            }
+
             if (LOG.isDebugEnabled()) {
-                LOG.debug("idToComputeNode: {}", idToComputeNode);
+                LOG.debug("idToComputeNode: {}, cnGroupName: {}", idToComputeNode, cnGroupName);
             }
 
             ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkers(idToComputeNode);

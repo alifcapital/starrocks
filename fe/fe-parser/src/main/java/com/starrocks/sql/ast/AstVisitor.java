@@ -933,6 +933,10 @@ public interface AstVisitor<R, C> {
         return visitShowStatement(statement, context);
     }
 
+    default R visitShowCnGroupsStatement(ShowCnGroupsStmt statement, C context) {
+        return visitShowStatement(statement, context);
+    }
+
     default R visitCleanTemporaryTableStatement(CleanTemporaryTableStmt statement, C context) {
         return visitStatement(statement, context);
     }
