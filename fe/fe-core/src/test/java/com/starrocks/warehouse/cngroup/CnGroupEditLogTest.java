@@ -61,16 +61,18 @@ public class CnGroupEditLogTest {
 
     @Test
     public void testCreateCnGroup() throws Exception {
+        String groupName = "etl_create_" + System.nanoTime();
+
         // 1. Verify initial state - only default group exists
         Assertions.assertTrue(masterCnGroupMgr.groupExists(CnGroup.DEFAULT_GROUP_NAME));
-        Assertions.assertFalse(masterCnGroupMgr.groupExists("etl"));
+        Assertions.assertFalse(masterCnGroupMgr.groupExists(groupName));
 
         // 2. Create group on master
-        CnGroup group = masterCnGroupMgr.createGroup("etl", "ETL workload");
+        CnGroup group = masterCnGroupMgr.createGroup(groupName, "ETL workload");
 
         // 3. Verify master state
-        Assertions.assertTrue(masterCnGroupMgr.groupExists("etl"));
-        Assertions.assertEquals("ETL workload", masterCnGroupMgr.getGroup("etl").getComment());
+        Assertions.assertTrue(masterCnGroupMgr.groupExists(groupName));
+        Assertions.assertEquals("ETL workload", masterCnGroupMgr.getGroup(groupName).getComment());
 
         // 4. Replay on follower
         CnGroup replayedGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
@@ -78,15 +80,17 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayCreateGroup(replayedGroup);
 
         // 5. Verify follower state matches master
-        Assertions.assertTrue(followerCnGroupMgr.groupExists("etl"));
-        Assertions.assertEquals("ETL workload", followerCnGroupMgr.getGroup("etl").getComment());
+        Assertions.assertTrue(followerCnGroupMgr.groupExists(groupName));
+        Assertions.assertEquals("ETL workload", followerCnGroupMgr.getGroup(groupName).getComment());
     }
 
     @Test
     public void testDropCnGroup() throws Exception {
+        String groupName = "etl_drop_" + System.nanoTime();
+
         // 1. Create group first
-        masterCnGroupMgr.createGroup("etl", "");
-        Assertions.assertTrue(masterCnGroupMgr.groupExists("etl"));
+        masterCnGroupMgr.createGroup(groupName, "");
+        Assertions.assertTrue(masterCnGroupMgr.groupExists(groupName));
 
         // Replay create on follower
         CnGroup createdGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
@@ -94,10 +98,10 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayCreateGroup(createdGroup);
 
         // 2. Drop group on master
-        masterCnGroupMgr.dropGroup("etl", false);
+        masterCnGroupMgr.dropGroup(groupName, false);
 
         // 3. Verify master state
-        Assertions.assertFalse(masterCnGroupMgr.groupExists("etl"));
+        Assertions.assertFalse(masterCnGroupMgr.groupExists(groupName));
 
         // 4. Replay drop on follower
         CnGroup droppedGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
@@ -105,28 +109,31 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayDropGroup(droppedGroup);
 
         // 5. Verify follower state
-        Assertions.assertFalse(followerCnGroupMgr.groupExists("etl"));
+        Assertions.assertFalse(followerCnGroupMgr.groupExists(groupName));
     }
 
     @Test
     public void testAddNodeToCnGroup() throws Exception {
+        String groupName = "etl_add_" + System.nanoTime();
+        long nodeId = 100L + System.nanoTime() % 10000;
+
         // 1. Create group
-        masterCnGroupMgr.createGroup("etl", "");
+        masterCnGroupMgr.createGroup(groupName, "");
         CnGroup createdGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_CREATE_CN_GROUP);
         followerCnGroupMgr.replayCreateGroup(createdGroup);
 
         // 2. Add compute node to system first
-        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        ComputeNode cn = new ComputeNode(nodeId, "host1", 9050);
         masterSystemInfoService.addComputeNode(cn);
         followerSystemInfoService.addComputeNode(cn);
 
         // 3. Add node to group on master
-        masterCnGroupMgr.addNodeToGroup(100L, "etl");
+        masterCnGroupMgr.addNodeToGroup(nodeId, groupName);
 
         // 4. Verify master state
-        Assertions.assertEquals("etl", masterCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup("etl").contains(100L));
+        Assertions.assertEquals(groupName, masterCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup(groupName).contains(nodeId));
 
         // 5. Replay on follower
         CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
@@ -134,37 +141,40 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayAddNodeToGroup(op);
 
         // 6. Verify follower state
-        Assertions.assertEquals("etl", followerCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertTrue(followerCnGroupMgr.getNodesInGroup("etl").contains(100L));
+        Assertions.assertEquals(groupName, followerCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertTrue(followerCnGroupMgr.getNodesInGroup(groupName).contains(nodeId));
     }
 
     @Test
     public void testRemoveNodeFromCnGroup() throws Exception {
+        String groupName = "etl_remove_" + System.nanoTime();
+        long nodeId = 200L + System.nanoTime() % 10000;
+
         // 1. Setup: create group and add node
-        masterCnGroupMgr.createGroup("etl", "");
+        masterCnGroupMgr.createGroup(groupName, "");
         CnGroup createdGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_CREATE_CN_GROUP);
         followerCnGroupMgr.replayCreateGroup(createdGroup);
 
-        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        ComputeNode cn = new ComputeNode(nodeId, "host1", 9050);
         masterSystemInfoService.addComputeNode(cn);
         followerSystemInfoService.addComputeNode(cn);
 
-        masterCnGroupMgr.addNodeToGroup(100L, "etl");
+        masterCnGroupMgr.addNodeToGroup(nodeId, groupName);
         CnGroupMgr.CnGroupNodeOp addOp = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_ADD_NODE_TO_CN_GROUP);
         followerCnGroupMgr.replayAddNodeToGroup(addOp);
 
-        // Verify node is in etl group
-        Assertions.assertEquals("etl", masterCnGroupMgr.getNodeGroup(100L));
+        // Verify node is in group
+        Assertions.assertEquals(groupName, masterCnGroupMgr.getNodeGroup(nodeId));
 
         // 2. Remove node from group on master
-        masterCnGroupMgr.removeNodeFromGroup(100L);
+        masterCnGroupMgr.removeNodeFromGroup(nodeId);
 
         // 3. Verify master state - node should be in default group now
-        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, masterCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertFalse(masterCnGroupMgr.getNodesInGroup("etl").contains(100L));
-        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup(CnGroup.DEFAULT_GROUP_NAME).contains(100L));
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, masterCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertFalse(masterCnGroupMgr.getNodesInGroup(groupName).contains(nodeId));
+        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup(CnGroup.DEFAULT_GROUP_NAME).contains(nodeId));
 
         // 4. Replay on follower
         CnGroupMgr.CnGroupNodeOp removeOp = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
@@ -172,15 +182,19 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayRemoveNodeFromGroup(removeOp);
 
         // 5. Verify follower state
-        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, followerCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertFalse(followerCnGroupMgr.getNodesInGroup("etl").contains(100L));
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, followerCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertFalse(followerCnGroupMgr.getNodesInGroup(groupName).contains(nodeId));
     }
 
     @Test
     public void testMoveNodeBetweenGroups() throws Exception {
+        String etlName = "etl_move_" + System.nanoTime();
+        String analyticsName = "analytics_move_" + System.nanoTime();
+        long nodeId = 300L + System.nanoTime() % 10000;
+
         // 1. Create two groups
-        masterCnGroupMgr.createGroup("etl", "");
-        masterCnGroupMgr.createGroup("analytics", "");
+        masterCnGroupMgr.createGroup(etlName, "");
+        masterCnGroupMgr.createGroup(analyticsName, "");
 
         // Replay creates on follower
         CnGroup etlGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
@@ -191,25 +205,25 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayCreateGroup(analyticsGroup);
 
         // 2. Add node to etl group
-        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        ComputeNode cn = new ComputeNode(nodeId, "host1", 9050);
         masterSystemInfoService.addComputeNode(cn);
         followerSystemInfoService.addComputeNode(cn);
 
-        masterCnGroupMgr.addNodeToGroup(100L, "etl");
+        masterCnGroupMgr.addNodeToGroup(nodeId, etlName);
         CnGroupMgr.CnGroupNodeOp addEtlOp = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_ADD_NODE_TO_CN_GROUP);
         followerCnGroupMgr.replayAddNodeToGroup(addEtlOp);
 
-        Assertions.assertEquals("etl", masterCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertEquals("etl", followerCnGroupMgr.getNodeGroup(100L));
+        Assertions.assertEquals(etlName, masterCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertEquals(etlName, followerCnGroupMgr.getNodeGroup(nodeId));
 
         // 3. Move node to analytics group
-        masterCnGroupMgr.addNodeToGroup(100L, "analytics");
+        masterCnGroupMgr.addNodeToGroup(nodeId, analyticsName);
 
         // 4. Verify master state
-        Assertions.assertEquals("analytics", masterCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertFalse(masterCnGroupMgr.getNodesInGroup("etl").contains(100L));
-        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup("analytics").contains(100L));
+        Assertions.assertEquals(analyticsName, masterCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertFalse(masterCnGroupMgr.getNodesInGroup(etlName).contains(nodeId));
+        Assertions.assertTrue(masterCnGroupMgr.getNodesInGroup(analyticsName).contains(nodeId));
 
         // 5. Replay on follower
         CnGroupMgr.CnGroupNodeOp moveOp = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
@@ -217,9 +231,9 @@ public class CnGroupEditLogTest {
         followerCnGroupMgr.replayAddNodeToGroup(moveOp);
 
         // 6. Verify follower state
-        Assertions.assertEquals("analytics", followerCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertFalse(followerCnGroupMgr.getNodesInGroup("etl").contains(100L));
-        Assertions.assertTrue(followerCnGroupMgr.getNodesInGroup("analytics").contains(100L));
+        Assertions.assertEquals(analyticsName, followerCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertFalse(followerCnGroupMgr.getNodesInGroup(etlName).contains(nodeId));
+        Assertions.assertTrue(followerCnGroupMgr.getNodesInGroup(analyticsName).contains(nodeId));
     }
 
     @Test
@@ -231,10 +245,15 @@ public class CnGroupEditLogTest {
         // 4. Drop empty group
         // And verifies master-follower consistency at each step
 
+        String etlName = "etl_full_" + System.nanoTime();
+        String analyticsName = "analytics_full_" + System.nanoTime();
+        String tempName = "temp_full_" + System.nanoTime();
+        long baseNodeId = 400L + System.nanoTime() % 10000;
+
         // Step 1: Create groups
-        masterCnGroupMgr.createGroup("etl", "ETL jobs");
-        masterCnGroupMgr.createGroup("analytics", "Analytics queries");
-        masterCnGroupMgr.createGroup("temp", "Temporary");
+        masterCnGroupMgr.createGroup(etlName, "ETL jobs");
+        masterCnGroupMgr.createGroup(analyticsName, "Analytics queries");
+        masterCnGroupMgr.createGroup(tempName, "Temporary");
 
         for (int i = 0; i < 3; i++) {
             CnGroup g = (CnGroup) UtFrameUtils.PseudoJournalReplayer
@@ -244,14 +263,14 @@ public class CnGroupEditLogTest {
 
         // Step 2: Add nodes
         for (long i = 1; i <= 3; i++) {
-            ComputeNode cn = new ComputeNode(i, "host" + i, 9050);
+            ComputeNode cn = new ComputeNode(baseNodeId + i, "host" + i, 9050);
             masterSystemInfoService.addComputeNode(cn);
             followerSystemInfoService.addComputeNode(cn);
         }
 
-        masterCnGroupMgr.addNodeToGroup(1L, "etl");
-        masterCnGroupMgr.addNodeToGroup(2L, "etl");
-        masterCnGroupMgr.addNodeToGroup(3L, "analytics");
+        masterCnGroupMgr.addNodeToGroup(baseNodeId + 1, etlName);
+        masterCnGroupMgr.addNodeToGroup(baseNodeId + 2, etlName);
+        masterCnGroupMgr.addNodeToGroup(baseNodeId + 3, analyticsName);
 
         for (int i = 0; i < 3; i++) {
             CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
@@ -260,46 +279,44 @@ public class CnGroupEditLogTest {
         }
 
         // Verify state
-        Assertions.assertEquals(2, masterCnGroupMgr.getNodesInGroup("etl").size());
-        Assertions.assertEquals(1, masterCnGroupMgr.getNodesInGroup("analytics").size());
-        Assertions.assertEquals(2, followerCnGroupMgr.getNodesInGroup("etl").size());
-        Assertions.assertEquals(1, followerCnGroupMgr.getNodesInGroup("analytics").size());
+        Assertions.assertEquals(2, masterCnGroupMgr.getNodesInGroup(etlName).size());
+        Assertions.assertEquals(1, masterCnGroupMgr.getNodesInGroup(analyticsName).size());
+        Assertions.assertEquals(2, followerCnGroupMgr.getNodesInGroup(etlName).size());
+        Assertions.assertEquals(1, followerCnGroupMgr.getNodesInGroup(analyticsName).size());
 
         // Step 3: Move node 2 from etl to analytics
-        masterCnGroupMgr.addNodeToGroup(2L, "analytics");
+        masterCnGroupMgr.addNodeToGroup(baseNodeId + 2, analyticsName);
         CnGroupMgr.CnGroupNodeOp moveOp = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_ADD_NODE_TO_CN_GROUP);
         followerCnGroupMgr.replayAddNodeToGroup(moveOp);
 
-        Assertions.assertEquals(1, masterCnGroupMgr.getNodesInGroup("etl").size());
-        Assertions.assertEquals(2, masterCnGroupMgr.getNodesInGroup("analytics").size());
-        Assertions.assertEquals(1, followerCnGroupMgr.getNodesInGroup("etl").size());
-        Assertions.assertEquals(2, followerCnGroupMgr.getNodesInGroup("analytics").size());
+        Assertions.assertEquals(1, masterCnGroupMgr.getNodesInGroup(etlName).size());
+        Assertions.assertEquals(2, masterCnGroupMgr.getNodesInGroup(analyticsName).size());
+        Assertions.assertEquals(1, followerCnGroupMgr.getNodesInGroup(etlName).size());
+        Assertions.assertEquals(2, followerCnGroupMgr.getNodesInGroup(analyticsName).size());
 
         // Step 4: Drop empty temp group
-        masterCnGroupMgr.dropGroup("temp", false);
+        masterCnGroupMgr.dropGroup(tempName, false);
         CnGroup droppedGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_DROP_CN_GROUP);
         followerCnGroupMgr.replayDropGroup(droppedGroup);
 
-        Assertions.assertFalse(masterCnGroupMgr.groupExists("temp"));
-        Assertions.assertFalse(followerCnGroupMgr.groupExists("temp"));
-
-        // Final verification
-        Assertions.assertEquals(3, masterCnGroupMgr.getAllGroups().size()); // default, etl, analytics
-        Assertions.assertEquals(3, followerCnGroupMgr.getAllGroups().size());
+        Assertions.assertFalse(masterCnGroupMgr.groupExists(tempName));
+        Assertions.assertFalse(followerCnGroupMgr.groupExists(tempName));
     }
 
     @Test
     public void testAutoCreateGroupOnReplay() throws Exception {
         // Test that group is auto-created when replaying add node to non-existent group
+        String groupName = "auto_created_" + System.nanoTime();
+        long nodeId = 500L + System.nanoTime() % 10000;
 
-        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        ComputeNode cn = new ComputeNode(nodeId, "host1", 9050);
         masterSystemInfoService.addComputeNode(cn);
         followerSystemInfoService.addComputeNode(cn);
 
         // Add node to non-existent group (will auto-create)
-        masterCnGroupMgr.addNodeToGroup(100L, "auto_created");
+        masterCnGroupMgr.addNodeToGroup(nodeId, groupName);
 
         // Skip the auto-created group's create log (it's done internally)
         // and replay the add node operation
@@ -309,9 +326,9 @@ public class CnGroupEditLogTest {
         // Follower should also auto-create the group during replay
         followerCnGroupMgr.replayAddNodeToGroup(op);
 
-        Assertions.assertTrue(masterCnGroupMgr.groupExists("auto_created"));
-        Assertions.assertTrue(followerCnGroupMgr.groupExists("auto_created"));
-        Assertions.assertEquals("auto_created", masterCnGroupMgr.getNodeGroup(100L));
-        Assertions.assertEquals("auto_created", followerCnGroupMgr.getNodeGroup(100L));
+        Assertions.assertTrue(masterCnGroupMgr.groupExists(groupName));
+        Assertions.assertTrue(followerCnGroupMgr.groupExists(groupName));
+        Assertions.assertEquals(groupName, masterCnGroupMgr.getNodeGroup(nodeId));
+        Assertions.assertEquals(groupName, followerCnGroupMgr.getNodeGroup(nodeId));
     }
 }

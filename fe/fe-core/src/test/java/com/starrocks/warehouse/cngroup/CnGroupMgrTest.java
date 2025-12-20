@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.google.common.collect.ImmutableMap;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -102,7 +104,11 @@ public class CnGroupMgrTest {
                 minTimes = 0;
 
                 systemInfoService.getIdComputeNode();
-                result = computeNodes;
+                result = new mockit.Delegate<ImmutableMap<Long, ComputeNode>>() {
+                    ImmutableMap<Long, ComputeNode> getIdComputeNode() {
+                        return ImmutableMap.copyOf(computeNodes);
+                    }
+                };
                 minTimes = 0;
 
                 systemInfoService.getIdToBackend();

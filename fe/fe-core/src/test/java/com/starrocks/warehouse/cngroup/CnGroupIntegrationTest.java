@@ -141,8 +141,9 @@ public class CnGroupIntegrationTest extends StarRocksTestBase {
         Assertions.assertTrue(cnGroupMgr.getNodesInGroup("node_test_group").contains(9001L));
         Assertions.assertEquals("node_test_group", cn.getCnGroupName());
 
-        // Cleanup
+        // Cleanup - simulate real drop behavior
         systemInfoService.dropComputeNode(cn);
+        cnGroupMgr.handleNodeDropped(9001L);
         cnGroupMgr.dropGroup("node_test_group", true);
     }
 
@@ -270,8 +271,9 @@ public class CnGroupIntegrationTest extends StarRocksTestBase {
         Assertions.assertFalse(cnGroupMgr.getNodesInGroup("move_from").contains(6001L));
         Assertions.assertTrue(cnGroupMgr.getNodesInGroup("move_to").contains(6001L));
 
-        // Cleanup
+        // Cleanup - simulate real drop behavior
         systemInfoService.dropComputeNode(cn);
+        cnGroupMgr.handleNodeDropped(6001L);
         cnGroupMgr.dropGroup("move_from", false);
         cnGroupMgr.dropGroup("move_to", false);
     }
