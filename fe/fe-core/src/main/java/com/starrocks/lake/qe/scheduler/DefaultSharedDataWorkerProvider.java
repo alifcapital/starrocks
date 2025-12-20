@@ -130,6 +130,9 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
 
     private final ComputeResource computeResource;
 
+    // Track backup worker usage for profiling
+    private final List<String> backupWorkerUsages = Lists.newArrayList();
+
     @VisibleForTesting
     public DefaultSharedDataWorkerProvider(ImmutableMap<Long, ComputeNode> id2ComputeNode,
                                            ImmutableMap<Long, ComputeNode> availableID2ComputeNode,
@@ -264,6 +267,10 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
             long buddyId = allComputeNodeIds.get(startPos);
             if (buddyId != workerId && availableID2ComputeNode.containsKey(buddyId) &&
                     !SimpleScheduler.isInBlocklist(buddyId)) {
+                // Track backup worker usage for profiling
+                synchronized (backupWorkerUsages) {
+                    backupWorkerUsages.add(workerId + "->" + buddyId);
+                }
                 return buddyId;
             }
         }
@@ -278,6 +285,23 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     @Override
     public ComputeResource getComputeResource() {
         return computeResource;
+    }
+
+    @Override
+    public int getBackupWorkerUsageCount() {
+        synchronized (backupWorkerUsages) {
+            return backupWorkerUsages.size();
+        }
+    }
+
+    @Override
+    public String getBackupWorkerUsageDetails() {
+        synchronized (backupWorkerUsages) {
+            if (backupWorkerUsages.isEmpty()) {
+                return "";
+            }
+            return String.join(", ", backupWorkerUsages);
+        }
     }
 
     private String computeNodesToString(boolean allowNormalNodes) {

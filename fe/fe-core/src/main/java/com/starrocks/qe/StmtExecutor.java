@@ -1269,6 +1269,16 @@ public class StmtExecutor {
                 summaryProfile.addInfoString(ProfileManager.RETRY_TIMES, Integer.toString(retryIndex + 1));
             }
 
+            // Add backup worker usage info for shared-data mode
+            int backupCount = coord.getBackupWorkerUsageCount();
+            if (backupCount > 0) {
+                summaryProfile.addInfoString("BackupWorkerUsageCount", String.valueOf(backupCount));
+                String details = coord.getBackupWorkerUsageDetails();
+                if (!details.isEmpty()) {
+                    summaryProfile.addInfoString("BackupWorkerUsage", details);
+                }
+            }
+
             ProfilingExecPlan profilingPlan;
             if (coord.isShortCircuit()) {
                 profilingPlan = null;

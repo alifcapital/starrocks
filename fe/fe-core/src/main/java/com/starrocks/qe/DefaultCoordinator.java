@@ -1463,6 +1463,30 @@ public class DefaultCoordinator extends Coordinator {
                 jobSpec.getResourceGroup().getName();
     }
 
+    @Override
+    public String getCnGroupName() {
+        if (connectContext == null) {
+            return "";
+        }
+        return connectContext.getCurrentComputeResourceName();
+    }
+
+    @Override
+    public int getBackupWorkerUsageCount() {
+        if (coordinatorPreprocessor == null) {
+            return 0;
+        }
+        return coordinatorPreprocessor.getWorkerProvider().getBackupWorkerUsageCount();
+    }
+
+    @Override
+    public String getBackupWorkerUsageDetails() {
+        if (coordinatorPreprocessor == null) {
+            return "";
+        }
+        return coordinatorPreprocessor.getWorkerProvider().getBackupWorkerUsageDetails();
+    }
+
     private void execShortCircuit() throws StarRocksException {
         shortCircuitExecutor.exec();
     }

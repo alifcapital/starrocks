@@ -120,4 +120,24 @@ public interface WorkerProvider {
     long selectBackupWorker(long workerId);
 
     ComputeResource getComputeResource();
+
+    /**
+     * Get the count of backup worker usages during scheduling.
+     * This is useful for profiling to see when shard owners were not available.
+     *
+     * @return the number of times a backup worker was used
+     */
+    default int getBackupWorkerUsageCount() {
+        return 0;
+    }
+
+    /**
+     * Get backup worker usage details as a string for profiling.
+     * Format: "originalNodeId1->backupNodeId1, originalNodeId2->backupNodeId2"
+     *
+     * @return a string describing backup worker usage, or empty if no backups were used
+     */
+    default String getBackupWorkerUsageDetails() {
+        return "";
+    }
 }
