@@ -844,4 +844,70 @@ public class DefaultSharedDataWorkerProviderTest {
             assertThat(workerId).isNotNegative();
         }
     }
+
+    @Test
+    public void testBackupWorkerUsageTracking() {
+        HostBlacklist blockList = SimpleScheduler.getHostBlacklist();
+        blockList.clear();
+
+        // Create nodes where some are unavailable
+        ImmutableMap<Long, ComputeNode> allNodes = ImmutableMap.<Long, ComputeNode>builder()
+                .put(1L, createTestComputeNode(1L, "host1", 9030))
+                .put(2L, createTestComputeNode(2L, "host2", 9030))
+                .put(3L, createTestComputeNode(3L, "host3", 9030))
+                .put(4L, createTestComputeNode(4L, "host4", 9030))
+                .build();
+
+        // Only nodes 3 and 4 are available
+        ImmutableMap<Long, ComputeNode> availableNodes = ImmutableMap.of(
+                3L, allNodes.get(3L),
+                4L, allNodes.get(4L)
+        );
+
+        DefaultSharedDataWorkerProvider provider = new DefaultSharedDataWorkerProvider(
+                allNodes, availableNodes, WarehouseManager.DEFAULT_RESOURCE);
+
+        // Initially no backup usage
+        Assertions.assertEquals(0, provider.getBackupWorkerUsageCount());
+        Assertions.assertEquals("", provider.getBackupWorkerUsageDetails());
+
+        // Select backup for unavailable node 1
+        long backup1 = provider.selectBackupWorker(1L);
+        Assertions.assertTrue(backup1 > 0);
+        Assertions.assertEquals(1, provider.getBackupWorkerUsageCount());
+        Assertions.assertTrue(provider.getBackupWorkerUsageDetails().contains("1->"));
+
+        // Select backup for unavailable node 2
+        long backup2 = provider.selectBackupWorker(2L);
+        Assertions.assertTrue(backup2 > 0);
+        Assertions.assertEquals(2, provider.getBackupWorkerUsageCount());
+        String details = provider.getBackupWorkerUsageDetails();
+        Assertions.assertTrue(details.contains("1->"));
+        Assertions.assertTrue(details.contains("2->"));
+        Assertions.assertTrue(details.contains(", "));
+    }
+
+    @Test
+    public void testBackupWorkerUsageNoBackupAvailable() {
+        HostBlacklist blockList = SimpleScheduler.getHostBlacklist();
+        blockList.clear();
+
+        // Create nodes where none are available
+        ImmutableMap<Long, ComputeNode> allNodes = ImmutableMap.<Long, ComputeNode>builder()
+                .put(1L, createTestComputeNode(1L, "host1", 9030))
+                .put(2L, createTestComputeNode(2L, "host2", 9030))
+                .build();
+
+        // No available nodes
+        ImmutableMap<Long, ComputeNode> availableNodes = ImmutableMap.of();
+
+        DefaultSharedDataWorkerProvider provider = new DefaultSharedDataWorkerProvider(
+                allNodes, availableNodes, WarehouseManager.DEFAULT_RESOURCE);
+
+        // Try to select backup - should fail and not track
+        long backup = provider.selectBackupWorker(1L);
+        Assertions.assertEquals(-1, backup);
+        Assertions.assertEquals(0, provider.getBackupWorkerUsageCount());
+        Assertions.assertEquals("", provider.getBackupWorkerUsageDetails());
+    }
 }

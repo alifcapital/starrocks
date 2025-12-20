@@ -33,4 +33,30 @@ class QueryStatisticsItemTest {
         Assertions.assertEquals("abc", item.getCustomQueryId());
         Assertions.assertEquals("123", item.getQueryId());
     }
+
+    @Test
+    void testQueryStatisticsItemWithCnGroup() {
+        final QueryStatisticsItem item = new QueryStatisticsItem.Builder()
+                .queryId("456")
+                .warehouseName("test_warehouse")
+                .cnGroupName("analytics")
+                .resourceGroupName("rg1")
+                .build();
+
+        Assertions.assertEquals("test_warehouse", item.getWarehouseName());
+        Assertions.assertEquals("analytics", item.getCnGroupName());
+        Assertions.assertEquals("rg1", item.getResourceGroupName());
+    }
+
+    @Test
+    void testQueryStatisticsItemWithNullCnGroup() {
+        // Test that null cnGroupName doesn't cause issues
+        final QueryStatisticsItem item = new QueryStatisticsItem.Builder()
+                .queryId("789")
+                .warehouseName("wh2")
+                .build();
+
+        Assertions.assertEquals("wh2", item.getWarehouseName());
+        Assertions.assertNull(item.getCnGroupName());
+    }
 }
