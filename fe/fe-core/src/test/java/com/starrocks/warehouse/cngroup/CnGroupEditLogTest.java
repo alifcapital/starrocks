@@ -14,7 +14,6 @@
 
 package com.starrocks.warehouse.cngroup;
 
-import com.starrocks.common.DdlException;
 import com.starrocks.leader.CheckpointController;
 import com.starrocks.persist.OperationType;
 import com.starrocks.server.GlobalStateMgr;
