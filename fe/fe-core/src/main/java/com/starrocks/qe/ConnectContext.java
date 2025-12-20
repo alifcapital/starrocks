@@ -1043,8 +1043,11 @@ public class ConnectContext {
         final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
         // Get cnGroupName from session variable for workload isolation
         final String cnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+        LOG.info("[CNGROUP_DEBUG] acquireComputeResource: warehouseId={}, cnGroupName={}, oldComputeResource={}",
+                warehouseId, cnGroupName, this.computeResource);
         this.computeResource = LazyComputeResource.of(warehouseId, cnGroupName, () ->
                 warehouseManager.acquireComputeResource(warehouseId, this.computeResource));
+        LOG.info("[CNGROUP_DEBUG] acquireComputeResource: created new LazyComputeResource={}", this.computeResource);
     }
 
     /**
@@ -1058,6 +1061,7 @@ public class ConnectContext {
             return WarehouseManager.DEFAULT_RESOURCE;
         }
         if (this.computeResource == null) {
+            LOG.info("[CNGROUP_DEBUG] getCurrentComputeResource: computeResource is null, acquiring...");
             acquireComputeResource();
         } else {
             final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
@@ -1072,8 +1076,13 @@ public class ConnectContext {
             String currentCnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
             String resourceCnGroupName = computeResource.getCnGroupName();
             boolean cnGroupChanged = !java.util.Objects.equals(currentCnGroupName, resourceCnGroupName);
+            boolean isRunning = state != null && state.isRunning();
+            LOG.info("[CNGROUP_DEBUG] getCurrentComputeResource: currentCnGroupName={}, resourceCnGroupName={}, " +
+                    "cnGroupChanged={}, isRunning={}, computeResource={}",
+                    currentCnGroupName, resourceCnGroupName, cnGroupChanged, isRunning, computeResource);
             if (cnGroupChanged && state != null && !state.isRunning()) {
                 // Re-acquire compute resource with new cnGroupName
+                LOG.info("[CNGROUP_DEBUG] getCurrentComputeResource: cnGroupName changed, re-acquiring...");
                 acquireComputeResource();
             } else if (!warehouseManager.isResourceAvailable(computeResource)) {
                 if (state != null && !state.isRunning()) {
