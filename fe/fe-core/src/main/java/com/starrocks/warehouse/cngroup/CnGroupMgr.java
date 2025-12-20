@@ -549,14 +549,39 @@ public class CnGroupMgr implements Writable {
     /**
      * Get info for SHOW CNGROUPS.
      * Returns: Name, NodeCount, NodeIds, Comment, CreateTime
+     *
+     * Note: NodeCount and NodeIds are computed from actual node properties (node.getCnGroupName()),
+     * not from CnGroup internal state. This ensures accuracy even for nodes that existed before
+     * CNGroup feature was added.
      */
     public List<List<String>> getGroupsInfo() {
         lock.readLock().lock();
         try {
-            List<List<String>> result = new ArrayList<>();
+            // Build map of group name -> list of node IDs based on actual node properties
+            SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+            Map<String, List<Long>> groupToNodeIds = Maps.newHashMap();
 
+            // Initialize with all known groups (so empty groups still show up)
+            for (String groupName : nameToGroup.keySet()) {
+                groupToNodeIds.put(groupName, new ArrayList<>());
+            }
+
+            // Collect nodes from backends and compute nodes
+            Collection<ComputeNode> allNodes = new ArrayList<>();
+            allNodes.addAll(systemInfo.getBackends());
+            allNodes.addAll(systemInfo.getComputeNodes());
+
+            for (ComputeNode node : allNodes) {
+                String nodeCnGroup = node.getCnGroupName();
+                if (nodeCnGroup == null || nodeCnGroup.isEmpty()) {
+                    nodeCnGroup = CnGroup.DEFAULT_GROUP_NAME;
+                }
+                groupToNodeIds.computeIfAbsent(nodeCnGroup, k -> new ArrayList<>()).add(node.getId());
+            }
+
+            List<List<String>> result = new ArrayList<>();
             for (CnGroup group : nameToGroup.values()) {
-                Set<Long> nodeIds = group.getNodeIds();
+                List<Long> nodeIds = groupToNodeIds.getOrDefault(group.getName(), new ArrayList<>());
                 String nodeIdsStr = nodeIds.stream()
                         .map(String::valueOf)
                         .collect(Collectors.joining(", "));
