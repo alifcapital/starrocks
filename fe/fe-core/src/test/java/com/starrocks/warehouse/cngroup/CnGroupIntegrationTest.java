@@ -15,8 +15,8 @@
 package com.starrocks.warehouse.cngroup;
 
 import com.google.common.collect.ImmutableMap;
-import com.starrocks.common.DdlException;
 import com.starrocks.authentication.AuthenticationMgr;
+import com.starrocks.common.DdlException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.WorkerProviderHelper;
