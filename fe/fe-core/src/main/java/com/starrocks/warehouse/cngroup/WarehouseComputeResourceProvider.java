@@ -63,9 +63,21 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
                     String.format("id: %d", warehouseId));
         }
-        WarehouseComputeResource computeResource = WarehouseComputeResource.of(warehouseId);
+        // Use cnGroupName from prevComputeResource if available
+        ComputeResource prevResource = acquireContext.getPrevComputeResource();
+        String cnGroupName = prevResource != null ? prevResource.getCnGroupName() : null;
+
+        ComputeResource computeResource;
+        if (cnGroupName != null && !cnGroupName.equals(CnGroup.DEFAULT_GROUP_NAME)) {
+            // User specified a custom cngroup via SET cngroup='xxx'
+            computeResource = CnGroupComputeResource.of(warehouseId, cnGroupName);
+        } else {
+            computeResource = WarehouseComputeResource.of(warehouseId);
+        }
+
         if (!isResourceAvailable(computeResource)) {
-            LOG.warn("failed to get alive compute nodes from warehouse {}", warehouse.getName());
+            LOG.warn("failed to get alive compute nodes from warehouse {} for cngroup {}",
+                    warehouse.getName(), cnGroupName);
             return Optional.empty();
         }
         return Optional.of(computeResource);

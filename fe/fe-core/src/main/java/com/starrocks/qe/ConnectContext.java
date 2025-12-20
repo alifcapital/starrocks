@@ -1068,7 +1068,14 @@ public class ConnectContext {
                 this.resetComputeResource();
                 throw new RuntimeException(errMsg);
             }
-            if (!warehouseManager.isResourceAvailable(computeResource)) {
+            // Check if cnGroupName has changed (e.g., user did SET cngroup='xxx')
+            String currentCnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+            String resourceCnGroupName = computeResource.getCnGroupName();
+            boolean cnGroupChanged = !java.util.Objects.equals(currentCnGroupName, resourceCnGroupName);
+            if (cnGroupChanged && state != null && !state.isRunning()) {
+                // Re-acquire compute resource with new cnGroupName
+                acquireComputeResource();
+            } else if (!warehouseManager.isResourceAvailable(computeResource)) {
                 if (state != null && !state.isRunning()) {
                     // if the query is not running, we can acquire a new compute resource.
                     acquireComputeResource();
