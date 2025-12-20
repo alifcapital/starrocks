@@ -111,6 +111,8 @@ import com.starrocks.system.Frontend;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TransactionStateBatch;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -1287,6 +1289,26 @@ public class EditLog {
                 case OperationType.OP_REMOVE_TABLET_RESHARD_JOB_LOG: {
                     RemoveTabletReshardJobLog log = (RemoveTabletReshardJobLog) journal.data();
                     globalStateMgr.getTabletReshardJobMgr().replayRemoveTabletReshardJob(log.getJobId());
+                    break;
+                }
+                case OperationType.OP_CREATE_CN_GROUP: {
+                    CnGroup group = (CnGroup) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayCreateGroup(group);
+                    break;
+                }
+                case OperationType.OP_DROP_CN_GROUP: {
+                    CnGroup group = (CnGroup) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayDropGroup(group);
+                    break;
+                }
+                case OperationType.OP_ADD_NODE_TO_CN_GROUP: {
+                    CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayAddNodeToGroup(op);
+                    break;
+                }
+                case OperationType.OP_REMOVE_NODE_FROM_CN_GROUP: {
+                    CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayRemoveNodeFromGroup(op);
                     break;
                 }
                 default: {

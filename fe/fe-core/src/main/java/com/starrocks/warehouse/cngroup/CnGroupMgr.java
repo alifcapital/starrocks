@@ -349,17 +349,17 @@ public class CnGroupMgr implements Writable {
             // Get or create group (without logging - this is internal sync)
             CnGroup group = nameToGroup.get(groupName);
             if (group == null) {
-                // For non-default groups, they should already exist
-                // Fall back to default group
-                groupName = CnGroup.DEFAULT_GROUP_NAME;
-                group = nameToGroup.get(groupName);
+                // Create the group if it doesn't exist
+                long id = GlobalStateMgr.getCurrentState().getNextId();
+                group = new CnGroup(id, groupName, "Auto-created group");
+                idToGroup.put(id, group);
+                nameToGroup.put(groupName, group);
+                LOG.info("Auto-created CnGroup '{}' for node {}", groupName, nodeId);
             }
 
-            if (group != null) {
-                group.addNode(nodeId);
-                nodeToGroup.put(nodeId, groupName);
-                LOG.info("Registered new node {} with CnGroup: {}", nodeId, groupName);
-            }
+            group.addNode(nodeId);
+            nodeToGroup.put(nodeId, groupName);
+            LOG.info("Registered new node {} with CnGroup: {}", nodeId, groupName);
         } finally {
             lock.writeLock().unlock();
         }
