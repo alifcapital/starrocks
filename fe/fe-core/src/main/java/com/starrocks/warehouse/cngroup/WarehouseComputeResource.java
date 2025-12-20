@@ -31,7 +31,7 @@ import java.util.Optional;
 /**
  * {@code WarehouseComputeResource} represents a compute node resource associated with a specific warehouse.
  */
-public final class WarehouseComputeResource implements ComputeResource {
+public class WarehouseComputeResource implements ComputeResource {
     private static final Logger LOG = LogManager.getLogger(WarehouseComputeResource.class);
     // The warehouseId is used to identify the warehouse.
     @SerializedName("warehouseId")
