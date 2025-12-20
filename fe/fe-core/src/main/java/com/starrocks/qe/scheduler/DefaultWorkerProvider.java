@@ -28,6 +28,7 @@ import com.starrocks.server.RunMode;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.logging.log4j.LogManager;
@@ -123,7 +124,8 @@ public class DefaultWorkerProvider implements WorkerProvider {
                     LOG.debug("backend: {}-{}-{}", backendID, backend.getHost(), backend.getBePort());
                 }
 
-                LOG.debug("idToComputeNode: {}, cnGroupName: {}", idToComputeNode, cnGroupName);
+                LOG.debug("idToComputeNode: {}, cnGroupName from computeResource: {}",
+                        idToComputeNode, computeResource != null ? computeResource.getCnGroupName() : null);
             }
 
             return new DefaultWorkerProvider(idToBackend, idToComputeNode,
@@ -385,8 +387,12 @@ public class DefaultWorkerProvider implements WorkerProvider {
         ImmutableMap<Long, ComputeNode> idToBackend
                 = ImmutableMap.copyOf(systemInfoService.getIdToBackend());
 
-        // Filter by CnGroup using common helper
-        idToComputeNode = filterByCnGroup(idToComputeNode, cnGroupName);
+        // Filter by CnGroup from ComputeResource
+        // null/empty treated as "default", only "*" skips filtering
+        String cnGroupFromResource = computeResource != null ? computeResource.getCnGroupName() : cnGroupName;
+        if (!CnGroupComputeResource.ALL_GROUPS.equals(cnGroupFromResource)) {
+            idToComputeNode = filterByCnGroup(idToComputeNode, cnGroupFromResource);
+        }
 
         //add CN and BE to Node Pool
         if (numUsedComputeNodes <= 0) {

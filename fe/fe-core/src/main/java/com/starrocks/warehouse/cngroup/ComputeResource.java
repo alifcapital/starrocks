@@ -31,4 +31,15 @@ public interface ComputeResource {
      * @return: the id of the worker group
      */
     long getWorkerGroupId();
+
+    /**
+     * Get the CNGroup name that this ComputeResource belongs to.
+     * Used for workload isolation - queries are routed to nodes in the specified CNGroup.
+     *
+     * @return the CNGroup name. Returns "default" by default.
+     *         Return null or "*" to indicate all nodes (no filtering).
+     */
+    default String getCnGroupName() {
+        return CnGroup.DEFAULT_GROUP_NAME;
+    }
 }

@@ -72,6 +72,16 @@ public final class WarehouseComputeResource implements ComputeResource {
         return Optional.of(ids.get(0));
     }
 
+    /**
+     * WarehouseComputeResource uses the default CNGroup.
+     * System tasks (stats collection, MV refresh, etc.) will run on nodes in "default" group,
+     * leaving other CNGroups (etl, analytics, etc.) for dedicated workloads.
+     */
+    @Override
+    public String getCnGroupName() {
+        return CnGroup.DEFAULT_GROUP_NAME;
+    }
+
     @Override
     public String toString() {
         return "{warehouseId=" + warehouseId + "}";

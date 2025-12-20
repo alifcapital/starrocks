@@ -92,7 +92,30 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
     @Override
     public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
         try {
-            return GlobalStateMgr.getCurrentState().getStarOSAgent().getWorkersByWorkerGroup(computeResource.getWorkerGroupId());
+            List<Long> allNodeIds = GlobalStateMgr.getCurrentState().getStarOSAgent()
+                    .getWorkersByWorkerGroup(computeResource.getWorkerGroupId());
+
+            // Filter by CNGroup (null/empty treated as "default", only "*" skips filtering)
+            String cnGroupName = computeResource.getCnGroupName();
+            if (shouldFilterByCnGroup(cnGroupName)) {
+                String effectiveCnGroupName = getEffectiveCnGroupName(cnGroupName);
+                SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+                List<Long> filteredIds = allNodeIds.stream()
+                        .filter(nodeId -> {
+                            ComputeNode node = systemInfoService.getBackendOrComputeNode(nodeId);
+                            return node != null && matchesCnGroup(node, effectiveCnGroupName);
+                        })
+                        .collect(Collectors.toList());
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Filtered compute nodes by cnGroup '{}' (effective: '{}'): {} -> {} nodes",
+                            cnGroupName, effectiveCnGroupName, allNodeIds.size(), filteredIds.size());
+                }
+                return filteredIds;
+            }
+
+            // Only reaches here when cnGroupName == "*" (ALL_GROUPS)
+            return allNodeIds;
         } catch (StarRocksException e) {
             LOG.warn("Fail to get compute node ids from starMgr : {}", e.getMessage());
             return new ArrayList<>();
@@ -108,7 +131,40 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
         List<ComputeNode> nodes = computeNodeIds.stream()
                 .map(id -> systemInfoService.getBackendOrComputeNode(id))
-                .filter(ComputeNode::isAlive).collect(Collectors.toList());
+                .filter(node -> node != null && node.isAlive())
+                .collect(Collectors.toList());
         return nodes;
+    }
+
+    /**
+     * Check if CNGroup filtering should be applied.
+     * Returns false only for "*" (ALL_GROUPS) which means use all nodes.
+     * null/empty are treated as "default" group and filtering IS applied.
+     */
+    private boolean shouldFilterByCnGroup(String cnGroupName) {
+        return !CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName);
+    }
+
+    /**
+     * Get effective CNGroup name, treating null/empty as "default".
+     */
+    private String getEffectiveCnGroupName(String cnGroupName) {
+        if (cnGroupName == null || cnGroupName.isEmpty()) {
+            return CnGroup.DEFAULT_GROUP_NAME;
+        }
+        return cnGroupName;
+    }
+
+    /**
+     * Check if a compute node matches the specified CNGroup.
+     * Nodes with null/empty cnGroupName are considered to be in "default" group.
+     */
+    private boolean matchesCnGroup(ComputeNode node, String cnGroupName) {
+        String nodeGroup = node.getCnGroupName();
+        // Treat null/empty as "default"
+        if (nodeGroup == null || nodeGroup.isEmpty()) {
+            nodeGroup = CnGroup.DEFAULT_GROUP_NAME;
+        }
+        return cnGroupName.equals(nodeGroup);
     }
 }

@@ -49,7 +49,8 @@ public interface WorkerProvider {
 
         /**
          * Capture available workers with CnGroup filtering.
-         * @param cnGroupName The name of the CnGroup to filter workers. If null or "default", no filtering is applied.
+         * @param cnGroupName The name of the CnGroup to filter workers.
+         *                    If null or empty, uses "default" group (required for system tasks).
          */
         default WorkerProvider captureAvailableWorkers(SystemInfoService systemInfoService,
                                                        boolean preferComputeNode,

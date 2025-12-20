@@ -68,9 +68,14 @@ public class WorkerProviderHelper {
                         })
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Filtered compute nodes by cnGroup '{}': {} -> {} nodes",
-                    effectiveGroupName, nodes.size(), filtered.size());
+        // Always log when filtering results in fewer nodes (helps debug CNGroup issues)
+        if (filtered.size() < nodes.size() || filtered.isEmpty()) {
+            LOG.warn("filterByCnGroup: requested='{}', effective='{}', input={} nodes, output={} nodes. " +
+                            "Input node groups: {}",
+                    cnGroupName, effectiveGroupName, nodes.size(), filtered.size(),
+                    nodes.values().stream()
+                            .map(n -> n.getId() + ":" + n.getCnGroupName())
+                            .collect(java.util.stream.Collectors.joining(", ")));
         }
 
         return filtered;

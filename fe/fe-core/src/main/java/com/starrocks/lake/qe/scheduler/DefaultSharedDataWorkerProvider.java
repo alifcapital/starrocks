@@ -45,7 +45,6 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
-import static com.starrocks.qe.WorkerProviderHelper.filterByCnGroup;
 import static com.starrocks.qe.WorkerProviderHelper.getNextWorker;
 
 /**
@@ -90,16 +89,15 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
+            // getAllComputeNodeIds already filters by computeResource.getCnGroupName() at WarehouseComputeResourceProvider
             final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
             computeNodeIds.forEach(nodeId -> builder.put(nodeId,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
 
-            // Filter by CnGroup using common helper
-            idToComputeNode = filterByCnGroup(idToComputeNode, cnGroupName);
-
             if (LOG.isDebugEnabled()) {
-                LOG.debug("idToComputeNode: {}, cnGroupName: {}", idToComputeNode, cnGroupName);
+                LOG.debug("idToComputeNode: {}, cnGroupName from computeResource: {}",
+                        idToComputeNode, computeResource.getCnGroupName());
             }
 
             ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkers(idToComputeNode);

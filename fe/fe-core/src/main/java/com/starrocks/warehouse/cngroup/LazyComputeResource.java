@@ -30,6 +30,7 @@ public class LazyComputeResource implements ComputeResource {
     private static final Logger LOG = LogManager.getLogger(LazyComputeResource.class);
 
     private final long warehouseId;
+    private final String cnGroupName;
     private final Supplier<ComputeResource> lazy;
     /**
      * Thread-safe flag to track whether the compute resource has been materialized.
@@ -37,13 +38,18 @@ public class LazyComputeResource implements ComputeResource {
      */
     private final AtomicBoolean initialized = new AtomicBoolean(false);
 
-    private LazyComputeResource(long warehouseId, Supplier<ComputeResource> lazy) {
+    private LazyComputeResource(long warehouseId, String cnGroupName, Supplier<ComputeResource> lazy) {
         this.warehouseId = warehouseId;
+        this.cnGroupName = cnGroupName;
         this.lazy = Suppliers.memoize(lazy);
     }
 
     public static LazyComputeResource of(long warehouseId, Supplier<ComputeResource> lazy) {
-        return new LazyComputeResource(warehouseId, lazy);
+        return new LazyComputeResource(warehouseId, CnGroup.DEFAULT_GROUP_NAME, lazy);
+    }
+
+    public static LazyComputeResource of(long warehouseId, String cnGroupName, Supplier<ComputeResource> lazy) {
+        return new LazyComputeResource(warehouseId, cnGroupName, lazy);
     }
 
     public ComputeResource get() {
@@ -74,8 +80,14 @@ public class LazyComputeResource implements ComputeResource {
     }
 
     @Override
+    public String getCnGroupName() {
+        return cnGroupName;
+    }
+
+    @Override
     public String toString() {
         return "{warehouseId=" + warehouseId +
+                ", cnGroupName=" + cnGroupName +
                 ", computeResource=" + (isInitialized() ? get().toString() : "not initialized") +
                 "}";
     }

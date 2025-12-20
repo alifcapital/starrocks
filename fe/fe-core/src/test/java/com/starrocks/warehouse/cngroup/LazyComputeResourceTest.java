@@ -277,9 +277,9 @@ public class LazyComputeResourceTest {
         java.util.concurrent.atomic.AtomicInteger invocationCount = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch completeLatch = new java.util.concurrent.CountDownLatch(10);
-        
+
         ComputeResource mockComputeResource = new StubComputeResource(777L, 888L, "ThreadSafeResource");
-        
+
         LazyComputeResource lazyComputeResource = LazyComputeResource.of(777L, () -> {
             invocationCount.incrementAndGet();
             try {
@@ -295,7 +295,7 @@ public class LazyComputeResourceTest {
             new Thread(() -> {
                 try {
                     startLatch.await(); // Wait for all threads to be ready
-                    
+
                     // Some threads call get(), others call isInitialized()
                     if (Thread.currentThread().getId() % 2 == 0) {
                         lazyComputeResource.get();
@@ -312,16 +312,117 @@ public class LazyComputeResourceTest {
 
         // Start all threads at once
         startLatch.countDown();
-        
+
         // Wait for all threads to complete
         completeLatch.await();
 
         // Verify that the supplier was invoked exactly once (memoization works)
         Assertions.assertEquals(1, invocationCount.get(),
                 "Supplier should be invoked exactly once despite concurrent access");
-        
+
         // Verify that after all threads complete, isInitialized returns true
         Assertions.assertTrue(lazyComputeResource.isInitialized(),
                 "Resource should be initialized after concurrent get() calls complete");
+    }
+
+    // ==================== CNGroup Name Tests ====================
+
+    @Test
+    public void testCnGroupNameWithDefaultValue() {
+        // When no cnGroupName is specified, should use DEFAULT_GROUP_NAME ("default")
+        ComputeResource mockComputeResource = new StubComputeResource(123L, 456L, "TestResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(123L, () -> mockComputeResource);
+
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, lazyComputeResource.getCnGroupName(),
+                "Default cnGroupName should be 'default'");
+    }
+
+    @Test
+    public void testCnGroupNameWithExplicitValue() {
+        // When cnGroupName is explicitly specified, it should be stored and returned
+        ComputeResource mockComputeResource = new StubComputeResource(123L, 456L, "TestResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(123L, "etl", () -> mockComputeResource);
+
+        Assertions.assertEquals("etl", lazyComputeResource.getCnGroupName(),
+                "cnGroupName should be 'etl'");
+    }
+
+    @Test
+    public void testCnGroupNameWithNullValue() {
+        // Null cnGroupName should be preserved (indicates no filtering for system tasks)
+        ComputeResource mockComputeResource = new StubComputeResource(123L, 456L, "TestResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(123L, null, () -> mockComputeResource);
+
+        Assertions.assertNull(lazyComputeResource.getCnGroupName(),
+                "Null cnGroupName should be preserved");
+    }
+
+    @Test
+    public void testCnGroupNameNotTriggersLazyLoad() {
+        // Accessing cnGroupName should NOT trigger lazy load
+        java.util.concurrent.atomic.AtomicInteger invocationCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        ComputeResource mockComputeResource = new StubComputeResource(123L, 456L, "TestResource");
+
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(123L, "etl", () -> {
+            invocationCount.incrementAndGet();
+            return mockComputeResource;
+        });
+
+        // Access cnGroupName
+        String cnGroupName = lazyComputeResource.getCnGroupName();
+
+        Assertions.assertEquals("etl", cnGroupName);
+        Assertions.assertEquals(0, invocationCount.get(),
+                "getCnGroupName() should NOT trigger lazy load");
+        Assertions.assertFalse(lazyComputeResource.isInitialized(),
+                "Resource should not be initialized after getCnGroupName()");
+    }
+
+    @Test
+    public void testCnGroupNameInToString() {
+        ComputeResource mockComputeResource = new StubComputeResource(123L, 456L, "TestResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(123L, "analytics", () -> mockComputeResource);
+
+        String str = lazyComputeResource.toString();
+        Assertions.assertTrue(str.contains("cnGroupName=analytics"),
+                "toString() should include cnGroupName");
+        Assertions.assertTrue(str.contains("warehouseId=123"),
+                "toString() should include warehouseId");
+    }
+
+    @Test
+    public void testCnGroupNameSimulatesUserSessionWithSetCngroup() {
+        // Simulates: SET cngroup = 'etl';
+        // Then: SELECT * FROM table; -- should route to etl nodes
+        ComputeResource mockComputeResource = new StubComputeResource(1L, 100L, "UserQueryResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(1L, "etl", () -> mockComputeResource);
+
+        // cnGroupName comes from SessionVariable.getCnGroupName()
+        Assertions.assertEquals("etl", lazyComputeResource.getCnGroupName());
+    }
+
+    @Test
+    public void testCnGroupNameSimulatesSystemTask() {
+        // System tasks (stats collector, MV refresh, etc.) use DEFAULT_RESOURCE
+        // which returns "default" for getCnGroupName().
+        // This ensures system tasks run on "default" group, leaving other groups for dedicated workloads.
+        ComputeResource mockComputeResource = new StubComputeResource(1L, 100L, "SystemTaskResource");
+
+        // System tasks use default group (same as normal user sessions without SET cngroup)
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(1L, () -> mockComputeResource);
+
+        // Default indicates "use default group nodes"
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, lazyComputeResource.getCnGroupName());
+    }
+
+    @Test
+    public void testCnGroupNameDefaultGroupForNormalUserSession() {
+        // Normal user session without SET cngroup uses "default"
+        ComputeResource mockComputeResource = new StubComputeResource(1L, 100L, "DefaultUserResource");
+        LazyComputeResource lazyComputeResource = LazyComputeResource.of(1L, () -> mockComputeResource);
+
+        // Uses DEFAULT_GROUP_NAME ("default")
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, lazyComputeResource.getCnGroupName());
+        Assertions.assertEquals("default", lazyComputeResource.getCnGroupName());
     }
 }

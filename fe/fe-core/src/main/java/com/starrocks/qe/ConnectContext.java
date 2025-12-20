@@ -1041,7 +1041,9 @@ public class ConnectContext {
         // try to acquire cn group id once the warehouse is set
         final long warehouseId = this.getCurrentWarehouseId();
         final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
-        this.computeResource = LazyComputeResource.of(warehouseId, () ->
+        // Get cnGroupName from session variable for workload isolation
+        final String cnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+        this.computeResource = LazyComputeResource.of(warehouseId, cnGroupName, () ->
                 warehouseManager.acquireComputeResource(warehouseId, this.computeResource));
     }
 

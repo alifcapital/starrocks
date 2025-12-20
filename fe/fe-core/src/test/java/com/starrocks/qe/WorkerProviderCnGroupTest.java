@@ -17,6 +17,8 @@ package com.starrocks.qe;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -267,21 +269,16 @@ public class WorkerProviderCnGroupTest {
     }
 
     @Test
-    public void testSystemTaskUsesDefaultGroup() {
-        // Simulate system task scenario: no cnGroupName set (null)
-        // All system/background tasks create ConnectContext without cnGroupName:
-        //   - StatisticAutoCollector (StatisticUtils.buildConnectContext)
-        //   - MV refresh (TaskRun.buildTaskRunConnectContext with resetSessionVariable)
-        //   - TabletWriteLogHistorySyncer
-        //   - Pipe tasks
-        //   - MVActiveChecker
-        //   - etc.
-        // In this case, filterByCnGroup should return only "default" group nodes.
+    public void testSystemTaskUsesDefaultGroupViaFilterByCnGroup() {
+        // Note: System tasks now use WarehouseManager.DEFAULT_RESOURCE which has null cnGroupName.
+        // When null is passed to filterByCnGroup, it uses "default" as the effective group.
+        // However, the proper architecture now filters at WarehouseComputeResourceProvider level.
+        // This test validates the WorkerProviderHelper.filterByCnGroup behavior for SHARED_NOTHING mode.
 
         ImmutableMap<Long, ComputeNode> systemTaskNodes =
                 WorkerProviderHelper.filterByCnGroup(allNodes, null);
 
-        // Should only get nodes from "default" group
+        // filterByCnGroup with null uses "default" as effective group (for backward compatibility)
         Assertions.assertEquals(2, systemTaskNodes.size());
         Assertions.assertTrue(systemTaskNodes.containsKey(1L));
         Assertions.assertTrue(systemTaskNodes.containsKey(2L));
@@ -295,34 +292,33 @@ public class WorkerProviderCnGroupTest {
     }
 
     @Test
-    public void testAllNodesInNonDefaultGroupFailsForSystemTask() {
-        // IMPORTANT: This test demonstrates a critical deployment requirement!
-        // If ALL nodes are assigned to non-default CNGroups (like "etl", "analytics"),
-        // system tasks will FAIL because they require nodes in "default" group.
-        //
-        // Example error from TabletWriteLogHistorySyncer:
-        //   "Compute node not found. Check if any compute node is down. nodeId: -1"
-        //
-        // SOLUTION: Always keep at least one node in "default" group for system tasks:
-        //   - Statistics collector
-        //   - MV refresh
-        //   - TabletWriteLogHistorySyncer
-        //   - Pipe tasks
-        //   - etc.
+    public void testSystemTasksUseDefaultGroupViaComputeResourceProvider() {
+        // In SHARED_DATA mode, system tasks use WarehouseManager.DEFAULT_RESOURCE.
+        // DEFAULT_RESOURCE is WarehouseComputeResource which returns "default" for getCnGroupName().
+        // This ensures system tasks run on "default" group nodes, leaving other CNGroups
+        // (etl, analytics, etc.) for dedicated workloads.
 
-        ComputeNode cn1 = new ComputeNode(1L, "host1", 9050);
-        cn1.setCnGroupName("etl");
+        // Verify that WarehouseComputeResource.getCnGroupName() returns "default"
+        ComputeResource defaultResource = WarehouseComputeResource.of(0L);
+        Assertions.assertEquals(CnGroup.DEFAULT_GROUP_NAME, defaultResource.getCnGroupName(),
+                "WarehouseComputeResource should return 'default' for getCnGroupName");
+    }
 
-        ComputeNode cn2 = new ComputeNode(2L, "host2", 9050);
-        cn2.setCnGroupName("analytics");
+    @Test
+    public void testUserSessionWithCnGroupRouting() {
+        // User session with SET cngroup='etl' creates LazyComputeResource with cnGroupName="etl"
+        // LazyComputeResource.getCnGroupName() returns "etl"
+        // WarehouseComputeResourceProvider filters nodes to only those in "etl" group
 
-        ImmutableMap<Long, ComputeNode> noDefaultNodes = ImmutableMap.of(1L, cn1, 2L, cn2);
+        // Test with explicit group name
+        ImmutableMap<Long, ComputeNode> etlNodes =
+                WorkerProviderHelper.filterByCnGroup(allNodes, "etl");
 
-        // System task (cnGroupName=null) gets empty result - NO nodes available!
-        ImmutableMap<Long, ComputeNode> systemTaskNodes =
-                WorkerProviderHelper.filterByCnGroup(noDefaultNodes, null);
-
-        Assertions.assertTrue(systemTaskNodes.isEmpty());
+        Assertions.assertEquals(2, etlNodes.size());
+        Assertions.assertTrue(etlNodes.containsKey(3L));
+        Assertions.assertTrue(etlNodes.containsKey(4L));
+        Assertions.assertFalse(etlNodes.containsKey(1L)); // "default" node excluded
+        Assertions.assertFalse(etlNodes.containsKey(5L)); // "analytics" node excluded
     }
 
     @Test
