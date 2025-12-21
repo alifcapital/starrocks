@@ -1665,6 +1665,7 @@ struct TQueryStatisticsInfo {
     16: optional string execProgress
     17: optional string execState
     18: optional string cnGroupName
+    19: optional string resultSinkState
 }
 
 struct TGetQueryStatisticsResponse {
@@ -2069,6 +2070,42 @@ struct TGetWarehouseQueriesResponse {
     1: optional list<TGetWarehouseQueriesResponseItem> queries;
 }
 
+struct TGetSrStatActivityRequest {
+    1: optional TAuthInfo auth_info
+}
+struct TGetSrStatActivityItem {
+    // Identification
+    1: optional string fe_ip;
+    2: optional i64 connection_id;
+    3: optional string query_id;
+    4: optional string custom_query_id;
+    // User and context
+    5: optional string user;
+    6: optional string catalog;
+    7: optional string db;
+    8: optional string warehouse;
+    9: optional string resource_group;
+    // State
+    10: optional string state;
+    11: optional string result_sink_state;
+    12: optional double progress_pct;
+    // Timestamps
+    13: optional i64 connect_time;
+    14: optional i64 query_start_time;
+    15: optional i64 exec_time_ms;
+    // Metrics
+    16: optional i64 cpu_cost_ns;
+    17: optional i64 scan_bytes;
+    18: optional i64 scan_rows;
+    19: optional i64 mem_usage_bytes;
+    20: optional i64 spill_bytes;
+    // SQL
+    21: optional string query;
+}
+struct TGetSrStatActivityResponse {
+    1: optional list<TGetSrStatActivityItem> items;
+}
+
 struct TStartCheckpointRequest {
     1: optional i64 epoch;
     2: optional i64 journal_id;
@@ -2423,5 +2460,7 @@ service FrontendService {
     TRefreshConnectionsResponse refreshConnections(1: TRefreshConnectionsRequest request)
 
     TBatchGetTableSchemaResponse getTableSchema(1: TBatchGetTableSchemaRequest request)
+
+    TGetSrStatActivityResponse getSrStatActivity(1: TGetSrStatActivityRequest request)
 }
 

@@ -334,6 +334,20 @@ std::pair<int32_t, int32_t> QueryContext::count_operator_progress() {
     return {total, finished};
 }
 
+int32_t QueryContext::get_result_sink_driver_state() {
+    int32_t state = static_cast<int32_t>(DriverState::NOT_READY);
+    _fragment_mgr->for_each_fragment([&](FragmentContext* fragment_ctx) {
+        fragment_ctx->iterate_drivers([&](const DriverPtr& driver) {
+            // Check if sink operator is result_sink
+            auto* sink_op = driver->sink_operator();
+            if (sink_op != nullptr && sink_op->get_name() == "result_sink") {
+                state = static_cast<int32_t>(driver->driver_state());
+            }
+        });
+    });
+    return state;
+}
+
 void QueryContext::init_node_exec_stats(const std::vector<int32_t>& exec_stats_node_ids) {
     std::call_once(_node_exec_stats_init_flag, [this, &exec_stats_node_ids]() {
         for (int32_t node_id : exec_stats_node_ids) {
@@ -650,6 +664,7 @@ void QueryContextManager::collect_query_statistics(const PCollectQueryStatistics
             query_statistics->set_total_operators(total_ops);
             query_statistics->set_finished_operators(finished_ops);
             query_statistics->set_fragment_count(static_cast<int32_t>(query_ctx->total_fragments()));
+            query_statistics->set_result_sink_state(query_ctx->get_result_sink_driver_state());
         }
     }
 }

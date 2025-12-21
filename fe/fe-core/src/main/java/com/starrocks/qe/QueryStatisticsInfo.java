@@ -71,6 +71,7 @@ public class QueryStatisticsInfo {
     private String cnGroupName;
     private String customQueryId;
     private String resourceGroupName;
+    private String resultSinkState;
 
     public QueryStatisticsInfo() {
     }
@@ -171,6 +172,10 @@ public class QueryStatisticsInfo {
         return customQueryId;
     }
 
+    public String getResultSinkState() {
+        return resultSinkState;
+    }
+
     public QueryStatisticsInfo withQueryStartTime(long queryStartTime) {
         this.queryStartTime = queryStartTime;
         return this;
@@ -261,6 +266,11 @@ public class QueryStatisticsInfo {
         return this;
     }
 
+    public QueryStatisticsInfo withResultSinkState(String resultSinkState) {
+        this.resultSinkState = resultSinkState;
+        return this;
+    }
+
     public TQueryStatisticsInfo toThrift() {
         return new TQueryStatisticsInfo()
                 .setQueryStartTime(queryStartTime)
@@ -280,7 +290,8 @@ public class QueryStatisticsInfo {
                 .setWareHouseName(wareHouseName)
                 .setCnGroupName(cnGroupName)
                 .setCustomQueryId(customQueryId)
-                .setResourceGroupName(resourceGroupName);
+                .setResourceGroupName(resourceGroupName)
+                .setResultSinkState(resultSinkState);
     }
 
     public static QueryStatisticsInfo fromThrift(TQueryStatisticsInfo tinfo) {
@@ -302,7 +313,8 @@ public class QueryStatisticsInfo {
                 .withWareHouseName(tinfo.getWareHouseName())
                 .withCnGroupName(tinfo.getCnGroupName())
                 .withCustomQueryId(tinfo.getCustomQueryId())
-                .withResourceGroupName(tinfo.getResourceGroupName());
+                .withResourceGroupName(tinfo.getResourceGroupName())
+                .withResultSinkState(tinfo.getResultSinkState());
     }
 
     public List<String> formatToList() {
@@ -325,6 +337,7 @@ public class QueryStatisticsInfo {
         values.add(this.getCnGroupName());
         values.add(this.getCustomQueryId());
         values.add(this.getResourceGroupName());
+        values.add(this.getResultSinkState());
         return values;
     }
 
@@ -344,13 +357,15 @@ public class QueryStatisticsInfo {
                 spillBytes == that.spillBytes && execTime == that.execTime && execProgress == that.execProgress &&
                 execState == that.execState && Objects.equals(wareHouseName, that.wareHouseName) &&
                 Objects.equals(customQueryId, that.customQueryId) &&
-                Objects.equals(resourceGroupName, that.resourceGroupName);
+                Objects.equals(resourceGroupName, that.resourceGroupName) &&
+                Objects.equals(resultSinkState, that.resultSinkState);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(queryStartTime, feIp, queryId, connId, db, user, cpuCostNs, scanBytes, scanRows, memUsageBytes,
-                spillBytes, execTime, execProgress, execState, wareHouseName, customQueryId, resourceGroupName);
+                spillBytes, execTime, execProgress, execState, wareHouseName, customQueryId, resourceGroupName,
+                resultSinkState);
     }
 
     @Override
@@ -372,6 +387,7 @@ public class QueryStatisticsInfo {
                 ", wareHouseName=" + wareHouseName +
                 ", customQueryId=" + customQueryId +
                 ", resourceGroupName=" + resourceGroupName +
+                ", resultSinkState=" + resultSinkState +
                 '}';
     }
 
@@ -418,7 +434,8 @@ public class QueryStatisticsInfo {
                         .withScanRows(statistics.getScanRows())
                         .withMemUsageBytes(statistics.getMemUsageBytes())
                         .withSpillBytes(statistics.getSpillBytes())
-                        .withCpuCostNs(statistics.getCpuCostNs());
+                        .withCpuCostNs(statistics.getCpuCostNs())
+                        .withResultSinkState(statistics.getResultSinkStateString());
             }
             sortedRowData.add(info);
         }

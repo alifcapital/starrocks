@@ -71,6 +71,7 @@ public class CurrentQueryStatisticsProcDir implements ProcDirInterface {
             .add("CNGroup")
             .add("CustomQueryId")
             .add("ResourceGroup")
+            .add("ResultSinkState")
             .build();
 
     @Override

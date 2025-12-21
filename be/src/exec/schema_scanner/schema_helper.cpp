@@ -285,6 +285,13 @@ Status SchemaHelper::get_tablet_reshard_jobs_info(const SchemaScannerState& stat
                      [&req, &res](FrontendServiceConnection& client) { client->getTabletReshardJobsInfo(*res, req); });
 }
 
+Status SchemaHelper::get_sr_stat_activity(const SchemaScannerState& state, const TGetSrStatActivityRequest& request,
+                                          TGetSrStatActivityResponse* response) {
+    return _call_rpc(state, [&request, &response](FrontendServiceConnection& client) {
+        client->getSrStatActivity(*response, request);
+    });
+}
+
 void fill_data_column_with_null(Column* data_column) {
     auto* nullable_column = down_cast<NullableColumn*>(data_column);
     nullable_column->append_nulls(1);

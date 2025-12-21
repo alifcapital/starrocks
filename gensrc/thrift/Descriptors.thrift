@@ -208,7 +208,9 @@ enum TSchemaTableType {
 
     SCH_FE_THREADS,
 
-    SCH_BE_TABLET_WRITE_LOG
+    SCH_BE_TABLET_WRITE_LOG,
+
+    SCH_SR_STAT_ACTIVITY
 }
 
 enum THdfsCompression {

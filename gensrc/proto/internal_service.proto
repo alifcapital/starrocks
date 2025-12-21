@@ -516,6 +516,7 @@ message PCollectQueryStatistics {
     optional int32 total_operators = 8;        // For operator-based progress (multi fragment)
     optional int32 finished_operators = 9;     // For operator-based progress (multi fragment)
     optional int32 fragment_count = 10;        // Number of fragments in this query
+    optional int32 result_sink_state = 11;     // DriverState of the result sink driver (detailed state when active)
 }
 
 message PCollectQueryStatisticsResult {

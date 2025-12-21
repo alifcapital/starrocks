@@ -134,6 +134,9 @@ public class CurrentQueryInfoProvider {
                     if (queryStatistics.fragmentCount != null) {
                         statistics.updateFragmentCount(queryStatistics.fragmentCount);
                     }
+                    if (queryStatistics.resultSinkState != null) {
+                        statistics.updateResultSinkState(queryStatistics.resultSinkState);
+                    }
                     final Request request = pair.first;
                     String host = String.format("%s:%d",
                             request.getAddress().getHostname(), request.getAddress().getPort());
@@ -242,6 +245,9 @@ public class CurrentQueryInfoProvider {
                         if (queryStatistics.fragmentCount != null) {
                             statistics.updateFragmentCount(queryStatistics.fragmentCount);
                         }
+                        if (queryStatistics.resultSinkState != null) {
+                            statistics.updateResultSinkState(queryStatistics.resultSinkState);
+                        }
                     }
                 }
             } catch (InterruptedException e) {
@@ -269,6 +275,7 @@ public class CurrentQueryInfoProvider {
         int totalOperators = 0;
         int finishedOperators = 0;
         int fragmentCount = 0;
+        int resultSinkState = 0;  // DriverState of result sink driver
 
         public QueryStatistics() {
 
@@ -345,6 +352,38 @@ public class CurrentQueryInfoProvider {
         public void updateFragmentCount(int value) {
             // Take max since we aggregate from multiple BEs
             fragmentCount = Math.max(fragmentCount, value);
+        }
+
+        public int getResultSinkState() {
+            return resultSinkState;
+        }
+
+        public void updateResultSinkState(int value) {
+            // Take max - higher state values typically indicate more progress
+            resultSinkState = Math.max(resultSinkState, value);
+        }
+
+        /**
+         * Get human-readable string for result sink driver state.
+         * Maps DriverState enum values to descriptive strings.
+         */
+        public String getResultSinkStateString() {
+            // DriverState enum from be/src/exec/pipeline/pipeline_driver.h:
+            // NOT_READY=0, READY=1, RUNNING=2, INPUT_EMPTY=3, OUTPUT_FULL=4,
+            // PRECONDITION_BLOCK=5, FINISH=6, CANCELED=7, INTERNAL_ERROR=8, PENDING_FINISH=9
+            switch (resultSinkState) {
+                case 0: return "not_ready";
+                case 1: return "ready";
+                case 2: return "running";
+                case 3: return "input_empty";
+                case 4: return "output_full";
+                case 5: return "blocked";
+                case 6: return "finish";
+                case 7: return "canceled";
+                case 8: return "error";
+                case 9: return "pending_finish";
+                default: return "";
+            }
         }
 
         /**

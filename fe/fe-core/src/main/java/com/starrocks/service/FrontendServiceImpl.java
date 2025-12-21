@@ -147,6 +147,7 @@ import com.starrocks.qe.GlobalVariable;
 import com.starrocks.qe.ProxyContextManager;
 import com.starrocks.qe.QeProcessorImpl;
 import com.starrocks.qe.QueryStatisticsInfo;
+import com.starrocks.qe.SrStatActivityBuilder;
 import com.starrocks.qe.scheduler.Coordinator;
 import com.starrocks.qe.scheduler.slot.LogicalSlot;
 import com.starrocks.qe.scheduler.warehouse.WarehouseQueryQueueMetrics;
@@ -278,6 +279,9 @@ import com.starrocks.thrift.TGetWarehouseMetricsRequest;
 import com.starrocks.thrift.TGetWarehouseMetricsRespone;
 import com.starrocks.thrift.TGetWarehouseQueriesRequest;
 import com.starrocks.thrift.TGetWarehouseQueriesResponse;
+import com.starrocks.thrift.TGetSrStatActivityRequest;
+import com.starrocks.thrift.TGetSrStatActivityResponse;
+import com.starrocks.thrift.TGetSrStatActivityItem;
 import com.starrocks.thrift.TGetWarehousesRequest;
 import com.starrocks.thrift.TGetWarehousesResponse;
 import com.starrocks.thrift.TImmutablePartitionRequest;
@@ -3136,6 +3140,19 @@ public class FrontendServiceImpl implements FrontendService.Iface {
     @Override
     public TGetWarehouseQueriesResponse getWarehouseQueries(TGetWarehouseQueriesRequest request) throws TException {
         return WarehouseQueryQueueMetrics.build(request);
+    }
+
+    @Override
+    public TGetSrStatActivityResponse getSrStatActivity(TGetSrStatActivityRequest request) throws TException {
+        TGetSrStatActivityResponse response = new TGetSrStatActivityResponse();
+        try {
+            List<TGetSrStatActivityItem> items = SrStatActivityBuilder.build(request);
+            response.setItems(items);
+        } catch (Exception e) {
+            LOG.warn("getSrStatActivity failed", e);
+            response.setItems(Lists.newArrayList());
+        }
+        return response;
     }
 
     @Override

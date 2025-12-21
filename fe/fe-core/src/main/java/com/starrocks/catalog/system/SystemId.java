@@ -140,4 +140,7 @@ public class SystemId {
 
     // ==================  Tablet Reshard  ======================== //
     public static final long TABLET_RESHARD_JOBS_ID = 170L;
+
+    // ==================  Activity Monitoring  =================== //
+    public static final long SR_STAT_ACTIVITY_ID = 180L;
 }

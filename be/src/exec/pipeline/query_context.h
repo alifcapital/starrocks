@@ -266,6 +266,9 @@ public:
     // Returns pair<total_operators, finished_operators>
     std::pair<int32_t, int32_t> count_operator_progress();
 
+    // Get the driver state of the result sink driver (for detailed state when active)
+    int32_t get_result_sink_driver_state();
+
     std::atomic_int64_t* mutable_total_spill_bytes() { return &_total_spill_bytes; }
     int64_t get_spill_bytes() { return _total_spill_bytes; }
     int64_t get_read_local_cnt() { return _total_read_local_cnt; }

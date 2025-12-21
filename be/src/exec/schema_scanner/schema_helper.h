@@ -144,6 +144,9 @@ public:
     static Status get_tablet_reshard_jobs_info(const SchemaScannerState& state, const TTabletReshardJobsRequest& req,
                                                TTabletReshardJobsResponse* res);
 
+    static Status get_sr_stat_activity(const SchemaScannerState& state, const TGetSrStatActivityRequest& request,
+                                       TGetSrStatActivityResponse* response);
+
 private:
     static Status _call_rpc(const SchemaScannerState& state,
                             std::function<void(ClientConnection<FrontendServiceClient>&)> callback);
