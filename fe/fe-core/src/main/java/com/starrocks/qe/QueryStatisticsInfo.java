@@ -79,7 +79,7 @@ public class QueryStatisticsInfo {
     public QueryStatisticsInfo(long queryStartTime, String feIp, String queryId, String connId, String db, String user,
                                long cpuCostNs, long scanBytes, long scanRows, long memUsageBytes, long spillBytes,
                                long execTime, String execProgress, String execState, String wareHouseName,
-                               String cnGroupName, String customQueryId, String resourceGroupName) {
+                               String cnGroupName, String customQueryId, String resourceGroupName, String resultSinkState) {
         this.queryStartTime = queryStartTime;
         this.feIp = feIp;
         this.queryId = queryId;
@@ -98,6 +98,7 @@ public class QueryStatisticsInfo {
         this.cnGroupName = cnGroupName;
         this.customQueryId = customQueryId;
         this.resourceGroupName = resourceGroupName;
+        this.resultSinkState = resultSinkState;
     }
 
     public long getQueryStartTime() {
