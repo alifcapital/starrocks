@@ -998,11 +998,17 @@ modifyFrontendHostClause
   ;
 
 addBackendClause
-   : ADD BACKEND string (',' string)* (INTO WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?)?
+   : ADD BACKEND string (',' string)* (
+       INTO WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?
+       | INTO CNGROUP cngroupName=identifierOrString
+     )?
    ;
 
 dropBackendClause
-   : DROP BACKEND string (',' string)* (FROM WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?)? FORCE?
+   : DROP BACKEND string (',' string)* (
+       FROM WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?
+       | FROM CNGROUP cngroupName=identifierOrString
+     )? FORCE?
    ;
 
 decommissionBackendClause
@@ -1015,11 +1021,17 @@ modifyBackendClause
    ;
 
 addComputeNodeClause
-   : ADD COMPUTE NODE string (',' string)* (INTO WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?)?
+   : ADD COMPUTE NODE string (',' string)* (
+       INTO WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?
+       | INTO CNGROUP cngroupName=identifierOrString
+     )?
    ;
 
 dropComputeNodeClause
-   : DROP COMPUTE NODE string (',' string)* (FROM WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?)?
+   : DROP COMPUTE NODE string (',' string)* (
+       FROM WAREHOUSE warehouseName=identifierOrString (CNGROUP cngroupName=identifierOrString)?
+       | FROM CNGROUP cngroupName=identifierOrString
+     )?
    ;
 
 modifyBrokerClause

@@ -4688,12 +4688,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // INTO WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // INTO CNGROUP xxx (uses default warehouse)
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4707,12 +4711,17 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = "";
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // FROM WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // FROM CNGROUP xxx (uses default warehouse)
+            whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4747,11 +4756,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // INTO WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // INTO CNGROUP xxx (uses default warehouse)
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4765,11 +4779,17 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = "";
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // FROM WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // FROM CNGROUP xxx (uses default warehouse)
+            whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
