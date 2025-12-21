@@ -658,8 +658,7 @@ void QueryContextManager::collect_query_statistics(const PCollectQueryStatistics
             query_statistics->set_scan_bytes(scan_bytes);
             query_statistics->set_mem_usage_bytes(mem_usage_bytes);
             query_statistics->set_spill_bytes(query_ctx->get_spill_bytes());
-            // Progress tracking fields
-            query_statistics->set_estimated_scan_rows(query_ctx->estimated_scan_rows());
+            // Progress tracking fields (estimated rows now from FE planner)
             auto [total_ops, finished_ops] = query_ctx->count_operator_progress();
             query_statistics->set_total_operators(total_ops);
             query_statistics->set_finished_operators(finished_ops);

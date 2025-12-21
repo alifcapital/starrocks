@@ -191,6 +191,18 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
                     info.getConnectContext().isPending() ?
                             LogicalSlot.State.REQUIRING :
                             LogicalSlot.State.ALLOCATED).toQueryStateString();
+
+            // Calculate estimated total rows from planner's cardinality (includes selectivity)
+            // If any scan node has cardinality = -1 (unknown), set total to 0 to fall back to operator-based progress
+            long estimatedTotalRows = 0;
+            boolean allCardinaltiesKnown = info.getCoord().getScanNodes().stream()
+                    .allMatch(node -> node.getCardinality() >= 0);
+            if (allCardinaltiesKnown) {
+                estimatedTotalRows = info.getCoord().getScanNodes().stream()
+                        .mapToLong(node -> node.getCardinality())
+                        .sum();
+            }
+
             final QueryStatisticsItem item = new QueryStatisticsItem.Builder()
                     .customQueryId(context.getCustomQueryId())
                     .queryId(queryIdStr)
@@ -206,6 +218,7 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
                     .cnGroupName(info.coord.getCnGroupName())
                     .resourceGroupName(info.coord.getResourceGroupName())
                     .execState(execState)
+                    .estimatedTotalRows(estimatedTotalRows)
                     .build();
 
             querySet.put(queryIdStr, item);

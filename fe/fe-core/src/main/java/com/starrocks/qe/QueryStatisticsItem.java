@@ -42,6 +42,8 @@ public final class QueryStatisticsItem {
     private final String resourceGroupName;
     // PENDING/RUNNING/FINISHED
     private final String execState;
+    // Planner's estimated total rows (with selectivity applied)
+    private final long estimatedTotalRows;
 
     private QueryStatisticsItem(Builder builder) {
         this.customQueryId = builder.customQueryId;
@@ -58,6 +60,7 @@ public final class QueryStatisticsItem {
         this.cnGroupName = builder.cnGroupName;
         this.resourceGroupName = builder.resourceGroupName;
         this.execState = builder.execState;
+        this.estimatedTotalRows = builder.estimatedTotalRows;
     }
 
     public String getDb() {
@@ -121,6 +124,10 @@ public final class QueryStatisticsItem {
         return execState;
     }
 
+    public long getEstimatedTotalRows() {
+        return estimatedTotalRows;
+    }
+
     public static final class Builder {
         private String customQueryId;
         private String queryId;
@@ -136,6 +143,7 @@ public final class QueryStatisticsItem {
         private String cnGroupName;
         private String resourceGroupName;
         private String execState;
+        private long estimatedTotalRows;
 
         public Builder() {
             fragmentInstanceInfos = Lists.newArrayList();
@@ -208,6 +216,11 @@ public final class QueryStatisticsItem {
 
         public Builder execState(String state) {
             this.execState = state;
+            return this;
+        }
+
+        public Builder estimatedTotalRows(long estimatedTotalRows) {
+            this.estimatedTotalRows = estimatedTotalRows;
             return this;
         }
 

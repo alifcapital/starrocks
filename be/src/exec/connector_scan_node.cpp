@@ -705,18 +705,6 @@ StatusOr<pipeline::MorselQueuePtr> ConnectorScanNode::convert_scan_range_to_mors
         const std::vector<TScanRangeParams>& scan_ranges, int node_id, int32_t pipeline_dop,
         bool enable_tablet_internal_parallel, TTabletInternalParallelMode::type tablet_internal_parallel_mode,
         size_t num_total_scan_ranges) {
-    // Collect estimated scan rows for progress tracking
-    int64_t estimated_rows = 0;
-    for (const auto& params : scan_ranges) {
-        if (params.scan_range.__isset.hdfs_scan_range &&
-            params.scan_range.hdfs_scan_range.__isset.record_count) {
-            estimated_rows += params.scan_range.hdfs_scan_range.record_count;
-        }
-    }
-    if (estimated_rows > 0 && runtime_state() != nullptr && runtime_state()->query_ctx() != nullptr) {
-        runtime_state()->query_ctx()->add_estimated_scan_rows(estimated_rows);
-    }
-
     return _data_source_provider->convert_scan_range_to_morsel_queue(
             scan_ranges, node_id, pipeline_dop, enable_tablet_internal_parallel, tablet_internal_parallel_mode,
             num_total_scan_ranges);

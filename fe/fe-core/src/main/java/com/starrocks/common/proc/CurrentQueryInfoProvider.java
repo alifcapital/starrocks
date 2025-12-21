@@ -75,7 +75,17 @@ public class CurrentQueryInfoProvider {
 
     public Map<String, QueryStatistics> getQueryStatistics(Collection<QueryStatisticsItem> items)
             throws AnalysisException {
-        return collectQueryStatistics(items);
+        Map<String, QueryStatistics> statisticsMap = collectQueryStatistics(items);
+
+        // Set FE planner's estimated total rows (with selectivity) for each query
+        for (QueryStatisticsItem item : items) {
+            QueryStatistics statistics = statisticsMap.get(item.getQueryId());
+            if (statistics != null) {
+                statistics.setEstimatedTotalRows(item.getEstimatedTotalRows());
+            }
+        }
+
+        return statisticsMap;
     }
 
     public Map<String, QueryStatistics> getQueryStatisticsByHost(QueryStatisticsItem item) throws AnalysisException {
@@ -121,10 +131,7 @@ public class CurrentQueryInfoProvider {
                     if (queryStatistics.spillBytes != null) {
                         statistics.updateSpillBytes(queryStatistics.spillBytes);
                     }
-                    // Progress tracking fields
-                    if (queryStatistics.estimatedScanRows != null) {
-                        statistics.updateEstimatedScanRows(queryStatistics.estimatedScanRows);
-                    }
+                    // Progress tracking fields (from BE)
                     if (queryStatistics.totalOperators != null) {
                         statistics.updateTotalOperators(queryStatistics.totalOperators);
                     }
@@ -232,10 +239,7 @@ public class CurrentQueryInfoProvider {
                         if (queryStatistics.spillBytes != null) {
                             statistics.updateSpillBytes(queryStatistics.spillBytes);
                         }
-                        // Progress tracking fields
-                        if (queryStatistics.estimatedScanRows != null) {
-                            statistics.updateEstimatedScanRows(queryStatistics.estimatedScanRows);
-                        }
+                        // Progress tracking fields (from BE)
                         if (queryStatistics.totalOperators != null) {
                             statistics.updateTotalOperators(queryStatistics.totalOperators);
                         }
@@ -271,7 +275,7 @@ public class CurrentQueryInfoProvider {
         long memUsageBytes = 0;
         long spillBytes = 0;
         // Progress tracking fields
-        long estimatedScanRows = 0;
+        long estimatedTotalRows = 0;  // From FE planner (with selectivity)
         int totalOperators = 0;
         int finishedOperators = 0;
         int fragmentCount = 0;
@@ -321,12 +325,12 @@ public class CurrentQueryInfoProvider {
             return spillBytes;
         }
 
-        public long getEstimatedScanRows() {
-            return estimatedScanRows;
+        public long getEstimatedTotalRows() {
+            return estimatedTotalRows;
         }
 
-        public void updateEstimatedScanRows(long value) {
-            estimatedScanRows += value;
+        public void setEstimatedTotalRows(long value) {
+            estimatedTotalRows = value;
         }
 
         public int getTotalOperators() {
@@ -388,13 +392,15 @@ public class CurrentQueryInfoProvider {
 
         /**
          * Calculate progress percentage (0-100).
-         * For single fragment queries (fragmentCount == 1) with estimated scan rows: use row-based progress.
-         * For multi-fragment queries: use operator-based progress.
+         * - Single fragment queries: use row-based progress (FE planner estimate with selectivity)
+         * - Multi-fragment queries: use operator-based progress (rows don't reflect overall progress)
          */
         public double getProgressPercent() {
-            // Row-based progress only for single fragment queries with estimated scan rows
-            if (fragmentCount == 1 && estimatedScanRows > 0) {
-                long maxRows = Math.max(scanRows, estimatedScanRows);
+            // Row-based progress ONLY for single fragment queries
+            // Multi-fragment queries have shuffles/joins where scan rows != overall progress
+            if (fragmentCount == 1 && estimatedTotalRows > 0) {
+                // Use max to handle cases where actual exceeds estimate
+                long maxRows = Math.max(scanRows, estimatedTotalRows);
                 return (double) scanRows / maxRows * 100.0;
             }
             // Operator-based progress for multi-fragment queries or when no row estimates
