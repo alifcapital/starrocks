@@ -36,6 +36,7 @@ SchemaScanner::ColumnDesc SchemaSrStatActivityScanner::_s_columns[] = {
         {"CATALOG", TypeDescriptor::create_varchar_type(sizeof(Slice)), sizeof(Slice), true},
         {"DB", TypeDescriptor::create_varchar_type(sizeof(Slice)), sizeof(Slice), true},
         {"WAREHOUSE", TypeDescriptor::create_varchar_type(sizeof(Slice)), sizeof(Slice), true},
+        {"CNGROUP", TypeDescriptor::create_varchar_type(sizeof(Slice)), sizeof(Slice), true},
         {"RESOURCE_GROUP", TypeDescriptor::create_varchar_type(sizeof(Slice)), sizeof(Slice), true},
         // State
         {"STATE", TypeDescriptor::create_varchar_type(32), 32, true},
@@ -104,7 +105,7 @@ Status SchemaSrStatActivityScanner::fill_chunk(ChunkPtr* chunk) {
     const TGetSrStatActivityItem& item = _response.items[_idx++];
 
     for (const auto& [slot_id, index] : slot_id_map) {
-        if (slot_id < 1 || slot_id > 21) {
+        if (slot_id < 1 || slot_id > 22) {
             return Status::InternalError(fmt::format("invalid slot id: {}", slot_id));
         }
         auto* column = (*chunk)->get_column_raw_ptr_by_slot_id(slot_id);
@@ -148,26 +149,31 @@ Status SchemaSrStatActivityScanner::fill_chunk(ChunkPtr* chunk) {
             fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
             break;
         }
-        case 9: { // RESOURCE_GROUP
+        case 9: { // CNGROUP
+            Slice v(item.cngroup);
+            fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
+            break;
+        }
+        case 10: { // RESOURCE_GROUP
             Slice v(item.resource_group);
             fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
             break;
         }
-        case 10: { // STATE
+        case 11: { // STATE
             Slice v(item.state);
             fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
             break;
         }
-        case 11: { // RESULT_SINK_STATE
+        case 12: { // RESULT_SINK_STATE
             Slice v(item.result_sink_state);
             fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
             break;
         }
-        case 12: { // PROGRESS_PCT
+        case 13: { // PROGRESS_PCT
             fill_column_with_slot<TYPE_DOUBLE>(column, (void*)&item.progress_pct);
             break;
         }
-        case 13: { // CONNECT_TIME
+        case 14: { // CONNECT_TIME
             DateTimeValue dt;
             if (dt.from_unixtime(item.connect_time / 1000, TimezoneUtils::default_time_zone)) {
                 fill_column_with_slot<TYPE_DATETIME>(column, (void*)&dt);
@@ -176,7 +182,7 @@ Status SchemaSrStatActivityScanner::fill_chunk(ChunkPtr* chunk) {
             }
             break;
         }
-        case 14: { // QUERY_START_TIME
+        case 15: { // QUERY_START_TIME
             DateTimeValue dt;
             if (item.query_start_time > 0 && dt.from_unixtime(item.query_start_time / 1000, TimezoneUtils::default_time_zone)) {
                 fill_column_with_slot<TYPE_DATETIME>(column, (void*)&dt);
@@ -185,31 +191,31 @@ Status SchemaSrStatActivityScanner::fill_chunk(ChunkPtr* chunk) {
             }
             break;
         }
-        case 15: { // EXEC_TIME_MS
+        case 16: { // EXEC_TIME_MS
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.exec_time_ms);
             break;
         }
-        case 16: { // CPU_COST_NS
+        case 17: { // CPU_COST_NS
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.cpu_cost_ns);
             break;
         }
-        case 17: { // SCAN_BYTES
+        case 18: { // SCAN_BYTES
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.scan_bytes);
             break;
         }
-        case 18: { // SCAN_ROWS
+        case 19: { // SCAN_ROWS
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.scan_rows);
             break;
         }
-        case 19: { // MEM_USAGE_BYTES
+        case 20: { // MEM_USAGE_BYTES
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.mem_usage_bytes);
             break;
         }
-        case 20: { // SPILL_BYTES
+        case 21: { // SPILL_BYTES
             fill_column_with_slot<TYPE_BIGINT>(column, (void*)&item.spill_bytes);
             break;
         }
-        case 21: { // QUERY
+        case 22: { // QUERY
             Slice v(item.query);
             fill_column_with_slot<TYPE_VARCHAR>(column, (void*)&v);
             break;

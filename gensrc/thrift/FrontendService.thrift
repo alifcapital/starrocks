@@ -2101,6 +2101,8 @@ struct TGetSrStatActivityItem {
     20: optional i64 spill_bytes;
     // SQL
     21: optional string query;
+    // CN Group
+    22: optional string cngroup;
 }
 struct TGetSrStatActivityResponse {
     1: optional list<TGetSrStatActivityItem> items;

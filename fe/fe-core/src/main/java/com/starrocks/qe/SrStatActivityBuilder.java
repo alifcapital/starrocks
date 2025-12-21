@@ -88,6 +88,12 @@ public class SrStatActivityBuilder {
                 item.setCatalog(nullToEmpty(ctx.getCurrentCatalog()));
                 item.setDb(nullToEmpty(ctx.getDatabase()));
                 item.setWarehouse(nullToEmpty(ctx.getCurrentWarehouseName()));
+                // Get cngroup from session variable or query item
+                String cngroup = "";
+                if (ctx.getSessionVariable() != null) {
+                    cngroup = nullToEmpty(ctx.getSessionVariable().getCnGroupName());
+                }
+                item.setCngroup(cngroup);
                 item.setResource_group(ctx.getResourceGroup() != null ? ctx.getResourceGroup().getName() : "");
 
                 // State - unified state based on command and query state

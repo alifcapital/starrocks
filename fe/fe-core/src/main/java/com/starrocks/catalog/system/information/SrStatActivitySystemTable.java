@@ -46,6 +46,7 @@ public class SrStatActivitySystemTable {
                         .column("CATALOG", TypeFactory.createVarcharType(NAME_CHAR_LEN))
                         .column("DB", TypeFactory.createVarcharType(NAME_CHAR_LEN))
                         .column("WAREHOUSE", TypeFactory.createVarcharType(NAME_CHAR_LEN))
+                        .column("CNGROUP", TypeFactory.createVarcharType(NAME_CHAR_LEN))
                         .column("RESOURCE_GROUP", TypeFactory.createVarcharType(NAME_CHAR_LEN))
                         // State
                         .column("STATE", TypeFactory.createVarcharType(32))
