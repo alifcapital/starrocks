@@ -511,6 +511,11 @@ message PCollectQueryStatistics {
     optional int64 scan_rows = 4;
     optional int64 mem_usage_bytes = 5;
     optional int64 spill_bytes = 6;
+    // Progress tracking fields
+    optional int64 estimated_scan_rows = 7;    // For row-based progress (single fragment)
+    optional int32 total_operators = 8;        // For operator-based progress (multi fragment)
+    optional int32 finished_operators = 9;     // For operator-based progress (multi fragment)
+    optional int32 fragment_count = 10;        // Number of fragments in this query
 }
 
 message PCollectQueryStatisticsResult {

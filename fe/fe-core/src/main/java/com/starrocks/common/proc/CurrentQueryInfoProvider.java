@@ -121,6 +121,19 @@ public class CurrentQueryInfoProvider {
                     if (queryStatistics.spillBytes != null) {
                         statistics.updateSpillBytes(queryStatistics.spillBytes);
                     }
+                    // Progress tracking fields
+                    if (queryStatistics.estimatedScanRows != null) {
+                        statistics.updateEstimatedScanRows(queryStatistics.estimatedScanRows);
+                    }
+                    if (queryStatistics.totalOperators != null) {
+                        statistics.updateTotalOperators(queryStatistics.totalOperators);
+                    }
+                    if (queryStatistics.finishedOperators != null) {
+                        statistics.updateFinishedOperators(queryStatistics.finishedOperators);
+                    }
+                    if (queryStatistics.fragmentCount != null) {
+                        statistics.updateFragmentCount(queryStatistics.fragmentCount);
+                    }
                     final Request request = pair.first;
                     String host = String.format("%s:%d",
                             request.getAddress().getHostname(), request.getAddress().getPort());
@@ -216,6 +229,19 @@ public class CurrentQueryInfoProvider {
                         if (queryStatistics.spillBytes != null) {
                             statistics.updateSpillBytes(queryStatistics.spillBytes);
                         }
+                        // Progress tracking fields
+                        if (queryStatistics.estimatedScanRows != null) {
+                            statistics.updateEstimatedScanRows(queryStatistics.estimatedScanRows);
+                        }
+                        if (queryStatistics.totalOperators != null) {
+                            statistics.updateTotalOperators(queryStatistics.totalOperators);
+                        }
+                        if (queryStatistics.finishedOperators != null) {
+                            statistics.updateFinishedOperators(queryStatistics.finishedOperators);
+                        }
+                        if (queryStatistics.fragmentCount != null) {
+                            statistics.updateFragmentCount(queryStatistics.fragmentCount);
+                        }
                     }
                 }
             } catch (InterruptedException e) {
@@ -238,6 +264,11 @@ public class CurrentQueryInfoProvider {
         long scanRows = 0;
         long memUsageBytes = 0;
         long spillBytes = 0;
+        // Progress tracking fields
+        long estimatedScanRows = 0;
+        int totalOperators = 0;
+        int finishedOperators = 0;
+        int fragmentCount = 0;
 
         public QueryStatistics() {
 
@@ -281,6 +312,57 @@ public class CurrentQueryInfoProvider {
 
         public long getSpillBytes() {
             return spillBytes;
+        }
+
+        public long getEstimatedScanRows() {
+            return estimatedScanRows;
+        }
+
+        public void updateEstimatedScanRows(long value) {
+            estimatedScanRows += value;
+        }
+
+        public int getTotalOperators() {
+            return totalOperators;
+        }
+
+        public void updateTotalOperators(int value) {
+            totalOperators += value;
+        }
+
+        public int getFinishedOperators() {
+            return finishedOperators;
+        }
+
+        public void updateFinishedOperators(int value) {
+            finishedOperators += value;
+        }
+
+        public int getFragmentCount() {
+            return fragmentCount;
+        }
+
+        public void updateFragmentCount(int value) {
+            // Take max since we aggregate from multiple BEs
+            fragmentCount = Math.max(fragmentCount, value);
+        }
+
+        /**
+         * Calculate progress percentage (0-100).
+         * For single fragment queries (fragmentCount == 1) with estimated scan rows: use row-based progress.
+         * For multi-fragment queries: use operator-based progress.
+         */
+        public double getProgressPercent() {
+            // Row-based progress only for single fragment queries with estimated scan rows
+            if (fragmentCount == 1 && estimatedScanRows > 0) {
+                long maxRows = Math.max(scanRows, estimatedScanRows);
+                return (double) scanRows / maxRows * 100.0;
+            }
+            // Operator-based progress for multi-fragment queries or when no row estimates
+            if (totalOperators > 0) {
+                return (double) finishedOperators / totalOperators * 100.0;
+            }
+            return 0.0;
         }
     }
 

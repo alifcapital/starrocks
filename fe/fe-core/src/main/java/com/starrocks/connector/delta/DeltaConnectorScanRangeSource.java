@@ -112,6 +112,10 @@ public class DeltaConnectorScanRangeSource extends ConnectorScanRangeSource {
         hdfsScanRange.setFile_format(remoteFileInputFormat.toThrift());
         hdfsScanRange.setPartition_value(table.toHdfsPartition(referencedPartitionInfo));
         hdfsScanRange.setTable_id(table.getId());
+        // Set record count for progress tracking
+        if (fileScanTask.getRecords() > 0) {
+            hdfsScanRange.setRecord_count(fileScanTask.getRecords());
+        }
         // serialize dv
         if (fileScanTask.getDv() != null) {
             TDeletionVectorDescriptor dv = new TDeletionVectorDescriptor();

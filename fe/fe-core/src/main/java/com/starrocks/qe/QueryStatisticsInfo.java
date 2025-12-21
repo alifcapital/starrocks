@@ -35,26 +35,15 @@
 package com.starrocks.qe;
 
 import com.google.common.collect.Lists;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.Config;
 import com.starrocks.common.proc.CurrentQueryInfoProvider;
 import com.starrocks.common.util.QueryStatisticsFormatter;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.service.FrontendOptions;
 import com.starrocks.thrift.TQueryStatisticsInfo;
-import org.apache.http.HttpStatus;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -398,9 +387,17 @@ public class QueryStatisticsInfo {
                 statistic.values().stream()
                         .sorted(Comparator.comparingLong(QueryStatisticsItem::getQueryStartTime))
                         .collect(Collectors.toList());
-        final HttpClient httpClient = HttpClient.newHttpClient();
         for (QueryStatisticsItem item : sorted) {
             final CurrentQueryInfoProvider.QueryStatistics statistics = statisticsMap.get(item.getQueryId());
+
+            // Use BRPC-based progress from statistics if available, otherwise empty
+            String progressStr = "";
+            if (statistics != null) {
+                double progress = statistics.getProgressPercent();
+                if (progress > 0) {
+                    progressStr = String.format("%.2f%%", progress);
+                }
+            }
 
             QueryStatisticsInfo info = new QueryStatisticsInfo()
                     .withQueryStartTime(item.getQueryStartTime())
@@ -410,8 +407,7 @@ public class QueryStatisticsInfo {
                     .withDb(item.getDb())
                     .withUser(item.getUser())
                     .withExecTime(item.getQueryExecTime())
-                    .withExecProgress(getExecProgress(FrontendOptions.getLocalHostAddress(),
-                                                      item.getQueryId(), httpClient))
+                    .withExecProgress(progressStr)
                     .withExecState(item.getExecState())
                     .withWareHouseName(item.getWarehouseName())
                     .withCnGroupName(item.getCnGroupName())
@@ -428,36 +424,5 @@ public class QueryStatisticsInfo {
         }
 
         return sortedRowData;
-    }
-
-    public static String getExecProgress(String feIp, String queryId, HttpClient httpClient) {
-        String result = "";
-        try {
-            String url = String.format("http://%s:%s/api/query/progress?query_id=%s",
-                    feIp, Config.http_port, queryId);
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() == HttpStatus.SC_OK) {
-                try {
-                    JsonElement jsonElement = JsonParser.parseString(response.body());
-                    JsonObject jsonObject = jsonElement.getAsJsonObject();
-                    JsonObject progressInfo = jsonObject.getAsJsonObject("progress_info");
-                    result = progressInfo.get("progress_percent").getAsString();
-                } catch (JsonSyntaxException e) {
-                    LOG.warn("failed to get query progress, query_id: {}, msg: {}", queryId, response.body());
-                }
-            } else {
-                LOG.warn("failed to get query progress, query_id: {}, status code: {}, msg: {}",
-                        queryId, response.statusCode(), response.body());
-            }
-        } catch (IOException | InterruptedException e) {
-            LOG.warn("failed to get query progress, query_id: {}, msg: {}", queryId, e);
-        } finally {
-            return result;
-        }
     }
 }

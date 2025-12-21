@@ -259,6 +259,13 @@ public:
     int64_t cpu_cost() const { return _total_cpu_cost_ns; }
     int64_t cur_scan_rows_num() const { return _total_scan_rows_num; }
     int64_t get_scan_bytes() const { return _total_scan_bytes; }
+    void add_estimated_scan_rows(int64_t rows) { _estimated_scan_rows += rows; }
+    int64_t estimated_scan_rows() const { return _estimated_scan_rows; }
+
+    // Count total and finished operators for progress tracking
+    // Returns pair<total_operators, finished_operators>
+    std::pair<int32_t, int32_t> count_operator_progress();
+
     std::atomic_int64_t* mutable_total_spill_bytes() { return &_total_spill_bytes; }
     int64_t get_spill_bytes() { return _total_spill_bytes; }
     int64_t get_read_local_cnt() { return _total_read_local_cnt; }
@@ -344,6 +351,7 @@ private:
     std::atomic<int64_t> _total_cpu_cost_ns = 0;
     std::atomic<int64_t> _total_scan_rows_num = 0;
     std::atomic<int64_t> _total_scan_bytes = 0;
+    std::atomic<int64_t> _estimated_scan_rows = 0;
     std::atomic<int64_t> _total_spill_bytes = 0;
     std::atomic<int64_t> _total_read_local_cnt = 0;
     std::atomic<int64_t> _total_read_remote_cnt = 0;

@@ -417,6 +417,18 @@ StatusOr<pipeline::MorselQueuePtr> OlapScanNode::convert_scan_range_to_morsel_qu
                                              &has_more_morsel);
     DCHECK(has_more_morsel == false);
 
+    // Collect estimated scan rows for progress tracking
+    int64_t estimated_rows = 0;
+    for (const auto& scan_range : scan_ranges) {
+        if (scan_range.scan_range.__isset.internal_scan_range &&
+            scan_range.scan_range.internal_scan_range.__isset.row_count) {
+            estimated_rows += scan_range.scan_range.internal_scan_range.row_count;
+        }
+    }
+    if (estimated_rows > 0 && runtime_state() != nullptr && runtime_state()->query_ctx() != nullptr) {
+        runtime_state()->query_ctx()->add_estimated_scan_rows(estimated_rows);
+    }
+
     if (partition_order_hint().has_value()) {
         bool asc = partition_order_hint().value();
         std::stable_sort(morsels.begin(), morsels.end(), [asc](auto& l, auto& r) {

@@ -194,6 +194,8 @@ public:
     RuntimeProfile* runtime_profile() { return _runtime_profile.get(); }
     RuntimeProfile* common_metrics() { return _common_metrics.get(); }
     RuntimeProfile* unique_metrics() { return _unique_metrics.get(); }
+    // Returns close time in nanoseconds (0 if operator not yet closed)
+    int64_t close_time_ns() const { return _close_timer != nullptr ? _close_timer->value() : 0; }
 
     // The different operators have their own independent logic for calculating Cost
     virtual int64_t get_last_growth_cpu_time_ns() {

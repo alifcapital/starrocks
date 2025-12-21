@@ -20,6 +20,7 @@
 #include "agent/master_info.h"
 #include "common/status.h"
 #include "exec/pipeline/fragment_context.h"
+#include "exec/pipeline/pipeline_driver.h"
 #include "exec/pipeline/pipeline_fwd.h"
 #include "exec/pipeline/scan/connector_scan_operator.h"
 #include "exec/pipeline/scan/glm_manager.h"
@@ -315,6 +316,22 @@ void QueryContext::update_scan_stats(int64_t table_id, int64_t scan_rows_num, in
     stats->delta_scan_rows_num += scan_rows_num;
     stats->total_scan_bytes += scan_bytes;
     stats->delta_scan_bytes += scan_bytes;
+}
+
+std::pair<int32_t, int32_t> QueryContext::count_operator_progress() {
+    int32_t total = 0;
+    int32_t finished = 0;
+    _fragment_mgr->for_each_fragment([&](FragmentContext* fragment_ctx) {
+        fragment_ctx->iterate_drivers([&](const DriverPtr& driver) {
+            for (const auto& op : driver->operators()) {
+                total++;
+                if (op->close_time_ns() > 0) {
+                    finished++;
+                }
+            }
+        });
+    });
+    return {total, finished};
 }
 
 void QueryContext::init_node_exec_stats(const std::vector<int32_t>& exec_stats_node_ids) {
@@ -627,6 +644,12 @@ void QueryContextManager::collect_query_statistics(const PCollectQueryStatistics
             query_statistics->set_scan_bytes(scan_bytes);
             query_statistics->set_mem_usage_bytes(mem_usage_bytes);
             query_statistics->set_spill_bytes(query_ctx->get_spill_bytes());
+            // Progress tracking fields
+            query_statistics->set_estimated_scan_rows(query_ctx->estimated_scan_rows());
+            auto [total_ops, finished_ops] = query_ctx->count_operator_progress();
+            query_statistics->set_total_operators(total_ops);
+            query_statistics->set_finished_operators(finished_ops);
+            query_statistics->set_fragment_count(static_cast<int32_t>(query_ctx->total_fragments()));
         }
     }
 }
