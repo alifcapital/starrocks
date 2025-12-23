@@ -449,10 +449,16 @@ public class CostModel {
             Statistics statistics = context.getStatistics();
             Preconditions.checkNotNull(statistics);
 
-            List<BinaryPredicateOperator> eqOnPredicates = JoinHelper.getEqualsPredicate(context.getChildOutputColumns(0),
-                    context.getChildOutputColumns(1), Utils.extractConjuncts(join.getOnPredicate()));
+            ColumnRefSet leftColumns = context.getChildOutputColumns(0);
+            ColumnRefSet rightColumns = context.getChildOutputColumns(1);
+            List<BinaryPredicateOperator> eqOnPredicates = JoinHelper.getEqualsPredicate(leftColumns,
+                    rightColumns, Utils.extractConjuncts(join.getOnPredicate()));
 
-            Preconditions.checkState(!(join.getJoinType().isCrossJoin() || eqOnPredicates.isEmpty()),
+            // Check for standard equality predicates or disjunctive OR predicates
+            boolean hasEqPredicates = !eqOnPredicates.isEmpty();
+            boolean hasDisjunctiveOr = join.getOnPredicate() != null &&
+                    JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, join.getOnPredicate());
+            Preconditions.checkState(!(join.getJoinType().isCrossJoin() || (!hasEqPredicates && !hasDisjunctiveOr)),
                     "should be handled by nestloopjoin");
             HashJoinCostModel joinCostModel = new HashJoinCostModel(context, inputProperties, eqOnPredicates, statistics);
             return CostEstimate.of(joinCostModel.getCpuCost(), joinCostModel.getMemCost(), 0);
