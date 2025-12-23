@@ -654,8 +654,8 @@ TEST_F(JoinHashTableApiTest, SecondaryHtBuildAndProbeAfterShare) {
 
     // The BUILD payload should come from the SHARED build_chunk (value: 100 + 5 = 105)
     // This validates that share_build_chunk_from works correctly for execution
-    auto* build_payload_col = result_chunk->get_column_by_slot_id(3);
-    ASSERT_NE(build_payload_col, nullptr);
+    auto build_payload_col = result_chunk->get_column_by_slot_id(3);
+    ASSERT_TRUE(build_payload_col != nullptr);
     EXPECT_EQ(build_payload_col->get(0).get_int32(), 105);
 }
 
