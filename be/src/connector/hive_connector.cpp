@@ -727,6 +727,12 @@ Status HiveDataSource::_init_scanner(RuntimeState* state) {
     ASSIGN_OR_RETURN(auto fs, FileSystem::CreateUniqueFromString(native_file_path, fsOptions));
     HdfsScannerParams scanner_params;
     RETURN_IF_ERROR(_init_global_dicts(&scanner_params));
+    // Add profile marker for low-cardinality dict optimization
+    if (scanner_params.global_dictmaps != nullptr && !scanner_params.global_dictmaps->empty()) {
+        _profile.runtime_profile->add_info_string("GlobalDictOptEnabled", "true");
+        _profile.runtime_profile->add_info_string("GlobalDictColumns",
+                                                   std::to_string(scanner_params.global_dictmaps->size()));
+    }
     scanner_params.runtime_filter_collector = _runtime_filters;
     scanner_params.scan_range = &scan_range;
     scanner_params.scan_range_id = _scan_range_id;

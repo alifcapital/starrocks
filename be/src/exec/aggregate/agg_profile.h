@@ -41,6 +41,10 @@ struct AggStatistics {
         // Consecutive keys cache statistics
         consecutive_keys_cache_hits = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheHits", TUnit::UNIT);
         consecutive_keys_cache_misses = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheMisses", TUnit::UNIT);
+
+        // Low-cardinality dict optimization statistics
+        low_card_group_by_keys = ADD_COUNTER(runtime_profile, "LowCardGroupByKeys", TUnit::UNIT);
+        low_card_group_by_rows = ADD_COUNTER(runtime_profile, "LowCardGroupByRows", TUnit::UNIT);
     }
 
     // timer for build hash table and compute aggregate function
@@ -78,5 +82,9 @@ struct AggStatistics {
     // Consecutive keys cache statistics - tracks cache hits when consecutive rows have the same key
     RuntimeProfile::Counter* consecutive_keys_cache_hits{};
     RuntimeProfile::Counter* consecutive_keys_cache_misses{};
+
+    // Low-cardinality dict optimization statistics - tracks GROUP BY keys using dict encoding
+    RuntimeProfile::Counter* low_card_group_by_keys{};
+    RuntimeProfile::Counter* low_card_group_by_rows{};
 };
 } // namespace starrocks

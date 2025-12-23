@@ -570,6 +570,11 @@ Status OlapChunkSource::_init_olap_reader(RuntimeState* runtime_state) {
     // Extend the tablet_schema with access path columns
     RETURN_IF_ERROR(_extend_schema_by_access_paths());
     RETURN_IF_ERROR(_init_global_dicts(&_params));
+    // Add profile marker for low-cardinality dict optimization
+    if (_params.global_dictmaps != nullptr && !_params.global_dictmaps->empty()) {
+        _runtime_profile->add_info_string("GlobalDictOptEnabled", "true");
+        _runtime_profile->add_info_string("GlobalDictColumns", std::to_string(_params.global_dictmaps->size()));
+    }
     RETURN_IF_ERROR(_init_unused_output_columns(thrift_olap_scan_node.unused_output_column_name));
     RETURN_IF_ERROR(_init_reader_params(_scan_ctx->key_ranges()));
     RETURN_IF_ERROR(_init_scanner_columns(scanner_columns, reader_columns));

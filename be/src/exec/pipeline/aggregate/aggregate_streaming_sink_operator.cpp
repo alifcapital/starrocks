@@ -126,6 +126,11 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_force_preaggregation(const
                 (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
     COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
                 (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+    // Low-cardinality dict optimization statistics
+    COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+    if (_aggregator->dict_encoded_key_count() > 0) {
+        COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+    }
     return Status::OK();
 }
 
@@ -169,6 +174,11 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_selective_preaggregation(c
                 (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
     COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
                 (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+    // Low-cardinality dict optimization statistics
+    COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+    if (_aggregator->dict_encoded_key_count() > 0) {
+        COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+    }
     return Status::OK();
 }
 
@@ -215,6 +225,11 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_auto(const ChunkPtr& chunk
                         (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
             COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
                         (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+            // Low-cardinality dict optimization statistics
+            COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+            if (_aggregator->dict_encoded_key_count() > 0) {
+                COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+            }
             break;
         } else {
             _auto_state = AggrAutoState::ADJUST;

@@ -74,6 +74,11 @@ Status AggregateBlockingSinkOperator::set_finishing(RuntimeState* state) {
                     (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
         COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
                     (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+        // Low-cardinality dict optimization statistics
+        COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+        if (_aggregator->dict_encoded_key_count() > 0) {
+            COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+        }
         // If hash map is empty, we don't need to return value
         if (_aggregator->hash_map_variant().size() == 0) {
             _aggregator->set_ht_eos();

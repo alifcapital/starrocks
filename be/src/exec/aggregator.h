@@ -308,6 +308,9 @@ public:
     RuntimeProfile::Counter* pass_through_row_count() { return _agg_stat->pass_through_row_count; }
     RuntimeProfile::Counter* consecutive_keys_cache_hits() { return _agg_stat->consecutive_keys_cache_hits; }
     RuntimeProfile::Counter* consecutive_keys_cache_misses() { return _agg_stat->consecutive_keys_cache_misses; }
+    RuntimeProfile::Counter* low_card_group_by_keys() { return _agg_stat->low_card_group_by_keys; }
+    RuntimeProfile::Counter* low_card_group_by_rows() { return _agg_stat->low_card_group_by_rows; }
+    size_t dict_encoded_key_count() const { return _dict_encoded_key_count; }
 
     void sink_complete() { _is_sink_complete.store(true, std::memory_order_release); }
 
@@ -499,6 +502,8 @@ protected:
     std::vector<std::optional<std::pair<VectorizedLiteral*, VectorizedLiteral*>>> _ranges;
     Columns _group_by_columns;
     std::vector<ColumnType> _group_by_types;
+    // Number of GROUP BY keys that use low-cardinality dict encoding (LowCardDictType)
+    size_t _dict_encoded_key_count = 0;
 
     // Tuple into which Update()/Merge()/Serialize() results are stored.
     TupleId _intermediate_tuple_id;

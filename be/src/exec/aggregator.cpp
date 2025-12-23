@@ -37,6 +37,7 @@
 #include "gen_cpp/PlanNodes_types.h"
 #include "runtime/current_thread.h"
 #include "runtime/descriptors.h"
+#include "runtime/global_dict/config.h"
 #include "types/logical_type.h"
 #include "udf/java/utils.h"
 #include "util/runtime_profile.h"
@@ -475,6 +476,14 @@ Status Aggregator::prepare(RuntimeState* state, RuntimeProfile* runtime_profile)
     _group_by_columns.resize(group_by_size);
     _group_by_types = _params->group_by_types;
     _has_nullable_key = _params->has_nullable_key;
+
+    // Count GROUP BY keys that use low-cardinality dict encoding (LowCardDictType = TYPE_INT)
+    _dict_encoded_key_count = 0;
+    for (const auto& col_type : _group_by_types) {
+        if (col_type.result_type.type == LowCardDictType) {
+            _dict_encoded_key_count++;
+        }
+    }
 
     _tmp_agg_states.resize(_state->chunk_size());
 
