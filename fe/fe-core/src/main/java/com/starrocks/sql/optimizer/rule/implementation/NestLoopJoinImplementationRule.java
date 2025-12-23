@@ -18,8 +18,10 @@ package com.starrocks.sql.optimizer.rule.implementation;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.JoinOperator;
+import com.starrocks.sql.optimizer.JoinHelper;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalNestLoopJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -53,6 +55,22 @@ public class NestLoopJoinImplementationRule extends JoinImplementationRule {
         } else {
             JoinOperator joinType = getJoinType(input);
             LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
+
+            // If the ON predicate is a disjunctive OR of equalities (e.g. a=x OR b=y), it can be executed by
+            // disjunctive hash join. In auto/hash mode, prefer hash join and do not fall back to nested loop join.
+            // (In explicit "nestloop" mode we still allow NLJ for debugging/compatibility.)
+            if (!joinType.isAsofJoin() && joinOperator.getOnPredicate() != null) {
+                String joinImplMode = context.getSessionVariable().getJoinImplementationMode();
+                boolean explicitNestLoop = "nestloop".equalsIgnoreCase(joinImplMode);
+                if (!explicitNestLoop) {
+                    ColumnRefSet leftColumns = input.inputAt(0).getLogicalProperty().getOutputColumns();
+                    ColumnRefSet rightColumns = input.inputAt(1).getLogicalProperty().getOutputColumns();
+                    if (JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, joinOperator.getOnPredicate())) {
+                        return false;
+                    }
+                }
+            }
+
             if (!supportJoinType(joinType)) {
                 throw new SemanticException(UNSUPPORTED_JOIN_CLAUSE, joinType, joinOperator.getOnPredicate());
             }

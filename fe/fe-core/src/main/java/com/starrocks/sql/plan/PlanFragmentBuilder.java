@@ -2994,6 +2994,11 @@ public class PlanFragmentBuilder {
                 // Set join on clauses for hash join with OR in ON clause
                 if (joinExpr.joinOnClauses != null && joinExpr.joinOnClauses.size() > 1) {
                     ((HashJoinNode) joinNode).setJoinOnClauses(joinExpr.joinOnClauses);
+                    // Ensure columns referenced by join_on_clauses are materialized by children.
+                    // Otherwise, BE may fail to evaluate per-clause expressions with "slot_id not found"
+                    // if a child ProjectNode prunes away required slots (e.g. probe-side columns used only
+                    // by clause other_conjuncts).
+                    ensureDisjunctiveJoinOnClauseSlotsMaterialized(context, joinNode, joinExpr.joinOnClauses);
                 }
 
                 // set skew join, this is used by runtime filter
@@ -3068,6 +3073,89 @@ public class PlanFragmentBuilder {
             }
 
             return buildJoinFragment(context, leftFragment, rightFragment, distributionMode, joinNode);
+        }
+
+        private void ensureDisjunctiveJoinOnClauseSlotsMaterialized(ExecPlan context, JoinNode joinNode,
+                                                                    List<ExprJoinOnClause> joinOnClauses) {
+            if (joinOnClauses == null || joinOnClauses.size() <= 1) {
+                return;
+            }
+
+            Set<Integer> slotIds = new HashSet<>();
+            for (ExprJoinOnClause clause : joinOnClauses) {
+                for (BinaryPredicate eq : clause.getEqJoinConjuncts()) {
+                    slotIds.addAll(ExprUtils.getUsedSlotIds(eq));
+                }
+                if (clause.hasOtherConjuncts()) {
+                    for (Expr other : clause.getOtherConjuncts()) {
+                        slotIds.addAll(ExprUtils.getUsedSlotIds(other));
+                    }
+                }
+            }
+            if (slotIds.isEmpty()) {
+                return;
+            }
+
+            Set<Integer> leftSlots = new HashSet<>();
+            Set<Integer> rightSlots = new HashSet<>();
+            for (Integer slotId : slotIds) {
+                SlotDescriptor slotDesc = context.getDescTbl().getSlotDesc(new SlotId(slotId));
+                if (slotDesc == null) {
+                    continue;
+                }
+                TupleId tupleId = slotDesc.getParent().getId();
+                if (joinNode.getChild(0).getTupleIds().contains(tupleId)) {
+                    leftSlots.add(slotId);
+                } else if (joinNode.getChild(1).getTupleIds().contains(tupleId)) {
+                    rightSlots.add(slotId);
+                }
+            }
+
+            ensurePlanNodeOutputsSlots(context, joinNode.getChild(0), leftSlots);
+            ensurePlanNodeOutputsSlots(context, joinNode.getChild(1), rightSlots);
+        }
+
+        private void ensurePlanNodeOutputsSlots(ExecPlan context, PlanNode node, Set<Integer> requiredSlotIds) {
+            if (node == null || requiredSlotIds == null || requiredSlotIds.isEmpty()) {
+                return;
+            }
+
+            if (node instanceof DecodeNode) {
+                ensurePlanNodeOutputsSlots(context, node.getChild(0), requiredSlotIds);
+                return;
+            }
+
+            if (!(node instanceof ProjectNode)) {
+                return;
+            }
+
+            ProjectNode projectNode = (ProjectNode) node;
+            TupleId tupleId = projectNode.getTupleIds().get(0);
+            TupleDescriptor outTuple = context.getDescTbl().getTupleDesc(tupleId);
+            if (outTuple == null) {
+                return;
+            }
+
+            Map<SlotId, Expr> slotMap = projectNode.getSlotMap();
+            for (Integer slotId : requiredSlotIds) {
+                SlotId sid = new SlotId(slotId);
+                if (slotMap.containsKey(sid)) {
+                    continue;
+                }
+                SlotDescriptor inSlotDesc = context.getDescTbl().getSlotDesc(sid);
+                if (inSlotDesc == null) {
+                    continue;
+                }
+                Expr passthrough = new SlotRef(inSlotDesc);
+                slotMap.put(sid, passthrough);
+
+                SlotDescriptor outSlotDesc = context.getDescTbl().addSlotDescriptor(outTuple, sid);
+                outSlotDesc.setIsNullable(passthrough.isNullable());
+                outSlotDesc.setIsMaterialized(true);
+                outSlotDesc.setType(passthrough.getType());
+            }
+
+            outTuple.computeMemLayout();
         }
 
         private boolean isExchangeWithDistributionType(PlanNode node, DistributionSpec.DistributionType expectedType) {
