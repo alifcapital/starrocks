@@ -559,7 +559,25 @@ StatusOr<ChunkPtr> DisjunctiveHashJoinProberImpl::probe_chunk(RuntimeState* stat
 
     // Probe all hash tables and merge results with deduplication
     // Use _seen_pairs (member) to track across multiple probe_chunk calls when has_remain is true
-    for (size_t ht_idx = 0; ht_idx < num_hash_tables; ++ht_idx) {
+    // Start from _current_ht_idx to support resuming after chunk size limit
+    const size_t max_chunk_size = state->chunk_size();
+
+    // For OUTER joins, we must process all HTs before returning to ensure correct
+    // deduplication of null-extended rows. Only limit chunk size for non-OUTER joins.
+    TJoinOp::type join_type = _hash_joiner.join_type();
+    bool is_outer_join = (join_type == TJoinOp::LEFT_OUTER_JOIN ||
+                          join_type == TJoinOp::RIGHT_OUTER_JOIN ||
+                          join_type == TJoinOp::FULL_OUTER_JOIN ||
+                          join_type == TJoinOp::ASOF_LEFT_OUTER_JOIN);
+
+    for (size_t ht_idx = _current_ht_idx; ht_idx < num_hash_tables; ++ht_idx) {
+        // Check BEFORE processing next HT if we already have enough rows
+        if (!is_outer_join && result_chunk && result_chunk->num_rows() >= max_chunk_size) {
+            _current_ht_idx = ht_idx;  // Resume from this HT on next call
+            has_remain = true;
+            break;
+        }
+
         auto& ht = _builder->hash_table(ht_idx);
         const auto& clause = _builder->clauses().clause(ht_idx);
         ChunkPtr ht_result_chunk = std::make_shared<Chunk>();
@@ -701,6 +719,11 @@ StatusOr<ChunkPtr> DisjunctiveHashJoinProberImpl::probe_chunk(RuntimeState* stat
         }
 
         has_remain = has_remain || ht_has_remain;
+    }
+
+    // Reset _current_ht_idx if we processed all hash tables
+    if (!has_remain || _current_ht_idx >= num_hash_tables) {
+        _current_ht_idx = 0;
     }
 
     // For LEFT/FULL OUTER joins across multiple hash tables: suppress null-extended rows from a hash table
