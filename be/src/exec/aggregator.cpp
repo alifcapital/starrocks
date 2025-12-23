@@ -21,6 +21,7 @@
 
 #include "column/chunk.h"
 #include "column/column_helper.h"
+#include "column/fixed_length_column.h"
 #include "column/vectorized_fwd.h"
 #include "common/logging.h"
 #include "common/status.h"
@@ -350,6 +351,35 @@ Status Aggregator::open(RuntimeState* state) {
             _agg_states_total_size = ALIGN_TO(_agg_states_total_size, _max_agg_state_align_size);
             _state_allocator.aggregate_key_size = _agg_states_total_size;
             _state_allocator.pool = _mem_pool.get();
+
+            // Detect simple COUNT(*) / COUNT(1) fast-path optimization.
+            // Conditions:
+            // 1. Exactly one aggregate function
+            // 2. Function is "count"
+            // 3. Either count(*) (no args) or count(1) (1 arg, non-nullable constant)
+            //    For count(1), we also require !has_outer_join_child to ensure non-nullable version is used
+            // 4. Not DISTINCT
+            // 5. State size is 8 bytes (int64_t) - sanity check
+            if (_agg_fn_ctxs.size() == 1 && !_agg_fn_types.empty()) {
+                const auto& fn = _fns[0];
+                const auto& agg_fn_type = _agg_fn_types[0];
+                // count(*) always uses non-nullable CountAggregateFunction
+                // count(1) uses non-nullable version only when !has_outer_join_child
+                bool is_simple_count_star = fn.arg_types.empty();
+                bool is_simple_count_one = fn.arg_types.size() == 1 && !_params->has_outer_join_child;
+                if (fn.name.function_name == FUNCTION_COUNT && !agg_fn_type.is_distinct &&
+                    (is_simple_count_star || is_simple_count_one) &&
+                    _agg_functions[0]->size() == sizeof(int64_t)) {
+                    _is_simple_count_star_only = true;
+                    _count_state_offset = _agg_states_offsets[0];
+                    VLOG_ROW << "Enabled simple COUNT(*) fast-path optimization, state_offset=" << _count_state_offset;
+                }
+            }
+
+            if (_runtime_profile != nullptr) {
+                _runtime_profile->add_info_string("CountStarOptimization",
+                                                  _is_simple_count_star_only ? "true" : "false");
+            }
         }
     }
 
@@ -437,6 +467,7 @@ Status Aggregator::prepare(RuntimeState* state, RuntimeProfile* runtime_profile)
     if (!_params->sql_aggregate_functions.empty()) {
         _runtime_profile->add_info_string("AggregateFunctions", _params->sql_aggregate_functions);
     }
+    _runtime_profile->add_info_string("CountStarOptimization", "false");
 
     bool has_outer_join_child = _params->has_outer_join_child;
 
@@ -863,6 +894,33 @@ Status Aggregator::evaluate_agg_input_column(Chunk* chunk, std::vector<ExprConte
 Status Aggregator::compute_single_agg_state(Chunk* chunk, size_t chunk_size) {
     SCOPED_TIMER(_agg_stat->agg_function_compute_timer);
     bool use_intermediate = _use_intermediate_as_input();
+
+    // Fast-path for simple COUNT(*) without GROUP BY - bypass virtual function calls
+    if (_is_simple_count_star_only) {
+        if (!_is_merge_funcs[0] && !use_intermediate) {
+            // Phase 1: Just add chunk_size to the single count state
+            *reinterpret_cast<int64_t*>(_single_agg_state + _count_state_offset) += chunk_size;
+        } else {
+            // Phase 2 / Spill merge: Sum all intermediate Int64 values
+            auto& agg_expr_ctxs = _intermediate_agg_expr_ctxs;
+            RETURN_IF_ERROR(evaluate_agg_input_column(chunk, agg_expr_ctxs[0], 0));
+            DCHECK_GE(_agg_input_columns[0].size(), 1);
+            // Handle NullableColumn/ConstColumn - get underlying data column
+            const auto* input_column = ColumnHelper::get_data_column(_agg_input_columns[0][0].get());
+            const auto* int64_column = down_cast<const Int64Column*>(input_column);
+            const int64_t* input_data = int64_column->get_data().data();
+            DCHECK_EQ(int64_column->size(), chunk_size);
+            int64_t sum = 0;
+            for (size_t i = 0; i < chunk_size; ++i) {
+                sum += input_data[i];
+            }
+            *reinterpret_cast<int64_t*>(_single_agg_state + _count_state_offset) += sum;
+        }
+        RETURN_IF_ERROR(check_has_error());
+        return Status::OK();
+    }
+
+    // General path for other aggregate functions
     auto& agg_expr_ctxs = use_intermediate ? _intermediate_agg_expr_ctxs : _agg_expr_ctxs;
 
     for (size_t i = 0; i < _agg_fn_ctxs.size(); i++) {
@@ -888,6 +946,35 @@ Status Aggregator::compute_single_agg_state(Chunk* chunk, size_t chunk_size) {
 Status Aggregator::compute_batch_agg_states(Chunk* chunk, size_t chunk_size) {
     SCOPED_TIMER(_agg_stat->agg_function_compute_timer);
     bool use_intermediate = _use_intermediate_as_input();
+
+    // Fast-path for simple COUNT(*) - bypass virtual function calls
+    if (_is_simple_count_star_only) {
+        if (!_is_merge_funcs[0] && !use_intermediate) {
+            // Phase 1: Direct increment - each row contributes 1 to its group's count
+            const AggDataPtr* states = _tmp_agg_states.data();
+            for (size_t i = 0; i < chunk_size; ++i) {
+                ++(*reinterpret_cast<int64_t*>(states[i] + _count_state_offset));
+            }
+        } else {
+            // Phase 2 / Spill merge: Sum intermediate Int64 values
+            auto& agg_expr_ctxs = _intermediate_agg_expr_ctxs;
+            RETURN_IF_ERROR(evaluate_agg_input_column(chunk, agg_expr_ctxs[0], 0));
+            DCHECK_GE(_agg_input_columns[0].size(), 1);
+            // Handle NullableColumn/ConstColumn - get underlying data column
+            const auto* input_column = ColumnHelper::get_data_column(_agg_input_columns[0][0].get());
+            const auto* int64_column = down_cast<const Int64Column*>(input_column);
+            DCHECK_EQ(int64_column->size(), chunk_size);
+            const int64_t* input_data = int64_column->get_data().data();
+            const AggDataPtr* states = _tmp_agg_states.data();
+            for (size_t i = 0; i < chunk_size; ++i) {
+                *reinterpret_cast<int64_t*>(states[i] + _count_state_offset) += input_data[i];
+            }
+        }
+        RETURN_IF_ERROR(check_has_error());
+        return Status::OK();
+    }
+
+    // General path for other aggregate functions
     auto& agg_expr_ctxs = use_intermediate ? _intermediate_agg_expr_ctxs : _agg_expr_ctxs;
 
     for (size_t i = 0; i < _agg_fn_ctxs.size(); i++) {
@@ -912,6 +999,41 @@ Status Aggregator::compute_batch_agg_states(Chunk* chunk, size_t chunk_size) {
 Status Aggregator::compute_batch_agg_states_with_selection(Chunk* chunk, size_t chunk_size) {
     SCOPED_TIMER(_agg_stat->agg_function_compute_timer);
     bool use_intermediate = _use_intermediate_as_input();
+
+    // Fast-path for simple COUNT(*) with selection - bypass virtual function calls
+    // selection[i] == 0 means row i was found in hash table and should be aggregated
+    if (_is_simple_count_star_only) {
+        const uint8_t* selection = _streaming_selection.data();
+        if (!_is_merge_funcs[0] && !use_intermediate) {
+            // Phase 1: Direct increment for selected rows only
+            const AggDataPtr* states = _tmp_agg_states.data();
+            for (size_t i = 0; i < chunk_size; ++i) {
+                if (selection[i] == 0) {
+                    ++(*reinterpret_cast<int64_t*>(states[i] + _count_state_offset));
+                }
+            }
+        } else {
+            // Phase 2 / Spill merge: Sum intermediate Int64 values for selected rows
+            auto& agg_expr_ctxs = _intermediate_agg_expr_ctxs;
+            RETURN_IF_ERROR(evaluate_agg_input_column(chunk, agg_expr_ctxs[0], 0));
+            DCHECK_GE(_agg_input_columns[0].size(), 1);
+            // Handle NullableColumn/ConstColumn - get underlying data column
+            const auto* input_column = ColumnHelper::get_data_column(_agg_input_columns[0][0].get());
+            const auto* int64_column = down_cast<const Int64Column*>(input_column);
+            DCHECK_EQ(int64_column->size(), chunk_size);
+            const int64_t* input_data = int64_column->get_data().data();
+            const AggDataPtr* states = _tmp_agg_states.data();
+            for (size_t i = 0; i < chunk_size; ++i) {
+                if (selection[i] == 0) {
+                    *reinterpret_cast<int64_t*>(states[i] + _count_state_offset) += input_data[i];
+                }
+            }
+        }
+        RETURN_IF_ERROR(check_has_error());
+        return Status::OK();
+    }
+
+    // General path for other aggregate functions
     auto& agg_expr_ctxs = use_intermediate ? _intermediate_agg_expr_ctxs : _agg_expr_ctxs;
 
     for (size_t i = 0; i < _agg_fn_ctxs.size(); i++) {

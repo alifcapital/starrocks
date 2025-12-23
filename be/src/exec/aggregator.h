@@ -460,6 +460,16 @@ protected:
     size_t _agg_states_total_size = 0;
     // The max align size for all aggregate state
     size_t _max_agg_state_align_size = 1;
+
+    // Fast-path optimization for simple COUNT(*) queries.
+    // When true, we bypass virtual function calls and directly increment int64_t counters.
+    // This is enabled when:
+    // - There is exactly one aggregate function
+    // - It's a non-nullable COUNT (count(*) or count(1), not count(col))
+    // - No DISTINCT
+    bool _is_simple_count_star_only = false;
+    // Cached offset to the count state (same as _agg_states_offsets[0] when fast-path is enabled)
+    size_t _count_state_offset = 0;
     // The followings are aggregate function information:
     std::vector<FunctionContext*> _agg_fn_ctxs;
     std::vector<const AggregateFunction*> _agg_functions;
