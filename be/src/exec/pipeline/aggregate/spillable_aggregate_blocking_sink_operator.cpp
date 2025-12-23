@@ -55,6 +55,10 @@ Status SpillableAggregateBlockingSinkOperator::set_finishing(RuntimeState* state
                     (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
         COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
                     (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+        const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+        if (uuid_packed > 0) {
+            COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+        }
     });
     auto defer_set_finishing = DeferOp([this]() {
         _aggregator->spill_channel()->set_finishing();
@@ -305,6 +309,10 @@ std::function<StatusOr<ChunkPtr>()> SpillableAggregateBlockingSinkOperator::_bui
                            (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
             COUNTER_UPDATE(_aggregator->consecutive_keys_cache_misses(),
                            (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+            const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+            if (uuid_packed > 0) {
+                COUNTER_UPDATE(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+            }
             COUNTER_UPDATE(_hash_table_spill_times, 1);
             RETURN_IF_ERROR(_aggregator->reset_state(state, {}, nullptr));
         }

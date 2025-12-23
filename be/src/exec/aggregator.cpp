@@ -601,6 +601,14 @@ Status Aggregator::prepare(RuntimeState* state, RuntimeProfile* runtime_profile)
     return Status::OK();
 }
 
+RuntimeProfile::Counter* Aggregator::ensure_uuid_key_packed_values_counter() {
+    if (_agg_stat == nullptr || _runtime_profile == nullptr) return nullptr;
+    if (_agg_stat->uuid_key_packed_values == nullptr) {
+        _agg_stat->uuid_key_packed_values = ADD_COUNTER(_runtime_profile, "UuidKeyPackedValues", TUnit::UNIT);
+    }
+    return _agg_stat->uuid_key_packed_values;
+}
+
 bool Aggregator::_is_agg_result_nullable(const TExpr& desc, const AggFunctionTypes& agg_func_type) {
     const TFunction& fn = desc.nodes[0].fn;
     // NOTE: For count, we cannot use agg_func_type since it's only mocked values.
@@ -1693,10 +1701,38 @@ void Aggregator::_init_agg_hash_variant(HashVariantType& hash_variant) {
              << static_cast<typename std::underlying_type<typename HashVariantType::Type>::type>(type);
     hash_variant.init(_state, type, _agg_stat);
 
+    // UUID-key packing works for "binary column" based string-like keys.
+    // We intentionally allow VARBINARY/BINARY here as well:
+    // - If the bytes happen to be canonical UUID36, we pack+decode back to the same 36 bytes.
+    // - Otherwise we fall back to raw bytes (tag=0) and decode returns raw bytes unchanged.
+    const bool has_uuid_key = std::any_of(_group_by_types.begin(), _group_by_types.end(), [](const ColumnType& t) {
+        const auto lt = t.result_type.type;
+        return lt == TYPE_VARCHAR || lt == TYPE_CHAR || lt == TYPE_VARBINARY || lt == TYPE_BINARY;
+    });
+    std::vector<uint8_t> uuid_key_columns;
+    if (has_uuid_key) {
+        uuid_key_columns.resize(_group_by_types.size(), 0);
+        for (size_t i = 0; i < _group_by_types.size(); ++i) {
+            const auto& t = _group_by_types[i].result_type;
+            if (t.type == TYPE_VARCHAR || t.type == TYPE_CHAR || t.type == TYPE_VARBINARY || t.type == TYPE_BINARY) {
+                uuid_key_columns[i] = 1;
+            }
+        }
+    }
+
     hash_variant.visit([&](auto& variant) {
         if constexpr (is_combined_fixed_size_key<std::decay_t<decltype(*variant)>>) {
             variant->has_null_column = has_null_column;
             variant->fixed_byte_size = fixed_byte_size;
+        }
+        if constexpr (requires { variant->enable_uuid_key_opt; }) {
+            // Enable only when there is at least one string-like grouping key.
+            // For unary grouping key, this affects AggHashMapWithOneStringKeyWithNullable.
+            // For multi-key grouping keys, this affects AggHashMapWithSerializedKey.
+            variant->enable_uuid_key_opt = has_uuid_key;
+        }
+        if constexpr (requires { variant->uuid_key_columns; }) {
+            variant->uuid_key_columns = uuid_key_columns;
         }
     });
 }

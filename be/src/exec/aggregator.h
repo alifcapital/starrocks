@@ -308,6 +308,8 @@ public:
     RuntimeProfile::Counter* pass_through_row_count() { return _agg_stat->pass_through_row_count; }
     RuntimeProfile::Counter* consecutive_keys_cache_hits() { return _agg_stat->consecutive_keys_cache_hits; }
     RuntimeProfile::Counter* consecutive_keys_cache_misses() { return _agg_stat->consecutive_keys_cache_misses; }
+    RuntimeProfile::Counter* uuid_key_packed_values() { return _agg_stat->uuid_key_packed_values; }
+    RuntimeProfile::Counter* ensure_uuid_key_packed_values_counter();
     RuntimeProfile::Counter* low_card_group_by_keys() { return _agg_stat->low_card_group_by_keys; }
     RuntimeProfile::Counter* low_card_group_by_rows() { return _agg_stat->low_card_group_by_rows; }
     size_t dict_encoded_key_count() const { return _dict_encoded_key_count; }

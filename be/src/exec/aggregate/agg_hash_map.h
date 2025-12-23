@@ -41,6 +41,82 @@ namespace starrocks {
 DECLARE_FAIL_POINT(aggregate_build_hash_map_bad_alloc);
 
 using AggDataPtr = uint8_t*;
+
+namespace {
+
+static constexpr uint8_t UUID_KEY_TAG_RAW = 0;
+static constexpr uint8_t UUID_KEY_TAG_PACKED16 = 1;
+
+ALWAYS_INLINE uint8_t _lower_hex_to_nibble_or_ff(unsigned char c) {
+    if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+    return 0xFF;
+}
+
+// Parse canonical lowercase UUID string (8-4-4-4-12) to 16 bytes.
+// Returns true only for strictly lowercase canonical form.
+ALWAYS_INLINE bool parse_canonical_lower_uuid36(const Slice& s, uint8_t out[16]) {
+    if (s.size != 36) return false;
+    const char* p = s.data;
+    if (p[8] != '-' || p[13] != '-' || p[18] != '-' || p[23] != '-') return false;
+
+    // Avoid branches inside the loop: 16 fixed pairs of hex digits (skip '-' positions).
+    static constexpr uint8_t kHexPairs[32] = {
+            0,  1,  2,  3,  4,  5,  6,  7,  // 8
+            9,  10, 11, 12,                 // 4
+            14, 15, 16, 17,                 // 4
+            19, 20, 21, 22,                 // 4
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 // 12
+    };
+
+    for (int out_idx = 0; out_idx < 16; ++out_idx) {
+        const uint8_t hi_pos = kHexPairs[out_idx * 2];
+        const uint8_t lo_pos = kHexPairs[out_idx * 2 + 1];
+        const uint8_t hi = _lower_hex_to_nibble_or_ff(static_cast<unsigned char>(p[hi_pos]));
+        const uint8_t lo = _lower_hex_to_nibble_or_ff(static_cast<unsigned char>(p[lo_pos]));
+        if ((hi | lo) == 0xFF) return false;
+        out[out_idx] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+// Fast UUID36 shape check (8-4-4-4-12 with '-' at fixed positions).
+// Used to avoid parsing overhead for obviously non-UUID values.
+ALWAYS_INLINE bool is_uuid36_shape(const Slice& s) {
+    if (s.size != 36) return false;
+    const char* p = s.data;
+    return p[8] == '-' && p[13] == '-' && p[18] == '-' && p[23] == '-';
+}
+
+ALWAYS_INLINE void format_lower_uuid36(const uint8_t in[16], char out[36]) {
+    static constexpr char hex_chars[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                           '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    int out_pos = 0;
+    for (int i = 0; i < 16; ++i) {
+        if (out_pos == 8 || out_pos == 13 || out_pos == 18 || out_pos == 23) {
+            out[out_pos++] = '-';
+        }
+        const uint8_t b = in[i];
+        out[out_pos++] = hex_chars[(b >> 4) & 0x0F];
+        out[out_pos++] = hex_chars[b & 0x0F];
+    }
+    DCHECK_EQ(out_pos, 36);
+}
+
+ALWAYS_INLINE uint32_t encode_uuid_key_or_raw36(const Slice& raw, uint8_t* dst) {
+    uint8_t uuid16[16];
+    if (parse_canonical_lower_uuid36(raw, uuid16)) {
+        dst[0] = UUID_KEY_TAG_PACKED16;
+        strings::memcpy_inlined(dst + 1, uuid16, 16);
+        return 1 + 16;
+    }
+    dst[0] = UUID_KEY_TAG_RAW;
+    strings::memcpy_inlined(dst + 1, raw.data, raw.size);
+    return 1 + static_cast<uint32_t>(raw.size);
+}
+
+} // namespace
+
 template <typename T>
 concept HasKeyType = requires {
     typename T::KeyType;
@@ -756,6 +832,17 @@ struct AggHashMapWithOneStringKeyWithNullable
     // Consecutive keys cache - optimization for sorted/clustered data
     ConsecutiveKeyCache<Slice> _consecutive_key_cache;
 
+    // UUID key optimization for canonical lowercase UUID strings (VARCHAR/CHAR(36)).
+    // If enabled, keys are encoded as:
+    // - [tag=1][16 bytes] for canonical lowercase UUID
+    // - [tag=0][raw bytes] otherwise
+    bool enable_uuid_key_opt = false;
+    bool uuid_key_opt_decided = false;
+    std::vector<uint8_t> _uuid_key_buffer;
+    size_t uuid_key_packed_values = 0;
+
+    size_t get_uuid_key_packed_values() const { return uuid_key_packed_values; }
+
     template <class... Args>
     AggHashMapWithOneStringKeyWithNullable(Args&&... args) : Base(std::forward<Args>(args)...) {}
 
@@ -792,6 +879,29 @@ struct AggHashMapWithOneStringKeyWithNullable
                                                          ExtraAggParam* extra) {
         DCHECK(key_column->is_binary());
         const auto* column = down_cast<const BinaryColumn*>(key_column);
+        if (UNLIKELY(enable_uuid_key_opt && !uuid_key_opt_decided)) {
+            // Decide once (while the hash map is empty) whether it is worth attempting UUID packing.
+            // If no early sample even matches UUID36 shape, disable UUID parsing entirely.
+            if (this->hash_map.empty()) {
+                bool any_uuid_shape = false;
+                const size_t probe = std::min<size_t>(chunk_size, 16);
+                for (size_t i = 0; i < probe; ++i) {
+                    if (is_uuid36_shape(column->get_slice(i))) {
+                        any_uuid_shape = true;
+                        break;
+                    }
+                }
+                if (!any_uuid_shape) {
+                    enable_uuid_key_opt = false;
+                }
+            }
+            uuid_key_opt_decided = true;
+        }
+        if (UNLIKELY(enable_uuid_key_opt)) {
+            // UUID key opt uses per-row encoding, so we use a unified non-prefetch path.
+            return this->template compute_agg_uuid_opt<Func, HTBuildOp>(column, chunk_size, agg_states, pool,
+                                                                        std::forward<Func>(allocate_func), extra);
+        }
         if (this->hash_map.bucket_count() < prefetch_threhold) {
             this->template compute_agg_noprefetch<Func, HTBuildOp>(column, agg_states, pool,
                                                                    std::forward<Func>(allocate_func), extra);
@@ -933,6 +1043,68 @@ struct AggHashMapWithOneStringKeyWithNullable
         const auto* data_column = down_cast<const BinaryColumn*>(nullable_column->data_column().get());
         const auto& null_data = nullable_column->null_column_data();
 
+        if (UNLIKELY(enable_uuid_key_opt)) {
+            // Upper bound for encoded bytes: sum(1 + raw.size) over non-null rows.
+            size_t total_bytes = 0;
+            for (size_t i = 0; i < chunk_size; ++i) {
+                if (!null_data[i]) {
+                    total_bytes += 1 + data_column->get_slice(i).size;
+                }
+            }
+            _uuid_key_buffer.resize(total_bytes);
+            uint8_t* cursor = _uuid_key_buffer.data();
+
+            [[maybe_unused]] const bool use_cache =
+                    (HTBuildOp::allocate && !HTBuildOp::fill_not_found) && _consecutive_key_cache.is_enabled();
+
+            for (size_t i = 0; i < chunk_size; ++i) {
+                if (null_data[i]) {
+                    if (UNLIKELY(null_key_data == nullptr)) {
+                        null_key_data = allocate_func(nullptr);
+                    }
+                    (*agg_states)[i] = null_key_data;
+                    continue;
+                }
+
+                const Slice raw = data_column->get_slice(i);
+                const uint32_t key_size = encode_uuid_key_or_raw36(raw, cursor);
+                if (cursor[0] == UUID_KEY_TAG_PACKED16) {
+                    ++uuid_key_packed_values;
+                }
+                Slice key{reinterpret_cast<char*>(cursor), key_size};
+                cursor += key_size;
+
+                if constexpr (HTBuildOp::allocate && !HTBuildOp::fill_not_found) {
+                    if (use_cache) {
+                        AggDataPtr cached_state;
+                        if (_consecutive_key_cache.try_get(key, cached_state)) {
+                            (*agg_states)[i] = cached_state;
+                            continue;
+                        }
+                    }
+                }
+
+                if constexpr (HTBuildOp::process_limit) {
+                    if (hash_table_size < extra->limits) {
+                        this->template _emplace_key<Func>(key, pool, std::forward<Func>(allocate_func), (*agg_states)[i],
+                                                          [&]() { hash_table_size++; });
+                    } else {
+                        _find_key((*agg_states)[i], (*not_founds)[i], key);
+                    }
+                } else if constexpr (HTBuildOp::allocate) {
+                    this->template _emplace_key<Func>(key, pool, std::forward<Func>(allocate_func), (*agg_states)[i],
+                                                      FillNotFounds<HTBuildOp::fill_not_found>(not_founds, i));
+                    if (use_cache) {
+                        _consecutive_key_cache.update(key, (*agg_states)[i]);
+                    }
+                } else if constexpr (HTBuildOp::fill_not_found) {
+                    DCHECK(not_founds);
+                    _find_key((*agg_states)[i], (*not_founds)[i], key);
+                }
+            }
+            return;
+        }
+
         for (size_t i = 0; i < chunk_size; i++) {
             if (null_data[i]) {
                 if (UNLIKELY(null_key_data == nullptr)) {
@@ -955,6 +1127,61 @@ struct AggHashMapWithOneStringKeyWithNullable
                     DCHECK(not_founds);
                     _find_key((*agg_states)[i], (*not_founds)[i], key);
                 }
+            }
+        }
+    }
+
+    template <AllocFunc<Self> Func, typename HTBuildOp>
+    ALWAYS_NOINLINE void compute_agg_uuid_opt(const BinaryColumn* column, size_t chunk_size, Buffer<AggDataPtr>* agg_states,
+                                              MemPool* pool, Func&& allocate_func, ExtraAggParam* extra) {
+        [[maybe_unused]] size_t hash_table_size = this->hash_map.size();
+        auto* __restrict not_founds = extra->not_founds;
+
+        // Upper bound for encoded bytes: sum(1 + raw.size). Packed form uses less.
+        size_t total_bytes = 0;
+        for (size_t i = 0; i < chunk_size; ++i) {
+            total_bytes += 1 + column->get_slice(i).size;
+        }
+        _uuid_key_buffer.resize(total_bytes);
+        uint8_t* cursor = _uuid_key_buffer.data();
+
+        [[maybe_unused]] const bool use_cache =
+                (HTBuildOp::allocate && !HTBuildOp::fill_not_found) && _consecutive_key_cache.is_enabled();
+
+        for (size_t i = 0; i < chunk_size; ++i) {
+            const Slice raw = column->get_slice(i);
+            const uint32_t key_size = encode_uuid_key_or_raw36(raw, cursor);
+            if (cursor[0] == UUID_KEY_TAG_PACKED16) {
+                ++uuid_key_packed_values;
+            }
+            Slice key{reinterpret_cast<char*>(cursor), key_size};
+            cursor += key_size;
+
+            if constexpr (HTBuildOp::allocate && !HTBuildOp::fill_not_found) {
+                if (use_cache) {
+                    AggDataPtr cached_state;
+                    if (_consecutive_key_cache.try_get(key, cached_state)) {
+                        (*agg_states)[i] = cached_state;
+                        continue;
+                    }
+                }
+            }
+
+            if constexpr (HTBuildOp::process_limit) {
+                if (hash_table_size < extra->limits) {
+                    this->template _emplace_key<Func>(key, pool, std::forward<Func>(allocate_func), (*agg_states)[i],
+                                                      [&]() { hash_table_size++; });
+                } else {
+                    _find_key((*agg_states)[i], (*not_founds)[i], key);
+                }
+            } else if constexpr (HTBuildOp::allocate) {
+                this->template _emplace_key<Func>(key, pool, std::forward<Func>(allocate_func), (*agg_states)[i],
+                                                  FillNotFounds<HTBuildOp::fill_not_found>(not_founds, i));
+                if (use_cache) {
+                    _consecutive_key_cache.update(key, (*agg_states)[i]);
+                }
+            } else if constexpr (HTBuildOp::fill_not_found) {
+                _find_key((*agg_states)[i], (*not_founds)[i], key);
             }
         }
     }
@@ -997,6 +1224,44 @@ struct AggHashMapWithOneStringKeyWithNullable
     }
 
     void insert_keys_to_columns(ResultVector& keys, MutableColumns& key_columns, size_t chunk_size) {
+        if (UNLIKELY(enable_uuid_key_opt)) {
+            DCHECK_EQ(key_columns.size(), 1);
+            keys.resize(chunk_size);
+            if constexpr (is_nullable) {
+                DCHECK(key_columns[0]->is_nullable());
+                auto* nullable_column = down_cast<NullableColumn*>(key_columns[0].get());
+                auto* column = down_cast<BinaryColumn*>(nullable_column->data_column_raw_ptr());
+                for (size_t i = 0; i < chunk_size; ++i) {
+                    const Slice key = keys[i];
+                    DCHECK_GE(key.size, 1U);
+                    const uint8_t tag = static_cast<uint8_t>(key.data[0]);
+                    if (tag == UUID_KEY_TAG_PACKED16) {
+                        char uuid36[36];
+                        format_lower_uuid36(reinterpret_cast<const uint8_t*>(key.data + 1), uuid36);
+                        column->append(Slice(uuid36, 36));
+                    } else {
+                        column->append(Slice(key.data + 1, key.size - 1));
+                    }
+                }
+                nullable_column->null_column_data().resize(chunk_size);
+            } else {
+                DCHECK(!null_key_data);
+                auto* column = down_cast<BinaryColumn*>(key_columns[0].get());
+                for (size_t i = 0; i < chunk_size; ++i) {
+                    const Slice key = keys[i];
+                    DCHECK_GE(key.size, 1U);
+                    const uint8_t tag = static_cast<uint8_t>(key.data[0]);
+                    if (tag == UUID_KEY_TAG_PACKED16) {
+                        char uuid36[36];
+                        format_lower_uuid36(reinterpret_cast<const uint8_t*>(key.data + 1), uuid36);
+                        column->append(Slice(uuid36, 36));
+                    } else {
+                        column->append(Slice(key.data + 1, key.size - 1));
+                    }
+                }
+            }
+            return;
+        }
         if constexpr (is_nullable) {
             DCHECK(key_columns[0]->is_nullable());
             auto* nullable_column = down_cast<NullableColumn*>(key_columns[0].get());
@@ -1040,6 +1305,21 @@ struct AggHashMapWithSerializedKey : public AggHashMapWithKey<HashMap, AggHashMa
     // Consecutive keys cache for multi-column GROUP BY (with adaptive disable)
     ConsecutiveSerializedKeyCache _consecutive_key_cache;
 
+    // UUID key optimization for canonical lowercase UUID strings (VARCHAR/CHAR(36)) within serialized keys.
+    // Only columns with uuid_key_columns[i]=1 are encoded with a custom format.
+    // For a uuid-key column:
+    // - if nullable: [bool is_null] [if !null -> tag + payload]
+    // - if non-nullable: [tag + payload]
+    // tag:
+    //   0 -> raw:    [uint32 len][bytes]
+    //   1 -> packed: [16 bytes uuid]
+    bool enable_uuid_key_opt = false;
+    std::vector<uint8_t> uuid_key_columns;
+    bool uuid_key_columns_decided = false;
+    size_t uuid_key_packed_values = 0;
+
+    size_t get_uuid_key_packed_values() const { return uuid_key_packed_values; }
+
     template <class... Args>
     AggHashMapWithSerializedKey(int chunk_size, Args&&... args)
             : Base(chunk_size, std::forward<Args>(args)...),
@@ -1060,6 +1340,11 @@ struct AggHashMapWithSerializedKey : public AggHashMapWithKey<HashMap, AggHashMa
                             Buffer<AggDataPtr>* agg_states, ExtraAggParam* extra) {
         // Notify cache of new chunk - handles adaptive enable/disable
         _consecutive_key_cache.on_chunk_start();
+
+        if (UNLIKELY(enable_uuid_key_opt)) {
+            return compute_agg_states_uuid_opt<Func, HTBuildOp>(chunk_size, key_columns, pool,
+                                                                std::forward<Func>(allocate_func), agg_states, extra);
+        }
 
         slice_sizes.assign(_chunk_size, 0);
         size_t cur_max_one_row_size = get_max_serialize_size(key_columns);
@@ -1127,6 +1412,135 @@ struct AggHashMapWithSerializedKey : public AggHashMapWithKey<HashMap, AggHashMa
                 _emplace_key(key, pool, allocate_func, (*agg_states)[i],
                              FillNotFounds<HTBuildOp::fill_not_found>(not_founds, i));
                 // Update cache with new key-state mapping (only if cache is enabled)
+                if (use_cache) {
+                    _consecutive_key_cache.update(key, (*agg_states)[i]);
+                }
+            } else if constexpr (HTBuildOp::fill_not_found) {
+                _find_key((*agg_states)[i], (*not_founds)[i], key);
+            }
+        }
+    }
+
+    template <AllocFunc<Self> Func, typename HTBuildOp>
+    ALWAYS_NOINLINE void compute_agg_states_uuid_opt(size_t chunk_size, const Columns& key_columns, MemPool* pool,
+                                                     Func&& allocate_func, Buffer<AggDataPtr>* agg_states,
+                                                     ExtraAggParam* extra) {
+        [[maybe_unused]] size_t hash_table_size = this->hash_map.size();
+        auto* __restrict not_founds = extra->not_founds;
+        DCHECK_EQ(uuid_key_columns.size(), key_columns.size());
+
+        // Decide once (while the hash map is still empty) which columns are actually UUID-shaped.
+        // If a column never looks like UUID36 early on, stop treating it as UUID-candidate to avoid per-row checks.
+        if (UNLIKELY(!uuid_key_columns_decided)) {
+            if (this->hash_map.empty()) {
+                for (size_t col_idx = 0; col_idx < key_columns.size(); ++col_idx) {
+                    if (!uuid_key_columns[col_idx]) continue;
+                    const Column* col = key_columns[col_idx].get();
+                    if (col->is_nullable()) {
+                        const auto* nullable = down_cast<const NullableColumn*>(col);
+                        col = nullable->data_column().get();
+                    }
+                    if (!col->is_binary()) {
+                        uuid_key_columns[col_idx] = 0;
+                        continue;
+                    }
+                    const auto* bin = down_cast<const BinaryColumn*>(col);
+                    bool any_uuid_shape = false;
+                    const size_t probe = std::min<size_t>(chunk_size, 16);
+                    for (size_t i = 0; i < probe; ++i) {
+                        if (is_uuid36_shape(bin->get_slice(i))) {
+                            any_uuid_shape = true;
+                            break;
+                        }
+                    }
+                    if (!any_uuid_shape) {
+                        uuid_key_columns[col_idx] = 0;
+                    }
+                }
+                enable_uuid_key_opt = std::any_of(uuid_key_columns.begin(), uuid_key_columns.end(),
+                                                  [](uint8_t v) { return v != 0; });
+            }
+            uuid_key_columns_decided = true;
+        }
+
+        // Conservative max row size: per-column max serialize size + 1 extra byte for UUID tag.
+        uint32_t cur_max_one_row_size = 0;
+        for (size_t col_idx = 0; col_idx < key_columns.size(); ++col_idx) {
+            cur_max_one_row_size += key_columns[col_idx]->max_one_element_serialize_size();
+            if (uuid_key_columns[col_idx]) cur_max_one_row_size += 1;
+        }
+
+        if (UNLIKELY(cur_max_one_row_size > max_one_row_size)) {
+            max_one_row_size = cur_max_one_row_size;
+            mem_pool->clear();
+            buffer = mem_pool->allocate(max_one_row_size * _chunk_size + SLICE_MEMEQUAL_OVERFLOW_PADDING);
+        }
+
+        [[maybe_unused]] const bool use_cache =
+                (HTBuildOp::allocate && !HTBuildOp::fill_not_found) && _consecutive_key_cache.is_enabled();
+
+        for (size_t i = 0; i < chunk_size; ++i) {
+            uint8_t* start = buffer + i * max_one_row_size;
+            uint8_t* cursor = start;
+
+            for (size_t col_idx = 0; col_idx < key_columns.size(); ++col_idx) {
+                const Column* col = key_columns[col_idx].get();
+                if (!uuid_key_columns[col_idx]) {
+                    cursor += col->serialize(i, cursor);
+                    continue;
+                }
+
+                // UUID column: custom encoding.
+                if (col->is_nullable()) {
+                    const auto* nullable = down_cast<const NullableColumn*>(col);
+                    const auto& null_data = nullable->null_column_data();
+                    const bool is_null = null_data[i] != 0;
+                    *cursor++ = static_cast<uint8_t>(is_null);
+                    if (is_null) continue;
+                    col = nullable->data_column().get();
+                }
+                DCHECK(col->is_binary());
+                const auto* bin = down_cast<const BinaryColumn*>(col);
+                const Slice raw = bin->get_slice(i);
+
+                uint8_t uuid16[16];
+                if (LIKELY(is_uuid36_shape(raw)) && parse_canonical_lower_uuid36(raw, uuid16)) {
+                    *cursor++ = UUID_KEY_TAG_PACKED16;
+                    strings::memcpy_inlined(cursor, uuid16, 16);
+                    cursor += 16;
+                    ++uuid_key_packed_values;
+                } else {
+                    *cursor++ = UUID_KEY_TAG_RAW;
+                    const uint32_t len = static_cast<uint32_t>(raw.size);
+                    strings::memcpy_inlined(cursor, &len, sizeof(uint32_t));
+                    cursor += sizeof(uint32_t);
+                    strings::memcpy_inlined(cursor, raw.data, raw.size);
+                    cursor += raw.size;
+                }
+            }
+
+            const size_t key_size = cursor - start;
+            Slice key{reinterpret_cast<char*>(start), key_size};
+
+            if constexpr (HTBuildOp::allocate && !HTBuildOp::fill_not_found) {
+                if (use_cache) {
+                    AggDataPtr cached_state;
+                    if (_consecutive_key_cache.try_get(key, cached_state)) {
+                        (*agg_states)[i] = cached_state;
+                        continue;
+                    }
+                }
+            }
+
+            if constexpr (HTBuildOp::process_limit) {
+                if (hash_table_size < extra->limits) {
+                    _emplace_key(key, pool, allocate_func, (*agg_states)[i], [&]() { hash_table_size++; });
+                } else {
+                    _find_key((*agg_states)[i], (*not_founds)[i], key);
+                }
+            } else if constexpr (HTBuildOp::allocate) {
+                _emplace_key(key, pool, allocate_func, (*agg_states)[i],
+                             FillNotFounds<HTBuildOp::fill_not_found>(not_founds, i));
                 if (use_cache) {
                     _consecutive_key_cache.update(key, (*agg_states)[i]);
                 }
@@ -1311,6 +1725,59 @@ struct AggHashMapWithSerializedKey : public AggHashMapWithKey<HashMap, AggHashMa
     }
 
     void insert_keys_to_columns(ResultVector& keys, MutableColumns& key_columns, int32_t chunk_size) {
+        if (UNLIKELY(enable_uuid_key_opt)) {
+            DCHECK_EQ(uuid_key_columns.size(), key_columns.size());
+            for (int32_t i = 0; i < chunk_size; ++i) {
+                const uint8_t* pos = reinterpret_cast<const uint8_t*>(keys[i].data);
+                for (size_t col_idx = 0; col_idx < key_columns.size(); ++col_idx) {
+                    if (!uuid_key_columns[col_idx]) {
+                        pos = key_columns[col_idx]->deserialize_and_append(pos);
+                        continue;
+                    }
+
+                    if (key_columns[col_idx]->is_nullable()) {
+                        auto* nullable = down_cast<NullableColumn*>(key_columns[col_idx].get());
+                        const bool is_null = (*reinterpret_cast<const bool*>(pos)) != 0;
+                        pos += sizeof(bool);
+                        nullable->null_column_data().push_back(is_null ? 1 : 0);
+                        auto* data_col = down_cast<BinaryColumn*>(nullable->data_column_raw_ptr());
+                        if (is_null) {
+                            data_col->append_default();
+                            continue;
+                        }
+                        const uint8_t tag = *pos++;
+                        if (tag == UUID_KEY_TAG_PACKED16) {
+                            char uuid36[36];
+                            format_lower_uuid36(pos, uuid36);
+                            pos += 16;
+                            data_col->append(Slice(uuid36, 36));
+                        } else {
+                            uint32_t len = 0;
+                            strings::memcpy_inlined(&len, pos, sizeof(uint32_t));
+                            pos += sizeof(uint32_t);
+                            data_col->append(Slice(reinterpret_cast<const char*>(pos), len));
+                            pos += len;
+                        }
+                    } else {
+                        auto* data_col = down_cast<BinaryColumn*>(key_columns[col_idx].get());
+                        const uint8_t tag = *pos++;
+                        if (tag == UUID_KEY_TAG_PACKED16) {
+                            char uuid36[36];
+                            format_lower_uuid36(pos, uuid36);
+                            pos += 16;
+                            data_col->append(Slice(uuid36, 36));
+                        } else {
+                            uint32_t len = 0;
+                            strings::memcpy_inlined(&len, pos, sizeof(uint32_t));
+                            pos += sizeof(uint32_t);
+                            data_col->append(Slice(reinterpret_cast<const char*>(pos), len));
+                            pos += len;
+                        }
+                    }
+                }
+            }
+            return;
+        }
         // When GroupBy has multiple columns, the memory is serialized by row.
         // If the length of a row is relatively long and there are multiple columns,
         // deserialization by column will cause the memory locality to deteriorate,

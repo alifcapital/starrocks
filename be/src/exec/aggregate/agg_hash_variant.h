@@ -538,6 +538,9 @@ struct AggHashMapVariant {
     size_t consecutive_keys_cache_hits() const;
     size_t consecutive_keys_cache_misses() const;
 
+    // UUID key optimization statistics (0 if the active hash map type doesn't support it).
+    size_t uuid_key_packed_values() const;
+
 private:
     Type _type = Type::phase1_slice;
     AggStatistics* _agg_stat = nullptr;
