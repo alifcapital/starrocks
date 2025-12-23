@@ -543,9 +543,10 @@ TEST_F(JoinHashTableApiTest, AppendKeysOnlyReal) {
     JoinHashTable secondary_ht;
     secondary_ht.create(param);
 
-    // create() initializes an empty build_chunk (not nullptr)
+    // create() initializes a build_chunk (not nullptr)
     EXPECT_NE(secondary_ht.get_build_chunk(), nullptr);
-    EXPECT_EQ(secondary_ht.get_build_chunk()->num_rows(), 0);
+    // Note: build_chunk may have columns initialized but no actual data rows yet
+    EXPECT_EQ(secondary_ht.get_row_count(), 0);
 
     // Secondary key column: different values (will be used for second disjunct)
     auto secondary_key_col = create_int32_column(10, 1000);  // keys: 1000-1009
