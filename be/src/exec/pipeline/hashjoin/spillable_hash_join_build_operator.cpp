@@ -245,7 +245,9 @@ StatusOr<std::function<StatusOr<ChunkPtr>()>> SpillableHashJoinBuildOperator::_c
     _hash_tables.clear();
     _hash_table_iterate_idx = 0;
 
-    _join_builder->hash_join_builder()->visitHt([this](JoinHashTable* ht) { _hash_tables.push_back(ht); });
+    // Use visitHtForSpill to avoid spilling duplicate data for disjunctive joins
+    // (where all hash tables contain the same build rows, just with different keys).
+    _join_builder->hash_join_builder()->visitHtForSpill([this](JoinHashTable* ht) { _hash_tables.push_back(ht); });
 
     for (auto* ht : _hash_tables) {
         auto build_chunk = ht->get_build_chunk();

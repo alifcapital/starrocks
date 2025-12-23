@@ -48,7 +48,9 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.thrift.TAsofJoinCondition;
 import com.starrocks.thrift.TEqJoinCondition;
 import com.starrocks.thrift.THashJoinNode;
+import com.starrocks.thrift.TJoinOnClause;
 import com.starrocks.thrift.TNormalHashJoinNode;
+import com.starrocks.thrift.TNormalJoinOnClause;
 import com.starrocks.thrift.TNormalPlanNode;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
@@ -70,6 +72,10 @@ public class HashJoinNode extends JoinNode {
 
     // only set when isSkewJoin = true && shuffle join
     private Map<Integer, Integer> eqJoinConjunctsIndexToRfId;
+
+    // Multiple disjuncts (OR branches) for hash join with OR in ON clause.
+    // When set and has more than one clause, the hash join will use multiple hash tables.
+    private List<ExprJoinOnClause> joinOnClauses;
 
     public HashJoinNode(PlanNodeId id, PlanNode outer, PlanNode inner, JoinOperator joinOp,
                         List<Expr> eqJoinConjuncts, List<Expr> otherJoinConjuncts) {
@@ -109,6 +115,18 @@ public class HashJoinNode extends JoinNode {
 
     public int getRfIdByEqJoinConjunctsIndex(int index) {
         return eqJoinConjunctsIndexToRfId.get(index);
+    }
+
+    public List<ExprJoinOnClause> getJoinOnClauses() {
+        return joinOnClauses;
+    }
+
+    public void setJoinOnClauses(List<ExprJoinOnClause> joinOnClauses) {
+        this.joinOnClauses = joinOnClauses;
+    }
+
+    public boolean hasMultipleJoinOnClauses() {
+        return joinOnClauses != null && joinOnClauses.size() > 1;
     }
 
     @Override
@@ -205,6 +223,33 @@ public class HashJoinNode extends JoinNode {
             commonSlotMap.forEach((key, value) ->
                     msg.hash_join_node.putToCommon_slot_map(key.asInt(), ExprToThrift.treeToThrift(value)));
         }
+
+        // Serialize join_on_clauses for hash join with OR in ON clause
+        if (hasMultipleJoinOnClauses()) {
+            List<TJoinOnClause> thriftClauses = new ArrayList<>();
+            for (ExprJoinOnClause clause : joinOnClauses) {
+                TJoinOnClause tClause = new TJoinOnClause();
+
+                // Convert equality predicates
+                List<TEqJoinCondition> eqConditions = new ArrayList<>();
+                for (BinaryPredicate eqPred : clause.getEqJoinConjuncts()) {
+                    TEqJoinCondition eqCond = new TEqJoinCondition(
+                            ExprToThrift.treeToThrift(eqPred.getChild(0)),
+                            ExprToThrift.treeToThrift(eqPred.getChild(1)));
+                    eqCond.setOpcode(ExprOpcodeRegistry.getBinaryOpcode(eqPred.getOp()));
+                    eqConditions.add(eqCond);
+                }
+                tClause.setEq_join_conjuncts(eqConditions);
+
+                // Convert other conjuncts if present
+                if (clause.hasOtherConjuncts()) {
+                    tClause.setOther_conjuncts(ExprToThrift.treesToThrift(clause.getOtherConjuncts()));
+                }
+
+                thriftClauses.add(tClause);
+            }
+            msg.hash_join_node.setJoin_on_clauses(thriftClauses);
+        }
     }
 
     @Override
@@ -217,6 +262,25 @@ public class HashJoinNode extends JoinNode {
         hashJoinNode.setPartition_exprs(normalizer.normalizeOrderedExprs(partitionExprs));
         hashJoinNode.setOutput_columns(normalizer.remapIntegerSlotIds(outputSlots));
         hashJoinNode.setLate_materialization(enableLateMaterialization);
+        // Mark as disjunctive join if we have multiple ON clauses (OR in ON condition)
+        // This ensures plan cache correctly differentiates disjunctive joins
+        hashJoinNode.setIs_disjunctive_join(hasMultipleJoinOnClauses());
+
+        // Normalize join_on_clauses for disjunctive join to ensure different OR structures
+        // produce different cache keys
+        if (hasMultipleJoinOnClauses()) {
+            List<TNormalJoinOnClause> normalizedClauses = new ArrayList<>();
+            for (ExprJoinOnClause clause : joinOnClauses) {
+                TNormalJoinOnClause normalClause = new TNormalJoinOnClause();
+                normalClause.setEq_join_conjuncts(normalizer.normalizeExprs(new ArrayList<>(clause.getEqJoinConjuncts())));
+                if (clause.hasOtherConjuncts()) {
+                    normalClause.setOther_conjuncts(normalizer.normalizeExprs(clause.getOtherConjuncts()));
+                }
+                normalizedClauses.add(normalClause);
+            }
+            hashJoinNode.setJoin_on_clauses(normalizedClauses);
+        }
+
         planNode.setHash_join_node(hashJoinNode);
         planNode.setNode_type(TPlanNodeType.HASH_JOIN_NODE);
         normalizeConjuncts(normalizer, planNode, conjuncts);

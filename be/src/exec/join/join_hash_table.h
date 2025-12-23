@@ -52,11 +52,20 @@ public:
     Status lazy_output(RuntimeState* state, ChunkPtr* probe_chunk, ChunkPtr* result_chunk);
 
     void append_chunk(const ChunkPtr& chunk, const Columns& key_columns);
+    // Append only key columns without duplicating build chunk data.
+    // Used by DisjunctiveHashJoinBuilder to avoid N-fold duplication of build data.
+    // The build chunk data is stored in the primary hash table; secondary hash tables
+    // only store key columns and will share the primary's build chunk after build phase.
+    void append_keys_only(const Columns& key_columns, size_t num_rows);
     void merge_ht(const JoinHashTable& ht);
     // convert input column to spill schema order
     ChunkPtr convert_to_spill_schema(const ChunkPtr& chunk) const;
 
     const ChunkPtr& get_build_chunk() const { return _table_items->build_chunk; }
+    // Share build chunk from another hash table.
+    // Used by DisjunctiveHashJoinBuilder to avoid N-fold memory duplication.
+    // After calling this, this hash table's build_chunk points to the source's build_chunk.
+    void share_build_chunk_from(const JoinHashTable& source);
     Columns& get_key_columns() { return _table_items->key_columns; }
     const Columns& get_key_columns() const { return _table_items->key_columns; }
     uint32_t get_row_count() const { return _table_items->row_count; }
@@ -71,6 +80,16 @@ public:
     JoinHashTableItems* table_items() const { return _table_items.get(); }
 
     int64_t mem_usage() const;
+
+    // For disjunctive join: get probe state for deduplication
+    // Returns the current probe result's build indices, probe indices, and count
+    // These are only valid immediately after probe() returns, before another probe() call
+    const Buffer<uint32_t>& get_last_build_indices() const { return _probe_state->build_index; }
+    const Buffer<uint32_t>& get_last_probe_indices() const { return _probe_state->probe_index; }
+    uint32_t get_last_probe_count() const { return _probe_state->count; }
+
+    // Mark build rows as matched (for RIGHT/FULL OUTER JOIN deduplication across hash tables)
+    Buffer<uint8_t>& get_build_match_index() { return _probe_state->build_match_index; }
 
 private:
     template <class Visitor>

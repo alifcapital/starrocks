@@ -138,7 +138,8 @@ public class JoinHelper {
 
     public boolean onlyBroadcast() {
         // Cross join only support broadcast join
-        return onlyBroadcast(type, equalsPredicate, hint);
+        // Disjunctive joins (OR in ON clause) require broadcast
+        return onlyBroadcast(type, equalsPredicate, hint) || isDisjunctiveJoin(onPredicate);
     }
 
     public boolean onlyShuffle() {
@@ -222,6 +223,23 @@ public class JoinHelper {
     }
 
     /**
+     * Check if the ON predicate contains OR at the top level, making it a disjunctive join.
+     * Disjunctive joins require BROADCAST because different disjuncts have different join keys,
+     * and SHUFFLE would only distribute data correctly for one key - matches on other keys
+     * could end up on different nodes and be missed.
+     *
+     * @param onPredicate The ON predicate
+     * @return true if the predicate has top-level OR (disjunctive join)
+     */
+    public static boolean isDisjunctiveJoin(ScalarOperator onPredicate) {
+        if (onPredicate == null) {
+            return false;
+        }
+        List<ScalarOperator> disjuncts = Utils.extractDisjunctive(onPredicate);
+        return disjuncts.size() > 1;
+    }
+
+    /**
      * Apply commutative transformation to a binary predicate
      * For comparison operators (>, <, >=, <=), swap operands and transform operators
      * For AsOf join scenarios where we need: left_table.column OP right_table.column
@@ -250,5 +268,83 @@ public class JoinHelper {
         } else {
             return predicate;
         }
+    }
+
+    /**
+     * Extract JoinOnClauses from an ON predicate that may contain OR conditions.
+     * For example: ON t1.x = t2.a OR t1.y = t2.b
+     * would return two JoinOnClause entries.
+     *
+     * @param leftColumns  Columns from left table
+     * @param rightColumns Columns from right table
+     * @param onPredicate  The ON predicate (may contain OR)
+     * @return List of JoinOnClause if all disjuncts have equality predicates, null otherwise
+     */
+    public static List<JoinOnClause> extractJoinOnClauses(ColumnRefSet leftColumns,
+                                                          ColumnRefSet rightColumns,
+                                                          ScalarOperator onPredicate) {
+        if (onPredicate == null) {
+            return null;
+        }
+
+        // Extract disjuncts (OR branches)
+        List<ScalarOperator> disjuncts = Utils.extractDisjunctive(onPredicate);
+
+        // If no OR or single predicate, return null (use standard hash join)
+        if (disjuncts.size() <= 1) {
+            return null;
+        }
+
+        List<JoinOnClause> clauses = Lists.newArrayList();
+
+        for (ScalarOperator disjunct : disjuncts) {
+            // Extract conjuncts (AND branches) within this disjunct
+            List<ScalarOperator> conjuncts = Lists.newArrayList(Utils.extractConjuncts(disjunct));
+
+            // Find equality predicates
+            List<BinaryPredicateOperator> eqPredicates = getEqualsPredicate(leftColumns, rightColumns, conjuncts);
+
+            // If no equality predicates in this disjunct, cannot use hash join with OR
+            if (eqPredicates.isEmpty()) {
+                return null;
+            }
+
+            // Remaining predicates are other conjuncts
+            conjuncts.removeAll(eqPredicates);
+
+            // Normalize equality predicates: ensure left child uses left columns
+            List<BinaryPredicateOperator> normalizedEqPredicates = Lists.newArrayList();
+            for (BinaryPredicateOperator eq : eqPredicates) {
+                if (!leftColumns.containsAll(eq.getChild(0).getUsedColumns())) {
+                    // Swap: right = left -> left = right
+                    normalizedEqPredicates.add(new BinaryPredicateOperator(
+                            eq.getBinaryType(), eq.getChild(1), eq.getChild(0)));
+                } else {
+                    normalizedEqPredicates.add(eq);
+                }
+            }
+
+            clauses.add(new JoinOnClause(normalizedEqPredicates, conjuncts, leftColumns, rightColumns));
+        }
+
+        return clauses;
+    }
+
+    /**
+     * Check if the given ON predicate can be handled by hash join with OR support.
+     * This is true if:
+     * 1. The predicate contains OR at the top level
+     * 2. Each OR branch has at least one equality predicate suitable for hash join
+     *
+     * @param leftColumns  Columns from left table
+     * @param rightColumns Columns from right table
+     * @param onPredicate  The ON predicate
+     * @return true if hash join with OR can be used
+     */
+    public static boolean canUseHashJoinWithOr(ColumnRefSet leftColumns,
+                                               ColumnRefSet rightColumns,
+                                               ScalarOperator onPredicate) {
+        List<JoinOnClause> clauses = extractJoinOnClauses(leftColumns, rightColumns, onPredicate);
+        return clauses != null && clauses.size() > 1;
     }
 }

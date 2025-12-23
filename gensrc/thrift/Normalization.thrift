@@ -53,6 +53,15 @@ struct TNormalDecodeNode {
 }
 
 
+// Normalized form of TJoinOnClause for plan cache.
+// Represents one disjunct (OR branch) in a disjunctive hash join.
+struct TNormalJoinOnClause {
+  // Normalized equality predicates (as binary blobs)
+  1: optional list<binary> eq_join_conjuncts;
+  // Normalized other conjuncts (as binary blobs)
+  2: optional list<binary> other_conjuncts;
+}
+
 struct TNormalHashJoinNode {
   1: optional PlanNodes.TJoinOp join_op
   2: optional list<binary> eq_join_conjuncts
@@ -62,6 +71,12 @@ struct TNormalHashJoinNode {
   6: optional list<binary> partition_exprs
   7: optional list<Types.TSlotId> output_columns
   8: optional bool late_materialization
+  // Flag to indicate this is a disjunctive join (OR in ON clause)
+  // When true, plan cache should differentiate this from regular hash join
+  9: optional bool is_disjunctive_join
+  // Normalized join_on_clauses for disjunctive join.
+  // Must be included in cache key to distinguish different OR structures.
+  10: optional list<TNormalJoinOnClause> join_on_clauses
 }
 
 

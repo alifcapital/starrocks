@@ -22,6 +22,7 @@
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/object_pool.h"
+#include "exec/disjunctive_hash_join_components.h"
 #include "exec/hash_joiner.h"
 #include "exec/join/join_hash_table.h"
 #include "exprs/expr_context.h"
@@ -1002,6 +1003,11 @@ void AdaptivePartitionHashJoinBuilder::clone_readable(HashJoinBuilder* other_bui
 
 HashJoinBuilder* HashJoinBuilderFactory::create(ObjectPool* pool, const HashJoinBuildOptions& options,
                                                 HashJoiner& hash_joiner) {
+    // Disjunctive join (OR in ON clause) takes precedence
+    if (options.disjunctive_clauses != nullptr && options.disjunctive_clauses->is_disjunctive()) {
+        return pool->add(new DisjunctiveHashJoinBuilder(hash_joiner, *options.disjunctive_clauses));
+    }
+
     if (options.enable_partitioned_hash_join) {
         return pool->add(new AdaptivePartitionHashJoinBuilder(hash_joiner));
     } else {

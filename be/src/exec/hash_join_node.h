@@ -19,6 +19,7 @@
 #include "column/vectorized_fwd.h"
 #include "exec/exec_node.h"
 #include "exec/join/join_hash_table.h"
+#include "exec/join_on_clause.h"
 #include "util/phmap/phmap.h"
 
 namespace starrocks {
@@ -145,6 +146,10 @@ private:
     size_t _runtime_join_filter_pushdown_limit = 1024000;
 
     std::map<SlotId, ExprContext*> _common_expr_ctxs;
+
+    // Multiple disjuncts (OR branches) for hash join with OR in ON clause.
+    // When _disjunctive_clauses.is_disjunctive() is true, we use multiple hash tables.
+    DisjunctiveJoinClauses _disjunctive_clauses;
 
     RuntimeProfile::Counter* _build_timer = nullptr;
     RuntimeProfile::Counter* _build_ht_timer = nullptr;

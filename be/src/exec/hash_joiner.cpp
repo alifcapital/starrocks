@@ -102,6 +102,11 @@ HashJoiner::HashJoiner(const HashJoinerParam& param)
     HashJoinBuildOptions build_options;
     build_options.enable_partitioned_hash_join = param._enable_partition_hash_join;
 
+    // For disjunctive join (OR in ON clause), use DisjunctiveHashJoinBuilder
+    if (param.is_disjunctive_join()) {
+        build_options.disjunctive_clauses = &param._disjunctive_clauses;
+    }
+
     _hash_join_builder = HashJoinBuilderFactory::create(_pool, build_options, *this);
     _hash_join_prober = _pool->add(new HashJoinProber(*this));
     _build_metrics = _pool->add(new HashJoinBuildMetrics());
@@ -332,6 +337,13 @@ void HashJoiner::close(RuntimeState* state) {
 
 Status HashJoiner::create_runtime_filters(RuntimeState* state) {
     if (_phase != HashJoinPhase::BUILD) {
+        return Status::OK();
+    }
+
+    // For disjunctive join: runtime filters are only valid when FE synthesizes exactly one eq join key
+    // representing the common probe key across all disjuncts. In that case, BE can build the RF from the union
+    // of ht->get_key_columns()[0] across all disjunct hash tables.
+    if (_hash_join_builder->get_disjunctive_clauses() != nullptr && _build_expr_ctxs.size() != 1) {
         return Status::OK();
     }
 

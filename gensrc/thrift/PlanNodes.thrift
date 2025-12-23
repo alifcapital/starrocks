@@ -700,6 +700,19 @@ struct TEqJoinCondition {
   3: optional Opcodes.TExprOpcode opcode;
 }
 
+// Represents one disjunct (OR branch) in a hash join with OR conditions.
+// For example: ON t1.x = t2.a OR t1.y = t2.b
+// would have two TJoinOnClause entries:
+//   clause[0]: eq_join_conjuncts = [(t1.x, t2.a)]
+//   clause[1]: eq_join_conjuncts = [(t1.y, t2.b)]
+// Each clause can have additional non-equality predicates (AND'd within the clause).
+struct TJoinOnClause {
+  // Equality predicates for hash join (combined with AND within this clause)
+  1: required list<TEqJoinCondition> eq_join_conjuncts;
+  // Additional non-equality predicates for this clause (AND'd with eq_join_conjuncts)
+  2: optional list<Exprs.TExpr> other_conjuncts;
+}
+
 struct TAsofJoinCondition {
   // left-hand side of the asof condition (probe side)
   1: required Exprs.TExpr left;
@@ -788,6 +801,14 @@ struct THashJoinNode {
   59: optional map<Types.TSlotId, Exprs.TExpr> common_slot_map
 
   70: optional TAsofJoinCondition asof_join_condition
+
+  // Multiple disjuncts (OR branches) for hash join with OR in ON clause.
+  // When this field is set and has more than one clause, the hash join will:
+  //   1. Build a separate hash table for each clause
+  //   2. Probe all hash tables for each left row
+  //   3. Deduplicate results across clauses
+  // If not set or has only one clause, falls back to standard hash join behavior.
+  80: optional list<TJoinOnClause> join_on_clauses
 }
 
 struct TMergeJoinNode {

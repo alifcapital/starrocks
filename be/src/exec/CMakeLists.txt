@@ -75,6 +75,7 @@ set(EXEC_FILES
     hash_joiner.cpp
     hash_join_node.cpp
     hash_join_components.cpp
+    disjunctive_hash_join_components.cpp
     join/join_hash_table_descriptor.cpp
     join/join_key_constructor.cpp
     join/join_hash_table.cpp

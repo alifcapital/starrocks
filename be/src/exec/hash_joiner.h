@@ -23,6 +23,7 @@
 #include "exec/exec_node.h"
 #include "exec/hash_join_components.h"
 #include "exec/join/join_hash_table.h"
+#include "exec/join_on_clause.h"
 #include "exec/pipeline/context_with_dependency.h"
 #include "exec/pipeline/runtime_filter_types.h"
 #include "exec/pipeline/spill_process_channel.h"
@@ -130,6 +131,14 @@ struct HashJoinerParam {
     TExprOpcode::type _asof_join_condition_op;
     ExprContext* _asof_join_condition_probe_expr_ctx;
     ExprContext* _asof_join_condition_build_expr_ctx;
+
+    // For hash join with OR in ON clause (disjunctive join)
+    // When this is set and has more than one clause, we use multiple hash tables
+    DisjunctiveJoinClauses _disjunctive_clauses;
+
+    void set_disjunctive_clauses(DisjunctiveJoinClauses clauses) { _disjunctive_clauses = std::move(clauses); }
+
+    bool is_disjunctive_join() const { return _disjunctive_clauses.is_disjunctive(); }
 };
 
 inline bool could_short_circuit(TJoinOp::type join_type) {
@@ -300,6 +309,8 @@ public:
         // We don't support spill partition hash join now.
         HashJoinBuildOptions options;
         options.enable_partitioned_hash_join = false;
+        // Preserve disjunctive join settings for spill
+        options.disjunctive_clauses = _hash_join_builder->get_disjunctive_clauses();
         return HashJoinBuilderFactory::create(pool, options, *this);
     }
 

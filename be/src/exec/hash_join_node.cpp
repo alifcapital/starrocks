@@ -143,6 +143,59 @@ Status HashJoinNode::init(const TPlanNode& tnode, RuntimeState* state) {
         }
     }
 
+    // Parse join_on_clauses for hash join with OR in ON clause
+    if (tnode.hash_join_node.__isset.join_on_clauses && tnode.hash_join_node.join_on_clauses.size() > 1) {
+        // Disjunctive join is currently supported for:
+        // - INNER JOIN: union of matches from all disjuncts with (probe_idx, build_idx) deduplication
+        // - LEFT/RIGHT/FULL OUTER JOIN: union with null-extension handling
+        // - LEFT/RIGHT SEMI JOIN: union with probe_idx/build_idx deduplication
+        //
+        // ANTI joins are NOT supported because they require checking non-existence across ALL disjuncts,
+        // which requires intersection of "not found" sets rather than union.
+        switch (_join_type) {
+        case TJoinOp::LEFT_ANTI_JOIN:
+        case TJoinOp::RIGHT_ANTI_JOIN:
+        case TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN:
+            return Status::NotSupported("hash join with OR in ON clause is not supported for ANTI joins");
+        default:
+            break;
+        }
+
+        // Limit the number of disjuncts to prevent excessive memory usage
+        // Each disjunct creates a separate hash table
+        constexpr size_t kMaxDisjunctiveClauses = 16;
+        if (tnode.hash_join_node.join_on_clauses.size() > kMaxDisjunctiveClauses) {
+            return Status::NotSupported(
+                    strings::Substitute("hash join with OR supports at most $0 disjuncts, got $1",
+                                        kMaxDisjunctiveClauses, tnode.hash_join_node.join_on_clauses.size()));
+        }
+
+        for (const auto& thrift_clause : tnode.hash_join_node.join_on_clauses) {
+            JoinOnClause clause;
+
+            // Parse equality predicates
+            for (const auto& eq_cond : thrift_clause.eq_join_conjuncts) {
+                ExprContext* probe_ctx = nullptr;
+                ExprContext* build_ctx = nullptr;
+                RETURN_IF_ERROR(Expr::create_expr_tree(_pool, eq_cond.left, &probe_ctx, state));
+                RETURN_IF_ERROR(Expr::create_expr_tree(_pool, eq_cond.right, &build_ctx, state));
+                clause.probe_expr_ctxs.push_back(probe_ctx);
+                clause.build_expr_ctxs.push_back(build_ctx);
+
+                bool is_null_safe = eq_cond.__isset.opcode && eq_cond.opcode == TExprOpcode::EQ_FOR_NULL;
+                clause.is_null_safes.push_back(is_null_safe);
+            }
+
+            // Parse other conjuncts if present
+            if (thrift_clause.__isset.other_conjuncts) {
+                RETURN_IF_ERROR(Expr::create_expr_trees(_pool, thrift_clause.other_conjuncts,
+                                                        &clause.other_conjunct_ctxs, state));
+            }
+
+            _disjunctive_clauses.add_clause(std::move(clause));
+        }
+    }
+
     RETURN_IF_ERROR(Expr::create_expr_trees(_pool, tnode.hash_join_node.other_join_conjuncts,
                                             &_other_join_conjunct_ctxs, state));
 
@@ -211,6 +264,14 @@ Status HashJoinNode::prepare(RuntimeState* state) {
 
     if (_asof_join_condition_probe_expr_ctx != nullptr) {
         RETURN_IF_ERROR(_asof_join_condition_probe_expr_ctx->prepare(state));
+    }
+
+    // Prepare disjunctive clauses expr contexts (for hash join with OR in ON clause)
+    for (size_t i = 0; i < _disjunctive_clauses.num_clauses(); ++i) {
+        auto& clause = _disjunctive_clauses.clause(i);
+        RETURN_IF_ERROR(Expr::prepare(clause.probe_expr_ctxs, state));
+        RETURN_IF_ERROR(Expr::prepare(clause.build_expr_ctxs, state));
+        RETURN_IF_ERROR(Expr::prepare(clause.other_conjunct_ctxs, state));
     }
 
     HashTableParam param;
@@ -293,6 +354,14 @@ Status HashJoinNode::open(RuntimeState* state) {
 
     if (_asof_join_condition_probe_expr_ctx != nullptr) {
         RETURN_IF_ERROR(_asof_join_condition_probe_expr_ctx->open(state));
+    }
+
+    // Open disjunctive clauses expr contexts (for hash join with OR in ON clause)
+    for (size_t i = 0; i < _disjunctive_clauses.num_clauses(); ++i) {
+        auto& clause = _disjunctive_clauses.clause(i);
+        RETURN_IF_ERROR(Expr::open(clause.probe_expr_ctxs, state));
+        RETURN_IF_ERROR(Expr::open(clause.build_expr_ctxs, state));
+        RETURN_IF_ERROR(Expr::open(clause.other_conjunct_ctxs, state));
     }
 
     {
@@ -540,6 +609,12 @@ pipeline::OpFactories HashJoinNode::_decompose_to_pipeline(pipeline::PipelineBui
                           _enable_late_materialization, _enable_partition_hash_join, _is_skew_join, _common_expr_ctxs,
                           _asof_join_condition_op, _asof_join_condition_probe_expr_ctx,
                           _asof_join_condition_build_expr_ctx);
+
+    // Pass disjunctive clauses for hash join with OR in ON clause
+    if (_disjunctive_clauses.is_disjunctive()) {
+        param.set_disjunctive_clauses(_disjunctive_clauses);
+    }
+
     auto hash_joiner_factory = std::make_shared<starrocks::pipeline::HashJoinerFactory>(param);
 
     // Create a shared RefCountedRuntimeFilterCollector

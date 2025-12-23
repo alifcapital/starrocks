@@ -120,6 +120,12 @@ public:
 
     virtual void visitHt(const std::function<void(JoinHashTable*)>& visitor) = 0;
 
+    // Visit hash tables for spilling. By default, same as visitHt.
+    // For disjunctive join, only visits the first hash table since all have the same data.
+    virtual void visitHtForSpill(const std::function<void(JoinHashTable*)>& visitor) {
+        visitHt(visitor);
+    }
+
     virtual std::unique_ptr<HashJoinProberImpl> create_prober() = 0;
 
     // clone readable to to builder
@@ -127,6 +133,10 @@ public:
 
     virtual Status prepare_for_spill_start(RuntimeState* state) { return Status::OK(); }
     virtual ChunkPtr convert_to_spill_schema(const ChunkPtr& chunk) const = 0;
+
+    // Get the disjunctive clauses if this is a disjunctive join builder.
+    // Returns nullptr for non-disjunctive builders.
+    virtual const DisjunctiveJoinClauses* get_disjunctive_clauses() const { return nullptr; }
 
 protected:
     HashJoiner& _hash_joiner;
@@ -180,8 +190,12 @@ private:
     Columns _key_columns;
 };
 
+class DisjunctiveJoinClauses;
+
 struct HashJoinBuildOptions {
     bool enable_partitioned_hash_join = false;
+    // For disjunctive join (OR in ON clause)
+    const DisjunctiveJoinClauses* disjunctive_clauses = nullptr;
 };
 
 class HashJoinBuilderFactory {

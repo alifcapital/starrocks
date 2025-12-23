@@ -751,6 +751,42 @@ void JoinHashTable::append_chunk(const ChunkPtr& chunk, const Columns& key_colum
     defer.cancel();
 }
 
+void JoinHashTable::append_keys_only(const Columns& key_columns, size_t num_rows) {
+    // Only append key columns, skip build chunk data.
+    // Used by secondary hash tables in disjunctive join to avoid N-fold memory duplication.
+    DCHECK_EQ(key_columns.size(), _table_items->key_columns.size());
+    for (size_t i = 0; i < _table_items->key_columns.size(); i++) {
+        DCHECK_EQ(key_columns[i]->size(), num_rows);
+        // If the join key is slot ref, will get from build chunk directly,
+        // otherwise will append from key_column of input
+        if (_table_items->join_keys[i].col_ref == nullptr) {
+            // upgrade to nullable column
+            if (!_table_items->key_columns[i]->is_nullable() && key_columns[i]->is_nullable()) {
+                size_t row_count = _table_items->key_columns[i]->size();
+                _table_items->key_columns[i] =
+                        NullableColumn::create(_table_items->key_columns[i], NullColumn::create(row_count, 0));
+            }
+            _table_items->key_columns[i]->as_mutable_raw_ptr()->append(*key_columns[i]);
+        }
+    }
+    _table_items->row_count += num_rows;
+}
+
+void JoinHashTable::share_build_chunk_from(const JoinHashTable& source) {
+    // Share build_chunk pointer from source hash table.
+    // This avoids N-fold memory duplication in disjunctive join.
+    // After this call, both hash tables reference the same build chunk data.
+    DCHECK_EQ(_table_items->row_count, source._table_items->row_count);
+    _table_items->build_chunk = source._table_items->build_chunk;
+
+    // Also share build slot metadata
+    _table_items->build_slots = source._table_items->build_slots;
+    _table_items->build_column_count = source._table_items->build_column_count;
+    _table_items->output_build_column_count = source._table_items->output_build_column_count;
+    _table_items->lazy_output_build_column_count = source._table_items->lazy_output_build_column_count;
+    _table_items->has_large_column = source._table_items->has_large_column;
+}
+
 void JoinHashTable::merge_ht(const JoinHashTable& ht) {
     auto& columns = _table_items->build_chunk->columns();
     auto& other_columns = ht._table_items->build_chunk->columns();

@@ -73,6 +73,7 @@ import com.starrocks.planner.FetchNode;
 import com.starrocks.planner.FileScanNode;
 import com.starrocks.planner.FileTableScanNode;
 import com.starrocks.planner.FragmentNormalizer;
+import com.starrocks.planner.ExprJoinOnClause;
 import com.starrocks.planner.HashJoinNode;
 import com.starrocks.planner.HdfsScanNode;
 import com.starrocks.planner.HudiScanNode;
@@ -141,6 +142,7 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.common.UnsupportedException;
 import com.starrocks.sql.optimizer.JoinHelper;
+import com.starrocks.sql.optimizer.JoinOnClause;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.UKFKConstraintsCollector;
@@ -1034,7 +1036,7 @@ public class PlanFragmentBuilder {
 
             tupleDescriptor.computeMemLayout();
 
-            // set unused output columns 
+            // set unused output columns
             setUnUsedOutputColumns(node, scanNode, predicates, referenceTable);
 
             // set isPreAggregation
@@ -2987,6 +2989,12 @@ public class PlanFragmentBuilder {
                     }
                 }
                 joinNode.setCommonSlotMap(commonSlotMap);
+
+                // Set join on clauses for hash join with OR in ON clause
+                if (joinExpr.joinOnClauses != null && joinExpr.joinOnClauses.size() > 1) {
+                    ((HashJoinNode) joinNode).setJoinOnClauses(joinExpr.joinOnClauses);
+                }
+
                 // set skew join, this is used by runtime filter
                 PhysicalHashJoinOperator physicalHashJoinOperator = (PhysicalHashJoinOperator) node;
                 boolean isSkewJoin = physicalHashJoinOperator.getSkewColumn() != null;
@@ -3756,14 +3764,18 @@ public class PlanFragmentBuilder {
             public final List<Expr> conjuncts;
             public final Expr asofJoinConjunct;
             public final Map<SlotId, Expr> commonSubOperatorMap;
+            // Multiple disjuncts (OR branches) for hash join with OR in ON clause
+            public final List<ExprJoinOnClause> joinOnClauses;
 
             public JoinExprInfo(List<Expr> eqJoinConjuncts, List<Expr> otherJoin, List<Expr> conjuncts,
-                                Expr asofJoinConjunct, Map<SlotId, Expr> commonSubOperatorMap) {
+                                Expr asofJoinConjunct, Map<SlotId, Expr> commonSubOperatorMap,
+                                List<ExprJoinOnClause> joinOnClauses) {
                 this.eqJoinConjuncts = eqJoinConjuncts;
                 this.otherJoin = otherJoin;
                 this.conjuncts = conjuncts;
                 this.asofJoinConjunct = asofJoinConjunct;
                 this.commonSubOperatorMap = commonSubOperatorMap;
+                this.joinOnClauses = joinOnClauses;
             }
 
         }
@@ -3808,10 +3820,17 @@ public class PlanFragmentBuilder {
             ColumnRefSet leftChildColumns = optExpr.inputAt(0).getOutputColumns();
             ColumnRefSet rightChildColumns = optExpr.inputAt(1).getOutputColumns();
 
+            // Detect disjunctive join (top-level OR in ON predicate) early.
+            // If present, we will serialize join_on_clauses for BE disjunctive hash join, and we must NOT
+            // keep the OR predicate in otherJoinConjuncts (otherwise it would be evaluated as a global ON predicate).
+            List<JoinOnClause> optimizerClauses = JoinHelper.extractJoinOnClauses(
+                    leftChildColumns, rightChildColumns, onPredicate);
+            boolean isDisjunctiveJoin = optimizerClauses != null && optimizerClauses.size() > 1;
+
             List<BinaryPredicateOperator> eqOnPredicates = JoinHelper.getEqualsPredicate(
                     leftChildColumns, rightChildColumns, onPredicates);
             eqOnPredicates = eqOnPredicates.stream().filter(p -> !p.isCorrelated()).toList();
-            Preconditions.checkState(!eqOnPredicates.isEmpty(), "must be eq-join");
+            Preconditions.checkState(isDisjunctiveJoin || !eqOnPredicates.isEmpty(), "must be eq-join");
 
             for (BinaryPredicateOperator s : eqOnPredicates) {
                 if (!optExpr.inputAt(0).getLogicalProperty().getOutputColumns()
@@ -3833,6 +3852,10 @@ public class PlanFragmentBuilder {
 
             List<ScalarOperator> otherJoin = Utils.extractConjuncts(onPredicate);
             otherJoin.removeAll(eqOnPredicates);
+            if (isDisjunctiveJoin) {
+                // The OR predicate is represented by join_on_clauses; do not keep it as a global other join conjunct.
+                otherJoin = Lists.newArrayList();
+            }
 
             Expr asofJoinConjunct = null;
             if (joinType.isAsofJoin()) {
@@ -3865,7 +3888,40 @@ public class PlanFragmentBuilder {
                             new ScalarOperatorToExpr.FormatterContext(context.getColRefToExpr())))
                     .collect(Collectors.toList());
 
-            return new JoinExprInfo(eqJoinConjuncts, otherJoinConjuncts, conjuncts, asofJoinConjunct, commonSubExprMap);
+            // Extract join on clauses for hash join with OR in ON clause
+            List<ExprJoinOnClause> joinOnClauses = null;
+            if (optimizerClauses != null && optimizerClauses.size() > 1) {
+                joinOnClauses = new ArrayList<>();
+                ScalarOperatorToExpr.FormatterContext formatterContext =
+                        new ScalarOperatorToExpr.FormatterContext(context.getColRefToExpr());
+                for (JoinOnClause clause : optimizerClauses) {
+                    // Convert equality predicates to BinaryPredicate
+                    List<BinaryPredicate> eqPreds = clause.getEqJoinConjuncts().stream()
+                            .map(op -> (BinaryPredicate) ScalarOperatorToExpr.buildExecExpression(op, formatterContext))
+                            .collect(Collectors.toList());
+                    // Convert other conjuncts to Expr
+                    List<Expr> otherPreds = clause.getOtherConjuncts().stream()
+                            .map(op -> ScalarOperatorToExpr.buildExecExpression(op, formatterContext))
+                            .collect(Collectors.toList());
+                    joinOnClauses.add(new ExprJoinOnClause(eqPreds, otherPreds));
+                }
+
+                // Allow runtime filters only when all disjuncts share the same probe key.
+                // In that case, we synthesize a single eqJoinConjunct for RF generation; BE will build the RF
+                // from the union of build key columns across all disjunct hash tables.
+                if (optimizerClauses.stream().allMatch(c -> c.getEqJoinConjuncts().size() == 1) &&
+                        optimizerClauses.stream().map(c -> c.getLeftKeyColumnIds().get(0)).distinct().count() == 1 &&
+                        optimizerClauses.stream().map(c -> c.getEqJoinConjuncts().get(0).getBinaryType()).distinct().count() == 1) {
+                    BinaryPredicateOperator rfEq = optimizerClauses.get(0).getEqJoinConjuncts().get(0);
+                    Expr rfExpr = ScalarOperatorToExpr.buildExecExpression(rfEq, formatterContext);
+                    if (!rfExpr.isConstant()) {
+                        eqJoinConjuncts = Lists.newArrayList(rfExpr);
+                    }
+                }
+            }
+
+            return new JoinExprInfo(eqJoinConjuncts, otherJoinConjuncts, conjuncts, asofJoinConjunct,
+                    commonSubExprMap, joinOnClauses);
         }
 
         // TODO(murphy) consider state distribution
