@@ -17,6 +17,7 @@ package com.starrocks.warehouse.cngroup;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.hash.Hashing;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
@@ -30,6 +31,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -51,6 +53,7 @@ import java.util.stream.Collectors;
  */
 public class CnGroupMgr implements Writable {
     private static final Logger LOG = LogManager.getLogger(CnGroupMgr.class);
+    private static final String IMPLICIT_GROUP_ID_SEED = "cngroup:";
 
     // Group ID -> CnGroup
     private final Map<Long, CnGroup> idToGroup = Maps.newConcurrentMap();
@@ -60,10 +63,6 @@ public class CnGroupMgr implements Writable {
     private final Map<Long, String> nodeToGroup = Maps.newConcurrentMap();
 
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
-
-    // Local ID counter for group creation during replay (to avoid EditLog access)
-    private final java.util.concurrent.atomic.AtomicLong localIdCounter =
-            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
 
     public CnGroupMgr() {
         // Initialize with default group
@@ -80,11 +79,16 @@ public class CnGroupMgr implements Writable {
     }
 
     /**
-     * Generate a local group ID without accessing EditLog.
-     * Used during replay when GlobalStateMgr.getNextId() cannot be called.
+     * Generate a deterministic implicit group ID (negative) without using EditLog/getNextId().
+     * This is used only when groups are discovered from node properties during replay/sync.
      */
-    private long generateLocalGroupId() {
-        return localIdCounter.getAndIncrement();
+    private long generateImplicitGroupId(String groupName) {
+        // Reserve negative IDs for implicit groups to avoid colliding with getNextId() (positive).
+        long h = Hashing.murmur3_128().hashString(IMPLICIT_GROUP_ID_SEED + groupName, StandardCharsets.UTF_8).asLong();
+        if (h == Long.MIN_VALUE) {
+            h = 0;
+        }
+        return -Math.abs(h);
     }
 
     /**
@@ -151,13 +155,15 @@ public class CnGroupMgr implements Writable {
                 }
                 throw new DdlException("CnGroup '" + name + "' does not exist");
             }
-            if (group.getNodeCount() > 0) {
+            int actualNodeCount = getActualNodeCount(name);
+            if (actualNodeCount > 0) {
                 throw new DdlException("Cannot drop CnGroup '" + name + "' with " +
-                        group.getNodeCount() + " nodes. Move nodes to another group first.");
+                        actualNodeCount + " nodes. Move nodes to another group first.");
             }
 
             idToGroup.remove(group.getId());
             nameToGroup.remove(name);
+            cleanupNodeToGroupMappings(name);
 
             // Log for persistence
             GlobalStateMgr.getCurrentState().getEditLog().logDropCnGroup(group);
@@ -179,6 +185,7 @@ public class CnGroupMgr implements Writable {
             for (Long nodeId : group.getNodeIds()) {
                 nodeToGroup.remove(nodeId);
             }
+            cleanupNodeToGroupMappings(group.getName());
             LOG.info("Replayed drop CnGroup: {}", group.getName());
         } finally {
             lock.writeLock().unlock();
@@ -206,11 +213,12 @@ public class CnGroupMgr implements Writable {
             // Get or create group
             CnGroup group = nameToGroup.get(groupName);
             if (group == null) {
-                // Auto-create group
+                // Auto-create group and persist it explicitly so that replay order is deterministic.
                 long id = GlobalStateMgr.getCurrentState().getNextId();
                 group = new CnGroup(id, groupName, "Auto-created group");
                 idToGroup.put(id, group);
                 nameToGroup.put(groupName, group);
+                GlobalStateMgr.getCurrentState().getEditLog().logCreateCnGroup(group);
                 LOG.info("Auto-created CnGroup: {}", groupName);
             }
 
@@ -222,7 +230,7 @@ public class CnGroupMgr implements Writable {
 
             // Log for persistence
             GlobalStateMgr.getCurrentState().getEditLog().logAddNodeToCnGroup(
-                    new CnGroupNodeOp(nodeId, groupName));
+                    new CnGroupNodeOp(nodeId, group.getId(), groupName));
             LOG.info("Added node {} to CnGroup: {}", nodeId, groupName);
         } finally {
             lock.writeLock().unlock();
@@ -244,10 +252,12 @@ public class CnGroupMgr implements Writable {
                 }
             }
 
-            // Get or create group (use local ID generation during replay to avoid EditLog access)
+            // Get or create group.
+            // Normally the group should have been replayed via OP_CREATE_CN_GROUP before OP_ADD_NODE_TO_CN_GROUP.
+            // For backward compatibility (older logs), we still allow implicit group creation here.
             CnGroup group = nameToGroup.get(op.getGroupName());
             if (group == null) {
-                long id = generateLocalGroupId();
+                long id = op.getGroupId() > 0 ? op.getGroupId() : generateImplicitGroupId(op.getGroupName());
                 group = new CnGroup(id, op.getGroupName(), "Auto-created group");
                 idToGroup.put(id, group);
                 nameToGroup.put(op.getGroupName(), group);
@@ -357,11 +367,11 @@ public class CnGroupMgr implements Writable {
         try {
             String groupName = CnGroup.getEffectiveName(cnGroupName);
 
-            // Get or create group (use local ID generation to avoid EditLog access during replay)
+            // Get or create group without EditLog/getNextId (this is called during replay).
             CnGroup group = nameToGroup.get(groupName);
             if (group == null) {
                 // Create the group if it doesn't exist
-                long id = generateLocalGroupId();
+                long id = generateImplicitGroupId(groupName);
                 group = new CnGroup(id, groupName, "Auto-created group");
                 idToGroup.put(id, group);
                 nameToGroup.put(groupName, group);
@@ -410,10 +420,10 @@ public class CnGroupMgr implements Writable {
     private void syncNode(ComputeNode node) {
         String groupName = CnGroup.getEffectiveName(node.getCnGroupName());
 
-        // Get or create group (use local ID generation to be safe for both leader and follower)
+        // Get or create group without EditLog/getNextId; keep deterministic ID for implicit groups.
         CnGroup group = nameToGroup.get(groupName);
         if (group == null) {
-            long id = generateLocalGroupId();
+            long id = generateImplicitGroupId(groupName);
             group = new CnGroup(id, groupName, "Auto-created during sync");
             idToGroup.put(id, group);
             nameToGroup.put(groupName, group);
@@ -430,6 +440,31 @@ public class CnGroupMgr implements Writable {
         if (node != null) {
             node.setCnGroupName(groupName);
         }
+    }
+
+    private void cleanupNodeToGroupMappings(String groupName) {
+        List<Long> toRemove = nodeToGroup.entrySet().stream()
+                .filter(e -> groupName.equals(e.getValue()))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+        toRemove.forEach(nodeToGroup::remove);
+    }
+
+    private int getActualNodeCount(String groupName) {
+        SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+        String effectiveGroup = CnGroup.getEffectiveName(groupName);
+        int count = 0;
+        for (ComputeNode node : systemInfo.getBackends()) {
+            if (effectiveGroup.equals(CnGroup.getEffectiveName(node.getCnGroupName()))) {
+                count++;
+            }
+        }
+        for (ComputeNode node : systemInfo.getComputeNodes()) {
+            if (effectiveGroup.equals(CnGroup.getEffectiveName(node.getCnGroupName()))) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -625,6 +660,9 @@ public class CnGroupMgr implements Writable {
         @com.google.gson.annotations.SerializedName("nodeId")
         private long nodeId;
 
+        @com.google.gson.annotations.SerializedName("groupId")
+        private long groupId;
+
         @com.google.gson.annotations.SerializedName("groupName")
         private String groupName;
 
@@ -633,11 +671,22 @@ public class CnGroupMgr implements Writable {
 
         public CnGroupNodeOp(long nodeId, String groupName) {
             this.nodeId = nodeId;
+            this.groupId = 0;
+            this.groupName = groupName;
+        }
+
+        public CnGroupNodeOp(long nodeId, long groupId, String groupName) {
+            this.nodeId = nodeId;
+            this.groupId = groupId;
             this.groupName = groupName;
         }
 
         public long getNodeId() {
             return nodeId;
+        }
+
+        public long getGroupId() {
+            return groupId;
         }
 
         public String getGroupName() {

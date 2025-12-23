@@ -307,7 +307,7 @@ public class CnGroupEditLogTest {
 
     @Test
     public void testAutoCreateGroupOnReplay() throws Exception {
-        // Test that group is auto-created when replaying add node to non-existent group
+        // Test that group auto-creation is persisted via OP_CREATE_CN_GROUP before OP_ADD_NODE_TO_CN_GROUP.
         String groupName = "auto_created_" + System.nanoTime();
         long nodeId = 500L + System.nanoTime() % 10000;
 
@@ -318,17 +318,24 @@ public class CnGroupEditLogTest {
         // Add node to non-existent group (will auto-create)
         masterCnGroupMgr.addNodeToGroup(nodeId, groupName);
 
-        // Skip the auto-created group's create log (it's done internally)
-        // and replay the add node operation
+        // Replay create group first
+        CnGroup createdGroup = (CnGroup) UtFrameUtils.PseudoJournalReplayer
+                .replayNextJournal(OperationType.OP_CREATE_CN_GROUP);
+        followerCnGroupMgr.replayCreateGroup(createdGroup);
+
+        // Replay add node operation
         CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) UtFrameUtils.PseudoJournalReplayer
                 .replayNextJournal(OperationType.OP_ADD_NODE_TO_CN_GROUP);
 
-        // Follower should also auto-create the group during replay
         followerCnGroupMgr.replayAddNodeToGroup(op);
 
         Assertions.assertTrue(masterCnGroupMgr.groupExists(groupName));
         Assertions.assertTrue(followerCnGroupMgr.groupExists(groupName));
         Assertions.assertEquals(groupName, masterCnGroupMgr.getNodeGroup(nodeId));
         Assertions.assertEquals(groupName, followerCnGroupMgr.getNodeGroup(nodeId));
+
+        // Group ID should be stable across master/follower (auto-create is persisted).
+        Assertions.assertEquals(masterCnGroupMgr.getGroup(groupName).getId(),
+                followerCnGroupMgr.getGroup(groupName).getId());
     }
 }

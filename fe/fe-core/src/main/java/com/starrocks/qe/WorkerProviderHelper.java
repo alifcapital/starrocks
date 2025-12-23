@@ -21,7 +21,10 @@ import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class WorkerProviderHelper {
@@ -63,16 +66,29 @@ public class WorkerProviderHelper {
                         })
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
 
-        // Always log when filtering results in fewer nodes (helps debug CNGroup issues)
-        if (filtered.size() < nodes.size() || filtered.isEmpty()) {
-            LOG.warn("filterByCnGroup: requested='{}', effective='{}', input={} nodes, output={} nodes. " +
-                            "Input node groups: {}",
-                    cnGroupName, effectiveGroupName, nodes.size(), filtered.size(),
-                    nodes.values().stream()
-                            .map(n -> n.getId() + ":" + n.getCnGroupName())
-                            .collect(java.util.stream.Collectors.joining(", ")));
+        if (nodes.isEmpty()) {
+            return filtered;
+        }
+
+        if (filtered.isEmpty()) {
+            // Error-level signal: requested group has no nodes (will likely fail scheduling).
+            LOG.warn("filterByCnGroup: requested='{}', effective='{}', input={} nodes, output=0. Input groups: {}",
+                    cnGroupName, effectiveGroupName, nodes.size(), groupCounts(nodes));
+        } else if (filtered.size() < nodes.size() && LOG.isDebugEnabled()) {
+            LOG.debug("filterByCnGroup: requested='{}', effective='{}', input={} nodes, output={} nodes. Input groups: {}",
+                    cnGroupName, effectiveGroupName, nodes.size(), filtered.size(), groupCounts(nodes));
         }
 
         return filtered;
+    }
+
+    private static <C extends ComputeNode> Map<String, Long> groupCounts(ImmutableMap<Long, C> nodes) {
+        if (nodes.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        // Keep it compact and stable (no node list), good for logs.
+        return nodes.values().stream()
+                .map(n -> CnGroup.getEffectiveName(n.getCnGroupName()))
+                .collect(Collectors.groupingBy(Function.identity(), HashMap::new, Collectors.counting()));
     }
 }

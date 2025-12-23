@@ -33,6 +33,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -113,6 +114,18 @@ public class CnGroupMgrTest {
                 systemInfoService.getIdToBackend();
                 result = ImmutableMap.of();
                 minTimes = 0;
+
+                systemInfoService.getBackends();
+                result = new ArrayList<>();
+                minTimes = 0;
+
+                systemInfoService.getComputeNodes();
+                result = new mockit.Delegate<Collection<ComputeNode>>() {
+                    Collection<ComputeNode> getComputeNodes() {
+                        return computeNodes.values();
+                    }
+                };
+                minTimes = 0;
             }
         };
     }
@@ -185,6 +198,34 @@ public class CnGroupMgrTest {
         Assertions.assertThrows(DdlException.class, () -> {
             cnGroupMgr.dropGroup("etl", false);
         });
+    }
+
+    @Test
+    public void testDropGroupUsesActualNodeProperties() throws DdlException {
+        cnGroupMgr.createGroup("etl", "");
+
+        // Node claims to be in "etl" but manager internal state is not updated via addNodeToGroup
+        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        cn.setCnGroupName("etl");
+        computeNodes.put(100L, cn);
+
+        Assertions.assertThrows(DdlException.class, () -> cnGroupMgr.dropGroup("etl", false));
+    }
+
+    @Test
+    public void testDropGroupIgnoresStaleInternalMappings() throws DdlException {
+        cnGroupMgr.createGroup("etl", "");
+
+        ComputeNode cn = new ComputeNode(100L, "host1", 9050);
+        computeNodes.put(100L, cn);
+        cnGroupMgr.addNodeToGroup(100L, "etl");
+
+        // Simulate an external correction: node is no longer in "etl"
+        cn.setCnGroupName("default");
+
+        // Should be allowed because actual node properties show no nodes in "etl"
+        cnGroupMgr.dropGroup("etl", false);
+        Assertions.assertFalse(cnGroupMgr.groupExists("etl"));
     }
 
     @Test
@@ -467,7 +508,7 @@ public class CnGroupMgrTest {
 
     @Test
     public void testCnGroupNodeOpSerialization() throws Exception {
-        CnGroupMgr.CnGroupNodeOp op = new CnGroupMgr.CnGroupNodeOp(100L, "etl");
+        CnGroupMgr.CnGroupNodeOp op = new CnGroupMgr.CnGroupNodeOp(100L, 123L, "etl");
 
         // Serialize
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -480,6 +521,7 @@ public class CnGroupMgrTest {
         CnGroupMgr.CnGroupNodeOp restored = CnGroupMgr.CnGroupNodeOp.read(dis);
 
         Assertions.assertEquals(100L, restored.getNodeId());
+        Assertions.assertEquals(123L, restored.getGroupId());
         Assertions.assertEquals("etl", restored.getGroupName());
     }
 }
