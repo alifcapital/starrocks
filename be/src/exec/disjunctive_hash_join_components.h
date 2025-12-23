@@ -15,6 +15,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "column/vectorized_fwd.h"
@@ -78,9 +79,20 @@ public:
 
     const DisjunctiveJoinClauses* get_disjunctive_clauses() const override { return _clauses; }
 
-    size_t num_hash_tables() const { return _hash_tables.size(); }
+    // Number of logical clauses (OR branches). This is the loop bound for the prober.
+    size_t num_hash_tables() const { return _clauses->num_clauses(); }
 
-    JoinHashTable& hash_table(size_t index) { return _hash_tables[index]; }
+    size_t num_unique_hash_tables() const { return _unique_hash_tables.size(); }
+
+    // Hash table used by a given clause. Multiple clauses may map to the same HT.
+    JoinHashTable& hash_table(size_t clause_idx) { return _unique_hash_tables[_clause_to_ht[clause_idx]]; }
+    const JoinHashTable& hash_table(size_t clause_idx) const { return _unique_hash_tables[_clause_to_ht[clause_idx]]; }
+
+    JoinHashTable& unique_hash_table(size_t ht_idx) { return _unique_hash_tables[ht_idx]; }
+    const JoinHashTable& unique_hash_table(size_t ht_idx) const { return _unique_hash_tables[ht_idx]; }
+
+    JoinHashTable& primary_hash_table() { return _unique_hash_tables[0]; }
+    const JoinHashTable& primary_hash_table() const { return _unique_hash_tables[0]; }
 
     const DisjunctiveJoinClauses& clauses() const { return *_clauses; }
 
@@ -89,9 +101,18 @@ private:
 
     // Stored as pointer to allow proper clone semantics
     const DisjunctiveJoinClauses* _clauses;
-    std::vector<JoinHashTable> _hash_tables;
-    // Per-clause key columns cache
-    std::vector<Columns> _key_columns_per_clause;
+
+    // One hash table per unique build-key signature.
+    std::vector<JoinHashTable> _unique_hash_tables;
+
+    // clause_idx -> ht_idx mapping (size = num_clauses)
+    std::vector<uint32_t> _clause_to_ht;
+
+    // ht_idx -> representative clause index for build-key evaluation / param init
+    std::vector<uint32_t> _ht_rep_clause_idx;
+
+    // Per-HT key columns cache (evaluated on build input chunks)
+    std::vector<Columns> _key_columns_per_ht;
 };
 
 /**

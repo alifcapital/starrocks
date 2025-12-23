@@ -25,6 +25,40 @@
 
 namespace starrocks {
 
+namespace {
+
+struct BuildKeySigKey {
+    std::string expr_fp;
+    std::string type_fp;
+    bool is_null_safe = false;
+
+    bool operator==(const BuildKeySigKey& rhs) const {
+        return expr_fp == rhs.expr_fp && type_fp == rhs.type_fp && is_null_safe == rhs.is_null_safe;
+    }
+};
+
+struct BuildKeySig {
+    std::vector<BuildKeySigKey> keys;
+
+    bool operator==(const BuildKeySig& rhs) const { return keys == rhs.keys; }
+};
+
+struct BuildKeySigHash {
+    size_t operator()(const BuildKeySig& s) const {
+        size_t h = 0;
+        auto mix = [&](size_t x) { h ^= x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+        mix(s.keys.size());
+        for (const auto& k : s.keys) {
+            mix(std::hash<std::string>{}(k.expr_fp));
+            mix(std::hash<std::string>{}(k.type_fp));
+            mix(std::hash<bool>{}(k.is_null_safe));
+        }
+        return h;
+    }
+};
+
+} // namespace
+
 // ============================================================================
 // DisjunctiveHashJoinBuilder
 // ============================================================================
@@ -36,19 +70,60 @@ DisjunctiveHashJoinBuilder::DisjunctiveHashJoinBuilder(HashJoiner& hash_joiner, 
 
 void DisjunctiveHashJoinBuilder::create(const HashTableParam& param) {
     size_t num_clauses = _clauses->num_clauses();
-    _hash_tables.resize(num_clauses);
-    _key_columns_per_clause.resize(num_clauses);
+    DCHECK_GE(num_clauses, 2);
 
-    // Create a hash table for each disjunct clause
-    // Each hash table has different join keys based on the clause
-    for (size_t i = 0; i < num_clauses; ++i) {
-        const auto& clause = _clauses->clause(i);
+    _unique_hash_tables.clear();
+    _clause_to_ht.clear();
+    _ht_rep_clause_idx.clear();
+    _key_columns_per_ht.clear();
 
-        // Create a modified HashTableParam for this clause
+    // Group clauses by identical build key signature to avoid building duplicate hash maps.
+    // This is common for patterns like:
+    //   t.user_id = ah.user_id OR t.user2_id = ah.user_id
+    // where build side key (ah.user_id) is identical across disjuncts.
+    phmap::flat_hash_map<BuildKeySig, uint32_t, BuildKeySigHash> sig_to_ht;
+    std::vector<bool> ht_has_other_conjuncts;
+
+    _clause_to_ht.resize(num_clauses);
+    for (size_t clause_idx = 0; clause_idx < num_clauses; ++clause_idx) {
+        const auto& clause = _clauses->clause(clause_idx);
+
+        BuildKeySig sig;
+        sig.keys.reserve(clause.build_expr_ctxs.size());
+        for (size_t k = 0; k < clause.build_expr_ctxs.size(); ++k) {
+            const Expr* expr = clause.build_expr_ctxs[k]->root();
+            BuildKeySigKey key;
+            key.expr_fp = expr->debug_string();
+            key.type_fp = expr->type().debug_string();
+            key.is_null_safe = clause.is_null_safes[k];
+            sig.keys.emplace_back(std::move(key));
+        }
+
+        auto it = sig_to_ht.find(sig);
+        if (it == sig_to_ht.end()) {
+            uint32_t ht_idx = _unique_hash_tables.size();
+            sig_to_ht.emplace(std::move(sig), ht_idx);
+            _unique_hash_tables.emplace_back();
+            _ht_rep_clause_idx.emplace_back(static_cast<uint32_t>(clause_idx));
+            ht_has_other_conjuncts.emplace_back(clause.has_other_conjuncts());
+            _clause_to_ht[clause_idx] = ht_idx;
+        } else {
+            uint32_t ht_idx = it->second;
+            _clause_to_ht[clause_idx] = ht_idx;
+            ht_has_other_conjuncts[ht_idx] = ht_has_other_conjuncts[ht_idx] || clause.has_other_conjuncts();
+        }
+    }
+
+    _key_columns_per_ht.resize(_unique_hash_tables.size());
+
+    // Create one hash table per unique build-key signature.
+    for (size_t ht_idx = 0; ht_idx < _unique_hash_tables.size(); ++ht_idx) {
+        const uint32_t rep_clause_idx = _ht_rep_clause_idx[ht_idx];
+        const auto& clause = _clauses->clause(rep_clause_idx);
+
         HashTableParam clause_param = param;
-
-        // Override join_keys with this clause's keys
         clause_param.join_keys.clear();
+        clause_param.join_keys.reserve(clause.build_expr_ctxs.size());
         for (size_t j = 0; j < clause.build_expr_ctxs.size(); ++j) {
             JoinKeyDesc key_desc;
             key_desc.type = &clause.build_expr_ctxs[j]->root()->type();
@@ -57,19 +132,19 @@ void DisjunctiveHashJoinBuilder::create(const HashTableParam& param) {
             clause_param.join_keys.push_back(key_desc);
         }
 
-        // If this clause has other_conjuncts, mark it
-        clause_param.with_other_conjunct = clause.has_other_conjuncts() || param.with_other_conjunct;
-
-        _hash_tables[i].create(clause_param);
+        clause_param.with_other_conjunct = param.with_other_conjunct || ht_has_other_conjuncts[ht_idx];
+        _unique_hash_tables[ht_idx].create(clause_param);
     }
 }
 
 void DisjunctiveHashJoinBuilder::close() {
-    for (auto& ht : _hash_tables) {
+    for (auto& ht : _unique_hash_tables) {
         ht.close();
     }
-    _hash_tables.clear();
-    _key_columns_per_clause.clear();
+    _unique_hash_tables.clear();
+    _clause_to_ht.clear();
+    _ht_rep_clause_idx.clear();
+    _key_columns_per_ht.clear();
 }
 
 void DisjunctiveHashJoinBuilder::reset(const HashTableParam& param) {
@@ -100,7 +175,8 @@ Status DisjunctiveHashJoinBuilder::_prepare_build_key_columns(size_t clause_idx,
 }
 
 Status DisjunctiveHashJoinBuilder::do_append_chunk(RuntimeState* state, const ChunkPtr& chunk) {
-    if (UNLIKELY(_hash_tables[0].get_row_count() + chunk->num_rows() >= max_hash_table_element_size)) {
+    DCHECK(!_unique_hash_tables.empty());
+    if (UNLIKELY(_unique_hash_tables[0].get_row_count() + chunk->num_rows() >= max_hash_table_element_size)) {
         return Status::NotSupported(strings::Substitute("row count of right table in hash join > $0", UINT32_MAX));
     }
 
@@ -109,13 +185,15 @@ Status DisjunctiveHashJoinBuilder::do_append_chunk(RuntimeState* state, const Ch
     // This reduces memory from O(N * build_data) to O(build_data + N * key_data).
 
     // First hash table: append build chunk + key columns
-    RETURN_IF_ERROR(_prepare_build_key_columns(0, &_key_columns_per_clause[0], chunk));
-    TRY_CATCH_BAD_ALLOC(_hash_tables[0].append_chunk(chunk, _key_columns_per_clause[0]));
+    const uint32_t primary_clause_idx = _ht_rep_clause_idx[0];
+    RETURN_IF_ERROR(_prepare_build_key_columns(primary_clause_idx, &_key_columns_per_ht[0], chunk));
+    TRY_CATCH_BAD_ALLOC(_unique_hash_tables[0].append_chunk(chunk, _key_columns_per_ht[0]));
 
-    // Secondary hash tables: only append key columns (no build chunk duplication)
-    for (size_t i = 1; i < _hash_tables.size(); ++i) {
-        RETURN_IF_ERROR(_prepare_build_key_columns(i, &_key_columns_per_clause[i], chunk));
-        TRY_CATCH_BAD_ALLOC(_hash_tables[i].append_keys_only(_key_columns_per_clause[i], chunk->num_rows()));
+    // Secondary unique hash tables: only append key columns (no build chunk duplication)
+    for (size_t ht_idx = 1; ht_idx < _unique_hash_tables.size(); ++ht_idx) {
+        const uint32_t rep_clause_idx = _ht_rep_clause_idx[ht_idx];
+        RETURN_IF_ERROR(_prepare_build_key_columns(rep_clause_idx, &_key_columns_per_ht[ht_idx], chunk));
+        TRY_CATCH_BAD_ALLOC(_unique_hash_tables[ht_idx].append_keys_only(_key_columns_per_ht[ht_idx], chunk->num_rows()));
     }
 
     return Status::OK();
@@ -125,15 +203,15 @@ Status DisjunctiveHashJoinBuilder::build(RuntimeState* state) {
     SCOPED_TIMER(_hash_joiner.build_metrics().build_ht_timer);
 
     // Build all hash tables
-    for (auto& ht : _hash_tables) {
+    for (auto& ht : _unique_hash_tables) {
         TRY_CATCH_BAD_ALLOC(RETURN_IF_ERROR(ht.build(state)));
     }
 
     // OPTIMIZATION: Share build chunk from first hash table to secondary ones.
     // This allows secondary hash tables to output build columns during probe
     // while avoiding N-fold memory duplication during append phase.
-    for (size_t i = 1; i < _hash_tables.size(); ++i) {
-        _hash_tables[i].share_build_chunk_from(_hash_tables[0]);
+    for (size_t i = 1; i < _unique_hash_tables.size(); ++i) {
+        _unique_hash_tables[i].share_build_chunk_from(_unique_hash_tables[0]);
     }
 
     _ready = true;
@@ -143,7 +221,7 @@ Status DisjunctiveHashJoinBuilder::build(RuntimeState* state) {
 bool DisjunctiveHashJoinBuilder::anti_join_key_column_has_null() const {
     // For disjunctive join, check all hash tables and all their key columns
     // ANTI join needs to check if any key column in any disjunct has NULL
-    for (const auto& ht : _hash_tables) {
+    for (const auto& ht : _unique_hash_tables) {
         const auto& key_columns = ht.get_key_columns();
         for (const auto& column : key_columns) {
             if (column->is_nullable()) {
@@ -158,21 +236,21 @@ bool DisjunctiveHashJoinBuilder::anti_join_key_column_has_null() const {
 }
 
 int64_t DisjunctiveHashJoinBuilder::ht_mem_usage() const {
-    if (_hash_tables.empty()) {
+    if (_unique_hash_tables.empty()) {
         return 0;
     }
 
     // First hash table has the actual build chunk data
-    int64_t total = _hash_tables[0].mem_usage();
+    int64_t total = _unique_hash_tables[0].mem_usage();
 
     // Secondary hash tables share build chunk with first, so only count their
     // hash map overhead (first, next, key_columns, etc.), not build_chunk.
     // We approximate this by subtracting the shared build_chunk memory.
-    for (size_t i = 1; i < _hash_tables.size(); ++i) {
-        int64_t ht_usage = _hash_tables[i].mem_usage();
+    for (size_t i = 1; i < _unique_hash_tables.size(); ++i) {
+        int64_t ht_usage = _unique_hash_tables[i].mem_usage();
         // After share_build_chunk_from, secondary HTs point to same build_chunk,
         // so mem_usage() double-counts it. Subtract to avoid over-counting.
-        const auto& build_chunk = _hash_tables[i].get_build_chunk();
+        const auto& build_chunk = _unique_hash_tables[i].get_build_chunk();
         if (build_chunk != nullptr) {
             ht_usage -= build_chunk->memory_usage();
         }
@@ -182,11 +260,11 @@ int64_t DisjunctiveHashJoinBuilder::ht_mem_usage() const {
 }
 
 size_t DisjunctiveHashJoinBuilder::get_output_probe_column_count() const {
-    return _hash_tables[0].get_output_probe_column_count();
+    return _unique_hash_tables[0].get_output_probe_column_count();
 }
 
 size_t DisjunctiveHashJoinBuilder::get_output_build_column_count() const {
-    return _hash_tables[0].get_output_build_column_count();
+    return _unique_hash_tables[0].get_output_build_column_count();
 }
 
 void DisjunctiveHashJoinBuilder::get_build_info(size_t* bucket_size, float* avg_keys_per_bucket,
@@ -194,29 +272,28 @@ void DisjunctiveHashJoinBuilder::get_build_info(size_t* bucket_size, float* avg_
     size_t total_bucket_size = 0;
     float total_keys_per_bucket = 0;
 
-    for (const auto& ht : _hash_tables) {
+    for (const auto& ht : _unique_hash_tables) {
         total_bucket_size += ht.get_bucket_size();
         total_keys_per_bucket += ht.get_keys_per_bucket();
     }
 
     *bucket_size = total_bucket_size;
-    *avg_keys_per_bucket = total_keys_per_bucket / _hash_tables.size();
-    *hash_map_type = "DisjunctiveHashMap[" + std::to_string(_hash_tables.size()) + "]";
+    *avg_keys_per_bucket = total_keys_per_bucket / _unique_hash_tables.size();
+    *hash_map_type = "DisjunctiveHashMap[clauses=" + std::to_string(_clauses->num_clauses()) +
+                     ", unique_ht=" + std::to_string(_unique_hash_tables.size()) + "]";
 }
 
 void DisjunctiveHashJoinBuilder::visitHt(const std::function<void(JoinHashTable*)>& visitor) {
-    for (auto& ht : _hash_tables) {
+    for (auto& ht : _unique_hash_tables) {
         visitor(&ht);
     }
 }
 
 void DisjunctiveHashJoinBuilder::visitHtForSpill(const std::function<void(JoinHashTable*)>& visitor) {
-    // For disjunctive join, all hash tables store the same build chunk data (rows).
-    // They differ only in the key columns (computed by different expressions per clause).
-    // Therefore, we only need to spill data from the first hash table to avoid
-    // writing duplicate data N times.
-    if (!_hash_tables.empty()) {
-        visitor(&_hash_tables[0]);
+    // For disjunctive join, all unique hash tables share the same build chunk data (rows).
+    // They differ only in the key columns used for hashing. Spill only once to avoid duplicates.
+    if (!_unique_hash_tables.empty()) {
+        visitor(&_unique_hash_tables[0]);
     }
 }
 
@@ -230,14 +307,17 @@ void DisjunctiveHashJoinBuilder::clone_readable(HashJoinBuilder* builder) {
     // Copy the clauses pointer - all clones share the same clauses
     other->_clauses = _clauses;
 
-    // Clone hash tables
-    other->_hash_tables.clear();
-    for (auto& ht : _hash_tables) {
-        other->_hash_tables.push_back(ht.clone_readable_table());
+    other->_unique_hash_tables.clear();
+    other->_unique_hash_tables.reserve(_unique_hash_tables.size());
+    for (auto& ht : _unique_hash_tables) {
+        other->_unique_hash_tables.push_back(ht.clone_readable_table());
     }
 
-    // Clone key columns cache structure (will be populated during probe)
-    other->_key_columns_per_clause.resize(_key_columns_per_clause.size());
+    other->_clause_to_ht = _clause_to_ht;
+    other->_ht_rep_clause_idx = _ht_rep_clause_idx;
+
+    // Key columns cache structure (populated during build append, not needed in readable clone)
+    other->_key_columns_per_ht.resize(_key_columns_per_ht.size());
 
     other->_ready = _ready;
 }
@@ -247,7 +327,7 @@ ChunkPtr DisjunctiveHashJoinBuilder::convert_to_spill_schema(const ChunkPtr& chu
     // the same spill schema. The first hash table's schema is used.
     // When restoring, do_append_chunk() correctly inserts the data into all hash tables
     // with the appropriate key columns computed for each clause.
-    return _hash_tables[0].convert_to_spill_schema(chunk);
+    return _unique_hash_tables[0].convert_to_spill_schema(chunk);
 }
 
 // ============================================================================
@@ -553,7 +633,7 @@ StatusOr<ChunkPtr> DisjunctiveHashJoinProberImpl::probe_chunk(RuntimeState* stat
 
     size_t num_hash_tables = _builder->num_hash_tables();
     bool has_remain = false;
-    auto& first_ht = _builder->hash_table(0);
+    auto& first_ht = _builder->primary_hash_table();
     std::vector<uint32_t> result_probe_indices;
     std::vector<uint32_t> result_build_indices;
 
@@ -787,7 +867,7 @@ StatusOr<ChunkPtr> DisjunctiveHashJoinProberImpl::probe_remain(RuntimeState* sta
         return result_chunk;
     }
 
-    auto& ht = _builder->hash_table(0);
+    auto& ht = _builder->primary_hash_table();
     RETURN_IF_ERROR(ht.probe_remain(state, &result_chunk, &_remain_has_more));
 
     if (!_remain_has_more) {
@@ -818,8 +898,8 @@ void DisjunctiveHashJoinProberImpl::reset(RuntimeState* runtime_state) {
     _probe_expr_cache_by_ptr.clear();
     _probe_expr_cache_by_str.clear();
 
-    for (size_t i = 0; i < _builder->num_hash_tables(); ++i) {
-        _builder->hash_table(i).reset_probe_state(runtime_state);
+    for (size_t i = 0; i < _builder->num_unique_hash_tables(); ++i) {
+        _builder->unique_hash_table(i).reset_probe_state(runtime_state);
     }
 }
 
