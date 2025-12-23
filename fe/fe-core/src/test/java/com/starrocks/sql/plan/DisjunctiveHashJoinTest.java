@@ -30,7 +30,7 @@ import com.starrocks.thrift.TJoinOnClause;
 import com.starrocks.thrift.TPlan;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
-import com.starrocks.type.Type;
+import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -672,10 +672,10 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     @Test
     public void testJoinHelperExtractJoinOnClauses() {
         // Test JoinHelper.extractJoinOnClauses directly
-        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, Type.BIGINT, "v1", true);
-        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, Type.BIGINT, "v2", true);
-        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, Type.BIGINT, "v4", true);
-        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, Type.BIGINT, "v5", true);
+        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, IntegerType.BIGINT, "v1", true);
+        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, IntegerType.BIGINT, "v2", true);
+        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, IntegerType.BIGINT, "v4", true);
+        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, IntegerType.BIGINT, "v5", true);
 
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
@@ -712,10 +712,10 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     @Test
     public void testJoinHelperCanUseHashJoinWithOr() {
         // Test canUseHashJoinWithOr returns true for valid OR predicates
-        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, Type.BIGINT, "v1", true);
-        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, Type.BIGINT, "v4", true);
-        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, Type.BIGINT, "v2", true);
-        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, Type.BIGINT, "v5", true);
+        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, IntegerType.BIGINT, "v1", true);
+        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, IntegerType.BIGINT, "v4", true);
+        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, IntegerType.BIGINT, "v2", true);
+        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, IntegerType.BIGINT, "v5", true);
 
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
@@ -736,10 +736,10 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     @Test
     public void testJoinHelperCannotUseHashJoinWithOrForNonEquality() {
         // Test returns false when a disjunct has no equality predicate
-        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, Type.BIGINT, "v1", true);
-        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, Type.BIGINT, "v4", true);
-        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, Type.BIGINT, "v2", true);
-        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, Type.BIGINT, "v5", true);
+        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, IntegerType.BIGINT, "v1", true);
+        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, IntegerType.BIGINT, "v4", true);
+        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, IntegerType.BIGINT, "v2", true);
+        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, IntegerType.BIGINT, "v5", true);
 
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         // Use > instead of = for second predicate
@@ -761,15 +761,15 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     @Test
     public void testJoinHelperExtractClausesWithOtherConjuncts() {
         // Test extraction with other_conjuncts: (v1 = v4 AND v3 > 10) OR v2 = v5
-        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, Type.BIGINT, "v1", true);
-        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, Type.BIGINT, "v2", true);
-        ColumnRefOperator leftCol3 = new ColumnRefOperator(3, Type.BIGINT, "v3", true);
-        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, Type.BIGINT, "v4", true);
-        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, Type.BIGINT, "v5", true);
+        ColumnRefOperator leftCol1 = new ColumnRefOperator(1, IntegerType.BIGINT, "v1", true);
+        ColumnRefOperator leftCol2 = new ColumnRefOperator(2, IntegerType.BIGINT, "v2", true);
+        ColumnRefOperator leftCol3 = new ColumnRefOperator(3, IntegerType.BIGINT, "v3", true);
+        ColumnRefOperator rightCol1 = new ColumnRefOperator(4, IntegerType.BIGINT, "v4", true);
+        ColumnRefOperator rightCol2 = new ColumnRefOperator(5, IntegerType.BIGINT, "v5", true);
 
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         BinaryPredicateOperator gt = BinaryPredicateOperator.gt(leftCol3,
-                new com.starrocks.sql.optimizer.operator.scalar.ConstantOperator(10L, Type.BIGINT));
+                new com.starrocks.sql.optimizer.operator.scalar.ConstantOperator(10L, IntegerType.BIGINT));
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
 
         // (v1 = v4 AND v3 > 10)
@@ -807,8 +807,8 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     @Test
     public void testJoinHelperSingleDisjunctReturnsNull() {
         // Single predicate (no OR) should return null
-        ColumnRefOperator leftCol = new ColumnRefOperator(1, Type.BIGINT, "v1", true);
-        ColumnRefOperator rightCol = new ColumnRefOperator(4, Type.BIGINT, "v4", true);
+        ColumnRefOperator leftCol = new ColumnRefOperator(1, IntegerType.BIGINT, "v1", true);
+        ColumnRefOperator rightCol = new ColumnRefOperator(4, IntegerType.BIGINT, "v4", true);
 
         BinaryPredicateOperator eq = BinaryPredicateOperator.eq(leftCol, rightCol);
 
