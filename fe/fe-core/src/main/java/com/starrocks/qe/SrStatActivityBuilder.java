@@ -15,14 +15,10 @@
 package com.starrocks.qe;
 
 import com.google.common.collect.Lists;
-import com.starrocks.authorization.AccessDeniedException;
-import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.common.proc.CurrentQueryInfoProvider;
 import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.service.ExecuteEnv;
 import com.starrocks.service.FrontendOptions;
-import com.starrocks.sql.analyzer.Authorizer;
-import com.starrocks.thrift.TAuthInfo;
 import com.starrocks.thrift.TGetSrStatActivityItem;
 import com.starrocks.thrift.TGetSrStatActivityRequest;
 import org.apache.logging.log4j.LogManager;
@@ -42,19 +38,33 @@ public class SrStatActivityBuilder {
         List<TGetSrStatActivityItem> items = Lists.newArrayList();
 
         try {
-            // Get query statistics from BE via BRPC
-            Map<String, QueryStatisticsItem> queryStats = QeProcessorImpl.INSTANCE.getQueryStatistics();
-            CurrentQueryInfoProvider provider = new CurrentQueryInfoProvider();
-            Map<String, CurrentQueryInfoProvider.QueryStatistics> statisticsMap =
-                    provider.getQueryStatistics(queryStats.values());
-
-            // Get requesting user info for authorization
-            String requestingUser = getRequestingUser(request);
-            boolean hasOperatePrivilege = checkOperatePrivilege();
-
-            // Get all connections
+            ConnectContext currentContext = ConnectContext.get();
+            if (currentContext == null || currentContext.getCurrentUserIdentity() == null) {
+                return items;
+            }
             List<ConnectContext.ThreadInfo> connections = ExecuteEnv.getInstance().getScheduler()
-                    .listConnection(null, null);
+                    .listConnection(currentContext, null);
+
+            Map<String, QueryStatisticsItem> queryStats = QeProcessorImpl.INSTANCE.getQueryStatistics();
+            List<QueryStatisticsItem> visibleQueries = Lists.newArrayListWithCapacity(connections.size());
+            for (ConnectContext.ThreadInfo threadInfo : connections) {
+                ConnectContext ctx = threadInfo.getConnectContext();
+                if (ctx == null || ctx.getQueryId() == null) {
+                    continue;
+                }
+                QueryStatisticsItem queryItem = queryStats.get(ctx.getQueryId().toString());
+                if (queryItem != null) {
+                    visibleQueries.add(queryItem);
+                }
+            }
+
+            Map<String, CurrentQueryInfoProvider.QueryStatistics> statisticsMap;
+            if (visibleQueries.isEmpty()) {
+                statisticsMap = Map.of();
+            } else {
+                CurrentQueryInfoProvider provider = new CurrentQueryInfoProvider();
+                statisticsMap = provider.getQueryStatistics(visibleQueries);
+            }
 
             String feIp = FrontendOptions.getLocalHostAddress();
             long nowMs = System.currentTimeMillis();
@@ -62,14 +72,6 @@ public class SrStatActivityBuilder {
             for (ConnectContext.ThreadInfo threadInfo : connections) {
                 ConnectContext ctx = threadInfo.getConnectContext();
                 if (ctx == null) {
-                    continue;
-                }
-
-                // Authorization check: users can only see their own connections
-                // unless they have OPERATE privilege
-                String connectionUser = ctx.getQualifiedUser();
-                if (!hasOperatePrivilege && requestingUser != null &&
-                        !requestingUser.equals(connectionUser)) {
                     continue;
                 }
 
@@ -192,40 +194,5 @@ public class SrStatActivityBuilder {
 
     private static String nullToEmpty(String s) {
         return s != null ? s : "";
-    }
-
-    /**
-     * Extract the requesting user from the request's auth_info.
-     */
-    private static String getRequestingUser(TGetSrStatActivityRequest request) {
-        if (request == null || !request.isSetAuth_info()) {
-            return null;
-        }
-        TAuthInfo authInfo = request.getAuth_info();
-        if (authInfo.isSetCurrent_user_ident()) {
-            return authInfo.getCurrent_user_ident().getUsername();
-        }
-        // Fallback to deprecated user field
-        if (authInfo.isSetUser()) {
-            return authInfo.getUser();
-        }
-        return null;
-    }
-
-    /**
-     * Check if the current context (if any) has OPERATE privilege.
-     * This allows admins to see all connections.
-     */
-    private static boolean checkOperatePrivilege() {
-        ConnectContext currentContext = ConnectContext.get();
-        if (currentContext == null) {
-            return false;
-        }
-        try {
-            Authorizer.checkSystemAction(currentContext, PrivilegeType.OPERATE);
-            return true;
-        } catch (AccessDeniedException e) {
-            return false;
-        }
     }
 }

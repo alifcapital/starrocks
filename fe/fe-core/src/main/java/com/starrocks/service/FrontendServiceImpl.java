@@ -3145,12 +3145,24 @@ public class FrontendServiceImpl implements FrontendService.Iface {
     @Override
     public TGetSrStatActivityResponse getSrStatActivity(TGetSrStatActivityRequest request) throws TException {
         TGetSrStatActivityResponse response = new TGetSrStatActivityResponse();
+        ConnectContext context = new ConnectContext();
+        if (request != null && request.isSetAuth_info()) {
+            UserIdentityUtils.setAuthInfoFromThrift(context, request.getAuth_info());
+        }
+        ConnectContext prev = ConnectContext.get();
+        ConnectContext.set(context);
         try {
             List<TGetSrStatActivityItem> items = SrStatActivityBuilder.build(request);
             response.setItems(items);
         } catch (Exception e) {
             LOG.warn("getSrStatActivity failed", e);
             response.setItems(Lists.newArrayList());
+        } finally {
+            if (prev != null) {
+                ConnectContext.set(prev);
+            } else {
+                ConnectContext.remove();
+            }
         }
         return response;
     }

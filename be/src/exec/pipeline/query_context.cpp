@@ -14,6 +14,7 @@
 
 #include "exec/pipeline/query_context.h"
 
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -335,13 +336,29 @@ std::pair<int32_t, int32_t> QueryContext::count_operator_progress() {
 }
 
 int32_t QueryContext::get_result_sink_driver_state() {
+    if (!_is_final_sink) {
+        return static_cast<int32_t>(DriverState::NOT_READY);
+    }
     int32_t state = static_cast<int32_t>(DriverState::NOT_READY);
+    int32_t best_driver_sequence = std::numeric_limits<int32_t>::max();
     _fragment_mgr->for_each_fragment([&](FragmentContext* fragment_ctx) {
         fragment_ctx->iterate_drivers([&](const DriverPtr& driver) {
             // Check if sink operator is result_sink
             auto* sink_op = driver->sink_operator();
             if (sink_op != nullptr && sink_op->get_name() == "result_sink") {
-                state = static_cast<int32_t>(driver->driver_state());
+                int32_t driver_sequence = sink_op->get_driver_sequence();
+                if (driver_sequence == 0) {
+                    best_driver_sequence = 0;
+                    state = static_cast<int32_t>(driver->driver_state());
+                    return;
+                }
+                if (best_driver_sequence == 0) {
+                    return;
+                }
+                if (driver_sequence < best_driver_sequence) {
+                    best_driver_sequence = driver_sequence;
+                    state = static_cast<int32_t>(driver->driver_state());
+                }
             }
         });
     });

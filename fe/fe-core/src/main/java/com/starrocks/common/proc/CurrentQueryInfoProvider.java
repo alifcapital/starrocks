@@ -374,18 +374,27 @@ public class CurrentQueryInfoProvider {
         public String getResultSinkStateString() {
             // DriverState enum from be/src/exec/pipeline/pipeline_driver.h:
             // NOT_READY=0, READY=1, RUNNING=2, INPUT_EMPTY=3, OUTPUT_FULL=4,
-            // PRECONDITION_BLOCK=5, FINISH=6, CANCELED=7, INTERNAL_ERROR=8, PENDING_FINISH=9
+            // PRECONDITION_BLOCK=5, FINISH=6, CANCELED=7, INTERNAL_ERROR=8, PENDING_FINISH=9,
+            // EPOCH_PENDING_FINISH=10, EPOCH_FINISH=11, LOCAL_WAITING=12
             switch (resultSinkState) {
+                // Not started / not schedulable yet
                 case 0: return "not_ready";
                 case 1: return "ready";
+                // Actively executing (may be producing and sending results)
                 case 2: return "running";
-                case 3: return "input_empty";
-                case 4: return "output_full";
+                // Waiting conditions (not producing results right now)
+                case 3: return "waiting_input";
+                case 4: return "waiting_output";
                 case 5: return "blocked";
-                case 6: return "finish";
+                case 12: return "local_waiting";
+                // Finishing / finished
+                case 9: return "finishing";
+                case 10: return "epoch_finishing";
+                case 6: return "finished";
+                case 11: return "epoch_finished";
+                // Terminal states
                 case 7: return "canceled";
                 case 8: return "error";
-                case 9: return "pending_finish";
                 default: return "";
             }
         }
