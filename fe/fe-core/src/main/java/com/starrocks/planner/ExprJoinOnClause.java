@@ -16,6 +16,7 @@ package com.starrocks.planner;
 
 import com.starrocks.sql.ast.expression.BinaryPredicate;
 import com.starrocks.sql.ast.expression.Expr;
+import com.starrocks.sql.ast.expression.ExprToSql;
 
 import java.util.List;
 import java.util.Objects;
@@ -79,16 +80,20 @@ public class ExprJoinOnClause {
         sb.append("ExprJoinOnClause{eq=[");
         if (eqJoinConjuncts != null) {
             for (int i = 0; i < eqJoinConjuncts.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(eqJoinConjuncts.get(i).toSql());
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(ExprToSql.toSql(eqJoinConjuncts.get(i)));
             }
         }
         sb.append("]");
         if (otherConjuncts != null && !otherConjuncts.isEmpty()) {
             sb.append(", other=[");
             for (int i = 0; i < otherConjuncts.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(otherConjuncts.get(i).toSql());
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(ExprToSql.toSql(otherConjuncts.get(i)));
             }
             sb.append("]");
         }
