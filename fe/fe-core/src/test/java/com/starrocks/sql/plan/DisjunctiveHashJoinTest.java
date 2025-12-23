@@ -24,11 +24,13 @@ import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.thrift.THashJoinNode;
 import com.starrocks.thrift.TJoinOnClause;
 import com.starrocks.thrift.TPlan;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
+import com.starrocks.type.Type;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +39,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -678,7 +681,7 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
 
         // v1 = v4 OR v2 = v5
-        CompoundPredicateOperator orPredicate = CompoundPredicateOperator.or(eq1, eq2);
+        ScalarOperator orPredicate = CompoundPredicateOperator.or(eq1, eq2);
 
         ColumnRefSet leftColumns = new ColumnRefSet();
         leftColumns.union(1);
@@ -716,7 +719,7 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
 
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
-        CompoundPredicateOperator orPredicate = CompoundPredicateOperator.or(eq1, eq2);
+        ScalarOperator orPredicate = CompoundPredicateOperator.or(eq1, eq2);
 
         ColumnRefSet leftColumns = new ColumnRefSet();
         leftColumns.union(1);
@@ -741,7 +744,7 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         BinaryPredicateOperator eq1 = BinaryPredicateOperator.eq(leftCol1, rightCol1);
         // Use > instead of = for second predicate
         BinaryPredicateOperator gt2 = BinaryPredicateOperator.gt(leftCol2, rightCol2);
-        CompoundPredicateOperator orPredicate = CompoundPredicateOperator.or(eq1, gt2);
+        ScalarOperator orPredicate = CompoundPredicateOperator.or(eq1, gt2);
 
         ColumnRefSet leftColumns = new ColumnRefSet();
         leftColumns.union(1);
@@ -770,9 +773,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         BinaryPredicateOperator eq2 = BinaryPredicateOperator.eq(leftCol2, rightCol2);
 
         // (v1 = v4 AND v3 > 10)
-        CompoundPredicateOperator andPredicate = CompoundPredicateOperator.and(eq1, gt);
+        ScalarOperator andPredicate = CompoundPredicateOperator.and(eq1, gt);
         // (v1 = v4 AND v3 > 10) OR v2 = v5
-        CompoundPredicateOperator orPredicate = CompoundPredicateOperator.or(andPredicate, eq2);
+        ScalarOperator orPredicate = CompoundPredicateOperator.or(andPredicate, eq2);
 
         ColumnRefSet leftColumns = new ColumnRefSet();
         leftColumns.union(1);
