@@ -16,8 +16,10 @@ package com.starrocks.sql.optimizer.rule.implementation;
 
 import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.JoinOperator;
+import com.starrocks.sql.optimizer.JoinHelper;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -40,8 +42,28 @@ public class HashJoinImplementationRule extends JoinImplementationRule {
     @Override
     public boolean check(final OptExpression input, OptimizerContext context) {
         JoinOperator joinType = getJoinType(input);
+        if (joinType.isCrossJoin()) {
+            return false;
+        }
+
+        // Check for standard equality predicates (AND-conjuncts)
         List<BinaryPredicateOperator> eqPredicates = extractEqPredicate(input, context);
-        return !joinType.isCrossJoin() && CollectionUtils.isNotEmpty(eqPredicates);
+        if (CollectionUtils.isNotEmpty(eqPredicates)) {
+            return true;
+        }
+
+        // Check for disjunctive OR predicates: ON a = x OR b = y
+        // These can use hash join with multiple hash tables
+        LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
+        if (joinOperator.getOnPredicate() != null) {
+            ColumnRefSet leftColumns = input.inputAt(0).getLogicalProperty().getOutputColumns();
+            ColumnRefSet rightColumns = input.inputAt(1).getLogicalProperty().getOutputColumns();
+            if (JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, joinOperator.getOnPredicate())) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     @Override
