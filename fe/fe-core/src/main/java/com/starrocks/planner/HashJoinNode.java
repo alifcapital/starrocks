@@ -135,6 +135,8 @@ public class HashJoinNode extends JoinNode {
         msg.hash_join_node = new THashJoinNode();
         msg.hash_join_node.join_op = ExprToThrift.joinOperatorToThrift(joinOp);
         msg.hash_join_node.distribution_mode = distrMode.toThrift();
+        // Initialize eq_join_conjuncts to empty list (required field in Thrift)
+        msg.hash_join_node.setEq_join_conjuncts(new ArrayList<>());
         StringBuilder sqlJoinPredicatesBuilder = new StringBuilder();
         for (BinaryPredicate eqJoinPredicate : eqJoinConjuncts) {
             TEqJoinCondition eqJoinCondition = new TEqJoinCondition(
