@@ -3084,11 +3084,11 @@ public class PlanFragmentBuilder {
             Set<Integer> slotIds = new HashSet<>();
             for (ExprJoinOnClause clause : joinOnClauses) {
                 for (BinaryPredicate eq : clause.getEqJoinConjuncts()) {
-                    slotIds.addAll(ExprUtils.getUsedSlotIds(eq));
+                    ExprUtils.getUsedSlotIds(eq).forEach((int slotId) -> slotIds.add(slotId));
                 }
                 if (clause.hasOtherConjuncts()) {
                     for (Expr other : clause.getOtherConjuncts()) {
-                        slotIds.addAll(ExprUtils.getUsedSlotIds(other));
+                        ExprUtils.getUsedSlotIds(other).forEach((int slotId) -> slotIds.add(slotId));
                     }
                 }
             }
