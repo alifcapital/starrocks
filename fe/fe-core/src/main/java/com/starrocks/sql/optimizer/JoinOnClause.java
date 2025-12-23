@@ -91,8 +91,12 @@ public class JoinOnClause {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
         JoinOnClause that = (JoinOnClause) o;
         return Objects.equals(eqJoinConjuncts, that.eqJoinConjuncts) &&
                 Objects.equals(otherConjuncts, that.otherConjuncts);
@@ -108,14 +112,18 @@ public class JoinOnClause {
         StringBuilder sb = new StringBuilder();
         sb.append("JoinOnClause{eq=[");
         for (int i = 0; i < eqJoinConjuncts.size(); i++) {
-            if (i > 0) sb.append(", ");
+            if (i > 0) {
+                sb.append(", ");
+            }
             sb.append(eqJoinConjuncts.get(i));
         }
         sb.append("]");
         if (!otherConjuncts.isEmpty()) {
             sb.append(", other=[");
             for (int i = 0; i < otherConjuncts.size(); i++) {
-                if (i > 0) sb.append(", ");
+                if (i > 0) {
+                    sb.append(", ");
+                }
                 sb.append(otherConjuncts.get(i));
             }
             sb.append("]");

@@ -69,11 +69,11 @@ import com.starrocks.planner.ExceptNode;
 import com.starrocks.planner.ExchangeNode;
 import com.starrocks.planner.ExecGroup;
 import com.starrocks.planner.ExecGroupSets;
+import com.starrocks.planner.ExprJoinOnClause;
 import com.starrocks.planner.FetchNode;
 import com.starrocks.planner.FileScanNode;
 import com.starrocks.planner.FileTableScanNode;
 import com.starrocks.planner.FragmentNormalizer;
-import com.starrocks.planner.ExprJoinOnClause;
 import com.starrocks.planner.HashJoinNode;
 import com.starrocks.planner.HdfsScanNode;
 import com.starrocks.planner.HudiScanNode;
@@ -3909,9 +3909,12 @@ public class PlanFragmentBuilder {
                 // Allow runtime filters only when all disjuncts share the same probe key.
                 // In that case, we synthesize a single eqJoinConjunct for RF generation; BE will build the RF
                 // from the union of build key columns across all disjunct hash tables.
-                if (optimizerClauses.stream().allMatch(c -> c.getEqJoinConjuncts().size() == 1) &&
-                        optimizerClauses.stream().map(c -> c.getLeftKeyColumnIds().get(0)).distinct().count() == 1 &&
-                        optimizerClauses.stream().map(c -> c.getEqJoinConjuncts().get(0).getBinaryType()).distinct().count() == 1) {
+                boolean allSingleEq = optimizerClauses.stream().allMatch(c -> c.getEqJoinConjuncts().size() == 1);
+                boolean sameProbeKey = optimizerClauses.stream()
+                        .map(c -> c.getLeftKeyColumnIds().get(0)).distinct().count() == 1;
+                boolean sameBinaryType = optimizerClauses.stream()
+                        .map(c -> c.getEqJoinConjuncts().get(0).getBinaryType()).distinct().count() == 1;
+                if (allSingleEq && sameProbeKey && sameBinaryType) {
                     BinaryPredicateOperator rfEq = optimizerClauses.get(0).getEqJoinConjuncts().get(0);
                     Expr rfExpr = ScalarOperatorToExpr.buildExecExpression(rfEq, formatterContext);
                     if (!rfExpr.isConstant()) {

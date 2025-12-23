@@ -24,8 +24,6 @@ import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.catalog.Type;
 import com.starrocks.thrift.THashJoinNode;
 import com.starrocks.thrift.TJoinOnClause;
 import com.starrocks.thrift.TPlan;
@@ -34,10 +32,13 @@ import com.starrocks.thrift.TPlanNodeType;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Comprehensive tests for hash join with OR in ON clause (disjunctive hash join).
@@ -493,7 +494,8 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
     public void testDistributionModeNotColocate() throws Exception {
         // Even if tables could be colocated, disjunctive join must use BROADCAST
         FeConstants.runningUnitTest = true;
-        String sql = "SELECT * FROM colocate_t0 JOIN colocate_t1 ON colocate_t0.v1 = colocate_t1.v4 OR colocate_t0.v2 = colocate_t1.v5";
+        String sql = "SELECT * FROM colocate_t0 JOIN colocate_t1 " +
+                "ON colocate_t0.v1 = colocate_t1.v4 OR colocate_t0.v2 = colocate_t1.v5";
         String plan = getFragmentPlan(sql);
 
         assertContains(plan, "BROADCAST");
@@ -563,10 +565,12 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         // Test with exactly 16 disjuncts (should work)
         StringBuilder sql = new StringBuilder("SELECT * FROM t0 JOIN t1 ON ");
         for (int i = 0; i < 16; i++) {
-            if (i > 0) sql.append(" OR ");
+            if (i > 0) {
+                sql.append(" OR ");
+            }
             // Cycle through columns: v1, v2, v3 and v4, v5, v6
             int leftCol = (i % 3) + 1;
-            int rightCol = ((i + i/3) % 3) + 4;
+            int rightCol = ((i + i / 3) % 3) + 4;
             sql.append("t0.v").append(leftCol).append(" = t1.v").append(rightCol);
         }
         String plan = getFragmentPlan(sql.toString());
@@ -582,9 +586,11 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         // 3. Use SplitJoinORToUnionRule instead
         StringBuilder sql = new StringBuilder("SELECT * FROM t0 JOIN t1 ON ");
         for (int i = 0; i < 17; i++) {
-            if (i > 0) sql.append(" OR ");
+            if (i > 0) {
+                sql.append(" OR ");
+            }
             int leftCol = (i % 3) + 1;
-            int rightCol = ((i + i/3) % 3) + 4;
+            int rightCol = ((i + i / 3) % 3) + 4;
             sql.append("t0.v").append(leftCol).append(" = t1.v").append(rightCol);
         }
         try {
@@ -934,7 +940,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode, "HashJoinNode not found in plan");
 
@@ -980,7 +988,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1004,7 +1014,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1040,7 +1052,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1066,7 +1080,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1089,7 +1105,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1115,7 +1133,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1143,7 +1163,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1171,7 +1193,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
@@ -1198,7 +1222,9 @@ public class DisjunctiveHashJoinTest extends PlanTestBase {
         HashJoinNode hashJoinNode = null;
         for (PlanFragment fragment : execPlan.getFragments()) {
             hashJoinNode = findHashJoinNode(fragment.getPlanRoot());
-            if (hashJoinNode != null) break;
+            if (hashJoinNode != null) {
+                break;
+            }
         }
         assertNotNull(hashJoinNode);
 
