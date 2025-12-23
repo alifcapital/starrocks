@@ -54,12 +54,15 @@ public class HashJoinImplementationRule extends JoinImplementationRule {
 
         // Check for disjunctive OR predicates: ON a = x OR b = y
         // These can use hash join with multiple hash tables
-        LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
-        if (joinOperator.getOnPredicate() != null) {
-            ColumnRefSet leftColumns = input.inputAt(0).getLogicalProperty().getOutputColumns();
-            ColumnRefSet rightColumns = input.inputAt(1).getLogicalProperty().getOutputColumns();
-            if (JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, joinOperator.getOnPredicate())) {
-                return true;
+        // Note: ASOF joins have special semantics not yet supported with disjunctive OR
+        if (!joinType.isAsofJoin()) {
+            LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
+            if (joinOperator.getOnPredicate() != null) {
+                ColumnRefSet leftColumns = input.inputAt(0).getLogicalProperty().getOutputColumns();
+                ColumnRefSet rightColumns = input.inputAt(1).getLogicalProperty().getOutputColumns();
+                if (JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, joinOperator.getOnPredicate())) {
+                    return true;
+                }
             }
         }
 

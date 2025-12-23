@@ -455,8 +455,10 @@ public class CostModel {
                     rightColumns, Utils.extractConjuncts(join.getOnPredicate()));
 
             // Check for standard equality predicates or disjunctive OR predicates
+            // Note: ASOF joins have special semantics not yet supported with disjunctive OR
             boolean hasEqPredicates = !eqOnPredicates.isEmpty();
-            boolean hasDisjunctiveOr = join.getOnPredicate() != null &&
+            boolean hasDisjunctiveOr = !join.getJoinType().isAsofJoin() &&
+                    join.getOnPredicate() != null &&
                     JoinHelper.canUseHashJoinWithOr(leftColumns, rightColumns, join.getOnPredicate());
             Preconditions.checkState(!(join.getJoinType().isCrossJoin() || (!hasEqPredicates && !hasDisjunctiveOr)),
                     "should be handled by nestloopjoin");
