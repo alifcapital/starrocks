@@ -91,6 +91,10 @@ Status AggregateStreamingSourceOperator::_output_chunk_from_hash_map(ChunkPtr* c
     if (!_aggregator->it_hash().has_value()) {
         _aggregator->it_hash() = _aggregator->state_allocator().begin();
         COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+        COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+        COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
     }
 
     RETURN_IF_ERROR(_aggregator->convert_hash_map_to_chunk(state->chunk_size(), chunk));

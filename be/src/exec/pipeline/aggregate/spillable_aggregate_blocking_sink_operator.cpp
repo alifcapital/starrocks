@@ -50,6 +50,12 @@ Status SpillableAggregateBlockingSinkOperator::set_finishing(RuntimeState* state
         return Status::OK();
     }
     ONCE_DETECT(_set_finishing_once);
+    auto defer_set_profile = DeferOp([this]() {
+        COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+        COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+    });
     auto defer_set_finishing = DeferOp([this]() {
         _aggregator->spill_channel()->set_finishing();
         _is_finished = true;
@@ -295,6 +301,10 @@ std::function<StatusOr<ChunkPtr>()> SpillableAggregateBlockingSinkOperator::_bui
             }
             COUNTER_UPDATE(_aggregator->input_row_count(), _aggregator->num_input_rows());
             COUNTER_UPDATE(_aggregator->rows_returned_counter(), _aggregator->hash_map_variant().size());
+            COUNTER_UPDATE(_aggregator->consecutive_keys_cache_hits(),
+                           (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+            COUNTER_UPDATE(_aggregator->consecutive_keys_cache_misses(),
+                           (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
             COUNTER_UPDATE(_hash_table_spill_times, 1);
             RETURN_IF_ERROR(_aggregator->reset_state(state, {}, nullptr));
         }

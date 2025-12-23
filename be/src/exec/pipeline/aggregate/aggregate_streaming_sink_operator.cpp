@@ -122,6 +122,10 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_force_preaggregation(const
     TRY_CATCH_ALLOC_SCOPE_END();
 
     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
     return Status::OK();
 }
 
@@ -161,6 +165,10 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_selective_preaggregation(c
     }
     TRY_CATCH_ALLOC_SCOPE_END();
     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
     return Status::OK();
 }
 
@@ -203,6 +211,10 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_auto(const ChunkPtr& chunk
             TRY_CATCH_ALLOC_SCOPE_END()
 
             COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+            COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                        (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+            COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                        (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
             break;
         } else {
             _auto_state = AggrAutoState::ADJUST;

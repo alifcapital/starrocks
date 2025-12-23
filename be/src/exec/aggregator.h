@@ -306,6 +306,8 @@ public:
     RuntimeProfile::Counter* rows_returned_counter() { return _agg_stat->rows_returned_counter; }
     RuntimeProfile::Counter* hash_table_size() { return _agg_stat->hash_table_size; }
     RuntimeProfile::Counter* pass_through_row_count() { return _agg_stat->pass_through_row_count; }
+    RuntimeProfile::Counter* consecutive_keys_cache_hits() { return _agg_stat->consecutive_keys_cache_hits; }
+    RuntimeProfile::Counter* consecutive_keys_cache_misses() { return _agg_stat->consecutive_keys_cache_misses; }
 
     void sink_complete() { _is_sink_complete.store(true, std::memory_order_release); }
 

@@ -37,6 +37,10 @@ struct AggStatistics {
 
         chunk_buffer_peak_memory = ADD_PEAK_COUNTER(runtime_profile, "ChunkBufferPeakMem", TUnit::BYTES);
         chunk_buffer_peak_size = ADD_PEAK_COUNTER(runtime_profile, "ChunkBufferPeakSize", TUnit::UNIT);
+
+        // Consecutive keys cache statistics
+        consecutive_keys_cache_hits = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheHits", TUnit::UNIT);
+        consecutive_keys_cache_misses = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheMisses", TUnit::UNIT);
     }
 
     // timer for build hash table and compute aggregate function
@@ -70,5 +74,9 @@ struct AggStatistics {
 
     RuntimeProfile::HighWaterMarkCounter* chunk_buffer_peak_memory{};
     RuntimeProfile::HighWaterMarkCounter* chunk_buffer_peak_size{};
+
+    // Consecutive keys cache statistics - tracks cache hits when consecutive rows have the same key
+    RuntimeProfile::Counter* consecutive_keys_cache_hits{};
+    RuntimeProfile::Counter* consecutive_keys_cache_misses{};
 };
 } // namespace starrocks

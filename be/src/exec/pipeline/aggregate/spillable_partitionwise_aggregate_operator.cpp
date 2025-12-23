@@ -305,6 +305,10 @@ std::function<StatusOr<ChunkPtr>()> SpillablePartitionWiseAggregateSinkOperator:
             COUNTER_UPDATE(_agg_op->aggregator()->input_row_count(), _agg_op->aggregator()->num_input_rows());
             COUNTER_UPDATE(_agg_op->aggregator()->rows_returned_counter(),
                            _agg_op->aggregator()->hash_map_variant().size());
+            COUNTER_UPDATE(_agg_op->aggregator()->consecutive_keys_cache_hits(),
+                           (int64_t)_agg_op->aggregator()->hash_map_variant().consecutive_keys_cache_hits());
+            COUNTER_UPDATE(_agg_op->aggregator()->consecutive_keys_cache_misses(),
+                           (int64_t)_agg_op->aggregator()->hash_map_variant().consecutive_keys_cache_misses());
             COUNTER_UPDATE(_hash_table_spill_times, 1);
             RETURN_IF_ERROR(_agg_op->aggregator()->reset_state(state, {}, nullptr));
         }

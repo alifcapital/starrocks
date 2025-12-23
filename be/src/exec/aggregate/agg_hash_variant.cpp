@@ -15,6 +15,8 @@
 #include "exec/aggregate/agg_hash_variant.h"
 
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <variant>
 
 #include "runtime/runtime_state.h"
@@ -361,6 +363,40 @@ size_t AggHashMapVariant::allocated_memory_usage(const MemPool* pool) const {
         return sizeof(typename decltype(hash_map_with_key->hash_map)::key_type) *
                        hash_map_with_key->hash_map.capacity() +
                pool->total_allocated_bytes();
+    });
+}
+
+namespace {
+template <class T, class = void>
+struct HasConsecutiveKeyCacheStats : std::false_type {};
+
+template <class T>
+struct HasConsecutiveKeyCacheStats<T, std::void_t<decltype(std::declval<const T&>().get_cache_hits()),
+                                                 decltype(std::declval<const T&>().get_cache_misses())>>
+        : std::true_type {};
+} // namespace
+
+size_t AggHashMapVariant::consecutive_keys_cache_hits() const {
+    return visit([](const auto& hash_map_with_key) -> size_t {
+        if (!hash_map_with_key) return 0;
+        using MapType = std::remove_reference_t<decltype(*hash_map_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<MapType>::value) {
+            return hash_map_with_key->get_cache_hits();
+        } else {
+            return 0;
+        }
+    });
+}
+
+size_t AggHashMapVariant::consecutive_keys_cache_misses() const {
+    return visit([](const auto& hash_map_with_key) -> size_t {
+        if (!hash_map_with_key) return 0;
+        using MapType = std::remove_reference_t<decltype(*hash_map_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<MapType>::value) {
+            return hash_map_with_key->get_cache_misses();
+        } else {
+            return 0;
+        }
     });
 }
 
