@@ -26,6 +26,7 @@ namespace starrocks {
 class HashJoiner;
 struct HashJoinProbeMetrics;
 class HashJoinBuilder;
+struct DisjunctiveJoinClauses;
 
 class HashJoinProberImpl {
 public:
