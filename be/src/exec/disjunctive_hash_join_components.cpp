@@ -435,7 +435,7 @@ Status DisjunctiveHashJoinProberImpl::_eval_and_filter_by_clause_conjuncts(
             auto& columns = chunk->columns();
             for (size_t col = start_column; col < start_column + column_count; ++col) {
                 // Ensure nullable so we can mark NULLs.
-                columns[col] = ColumnHelper::cast_to_nullable_column(columns[col]);
+                columns[col] = ColumnHelper::cast_to_nullable_column(std::move(columns[col]));
                 auto* null_column =
                         ColumnHelper::as_raw_column<NullableColumn>(columns[col]->as_mutable_raw_ptr());
                 auto& null_data = null_column->null_column_raw_ptr()->get_data();
@@ -570,10 +570,12 @@ StatusOr<ChunkPtr> DisjunctiveHashJoinProberImpl::probe_chunk(RuntimeState* stat
 
         // Copy indices before filtering (probe may overwrite on next call)
         uint32_t count = ht.get_last_probe_count();
-        std::vector<uint32_t> probe_indices(ht.get_last_probe_indices(),
-                                            ht.get_last_probe_indices() + count);
-        std::vector<uint32_t> build_indices(ht.get_last_build_indices(),
-                                            ht.get_last_build_indices() + count);
+        const auto& probe_idx_buf = ht.get_last_probe_indices();
+        const auto& build_idx_buf = ht.get_last_build_indices();
+        std::vector<uint32_t> probe_indices(probe_idx_buf.data(),
+                                            probe_idx_buf.data() + count);
+        std::vector<uint32_t> build_indices(build_idx_buf.data(),
+                                            build_idx_buf.data() + count);
 
         // Apply clause-specific other_conjuncts BEFORE merge.
         // This ensures only rows matching (eq_keys AND other_conjuncts) pass for this clause.
