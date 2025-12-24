@@ -121,6 +121,10 @@ Usage: $0 <options>
      --output           specify the output directory (default: $STARROCKS_HOME/output)
      --disable-java-check-style
                         disable Java checkstyle checks during build (default: $DISABLE_JAVA_CHECK_STYLE)
+     --with-lto         build Backend with ThinLTO (requires Clang/LLD)
+     --with-bolt        build Backend with BOLT support (adds --emit-relocs for post-link optimization)
+     --with-autofdo <profile>
+                        build Backend with AutoFDO profile (.afdo file)
      -h,--help          Show this help message
   Eg.
     $0                                           build all
@@ -183,6 +187,9 @@ OPTS=$(${GETOPT_BIN} \
   -l 'output:' \
   -l 'help' \
   -l 'disable-java-check-style' \
+  -l 'with-lto' \
+  -l 'with-bolt' \
+  -l 'with-autofdo:' \
   -- "$@")
 
 if [ $? != 0 ] ; then
@@ -209,6 +216,11 @@ WITH_TENANN=ON
 WITH_RELATIVE_SRC_PATH=ON
 ENABLE_MULTI_DYNAMIC_LIBS=OFF
 BUILD_BE_MODULE=all
+
+# PGO/LTO options
+WITH_LTO=OFF
+WITH_BOLT=OFF
+AUTOFDO_PROFILE=""
 
 # Default to OFF, turn it ON if current shell is non-interactive
 WITH_MAVEN_BATCH_MODE=OFF
@@ -326,6 +338,9 @@ else
             --help) HELP=1; shift ;;
             -j) PARALLEL=$2; shift 2 ;;
             --disable-java-check-style) DISABLE_JAVA_CHECK_STYLE=ON; shift ;;
+            --with-lto) WITH_LTO=ON; shift ;;
+            --with-bolt) WITH_BOLT=ON; shift ;;
+            --with-autofdo) AUTOFDO_PROFILE=$2; shift 2 ;;
             --) shift ;  break ;;
             *) echo "Internal error" ; exit 1 ;;
         esac
@@ -385,6 +400,9 @@ echo "Get params:
     DISABLE_JAVA_CHECK_STYLE    -- $DISABLE_JAVA_CHECK_STYLE
     ENABLE_MULTI_DYNAMIC_LIBS   -- $ENABLE_MULTI_DYNAMIC_LIBS
     BUILD_BE_MODULE             -- $BUILD_BE_MODULE
+    WITH_LTO                    -- $WITH_LTO
+    WITH_BOLT                   -- $WITH_BOLT
+    AUTOFDO_PROFILE             -- $AUTOFDO_PROFILE
 "
 
 check_tool()
@@ -512,6 +530,9 @@ if [ ${BUILD_BE} -eq 1 ] || [ ${BUILD_FORMAT_LIB} -eq 1 ] ; then
                   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON                    \
                   -DBUILD_FORMAT_LIB=${BUILD_FORMAT_LIB}                \
                   -DWITH_RELATIVE_SRC_PATH=${WITH_RELATIVE_SRC_PATH}    \
+                  -DWITH_LTO=${WITH_LTO}                                \
+                  -DWITH_BOLT=${WITH_BOLT}                              \
+                  -DAUTOFDO_PROFILE=${AUTOFDO_PROFILE}                  \
                   ..
 
     if [ "${BUILD_BE_MODULE}" != "all" ] ; then

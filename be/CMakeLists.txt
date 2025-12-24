@@ -101,6 +101,11 @@ option(WITH_TENANN "Build with TENANN" OFF)
 
 option(WITH_RELATIVE_SRC_PATH "Build source file with relative path" ON)
 
+# PGO/LTO options
+option(WITH_LTO "Build with ThinLTO (requires Clang/LLD)" OFF)
+option(WITH_BOLT "Build with BOLT support (adds --emit-relocs)" OFF)
+set(AUTOFDO_PROFILE "" CACHE STRING "Path to AutoFDO profile (.afdo file)")
+
 if (${WITH_TENANN} STREQUAL "ON")
     add_definitions(-DWITH_TENANN)
 endif()
@@ -162,6 +167,38 @@ set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} $ENV{STARROCKS_CXX_COMMON_FLAGS}")
 # -no-pie: Disable Position Independent Executables (PIE) as certain libraries cannot be linked against PIE executables.
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} $ENV{STARROCKS_CXX_LINKER_FLAGS}")
+
+# LTO/BOLT/AutoFDO configuration
+if (WITH_LTO)
+    message(STATUS "LTO enabled (ThinLTO)")
+    if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(WARNING "ThinLTO works best with Clang. GCC LTO may be slower.")
+        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
+    else()
+        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto=thin")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=thin -fuse-ld=lld")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/lto-cache")
+    endif()
+endif()
+
+if (WITH_BOLT)
+    message(STATUS "BOLT support enabled (adding --emit-relocs)")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--emit-relocs")
+endif()
+
+if (NOT "${AUTOFDO_PROFILE}" STREQUAL "")
+    if (EXISTS "${AUTOFDO_PROFILE}")
+        message(STATUS "AutoFDO enabled with profile: ${AUTOFDO_PROFILE}")
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fprofile-sample-use=${AUTOFDO_PROFILE}")
+        else()
+            set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fauto-profile=${AUTOFDO_PROFILE}")
+        endif()
+    else()
+        message(WARNING "AutoFDO profile not found: ${AUTOFDO_PROFILE}")
+    endif()
+endif()
 
 # compiler flags that are common across debug/release builds
 #  -Wall: Enable all warnings.

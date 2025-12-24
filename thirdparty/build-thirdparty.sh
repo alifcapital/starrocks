@@ -235,6 +235,27 @@ else
     exit 1
 fi
 
+# LTO configuration
+WITH_LTO=${WITH_LTO:-OFF}
+LTO_FLAGS=""
+if [[ "${WITH_LTO}" == "ON" ]]; then
+    echo "Building thirdparty with LTO enabled"
+
+    if [[ -z "${STARROCKS_LLVM_HOME}" ]]; then
+        echo "WARNING: WITH_LTO=ON but STARROCKS_LLVM_HOME is not set"
+        echo "Using GCC LTO (slower than ThinLTO with Clang)"
+        LTO_FLAGS="-flto"
+    else
+        echo "Using Clang ThinLTO from ${STARROCKS_LLVM_HOME}"
+        export CC="${STARROCKS_LLVM_HOME}/bin/clang"
+        export CXX="${STARROCKS_LLVM_HOME}/bin/clang++"
+        export AR="${STARROCKS_LLVM_HOME}/bin/llvm-ar"
+        export RANLIB="${STARROCKS_LLVM_HOME}/bin/llvm-ranlib"
+        export NM="${STARROCKS_LLVM_HOME}/bin/llvm-nm"
+        LTO_FLAGS="-flto=thin"
+    fi
+fi
+
 # prepare installed prefix
 mkdir -p ${TP_DIR}/installed
 
@@ -1694,8 +1715,15 @@ strip_binary() {
 export FILE_PREFIX_MAP_OPTION="-ffile-prefix-map=${TP_SOURCE_DIR}=. -ffile-prefix-map=${TP_INSTALL_DIR}=."
 # set GLOBAL_C*FLAGS for easy restore in each sub build process
 export GLOBAL_CPPFLAGS="-I${TP_INCLUDE_DIR} "
-export GLOBAL_CFLAGS="-O3 -fno-omit-frame-pointer -std=gnu17 -fPIC -g -gz=zlib ${FILE_PREFIX_MAP_OPTION}"
-export GLOBAL_CXXFLAGS="-O3 -fno-omit-frame-pointer -Wno-class-memaccess -fPIC -g -gz=zlib ${FILE_PREFIX_MAP_OPTION}"
+export GLOBAL_CFLAGS="-O3 -fno-omit-frame-pointer -std=gnu17 -fPIC -g -gz=zlib ${LTO_FLAGS} ${FILE_PREFIX_MAP_OPTION}"
+export GLOBAL_CXXFLAGS="-O3 -fno-omit-frame-pointer -Wno-class-memaccess -fPIC -g -gz=zlib ${LTO_FLAGS} ${FILE_PREFIX_MAP_OPTION}"
+
+if [[ "${WITH_LTO}" == "ON" ]]; then
+    echo "GLOBAL_CFLAGS: ${GLOBAL_CFLAGS}"
+    echo "GLOBAL_CXXFLAGS: ${GLOBAL_CXXFLAGS}"
+    echo "AR: ${AR:-ar}"
+    echo "RANLIB: ${RANLIB:-ranlib}"
+fi
 
 # set those GLOBAL_*FLAGS to the CFLAGS/CXXFLAGS/CPPFLAGS
 export CPPFLAGS=$GLOBAL_CPPFLAGS
