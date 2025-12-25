@@ -13,6 +13,7 @@ docs/build
 docs/contents
 gensrc/build
 fe/fe-core/target
+fe/target
 thirdparty/src
 thirdparty/installed
 *.so.tmp
