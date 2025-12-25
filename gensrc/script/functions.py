@@ -412,6 +412,14 @@ vectorized_functions = [
      'StringFunctions::ngram_search_case_insensitive', 'StringFunctions::ngram_search_case_insensitive_prepare',
      'StringFunctions::ngram_search_close'],
 
+    # Levenshtein edit distance (UTF-8 aware, fuzzywuzzy-style Indel costs)
+    [30445, 'levenshtein_distance', True, False, 'INT', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_distance'],
+    # Levenshtein similarity ratio (0.0 to 1.0)
+    [30446, 'levenshtein_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_ratio'],
+
+    # Tajik text normalization (lowercase + transliteration to Russian Cyrillic)
+    [30447, 'norm_tj', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::norm_tj'],
+
     [30450, 'field', True, False, 'INT', ['VARCHAR', '...'], 'StringFunctions::field<TYPE_VARCHAR>',
      'StringFunctions::field_prepare<TYPE_VARCHAR>', 'StringFunctions::field_close<TYPE_VARCHAR>'],
     [30451, 'field', True, False, 'INT', ['BOOLEAN', '...'], 'StringFunctions::field<TYPE_BOOLEAN>',

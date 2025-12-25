@@ -560,6 +560,8 @@ public class FunctionSet {
 
     public static final String NGRAM_SEARCH = "ngram_search";
     public static final String NGRAM_SEARCH_CASE_INSENSITIVE = "ngram_search_case_insensitive";
+    public static final String LEVENSHTEIN_DISTANCE = "levenshtein_distance";
+    public static final String LEVENSHTEIN_RATIO = "levenshtein_ratio";
 
     // JSON functions
     public static final Function JSON_QUERY_FUNC = new Function(

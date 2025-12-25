@@ -617,6 +617,30 @@ public:
 
     DEFINE_VECTORIZED_FN(ngram_search_case_insensitive);
 
+    /**
+     * Compute Levenshtein edit distance between two UTF-8 strings.
+     * Uses fuzzywuzzy-style costs: match=0, mismatch=2, gap=1 (Indel distance)
+     *
+     * @param: [string_value, string_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: IntColumn
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_distance);
+
+    /**
+     * @functionName: levenshtein_ratio
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (0.0 to 1.0 similarity ratio)
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_ratio);
+
+    /**
+     * @functionName: norm_tj
+     * @paramType: [BinaryColumn]
+     * @return: BinaryColumn (normalized Tajik text: lowercase + transliteration)
+     */
+    DEFINE_VECTORIZED_FN(norm_tj);
+
     DEFINE_VECTORIZED_FN_TEMPLATE(field);
     template <LogicalType Type>
     static Status field_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
@@ -683,13 +707,6 @@ private:
     static inline void money_format_decimal_impl(FunctionContext* context, ColumnViewer<Type> const& money_viewer,
                                                  size_t num_rows, int adjust_scale,
                                                  ColumnBuilder<TYPE_VARCHAR>* result);
-};
-
-template <bool to_upper>
-struct StringCaseToggleFunction {
-public:
-    template <LogicalType Type, LogicalType ResultType>
-    static ColumnPtr evaluate(const ColumnPtr& v1);
 };
 
 template <LogicalType Type, bool scale_up, bool check_overflow>
