@@ -1605,6 +1605,16 @@ build_xsimd() {
     ${BUILD_SYSTEM} install
 }
 
+build_stringzilla() {
+    check_if_source_exist $STRINGZILLA_SOURCE
+    cd $TP_SOURCE_DIR/$STRINGZILLA_SOURCE
+
+    # stringzilla is header-only, just copy headers
+    mkdir -p $TP_INSTALL_DIR/include
+    cp -r include/stringzilla $TP_INSTALL_DIR/include/
+    cp -r include/stringzillas $TP_INSTALL_DIR/include/
+}
+
 build_libxml2() {
     check_if_source_exist $LIBXML2_SOURCE
     cd $TP_SOURCE_DIR/$LIBXML2_SOURCE
@@ -1778,6 +1788,7 @@ declare -a all_packages=(
     tenann
     xxhash
     pprof
+    stringzilla
 )
 
 # Machine specific packages
