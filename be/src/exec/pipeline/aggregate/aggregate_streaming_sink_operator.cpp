@@ -122,6 +122,19 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_force_preaggregation(const
     TRY_CATCH_ALLOC_SCOPE_END();
 
     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+    const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+    if (uuid_packed > 0) {
+        COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+    }
+    // Low-cardinality dict optimization statistics
+    COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+    if (_aggregator->dict_encoded_key_count() > 0) {
+        COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+    }
     return Status::OK();
 }
 
@@ -161,6 +174,19 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_selective_preaggregation(c
     }
     TRY_CATCH_ALLOC_SCOPE_END();
     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+    const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+    if (uuid_packed > 0) {
+        COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+    }
+    // Low-cardinality dict optimization statistics
+    COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+    if (_aggregator->dict_encoded_key_count() > 0) {
+        COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+    }
     return Status::OK();
 }
 
@@ -203,6 +229,19 @@ Status AggregateStreamingSinkOperator::_push_chunk_by_auto(const ChunkPtr& chunk
             TRY_CATCH_ALLOC_SCOPE_END()
 
             COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+            COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                        (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+            COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                        (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+            const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+            if (uuid_packed > 0) {
+                COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+            }
+            // Low-cardinality dict optimization statistics
+            COUNTER_SET(_aggregator->low_card_group_by_keys(), (int64_t)_aggregator->dict_encoded_key_count());
+            if (_aggregator->dict_encoded_key_count() > 0) {
+                COUNTER_SET(_aggregator->low_card_group_by_rows(), _aggregator->num_input_rows());
+            }
             break;
         } else {
             _auto_state = AggrAutoState::ADJUST;

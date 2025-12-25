@@ -95,6 +95,14 @@ Status AggregateStreamingNode::get_next(RuntimeState* state, ChunkPtr* chunk, bo
                 TRY_CATCH_ALLOC_SCOPE_END()
 
                 COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+                COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                            (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+                COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                            (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+                const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+                if (uuid_packed > 0) {
+                    COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+                }
 
                 continue;
             } else {
@@ -130,6 +138,14 @@ Status AggregateStreamingNode::get_next(RuntimeState* state, ChunkPtr* chunk, bo
                     _aggregator->try_convert_to_two_level_map();
                     TRY_CATCH_ALLOC_SCOPE_END()
                     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+                    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+                    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+                    const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+                    if (uuid_packed > 0) {
+                        COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+                    }
                     continue;
                 } else {
                     TRY_CATCH_ALLOC_SCOPE_START()
@@ -161,6 +177,10 @@ Status AggregateStreamingNode::get_next(RuntimeState* state, ChunkPtr* chunk, bo
                     TRY_CATCH_ALLOC_SCOPE_END()
 
                     COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+                    COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+                    COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                                (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
                     if (*chunk != nullptr && (*chunk)->num_rows() > 0) {
                         break;
                     } else {
@@ -206,6 +226,14 @@ Status AggregateStreamingNode::_output_chunk_from_hash_map(ChunkPtr* chunk) {
     if (!_aggregator->it_hash().has_value()) {
         _aggregator->it_hash() = _aggregator->state_allocator().begin();
         COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
+        COUNTER_SET(_aggregator->consecutive_keys_cache_hits(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_hits());
+        COUNTER_SET(_aggregator->consecutive_keys_cache_misses(),
+                    (int64_t)_aggregator->hash_map_variant().consecutive_keys_cache_misses());
+        const int64_t uuid_packed = (int64_t)_aggregator->hash_map_variant().uuid_key_packed_values();
+        if (uuid_packed > 0) {
+            COUNTER_SET(_aggregator->ensure_uuid_key_packed_values_counter(), uuid_packed);
+        }
     }
 
     RETURN_IF_ERROR(_aggregator->convert_hash_map_to_chunk(runtime_state()->chunk_size(), chunk));
