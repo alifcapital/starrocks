@@ -22,10 +22,7 @@
 #include <mmintrin.h>
 #endif
 
-#include <unicode/ucasemap.h>
-#include <unicode/unistr.h>
-#include <unicode/urename.h>
-#include <unicode/utypes.h>
+#include "thirdparty/stringzilla/utf8_case.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1929,127 +1926,52 @@ StatusOr<ColumnPtr> StringFunctions::utf8_length(FunctionContext* context, const
     return VectorizedStrictUnaryFunction<utf8LengthImpl>::evaluate<TYPE_VARCHAR, TYPE_INT>(columns[0]);
 }
 
-template <char CA, char CZ>
-static inline void vectorized_toggle_case(const ImmBytes src, Bytes* dst) {
-    const size_t size = src.size();
-    // resize of raw::RawVectorPad16 is faster than std::vector because of
-    // no initialization
-    static_assert(sizeof(Bytes::value_type) == 1, "Underlying element type must be 8-bit width");
-    static_assert(std::is_trivially_destructible_v<Bytes::value_type>,
-                  "Underlying element type must have a trivial destructor");
-    Bytes buffer;
-    buffer.resize(size);
-    uint8_t* dst_ptr = buffer.data();
-    char* begin = (char*)(src.data());
-    char* end = (char*)(begin + size);
-    char* src_ptr = begin;
-#if defined(__SSE2__)
-    static constexpr int SSE2_BYTES = sizeof(__m128i);
-    const char* sse2_end = begin + (size & ~(SSE2_BYTES - 1));
-    const auto a_minus1 = _mm_set1_epi8(CA - 1);
-    const auto z_plus1 = _mm_set1_epi8(CZ + 1);
-    const auto flips = _mm_set1_epi8(32);
-
-    for (; src_ptr > sse2_end; src_ptr += SSE2_BYTES, dst_ptr += SSE2_BYTES) {
-        auto bytes = _mm_loadu_si128((const __m128i*)src_ptr);
-        // the i-th byte of masks is set to 0xff if the corresponding byte is
-        // between a..z when computing upper function (A..Z when computing lower function),
-        // otherwise set to 0;
-        auto masks = _mm_and_si128(_mm_cmpgt_epi8(bytes, a_minus1), _mm_cmpgt_epi8(z_plus1, bytes));
-        // only flip 5th bit of lowcase(uppercase) byte, other bytes keep verbatim.
-        _mm_storeu_si128((__m128i*)dst_ptr, _mm_xor_si128(bytes, _mm_and_si128(masks, flips)));
-    }
-#endif
-    // only flip 5th bit of lowcase(uppercase) byte, other bytes keep verbatim.
-    // i.e.  'a' and 'A' are 0b0110'0001 and 0b'0100'0001 respectively in binary form,
-    // whether 'a' to 'A' or 'A' to 'a' conversion, just flip 5th bit(xor 32).
-    for (; src_ptr < end; src_ptr += 1, dst_ptr += 1) {
-        *dst_ptr = *src_ptr ^ (((CA <= *src_ptr) & (*src_ptr <= CZ)) << 5);
-    }
-    // move semantics
-    *dst = std::move(buffer);
-}
-
-template <bool to_upper>
-void utf8_case_toggle(const Bytes& src_bytes, const Offsets& src_offsets, Bytes* dst_bytes, Offsets* dst_offsets) {
-    UErrorCode err_code = U_ZERO_ERROR;
-    UCaseMap* case_map = ucasemap_open("", U_FOLD_CASE_DEFAULT, &err_code);
-    if (U_FAILURE(err_code)) {
-        throw std::runtime_error(fmt::format("Failed to open case map: {}", u_errorName(err_code)));
-    }
-    DeferOp defer([&]() { ucasemap_close(case_map); });
+// UTF-8 lowercase using StringZilla (full Unicode case folding)
+void utf8_lower(const Bytes& src_bytes, const Offsets& src_offsets, Bytes* dst_bytes, Offsets* dst_offsets) {
     size_t num_rows = src_offsets.size() - 1;
-    size_t current_dst_size = dst_bytes->size();
+    // Reserve 3x space for worst-case expansion (e.g., İ -> i + combining dot)
+    dst_bytes->resize(src_bytes.size() * 3);
 
     size_t current_offset = 0;
     (*dst_offsets)[0] = 0;
+
     for (size_t i = 0; i < num_rows; i++) {
         const auto* src_data = reinterpret_cast<const char*>(src_bytes.data() + src_offsets[i]);
         size_t src_len = src_offsets[i + 1] - src_offsets[i];
+        auto* dst_data = reinterpret_cast<char*>(dst_bytes->data() + current_offset);
 
-        auto* dst_data = dst_bytes->data() + current_offset;
-        int32_t dst_size;
-        if constexpr (to_upper) {
-            dst_size = ucasemap_utf8ToUpper(case_map, reinterpret_cast<char*>(dst_data),
-                                            dst_bytes->size() - current_offset, src_data, src_len, &err_code);
-        } else {
-            dst_size = ucasemap_utf8ToLower(case_map, reinterpret_cast<char*>(dst_data),
-                                            dst_bytes->size() - current_offset, src_data, src_len, &err_code);
-        }
-        if (err_code == U_BUFFER_OVERFLOW_ERROR || err_code == U_STRING_NOT_TERMINATED_WARNING) {
-            // Some unicode characters occupy different numbers of bytes after case conversion.
-            // When this happens, we need to expand the capacity.
-            // Considering that there are not many such characters, we will not reserve additional memory during resize.
-            // If necessary, we can make some strategies for reserving memory in the future.
-            current_dst_size = current_offset + dst_size + 1;
-            dst_bytes->resize(current_dst_size);
-            dst_data = dst_bytes->data() + current_offset;
-
-            err_code = U_ZERO_ERROR;
-            if constexpr (to_upper) {
-                dst_size = ucasemap_utf8ToUpper(case_map, reinterpret_cast<char*>(dst_data),
-                                                dst_bytes->size() - current_offset, src_data, src_len, &err_code);
-            } else {
-                dst_size = ucasemap_utf8ToLower(case_map, reinterpret_cast<char*>(dst_data),
-                                                dst_bytes->size() - current_offset, src_data, src_len, &err_code);
-            }
-        }
-        if (err_code != U_ZERO_ERROR) {
-            throw std::runtime_error(fmt::format("Failed to convert case: {}", u_errorName(err_code)));
-        }
+        size_t dst_size = sz_utf8_case_fold(src_data, src_len, dst_data);
         current_offset += dst_size;
         (*dst_offsets)[i + 1] = current_offset;
-    };
+    }
+
     dst_bytes->resize(current_offset);
 }
 
-template <bool to_upper>
-template <LogicalType Type, LogicalType ResultType>
-ColumnPtr StringCaseToggleFunction<to_upper>::evaluate(const ColumnPtr& v1) {
-    const auto* src = down_cast<const BinaryColumn*>(v1.get());
-    const auto& src_bytes = src->get_bytes();
-    const auto& src_offsets = src->get_offset();
-    auto dst = RunTimeColumnType<TYPE_VARCHAR>::create();
-    auto& dst_offsets = dst->get_offset();
-    auto& dst_bytes = dst->get_bytes();
-    dst_offsets.assign(src_offsets.begin(), src_offsets.end());
-    if constexpr (to_upper) {
-        vectorized_toggle_case<'a', 'z'>(src_bytes, &dst_bytes);
-    } else {
-        vectorized_toggle_case<'A', 'Z'>(src_bytes, &dst_bytes);
+// UTF-8 uppercase using StringZilla (full Unicode uppercase)
+void utf8_upper(const Bytes& src_bytes, const Offsets& src_offsets, Bytes* dst_bytes, Offsets* dst_offsets) {
+    size_t num_rows = src_offsets.size() - 1;
+    // Reserve 3x space for worst-case expansion (e.g., ß -> SS, ﬃ -> FFI)
+    dst_bytes->resize(src_bytes.size() * 3);
+
+    size_t current_offset = 0;
+    (*dst_offsets)[0] = 0;
+
+    for (size_t i = 0; i < num_rows; i++) {
+        const auto* src_data = reinterpret_cast<const char*>(src_bytes.data() + src_offsets[i]);
+        size_t src_len = src_offsets[i + 1] - src_offsets[i];
+        auto* dst_data = reinterpret_cast<char*>(dst_bytes->data() + current_offset);
+
+        size_t dst_size = sz_utf8_case_upper(src_data, src_len, dst_data);
+        current_offset += dst_size;
+        (*dst_offsets)[i + 1] = current_offset;
     }
-    return dst;
+
+    dst_bytes->resize(current_offset);
 }
 
-template struct StringCaseToggleFunction<true>;
-template ColumnPtr StringCaseToggleFunction<true>::evaluate<TYPE_VARCHAR, TYPE_VARCHAR>(const ColumnPtr& v1);
-
-template struct StringCaseToggleFunction<false>;
-template ColumnPtr StringCaseToggleFunction<false>::evaluate<TYPE_VARCHAR, TYPE_VARCHAR>(const ColumnPtr& v1);
-
-template <bool to_upper>
-struct UTF8StringCaseToggleFunction {
-public:
+// UTF-8 lowercase function - StringZilla has internal ASCII fast-path
+struct UTF8LowerFunction {
     template <LogicalType Type, LogicalType ResultType>
     static ColumnPtr evaluate(const ColumnPtr& v1) {
         const auto* src = down_cast<const BinaryColumn*>(v1.get());
@@ -2058,41 +1980,39 @@ public:
         auto dst = RunTimeColumnType<TYPE_VARCHAR>::create();
         auto& dst_offsets = dst->get_offset();
         auto& dst_bytes = dst->get_bytes();
-        if (validate_ascii_fast(reinterpret_cast<const char*>(src_bytes.data()), src_bytes.size())) {
-            dst_offsets.assign(src_offsets.begin(), src_offsets.end());
-            // if all characters are ascii, we process them with the fast path
-            if constexpr (to_upper) {
-                vectorized_toggle_case<'a', 'z'>(src_bytes, &dst_bytes);
-            } else {
-                vectorized_toggle_case<'A', 'Z'>(src_bytes, &dst_bytes);
-            }
-        } else {
-            dst_bytes.resize(src_offsets.back());
-            dst_offsets.resize(src_offsets.size());
-            utf8_case_toggle<to_upper>(src_bytes, src_offsets, &dst_bytes, &dst_offsets);
-        }
+
+        dst_offsets.resize(src_offsets.size());
+        utf8_lower(src_bytes, src_offsets, &dst_bytes, &dst_offsets);
 
         return dst;
     }
 };
 
-// lower
-DEFINE_STRING_UNARY_FN_WITH_IMPL(lowerImpl, str) {
-    std::string v = str.to_string();
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
-    return v;
-}
+// UTF-8 uppercase function - StringZilla has internal ASCII fast-path
+struct UTF8UpperFunction {
+    template <LogicalType Type, LogicalType ResultType>
+    static ColumnPtr evaluate(const ColumnPtr& v1) {
+        const auto* src = down_cast<const BinaryColumn*>(v1.get());
+        const auto& src_bytes = src->get_bytes();
+        const auto& src_offsets = src->get_offset();
+        auto dst = RunTimeColumnType<TYPE_VARCHAR>::create();
+        auto& dst_offsets = dst->get_offset();
+        auto& dst_bytes = dst->get_bytes();
+
+        dst_offsets.resize(src_offsets.size());
+        utf8_upper(src_bytes, src_offsets, &dst_bytes, &dst_offsets);
+
+        return dst;
+    }
+};
 
 Status StringFunctions::lower_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
     if (scope != FunctionContext::FRAGMENT_LOCAL) {
         return Status::OK();
     }
     auto state = new LowerUpperState();
-    if (context->state()->lower_upper_support_utf8()) {
-        state->impl_func = VectorizedUnaryFunction<UTF8StringCaseToggleFunction<false>>::evaluate<TYPE_VARCHAR>;
-    } else {
-        state->impl_func = VectorizedUnaryFunction<StringCaseToggleFunction<false>>::evaluate<TYPE_VARCHAR>;
-    }
+    // Use UTF8LowerFunction with StringZilla - fast path for ASCII is handled internally
+    state->impl_func = VectorizedUnaryFunction<UTF8LowerFunction>::evaluate<TYPE_VARCHAR>;
     context->set_function_state(scope, state);
     return Status::OK();
 }
@@ -2110,23 +2030,13 @@ StatusOr<ColumnPtr> StringFunctions::lower(FunctionContext* context, const Colum
     return state->impl_func(columns[0]);
 }
 
-// upper
-DEFINE_STRING_UNARY_FN_WITH_IMPL(upperImpl, str) {
-    std::string v = str.to_string();
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::toupper(c); });
-    return v;
-}
-
 Status StringFunctions::upper_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
     if (scope != FunctionContext::FRAGMENT_LOCAL) {
         return Status::OK();
     }
     auto state = new LowerUpperState();
-    if (context->state()->lower_upper_support_utf8()) {
-        state->impl_func = VectorizedUnaryFunction<UTF8StringCaseToggleFunction<true>>::evaluate<TYPE_VARCHAR>;
-    } else {
-        state->impl_func = VectorizedUnaryFunction<StringCaseToggleFunction<true>>::evaluate<TYPE_VARCHAR>;
-    }
+    // Use UTF8UpperFunction with StringZilla - fast path for ASCII is handled internally
+    state->impl_func = VectorizedUnaryFunction<UTF8UpperFunction>::evaluate<TYPE_VARCHAR>;
     context->set_function_state(scope, state);
     return Status::OK();
 }

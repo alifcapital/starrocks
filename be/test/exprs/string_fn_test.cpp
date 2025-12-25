@@ -28,6 +28,7 @@
 #include "testutil/assert.h"
 #include "testutil/parallel_test.h"
 #include "types/large_int_value.h"
+#include "util/utf8.h"
 
 namespace starrocks {
 
@@ -1494,10 +1495,9 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
         Slice origin = src->get_slice(i);
         Slice uc = binary_upper_dst->get_slice(i);
         Slice lc = binary_lower_dst->get_slice(i);
-        std::string uc1 = origin.to_string();
-        std::string lc1 = origin.to_string();
-        std::transform(uc1.begin(), uc1.end(), uc1.begin(), [](char c) -> char { return std::toupper(c); });
-        std::transform(lc1.begin(), lc1.end(), lc1.begin(), [](char c) -> char { return std::tolower(c); });
+        std::string uc1, lc1;
+        utf8_toupper(origin.data, origin.size, uc1);
+        utf8_tolower(origin.data, origin.size, lc1);
         ASSERT_EQ(uc.to_string(), uc1);
         ASSERT_EQ(lc.to_string(), lc1);
     }
