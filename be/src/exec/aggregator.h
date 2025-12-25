@@ -306,6 +306,13 @@ public:
     RuntimeProfile::Counter* rows_returned_counter() { return _agg_stat->rows_returned_counter; }
     RuntimeProfile::Counter* hash_table_size() { return _agg_stat->hash_table_size; }
     RuntimeProfile::Counter* pass_through_row_count() { return _agg_stat->pass_through_row_count; }
+    RuntimeProfile::Counter* consecutive_keys_cache_hits() { return _agg_stat->consecutive_keys_cache_hits; }
+    RuntimeProfile::Counter* consecutive_keys_cache_misses() { return _agg_stat->consecutive_keys_cache_misses; }
+    RuntimeProfile::Counter* uuid_key_packed_values() { return _agg_stat->uuid_key_packed_values; }
+    RuntimeProfile::Counter* ensure_uuid_key_packed_values_counter();
+    RuntimeProfile::Counter* low_card_group_by_keys() { return _agg_stat->low_card_group_by_keys; }
+    RuntimeProfile::Counter* low_card_group_by_rows() { return _agg_stat->low_card_group_by_rows; }
+    size_t dict_encoded_key_count() const { return _dict_encoded_key_count; }
 
     void sink_complete() { _is_sink_complete.store(true, std::memory_order_release); }
 
@@ -458,6 +465,16 @@ protected:
     size_t _agg_states_total_size = 0;
     // The max align size for all aggregate state
     size_t _max_agg_state_align_size = 1;
+
+    // Fast-path optimization for simple COUNT(*) queries.
+    // When true, we bypass virtual function calls and directly increment int64_t counters.
+    // This is enabled when:
+    // - There is exactly one aggregate function
+    // - It's a non-nullable COUNT (count(*) or count(non-null constant), not count(col))
+    // - No DISTINCT
+    bool _is_simple_count_star_only = false;
+    // Cached offset to the count state (same as _agg_states_offsets[0] when fast-path is enabled)
+    size_t _count_state_offset = 0;
     // The followings are aggregate function information:
     std::vector<FunctionContext*> _agg_fn_ctxs;
     std::vector<const AggregateFunction*> _agg_functions;
@@ -487,6 +504,8 @@ protected:
     std::vector<std::optional<std::pair<VectorizedLiteral*, VectorizedLiteral*>>> _ranges;
     Columns _group_by_columns;
     std::vector<ColumnType> _group_by_types;
+    // Number of GROUP BY keys that use low-cardinality dict encoding (LowCardDictType)
+    size_t _dict_encoded_key_count = 0;
 
     // Tuple into which Update()/Merge()/Serialize() results are stored.
     TupleId _intermediate_tuple_id;
