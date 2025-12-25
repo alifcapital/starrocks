@@ -111,6 +111,8 @@ import com.starrocks.system.Frontend;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TransactionStateBatch;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -1289,6 +1291,26 @@ public class EditLog {
                     globalStateMgr.getTabletReshardJobMgr().replayRemoveTabletReshardJob(log.getJobId());
                     break;
                 }
+                case OperationType.OP_CREATE_CN_GROUP: {
+                    CnGroup group = (CnGroup) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayCreateGroup(group);
+                    break;
+                }
+                case OperationType.OP_DROP_CN_GROUP: {
+                    CnGroup group = (CnGroup) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayDropGroup(group);
+                    break;
+                }
+                case OperationType.OP_ADD_NODE_TO_CN_GROUP: {
+                    CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayAddNodeToGroup(op);
+                    break;
+                }
+                case OperationType.OP_REMOVE_NODE_FROM_CN_GROUP: {
+                    CnGroupMgr.CnGroupNodeOp op = (CnGroupMgr.CnGroupNodeOp) journal.data();
+                    globalStateMgr.getCnGroupMgr().replayRemoveNodeFromGroup(op);
+                    break;
+                }
                 default: {
                     if (Config.metadata_ignore_unknown_operation_type) {
                         LOG.warn("UNKNOWN Operation Type {}", opCode);
@@ -1596,6 +1618,25 @@ public class EditLog {
 
     public void logUpdateHistoricalNode(UpdateHistoricalNodeLog log, WALApplier applier) {
         logJsonObject(OperationType.OP_UPDATE_HISTORICAL_NODE, log, applier);
+    }
+
+    // CnGroup operations - no replay callbacks, replay happens via case in loadJournal()
+    public void logCreateCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
+        logJsonObject(OperationType.OP_CREATE_CN_GROUP, group);
+    }
+
+    public void logDropCnGroup(com.starrocks.warehouse.cngroup.CnGroup group) {
+        logJsonObject(OperationType.OP_DROP_CN_GROUP, group);
+    }
+
+    public void logAddNodeToCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
+        // No replay callback - replay happens via case in loadJournal()
+        logJsonObject(OperationType.OP_ADD_NODE_TO_CN_GROUP, op);
+    }
+
+    public void logRemoveNodeFromCnGroup(com.starrocks.warehouse.cngroup.CnGroupMgr.CnGroupNodeOp op) {
+        // No replay callback - replay happens via case in loadJournal()
+        logJsonObject(OperationType.OP_REMOVE_NODE_FROM_CN_GROUP, op);
     }
 
     public void logAddFrontend(Frontend fe, WALApplier applier) {

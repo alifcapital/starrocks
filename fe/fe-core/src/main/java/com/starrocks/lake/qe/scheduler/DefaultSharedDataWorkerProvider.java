@@ -32,6 +32,7 @@ import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroup;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -74,15 +75,30 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
                 int numUsedComputeNodes,
                 ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
                 ComputeResource computeResource) {
+            return captureAvailableWorkers(systemInfoService, preferComputeNode, numUsedComputeNodes,
+                    computationFragmentSchedulingPolicy, computeResource, null);
+        }
+
+        @Override
+        public DefaultSharedDataWorkerProvider captureAvailableWorkers(
+                SystemInfoService systemInfoService,
+                boolean preferComputeNode,
+                int numUsedComputeNodes,
+                ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
+                ComputeResource computeResource,
+                String cnGroupName) {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
+            // getAllComputeNodeIds already filters by computeResource.getCnGroupName() at WarehouseComputeResourceProvider
             final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
             computeNodeIds.forEach(nodeId -> builder.put(nodeId,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
+
             if (LOG.isDebugEnabled()) {
-                LOG.debug("idToComputeNode: {}", idToComputeNode);
+                LOG.debug("idToComputeNode: {}, cnGroupName from computeResource: {}",
+                        idToComputeNode, computeResource.getCnGroupName());
             }
 
             ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkers(idToComputeNode);
@@ -113,6 +129,9 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     private final Set<Long> selectedWorkerIds;
 
     private final ComputeResource computeResource;
+
+    // Track backup worker usage for profiling
+    private final List<String> backupWorkerUsages = Lists.newArrayList();
 
     @VisibleForTesting
     public DefaultSharedDataWorkerProvider(ImmutableMap<Long, ComputeNode> id2ComputeNode,
@@ -209,8 +228,14 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     }
 
     private void reportWorkerNotFoundException(long workerId) throws NonRecoverableException {
-        throw new NonRecoverableException(
-                FeConstants.getNodeNotFoundError(true) + " nodeId: " + workerId + " " + computeNodesToString(false));
+        String cnGroupName = CnGroup.getEffectiveName(computeResource.getCnGroupName());
+        String errorMsg;
+        if (!CnGroup.DEFAULT_GROUP_NAME.equals(cnGroupName) && id2ComputeNode.isEmpty()) {
+            errorMsg = String.format("CNGroup '%s' has no available compute nodes", cnGroupName);
+        } else {
+            errorMsg = FeConstants.getNodeNotFoundError(true) + " nodeId: " + workerId + " " + computeNodesToString(false);
+        }
+        throw new NonRecoverableException(errorMsg);
     }
 
     @Override
@@ -242,6 +267,10 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
             long buddyId = allComputeNodeIds.get(startPos);
             if (buddyId != workerId && availableID2ComputeNode.containsKey(buddyId) &&
                     !SimpleScheduler.isInBlocklist(buddyId)) {
+                // Track backup worker usage for profiling
+                synchronized (backupWorkerUsages) {
+                    backupWorkerUsages.add(workerId + "->" + buddyId);
+                }
                 return buddyId;
             }
         }
@@ -256,6 +285,23 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     @Override
     public ComputeResource getComputeResource() {
         return computeResource;
+    }
+
+    @Override
+    public int getBackupWorkerUsageCount() {
+        synchronized (backupWorkerUsages) {
+            return backupWorkerUsages.size();
+        }
+    }
+
+    @Override
+    public String getBackupWorkerUsageDetails() {
+        synchronized (backupWorkerUsages) {
+            if (backupWorkerUsages.isEmpty()) {
+                return "";
+            }
+            return String.join(", ", backupWorkerUsages);
+        }
     }
 
     private String computeNodesToString(boolean allowNormalNodes) {

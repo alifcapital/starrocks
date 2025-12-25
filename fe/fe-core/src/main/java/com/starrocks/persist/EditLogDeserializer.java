@@ -68,6 +68,8 @@ import com.starrocks.system.Frontend;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TransactionStateBatch;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -277,6 +279,10 @@ public class EditLogDeserializer {
             .put(OperationType.OP_ERASE_PARTITION_V2, ErasePartitionLog.class)
             .put(OperationType.OP_DROP_ALL_BROKER_V2, DropBrokerLog.class)
             .put(OperationType.OP_DROP_REPOSITORY_V2, DropRepositoryLog.class)
+            .put(OperationType.OP_CREATE_CN_GROUP, CnGroup.class)
+            .put(OperationType.OP_DROP_CN_GROUP, CnGroup.class)
+            .put(OperationType.OP_ADD_NODE_TO_CN_GROUP, CnGroupMgr.CnGroupNodeOp.class)
+            .put(OperationType.OP_REMOVE_NODE_FROM_CN_GROUP, CnGroupMgr.CnGroupNodeOp.class)
             .build();
 
     public static Writable deserialize(Short opCode, DataInput in) throws IOException {

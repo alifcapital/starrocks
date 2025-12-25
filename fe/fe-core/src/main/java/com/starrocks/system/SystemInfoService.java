@@ -1280,6 +1280,10 @@ public class SystemInfoService implements GsonPostProcessable {
     public void replayAddComputeNode(ComputeNode newComputeNode) {
         // update idToComputeNode
         idToComputeNodeRef.put(newComputeNode.getId(), newComputeNode);
+
+        // Register with CnGroupMgr
+        GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                .handleNodeAdded(newComputeNode.getId(), newComputeNode.getCnGroupName());
     }
 
     public void replayAddBackend(Backend newBackend) {
@@ -1290,6 +1294,10 @@ public class SystemInfoService implements GsonPostProcessable {
         Map<Long, AtomicLong> copiedReportVersions = Maps.newHashMap(idToReportVersionRef);
         copiedReportVersions.put(newBackend.getId(), new AtomicLong(0L));
         idToReportVersionRef = ImmutableMap.copyOf(copiedReportVersions);
+
+        // Register with CnGroupMgr
+        GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                .handleNodeAdded(newBackend.getId(), newBackend.getCnGroupName());
     }
 
     private ComputeNode removeComputeNode(DropComputeNodeLog dropComputeNodeLog) {
@@ -1305,6 +1313,10 @@ public class SystemInfoService implements GsonPostProcessable {
             // remove from BackendCoreStat
             BackendResourceStat.getInstance().removeBe(cn.getWarehouseId(), dropComputeNodeLog.getComputeNodeId());
         }
+
+        // Remove from CnGroupMgr
+        GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                .handleNodeDropped(dropComputeNodeLog.getComputeNodeId());
 
         return cn;
     }
@@ -1346,6 +1358,11 @@ public class SystemInfoService implements GsonPostProcessable {
             // remove from BackendCoreStat
             BackendResourceStat.getInstance().removeBe(backend.getWarehouseId(), backend.getId());
         }
+
+        // Remove from CnGroupMgr
+        GlobalStateMgr.getCurrentState().getCnGroupMgr()
+                .handleNodeDropped(info.getId());
+
         return backend;
     }
 

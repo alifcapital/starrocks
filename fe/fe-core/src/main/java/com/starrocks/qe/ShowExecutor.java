@@ -171,6 +171,7 @@ import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowBrokerStmt;
 import com.starrocks.sql.ast.ShowCatalogsStmt;
 import com.starrocks.sql.ast.ShowCharsetStmt;
+import com.starrocks.sql.ast.ShowCnGroupsStmt;
 import com.starrocks.sql.ast.ShowCollationStmt;
 import com.starrocks.sql.ast.ShowColumnStmt;
 import com.starrocks.sql.ast.ShowComputeNodeBlackListStmt;
@@ -2595,6 +2596,12 @@ public class ShowExecutor {
         @Override
         public ShowResultSet visitShowResourceGroupStatement(ShowResourceGroupStmt statement, ConnectContext context) {
             List<List<String>> rows = GlobalStateMgr.getCurrentState().getResourceGroupMgr().showResourceGroup(statement);
+            return new ShowResultSet(showResultMetaFactory.getMetadata(statement), rows);
+        }
+
+        @Override
+        public ShowResultSet visitShowCnGroupsStatement(ShowCnGroupsStmt statement, ConnectContext context) {
+            List<List<String>> rows = GlobalStateMgr.getCurrentState().getCnGroupMgr().getGroupsInfo();
             return new ShowResultSet(showResultMetaFactory.getMetadata(statement), rows);
         }
 

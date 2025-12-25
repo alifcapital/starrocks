@@ -31,7 +31,7 @@ import java.util.Optional;
 /**
  * {@code WarehouseComputeResource} represents a compute node resource associated with a specific warehouse.
  */
-public final class WarehouseComputeResource implements ComputeResource {
+public class WarehouseComputeResource implements ComputeResource {
     private static final Logger LOG = LogManager.getLogger(WarehouseComputeResource.class);
     // The warehouseId is used to identify the warehouse.
     @SerializedName("warehouseId")
@@ -70,6 +70,16 @@ public final class WarehouseComputeResource implements ComputeResource {
             return Optional.empty();
         }
         return Optional.of(ids.get(0));
+    }
+
+    /**
+     * WarehouseComputeResource uses the default CNGroup.
+     * System tasks (stats collection, MV refresh, etc.) will run on nodes in "default" group,
+     * leaving other CNGroups (etl, analytics, etc.) for dedicated workloads.
+     */
+    @Override
+    public String getCnGroupName() {
+        return CnGroup.DEFAULT_GROUP_NAME;
     }
 
     @Override

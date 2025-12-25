@@ -113,6 +113,7 @@ import com.starrocks.thrift.TTabletLocation;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.thrift.TWriteQuorumType;
 import com.starrocks.transaction.TransactionState;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -317,8 +318,14 @@ public class OlapTableSink extends DataSink {
         TOlapTablePartitionParam partitionParam = createPartition(tSink.getDb_id(), dstTable, tupleDescriptor,
                 enableAutomaticPartition, automaticBucketSize, getOpenPartitions());
         tSink.setPartition(partitionParam);
-        tSink.setLocation(createLocation(dstTable, partitionParam, enableReplicatedStorage, computeResource));
-        tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(computeResource, getSystemInfoService(dstTable)));
+        // For shared-data mode, use ALL_GROUPS for location and nodes_info because tablet locations
+        // can reference nodes in any CNGroup - shard ownership is NOT CNGroup-aware.
+        // CNGroup filtering applies to compute/scan, but write coordination must reach shard owners.
+        ComputeResource resourceForLocation = RunMode.isSharedDataMode()
+                ? CnGroupComputeResource.forSystemTask(computeResource.getWarehouseId())
+                : computeResource;
+        tSink.setLocation(createLocation(dstTable, partitionParam, enableReplicatedStorage, resourceForLocation));
+        tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(resourceForLocation, getSystemInfoService(dstTable)));
         tSink.setPartial_update_mode(this.partialUpdateMode);
         tSink.setAutomatic_bucket_size(automaticBucketSize);
         if (canUseColocateMVIndex(dstTable)) {
@@ -341,7 +348,7 @@ public class OlapTableSink extends DataSink {
                 TOlapTablePartitionParam partitionParam2 = createPartition(tSink2.getDb_id(), dstTable, tupleDescriptor,
                         false, automaticBucketSize, doubleWritePartitionIds);
                 tSink2.setPartition(partitionParam2);
-                tSink2.setLocation(createLocation(dstTable, partitionParam2, enableReplicatedStorage, computeResource));
+                tSink2.setLocation(createLocation(dstTable, partitionParam2, enableReplicatedStorage, resourceForLocation));
                 tSink2.setIgnore_out_of_partition(true);
 
                 TDataSink tDataSink2 = new TDataSink();
@@ -864,9 +871,12 @@ public class OlapTableSink extends DataSink {
         if (RunMode.isSharedDataMode()) {
             // NOTE: shared-nothing workerProvider.allowUsingBackupNode() == false, so don't bother to create it
             WorkerProvider.Factory workerProviderFactory = new DefaultSharedDataWorkerProvider.Factory();
+            // Use ALL_GROUPS for shard owner access - shards can be on any node regardless of CNGroup.
+            // CNGroup filtering applies to compute/scan, but write coordination must reach shard owners.
+            ComputeResource allGroupsResource = CnGroupComputeResource.forSystemTask(computeResource.getWarehouseId());
             WorkerProvider workerProvider = workerProviderFactory.captureAvailableWorkers(
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo(), false, 0,
-                    SessionVariableConstants.ComputationFragmentSchedulingPolicy.ALL_NODES, computeResource);
+                    SessionVariableConstants.ComputationFragmentSchedulingPolicy.ALL_NODES, allGroupsResource);
             if (workerProvider.allowUsingBackupNode()) {
                 for (TTabletLocation location : locationParam.getTablets()) {
                     Map<Long, Long> replacePair = new HashMap<>();

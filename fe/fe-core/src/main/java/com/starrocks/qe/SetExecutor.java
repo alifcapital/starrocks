@@ -38,6 +38,7 @@ import com.starrocks.authentication.UserAuthenticationInfo;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.analyzer.SetStmtAnalyzer;
 import com.starrocks.sql.ast.SetListItem;
 import com.starrocks.sql.ast.SetPassVar;
@@ -45,6 +46,8 @@ import com.starrocks.sql.ast.SetStmt;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.sql.ast.UserRef;
 import com.starrocks.sql.ast.UserVariable;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -99,6 +102,8 @@ public class SetExecutor {
                     SystemVariable systemVariable = (SystemVariable) var;
                     if (SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
                         handleSetWarehouse(systemVariable);
+                    } else if (SessionVariable.CNGROUP_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
+                        handleSetCnGroup(systemVariable);
                     } else {
                         setVariablesOfAllType(var);
                     }
@@ -133,5 +138,27 @@ public class SetExecutor {
         } else {
             ctx.resetComputeResource();
         }
+    }
+
+    private void handleSetCnGroup(SystemVariable var) throws DdlException {
+        // CNGroup is only supported in SHARED_DATA mode
+        if (!RunMode.isSharedDataMode()) {
+            throw new DdlException("CNGroup is only supported in shared-data mode");
+        }
+
+        // Get the requested cngroup name
+        String cnGroupName = var.getResolvedExpression().getStringValue();
+        String effectiveName = CnGroup.getEffectiveName(cnGroupName);
+
+        // Validate group exists
+        CnGroupMgr cnGroupMgr = GlobalStateMgr.getCurrentState().getCnGroupMgr();
+        if (cnGroupMgr != null && !cnGroupMgr.groupExists(effectiveName)) {
+            throw new DdlException("Unknown cngroup: '" + effectiveName + "'");
+        }
+
+        setVariablesOfAllType(var);
+        // After SET cngroup, reset compute resource so that the next query
+        // will acquire a new compute resource with the new CNGroup
+        ctx.resetComputeResource();
     }
 }

@@ -475,6 +475,8 @@ public class GlobalStateMgr {
 
     private final WarehouseManager warehouseMgr;
 
+    private final com.starrocks.warehouse.cngroup.CnGroupMgr cnGroupMgr;
+
     private final HistoricalNodeMgr historicalNodeMgr;
 
     private final ConfigRefreshDaemon configRefreshDaemon;
@@ -760,6 +762,7 @@ public class GlobalStateMgr {
         this.localMetastore = new LocalMetastore(this, recycleBin, colocateTableIndex);
         this.temporaryTableMgr = new TemporaryTableMgr();
         this.warehouseMgr = new WarehouseManager();
+        this.cnGroupMgr = new com.starrocks.warehouse.cngroup.CnGroupMgr();
         this.historicalNodeMgr = new HistoricalNodeMgr();
         this.connectorMgr = new ConnectorMgr();
         this.connectorTblMetaInfoMgr = new ConnectorTblMetaInfoMgr();
@@ -1042,6 +1045,10 @@ public class GlobalStateMgr {
         return warehouseMgr;
     }
 
+    public com.starrocks.warehouse.cngroup.CnGroupMgr getCnGroupMgr() {
+        return cnGroupMgr;
+    }
+
     public HistoricalNodeMgr getHistoricalNodeMgr() {
         return historicalNodeMgr;
     }
@@ -1296,6 +1303,12 @@ public class GlobalStateMgr {
         if (!isDefaultWarehouseCreated) {
             // A brand-new cluster was up for the first time, the leader node initializes its default warehouse here.
             initDefaultWarehouse();
+        }
+
+        // Sync CnGroupMgr with existing compute nodes.
+        // This ensures nodes that existed before CNGroup feature was added are properly registered.
+        if (cnGroupMgr != null) {
+            cnGroupMgr.syncWithExistingNodes();
         }
 
         // set this after replay thread stopped. to avoid replay thread modify them.
@@ -1568,6 +1581,12 @@ public class GlobalStateMgr {
         if (!isDefaultWarehouseCreated) {
             // A brand-new cluster was up for the first time, the follower/observer node initializes its default warehouse here.
             initDefaultWarehouse();
+        }
+
+        // Sync CnGroupMgr with existing compute nodes.
+        // This ensures nodes that existed before CNGroup feature was added are properly registered.
+        if (cnGroupMgr != null) {
+            cnGroupMgr.syncWithExistingNodes();
         }
 
         // transfer from INIT/UNKNOWN to OBSERVER/FOLLOWER

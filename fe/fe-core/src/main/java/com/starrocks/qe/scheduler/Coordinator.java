@@ -260,5 +260,27 @@ public abstract class Coordinator {
 
     public abstract String getResourceGroupName();
 
+    public abstract String getCnGroupName();
+
+    /**
+     * Get the count of backup worker usages during scheduling.
+     * This is useful for profiling to see when shard owners were not available.
+     *
+     * @return the number of times a backup worker was used, 0 if not applicable
+     */
+    public int getBackupWorkerUsageCount() {
+        return 0;
+    }
+
+    /**
+     * Get backup worker usage details as a string for profiling.
+     * Format: "originalNodeId1->backupNodeId1, originalNodeId2->backupNodeId2"
+     *
+     * @return a string describing backup worker usage, or empty if no backups were used
+     */
+    public String getBackupWorkerUsageDetails() {
+        return "";
+    }
+
     public abstract boolean isShortCircuit();
 }

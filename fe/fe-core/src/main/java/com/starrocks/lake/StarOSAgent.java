@@ -738,6 +738,8 @@ public class StarOSAgent {
                 workerToId.put(workerAddr, workerId);
                 workerToNode.put(workerId, result.get());
             }
+        } else {
+            LOG.warn("Failed to find nodeId for workerId={}, workerAddr={}", workerId, workerAddr);
         }
         return result;
     }
@@ -852,8 +854,15 @@ public class StarOSAgent {
             List<WorkerGroupDetailInfo> workerGroupDetailInfos = client.
                     listWorkerGroup(serviceId, Collections.singletonList(workerGroupId), true);
             for (WorkerGroupDetailInfo detailInfo : workerGroupDetailInfos) {
-                detailInfo.getWorkersInfoList()
-                        .forEach(x -> getOrUpdateNodeIdByWorkerInfo(x).ifPresent(nodeIds::add));
+                for (WorkerInfo worker : detailInfo.getWorkersInfoList()) {
+                    Optional<Long> nodeId = getOrUpdateNodeIdByWorkerInfo(worker);
+                    if (nodeId.isPresent()) {
+                        nodeIds.add(nodeId.get());
+                    } else {
+                        LOG.warn("getWorkersByWorkerGroup: skipped worker {} - could not resolve to nodeId",
+                                worker.getWorkerId() + "@" + worker.getIpPort());
+                    }
+                }
             }
             return nodeIds;
         } catch (StarClientException e) {

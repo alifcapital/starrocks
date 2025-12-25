@@ -226,7 +226,7 @@ public class WarehouseManager implements Writable {
     /**
      * Get the warehouse and compute resource name for the given compute resource.
      * @param computeResource: the compute resource to get the warehouse name from
-     * @return: the warehouse name, empty if the compute resource is not available
+     * @return: the warehouse name with cngroup (e.g., "warehouse_name" or "warehouse_name (cngroup: group_name)")
      */
     public String getWarehouseComputeResourceName(ComputeResource computeResource) {
         if (!RunMode.isSharedDataMode()) {
@@ -234,7 +234,13 @@ public class WarehouseManager implements Writable {
         }
         try {
             final Warehouse warehouse = getWarehouse(computeResource.getWarehouseId());
-            return String.format("%s", warehouse.getName());
+            String warehouseName = warehouse.getName();
+            String cnGroupName = computeResource.getCnGroupName();
+            String effectiveCnGroup = com.starrocks.warehouse.cngroup.CnGroup.getEffectiveName(cnGroupName);
+            if (!com.starrocks.warehouse.cngroup.CnGroup.DEFAULT_GROUP_NAME.equals(effectiveCnGroup)) {
+                return String.format("%s (cngroup: %s)", warehouseName, effectiveCnGroup);
+            }
+            return warehouseName;
         } catch (Exception e) {
             LOG.warn("Failed to get warehouse name for computeResource: {}", computeResource, e);
             return "";

@@ -326,6 +326,7 @@ import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowBrokerStmt;
 import com.starrocks.sql.ast.ShowCatalogsStmt;
 import com.starrocks.sql.ast.ShowCharsetStmt;
+import com.starrocks.sql.ast.ShowCnGroupsStmt;
 import com.starrocks.sql.ast.ShowCollationStmt;
 import com.starrocks.sql.ast.ShowColumnStmt;
 import com.starrocks.sql.ast.ShowComputeNodeBlackListStmt;
@@ -4687,12 +4688,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // INTO WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // INTO CNGROUP xxx (uses default warehouse)
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4706,12 +4711,17 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = "";
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // FROM WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // FROM CNGROUP xxx (uses default warehouse)
+            whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4746,11 +4756,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // INTO WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // INTO CNGROUP xxx (uses default warehouse)
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -4764,11 +4779,17 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         String whName = "";
         String cngroupName = "";
         if (context.warehouseName != null) {
+            // FROM WAREHOUSE xxx [CNGROUP yyy]
             Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             whName = identifier.getValue();
-        }
-        if (context.cngroupName != null) {
-            Identifier identifier = (Identifier) visit(context.identifierOrString().get(1));
+            if (context.cngroupName != null) {
+                Identifier cngroupId = (Identifier) visit(context.identifierOrString().get(1));
+                cngroupName = cngroupId.getValue();
+            }
+        } else if (context.cngroupName != null) {
+            // FROM CNGROUP xxx (uses default warehouse)
+            whName = WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+            Identifier identifier = (Identifier) visit(context.identifierOrString().get(0));
             cngroupName = identifier.getValue();
         }
 
@@ -5466,6 +5487,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     public ParseNode visitShowClustersStatement(com.starrocks.sql.parser.StarRocksParser.ShowClustersStatementContext context) {
         String whName = ((Identifier) visit(context.identifier())).getValue();
         return new ShowClustersStmt(whName, createPos(context));
+    }
+
+    @Override
+    public ParseNode visitShowCnGroupsStatement(
+            com.starrocks.sql.parser.StarRocksParser.ShowCnGroupsStatementContext context) {
+        return new ShowCnGroupsStmt(createPos(context));
     }
 
     @Override

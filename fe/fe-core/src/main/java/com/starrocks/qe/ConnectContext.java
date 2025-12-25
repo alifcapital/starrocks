@@ -1041,7 +1041,9 @@ public class ConnectContext {
         // try to acquire cn group id once the warehouse is set
         final long warehouseId = this.getCurrentWarehouseId();
         final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
-        this.computeResource = LazyComputeResource.of(warehouseId, () ->
+        // Get cnGroupName from session variable for workload isolation
+        final String cnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+        this.computeResource = LazyComputeResource.of(warehouseId, cnGroupName, () ->
                 warehouseManager.acquireComputeResource(warehouseId, this.computeResource));
     }
 
@@ -1066,7 +1068,14 @@ public class ConnectContext {
                 this.resetComputeResource();
                 throw new RuntimeException(errMsg);
             }
-            if (!warehouseManager.isResourceAvailable(computeResource)) {
+            // Check if cnGroupName has changed (e.g., user did SET cngroup='xxx')
+            String currentCnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+            String resourceCnGroupName = computeResource.getCnGroupName();
+            boolean cnGroupChanged = !java.util.Objects.equals(currentCnGroupName, resourceCnGroupName);
+            if (cnGroupChanged && state != null && !state.isRunning()) {
+                // Re-acquire compute resource with new cnGroupName
+                acquireComputeResource();
+            } else if (!warehouseManager.isResourceAvailable(computeResource)) {
                 if (state != null && !state.isRunning()) {
                     // if the query is not running, we can acquire a new compute resource.
                     acquireComputeResource();

@@ -79,6 +79,7 @@ public class QueryStatisticsInfo {
     private String execProgress;
     private String execState;
     private String wareHouseName;
+    private String cnGroupName;
     private String customQueryId;
     private String resourceGroupName;
 
@@ -88,7 +89,7 @@ public class QueryStatisticsInfo {
     public QueryStatisticsInfo(long queryStartTime, String feIp, String queryId, String connId, String db, String user,
                                long cpuCostNs, long scanBytes, long scanRows, long memUsageBytes, long spillBytes,
                                long execTime, String execProgress, String execState, String wareHouseName,
-                               String customQueryId, String resourceGroupName) {
+                               String cnGroupName, String customQueryId, String resourceGroupName) {
         this.queryStartTime = queryStartTime;
         this.feIp = feIp;
         this.queryId = queryId;
@@ -104,6 +105,7 @@ public class QueryStatisticsInfo {
         this.execProgress = execProgress;
         this.execState = execState;
         this.wareHouseName = wareHouseName;
+        this.cnGroupName = cnGroupName;
         this.customQueryId = customQueryId;
         this.resourceGroupName = resourceGroupName;
     }
@@ -166,6 +168,10 @@ public class QueryStatisticsInfo {
 
     public String getWareHouseName() {
         return wareHouseName;
+    }
+
+    public String getCnGroupName() {
+        return cnGroupName;
     }
 
     public String getResourceGroupName() {
@@ -251,6 +257,11 @@ public class QueryStatisticsInfo {
         return this;
     }
 
+    public QueryStatisticsInfo withCnGroupName(String cnGroupName) {
+        this.cnGroupName = cnGroupName;
+        return this;
+    }
+
     public QueryStatisticsInfo withResourceGroupName(String resourceGroupName) {
         this.resourceGroupName = resourceGroupName;
         return this;
@@ -278,6 +289,7 @@ public class QueryStatisticsInfo {
                 .setExecProgress(execProgress)
                 .setExecState(execState)
                 .setWareHouseName(wareHouseName)
+                .setCnGroupName(cnGroupName)
                 .setCustomQueryId(customQueryId)
                 .setResourceGroupName(resourceGroupName);
     }
@@ -299,6 +311,7 @@ public class QueryStatisticsInfo {
                 .withExecProgress(tinfo.getExecProgress())
                 .withExecState(tinfo.getExecState())
                 .withWareHouseName(tinfo.getWareHouseName())
+                .withCnGroupName(tinfo.getCnGroupName())
                 .withCustomQueryId(tinfo.getCustomQueryId())
                 .withResourceGroupName(tinfo.getResourceGroupName());
     }
@@ -320,6 +333,7 @@ public class QueryStatisticsInfo {
         values.add(this.getExecProgress());
         values.add(this.getExecState());
         values.add(this.getWareHouseName());
+        values.add(this.getCnGroupName());
         values.add(this.getCustomQueryId());
         values.add(this.getResourceGroupName());
         return values;
@@ -396,10 +410,11 @@ public class QueryStatisticsInfo {
                     .withDb(item.getDb())
                     .withUser(item.getUser())
                     .withExecTime(item.getQueryExecTime())
-                    .withExecProgress(getExecProgress(FrontendOptions.getLocalHostAddress(), 
+                    .withExecProgress(getExecProgress(FrontendOptions.getLocalHostAddress(),
                                                       item.getQueryId(), httpClient))
                     .withExecState(item.getExecState())
                     .withWareHouseName(item.getWarehouseName())
+                    .withCnGroupName(item.getCnGroupName())
                     .withCustomQueryId(item.getCustomQueryId())
                     .withResourceGroupName(item.getResourceGroupName());
             if (statistics != null) {

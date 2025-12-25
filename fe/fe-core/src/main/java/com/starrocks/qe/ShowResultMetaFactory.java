@@ -54,6 +54,7 @@ import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowBrokerStmt;
 import com.starrocks.sql.ast.ShowCatalogsStmt;
 import com.starrocks.sql.ast.ShowCharsetStmt;
+import com.starrocks.sql.ast.ShowCnGroupsStmt;
 import com.starrocks.sql.ast.ShowCollationStmt;
 import com.starrocks.sql.ast.ShowColumnStmt;
 import com.starrocks.sql.ast.ShowComputeNodeBlackListStmt;
@@ -1299,6 +1300,17 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("Running", TypeFactory.createVarcharType(20)))
                 .addColumn(new Column("Enabled", TypeFactory.createVarcharType(10)))
                 .addColumn(new Column("Properties", TypeFactory.createVarcharType(1024)))
+                .build();
+    }
+
+    @Override
+    public ShowResultSetMetaData visitShowCnGroupsStatement(ShowCnGroupsStmt statement, Void context) {
+        return ShowResultSetMetaData.builder()
+                .addColumn(new Column("Name", TypeFactory.createVarcharType(256)))
+                .addColumn(new Column("NodeCount", TypeFactory.createVarcharType(20)))
+                .addColumn(new Column("NodeIds", TypeFactory.createVarcharType(4096)))
+                .addColumn(new Column("Comment", TypeFactory.createVarcharType(1024)))
+                .addColumn(new Column("CreateTime", TypeFactory.createVarcharType(256)))
                 .build();
     }
 

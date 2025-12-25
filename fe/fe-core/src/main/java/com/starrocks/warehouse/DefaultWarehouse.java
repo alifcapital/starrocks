@@ -18,16 +18,18 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.ErrorCode;
-import com.starrocks.common.ErrorReport;
 import com.starrocks.common.proc.BaseProcResult;
 import com.starrocks.common.proc.ProcResult;
 import com.starrocks.lake.StarOSAgent;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.warehouse.cngroup.AlterCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.CreateCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.DropCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.EnableDisableCnGroupStmt;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.warehouse.cngroup.CnGroup;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
+import com.starrocks.warehouse.cngroup.CnGroupMgr;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,29 +58,52 @@ public class DefaultWarehouse extends Warehouse {
 
     @Override
     public void addNodeToCNGroup(ComputeNode node, String cnGroupName) throws DdlException {
-        if (!Strings.isNullOrEmpty(cnGroupName)) {
-            // NOTE: NOT IMPLEMENTED, so the cnGroupName must be empty!
-            ErrorReport.reportDdlException(ErrorCode.ERR_CNGROUP_NOT_IMPLEMENTED);
-        }
         node.setWorkerGroupId(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
         node.setWarehouseId(getId());
+
+        // Determine the group name - use default if not specified
+        String groupName = Strings.isNullOrEmpty(cnGroupName) ? CnGroup.DEFAULT_GROUP_NAME : cnGroupName;
+        node.setCnGroupName(groupName);
+
+        // Register with CnGroupMgr
+        CnGroupMgr cnGroupMgr = GlobalStateMgr.getCurrentState().getCnGroupMgr();
+        if (cnGroupMgr != null) {
+            cnGroupMgr.addNodeToGroup(node.getId(), groupName);
+        }
     }
 
     @Override
     public void validateRemoveNodeFromCNGroup(ComputeNode node, String cnGroupName) throws DdlException {
         if (!Strings.isNullOrEmpty(cnGroupName)) {
-            // NOTE: NOT IMPLEMENTED, so the cnGroupName must be empty!
-            ErrorReport.reportDdlException(ErrorCode.ERR_CNGROUP_NOT_IMPLEMENTED);
+            // Validate that the node is in the specified group
+            String currentGroup = node.getCnGroupName();
+            if (currentGroup == null) {
+                currentGroup = CnGroup.DEFAULT_GROUP_NAME;
+            }
+            if (!cnGroupName.equals(currentGroup)) {
+                throw new DdlException("Node " + node.getId() + " is not in CNGroup '" + cnGroupName +
+                        "', it is in '" + currentGroup + "'");
+            }
         }
     }
 
     @Override
     public List<String> getWarehouseInfo() {
+        // Get actual node count using ALL_GROUPS to include all CNGroups
+        long nodeCount = 0;
+        try {
+            CnGroupComputeResource allGroupsResource = CnGroupComputeResource.forSystemTask(getId());
+            nodeCount = GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                    .getAllComputeNodeIds(allGroupsResource).size();
+        } catch (Exception e) {
+            // Ignore errors, return 0
+        }
+
         return Lists.newArrayList(
                 String.valueOf(getId()),
                 getName(),
                 "AVAILABLE",
-                String.valueOf(0L),
+                String.valueOf(nodeCount),
                 String.valueOf(1L),
                 String.valueOf(1L),
                 String.valueOf(1L),

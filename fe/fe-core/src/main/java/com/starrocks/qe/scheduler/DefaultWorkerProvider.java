@@ -28,6 +28,7 @@ import com.starrocks.server.RunMode;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.logging.log4j.LogManager;
@@ -43,6 +44,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import static com.starrocks.qe.WorkerProviderHelper.filterByCnGroup;
 import static com.starrocks.qe.WorkerProviderHelper.getNextWorker;
 
 /**
@@ -98,10 +100,19 @@ public class DefaultWorkerProvider implements WorkerProvider {
                                      boolean preferComputeNode, int numUsedComputeNodes,
                                      ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
                                      ComputeResource computeResource) {
+            return captureAvailableWorkers(systemInfoService, preferComputeNode, numUsedComputeNodes,
+                    computationFragmentSchedulingPolicy, computeResource, null);
+        }
+
+        @Override
+        public DefaultWorkerProvider captureAvailableWorkers(SystemInfoService systemInfoService,
+                                     boolean preferComputeNode, int numUsedComputeNodes,
+                                     ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
+                                     ComputeResource computeResource, String cnGroupName) {
 
             ImmutableMap<Long, ComputeNode> idToComputeNode =
-                    buildComputeNodeInfo(systemInfoService, numUsedComputeNodes, 
-                                         computationFragmentSchedulingPolicy, computeResource);
+                    buildComputeNodeInfo(systemInfoService, numUsedComputeNodes,
+                                         computationFragmentSchedulingPolicy, computeResource, cnGroupName);
 
             ImmutableMap<Long, ComputeNode> idToBackend = ImmutableMap.copyOf(systemInfoService.getIdToBackend());
 
@@ -113,7 +124,8 @@ public class DefaultWorkerProvider implements WorkerProvider {
                     LOG.debug("backend: {}-{}-{}", backendID, backend.getHost(), backend.getBePort());
                 }
 
-                LOG.debug("idToComputeNode: {}", idToComputeNode);
+                LOG.debug("idToComputeNode: {}, cnGroupName from computeResource: {}",
+                        idToComputeNode, computeResource != null ? computeResource.getCnGroupName() : null);
             }
 
             return new DefaultWorkerProvider(idToBackend, idToComputeNode,
@@ -364,7 +376,8 @@ public class DefaultWorkerProvider implements WorkerProvider {
     private static ImmutableMap<Long, ComputeNode> buildComputeNodeInfo(SystemInfoService systemInfoService,
                                   int numUsedComputeNodes,
                                   ComputationFragmentSchedulingPolicy computationFragmentSchedulingPolicy,
-                                  ComputeResource computeResource) {
+                                  ComputeResource computeResource,
+                                  String cnGroupName) {
         //define Node Pool
         Map<Long, ComputeNode> computeNodes = new HashMap<>();
 
@@ -373,6 +386,13 @@ public class DefaultWorkerProvider implements WorkerProvider {
                 = ImmutableMap.copyOf(systemInfoService.getIdComputeNode());
         ImmutableMap<Long, ComputeNode> idToBackend
                 = ImmutableMap.copyOf(systemInfoService.getIdToBackend());
+
+        // Filter by CnGroup from ComputeResource
+        // null/empty treated as "default", only "*" skips filtering
+        String cnGroupFromResource = computeResource != null ? computeResource.getCnGroupName() : cnGroupName;
+        if (!CnGroupComputeResource.ALL_GROUPS.equals(cnGroupFromResource)) {
+            idToComputeNode = filterByCnGroup(idToComputeNode, cnGroupFromResource);
+        }
 
         //add CN and BE to Node Pool
         if (numUsedComputeNodes <= 0) {

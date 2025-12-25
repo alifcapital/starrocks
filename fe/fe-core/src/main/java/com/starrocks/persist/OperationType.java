@@ -663,6 +663,19 @@ public class OperationType {
     @IgnorableOnReplayFailed
     public static final short OP_ALTER_RESOURCE = 13557;
 
+    // cn group operations (custom fork, using high range 19900-19910 to avoid upstream conflicts)
+    @IgnorableOnReplayFailed
+    public static final short OP_CREATE_CN_GROUP = 19901;
+
+    @IgnorableOnReplayFailed
+    public static final short OP_DROP_CN_GROUP = 19902;
+
+    @IgnorableOnReplayFailed
+    public static final short OP_ADD_NODE_TO_CN_GROUP = 19903;
+
+    @IgnorableOnReplayFailed
+    public static final short OP_REMOVE_NODE_FROM_CN_GROUP = 19904;
+
     /*
      * NOTICE: OperationType cannot use a value exceeding 20000, please follow the above sequence number
      */

@@ -114,6 +114,10 @@ public class ComputeNode implements IComputable, Writable, GsonPostProcessable {
 
     @SerializedName("warehouseId")
     private long warehouseId = WarehouseManager.DEFAULT_WAREHOUSE_ID;
+
+    @SerializedName("cnGroupName")
+    private volatile String cnGroupName = "default";
+
     // Indicate there is whether storage_path or not with CN node
     // It must be true for Backend
     @SerializedName("isSetStoragePath")
@@ -290,6 +294,14 @@ public class ComputeNode implements IComputable, Writable, GsonPostProcessable {
 
     public long getWarehouseId() {
         return warehouseId;
+    }
+
+    public String getCnGroupName() {
+        return cnGroupName;
+    }
+
+    public void setCnGroupName(String cnGroupName) {
+        this.cnGroupName = cnGroupName;
     }
 
     // For TEST ONLY

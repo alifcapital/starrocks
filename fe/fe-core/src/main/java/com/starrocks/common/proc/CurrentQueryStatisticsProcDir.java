@@ -68,6 +68,7 @@ public class CurrentQueryStatisticsProcDir implements ProcDirInterface {
             .add("ExecProgress")
             .add("ExecState")
             .add("Warehouse")
+            .add("CNGroup")
             .add("CustomQueryId")
             .add("ResourceGroup")
             .build();
