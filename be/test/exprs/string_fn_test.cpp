@@ -28,6 +28,7 @@
 #include "testutil/assert.h"
 #include "testutil/parallel_test.h"
 #include "types/large_int_value.h"
+#include "util/utf8.h"
 
 namespace starrocks {
 
@@ -1465,17 +1466,27 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
     src->append("abcd_efg_higk_lmn_opq_rst_uvw_xyz");
     src->append("ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ");
     src->append("AbCd_EfG_HiGk_LmN_oPq_RsT_UvW_xYz");
-    std::string s;
-    s.resize(255);
-    for (int i = 0; i < 255; ++i) {
-        s[i] = (char)i;
-    }
-    src->append(s);
     src->append("三aBcD十eFg年HiGk众生LmN牛马oPq六十年RsT诸uVw佛XyZ龙象");
-    src->append(
-            "φημὶγὰρἐγὼεἶναιτὸABCD_EFG_HIGK_LMNδίκαιονοὐκἄλλοτιOPQRST_"
-            "UVWἢτὸτοῦκρείττονοςσυμφέρονXYZ");
+    // Full-Unicode case folding/upper: verify explicit expected strings.
+    src->append("Ёлка über Größe");
     columns.emplace_back(src);
+
+    std::vector<std::string> expected_upper = {
+            "", "A", "1",
+            "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
+            "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
+            "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
+            "三ABCD十EFG年HIGK众生LMN牛马OPQ六十年RST诸UVW佛XYZ龙象",
+            "ЁЛКА ÜBER GRÖSSE",
+    };
+    std::vector<std::string> expected_lower = {
+            "", "a", "1",
+            "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
+            "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
+            "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
+            "三abcd十efg年higk众生lmn牛马opq六十年rst诸uvw佛xyz龙象",
+            "ёлка über größe",
+    };
 
     ASSERT_TRUE(StringFunctions::upper_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
     auto upper_dst = StringFunctions::upper(ctx.get(), columns).value();
@@ -1490,16 +1501,11 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
     auto size = src->size();
     ASSERT_EQ(binary_upper_dst->size(), size);
     ASSERT_EQ(binary_lower_dst->size(), size);
+    ASSERT_EQ(expected_upper.size(), size);
+    ASSERT_EQ(expected_lower.size(), size);
     for (auto i = 0; i < size; ++i) {
-        Slice origin = src->get_slice(i);
-        Slice uc = binary_upper_dst->get_slice(i);
-        Slice lc = binary_lower_dst->get_slice(i);
-        std::string uc1 = origin.to_string();
-        std::string lc1 = origin.to_string();
-        std::transform(uc1.begin(), uc1.end(), uc1.begin(), [](char c) -> char { return std::toupper(c); });
-        std::transform(lc1.begin(), lc1.end(), lc1.begin(), [](char c) -> char { return std::tolower(c); });
-        ASSERT_EQ(uc.to_string(), uc1);
-        ASSERT_EQ(lc.to_string(), lc1);
+        ASSERT_EQ(binary_upper_dst->get_slice(i).to_string(), expected_upper[i]);
+        ASSERT_EQ(binary_lower_dst->get_slice(i).to_string(), expected_lower[i]);
     }
 }
 

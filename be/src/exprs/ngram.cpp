@@ -18,6 +18,8 @@
 #include "exprs/function_context.h"
 #include "exprs/string_functions.h"
 #include "gutil/strings/fastmem.h"
+#include "util/utf8.h"
+
 namespace starrocks {
 static constexpr size_t MAX_STRING_SIZE = 1 << 15;
 // uint16[2^16] can almost fit into L2
@@ -186,8 +188,16 @@ private:
             haystackPtr = haystack_column;
         }
         if constexpr (case_insensitive) {
-            // @TODO if ngram supports utf8 in the future, we should use antoher implementation.
-            haystackPtr = StringCaseToggleFunction<false>::evaluate<TYPE_VARCHAR, TYPE_VARCHAR>(haystackPtr);
+            auto src = ColumnHelper::as_raw_column<BinaryColumn>(haystackPtr);
+            auto lower_col = RunTimeColumnType<TYPE_VARCHAR>::create();
+            lower_col->reserve(src->size());
+            std::string buf;
+            for (size_t r = 0; r < src->size(); r++) {
+                Slice s = src->get_slice(r);
+                utf8_tolower(s.get_data(), s.get_size(), buf);
+                lower_col->append(Slice(buf.data(), buf.size()));
+            }
+            haystackPtr = std::move(lower_col);
         }
 
         const BinaryColumn* haystack = ColumnHelper::as_raw_column<BinaryColumn>(haystackPtr);
