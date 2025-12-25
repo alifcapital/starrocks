@@ -37,6 +37,17 @@ struct AggStatistics {
 
         chunk_buffer_peak_memory = ADD_PEAK_COUNTER(runtime_profile, "ChunkBufferPeakMem", TUnit::BYTES);
         chunk_buffer_peak_size = ADD_PEAK_COUNTER(runtime_profile, "ChunkBufferPeakSize", TUnit::UNIT);
+
+        // Consecutive keys cache statistics
+        consecutive_keys_cache_hits = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheHits", TUnit::UNIT);
+        consecutive_keys_cache_misses = ADD_COUNTER(runtime_profile, "ConsecutiveKeysCacheMisses", TUnit::UNIT);
+
+        // UUID key optimization statistics:
+        // created lazily (only when UUID packing actually happens) to avoid polluting profiles with zeros.
+
+        // Low-cardinality dict optimization statistics
+        low_card_group_by_keys = ADD_COUNTER(runtime_profile, "LowCardGroupByKeys", TUnit::UNIT);
+        low_card_group_by_rows = ADD_COUNTER(runtime_profile, "LowCardGroupByRows", TUnit::UNIT);
     }
 
     // timer for build hash table and compute aggregate function
@@ -70,5 +81,16 @@ struct AggStatistics {
 
     RuntimeProfile::HighWaterMarkCounter* chunk_buffer_peak_memory{};
     RuntimeProfile::HighWaterMarkCounter* chunk_buffer_peak_size{};
+
+    // Consecutive keys cache statistics - tracks cache hits when consecutive rows have the same key
+    RuntimeProfile::Counter* consecutive_keys_cache_hits{};
+    RuntimeProfile::Counter* consecutive_keys_cache_misses{};
+
+    // UUID key optimization statistics
+    RuntimeProfile::Counter* uuid_key_packed_values{};
+
+    // Low-cardinality dict optimization statistics - tracks GROUP BY keys using dict encoding
+    RuntimeProfile::Counter* low_card_group_by_keys{};
+    RuntimeProfile::Counter* low_card_group_by_rows{};
 };
 } // namespace starrocks
