@@ -186,8 +186,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String TRANSACTION_READ_ONLY = "transaction_read_only";
     public static final String DEFAULT_STORAGE_ENGINE = "default_storage_engine";
     public static final String DEFAULT_TMP_STORAGE_ENGINE = "default_tmp_storage_engine";
-    public static final String DEFAULT_AUTHENTICATION_PLUGIN = "default_authentication_plugin"; 
-    public static final String AUTHENTICATION_POLICY = "authentication_policy"; 
+    public static final String DEFAULT_AUTHENTICATION_PLUGIN = "default_authentication_plugin";
+    public static final String AUTHENTICATION_POLICY = "authentication_policy";
     public static final String CHARACTER_SET_CLIENT = "character_set_client";
     public static final String CHARACTER_SET_CONNNECTION = "character_set_connection";
     public static final String CHARACTER_SET_RESULTS = "character_set_results";
@@ -1001,8 +1001,6 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String BACK_PRESSURE_MAX_ROUNDS = "back_pressure_back_rounds";
     public static final String BACK_PRESSURE_THROTTLE_TIME_UPPER_BOUND = "back_pressure_throttle_time_upper_bound";
 
-    public static final String LOWER_UPPER_SUPPORT_UTF8 = "lower_upper_support_utf8";
-
     public static final String SEMI_JOIN_DEDUPLICATE_MODE = "semi_join_deduplicat_mode";
     public static final String ENABLE_INNER_JOIN_TO_SEMI = "enable_inner_join_to_semi";
     public static final String ENABLE_JOIN_REORDER_BEFORE_DEDUPLICATE = "enable_join_reorder_before_deduplicate";
@@ -1119,8 +1117,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     /**
      * used for test
-     * Determines whether to enable gather fragment locality optimization. When enabled, 
-     * gather fragments will be assigned to the same node as other fragments if all 
+     * Determines whether to enable gather fragment locality optimization. When enabled,
+     * gather fragments will be assigned to the same node as other fragments if all
      * other fragments' instances are on the same node.
      */
     @VariableMgr.VarAttr(name = ENABLE_GATHER_FRAGMENT_LOCALITY_OPTIMIZATION)
@@ -1245,9 +1243,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = DEFAULT_TMP_STORAGE_ENGINE)
     private String defaultTmpStorageEngine = "InnoDB";
     @VariableMgr.VarAttr(name = DEFAULT_AUTHENTICATION_PLUGIN)
-    private String defaultAuthenticationPlugin = "mysql_native_password"; 
+    private String defaultAuthenticationPlugin = "mysql_native_password";
     @VariableMgr.VarAttr(name = AUTHENTICATION_POLICY)
-    private String authenticationPolicy = "*,,"; 
+    private String authenticationPolicy = "*,,";
 
     // this is used to make c3p0 library happy
     @VariableMgr.VarAttr(name = CHARACTER_SET_CLIENT)
@@ -2026,17 +2024,6 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     private int backPressureMaxRounds = 3;
     @VarAttr(name = BACK_PRESSURE_THROTTLE_TIME_UPPER_BOUND)
     private long backPressureThrottleTimeUpperBound = 300;
-
-    // Determines whether the upper/lower function supports utf8,
-    // introduced by https://github.com/StarRocks/starrocks/pull/56192
-    // Before this, the upper/lower function only supports ascii characters, and SR has made special optimizations in performance.
-    // After this change, the upper/lower function is able to handle utf8 characters,
-    // but the performance will be slightly reduced in the scenario of only ascii characters.
-    // This variable is added to give the user the right to choose.
-    // If the user does not use utf8 characters, turning off the switch can avoid performance degradation.
-    // In order to be compatible with the previous behavior, the default value is false.
-    @VarAttr(name = LOWER_UPPER_SUPPORT_UTF8)
-    private boolean lowerUpperSupportUTF8 = false;
 
     // this sv controls whether to create distinct agg below semi join
     // -1 means disable this optimization
@@ -5790,7 +5777,6 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setRuntime_filter_rpc_http_min_size(globalRuntimeFilterRpcHttpMinSize);
         tResult.setEnable_join_runtime_filter_pushdown(enableJoinRuntimeFilterPushDown);
         tResult.setEnable_join_runtime_bitset_filter(enableJoinRuntimeBitsetFilter);
-        tResult.setLower_upper_support_utf8(lowerUpperSupportUTF8);
         tResult.setEnable_global_late_materialization(enableGlobalLateMaterialization);
         tResult.setPipeline_dop(pipelineDop);
         if (pipelineProfileLevel == 2) {
