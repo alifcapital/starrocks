@@ -66,7 +66,7 @@ public class IcebergPartitionsTable extends MetadataTable {
         if (table.spec().isPartitioned()) {
             List<PartitionField> partitionFields = IcebergPartitionUtils.getAllPartitionFields(table);
             List<StructField> partitionStructFields = IcebergApiConverter.getPartitionColumns(partitionFields, table.schema());
-            LOG.debug("[IcebergPartitions] build metadata table schema. table={}, partition_fields={}, struct_fields={}",
+            LOG.debug("Iceberg partitions build metadata table schema. table={}, partition_fields={}, struct_fields={}",
                     originDb + "." + originTable, partitionFields, partitionStructFields);
             StructType partitionType = new StructType(partitionStructFields, true);
             builder.column("partition_value", partitionType);

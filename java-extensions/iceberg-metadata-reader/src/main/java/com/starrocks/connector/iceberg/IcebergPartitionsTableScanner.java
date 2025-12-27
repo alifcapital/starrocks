@@ -123,7 +123,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
             this.usingStatsFile = true;
             PartitionStatsSplitBean statsSplit = (PartitionStatsSplitBean) split;
             this.updateOnly = statsSplit.isUpdateMode();
-            LOG.debug("[IcebergPartitions] scanner using stats file. mode={}, stats_snapshot={}, target_snapshot={}, "
+            LOG.debug("Iceberg partitions scanner using stats file. mode={}, stats_snapshot={}, target_snapshot={}, "
                             + "has_incremental={}",
                     statsSplit.getMode(), statsSplit.getStatsSnapshotId(), statsSplit.getTargetSnapshotId(),
                     statsSplit.hasIncrementalManifests());
@@ -329,7 +329,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
         try {
             if (statsSplit.isDeltaMode()) {
                 PartitionMap<PartitionStats> deltaMap = computeDeltaStats(statsSplit);
-                LOG.debug("[IcebergPartitions] stats delta only. delta_partitions={}, elapsed_ms={}",
+                LOG.debug("Iceberg partitions stats delta only. delta_partitions={}, elapsed_ms={}",
                         deltaMap.size(), System.currentTimeMillis() - startMs);
                 this.statsIterator = deltaMap.values().iterator();
                 return;
@@ -338,7 +338,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
             PartitionMap<PartitionStats> statsMap = readStatsFileToMap(statsSplit.getStatsFilePath());
             int baseCount = statsMap.size();
             if (statsSplit.isBaseMode()) {
-                LOG.debug("[IcebergPartitions] stats base only. base_partitions={}, elapsed_ms={}",
+                LOG.debug("Iceberg partitions stats base only. base_partitions={}, elapsed_ms={}",
                         baseCount, System.currentTimeMillis() - startMs);
                 this.statsIterator = statsMap.values().iterator();
                 return;
@@ -349,7 +349,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
                 for (ManifestFileBean bean : statsSplit.getIncrementalManifests()) {
                     manifests.add(bean);
                 }
-                LOG.debug("[IcebergPartitions] stats incremental apply. manifests_to_apply={}", manifests.size());
+                LOG.debug("Iceberg partitions stats incremental apply. manifests_to_apply={}", manifests.size());
                 long deltaReadStartMs = System.currentTimeMillis();
                 PartitionMap<PartitionStats> incrementalMap =
                         PartitionStatsScanHelper.computeStatsFromManifests(
@@ -359,12 +359,12 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
                 long mergeStartMs = System.currentTimeMillis();
                 mergeIncrementalStats(statsMap, incrementalMap);
                 long mergeMs = System.currentTimeMillis() - mergeStartMs;
-                LOG.debug("[IcebergPartitions] stats incremental applied. base_partitions={}, incremental_partitions={}, "
+                LOG.debug("Iceberg partitions stats incremental applied. base_partitions={}, incremental_partitions={}, "
                                 + "merged_partitions={}, delta_read_ms={}, merge_ms={}, elapsed_ms={}",
                         baseCount, incrementalCount, statsMap.size(),
                         deltaReadMs, mergeMs, System.currentTimeMillis() - startMs);
             } else {
-                LOG.debug("[IcebergPartitions] stats file only. base_partitions={}, elapsed_ms={}",
+                LOG.debug("Iceberg partitions stats file only. base_partitions={}, elapsed_ms={}",
                         baseCount, System.currentTimeMillis() - startMs);
             }
             this.statsIterator = statsMap.values().iterator();
@@ -381,12 +381,12 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
         for (ManifestFileBean bean : statsSplit.getIncrementalManifests()) {
             manifests.add(bean);
         }
-        LOG.debug("[IcebergPartitions] stats delta apply. manifests_to_apply={}", manifests.size());
+        LOG.debug("Iceberg partitions stats delta apply. manifests_to_apply={}", manifests.size());
         long deltaReadStartMs = System.currentTimeMillis();
         PartitionMap<PartitionStats> deltaMap =
                 PartitionStatsScanHelper.computeStatsFromManifests(table, manifests, unifiedPartitionType, true);
         long deltaReadMs = System.currentTimeMillis() - deltaReadStartMs;
-        LOG.debug("[IcebergPartitions] stats delta read. delta_partitions={}, delta_read_ms={}",
+        LOG.debug("Iceberg partitions stats delta read. delta_partitions={}, delta_read_ms={}",
                 deltaMap.size(), deltaReadMs);
         return deltaMap;
     }
@@ -449,7 +449,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
                 try {
                     projection = Projections.inclusive(spec, false).project(predicate);
                 } catch (org.apache.iceberg.exceptions.ValidationException e) {
-                    LOG.debug("[IcebergPartitions] predicate projection failed, using partition filter directly. " +
+                    LOG.debug("Iceberg partitions predicate projection failed, using partition filter directly. " +
                                     "spec_id={}, predicate={}",
                             specId, predicate);
                 }
@@ -507,7 +507,7 @@ public class IcebergPartitionsTableScanner extends AbstractIcebergMetadataScanne
         fallbackLogged = true;
         long elapsedMs = System.currentTimeMillis() - fallbackScanStartMs;
         String manifestPath = manifestFile == null ? "null" : manifestFile.path().toString();
-        LOG.debug("[IcebergPartitions] fallback scan. manifest={}, entries={}, matched_entries={}, completed={}, " +
+        LOG.debug("Iceberg partitions fallback scan. manifest={}, entries={}, matched_entries={}, completed={}, " +
                         "elapsed_ms={}",
                 manifestPath, fallbackEntries, fallbackMatched, completed && fallbackExhausted, elapsedMs);
     }
