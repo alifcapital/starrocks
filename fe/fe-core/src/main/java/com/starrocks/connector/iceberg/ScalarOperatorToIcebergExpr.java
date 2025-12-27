@@ -123,13 +123,23 @@ public class ScalarOperatorToIcebergExpr {
 
     public static class IcebergContext {
         private final Types.StructType schema;
+        private final String stripSubfieldRoot;
 
         public IcebergContext(Types.StructType schema) {
+            this(schema, null);
+        }
+
+        public IcebergContext(Types.StructType schema, String stripSubfieldRoot) {
             this.schema = schema;
+            this.stripSubfieldRoot = stripSubfieldRoot;
         }
 
         public Types.StructType getSchema() {
             return schema;
+        }
+
+        public String getStripSubfieldRoot() {
+            return stripSubfieldRoot;
         }
     }
 
@@ -183,7 +193,7 @@ public class ScalarOperatorToIcebergExpr {
 
         @Override
         public Expression visitIsNullPredicate(IsNullPredicateOperator operator, IcebergContext context) {
-            String columnName = getColumnName(operator.getChild(0));
+            String columnName = getColumnName(operator.getChild(0), context);
             if (columnName == null) {
                 return null;
             }
@@ -196,7 +206,7 @@ public class ScalarOperatorToIcebergExpr {
 
         @Override
         public Expression visitBinaryPredicate(BinaryPredicateOperator operator, IcebergContext context) {
-            String columnName = getColumnName(operator.getChild(0));
+            String columnName = getColumnName(operator.getChild(0), context);
             if (columnName == null) {
                 return null;
             }
@@ -236,7 +246,7 @@ public class ScalarOperatorToIcebergExpr {
 
         @Override
         public Expression visitInPredicate(InPredicateOperator operator, IcebergContext context) {
-            String columnName = getColumnName(operator.getChild(0));
+            String columnName = getColumnName(operator.getChild(0), context);
             if (columnName == null) {
                 return null;
             }
@@ -268,7 +278,7 @@ public class ScalarOperatorToIcebergExpr {
 
         @Override
         public Expression visitLikePredicateOperator(LikePredicateOperator operator, IcebergContext context) {
-            String columnName = getColumnName(operator.getChild(0));
+            String columnName = getColumnName(operator.getChild(0), context);
             if (columnName == null) {
                 return null;
             }
@@ -459,12 +469,18 @@ public class ScalarOperatorToIcebergExpr {
         }
     }
 
-    private static String getColumnName(ScalarOperator operator) {
+    private static String getColumnName(ScalarOperator operator, IcebergContext context) {
         if (operator == null) {
             return null;
         }
 
         String columnName = operator.accept(new ExtractColumnName(), null);
+        if (columnName != null && context != null && context.getStripSubfieldRoot() != null) {
+            String prefix = context.getStripSubfieldRoot() + ".";
+            if (columnName.startsWith(prefix)) {
+                columnName = columnName.substring(prefix.length());
+            }
+        }
         if (columnName == null || columnName.isEmpty()) {
             return null;
         }

@@ -478,23 +478,33 @@ public class IcebergApiConverter {
     }
 
     public static List<ManifestFile> filterManifests(List<ManifestFile> manifests,
-                                               org.apache.iceberg.Table table, Expression filter) {
-        Map<Integer, ManifestEvaluator> evalCache = specCache(table, filter);
+                                                     org.apache.iceberg.Table table, Expression filter,
+                                                     boolean partitionPredicate) {
+        Map<Integer, ManifestEvaluator> evalCache = specCache(table, filter, partitionPredicate);
 
         return manifests.stream()
-                .filter(manifest -> manifest.hasAddedFiles() || manifest.hasExistingFiles())
                 .filter(manifest -> evalCache.get(manifest.partitionSpecId()).eval(manifest))
                 .collect(Collectors.toList());
     }
 
-    private static Map<Integer, ManifestEvaluator> specCache(org.apache.iceberg.Table table, Expression filter) {
+    private static Map<Integer, ManifestEvaluator> specCache(
+            org.apache.iceberg.Table table, Expression filter, boolean partitionPredicate) {
         Map<Integer, ManifestEvaluator> cache = new ConcurrentHashMap<>();
 
         for (Map.Entry<Integer, PartitionSpec> entry : table.specs().entrySet()) {
             Integer spedId = entry.getKey();
             PartitionSpec spec = entry.getValue();
 
-            Expression projection = Projections.inclusive(spec, false).project(filter);
+            Expression projection = filter;
+            if (!partitionPredicate) {
+                try {
+                    projection = Projections.inclusive(spec, false).project(filter);
+                } catch (org.apache.iceberg.exceptions.ValidationException e) {
+                    LOG.debug("[IcebergPartitions] manifest projection failed, using partition filter directly. " +
+                                    "table={}, specId={}, predicate={}",
+                            table.name(), spedId, filter);
+                }
+            }
             ManifestEvaluator evaluator = ManifestEvaluator.forPartitionFilter(projection, spec, false);
 
             cache.put(spedId, evaluator);

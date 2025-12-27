@@ -28,9 +28,14 @@ import com.starrocks.memory.MemoryTrackable;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.AlterViewStmt;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.MetadataTableUtils;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.PartitionStatisticsFile;
+import org.apache.iceberg.PartitionStats;
+import org.apache.iceberg.PartitionStatsHandler;
+import org.apache.iceberg.Partitioning;
 import org.apache.iceberg.PartitionsTable;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
@@ -44,7 +49,8 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.RESTException;
 import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.util.StructProjection;
+import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.PartitionMap;
 import org.apache.iceberg.view.SQLViewRepresentation;
 import org.apache.iceberg.view.View;
 import org.apache.iceberg.view.ViewBuilder;
@@ -272,7 +278,145 @@ public interface IcebergCatalog extends MemoryTrackable {
     // --------------- partition APIs ---------------
     default Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
         Table nativeTable = icebergTable.getNativeTable();
+        Logger logger = getLogger();
+
+        // TODO: ideally we should know if table is partitioned under a snapshotId.
+        // but currently we just did it in a very wild way.
+        if (nativeTable.spec().isUnpartitioned()) {
+            return getPartitionsForUnpartitionedTable(icebergTable, snapshotId, executorService);
+        }
+
+        // Try to use partition-statistics file for better performance and accurate last_updated_at
+        Snapshot currentSnapshot = nativeTable.currentSnapshot();
+        if (currentSnapshot == null) {
+            // Empty table - no partitions
+            return Maps.newHashMap();
+        }
+        long effectiveSnapshotId = snapshotId != -1 ? snapshotId : currentSnapshot.snapshotId();
+        try {
+            PartitionStatisticsFile statsFile = PartitionStatsHandler.latestStatsFile(nativeTable, effectiveSnapshotId);
+            if (statsFile != null) {
+                logger.info("Found partition statistics file for table [{}], statsFileSnapshotId={}, requestedSnapshotId={}",
+                        nativeTable.name(), statsFile.snapshotId(), effectiveSnapshotId);
+                if (statsFile.snapshotId() == effectiveSnapshotId) {
+                    Map<String, Partition> result =
+                            getPartitionsFromStatsFile(icebergTable, statsFile, effectiveSnapshotId);
+                    if (result != null) {
+                        return result;
+                    }
+                    // null means graceful fallback needed
+                    logger.info("Falling back to PartitionsTable (manifest scan) for table [{}]", nativeTable.name());
+                } else {
+                    Map<String, Partition> currentPartitions =
+                            getPartitionsViaManifestScan(icebergTable, effectiveSnapshotId, executorService);
+                    Map<String, Long> statsLastUpdated =
+                            readStatsFileLastUpdated(icebergTable, statsFile);
+                    if (!statsLastUpdated.isEmpty()) {
+                        for (Map.Entry<String, Partition> entry : currentPartitions.entrySet()) {
+                            Long lastUpdatedAt = statsLastUpdated.get(entry.getKey());
+                            if (lastUpdatedAt != null) {
+                                Partition existing = entry.getValue();
+                                currentPartitions.put(entry.getKey(),
+                                        new Partition(lastUpdatedAt, existing.getSpecId()));
+                            }
+                        }
+                    }
+                    return currentPartitions;
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read partition statistics file for table [{}], " +
+                    "falling back to PartitionsTable (manifest scan)", nativeTable.name(), e);
+        }
+
+        // Fallback to PartitionsTable (manifest scan)
+        return getPartitionsViaManifestScan(icebergTable, snapshotId, executorService);
+    }
+
+    private Map<String, Partition> getPartitionsFromStatsFile(
+            IcebergTable icebergTable, PartitionStatisticsFile statsFile, long targetSnapshotId) {
+        Table nativeTable = icebergTable.getNativeTable();
+        Logger logger = getLogger();
         Map<String, Partition> partitionMap = Maps.newHashMap();
+
+        try {
+            java.util.Collection<PartitionStats> stats;
+            Types.StructType partitionType = Partitioning.partitionType(nativeTable);
+
+            if (statsFile.snapshotId() == targetSnapshotId) {
+                // Exact match - read directly from stats file
+                logger.info("Reading partition stats directly from file for table [{}]", nativeTable.name());
+                Schema schema = PartitionStatsHandler.schema(partitionType);
+                try (CloseableIterable<PartitionStats> statsIterable = PartitionStatsHandler.readPartitionStatsFile(
+                        schema, nativeTable.io().newInputFile(statsFile.path()))) {
+                    stats = com.google.common.collect.Lists.newArrayList(statsIterable);
+                }
+            } else {
+                // Older stats file should be handled via current manifests + stats-file update in caller.
+                return null;
+            }
+
+            for (PartitionStats stat : stats) {
+                StructLike partitionData = stat.partition();
+                int specId = stat.specId();
+                PartitionSpec spec = nativeTable.specs().get(specId);
+                if (spec == null) {
+                    logger.warn("PartitionSpec not found for specId {} in table [{}], skipping partition",
+                            specId, nativeTable.name());
+                    continue;
+                }
+
+                String partitionName = PartitionUtil.convertIcebergPartitionToPartitionName(
+                        nativeTable, spec, partitionData);
+
+                Long lastUpdatedAt = stat.lastUpdatedAt();
+                long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : getTableLastestSnapshotTime(icebergTable, logger);
+
+                Partition partition = new Partition(lastUpdated, specId);
+                partitionMap.put(partitionName, partition);
+            }
+        } catch (Exception e) {
+            throw new StarRocksConnectorException(
+                    "Failed to get partitions from stats file for table: " + nativeTable.name(), e);
+        }
+
+        return partitionMap;
+    }
+
+    private Map<String, Long> readStatsFileLastUpdated(
+            IcebergTable icebergTable, PartitionStatisticsFile statsFile) {
+        Table nativeTable = icebergTable.getNativeTable();
+        Logger logger = getLogger();
+        Map<String, Long> lastUpdatedMap = Maps.newHashMap();
+        Types.StructType partitionType = Partitioning.partitionType(nativeTable);
+        Schema schema = PartitionStatsHandler.schema(partitionType);
+        try (CloseableIterable<PartitionStats> statsIterable = PartitionStatsHandler.readPartitionStatsFile(
+                schema, nativeTable.io().newInputFile(statsFile.path()))) {
+            for (PartitionStats stat : statsIterable) {
+                int specId = stat.specId();
+                PartitionSpec spec = nativeTable.specs().get(specId);
+                if (spec == null) {
+                    logger.warn("PartitionSpec not found for specId {} in table [{}], skipping stats update",
+                            specId, nativeTable.name());
+                    continue;
+                }
+                String partitionName = PartitionUtil.convertIcebergPartitionToPartitionName(
+                        nativeTable, spec, stat.partition());
+                lastUpdatedMap.put(partitionName, stat.lastUpdatedAt());
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read partition stats file for table [{}] in update mode",
+                    nativeTable.name(), e);
+        }
+        return lastUpdatedMap;
+    }
+
+    private Map<String, Partition> getPartitionsForUnpartitionedTable(
+            IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
+        Table nativeTable = icebergTable.getNativeTable();
+        Map<String, Partition> partitionMap = Maps.newHashMap();
+        Logger logger = getLogger();
+
         PartitionsTable partitionsTable = (PartitionsTable) MetadataTableUtils.
                 createMetadataTableInstance(nativeTable, MetadataTableType.PARTITIONS);
         TableScan tableScan = partitionsTable.newScan();
@@ -282,80 +426,68 @@ public interface IcebergCatalog extends MemoryTrackable {
         if (executorService != null) {
             tableScan = tableScan.planWith(executorService);
         }
-        Logger logger = getLogger();
 
-        // TODO: ideally we should know if table is partitioned under a snapshotId.
-        // but currently we just did it in a very wild way.
-        if (nativeTable.spec().isUnpartitioned()) {
-            Partition partition = null;
-            try (CloseableIterable<FileScanTask> tasks = tableScan.planFiles()) {
-                for (FileScanTask task : tasks) {
-                    // partitionsTable Table schema :
-                    // record_count,
-                    // file_count,
-                    // total_data_file_size_in_bytes,
-                    // position_delete_record_count,
-                    // position_delete_file_count,
-                    // equality_delete_record_count,
-                    // equality_delete_file_count,
-                    // last_updated_at,
-                    // last_updated_snapshot_id
-                    CloseableIterable<StructLike> rows = task.asDataTask().rows();
-                    for (StructLike row : rows) {
-                        // Get the last updated time of the table according to the table schema
-                        // last_updated_at can be null if the referenced snapshot has been expired.
-                        // Use Long wrapper to avoid NPE during auto-unboxing.
-                        long lastUpdated = getPartitionLastUpdatedTime(icebergTable, row, 7,
-                                EMPTY_PARTITION_NAME, snapshotId);
-                        partition = new Partition(lastUpdated);
-                        break;
-                    }
+        Partition partition = null;
+        try (CloseableIterable<FileScanTask> tasks = tableScan.planFiles()) {
+            for (FileScanTask task : tasks) {
+                CloseableIterable<StructLike> rows = task.asDataTask().rows();
+                for (StructLike row : rows) {
+                    long lastUpdated = getPartitionLastUpdatedTime(icebergTable, row, 7,
+                            EMPTY_PARTITION_NAME, snapshotId);
+                    partition = new Partition(lastUpdated);
+                    break;
                 }
-                if (partition == null) {
-                    long tableLastestSnapshotTime = getTableLastestSnapshotTime(icebergTable, logger);
-                    logger.warn("The unpartitioned table [{}] has no partitions in PartitionsTable, " +
-                            "using {} as last updated time", nativeTable.name(), tableLastestSnapshotTime);
-                    partition = new Partition(tableLastestSnapshotTime);
-                }
-                partitionMap.put(EMPTY_PARTITION_NAME, partition);
-            } catch (IOException e) {
-                throw new StarRocksConnectorException("Failed to get partitions for table: " + nativeTable.name(), e);
             }
-        } else {
-            // For partition table, we need to get all partitions from PartitionsTable.
-            try (CloseableIterable<FileScanTask> tasks = tableScan.planFiles()) {
-                for (FileScanTask task : tasks) {
-                    // partitionsTable Table schema :
-                    // partition,
-                    // spec_id,
-                    // record_count,
-                    // file_count,
-                    // total_data_file_size_in_bytes,
-                    // position_delete_record_count,
-                    // position_delete_file_count,
-                    // equality_delete_record_count,
-                    // equality_delete_file_count,
-                    // last_updated_at,
-                    // last_updated_snapshot_id
-                    CloseableIterable<StructLike> rows = task.asDataTask().rows();
-                    for (StructLike row : rows) {
-                        // Get the partition data/spec id/last updated time according to the table schema
-                        StructProjection partitionData = row.get(0, StructProjection.class);
-                        int specId = row.get(1, Integer.class);
-                        PartitionSpec spec = nativeTable.specs().get(specId);
-
-                        String partitionName =
-                                PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, spec, partitionData);
-                        long lastUpdated =
-                                getPartitionLastUpdatedTime(icebergTable, row, 9, partitionName, snapshotId);
-                        Partition partition = new Partition(lastUpdated, specId);
-                        partitionMap.put(partitionName, partition);
-                    }
-                }
-            } catch (IOException e) {
-                throw new StarRocksConnectorException("Failed to get partitions for table: " + nativeTable.name(), e);
+            if (partition == null) {
+                long tableLastestSnapshotTime = getTableLastestSnapshotTime(icebergTable, logger);
+                logger.warn("The unpartitioned table [{}] has no partitions in PartitionsTable, " +
+                        "using {} as last updated time", nativeTable.name(), tableLastestSnapshotTime);
+                partition = new Partition(tableLastestSnapshotTime);
             }
+            partitionMap.put(EMPTY_PARTITION_NAME, partition);
+        } catch (IOException e) {
+            throw new StarRocksConnectorException("Failed to get partitions for table: " + nativeTable.name(), e);
         }
+
+        return partitionMap;
+    }
+
+    private Map<String, Partition> getPartitionsViaManifestScan(
+            IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
+        Table nativeTable = icebergTable.getNativeTable();
+        Map<String, Partition> partitionMap = Maps.newHashMap();
+        Logger logger = getLogger();
+        Snapshot snapshot = snapshotId != -1 ? nativeTable.snapshot(snapshotId) : nativeTable.currentSnapshot();
+        if (snapshot == null) {
+            return partitionMap;
+        }
+
+        List<ManifestFile> manifests = new ArrayList<>();
+        manifests.addAll(snapshot.dataManifests(nativeTable.io()));
+        manifests.addAll(snapshot.deleteManifests(nativeTable.io()));
+
+        try {
+            PartitionMap<PartitionStats> statsMap = PartitionStatsHandler.computeStats(nativeTable, manifests, false);
+            for (PartitionStats stat : statsMap.values()) {
+                int specId = stat.specId();
+                PartitionSpec spec = nativeTable.specs().get(specId);
+                if (spec == null) {
+                    logger.warn("PartitionSpec not found for specId {} in table [{}], skipping partition",
+                            specId, nativeTable.name());
+                    continue;
+                }
+
+                String partitionName =
+                        PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, spec, stat.partition());
+                Long lastUpdatedAt = stat.lastUpdatedAt();
+                long lastUpdated =
+                        lastUpdatedAt != null ? lastUpdatedAt : getTableLastestSnapshotTime(icebergTable, logger);
+                partitionMap.put(partitionName, new Partition(lastUpdated, specId));
+            }
+        } catch (Exception e) {
+            throw new StarRocksConnectorException("Failed to get partitions for table: " + nativeTable.name(), e);
+        }
+
         return partitionMap;
     }
 

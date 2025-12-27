@@ -19,6 +19,7 @@ import com.esotericsoftware.kryo.io.Output;
 import com.google.common.collect.ImmutableList;
 import com.starrocks.connector.share.iceberg.CommonMetadataBean;
 import com.starrocks.connector.share.iceberg.IcebergMetricsBean;
+import com.starrocks.connector.share.iceberg.IcebergPredicateInfo;
 import com.starrocks.jni.connector.ColumnValue;
 import de.javakaffee.kryoserializers.UnmodifiableCollectionsSerializer;
 import org.apache.iceberg.ContentFile;
@@ -104,7 +105,16 @@ public class IcebergMetadataScanner extends AbstractIcebergMetadataScanner {
 
     @Override
     public void doOpen() {
-        this.predicate = predicateInfo.isEmpty() ? Expressions.alwaysTrue() : deserializeFromBase64(predicateInfo);
+        if (predicateInfo.isEmpty()) {
+            this.predicate = Expressions.alwaysTrue();
+        } else {
+            Object predicateObj = deserializeFromBase64(predicateInfo);
+            if (predicateObj instanceof IcebergPredicateInfo) {
+                this.predicate = ((IcebergPredicateInfo) predicateObj).predicate();
+            } else {
+                this.predicate = (Expression) predicateObj;
+            }
+        }
         this.manifestFile = deserializeFromBase64(manifestBean);
         initSerializer();
     }
