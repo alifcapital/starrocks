@@ -37,7 +37,7 @@ public final class PartitionStatsScanHelper {
         for (ManifestFile manifest : manifests) {
             mergePartitionMap(collectStatsForManifest(table, manifest, partitionType, incremental, metrics), statsMap);
         }
-        LOG.debug("[IcebergPartitions] stats scan manifests. manifests={}, entries={}, live_entries={}, added_entries={}, "
+        LOG.debug("Iceberg partitions stats scan manifests. manifests={}, entries={}, live_entries={}, added_entries={}, "
                         + "deleted_entries={}, incremental={}, elapsed_ms={}",
                 manifests.size(), metrics.entries, metrics.liveEntries, metrics.addedEntries,
                 metrics.deletedEntries, incremental, System.currentTimeMillis() - startMs);

@@ -752,7 +752,7 @@ public class IcebergMetadata implements ConnectorMetadata {
                 remoteMetaSplits.add(IcebergMetaSplit.from(file));
             }
             if (metadataTableType == MetadataTableType.PARTITIONS) {
-                LOG.debug("[IcebergPartitions] fallback manifests. table={}, snapshot={}, predicate={}, " +
+                LOG.debug("Iceberg partitions fallback manifests. table={}, snapshot={}, predicate={}, " +
                                 "data_manifests={}, matched_data={}, delete_manifests={}, matched_delete={}, " +
                                 "total_splits={}, elapsed_ms={}",
                         nativeTable.name(), snapshotId, predicate,
@@ -774,20 +774,20 @@ public class IcebergMetadata implements ConnectorMetadata {
             org.apache.iceberg.Table nativeTable, long snapshotId, String serializedTable, Expression predicate,
             boolean partitionPredicate) {
         if (!ConnectContext.getSessionVariableOrDefault().enableIcebergPartitionStats()) {
-            LOG.debug("[IcebergPartitions] fallback to manifest scan. table={}, reason=disabled_by_session",
+            LOG.debug("Iceberg partitions fallback to manifest scan. table={}, reason=disabled_by_session",
                     nativeTable.name());
             return null;
         }
         PartitionStatisticsFile statsFile = PartitionStatsHandler.latestStatsFile(nativeTable, snapshotId);
         if (statsFile == null) {
-            LOG.debug("[IcebergPartitions] fallback to manifest scan. table={}, reason=no_stats_file",
+            LOG.debug("Iceberg partitions fallback to manifest scan. table={}, reason=no_stats_file",
                     nativeTable.name());
             return null;
         }
 
         Snapshot targetSnapshot = nativeTable.snapshot(snapshotId);
         if (targetSnapshot == null) {
-            LOG.debug("[IcebergPartitions] fallback to manifest scan. table={}, reason=missing_target_snapshot, snapshot={}",
+            LOG.debug("Iceberg partitions fallback to manifest scan. table={}, reason=missing_target_snapshot, snapshot={}",
                     nativeTable.name(), snapshotId);
             return null;
         }
@@ -799,7 +799,7 @@ public class IcebergMetadata implements ConnectorMetadata {
         baseSplit.setTargetSnapshotId(snapshotId);
 
         if (statsFile.snapshotId() != snapshotId) {
-            LOG.debug("[IcebergPartitions] stats file older. table={}, stats_snapshot={}, target_snapshot={}, predicate={}",
+            LOG.debug("Iceberg partitions stats file older. table={}, stats_snapshot={}, target_snapshot={}, predicate={}",
                     nativeTable.name(), statsFile.snapshotId(), snapshotId, predicate);
             List<RemoteMetaSplit> splits = new ArrayList<>();
             PartitionStatsSplitBean updateSplit = new PartitionStatsSplitBean();
@@ -823,13 +823,13 @@ public class IcebergMetadata implements ConnectorMetadata {
                 splits.add(IcebergMetaSplit.from(manifest));
             }
 
-            LOG.debug("[IcebergPartitions] stats update split. table={}, data_manifests={}, matched_data={}, " +
+            LOG.debug("Iceberg partitions stats update split. table={}, data_manifests={}, matched_data={}, " +
                             "delete_manifests={}, matched_delete={}, total_splits={}",
                     nativeTable.name(), dataManifests.size(), matchingDataManifests.size(),
                     deleteManifests.size(), matchingDeleteManifests.size(), splits.size());
             return new IcebergMetaSpec(serializedTable, splits, false);
         } else {
-            LOG.debug("[IcebergPartitions] stats file matches target. table={}, mode=stats_only, snapshot={}",
+            LOG.debug("Iceberg partitions stats file matches target. table={}, mode=stats_only, snapshot={}",
                     nativeTable.name(), snapshotId);
         }
 

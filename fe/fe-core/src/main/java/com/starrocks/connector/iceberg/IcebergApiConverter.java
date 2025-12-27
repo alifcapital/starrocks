@@ -500,7 +500,7 @@ public class IcebergApiConverter {
                 try {
                     projection = Projections.inclusive(spec, false).project(filter);
                 } catch (org.apache.iceberg.exceptions.ValidationException e) {
-                    LOG.debug("[IcebergPartitions] manifest projection failed, using partition filter directly. " +
+                    LOG.debug("Iceberg partitions manifest projection failed, using partition filter directly. " +
                                     "table={}, specId={}, predicate={}",
                             table.name(), spedId, filter);
                 }

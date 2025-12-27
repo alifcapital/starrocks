@@ -1673,10 +1673,10 @@ public class PlanFragmentBuilder {
                 Set<String> partitionFieldNames = Collections.emptySet();
                 if (isPartitionsMetadata) {
                     partitionFieldNames = getPartitionFieldNames(table);
-                    LOG.debug("[IcebergPartitions] metadata scan partition fields. table={}, fields={}",
+                    LOG.debug("Iceberg partitions metadata scan partition fields. table={}, fields={}",
                             table.getOriginDb() + "." + table.getOriginTable(), partitionFieldNames);
                     if (partitionFieldNames.isEmpty()) {
-                        LOG.debug("[IcebergPartitions] metadata scan partition fields empty. table={}",
+                        LOG.debug("Iceberg partitions metadata scan partition fields empty. table={}",
                                 table.getOriginDb() + "." + table.getOriginTable());
                     }
                 }
@@ -1688,7 +1688,7 @@ public class PlanFragmentBuilder {
                         boolean hasPartitionValue =
                                 containsPartitionValue(predicate) || containsPartitionField(predicate, partitionFieldNames);
                         if (isPartitionsMetadata) {
-                            LOG.debug("[IcebergPartitions] metadata scan predicate. predicate={}, " +
+                            LOG.debug("Iceberg partitions metadata scan predicate. predicate={}, " +
                                             "has_partition_value={}, partition_fields={}",
                                     predicate, hasPartitionValue, partitionFieldNames);
                         }
