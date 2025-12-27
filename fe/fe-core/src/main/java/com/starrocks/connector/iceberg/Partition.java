@@ -29,7 +29,8 @@ public class Partition implements PartitionInfo {
 
     @Override
     public TimeUnit getModifiedTimeUnit() {
-        return TimeUnit.MICROSECONDS;
+        // last_updated_at comes from snapshot.timestampMillis() which is in milliseconds
+        return TimeUnit.MILLISECONDS;
     }
 
     public int getSpecId() {
