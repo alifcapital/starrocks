@@ -51,7 +51,10 @@ import com.starrocks.common.LocalExchangerType;
 import com.starrocks.common.Pair;
 import com.starrocks.common.StarRocksException;
 import com.starrocks.connector.BucketProperty;
+import com.starrocks.connector.iceberg.ScalarOperatorToIcebergExpr;
 import com.starrocks.connector.metadata.MetadataTable;
+import com.starrocks.connector.metadata.MetadataTableType;
+import com.starrocks.connector.share.iceberg.IcebergPredicateInfo;
 import com.starrocks.load.BrokerFileGroup;
 import com.starrocks.planner.AggregateInfo;
 import com.starrocks.planner.AggregationNode;
@@ -210,6 +213,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil;
+import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamAggOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamJoinOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamScanOperator;
@@ -222,6 +226,8 @@ import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.thrift.TFileScanType;
 import com.starrocks.thrift.TPartitionType;
 import com.starrocks.thrift.TResultSinkType;
+import com.starrocks.type.StructField;
+import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.commons.collections4.CollectionUtils;
@@ -238,6 +244,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -1660,14 +1667,75 @@ public class PlanFragmentBuilder {
                 ColumnRefOperator placeHolderOp = new ColumnRefOperator(
                         phCol.getUniqueId(), phCol.getType(), phCol.getName(), phCol.isAllowNull());
                 String icebergPredicate = "";
+                List<ScalarOperator> icebergPredicates = new ArrayList<>();
 
+                boolean isPartitionsMetadata = table.getMetadataTableType() == MetadataTableType.PARTITIONS;
+                Set<String> partitionFieldNames = Collections.emptySet();
+                if (isPartitionsMetadata) {
+                    partitionFieldNames = getPartitionFieldNames(table);
+                    LOG.debug("[IcebergPartitions] metadata scan partition fields. table={}, fields={}",
+                            table.getOriginDb() + "." + table.getOriginTable(), partitionFieldNames);
+                    if (partitionFieldNames.isEmpty()) {
+                        LOG.debug("[IcebergPartitions] metadata scan partition fields empty. table={}",
+                                table.getOriginDb() + "." + table.getOriginTable());
+                    }
+                }
                 for (ScalarOperator predicate : predicates) {
                     // exclude iceberg predicate
                     if (isColumnEqualConstant(predicate) && predicate.getChild(0).equivalent(placeHolderOp)) {
                         icebergPredicate = ((ConstantOperator) predicate.getChild(1)).getVarchar();
                     } else {
-                        metadataScanNode.getConjuncts().add(
-                                ScalarOperatorToExpr.buildExecExpression(predicate, formatterContext));
+                        boolean hasPartitionValue =
+                                containsPartitionValue(predicate) || containsPartitionField(predicate, partitionFieldNames);
+                        if (isPartitionsMetadata) {
+                            LOG.debug("[IcebergPartitions] metadata scan predicate. predicate={}, " +
+                                            "has_partition_value={}, partition_fields={}",
+                                    predicate, hasPartitionValue, partitionFieldNames);
+                        }
+                        if (!(isPartitionsMetadata && hasPartitionValue)) {
+                            metadataScanNode.getConjuncts().add(
+                                    ScalarOperatorToExpr.buildExecExpression(predicate, formatterContext));
+                        }
+                        if (hasPartitionValue) {
+                            icebergPredicates.add(predicate);
+                        }
+                    }
+                }
+
+                if (icebergPredicate.isEmpty() && !icebergPredicates.isEmpty() &&
+                        table.getMetadataTableType() == MetadataTableType.PARTITIONS) {
+                    try {
+                        Table originTable = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(
+                                new ConnectContext(), table.getCatalogName(), table.getOriginDb(), table.getOriginTable());
+                        if (originTable instanceof IcebergTable) {
+                            org.apache.iceberg.Table nativeTable = ((IcebergTable) originTable).getNativeTable();
+                            org.apache.iceberg.types.Types.StructType partitionType =
+                                    org.apache.iceberg.Partitioning.partitionType(nativeTable);
+                            ScalarOperatorToIcebergExpr.IcebergContext icebergContext =
+                                    new ScalarOperatorToIcebergExpr.IcebergContext(partitionType, "partition_value");
+                            org.apache.iceberg.expressions.Expression expr =
+                                    new ScalarOperatorToIcebergExpr().convert(icebergPredicates, icebergContext);
+                            if (!expr.equals(org.apache.iceberg.expressions.Expressions.alwaysTrue())) {
+                                icebergPredicate = org.apache.iceberg.util.SerializationUtil.serializeToBase64(
+                                        new IcebergPredicateInfo(expr, true));
+                            }
+                        }
+                    } catch (Exception e) {
+                        LOG.warn("Failed to build iceberg predicate for metadata scan", e);
+                    }
+                }
+
+                if (isPartitionsMetadata && !icebergPredicate.isEmpty()) {
+                    try {
+                        Object predicateObj =
+                                org.apache.iceberg.util.SerializationUtil.deserializeFromBase64(icebergPredicate);
+                        if (predicateObj instanceof org.apache.iceberg.expressions.Expression) {
+                            icebergPredicate = org.apache.iceberg.util.SerializationUtil.serializeToBase64(
+                                    new IcebergPredicateInfo(
+                                            (org.apache.iceberg.expressions.Expression) predicateObj, true));
+                        }
+                    } catch (Exception e) {
+                        LOG.warn("Failed to wrap iceberg predicate for metadata scan", e);
                     }
                 }
 
@@ -4544,5 +4612,67 @@ public class PlanFragmentBuilder {
             context.getFragments().add(fragment);
             return fragment;
         }
+    }
+
+    private static boolean containsPartitionValue(ScalarOperator predicate) {
+        if (predicate == null) {
+            return false;
+        }
+        if (predicate instanceof ColumnRefOperator) {
+            return "partition_value".equalsIgnoreCase(((ColumnRefOperator) predicate).getName());
+        }
+        if (predicate instanceof SubfieldOperator) {
+            ScalarOperator child = predicate.getChild(0);
+            if (child instanceof ColumnRefOperator) {
+                return "partition_value".equalsIgnoreCase(((ColumnRefOperator) child).getName());
+            }
+        }
+        for (ScalarOperator child : predicate.getChildren()) {
+            if (containsPartitionValue(child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsPartitionField(ScalarOperator predicate, Set<String> partitionFieldNames) {
+        if (predicate == null || partitionFieldNames.isEmpty()) {
+            return false;
+        }
+        if (predicate instanceof ColumnRefOperator) {
+            return partitionFieldNames.contains(((ColumnRefOperator) predicate).getName().toLowerCase(Locale.ROOT));
+        }
+        if (predicate instanceof SubfieldOperator) {
+            ScalarOperator child = predicate.getChild(0);
+            if (child instanceof ColumnRefOperator) {
+                List<String> paths = new ArrayList<>();
+                paths.add(((ColumnRefOperator) child).getName());
+                paths.addAll(((SubfieldOperator) predicate).getFieldNames());
+                for (String path : paths) {
+                    if (partitionFieldNames.contains(path.toLowerCase(Locale.ROOT))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for (ScalarOperator child : predicate.getChildren()) {
+            if (containsPartitionField(child, partitionFieldNames)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Set<String> getPartitionFieldNames(MetadataTable table) {
+        Column partitionValue = table.getColumn("partition_value");
+        if (partitionValue == null || !(partitionValue.getType() instanceof StructType)) {
+            return Collections.emptySet();
+        }
+        StructType structType = (StructType) partitionValue.getType();
+        Set<String> fieldNames = new HashSet<>();
+        for (StructField field : structType.getFields()) {
+            fieldNames.add(field.getName().toLowerCase(Locale.ROOT));
+        }
+        return fieldNames;
     }
 }

@@ -209,7 +209,8 @@ public class StarRocksIcebergTableScan
         List<ManifestFile> dataManifests = snapshot.dataManifests(io());
         scanMetrics().totalDataManifests().increment(dataManifests.size());
 
-        List<ManifestFile> matchingDataManifests = IcebergApiConverter.filterManifests(dataManifests, table(), filter());
+        List<ManifestFile> matchingDataManifests =
+                IcebergApiConverter.filterManifests(dataManifests, table(), filter(), false);
         int skippedDataManifestsCount = dataManifests.size() - matchingDataManifests.size();
         scanMetrics().skippedDataManifests().increment(skippedDataManifestsCount);
 
@@ -218,7 +219,8 @@ public class StarRocksIcebergTableScan
 
     private List<ManifestFile> findMatchingDeleteManifests(Snapshot snapshot) {
         List<ManifestFile> deleteManifests = snapshot.deleteManifests(io());
-        List<ManifestFile> matchingDeleteManifests = IcebergApiConverter.filterManifests(deleteManifests, table(), filter());
+        List<ManifestFile> matchingDeleteManifests =
+                IcebergApiConverter.filterManifests(deleteManifests, table(), filter(), false);
 
         scanMetrics().totalDeleteManifests().increment(deleteManifests.size());
         scanMetrics().skippedDeleteManifests().increment(deleteManifests.size() - matchingDeleteManifests.size());
