@@ -32,6 +32,8 @@ import com.starrocks.thrift.TTableType;
 import com.starrocks.type.StructField;
 import com.starrocks.type.StructType;
 import org.apache.iceberg.PartitionField;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 
@@ -42,6 +44,7 @@ import static com.starrocks.type.IntegerType.INT;
 
 public class IcebergPartitionsTable extends MetadataTable {
     public static final String TABLE_NAME = "iceberg_partitions_table";
+    private static final Logger LOG = LogManager.getLogger(IcebergPartitionsTable.class);
 
     public IcebergPartitionsTable(String catalogName, long id, String name, Table.TableType type,
                              List<Column> baseSchema, String originDb, String originTable,
@@ -63,6 +66,8 @@ public class IcebergPartitionsTable extends MetadataTable {
         if (table.spec().isPartitioned()) {
             List<PartitionField> partitionFields = IcebergPartitionUtils.getAllPartitionFields(table);
             List<StructField> partitionStructFields = IcebergApiConverter.getPartitionColumns(partitionFields, table.schema());
+            LOG.debug("[IcebergPartitions] build metadata table schema. table={}, partition_fields={}, struct_fields={}",
+                    originDb + "." + originTable, partitionFields, partitionStructFields);
             StructType partitionType = new StructType(partitionStructFields, true);
             builder.column("partition_value", partitionType);
             builder.column("spec_id", INT);
@@ -80,6 +85,7 @@ public class IcebergPartitionsTable extends MetadataTable {
                         .column("equality_delete_record_count", BIGINT)
                         .column("equality_delete_file_count", BIGINT)
                         .column("last_updated_at", DATETIME)
+                        .column("last_updated_snapshot_id", BIGINT)
                         .build(),
                 originDb,
                 originTable,
