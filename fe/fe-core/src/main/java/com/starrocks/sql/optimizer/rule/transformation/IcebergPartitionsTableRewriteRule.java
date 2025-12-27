@@ -95,6 +95,10 @@ public class IcebergPartitionsTableRewriteRule extends TransformationRule {
                     fun = ExprUtils.getBuiltinFunction("max", argTypes, Function.CompareMode.IS_IDENTICAL);
                     agg = new CallOperator("max", DateType.DATETIME, Lists.newArrayList(columnRefOperator), fun);
                     break;
+                case "last_updated_snapshot_id":
+                    fun = ExprUtils.getBuiltinFunction("max", argTypes, Function.CompareMode.IS_IDENTICAL);
+                    agg = new CallOperator("max", IntegerType.BIGINT, Lists.newArrayList(columnRefOperator), fun);
+                    break;
                 default:
                     throw new StarRocksConnectorException("Unknown column name %s when rewriting " +
                             "iceberg partitions table", columnName);
