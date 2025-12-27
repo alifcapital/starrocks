@@ -112,17 +112,22 @@ Status JniScanner::_init_jni_table_scanner(JNIEnv* env, RuntimeState* runtime_st
             env->GetMethodID(hashmap_class, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
     RETURN_IF_ERROR(_check_jni_exception(env, "Failed to get the HashMap methods."));
 
+    constexpr size_t k_max_logged_value_len = 200;
     std::string message = "Initialize a scanner with parameters: ";
     for (const auto& it : _jni_scanner_params) {
         jstring key = env->NewStringUTF(it.first.c_str());
         jstring value = env->NewStringUTF(it.second.c_str());
-        // skip encoded object
-        if (_skipped_log_jni_scanner_params.find(it.first) == _skipped_log_jni_scanner_params.end()) {
-            message.append(it.first);
-            message.append("->");
+        message.append(it.first);
+        message.append("->");
+        if (_skipped_log_jni_scanner_params.find(it.first) != _skipped_log_jni_scanner_params.end()) {
+            message.append("<skipped>");
+        } else if (it.second.size() > k_max_logged_value_len) {
+            message.append(fmt::format("{}...(len={})", it.second.substr(0, k_max_logged_value_len),
+                                       it.second.size()));
+        } else {
             message.append(it.second);
-            message.append(", ");
         }
+        message.append(", ");
 
         env->CallObjectMethod(hashmap_object, hashmap_put, key, value);
         env->DeleteLocalRef(key);
