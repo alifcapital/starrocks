@@ -201,12 +201,16 @@ public class PCTTableSnapshotInfo extends BaseTableSnapshotInfo {
             return;
         }
         for (int index = 0; index < refreshedPartitionNames.size(); ++index) {
-            long modifiedTime = partitions.get(index).getModifiedTime();
+            com.starrocks.connector.PartitionInfo partitionInfo = partitions.get(index);
+            long modifiedTime = partitionInfo.getModifiedTime();
+            long version = (partitionInfo instanceof com.starrocks.connector.iceberg.Partition)
+                    ? ((com.starrocks.connector.iceberg.Partition) partitionInfo).getVersion()
+                    : modifiedTime;
             String partitionName = refreshedPartitionNames.get(index);
             Preconditions.checkArgument(partitionName != null, "name should not be null");
 
             MaterializedView.BasePartitionInfo basePartitionInfo = new MaterializedView.BasePartitionInfo(
-                    -1, modifiedTime, modifiedTime);
+                    -1, version, modifiedTime);
             if (Config.enable_mv_automatic_repairing_for_broken_base_tables) {
                 MVPCTMetaRepairer.collectTableRepairInfo(table, partitionName, basePartitionInfo);
             }

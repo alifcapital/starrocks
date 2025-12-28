@@ -599,6 +599,27 @@ public class MockIcebergMetadata implements ConnectorMetadata {
         }
     }
 
+    /**
+     * Simulate partition update when modifiedTime is unavailable (expired snapshots).
+     * Uses snapshotId for change detection instead.
+     */
+    public void updatePartitionsWithSnapshotId(String dbName, String tableName, List<String> partitionNames) {
+        writeLock();
+        try {
+            Map<String, PartitionInfo> partitionInfoMap = MOCK_TABLE_MAP.get(dbName).get(tableName).partitionInfoMap;
+            for (String partitionName : partitionNames) {
+                Partition existing = (Partition) partitionInfoMap.get(partitionName);
+                Long newSnapshotId = (existing != null && existing.getSnapshotId() != null)
+                        ? existing.getSnapshotId() + 1
+                        : 1000L;
+                // modifiedTime = -1 simulates expired snapshot, snapshotId changes
+                partitionInfoMap.put(partitionName, new Partition(-1, -1, newSnapshotId));
+            }
+        } finally {
+            writeUnlock();
+        }
+    }
+
     private static class IcebergTableInfo {
         private MockIcebergTable icebergTable;
         private final List<String> partitionNames;

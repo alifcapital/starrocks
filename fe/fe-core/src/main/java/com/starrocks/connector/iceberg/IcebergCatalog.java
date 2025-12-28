@@ -309,15 +309,20 @@ public interface IcebergCatalog extends MemoryTrackable {
                 } else {
                     Map<String, Partition> currentPartitions =
                             getPartitionsViaManifestScan(icebergTable, effectiveSnapshotId, executorService);
-                    Map<String, Long> statsLastUpdated =
-                            readStatsFileLastUpdated(icebergTable, statsFile);
-                    if (!statsLastUpdated.isEmpty()) {
+                    Map<String, Partition> statsPartitions =
+                            readStatsFilePartitionInfo(icebergTable, statsFile);
+                    if (!statsPartitions.isEmpty()) {
+                        // Patch missing lastUpdatedAt from stats file without overwriting manifest-derived data.
                         for (Map.Entry<String, Partition> entry : currentPartitions.entrySet()) {
-                            Long lastUpdatedAt = statsLastUpdated.get(entry.getKey());
-                            if (lastUpdatedAt != null) {
-                                Partition existing = entry.getValue();
-                                currentPartitions.put(entry.getKey(),
-                                        new Partition(lastUpdatedAt, existing.getSpecId()));
+                            Partition currentPartition = entry.getValue();
+                            Partition statsPartition = statsPartitions.get(entry.getKey());
+                            if (statsPartition != null
+                                    && currentPartition.getModifiedTime() <= 0
+                                    && statsPartition.getModifiedTime() > 0) {
+                                currentPartitions.put(entry.getKey(), new Partition(
+                                        statsPartition.getModifiedTime(),
+                                        currentPartition.getSpecId(),
+                                        currentPartition.getSnapshotId()));
                             }
                         }
                     }
@@ -370,9 +375,12 @@ public interface IcebergCatalog extends MemoryTrackable {
                         nativeTable, spec, partitionData);
 
                 Long lastUpdatedAt = stat.lastUpdatedAt();
-                long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : getTableLastestSnapshotTime(icebergTable, logger);
+                Long snapshotId = stat.lastUpdatedSnapshotId();
+                // Don't fallback to table's latest snapshot time - it causes false positives in change detection.
+                // If lastUpdatedAt is null, we rely on snapshotId for change detection.
+                long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : -1;
 
-                Partition partition = new Partition(lastUpdated, specId);
+                Partition partition = new Partition(lastUpdated, specId, snapshotId);
                 partitionMap.put(partitionName, partition);
             }
         } catch (Exception e) {
@@ -383,11 +391,11 @@ public interface IcebergCatalog extends MemoryTrackable {
         return partitionMap;
     }
 
-    private Map<String, Long> readStatsFileLastUpdated(
+    private Map<String, Partition> readStatsFilePartitionInfo(
             IcebergTable icebergTable, PartitionStatisticsFile statsFile) {
         Table nativeTable = icebergTable.getNativeTable();
         Logger logger = getLogger();
-        Map<String, Long> lastUpdatedMap = Maps.newHashMap();
+        Map<String, Partition> partitionMap = Maps.newHashMap();
         Types.StructType partitionType = Partitioning.partitionType(nativeTable);
         Schema schema = PartitionStatsHandler.schema(partitionType);
         try (CloseableIterable<PartitionStats> statsIterable = PartitionStatsHandler.readPartitionStatsFile(
@@ -402,13 +410,16 @@ public interface IcebergCatalog extends MemoryTrackable {
                 }
                 String partitionName = PartitionUtil.convertIcebergPartitionToPartitionName(
                         nativeTable, spec, stat.partition());
-                lastUpdatedMap.put(partitionName, stat.lastUpdatedAt());
+                Long lastUpdatedAt = stat.lastUpdatedAt();
+                Long snapshotId = stat.lastUpdatedSnapshotId();
+                long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : -1;
+                partitionMap.put(partitionName, new Partition(lastUpdated, specId, snapshotId));
             }
         } catch (Exception e) {
             logger.warn("Failed to read partition stats file for table [{}] in update mode",
                     nativeTable.name(), e);
         }
-        return lastUpdatedMap;
+        return partitionMap;
     }
 
     private Map<String, Partition> getPartitionsForUnpartitionedTable(
@@ -480,9 +491,11 @@ public interface IcebergCatalog extends MemoryTrackable {
                 String partitionName =
                         PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, spec, stat.partition());
                 Long lastUpdatedAt = stat.lastUpdatedAt();
-                long lastUpdated =
-                        lastUpdatedAt != null ? lastUpdatedAt : getTableLastestSnapshotTime(icebergTable, logger);
-                partitionMap.put(partitionName, new Partition(lastUpdated, specId));
+                Long snapshotId = stat.lastUpdatedSnapshotId();
+                // Don't fallback to table's latest snapshot time - it causes false positives in change detection.
+                // If lastUpdatedAt is null, we rely on snapshotId for change detection.
+                long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : -1;
+                partitionMap.put(partitionName, new Partition(lastUpdated, specId, snapshotId));
             }
         } catch (Exception e) {
             throw new StarRocksConnectorException("Failed to get partitions for table: " + nativeTable.name(), e);

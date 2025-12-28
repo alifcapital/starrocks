@@ -15,9 +15,12 @@ package com.starrocks.connector.partitiontraits;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.starrocks.catalog.BaseTableInfo;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergPartitionKey;
 import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.NullablePartitionKey;
 import com.starrocks.catalog.PartitionKey;
 import com.starrocks.common.AnalysisException;
@@ -25,6 +28,7 @@ import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.connector.ConnectorMetadatRequestContext;
 import com.starrocks.connector.PartitionInfo;
 import com.starrocks.connector.iceberg.IcebergPartitionUtils;
+import com.starrocks.connector.iceberg.Partition;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.expression.LiteralExpr;
 import com.starrocks.sql.ast.expression.LiteralExprFactory;
@@ -37,7 +41,9 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public class IcebergPartitionTraits extends DefaultTraits {
     @Override
@@ -167,6 +173,48 @@ public class IcebergPartitionTraits extends DefaultTraits {
             }
         }
         return partitionKey;
+    }
+
+    @Override
+    public Set<String> getUpdatedPartitionNames(List<BaseTableInfo> baseTables,
+                                                MaterializedView.AsyncRefreshContext context) {
+        Set<String> result = Sets.newHashSet();
+        Map<String, PartitionInfo> latestPartitionInfo = getPartitionNameWithPartitionInfo();
+
+        for (BaseTableInfo baseTableInfo : baseTables) {
+            if (!baseTableInfo.getTableIdentifier().equalsIgnoreCase(table.getTableIdentifier())) {
+                continue;
+            }
+            Map<String, MaterializedView.BasePartitionInfo> versionMap =
+                    context.getBaseTableRefreshInfo(baseTableInfo);
+
+            // check whether there are partitions added
+            for (Map.Entry<String, PartitionInfo> entry : latestPartitionInfo.entrySet()) {
+                if (!versionMap.containsKey(entry.getKey())) {
+                    result.add(entry.getKey());
+                }
+            }
+
+            for (Map.Entry<String, MaterializedView.BasePartitionInfo> versionEntry : versionMap.entrySet()) {
+                String basePartitionName = versionEntry.getKey();
+                if (!latestPartitionInfo.containsKey(basePartitionName)) {
+                    // If this partition is dropped, ignore it.
+                    continue;
+                }
+                PartitionInfo partitionInfo = latestPartitionInfo.get(basePartitionName);
+                long basePartitionVersion = (partitionInfo instanceof Partition)
+                        ? ((Partition) partitionInfo).getVersion()
+                        : partitionInfo.getModifiedTime();
+
+                MaterializedView.BasePartitionInfo basePartitionInfo = versionEntry.getValue();
+                // basePartitionVersion less than 0 is illegal
+                if ((basePartitionInfo == null || basePartitionVersion != basePartitionInfo.getVersion())
+                        && basePartitionVersion >= 0) {
+                    result.add(basePartitionName);
+                }
+            }
+        }
+        return result;
     }
 }
 

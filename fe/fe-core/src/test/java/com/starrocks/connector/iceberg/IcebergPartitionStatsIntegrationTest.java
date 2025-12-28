@@ -132,9 +132,9 @@ public class IcebergPartitionStatsIntegrationTest extends TableTestBase {
                     String partitionName =
                             PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, spec, partitionData);
                     Long lastUpdatedAt = row.get(9, Long.class);
-                    long lastUpdated =
-                            lastUpdatedAt != null ? lastUpdatedAt : nativeTable.currentSnapshot().timestampMillis();
-                    partitionMap.put(partitionName, new Partition(lastUpdated, specId));
+                    Long lastUpdatedSnapshotId = row.get(10, Long.class);
+                    long lastUpdated = lastUpdatedAt != null ? lastUpdatedAt : -1;
+                    partitionMap.put(partitionName, new Partition(lastUpdated, specId, lastUpdatedSnapshotId));
                 }
             }
         } catch (IOException e) {
@@ -152,6 +152,8 @@ public class IcebergPartitionStatsIntegrationTest extends TableTestBase {
             Assertions.assertNotNull(actualPartition);
             Assertions.assertEquals(expectedPartition.getModifiedTime(), actualPartition.getModifiedTime());
             Assertions.assertEquals(expectedPartition.getSpecId(), actualPartition.getSpecId());
+            Assertions.assertEquals(expectedPartition.getSnapshotId(), actualPartition.getSnapshotId());
+            Assertions.assertEquals(expectedPartition.getVersion(), actualPartition.getVersion());
         }
     }
 

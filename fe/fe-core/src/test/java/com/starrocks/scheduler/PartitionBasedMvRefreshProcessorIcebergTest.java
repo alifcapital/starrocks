@@ -617,4 +617,75 @@ public class PartitionBasedMvRefreshProcessorIcebergTest extends MVTestBase {
         Assertions.assertEquals(5, partitions.size());
         starRocksAssert.dropMaterializedView(mvName);
     }
+
+    @Test
+    public void testMvRefreshWithSnapshotIdFallback() throws Exception {
+        // Test that MV refresh works when modifiedTime is unavailable (expired snapshots)
+        // and change detection falls back to snapshotId
+        String mvName = "iceberg_snapshotid_mv1";
+        starRocksAssert.useDatabase("test")
+                .withMaterializedView("CREATE MATERIALIZED VIEW `test`.`iceberg_snapshotid_mv1`\n" +
+                        "PARTITION BY str2date(`date`, '%Y-%m-%d')\n" +
+                        "DISTRIBUTED BY HASH(`id`) BUCKETS 10\n" +
+                        "REFRESH DEFERRED MANUAL\n" +
+                        "PROPERTIES (\n" +
+                        "\"replication_num\" = \"1\",\n" +
+                        "\"storage_medium\" = \"HDD\"\n" +
+                        ")\n" +
+                        "AS SELECT id, data, date  FROM `iceberg0`.`partitioned_db`.`t1` as a;");
+
+        Database testDb = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb("test");
+        MaterializedView partitionedMaterializedView = ((MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore()
+                .getTable(testDb.getFullName(), "iceberg_snapshotid_mv1"));
+        triggerRefreshMv(testDb, partitionedMaterializedView);
+
+        Collection<Partition> partitions = partitionedMaterializedView.getPartitions();
+        Assertions.assertEquals(4, partitions.size());
+
+        MockIcebergMetadata mockIcebergMetadata =
+                (MockIcebergMetadata) connectContext.getGlobalStateMgr().getMetadataMgr().
+                        getOptionalMetadata(MockIcebergMetadata.MOCKED_ICEBERG_CATALOG_NAME).get();
+
+        // Simulate partition change with expired snapshot (modifiedTime = -1, snapshotId changes)
+        mockIcebergMetadata.updatePartitionsWithSnapshotId("partitioned_db", "t1",
+                ImmutableList.of("date=2020-01-02"));
+
+        // refresh should detect change via snapshotId fallback
+        Task task = TaskBuilder.buildMvTask(partitionedMaterializedView, testDb.getFullName());
+        TaskRun taskRun = TaskRunBuilder.newBuilder(task).build();
+        initAndExecuteTaskRun(taskRun);
+        MVPCTBasedRefreshProcessor processor = getPartitionBasedRefreshProcessor(taskRun);
+
+        MvTaskRunContext mvContext = processor.getMvContext();
+        ExecPlan execPlan = mvContext.getExecPlan();
+        // Should refresh only the partition with changed snapshotId
+        assertPlanContains(execPlan, "3: date >= '2020-01-02', 3: date < '2020-01-03'");
+
+        Map<String, Long> partitionVersionMap = new HashMap<>();
+        for (Partition p : partitionedMaterializedView.getPartitions()) {
+            partitionVersionMap.put(p.getName(), p.getDefaultPhysicalPartition().getVisibleVersion());
+        }
+
+        // Only p20200102_20200103 should have version 3 (refreshed twice)
+        Assertions.assertEquals(
+                ImmutableMap.of("p20200104_20200105", 2L,
+                        "p20200101_20200102", 2L,
+                        "p20200103_20200104", 2L,
+                        "p20200102_20200103", 3L),
+                ImmutableMap.copyOf(partitionVersionMap));
+
+        // Run refresh again without changing snapshotId - should NOT trigger any partition refresh
+        taskRun = TaskRunBuilder.newBuilder(task).build();
+        initAndExecuteTaskRun(taskRun);
+
+        Map<String, Long> partitionVersionMapAfter = new HashMap<>();
+        for (Partition p : partitionedMaterializedView.getPartitions()) {
+            partitionVersionMapAfter.put(p.getName(), p.getDefaultPhysicalPartition().getVisibleVersion());
+        }
+
+        // Versions should remain the same - no false positive refresh
+        Assertions.assertEquals(partitionVersionMap, partitionVersionMapAfter);
+
+        starRocksAssert.dropMaterializedView(mvName);
+    }
 }

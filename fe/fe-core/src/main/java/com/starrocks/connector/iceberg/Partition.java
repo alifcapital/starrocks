@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 
 public class Partition implements PartitionInfo {
     private final long modifiedTime;
+    private final Long snapshotId;
     private int specId;
 
     @Override
@@ -37,13 +38,40 @@ public class Partition implements PartitionInfo {
         return specId;
     }
 
+    public Long getSnapshotId() {
+        return snapshotId;
+    }
+
+    /**
+     * Returns a version identifier for change detection.
+     * Prefers modifiedTime (from last_updated_at) if available,
+     * falls back to snapshotId when modifiedTime is unavailable (e.g., expired snapshots).
+     */
+    public long getVersion() {
+        if (modifiedTime > 0) {
+            return modifiedTime;
+        }
+        if (snapshotId != null) {
+            return snapshotId;
+        }
+        return -1;
+    }
+
     public Partition(long modifiedTime) {
         this.modifiedTime = modifiedTime;
+        this.snapshotId = null;
         this.specId = -1;
     }
 
     public Partition(long modifiedTime, int specId) {
         this.modifiedTime = modifiedTime;
+        this.snapshotId = null;
+        this.specId = specId;
+    }
+
+    public Partition(long modifiedTime, int specId, Long snapshotId) {
+        this.modifiedTime = modifiedTime;
+        this.snapshotId = snapshotId;
         this.specId = specId;
     }
 }

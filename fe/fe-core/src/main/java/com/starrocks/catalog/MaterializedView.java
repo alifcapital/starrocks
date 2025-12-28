@@ -273,8 +273,10 @@ public class MaterializedView extends OlapTable implements GsonPreProcessable, G
         }
 
         public static BasePartitionInfo fromExternalTable(com.starrocks.connector.PartitionInfo info) {
-            // TODO: id and version
-            return new BasePartitionInfo(-1, -1, info.getModifiedTime());
+            long version = (info instanceof com.starrocks.connector.iceberg.Partition)
+                    ? ((com.starrocks.connector.iceberg.Partition) info).getVersion()
+                    : info.getModifiedTime();
+            return new BasePartitionInfo(-1, version, info.getModifiedTime());
         }
 
         public static BasePartitionInfo fromOlapTable(Partition partition) {
