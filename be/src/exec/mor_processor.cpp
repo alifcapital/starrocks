@@ -41,8 +41,10 @@ Status IcebergMORProcessor::init(RuntimeState* runtime_state, const MORParams& p
             std::make_unique<RowDescriptor>(runtime_state->desc_tbl().get_tuple_descriptor(params.mor_tuple_id));
     _probe_row_desc = std::make_unique<RowDescriptor>(params.tuple_desc);
 
+    // Use null-safe equals (true) for all equality columns to match Iceberg spec:
+    // "A null value in a delete column matches a row if the row's value is null"
     const auto param = _pool.add(new HashJoinerParam(
-            &_pool, _hash_join_node, std::vector<bool>(params.equality_slots.size(), false), _join_exprs, _join_exprs,
+            &_pool, _hash_join_node, std::vector<bool>(params.equality_slots.size(), true), _join_exprs, _join_exprs,
             std::vector<ExprContext*>(), std::vector<ExprContext*>(), *_build_row_desc, *_probe_row_desc,
             TPlanNodeType::HDFS_SCAN_NODE, TPlanNodeType::HDFS_SCAN_NODE, true,
             std::list<RuntimeFilterBuildDescriptor*>(), std::set<SlotId>(), probe_output_slot_ids,
