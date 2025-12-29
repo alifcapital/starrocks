@@ -43,6 +43,11 @@ if (NOT BUILD_FORMAT_LIB)
     list(APPEND EXEC_FILES fs_starlet.cpp)
 endif()
 
+# Add io_uring sources if enabled
+if (WITH_IO_URING)
+    list(APPEND EXEC_FILES io_uring_writable_file.cpp)
+endif()
+
 ADD_BE_LIB(FileSystem
     ${EXEC_FILES}
 )

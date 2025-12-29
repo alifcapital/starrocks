@@ -1338,6 +1338,26 @@ CONF_mDouble(spill_max_dir_bytes_ratio, "0.8"); // 80%
 CONF_Int64(spill_read_buffer_min_bytes, "1048576");
 CONF_mInt64(mem_limited_chunk_queue_block_size, "8388608");
 
+// io_uring configuration for async spill I/O (Linux only, requires kernel >= 5.10)
+// Enable io_uring for spill I/O operations (writes and reads)
+CONF_mBool(enable_io_uring_for_spill, "true");
+// io_uring ring queue depth (number of concurrent I/O operations per thread)
+CONF_Int32(io_uring_queue_depth, "256");
+// Enable io_uring I/O batching to reduce syscall overhead (Phase 2)
+CONF_mBool(enable_io_uring_batching, "true");
+// Maximum number of I/O operations to batch before submission
+CONF_Int32(io_uring_max_batch_size, "32");
+/// Phase 3: Enable io_uring registered buffers for zero-copy I/O
+// Per VLDB'26 paper: registered buffers avoid per-request page pinning and kernel-user copies
+CONF_mBool(enable_io_uring_registered_buffers, "false");
+// Size of each registered buffer in bytes
+// Per VLDB'26 paper Figure 8: block sizes > 512KiB trigger io_workers fallback which hurts performance
+// Optimal range is 128-256KiB for PCIe 5 SSDs. Default 128KiB = sweet spot per paper.
+CONF_Int64(io_uring_registered_buffer_size, "131072");
+// Number of registered buffers in the per-thread pool
+// With 128KiB buffers, 256 buffers = 32MB per thread (reasonable memory footprint)
+CONF_Int32(io_uring_registered_buffer_count, "256");
+
 CONF_Int32(internal_service_query_rpc_thread_num, "-1");
 CONF_Int32(internal_service_datacache_rpc_thread_num, "-1");
 // The retry times of rpc request to report exec rpc request to FE. The default value is 10,

@@ -39,6 +39,12 @@
 #include "io/fd_input_stream.h"
 #include "io/io_profiler.h"
 #include "testutil/sync_point.h"
+
+#ifdef WITH_IO_URING
+#include "fs/io_uring_writable_file.h"
+#include "io/io_uring_input_stream.h"
+#include "io/io_uring_manager.h"
+#endif
 #include "util/errno.h"
 #include "util/slice.h"
 #include "util/stopwatch.hpp"
@@ -355,6 +361,19 @@ public:
         if (fd < 0) {
             return io_error(fname, errno);
         }
+
+#ifdef WITH_IO_URING
+        // Use io_uring for async I/O if enabled and supported
+        if (config::enable_io_uring_for_spill) {
+            auto* ctx = io::IoUringManager::instance()->get_or_create_context();
+            if (ctx != nullptr && ctx->is_initialized()) {
+                auto stream = std::make_unique<io::IoUringInputStream>(fd, ctx);
+                stream->set_close_on_delete(true);
+                return SequentialFile::from(std::move(stream), fname, opts.encryption_info);
+            }
+        }
+#endif
+        // Fallback to synchronous FdInputStream
         auto stream = std::make_unique<io::FdInputStream>(fd);
         stream->set_close_on_delete(true);
         return SequentialFile::from(std::move(stream), fname, opts.encryption_info);
@@ -407,6 +426,19 @@ public:
         if (opts.mode == MUST_EXIST) {
             ASSIGN_OR_RETURN(file_size, get_file_size(fname));
         }
+
+#ifdef WITH_IO_URING
+        // Use io_uring for async I/O if enabled and supported
+        if (config::enable_io_uring_for_spill) {
+            auto* ctx = io::IoUringManager::instance()->get_or_create_context();
+            if (ctx != nullptr && ctx->is_initialized()) {
+                return wrap_encrypted(
+                        std::make_unique<IoUringWritableFile>(fname, fd, file_size, opts.sync_on_close, ctx),
+                        opts.encryption_info);
+            }
+        }
+#endif
+        // Fallback to synchronous PosixWritableFile
         return wrap_encrypted(std::make_unique<PosixWritableFile>(fname, fd, file_size, opts.sync_on_close),
                               opts.encryption_info);
     }
