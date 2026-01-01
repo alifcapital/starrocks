@@ -1073,6 +1073,15 @@ CONF_Int64(object_storage_rename_file_request_timeout_ms, "30000");
 CONF_Int64(object_storage_max_retries, "10");
 CONF_Int64(object_storage_retry_scale_factor, "25");
 
+// S3 enhanced retry strategy with exponential backoff and global throttling
+CONF_mInt64(s3_retry_initial_delay_ms, "25");   // Initial delay for exponential backoff
+CONF_mInt64(s3_retry_max_delay_ms, "10000");    // Maximum delay between retries (10s)
+
+// S3 parallel read in SharedBufferedInputStream.
+// Max inflight bytes = thread_pool_size * max_buffer_size (8MB) = 128 * 8MB = 1GB by default.
+CONF_mInt32(s3_read_thread_pool_size, "128");               // Global thread pool size for parallel S3 reads
+CONF_mInt32(s3_parallel_read_workers_per_file, "8");        // Max parallel reads per file (sliding window)
+
 CONF_Strings(fallback_to_hadoop_fs_list, "");
 CONF_Strings(s3_compatible_fs_list, "s3n://, s3a://, s3://, oss://, cos://, cosn://, obs://, ks3://, tos://");
 CONF_mBool(s3_use_list_objects_v1, "false");

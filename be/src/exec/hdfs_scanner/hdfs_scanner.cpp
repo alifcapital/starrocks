@@ -313,9 +313,15 @@ void HdfsScanner::close() noexcept {
 StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_file(
         std::shared_ptr<io::SharedBufferedInputStream>& shared_buffered_input_stream,
         std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options) {
-    ASSIGN_OR_RETURN(std::unique_ptr<RandomAccessFile> raw_file, options.fs->new_random_access_file(options.path))
+    // Use FileInfo with size when known - allows S3InputStream to skip HEAD request
+    std::unique_ptr<RandomAccessFile> raw_file;
     int64_t file_size = options.file_size;
-    if (file_size < 0) {
+
+    if (file_size > 0) {
+        FileInfo file_info{.path = options.path, .size = file_size};
+        ASSIGN_OR_RETURN(raw_file, options.fs->new_random_access_file(file_info));
+    } else {
+        ASSIGN_OR_RETURN(raw_file, options.fs->new_random_access_file(options.path));
         ASSIGN_OR_RETURN(file_size, raw_file->stream()->get_size());
     }
     raw_file->set_size(file_size);

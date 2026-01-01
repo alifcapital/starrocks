@@ -20,6 +20,7 @@
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <fmt/format.h>
 
+#include "fs/s3/s3_retry_strategy.h"
 #include "io/io_profiler.h"
 #include "io/s3_zero_copy_iostream.h"
 #include "util/stopwatch.hpp"
@@ -164,6 +165,55 @@ StatusOr<std::string> S3InputStream::read_all() {
         Aws::IOStream& body = outcome.GetResult().GetBody();
         IOProfiler::add_read(body.gcount(), watch.elapsed_time());
         return std::string(std::istreambuf_iterator<char>(body), {});
+    } else {
+        return make_error_status(outcome.GetError());
+    }
+}
+
+// Thread-safe positional read for parallel I/O.
+// This method does NOT modify internal stream state (_offset, _read_buffer).
+// S3 GetObject with Range header is inherently thread-safe - each call creates a new HTTP request.
+Status S3InputStream::read_at_fully(int64_t offset, void* out, int64_t count) {
+    if (count == 0) return Status::OK();
+
+    // Get size if not known
+    int64_t size = _size;
+    if (size == -1) {
+        ASSIGN_OR_RETURN(size, S3InputStream::get_size());
+    }
+
+    if (offset < 0 || offset + count > size) {
+        return Status::IOError(
+                fmt::format("S3 read_at_fully out of bounds: offset={}, count={}, size={}", offset, count, size));
+    }
+
+    // Wait for global throttle if another thread received 429/503
+    S3RetryStrategy::wait_for_global_throttle();
+
+    MonotonicStopWatch watch;
+    watch.start();
+
+    // https://www.rfc-editor.org/rfc/rfc9110.html#name-range
+    auto range = fmt::format("bytes={}-{}", offset, offset + count - 1);
+
+    Aws::S3::Model::GetObjectRequest request;
+    request.SetBucket(_bucket);
+    request.SetKey(_object);
+    request.SetRange(std::move(range));
+    request.SetResponseStreamFactory([out, count]() {
+        return Aws::New<S3ZeroCopyIOStream>(AWS_ALLOCATE_TAG, reinterpret_cast<char*>(out), count);
+    });
+
+    Aws::S3::Model::GetObjectOutcome outcome = _s3client->GetObject(request);
+    if (outcome.IsSuccess()) {
+        if (UNLIKELY(outcome.GetResult().GetContentLength() != count)) {
+            return Status::InternalError(
+                    fmt::format("S3 response length mismatch: expected={}, got={}", count,
+                                outcome.GetResult().GetContentLength()));
+        }
+        // Note: Do NOT modify _offset here - this is a thread-safe positional read
+        IOProfiler::add_read(count, watch.elapsed_time());
+        return Status::OK();
     } else {
         return make_error_status(outcome.GetError());
     }

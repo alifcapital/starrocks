@@ -14,9 +14,12 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
+#include <mutex>
 
 #include "common/status.h"
 #include "io/seekable_input_stream.h"
@@ -47,13 +50,17 @@ public:
         int64_t size;
         int64_t ref_count;
         std::vector<uint8_t> buffer;
+        // Parallel read support
+        std::future<Status> read_future;
+        bool read_started = false;
+
         void align(int64_t align_size, int64_t file_size);
         std::string debug_string() const;
     };
     using SharedBufferPtr = std::shared_ptr<SharedBuffer>;
 
     SharedBufferedInputStream(std::shared_ptr<SeekableInputStream> stream, std::string filename, size_t file_size);
-    ~SharedBufferedInputStream() override = default;
+    ~SharedBufferedInputStream() override;
 
     Status seek(int64_t position) override {
         _offset = position;
@@ -105,6 +112,12 @@ private:
     void _merge_small_ranges(const std::vector<IORange>& ranges);
     Status _set_io_ranges_all_columns(const std::vector<IORange>& ranges);
     Status _set_io_ranges_active_and_lazy_columns(const std::vector<IORange>& ranges);
+
+    // Parallel read methods
+    void _start_parallel_reads();
+    void _submit_parallel_read(SharedBufferPtr sb);
+    void _on_parallel_read_complete();
+
     const std::shared_ptr<SeekableInputStream> _stream;
     const std::string _filename;
     std::map<int64_t, SharedBufferPtr> _map;
@@ -120,6 +133,12 @@ private:
     int64_t _direct_io_timer = 0;
     int64_t _align_size = 0;
     int64_t _estimated_mem_usage = 0;
+
+    // Parallel read state
+    mutable std::mutex _parallel_read_mutex;
+    std::condition_variable _parallel_read_cv;
+    int32_t _active_read_count = 0;
+    bool _shutting_down = false;
 };
 
 } // namespace starrocks::io

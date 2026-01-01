@@ -58,6 +58,11 @@ public:
 
     StatusOr<std::string> read_all() override;
 
+    // Thread-safe positional read for parallel I/O.
+    // Does NOT modify internal stream state (_offset, _read_buffer).
+    // S3 GetObject with Range header is inherently thread-safe.
+    Status read_at_fully(int64_t offset, void* out, int64_t count) override;
+
     // only for UT
     int64_t get_read_ahead_size() const { return _read_ahead_size; }
 

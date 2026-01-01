@@ -16,13 +16,91 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+#include "common/config.h"
 #include "io_test_base.h"
 #include "testutil/assert.h"
 #include "testutil/parallel_test.h"
 
 namespace starrocks::io {
 
-class SharedBufferedInputStreamTest : public ::testing::Test {};
+// Mock stream with configurable delay for testing parallel read behavior
+class MockDelayedInputStream : public SeekableInputStream {
+public:
+    MockDelayedInputStream(std::string data, int read_delay_ms = 0)
+            : _data(std::move(data)), _read_delay_ms(read_delay_ms) {}
+
+    StatusOr<int64_t> read(void* out, int64_t count) override {
+        int64_t to_read = std::min(count, static_cast<int64_t>(_data.size()) - _offset);
+        if (to_read > 0) {
+            memcpy(out, _data.data() + _offset, to_read);
+            _offset += to_read;
+        }
+        return to_read;
+    }
+
+    Status read_fully(void* out, int64_t count) override {
+        ASSIGN_OR_RETURN(auto nread, read(out, count));
+        if (nread < count) {
+            return Status::IOError("Unexpected EOF");
+        }
+        return Status::OK();
+    }
+
+    Status seek(int64_t offset) override {
+        _offset = offset;
+        return Status::OK();
+    }
+
+    StatusOr<int64_t> position() override { return _offset; }
+
+    StatusOr<int64_t> get_size() override { return static_cast<int64_t>(_data.size()); }
+
+    Status skip(int64_t count) override {
+        _offset += count;
+        return Status::OK();
+    }
+
+    // Thread-safe positional read with configurable delay
+    Status read_at_fully(int64_t offset, void* out, int64_t count) override {
+        if (_read_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(_read_delay_ms));
+        }
+        _read_count.fetch_add(1, std::memory_order_relaxed);
+
+        if (offset + count > static_cast<int64_t>(_data.size())) {
+            return Status::IOError("Read beyond EOF");
+        }
+        memcpy(out, _data.data() + offset, count);
+        return Status::OK();
+    }
+
+    int read_count() const { return _read_count.load(std::memory_order_relaxed); }
+
+private:
+    std::string _data;
+    int64_t _offset{0};
+    int _read_delay_ms;
+    std::atomic<int> _read_count{0};
+};
+
+// Helper to generate test data
+static std::string generate_test_data(size_t size) {
+    std::string data(size, '\0');
+    for (size_t i = 0; i < size; ++i) {
+        data[i] = static_cast<char>('A' + (i % 26));
+    }
+    return data;
+}
+
+class SharedBufferedInputStreamTest : public ::testing::Test {
+protected:
+    static constexpr int64_t KB = 1024;
+    static constexpr int64_t MB = 1024 * 1024;
+};
 
 PARALLEL_TEST(SharedBufferedInputStreamTest, test_release) {
     size_t len = 1 * 1024 * 1024; // 1MB
@@ -177,6 +255,206 @@ TEST_F(SharedBufferedInputStreamTest, test_orc) {
             "SharedBuffer raw_offset=22420223, raw_size=197, offset=22282240, size=262144, ref_count=2, "
             "buffer_capacity=0",
             sb.value()->debug_string());
+}
+
+// ==================== Parallel Read Tests ====================
+
+// Test: Parallel read is triggered by set_io_ranges and get_bytes returns correct data
+TEST_F(SharedBufferedInputStreamTest, test_parallel_read_data_integrity) {
+    const size_t file_size = 8 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Create 4 IO ranges of 2MB each
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    for (int i = 0; i < 4; ++i) {
+        ranges.emplace_back(i * 2 * MB, 2 * MB, true);
+    }
+
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // Read all ranges - get_bytes() blocks until parallel read completes
+    for (int i = 0; i < 4; ++i) {
+        int64_t offset = i * 2 * MB;
+        const uint8_t* buffer = nullptr;
+        ASSERT_OK(sb_stream->get_bytes(&buffer, offset, 2 * MB, nullptr));
+
+        // Verify data matches
+        for (size_t j = 0; j < 2 * MB; ++j) {
+            ASSERT_EQ(data[offset + j], static_cast<char>(buffer[j]))
+                    << "Mismatch at offset " << (offset + j);
+        }
+    }
+}
+
+// Test: Parallel reads run concurrently (2 reads with 30ms delay complete in ~30ms, not 60ms)
+TEST_F(SharedBufferedInputStreamTest, test_parallel_read_concurrent) {
+    const size_t file_size = 8 * MB;
+    const int delay_ms = 30;
+
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data, delay_ms);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Create 2 IO ranges - both should read in parallel
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 4 * MB, true);
+    ranges.emplace_back(4 * MB, 4 * MB, true);
+
+    auto start = std::chrono::steady_clock::now();
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // get_bytes() blocks until parallel read completes
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 4 * MB, nullptr));
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 4 * MB, 4 * MB, nullptr));
+
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+
+    // If sequential: 2 * 30ms = 60ms. If parallel: ~30ms.
+    // Allow overhead but should be less than sequential time.
+    ASSERT_LT(elapsed_ms, delay_ms * 2) << "Parallel reads should complete faster than sequential";
+}
+
+// Test: Direct IO fallback works when not using set_io_ranges
+TEST_F(SharedBufferedInputStreamTest, test_direct_io_fallback) {
+    const size_t file_size = 4 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Read without setting IO ranges - should use direct read
+    std::string result(file_size, '\0');
+    ASSERT_OK(sb_stream->read_at_fully(0, result.data(), file_size));
+
+    ASSERT_EQ(data, result);
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+}
+
+// Test: Shared buffers are created correctly with coalescing
+TEST_F(SharedBufferedInputStreamTest, test_coalesce_io_ranges) {
+    const size_t file_size = 16 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Set coalesce options
+    SharedBufferedInputStream::CoalesceOptions opts;
+    opts.max_dist_size = 1 * MB;    // Coalesce ranges within 1MB
+    opts.max_buffer_size = 8 * MB;  // Max buffer 8MB
+    sb_stream->set_coalesce_options(opts);
+
+    // Create ranges that should be coalesced (close together)
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 1 * MB, true);
+    ranges.emplace_back(1 * MB + 100, 1 * MB, true);  // 100 bytes gap - should coalesce
+    ranges.emplace_back(10 * MB, 1 * MB, true);       // Far away - separate buffer
+
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // First two ranges should be in same buffer
+    auto sb1 = sb_stream->find_shared_buffer(0, 1 * MB);
+    ASSERT_OK(sb1);
+    auto sb2 = sb_stream->find_shared_buffer(1 * MB + 100, 1 * MB);
+    ASSERT_OK(sb2);
+
+    // They should be the same shared buffer (coalesced)
+    ASSERT_EQ(sb1.value().get(), sb2.value().get());
+
+    // Third range should be separate
+    auto sb3 = sb_stream->find_shared_buffer(10 * MB, 1 * MB);
+    ASSERT_OK(sb3);
+    ASSERT_NE(sb1.value().get(), sb3.value().get());
+}
+
+// Test: 8 parallel reads with sliding window (8 workers per file)
+TEST_F(SharedBufferedInputStreamTest, test_parallel_read_sliding_window) {
+    const size_t file_size = 32 * MB;
+    const int delay_ms = 50;
+
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data, delay_ms);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Create 8 IO ranges of 4MB each
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    for (int i = 0; i < 8; ++i) {
+        ranges.emplace_back(i * 4 * MB, 4 * MB, true);
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // get_bytes() blocks until each range's parallel read completes
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t* buffer = nullptr;
+        ASSERT_OK(sb_stream->get_bytes(&buffer, i * 4 * MB, 4 * MB, nullptr));
+    }
+
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+
+    // With 8 parallel workers, all 8 reads with 50ms delay should complete in ~50ms
+    // Sequential would be 8 * 50ms = 400ms
+    ASSERT_LT(elapsed_ms, 4 * delay_ms) << "8 parallel reads should complete much faster than sequential";
+}
+
+// Test: Release clears buffers
+TEST_F(SharedBufferedInputStreamTest, test_release_clears_buffers) {
+    const size_t file_size = 4 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Set IO ranges
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 2 * MB, true);
+    ranges.emplace_back(2 * MB, 2 * MB, true);
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // Read data first (this waits for parallel reads to complete)
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 2 * MB, nullptr));
+
+    // Release everything
+    sb_stream->release();
+
+    // Now find_shared_buffer should fail
+    auto sb = sb_stream->find_shared_buffer(0, 1 * MB);
+    ASSERT_FALSE(sb.ok());
+}
+
+// Test: Read statistics are tracked correctly
+TEST_F(SharedBufferedInputStreamTest, test_io_statistics) {
+    const size_t file_size = 4 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Set IO ranges
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 2 * MB, true);
+    ranges.emplace_back(2 * MB, 2 * MB, true);
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // Read both ranges - get_bytes() waits for parallel reads
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 2 * MB, nullptr));
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 2 * MB, 2 * MB, nullptr));
+
+    // Verify IO statistics
+    ASSERT_EQ(2, sb_stream->shared_io_count());
+    ASSERT_EQ(4 * MB, sb_stream->shared_io_bytes());
+    ASSERT_EQ(0, sb_stream->direct_io_count());
 }
 
 } // namespace starrocks::io

@@ -16,16 +16,56 @@
 
 #include <gutil/strings/substitute.h>
 
+#include <algorithm>
+#include <mutex>
+
 #include "common/config.h"
 #include "gutil/strings/fastmem.h"
 #include "runtime/current_thread.h"
+#include "runtime/mem_tracker.h"
 #include "util/runtime_profile.h"
+#include "util/threadpool.h"
 
 namespace starrocks::io {
+
+// Global thread pool for S3 parallel reads (lazy singleton)
+static std::once_flag s_parallel_read_pool_init_flag;
+static std::unique_ptr<ThreadPool> s_parallel_read_thread_pool;
+
+static ThreadPool* get_parallel_read_thread_pool() {
+    std::call_once(s_parallel_read_pool_init_flag, []() {
+        int max_threads = config::s3_read_thread_pool_size;
+        if (max_threads <= 0) {
+            return;
+        }
+        std::unique_ptr<ThreadPool> pool;
+        Status status = ThreadPoolBuilder("s3_parallel_read_pool")
+                                .set_min_threads(0)
+                                .set_max_threads(max_threads)
+                                .set_max_queue_size(max_threads * 4)
+                                .set_idle_timeout(MonoDelta::FromMilliseconds(5000))
+                                .build(&pool);
+        if (status.ok()) {
+            s_parallel_read_thread_pool = std::move(pool);
+            LOG(INFO) << "S3 parallel read thread pool initialized with max_threads=" << max_threads;
+        } else {
+            LOG(WARNING) << "Failed to create S3 parallel read thread pool: " << status.message();
+        }
+    });
+    return s_parallel_read_thread_pool.get();
+}
 
 SharedBufferedInputStream::SharedBufferedInputStream(std::shared_ptr<SeekableInputStream> stream, std::string filename,
                                                      size_t file_size)
         : _stream(std::move(stream)), _filename(std::move(filename)), _file_size(file_size) {}
+
+SharedBufferedInputStream::~SharedBufferedInputStream() {
+    // Wait for all active parallel read tasks to complete before destruction
+    // This prevents use-after-free when callbacks try to access this object
+    std::unique_lock<std::mutex> lock(_parallel_read_mutex);
+    _shutting_down = true;
+    _parallel_read_cv.wait(lock, [this]() { return _active_read_count == 0; });
+}
 
 void SharedBufferedInputStream::SharedBuffer::align(int64_t align_size, int64_t file_size) {
     if (align_size != 0) {
@@ -188,10 +228,15 @@ Status SharedBufferedInputStream::_set_io_ranges_active_and_lazy_columns(const s
 
 Status SharedBufferedInputStream::set_io_ranges(const std::vector<IORange>& ranges, bool coalesce_lazy_column) {
     if (coalesce_lazy_column || !config::io_coalesce_adaptive_lazy_active) {
-        return _set_io_ranges_all_columns(ranges);
+        RETURN_IF_ERROR(_set_io_ranges_all_columns(ranges));
     } else {
-        return _set_io_ranges_active_and_lazy_columns(ranges);
+        RETURN_IF_ERROR(_set_io_ranges_active_and_lazy_columns(ranges));
     }
+
+    // Start parallel reads for all SharedBuffers (sliding window)
+    _start_parallel_reads();
+
+    return Status::OK();
 }
 
 StatusOr<SharedBufferedInputStream::SharedBufferPtr> SharedBufferedInputStream::find_shared_buffer(size_t offset,
@@ -215,19 +260,33 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
     }
 
     SharedBuffer& sb = *shared_buffer;
-    if (sb.buffer.capacity() == 0) {
+
+    // Wait for parallel read to complete if it was started
+    if (sb.read_started && sb.read_future.valid()) {
+        SCOPED_RAW_TIMER(&_shared_io_timer);
+        Status read_status = sb.read_future.get();
+        sb.read_started = false;
+        if (!read_status.ok()) {
+            return read_status;
+        }
+        _shared_io_count += 1;
+        _shared_io_bytes += sb.size;
+        if (sb.size > sb.raw_size) {
+            _shared_align_io_bytes += sb.size - sb.raw_size;
+        }
+    } else if (sb.buffer.capacity() == 0) {
+        // Fallback: synchronous read if parallel read was not started
         RETURN_IF_ERROR(CurrentThread::mem_tracker()->check_mem_limit("read into shared buffer"));
         SCOPED_RAW_TIMER(&_shared_io_timer);
         _shared_io_count += 1;
         _shared_io_bytes += sb.size;
         if (sb.size > sb.raw_size) {
-            // after called _deduplicate_shared_buffer(), sb.size maybe is larger than sb.raw_size
-            // we will count how many extra bytes we read because of alignment.
             _shared_align_io_bytes += sb.size - sb.raw_size;
         }
-        sb.buffer.reserve(sb.size);
+        sb.buffer.resize(sb.size);
         RETURN_IF_ERROR(_stream->read_at_fully(sb.offset, sb.buffer.data(), sb.size));
     }
+
     *buffer = sb.buffer.data() + offset - sb.offset;
     return Status::OK();
 }
@@ -303,6 +362,76 @@ int64_t SharedBufferedInputStream::current_range_ref_sum() const {
         ref += sb->ref_count;
     }
     return ref;
+}
+
+void SharedBufferedInputStream::_start_parallel_reads() {
+    ThreadPool* pool = get_parallel_read_thread_pool();
+    if (pool == nullptr) {
+        return;
+    }
+
+    int32_t max_per_file = config::s3_parallel_read_workers_per_file;
+
+    std::lock_guard<std::mutex> lock(_parallel_read_mutex);
+
+    // Don't start new tasks if we're shutting down
+    if (_shutting_down) {
+        return;
+    }
+
+    for (auto& [_, sb] : _map) {
+        if (_active_read_count >= max_per_file) {
+            break;
+        }
+        if (sb->read_started) {
+            continue;
+        }
+
+        _active_read_count++;
+        sb->read_started = true;
+
+        _submit_parallel_read(sb);
+    }
+}
+
+void SharedBufferedInputStream::_submit_parallel_read(SharedBufferPtr sb) {
+    auto promise = std::make_shared<std::promise<Status>>();
+    sb->read_future = promise->get_future();
+
+    auto stream = _stream;
+    int64_t offset = sb->offset;
+    int64_t size = sb->size;
+    auto* self = this;
+
+    auto status = get_parallel_read_thread_pool()->submit_func([promise, stream, sb, offset, size, self]() {
+        sb->buffer.resize(size);
+        Status read_status = stream->read_at_fully(offset, sb->buffer.data(), size);
+        promise->set_value(read_status);
+
+        // Sliding window: release slot and start next read
+        self->_on_parallel_read_complete();
+    });
+
+    if (!status.ok()) {
+        LOG(WARNING) << "Failed to submit parallel read task: " << status.message();
+        promise->set_value(status);
+        {
+            std::lock_guard<std::mutex> lock(_parallel_read_mutex);
+            _active_read_count--;
+        }
+        _parallel_read_cv.notify_all();
+    }
+}
+
+void SharedBufferedInputStream::_on_parallel_read_complete() {
+    {
+        std::lock_guard<std::mutex> lock(_parallel_read_mutex);
+        _active_read_count--;
+    }
+    // Notify destructor if waiting
+    _parallel_read_cv.notify_all();
+    // Start next parallel read task (sliding window)
+    _start_parallel_reads();
 }
 
 } // namespace starrocks::io
