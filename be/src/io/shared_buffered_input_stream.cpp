@@ -370,17 +370,23 @@ void SharedBufferedInputStream::_start_parallel_reads() {
         return;
     }
 
-    int32_t max_per_file = config::s3_parallel_read_workers_per_file;
+    // Adaptive per-file limit based on pool availability:
+    // - Take 1/4 of available workers (so ~4 files can fill the pool)
+    // - Minimum is base config (8) to ensure progress
+    int32_t pool_size = config::s3_read_thread_pool_size;
+    int32_t base_per_file = config::s3_parallel_read_workers_per_file;
+    int32_t active = pool->active_threads();
+    int32_t available = std::max(0, pool_size - active);
+    int32_t max_this_file = std::max(base_per_file, available / 4);
 
     std::lock_guard<std::mutex> lock(_parallel_read_mutex);
 
-    // Don't start new tasks if we're shutting down
     if (_shutting_down) {
         return;
     }
 
     for (auto& [_, sb] : _map) {
-        if (_active_read_count >= max_per_file) {
+        if (_active_read_count >= max_this_file) {
             break;
         }
         if (sb->read_started) {
