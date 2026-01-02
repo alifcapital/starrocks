@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -50,9 +51,17 @@ public:
         int64_t size;
         int64_t ref_count;
         std::vector<uint8_t> buffer;
-        // Parallel read support
-        std::future<Status> read_future;
-        bool read_started = false;
+
+        // Chunked parallel read support
+        struct ChunkInfo {
+            int64_t file_offset;    // offset in file
+            int64_t buffer_offset;  // offset in buffer
+            int64_t size;           // chunk size
+            std::future<Status> future;
+            bool submitted = false; // submitted to thread pool
+        };
+        std::vector<ChunkInfo> chunks;
+        std::atomic<int32_t> completed_chunks{0};
 
         void align(int64_t align_size, int64_t file_size);
         std::string debug_string() const;
@@ -115,7 +124,8 @@ private:
 
     // Parallel read methods
     void _start_parallel_reads();
-    void _submit_parallel_read(SharedBufferPtr sb);
+    void _init_chunks(SharedBufferPtr sb);
+    void _submit_chunk(SharedBufferPtr sb, SharedBuffer::ChunkInfo& chunk);
     void _on_parallel_read_complete();
 
     const std::shared_ptr<SeekableInputStream> _stream;

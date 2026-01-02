@@ -457,4 +457,109 @@ TEST_F(SharedBufferedInputStreamTest, test_io_statistics) {
     ASSERT_EQ(0, sb_stream->direct_io_count());
 }
 
+// ==================== Chunked Parallel Read Tests ====================
+
+// Test: Large buffer (>8MB) is split into chunks and read in parallel
+TEST_F(SharedBufferedInputStreamTest, test_chunked_parallel_read) {
+    const size_t file_size = 32 * MB;
+    const int delay_ms = 50;
+
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data, delay_ms);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Set max_buffer_size to 8MB (chunk size)
+    SharedBufferedInputStream::CoalesceOptions opts;
+    opts.max_buffer_size = 8 * MB;
+    sb_stream->set_coalesce_options(opts);
+
+    // Create one large 24MB range - should be split into 3 chunks of 8MB
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 24 * MB, true);
+
+    auto start = std::chrono::steady_clock::now();
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    // get_bytes() waits for all 3 chunks to complete
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 24 * MB, nullptr));
+
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+
+    // With 3 parallel chunk reads (each 50ms), should complete in ~50ms
+    // Sequential would be 3 * 50ms = 150ms
+    ASSERT_LT(elapsed_ms, 2 * delay_ms) << "Chunked parallel reads should be faster than sequential";
+
+    // Verify data integrity
+    for (size_t i = 0; i < 24 * MB; ++i) {
+        ASSERT_EQ(data[i], static_cast<char>(buffer[i])) << "Mismatch at offset " << i;
+    }
+
+    // Verify mock was called 3 times (3 chunks)
+    ASSERT_EQ(3, underlying->read_count());
+}
+
+// Test: Verify chunk boundaries are correct
+// Also tests smart chunking: don't create tiny last chunks (< chunk_size/2)
+TEST_F(SharedBufferedInputStreamTest, test_chunked_read_boundaries) {
+    const size_t file_size = 20 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    SharedBufferedInputStream::CoalesceOptions opts;
+    opts.max_buffer_size = 8 * MB;
+    sb_stream->set_coalesce_options(opts);
+
+    // 17MB range → 2 chunks: 8MB + 9MB (not 8+8+1, because 1MB < 4MB threshold)
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 17 * MB, true);
+
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 17 * MB, nullptr));
+
+    // Verify data at chunk boundary (8MB)
+    ASSERT_EQ(data[8 * MB - 1], static_cast<char>(buffer[8 * MB - 1]));   // end of chunk 1
+    ASSERT_EQ(data[8 * MB], static_cast<char>(buffer[8 * MB]));           // start of chunk 2
+    ASSERT_EQ(data[17 * MB - 1], static_cast<char>(buffer[17 * MB - 1])); // end of chunk 2
+
+    // 2 read_at_fully calls (2 chunks: 8MB + 9MB)
+    ASSERT_EQ(2, underlying->read_count());
+}
+
+// Test: Small buffer (<= max_buffer_size * 1.5) uses single chunk
+TEST_F(SharedBufferedInputStreamTest, test_small_buffer_single_chunk) {
+    const size_t file_size = 16 * MB;
+    std::string data = generate_test_data(file_size);
+    auto underlying = std::make_shared<MockDelayedInputStream>(data);
+
+    auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    SharedBufferedInputStream::CoalesceOptions opts;
+    opts.max_buffer_size = 8 * MB;
+    sb_stream->set_coalesce_options(opts);
+
+    // 12MB range <= 8MB * 1.5 = 12MB → 1 chunk (smart chunking avoids 8+4 split)
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 12 * MB, true);
+
+    ASSERT_OK(sb_stream->set_io_ranges(ranges, true));
+
+    const uint8_t* buffer = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buffer, 0, 12 * MB, nullptr));
+
+    // Verify data
+    for (size_t i = 0; i < 12 * MB; ++i) {
+        ASSERT_EQ(data[i], static_cast<char>(buffer[i])) << "Mismatch at offset " << i;
+    }
+
+    // Only 1 read_at_fully call (1 chunk, not 8+4)
+    ASSERT_EQ(1, underlying->read_count());
+}
+
 } // namespace starrocks::io

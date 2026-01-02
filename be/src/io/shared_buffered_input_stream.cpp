@@ -261,18 +261,36 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
 
     SharedBuffer& sb = *shared_buffer;
 
-    // Wait for parallel read to complete if it was started
-    if (sb.read_started && sb.read_future.valid()) {
+    // Wait for all chunks to complete
+    if (!sb.chunks.empty()) {
+        bool did_io = false;
         SCOPED_RAW_TIMER(&_shared_io_timer);
-        Status read_status = sb.read_future.get();
-        sb.read_started = false;
-        if (!read_status.ok()) {
-            return read_status;
+        for (auto& chunk : sb.chunks) {
+            if (chunk.future.valid()) {
+                // Chunk was submitted - wait for it
+                Status status = chunk.future.get();
+                if (!status.ok()) {
+                    return status;
+                }
+                did_io = true;
+            } else if (!chunk.submitted) {
+                // Chunk was not submitted yet (sliding window limit) - read synchronously
+                RETURN_IF_ERROR(_stream->read_at_fully(chunk.file_offset,
+                                                       sb.buffer.data() + chunk.buffer_offset,
+                                                       chunk.size));
+                // Mark as submitted to prevent re-submission by _start_parallel_reads
+                chunk.submitted = true;
+                did_io = true;
+            }
+            // else: chunk.submitted && !future.valid() means future was already consumed
         }
-        _shared_io_count += 1;
-        _shared_io_bytes += sb.size;
-        if (sb.size > sb.raw_size) {
-            _shared_align_io_bytes += sb.size - sb.raw_size;
+        // Only count IO stats on first read, not on subsequent cache hits
+        if (did_io) {
+            _shared_io_count += 1;
+            _shared_io_bytes += sb.size;
+            if (sb.size > sb.raw_size) {
+                _shared_align_io_bytes += sb.size - sb.raw_size;
+            }
         }
     } else if (sb.buffer.capacity() == 0) {
         // Fallback: synchronous read if parallel read was not started
@@ -364,9 +382,61 @@ int64_t SharedBufferedInputStream::current_range_ref_sum() const {
     return ref;
 }
 
+void SharedBufferedInputStream::_init_chunks(SharedBufferPtr sb) {
+    int64_t chunk_size = _options.max_buffer_size;
+
+    // Don't split if last chunk would be < chunk_size/2 (not worth the HTTP overhead)
+    // This means: single chunk if size <= chunk_size * 1.5
+    if (sb->size <= chunk_size + chunk_size / 2) {
+        sb->chunks.push_back({
+                .file_offset = sb->offset,
+                .buffer_offset = 0,
+                .size = sb->size,
+                .future = {},
+                .submitted = false});
+        sb->buffer.resize(sb->size);
+        return;
+    }
+
+    // Large buffers - split into multiple chunks
+    // But merge last chunk with previous if it would be < chunk_size/2
+    int64_t offset = 0;
+    while (offset < sb->size) {
+        int64_t remaining = sb->size - offset;
+        int64_t this_size;
+
+        if (remaining <= chunk_size) {
+            // Last chunk
+            this_size = remaining;
+        } else if (remaining < chunk_size + chunk_size / 2) {
+            // Remaining would split into chunk + tiny_chunk, take it all
+            this_size = remaining;
+        } else {
+            this_size = chunk_size;
+        }
+
+        sb->chunks.push_back({
+                .file_offset = sb->offset + offset,
+                .buffer_offset = offset,
+                .size = this_size,
+                .future = {},
+                .submitted = false});
+        offset += this_size;
+    }
+
+    // Allocate buffer upfront
+    sb->buffer.resize(sb->size);
+}
+
 void SharedBufferedInputStream::_start_parallel_reads() {
     ThreadPool* pool = get_parallel_read_thread_pool();
     if (pool == nullptr) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(_parallel_read_mutex);
+
+    if (_shutting_down) {
         return;
     }
 
@@ -379,47 +449,60 @@ void SharedBufferedInputStream::_start_parallel_reads() {
     int32_t available = std::max(0, pool_size - active);
     int32_t max_this_file = std::max(base_per_file, available / 4);
 
-    std::lock_guard<std::mutex> lock(_parallel_read_mutex);
-
-    if (_shutting_down) {
-        return;
-    }
-
     for (auto& [_, sb] : _map) {
         if (_active_read_count >= max_this_file) {
             break;
         }
-        if (sb->read_started) {
-            continue;
+
+        // Initialize chunks if not done yet
+        if (sb->chunks.empty() && sb->size > 0) {
+            _init_chunks(sb);
         }
 
-        _active_read_count++;
-        sb->read_started = true;
+        // Submit chunks one by one while slots available
+        for (auto& chunk : sb->chunks) {
+            if (_active_read_count >= max_this_file) {
+                break;
+            }
+            if (chunk.submitted) {
+                continue;
+            }
 
-        _submit_parallel_read(sb);
+            // Increment BEFORE submit to prevent race with fast task completion
+            _active_read_count++;
+            chunk.submitted = true;
+            _submit_chunk(sb, chunk);
+        }
     }
 }
 
-void SharedBufferedInputStream::_submit_parallel_read(SharedBufferPtr sb) {
+void SharedBufferedInputStream::_submit_chunk(SharedBufferPtr sb, SharedBuffer::ChunkInfo& chunk) {
+    ThreadPool* pool = get_parallel_read_thread_pool();
+
     auto promise = std::make_shared<std::promise<Status>>();
-    sb->read_future = promise->get_future();
+    chunk.future = promise->get_future();
 
     auto stream = _stream;
-    int64_t offset = sb->offset;
-    int64_t size = sb->size;
+    int64_t buffer_offset = chunk.buffer_offset;
+    int64_t file_offset = chunk.file_offset;
+    int64_t size = chunk.size;
     auto* self = this;
 
-    auto status = get_parallel_read_thread_pool()->submit_func([promise, stream, sb, offset, size, self]() {
-        sb->buffer.resize(size);
-        Status read_status = stream->read_at_fully(offset, sb->buffer.data(), size);
+    // Capture sb by value (strong ref) to keep buffer alive during async read
+    auto status = pool->submit_func([promise, stream, sb, buffer_offset, file_offset, size, self]() {
+        uint8_t* dest = sb->buffer.data() + buffer_offset;
+        Status read_status = stream->read_at_fully(file_offset, dest, size);
         promise->set_value(read_status);
 
-        // Sliding window: release slot and start next read
+        // Increment completed counter
+        sb->completed_chunks.fetch_add(1, std::memory_order_release);
+
+        // Sliding window: release slot and start next chunk
         self->_on_parallel_read_complete();
     });
 
     if (!status.ok()) {
-        LOG(WARNING) << "Failed to submit parallel read task: " << status.message();
+        LOG(WARNING) << "Failed to submit parallel chunk read task: " << status.message();
         promise->set_value(status);
         {
             std::lock_guard<std::mutex> lock(_parallel_read_mutex);
