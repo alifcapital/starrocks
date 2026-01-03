@@ -22,6 +22,8 @@
 
 #ifdef __AVX2__
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include "column/array_column.h"
@@ -691,6 +693,26 @@ std::shared_ptr<std::vector<uint8_t>> LevelBuilder::_make_null_bitset(const Leve
                 // movemask extracts MSB of each byte as 32-bit mask
                 uint32_t mask = _mm256_movemask_epi8(not_null);
                 *reinterpret_cast<uint32_t*>(bitset->data() + (i >> 3)) = mask;
+            }
+            for (; i < col_size; i++) {
+                (*bitset)[i >> 3] |= (1 - nulls[i]) << (i & 0b111);
+            }
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        {
+            // NEON: process 8 bytes -> 1 output byte using pairwise add
+            const uint8x8_t zero_vec = vdup_n_u8(0);
+            const uint8x8_t bit_mask = {1, 2, 4, 8, 16, 32, 64, 128};
+            size_t i = 0;
+            for (; i + 8 <= col_size; i += 8) {
+                uint8x8_t nulls_vec = vld1_u8(nulls + i);
+                uint8x8_t not_null = vceq_u8(nulls_vec, zero_vec);
+                // AND with bit positions, then horizontal add to pack
+                uint8x8_t masked = vand_u8(not_null, bit_mask);
+                uint8x8_t sum1 = vpadd_u8(masked, masked);
+                uint8x8_t sum2 = vpadd_u8(sum1, sum1);
+                uint8x8_t sum3 = vpadd_u8(sum2, sum2);
+                (*bitset)[i >> 3] = vget_lane_u8(sum3, 0);
             }
             for (; i < col_size; i++) {
                 (*bitset)[i >> 3] |= (1 - nulls[i]) << (i & 0b111);
