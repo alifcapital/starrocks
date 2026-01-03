@@ -18,6 +18,8 @@
 
 #ifdef __x86_64__
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include "column/bytes.h"
@@ -75,9 +77,56 @@ void BinaryColumnBase<T>::append(const Column& src, size_t offset, size_t count)
     strings::memcpy_inlined(new_offsets, b._offsets.data() + offset + 1, count * sizeof(Offset));
 
     const auto delta = _offsets[num_prev_offsets - 1] - b._offsets[offset];
+    // SIMD-optimized offset delta addition
+#ifdef __AVX2__
+    if constexpr (sizeof(T) == 4) {
+        const __m256i delta_vec = _mm256_set1_epi32(static_cast<int32_t>(delta));
+        size_t i = 0;
+        for (; i + 8 <= count; i += 8) {
+            __m256i offsets = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(new_offsets + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(new_offsets + i), _mm256_add_epi32(offsets, delta_vec));
+        }
+        for (; i < count; i++) {
+            new_offsets[i] += delta;
+        }
+    } else {
+        const __m256i delta_vec = _mm256_set1_epi64x(static_cast<int64_t>(delta));
+        size_t i = 0;
+        for (; i + 4 <= count; i += 4) {
+            __m256i offsets = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(new_offsets + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(new_offsets + i), _mm256_add_epi64(offsets, delta_vec));
+        }
+        for (; i < count; i++) {
+            new_offsets[i] += delta;
+        }
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    if constexpr (sizeof(T) == 4) {
+        const uint32x4_t delta_vec = vdupq_n_u32(static_cast<uint32_t>(delta));
+        size_t i = 0;
+        for (; i + 4 <= count; i += 4) {
+            uint32x4_t offsets = vld1q_u32(reinterpret_cast<const uint32_t*>(new_offsets + i));
+            vst1q_u32(reinterpret_cast<uint32_t*>(new_offsets + i), vaddq_u32(offsets, delta_vec));
+        }
+        for (; i < count; i++) {
+            new_offsets[i] += delta;
+        }
+    } else {
+        const uint64x2_t delta_vec = vdupq_n_u64(static_cast<uint64_t>(delta));
+        size_t i = 0;
+        for (; i + 2 <= count; i += 2) {
+            uint64x2_t offsets = vld1q_u64(reinterpret_cast<const uint64_t*>(new_offsets + i));
+            vst1q_u64(reinterpret_cast<uint64_t*>(new_offsets + i), vaddq_u64(offsets, delta_vec));
+        }
+        for (; i < count; i++) {
+            new_offsets[i] += delta;
+        }
+    }
+#else
     for (size_t i = 0; i < count; i++) {
         new_offsets[i] += delta;
     }
+#endif
 
     invalidate_slice_cache();
 }

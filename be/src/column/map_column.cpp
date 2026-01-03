@@ -375,8 +375,12 @@ size_t MapColumn::filter_range(const Filter& filter, size_t from, size_t to) {
                 // ```
                 auto delta = offsets[check_offset] - offsets[result_offset];
                 memmove(offsets + result_offset + 1, offsets + check_offset + 1, kBatchSize * sizeof(offsets[0]));
-                for (int i = 0; i < kBatchSize; i++) {
-                    offsets[result_offset + i + 1] -= delta;
+                // SIMD-optimized offset delta subtraction (kBatchSize = 32, process 8 uint32_t per iteration)
+                const __m256i delta_vec = _mm256_set1_epi32(static_cast<int32_t>(delta));
+                for (int i = 0; i < kBatchSize; i += 8) {
+                    __m256i off = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offsets + result_offset + i + 1));
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(offsets + result_offset + i + 1),
+                                        _mm256_sub_epi32(off, delta_vec));
                 }
             }
             result_offset += kBatchSize;
