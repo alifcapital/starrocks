@@ -56,7 +56,26 @@ Filter& ColumnHelper::merge_nullable_filter(Column* column) {
         auto selected = sel_vec.data();
         size_t num_rows = sel_vec.size();
         // we treat null(1) as false(0)
-        for (size_t i = 0; i < num_rows; ++i) {
+        // SIMD optimization: selected &= ~nulls (ANDN pattern)
+        size_t i = 0;
+#ifdef __AVX2__
+        for (; i + 32 <= num_rows; i += 32) {
+            __m256i sel_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(selected + i));
+            __m256i null_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(nulls + i));
+            // ANDN: result = ~null_vec & sel_vec
+            __m256i result = _mm256_andnot_si256(null_vec, sel_vec);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(selected + i), result);
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        for (; i + 16 <= num_rows; i += 16) {
+            uint8x16_t sel_vec = vld1q_u8(selected + i);
+            uint8x16_t null_vec = vld1q_u8(nulls + i);
+            // BIC: result = sel_vec & ~null_vec
+            uint8x16_t result = vbicq_u8(sel_vec, null_vec);
+            vst1q_u8(selected + i, result);
+        }
+#endif
+        for (; i < num_rows; ++i) {
             selected[i] = static_cast<uint8_t>(selected[i] & !nulls[i]);
         }
         return sel_vec;

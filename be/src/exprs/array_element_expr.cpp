@@ -91,15 +91,13 @@ public:
 
         if (auto* nullable = dynamic_cast<const NullableColumn*>(arg0.get()); nullable != nullptr) {
             const uint8_t* nulls = nullable->null_column()->raw_data();
-            for (size_t i = 0; i < num_rows; i++) {
-                null_flags[i] |= nulls[i];
-            }
+            // Use SIMD-optimized OR
+            ColumnHelper::or_two_filters(num_rows, null_flags.data(), nulls);
         }
         if (auto* nullable = dynamic_cast<const NullableColumn*>(arg1.get()); nullable != nullptr) {
             const uint8_t* nulls = nullable->null_column()->raw_data();
-            for (size_t i = 0; i < num_rows; i++) {
-                null_flags[i] |= nulls[i];
-            }
+            // Use SIMD-optimized OR
+            ColumnHelper::or_two_filters(num_rows, null_flags.data(), nulls);
         }
 
         // construct selection list.

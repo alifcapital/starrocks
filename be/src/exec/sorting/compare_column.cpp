@@ -14,6 +14,13 @@
 
 #include <utility>
 
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/array_column.h"
 #include "column/column_helper.h"
 #include "column/column_visitor_adapter.h"
@@ -95,8 +102,26 @@ public:
         int nan_direction = _sort_order * _null_first;
 
         // Set byte to 0 when it's null/null byte is 1
+        // SIMD optimization: null_vector[i] = null_data[i] ^ 1
         CompareVector null_vector(null_data.size());
-        for (size_t i = 0; i < null_data.size(); i++) {
+        size_t i = 0;
+        const size_t size = null_data.size();
+#ifdef __AVX2__
+        const __m256i ones = _mm256_set1_epi8(1);
+        for (; i + 32 <= size; i += 32) {
+            __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(null_data.data() + i));
+            __m256i result = _mm256_xor_si256(data, ones);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(null_vector.data() + i), result);
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        const uint8x16_t ones = vdupq_n_u8(1);
+        for (; i + 16 <= size; i += 16) {
+            uint8x16_t data = vld1q_u8(null_data.data() + i);
+            uint8x16_t result = veorq_u8(data, ones);
+            vst1q_s8(null_vector.data() + i, vreinterpretq_s8_u8(result));
+        }
+#endif
+        for (; i < size; i++) {
             null_vector[i] = (null_data[i] == 1) ? 0 : 1;
         }
         auto null_cmp = [&](int lhs_row) -> int {
@@ -271,7 +296,32 @@ public:
         // 2. Compare the value if both are not null. Since value for null is just default value,
         //    which are equal, so just compare the value directly
         const auto null_data = column.immutable_null_column_data();
-        for (size_t i = 1; i < column.size(); i++) {
+        const size_t col_size = column.size();
+        size_t i = 1;
+        // SIMD optimization: compare adjacent null flags and AND with tie
+#ifdef __AVX2__
+        for (; i + 32 <= col_size; i += 32) {
+            __m256i prev = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(null_data.data() + i - 1));
+            __m256i curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(null_data.data() + i));
+            // Compare equal: 0xFF if equal, 0x00 if not
+            __m256i eq = _mm256_cmpeq_epi8(prev, curr);
+            __m256i tie_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(_tie->data() + i));
+            // tie &= eq (works because tie values are 0 or 1)
+            __m256i result = _mm256_and_si256(tie_vec, eq);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(_tie->data() + i), result);
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        for (; i + 16 <= col_size; i += 16) {
+            uint8x16_t prev = vld1q_u8(null_data.data() + i - 1);
+            uint8x16_t curr = vld1q_u8(null_data.data() + i);
+            // Compare equal: 0xFF if equal, 0x00 if not
+            uint8x16_t eq = vceqq_u8(prev, curr);
+            uint8x16_t tie_vec = vld1q_u8(_tie->data() + i);
+            uint8x16_t result = vandq_u8(tie_vec, eq);
+            vst1q_u8(_tie->data() + i, result);
+        }
+#endif
+        for (; i < col_size; i++) {
             (*_tie)[i] &= (null_data[i - 1] == null_data[i]);
         }
 

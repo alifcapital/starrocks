@@ -37,6 +37,13 @@
 #include <thrift/protocol/TDebugProtocol.h>
 #include <unistd.h>
 
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <sstream>
 
 #include "column/column_helper.h"
@@ -817,11 +824,26 @@ void ExecNode::eval_filter_null_values(Chunk* chunk, const std::vector<SlotId>& 
         // let compiler tells me.
         // let compiler does vectorization.
         // let compiler does everything.
-        // let's pray for compiler,
-        // till the end of the world.
+        // SIMD optimization: sel &= ~nulls (ANDN pattern)
         const uint8_t* nulls = nullable_column->null_column()->raw_data();
         uint8_t* sel = selection.data();
-        for (size_t i = 0; i < before_size; i++) {
+        size_t i = 0;
+#ifdef __AVX2__
+        for (; i + 32 <= before_size; i += 32) {
+            __m256i sel_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sel + i));
+            __m256i null_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(nulls + i));
+            __m256i result = _mm256_andnot_si256(null_vec, sel_vec);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(sel + i), result);
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        for (; i + 16 <= before_size; i += 16) {
+            uint8x16_t sel_vec = vld1q_u8(sel + i);
+            uint8x16_t null_vec = vld1q_u8(nulls + i);
+            uint8x16_t result = vbicq_u8(sel_vec, null_vec);
+            vst1q_u8(sel + i, result);
+        }
+#endif
+        for (; i < before_size; i++) {
             sel[i] &= !nulls[i];
         }
     }
