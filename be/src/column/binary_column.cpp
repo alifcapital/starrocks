@@ -525,16 +525,40 @@ void BinaryColumnBase<T>::assign(size_t n, size_t idx) {
     invalidate_slice_cache();
 }
 
-//TODO(kks): improve this
+// Optimized in-place implementation - avoids creating temporary column
 template <typename T>
 void BinaryColumnBase<T>::remove_first_n_values(size_t count) {
     DCHECK_LE(count, _offsets.size() - 1);
-    size_t remain_size = _offsets.size() - 1 - count;
+    if (count == 0) {
+        return;
+    }
 
-    ColumnPtr column = cut(count, remain_size);
-    auto* binary_column = down_cast<const BinaryColumnBase<T>*>(column.get());
-    _offsets = std::move(binary_column->_offsets);
-    _bytes = std::move(binary_column->_bytes);
+    size_t remain_size = _offsets.size() - 1 - count;
+    if (remain_size == 0) {
+        _bytes.clear();
+        _offsets.resize(1);
+        _offsets[0] = 0;
+        invalidate_slice_cache();
+        return;
+    }
+
+    // Calculate bytes to remove and remaining bytes
+    T bytes_to_remove = _offsets[count];
+    T total_bytes = _offsets.back();
+    T remaining_bytes = total_bytes - bytes_to_remove;
+
+    // Move bytes in-place using memmove (handles overlapping regions)
+    if (remaining_bytes > 0) {
+        memmove(_bytes.data(), _bytes.data() + bytes_to_remove, remaining_bytes);
+    }
+    _bytes.resize(remaining_bytes);
+
+    // Adjust offsets in-place: shift and subtract delta
+    for (size_t i = 0; i <= remain_size; ++i) {
+        _offsets[i] = _offsets[i + count] - bytes_to_remove;
+    }
+    _offsets.resize(remain_size + 1);
+
     invalidate_slice_cache();
 }
 
