@@ -20,6 +20,10 @@
 #include <string>
 #include <utility>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 #include "column/array_column.h"
 #include "column/column.h"
 #include "column/column_helper.h"
@@ -676,9 +680,27 @@ std::shared_ptr<std::vector<uint8_t>> LevelBuilder::_make_null_bitset(const Leve
         }
 
         auto bitset = std::make_shared<std::vector<uint8_t>>((col_size + 7) / 8);
+#ifdef __AVX2__
+        {
+            const __m256i zero_vec = _mm256_setzero_si256();
+            size_t i = 0;
+            for (; i + 32 <= col_size; i += 32) {
+                __m256i nulls_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(nulls + i));
+                // cmpeq gives 0xFF where nulls==0 (not null), 0x00 where nulls==1 (null)
+                __m256i not_null = _mm256_cmpeq_epi8(nulls_vec, zero_vec);
+                // movemask extracts MSB of each byte as 32-bit mask
+                uint32_t mask = _mm256_movemask_epi8(not_null);
+                *reinterpret_cast<uint32_t*>(bitset->data() + (i >> 3)) = mask;
+            }
+            for (; i < col_size; i++) {
+                (*bitset)[i >> 3] |= (1 - nulls[i]) << (i & 0b111);
+            }
+        }
+#else
         for (size_t i = 0; i < col_size; i++) {
             (*bitset)[i >> 3] |= (1 - nulls[i]) << (i & 0b111);
         }
+#endif
         return bitset;
     }
 
