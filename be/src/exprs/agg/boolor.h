@@ -22,6 +22,7 @@
 #include "exprs/agg/aggregate.h"
 #include "exprs/agg/aggregate_traits.h"
 #include "gutil/casts.h"
+#include "simd/simd.h"
 #include "util/raw_container.h"
 
 namespace starrocks {
@@ -101,13 +102,10 @@ public:
             }
         } else {
             const auto& column = down_cast<const InputColumnType&>(*columns[0]);
-
-            for (size_t i = 0; i < chunk_size; ++i) {
-                bool value = column.immutable_data()[i];
-                if (value) {
-                    this->data(state).result = true;
-                    break;
-                }
+            const auto* data = column.immutable_data().data();
+            // SIMD optimization: use contains_nonzero_bit to quickly check for any true value
+            if (SIMD::contains_nonzero_bit(data, chunk_size)) {
+                this->data(state).result = true;
             }
         }
     }
@@ -135,13 +133,10 @@ public:
             }
         } else {
             const auto& column = down_cast<const InputColumnType&>(*columns[0]);
-
-            for (size_t i = frame_start; i < frame_end; ++i) {
-                bool value = column.immutable_data()[i];
-                if (value) {
-                    this->data(state).result = true;
-                    break;
-                }
+            const auto* data = column.immutable_data().data();
+            // SIMD optimization: use contains_nonzero_bit to quickly check for any true value in frame
+            if (SIMD::contains_nonzero_bit(data + frame_start, frame_end - frame_start)) {
+                this->data(state).result = true;
             }
         }
     }
