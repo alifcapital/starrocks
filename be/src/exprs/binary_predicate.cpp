@@ -14,6 +14,12 @@
 
 #include "exprs/binary_predicate.h"
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/array_column.h"
 #include "column/column_builder.h"
 #include "column/column_viewer.h"
@@ -65,10 +71,212 @@ struct EvalCmpZero {
     EvalCmpZero(TExprOpcode::type in_op) : op(in_op) {}
 
     void eval(const std::vector<int8_t>& cmp_values, ColumnBuilder<TYPE_BOOLEAN>* output) {
-        auto cmp = build_comparator();
-        for (int8_t x : cmp_values) {
-            output->append(cmp(x));
+        const size_t size = cmp_values.size();
+        if (size == 0) return;
+
+        // Pre-allocate space instead of appending one by one
+        output->resize_uninitialized(size);
+        auto* dst = output->data_column()->get_data().data();
+        auto* nulls = output->null_column()->get_data().data();
+        const auto* src = cmp_values.data();
+
+        // Fill null flags with 0 (all not null)
+        memset(nulls, 0, size);
+
+#ifdef __AVX2__
+        const __m256i zero = _mm256_setzero_si256();
+        const __m256i one = _mm256_set1_epi8(1);
+        size_t i = 0;
+
+        switch (op) {
+        case TExprOpcode::EQ:
+        case TExprOpcode::EQ_FOR_NULL:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                __m256i cmp = _mm256_cmpeq_epi8(val, zero);
+                // Convert 0xFF to 0x01
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_and_si256(cmp, one));
+            }
+            break;
+        case TExprOpcode::NE:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                __m256i cmp = _mm256_cmpeq_epi8(val, zero);
+                // NE = NOT EQ, then convert 0xFF to 0x01
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+                                    _mm256_andnot_si256(cmp, one));
+            }
+            break;
+        case TExprOpcode::GT:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                __m256i cmp = _mm256_cmpgt_epi8(val, zero);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_and_si256(cmp, one));
+            }
+            break;
+        case TExprOpcode::GE:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                // GE: val >= 0 means NOT (val < 0) = NOT (0 > val)
+                __m256i cmp = _mm256_cmpgt_epi8(zero, val);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+                                    _mm256_andnot_si256(cmp, one));
+            }
+            break;
+        case TExprOpcode::LT:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                // LT: val < 0 means 0 > val
+                __m256i cmp = _mm256_cmpgt_epi8(zero, val);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_and_si256(cmp, one));
+            }
+            break;
+        case TExprOpcode::LE:
+            for (; i + 32 <= size; i += 32) {
+                __m256i val = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+                // LE: val <= 0 means NOT (val > 0)
+                __m256i cmp = _mm256_cmpgt_epi8(val, zero);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+                                    _mm256_andnot_si256(cmp, one));
+            }
+            break;
+        default:
+            break;
         }
+
+        // Scalar tail
+        for (; i < size; ++i) {
+            switch (op) {
+            case TExprOpcode::EQ:
+            case TExprOpcode::EQ_FOR_NULL:
+                dst[i] = (src[i] == 0) ? 1 : 0;
+                break;
+            case TExprOpcode::NE:
+                dst[i] = (src[i] != 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GT:
+                dst[i] = (src[i] > 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GE:
+                dst[i] = (src[i] >= 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LT:
+                dst[i] = (src[i] < 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LE:
+                dst[i] = (src[i] <= 0) ? 1 : 0;
+                break;
+            default:
+                CHECK(false) << "illegal operation: " << op;
+            }
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        const int8x16_t zero = vdupq_n_s8(0);
+        const uint8x16_t one = vdupq_n_u8(1);
+        size_t i = 0;
+
+        switch (op) {
+        case TExprOpcode::EQ:
+        case TExprOpcode::EQ_FOR_NULL:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vceqq_s8(val, zero);
+                vst1q_u8(dst + i, vandq_u8(cmp, one));
+            }
+            break;
+        case TExprOpcode::NE:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vceqq_s8(val, zero);
+                vst1q_u8(dst + i, vbicq_u8(one, cmp));
+            }
+            break;
+        case TExprOpcode::GT:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vcgtq_s8(val, zero);
+                vst1q_u8(dst + i, vandq_u8(cmp, one));
+            }
+            break;
+        case TExprOpcode::GE:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vcgeq_s8(val, zero);
+                vst1q_u8(dst + i, vandq_u8(cmp, one));
+            }
+            break;
+        case TExprOpcode::LT:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vcltq_s8(val, zero);
+                vst1q_u8(dst + i, vandq_u8(cmp, one));
+            }
+            break;
+        case TExprOpcode::LE:
+            for (; i + 16 <= size; i += 16) {
+                int8x16_t val = vld1q_s8(src + i);
+                uint8x16_t cmp = vcleq_s8(val, zero);
+                vst1q_u8(dst + i, vandq_u8(cmp, one));
+            }
+            break;
+        default:
+            break;
+        }
+
+        // Scalar tail
+        for (; i < size; ++i) {
+            switch (op) {
+            case TExprOpcode::EQ:
+            case TExprOpcode::EQ_FOR_NULL:
+                dst[i] = (src[i] == 0) ? 1 : 0;
+                break;
+            case TExprOpcode::NE:
+                dst[i] = (src[i] != 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GT:
+                dst[i] = (src[i] > 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GE:
+                dst[i] = (src[i] >= 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LT:
+                dst[i] = (src[i] < 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LE:
+                dst[i] = (src[i] <= 0) ? 1 : 0;
+                break;
+            default:
+                CHECK(false) << "illegal operation: " << op;
+            }
+        }
+#else
+        // Scalar fallback
+        for (size_t i = 0; i < size; ++i) {
+            switch (op) {
+            case TExprOpcode::EQ:
+            case TExprOpcode::EQ_FOR_NULL:
+                dst[i] = (src[i] == 0) ? 1 : 0;
+                break;
+            case TExprOpcode::NE:
+                dst[i] = (src[i] != 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GT:
+                dst[i] = (src[i] > 0) ? 1 : 0;
+                break;
+            case TExprOpcode::GE:
+                dst[i] = (src[i] >= 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LT:
+                dst[i] = (src[i] < 0) ? 1 : 0;
+                break;
+            case TExprOpcode::LE:
+                dst[i] = (src[i] <= 0) ? 1 : 0;
+                break;
+            default:
+                CHECK(false) << "illegal operation: " << op;
+            }
+        }
+#endif
     }
 
     std::function<bool(int)> build_comparator() {
