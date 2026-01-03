@@ -170,7 +170,8 @@ public:
         if constexpr (IS_FLBA) {
             RETURN_IF_ERROR(Decode(nullptr, values_to_skip));
         } else {
-            skip_buffer_.reserve(values_to_skip);
+            // Use resize() instead of reserve() to avoid UB/ASAN issues
+            skip_buffer_.resize(values_to_skip);
             RETURN_IF_ERROR(Decode(skip_buffer_.data(), values_to_skip));
         }
         return Status::OK();

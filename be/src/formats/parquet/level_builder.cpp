@@ -16,6 +16,7 @@
 
 #include <fmt/core.h>
 
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -29,6 +30,7 @@
 #include "column/type_traits.h"
 #include "common/compiler_util.h"
 #include "gutil/casts.h"
+#include "simd/rle_simd.h"
 #include "types/date_value.h"
 #include "util/defer_op.h"
 #include "utils.h"
@@ -220,8 +222,28 @@ Status LevelBuilder::_write_int_column_chunk(const LevelBuilderContext& ctx, con
         auto values = new target_type[col->size()];
         DeferOp defer([&] { delete[] values; });
 
-        for (size_t i = 0; i < col->size(); i++) {
-            values[i] = static_cast<target_type>(data_col[i]);
+        // Use SIMD for common type widening patterns (with size check to avoid int32 overflow)
+        const size_t col_size = col->size();
+        if constexpr (std::is_same_v<source_type, int8_t> && std::is_same_v<target_type, int32_t>) {
+            if (col_size <= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                simd_widen_int8_to_int32(values, data_col, static_cast<int32_t>(col_size));
+            } else {
+                for (size_t i = 0; i < col_size; i++) {
+                    values[i] = static_cast<target_type>(data_col[i]);
+                }
+            }
+        } else if constexpr (std::is_same_v<source_type, int16_t> && std::is_same_v<target_type, int32_t>) {
+            if (col_size <= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                simd_widen_int16_to_int32(values, data_col, static_cast<int32_t>(col_size));
+            } else {
+                for (size_t i = 0; i < col_size; i++) {
+                    values[i] = static_cast<target_type>(data_col[i]);
+                }
+            }
+        } else {
+            for (size_t i = 0; i < col_size; i++) {
+                values[i] = static_cast<target_type>(data_col[i]);
+            }
         }
 
         write_leaf_callback(LevelBuilderResult{

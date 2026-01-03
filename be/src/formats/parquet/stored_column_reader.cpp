@@ -17,6 +17,10 @@
 #include <fmt/core.h>
 #include <glog/logging.h>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 #include <algorithm>
 #include <sstream>
 #include <string>
@@ -289,9 +293,24 @@ Status StoredColumnReader::create(const ColumnReaderOptions& opts, const Parquet
 
 size_t StoredColumnReaderImpl::count_not_null(level_t* def_levels, size_t num_parsed_levels, level_t max_def_level) {
     size_t count = 0;
-    for (int i = 0; i < num_parsed_levels; ++i) {
-        level_t def_level = def_levels[i];
-        if (def_level == max_def_level) {
+    size_t i = 0;
+
+#if defined(__AVX2__) && defined(__POPCNT__)
+    // SIMD path: compare 16 int16_t elements at a time
+    const __m256i v_max = _mm256_set1_epi16(max_def_level);
+    for (; i + 16 <= num_parsed_levels; i += 16) {
+        __m256i v_data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(def_levels + i));
+        __m256i v_cmp = _mm256_cmpeq_epi16(v_data, v_max);
+        // Each matching element becomes 0xFFFF, movemask extracts high bit of each byte
+        uint32_t mask = _mm256_movemask_epi8(v_cmp);
+        // Each match produces 2 bits (since int16 = 2 bytes), so divide popcount by 2
+        count += __builtin_popcount(mask) >> 1;
+    }
+#endif
+
+    // Scalar tail
+    for (; i < num_parsed_levels; ++i) {
+        if (def_levels[i] == max_def_level) {
             count++;
         }
     }

@@ -198,8 +198,11 @@ public:
 
         size_t max_size = 0;
         size_t read_count = count - null_cnt;
-        uint32_t lengths[read_count + 1];
-        char* datas[read_count + 1];
+        // Use pre-allocated member vectors instead of VLA to avoid stack overflow
+        _temp_lengths.resize(read_count + 1);
+        _temp_datas.resize(read_count + 1);
+        uint32_t* lengths = _temp_lengths.data();
+        char** datas = _temp_datas.data();
         size_t i = 0;
         size_t cursor = _offset;
         //
@@ -344,6 +347,9 @@ public:
 private:
     Slice _data;
     size_t _offset = 0;
+    // Pre-allocated buffers to avoid VLA stack allocation (prevents stack overflow for large batches)
+    std::vector<uint32_t> _temp_lengths;
+    std::vector<char*> _temp_datas;
 };
 
 // plain encoding for boolean type is stored as `Bit Packed`, `LSB` first format
@@ -373,9 +379,8 @@ public:
 
     Status skip(size_t values_to_skip) override {
         //TODO(Smith) still heavy work load
-        std::vector<uint8_t> tmp;
-        tmp.reserve(values_to_skip);
-        return next_batch(values_to_skip, tmp.data());
+        _skip_buffer.resize(values_to_skip);
+        return next_batch(values_to_skip, _skip_buffer.data());
     }
 
     Status next_batch(size_t count, uint8_t* dst) override {
@@ -397,6 +402,7 @@ private:
     std::size_t _decoded_buffer_size;
     std::size_t _decoded_values_size;
     std::size_t _decoded_values_offset;
+    std::vector<uint8_t> _skip_buffer;  // Reusable buffer for skip() to avoid UB
 
     std::size_t read_decoded_values(std::size_t num_values, uint8_t* v) {
         if (_decoded_values_buffer != nullptr && _decoded_values_offset < _decoded_values_size) {

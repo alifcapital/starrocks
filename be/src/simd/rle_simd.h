@@ -355,4 +355,71 @@ inline void simd_dict_gather_double(double* __restrict dest, const double* __res
                            indices, count);
 }
 
+// ============================================================================
+// SIMD-optimized type widening (sign extension) for Parquet type conversion
+// int8 -> int32, int16 -> int32
+// ============================================================================
+
+#if defined(__AVX2__)
+MFV_AVX2(void simd_widen_int8_to_int32_avx2(int32_t* __restrict dest, const int8_t* __restrict src, int32_t count) {
+    int32_t i = 0;
+    // Process 8 elements at a time (256 bits / 32 bits = 8 int32s)
+    // Load 8 int8s (64 bits), sign-extend to 8 int32s
+    for (; i + 8 <= count; i += 8) {
+        __m128i v_src = _mm_loadl_epi64((const __m128i*)(src + i)); // load 8 bytes
+        __m256i v_dst = _mm256_cvtepi8_epi32(v_src);
+        _mm256_storeu_si256((__m256i*)(dest + i), v_dst);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dest[i] = static_cast<int32_t>(src[i]);
+    }
+})
+#endif
+
+MFV_DEFAULT(void simd_widen_int8_to_int32_default(int32_t* __restrict dest, const int8_t* __restrict src, int32_t count) {
+    for (int32_t i = 0; i < count; ++i) {
+        dest[i] = static_cast<int32_t>(src[i]);
+    }
+})
+
+inline void simd_widen_int8_to_int32(int32_t* __restrict dest, const int8_t* __restrict src, int32_t count) {
+#if defined(__AVX2__)
+    simd_widen_int8_to_int32_avx2(dest, src, count);
+#else
+    simd_widen_int8_to_int32_default(dest, src, count);
+#endif
+}
+
+#if defined(__AVX2__)
+MFV_AVX2(void simd_widen_int16_to_int32_avx2(int32_t* __restrict dest, const int16_t* __restrict src, int32_t count) {
+    int32_t i = 0;
+    // Process 8 elements at a time (256 bits / 32 bits = 8 int32s)
+    // Load 8 int16s (128 bits), sign-extend to 8 int32s
+    for (; i + 8 <= count; i += 8) {
+        __m128i v_src = _mm_loadu_si128((const __m128i*)(src + i));
+        __m256i v_dst = _mm256_cvtepi16_epi32(v_src);
+        _mm256_storeu_si256((__m256i*)(dest + i), v_dst);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dest[i] = static_cast<int32_t>(src[i]);
+    }
+})
+#endif
+
+MFV_DEFAULT(void simd_widen_int16_to_int32_default(int32_t* __restrict dest, const int16_t* __restrict src, int32_t count) {
+    for (int32_t i = 0; i < count; ++i) {
+        dest[i] = static_cast<int32_t>(src[i]);
+    }
+})
+
+inline void simd_widen_int16_to_int32(int32_t* __restrict dest, const int16_t* __restrict src, int32_t count) {
+#if defined(__AVX2__)
+    simd_widen_int16_to_int32_avx2(dest, src, count);
+#else
+    simd_widen_int16_to_int32_default(dest, src, count);
+#endif
+}
+
 } // namespace starrocks
