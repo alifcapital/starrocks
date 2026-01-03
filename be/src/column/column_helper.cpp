@@ -101,15 +101,13 @@ void ColumnHelper::merge_two_anti_filters(const ColumnPtr& column, NullData& nul
     if (column->is_nullable()) {
         const auto* nullable_column = as_raw_const_column<NullableColumn>(column);
         const auto nulls = nullable_column->null_column_data().data();
-        for (size_t i = 0; i < num_rows; ++i) {
-            null_data[i] |= nulls[i];
-        }
+        // Use SIMD OR for null data merge
+        or_two_filters(num_rows, null_data.data(), nulls);
     }
 
     const auto* datas = get_cpp_data<TYPE_BOOLEAN>(data_column);
-    for (size_t j = 0; j < num_rows; ++j) {
-        (*filter)[j] &= datas[j];
-    }
+    // Use SIMD AND for filter merge
+    merge_two_filters(filter, datas, nullptr);
 }
 
 void ColumnHelper::merge_filters(const Columns& columns, Filter* __restrict filter) {
@@ -128,7 +126,28 @@ void ColumnHelper::merge_filters(const Columns& columns, Filter* __restrict filt
 void ColumnHelper::merge_two_filters(Filter* __restrict filter, const uint8_t* __restrict selected, bool* all_zero) {
     uint8_t* data = filter->data();
     size_t num_rows = filter->size();
-    for (size_t i = 0; i < num_rows; i++) {
+    size_t i = 0;
+
+#ifdef __AVX2__
+    // Process 32 bytes at a time using AVX2
+    for (; i + 32 <= num_rows; i += 32) {
+        __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(selected + i));
+        __m256i result = _mm256_and_si256(a, b);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), result);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    // Process 16 bytes at a time using NEON
+    for (; i + 16 <= num_rows; i += 16) {
+        uint8x16_t a = vld1q_u8(data + i);
+        uint8x16_t b = vld1q_u8(selected + i);
+        uint8x16_t result = vandq_u8(a, b);
+        vst1q_u8(data + i, result);
+    }
+#endif
+
+    // Scalar fallback for remaining elements
+    for (; i < num_rows; i++) {
         data[i] = data[i] & selected[i];
     }
     if (all_zero != nullptr) {
@@ -141,7 +160,28 @@ void ColumnHelper::or_two_filters(Filter* __restrict filter, const uint8_t* __re
 }
 
 void ColumnHelper::or_two_filters(size_t count, uint8_t* __restrict data, const uint8_t* __restrict selected) {
-    for (size_t i = 0; i < count; i++) {
+    size_t i = 0;
+
+#ifdef __AVX2__
+    // Process 32 bytes at a time using AVX2
+    for (; i + 32 <= count; i += 32) {
+        __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(selected + i));
+        __m256i result = _mm256_or_si256(a, b);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), result);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    // Process 16 bytes at a time using NEON
+    for (; i + 16 <= count; i += 16) {
+        uint8x16_t a = vld1q_u8(data + i);
+        uint8x16_t b = vld1q_u8(selected + i);
+        uint8x16_t result = vorrq_u8(a, b);
+        vst1q_u8(data + i, result);
+    }
+#endif
+
+    // Scalar fallback for remaining elements
+    for (; i < count; i++) {
         data[i] |= selected[i];
     }
 }
