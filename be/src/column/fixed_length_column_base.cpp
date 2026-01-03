@@ -14,6 +14,12 @@
 
 #include "column/fixed_length_column_base.h"
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
 #include "common/config.h"
@@ -131,13 +137,84 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
 template <typename T>
 void FixedLengthColumnBase<T>::fill_default(const Filter& filter) {
     auto& datas = get_data();
-
     T val = DefaultValueGenerator<T>::next_value();
-    for (size_t i = 0; i < filter.size(); i++) {
-        if (filter[i] == 1) {
-            datas[i] = val;
+    const size_t size = filter.size();
+    const uint8_t* f = filter.data();
+    T* data = datas.data();
+
+#ifdef __AVX2__
+    if constexpr (sizeof(T) == 4) {
+        const __m256i val_vec = _mm256_set1_epi32(*reinterpret_cast<const int32_t*>(&val));
+        const __m256i zero = _mm256_setzero_si256();
+        size_t i = 0;
+        for (; i + 8 <= size; i += 8) {
+            // Load 8 filter bytes, expand to 32-bit mask
+            __m256i flt = _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(f + i)));
+            __m256i mask = _mm256_cmpgt_epi32(flt, zero);
+            __m256i cur = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), _mm256_blendv_epi8(cur, val_vec, mask));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else if constexpr (sizeof(T) == 8) {
+        const __m256i val_vec = _mm256_set1_epi64x(*reinterpret_cast<const int64_t*>(&val));
+        const __m256i zero = _mm256_setzero_si256();
+        size_t i = 0;
+        for (; i + 4 <= size; i += 4) {
+            // AVX2: manually expand 4 bytes to 4 int64
+            uint32_t f4 = *reinterpret_cast<const uint32_t*>(f + i);
+            __m256i flt = _mm256_set_epi64x((f4 >> 24) & 0xFF, (f4 >> 16) & 0xFF, (f4 >> 8) & 0xFF, f4 & 0xFF);
+            __m256i mask = _mm256_cmpgt_epi64(flt, zero);
+            __m256i cur = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), _mm256_blendv_epi8(cur, val_vec, mask));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else {
+        for (size_t i = 0; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
         }
     }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    if constexpr (sizeof(T) == 4) {
+        const uint32x4_t val_vec = vdupq_n_u32(*reinterpret_cast<const uint32_t*>(&val));
+        size_t i = 0;
+        for (; i + 4 <= size; i += 4) {
+            // Load exactly 4 filter bytes, expand to 32-bit
+            uint32_t f4 = *reinterpret_cast<const uint32_t*>(f + i);
+            uint32x4_t flt32 = {f4 & 0xFF, (f4 >> 8) & 0xFF, (f4 >> 16) & 0xFF, (f4 >> 24) & 0xFF};
+            uint32x4_t mask = vcgtq_u32(flt32, vdupq_n_u32(0));
+            uint32x4_t cur = vld1q_u32(reinterpret_cast<const uint32_t*>(data + i));
+            vst1q_u32(reinterpret_cast<uint32_t*>(data + i), vbslq_u32(mask, val_vec, cur));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else if constexpr (sizeof(T) == 8) {
+        const uint64x2_t val_vec = vdupq_n_u64(*reinterpret_cast<const uint64_t*>(&val));
+        size_t i = 0;
+        for (; i + 2 <= size; i += 2) {
+            uint16_t f01 = *reinterpret_cast<const uint16_t*>(f + i);
+            uint64x2_t flt64 = {static_cast<uint64_t>(f01 & 0xFF), static_cast<uint64_t>((f01 >> 8) & 0xFF)};
+            uint64x2_t mask = vcgtq_u64(flt64, vdupq_n_u64(0));
+            uint64x2_t cur = vld1q_u64(reinterpret_cast<const uint64_t*>(data + i));
+            vst1q_u64(reinterpret_cast<uint64_t*>(data + i), vbslq_u64(mask, val_vec, cur));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else {
+        for (size_t i = 0; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    }
+#else
+    for (size_t i = 0; i < size; i++) {
+        if (f[i] == 1) data[i] = val;
+    }
+#endif
 }
 
 template <typename T>
