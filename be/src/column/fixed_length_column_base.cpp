@@ -22,6 +22,7 @@
 #include "gutil/strings/fastmem.h"
 #include "gutil/strings/substitute.h"
 #include "simd/gather.h"
+#include "simd/simd_utils.h"
 #include "storage/decimal12.h"
 #include "types/int256.h"
 #include "types/large_int_value.h"
@@ -108,7 +109,7 @@ void FixedLengthColumnBase<T>::append_default(size_t count) {
     datas.resize(datas.size() + count, DefaultValueGenerator<ValueType>::next_value());
 }
 
-//TODO(fzh): optimize copy using SIMD
+// SIMD-optimized replicate: uses AVX2 broadcast+store for filling repeated values
 template <typename T>
 StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint32_t>& offsets) {
     auto dest = this->clone_empty();
@@ -118,10 +119,11 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
     const auto datas = this->immutable_data();
     dest_datas.resize(offsets.back());
     size_t orig_size = offsets.size() - 1; // this->size() may be large than offsets->size() -1
-    for (auto i = 0; i < orig_size; ++i) {
-        for (auto j = offsets[i]; j < offsets[i + 1]; ++j) {
-            dest_datas[j] = datas[i];
-        }
+
+    T* dest_ptr = dest_datas.data();
+    for (size_t i = 0; i < orig_size; ++i) {
+        size_t fill_count = offsets[i + 1] - offsets[i];
+        SIMDUtils::simd_fill(dest_ptr + offsets[i], datas[i], fill_count);
     }
     return dest;
 }
