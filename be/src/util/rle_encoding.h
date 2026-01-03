@@ -35,7 +35,10 @@
 
 #include <glog/logging.h>
 
+#include <cstring>
+
 #include "gutil/port.h"
+#include "simd/rle_simd.h"
 #include "util/bit_stream_utils.inline.h"
 #include "util/bit_util.h"
 
@@ -914,8 +917,18 @@ inline int32_t RleBatchDecoder<T>::GetBatch(T* values, int32_t batch_num) {
         if (num_repeats > 0) {
             int32_t num_repeats_to_set = std::min(num_repeats, batch_num - num_consumed);
             T repeated_value = GetRepeatedValue(num_repeats_to_set);
-            for (int i = 0; i < num_repeats_to_set; ++i) {
-                values[num_consumed + i] = repeated_value;
+            // Use SIMD-optimized fill for 32-bit types
+            if constexpr (sizeof(T) == 4) {
+                // Use memcpy for type-safe bit reinterpretation (avoids strict aliasing UB)
+                int32_t value_bits;
+                memcpy(&value_bits, &repeated_value, sizeof(int32_t));
+                simd_fill_int32(reinterpret_cast<int32_t*>(values + num_consumed),
+                                value_bits,
+                                num_repeats_to_set);
+            } else {
+                for (int i = 0; i < num_repeats_to_set; ++i) {
+                    values[num_consumed + i] = repeated_value;
+                }
             }
             num_consumed += num_repeats_to_set;
             continue;
@@ -965,14 +978,22 @@ static inline bool IndexInRange(T idx, int32_t dictionary_length) {
 
 template <typename T>
 static inline bool IndicesInRange(const T* values, int32_t length, int32_t dictionary_length) {
-    T min_index = std::numeric_limits<T>::max();
-    T max_index = std::numeric_limits<T>::min();
-    for (int x = 0; x < length; x++) {
-        min_index = std::min(values[x], min_index);
-        max_index = std::max(values[x], max_index);
+    // Use SIMD-optimized min/max for 32-bit types
+    if constexpr (sizeof(T) == 4) {
+        int32_t min_index, max_index;
+        simd_minmax_int32(reinterpret_cast<const int32_t*>(values), length, min_index, max_index);
+        return IndexInRange(static_cast<T>(min_index), dictionary_length) &&
+               IndexInRange(static_cast<T>(max_index), dictionary_length);
+    } else {
+        // Fallback for other types
+        T min_index = std::numeric_limits<T>::max();
+        T max_index = std::numeric_limits<T>::min();
+        for (int x = 0; x < length; x++) {
+            min_index = std::min(values[x], min_index);
+            max_index = std::max(values[x], max_index);
+        }
+        return IndexInRange(min_index, dictionary_length) && IndexInRange(max_index, dictionary_length);
     }
-
-    return IndexInRange(min_index, dictionary_length) && IndexInRange(max_index, dictionary_length);
 }
 
 template <typename T>
@@ -991,8 +1012,18 @@ inline int RleBatchDecoder<T>::GetBatchWithDict(const TV* dictionary, int32_t di
                 return -1;
             }
             TV value = dictionary[repeated_value];
-            for (int i = 0; i < num_repeats_to_set; ++i) {
-                values[num_consumed + i] = value;
+            // Use SIMD-optimized fill for supported types
+            if constexpr (sizeof(TV) == 4) {
+                // Use memcpy for type-safe bit reinterpretation (avoids strict aliasing UB)
+                int32_t value_bits;
+                memcpy(&value_bits, &value, sizeof(int32_t));
+                simd_fill_int32(reinterpret_cast<int32_t*>(values + num_consumed),
+                                value_bits,
+                                num_repeats_to_set);
+            } else {
+                for (int i = 0; i < num_repeats_to_set; ++i) {
+                    values[num_consumed + i] = value;
+                }
             }
             num_consumed += num_repeats_to_set;
             continue;
@@ -1014,8 +1045,24 @@ inline int RleBatchDecoder<T>::GetBatchWithDict(const TV* dictionary, int32_t di
         if (UNLIKELY(!IndicesInRange(indices, num_literals_to_set, dictionary_length))) {
             return -1;
         }
-        for (int i = 0; i < num_literals_to_set; ++i) {
-            values[num_consumed + i] = dictionary[indices[i]];
+        // Use SIMD-optimized gather for supported types (32-bit indices, 32-bit or 64-bit values)
+        // NOTE: The reinterpret_casts below treat TV* as int32_t*/int64_t* for SIMD gather.
+        // This is safe for SIMD intrinsics which operate on raw memory without type interpretation.
+        // Same pattern is used in simd/gather.h:53.
+        if constexpr (sizeof(T) == 4 && sizeof(TV) == 4) {
+            simd_dict_gather_int32(reinterpret_cast<int32_t*>(values + num_consumed),
+                                   reinterpret_cast<const int32_t*>(dictionary),
+                                   reinterpret_cast<const uint32_t*>(indices),
+                                   num_literals_to_set);
+        } else if constexpr (sizeof(T) == 4 && sizeof(TV) == 8) {
+            simd_dict_gather_int64(reinterpret_cast<int64_t*>(values + num_consumed),
+                                   reinterpret_cast<const int64_t*>(dictionary),
+                                   reinterpret_cast<const uint32_t*>(indices),
+                                   num_literals_to_set);
+        } else {
+            for (int i = 0; i < num_literals_to_set; ++i) {
+                values[num_consumed + i] = dictionary[indices[i]];
+            }
         }
         num_consumed += num_literals_to_set;
     }
