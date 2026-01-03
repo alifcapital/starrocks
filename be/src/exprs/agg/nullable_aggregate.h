@@ -292,10 +292,22 @@ public:
 
     void merge_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column* column,
                                  AggDataPtr* states, const Filter& filter) const override {
-        for (size_t i = 0; i < chunk_size; i++) {
-            // TODO: optimize with simd ?
-            if (filter[i] == 0) {
-                merge(ctx, column, states[i] + state_offset, i);
+        // Adaptive SIMD: for sparse filters, use find_zero to skip; for dense, iterate all
+        if (SIMD::count_zero(filter.data(), chunk_size) > chunk_size / 8) {
+            // Dense: more than 12.5% rows pass filter, iterate all
+            for (size_t i = 0; i < chunk_size; i++) {
+                if (filter[i] == 0) {
+                    merge(ctx, column, states[i] + state_offset, i);
+                }
+            }
+        } else {
+            // Sparse: use SIMD to find zero positions
+            size_t idx = 0;
+            while (idx < chunk_size) {
+                idx = SIMD::find_zero(filter, idx, chunk_size - idx);
+                if (idx >= chunk_size) break;
+                merge(ctx, column, states[idx] + state_offset, idx);
+                ++idx;
             }
         }
     }
