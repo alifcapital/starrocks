@@ -41,7 +41,7 @@ public:
         } else if constexpr (sizeof(T) == 8) {
             return _mm256_set1_epi64x(*reinterpret_cast<int64_t*>(&data));
         } else {
-            static_assert(sizeof(T) > 8, "only support sizeof type LE than 8");
+            static_assert(sizeof(T) == 0, "set_data only supports sizeof(T) == 1, 2, 4, or 8");
         }
     }
 #endif
@@ -55,7 +55,7 @@ public:
 #ifdef __AVX2__
         constexpr size_t elements_per_vector = 32 / sizeof(T);
 
-        if constexpr (sizeof(T) <= 8) {
+        if constexpr (sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8) {
             __m256i v_value = set_data(value);
 
             size_t i = 0;
