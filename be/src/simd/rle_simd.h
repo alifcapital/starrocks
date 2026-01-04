@@ -306,6 +306,38 @@ MFV_AVX2(void simd_minmax_int32_avx2(const int32_t* __restrict data, int32_t cou
 })
 #endif
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
+inline void simd_minmax_int32_neon(const int32_t* __restrict data, int32_t count,
+                                    int32_t& out_min, int32_t& out_max) {
+    if (count <= 0) {
+        out_min = std::numeric_limits<int32_t>::max();
+        out_max = std::numeric_limits<int32_t>::min();
+        return;
+    }
+
+    int32x4_t v_min = vdupq_n_s32(std::numeric_limits<int32_t>::max());
+    int32x4_t v_max = vdupq_n_s32(std::numeric_limits<int32_t>::min());
+
+    int32_t i = 0;
+    // Process 4 elements at a time
+    for (; i + 4 <= count; i += 4) {
+        int32x4_t v_data = vld1q_s32(data + i);
+        v_min = vminq_s32(v_min, v_data);
+        v_max = vmaxq_s32(v_max, v_data);
+    }
+
+    // Horizontal reduction using vminvq_s32/vmaxvq_s32 (aarch64)
+    out_min = vminvq_s32(v_min);
+    out_max = vmaxvq_s32(v_max);
+
+    // Process remaining elements
+    for (; i < count; ++i) {
+        out_min = std::min(out_min, data[i]);
+        out_max = std::max(out_max, data[i]);
+    }
+}
+#endif
+
 MFV_DEFAULT(void simd_minmax_int32_default(const int32_t* __restrict data, int32_t count,
                                            int32_t& out_min, int32_t& out_max) {
     out_min = std::numeric_limits<int32_t>::max();
@@ -322,6 +354,8 @@ inline void simd_minmax_int32(const int32_t* __restrict data, int32_t count,
     simd_minmax_int32_avx512(data, count, out_min, out_max);
 #elif defined(__AVX2__)
     simd_minmax_int32_avx2(data, count, out_min, out_max);
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    simd_minmax_int32_neon(data, count, out_min, out_max);
 #else
     simd_minmax_int32_default(data, count, out_min, out_max);
 #endif
