@@ -188,7 +188,9 @@ bthreads::Future<StatusOr<size_t>> IoUringContext::submit_request(std::unique_pt
     }
 
     // Store request_id in user_data for retrieval on completion
-    io_uring_sqe_set_data64(sqe, request_id);
+    // Use io_uring_sqe_set_data (void*) for compatibility with older liburing versions
+    // that don't have io_uring_sqe_set_data64
+    io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(static_cast<uintptr_t>(request_id)));
 
     // Store request in pending map
     _pending_requests[request_id] = std::move(request);
@@ -349,7 +351,9 @@ Status IoUringContext::poll_completions(int min_complete) {
 }
 
 void IoUringContext::handle_completion(struct io_uring_cqe* cqe) {
-    uint64_t request_id = io_uring_cqe_get_data64(cqe);
+    // Use io_uring_cqe_get_data (void*) for compatibility with older liburing versions
+    // that don't have io_uring_cqe_get_data64
+    uint64_t request_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(io_uring_cqe_get_data(cqe)));
 
     auto it = _pending_requests.find(request_id);
     if (it == _pending_requests.end()) {
