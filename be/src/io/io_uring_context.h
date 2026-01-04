@@ -138,6 +138,28 @@ public:
         std::atomic<uint64_t> fixed_writes{0};  // Writes using registered buffers
     };
 
+    // Non-atomic snapshot of Stats for returning by value
+    struct StatsSnapshot {
+        uint64_t reads_submitted{0};
+        uint64_t writes_submitted{0};
+        uint64_t fsyncs_submitted{0};
+        uint64_t completions{0};
+        uint64_t errors{0};
+        uint64_t sq_full_count{0};
+
+        uint64_t total_read_bytes{0};
+        uint64_t total_write_bytes{0};
+        uint64_t total_read_latency_ns{0};
+        uint64_t total_write_latency_ns{0};
+
+        uint64_t batches_submitted{0};
+        uint64_t total_batch_size{0};
+        uint64_t syscalls_saved{0};
+
+        uint64_t fixed_reads{0};
+        uint64_t fixed_writes{0};
+    };
+
     const Stats& stats() const { return _stats; }
 
     // Phase 3: Registered buffer support

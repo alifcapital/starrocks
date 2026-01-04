@@ -66,7 +66,7 @@ public:
     bool is_enabled() const;
 
     // Get aggregate statistics from all contexts
-    IoUringContext::Stats get_aggregate_stats() const;
+    IoUringContext::StatsSnapshot get_aggregate_stats() const;
 
     // Get the number of active contexts
     size_t active_context_count() const;

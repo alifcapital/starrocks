@@ -177,8 +177,8 @@ void IoUringManager::thread_local_destructor(void* ptr) {
     LOG(INFO) << "IoUringContext destroyed for thread (thread exit)";
 }
 
-IoUringContext::Stats IoUringManager::get_aggregate_stats() const {
-    IoUringContext::Stats aggregate;
+IoUringContext::StatsSnapshot IoUringManager::get_aggregate_stats() const {
+    IoUringContext::StatsSnapshot aggregate;
 
     std::lock_guard<std::mutex> lock(_mutex);
     for (const auto* ctx : _all_contexts) {
