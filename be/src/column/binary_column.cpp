@@ -34,6 +34,43 @@
 #include "util/raw_container.h"
 
 namespace starrocks {
+
+namespace {
+inline void simd_copy_bytes(uint8_t* __restrict dst, const uint8_t* __restrict src, size_t size) {
+#if defined(__AVX2__)
+    constexpr size_t kMinSimdCopy = 32;
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    constexpr size_t kMinSimdCopy = 16;
+#else
+    constexpr size_t kMinSimdCopy = 0;
+#endif
+    if (size < kMinSimdCopy) {
+        strings::memcpy_inlined(dst, src, size);
+        return;
+    }
+
+    size_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 32 <= size; i += 32) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+    }
+    for (; i + 16 <= size; i += 16) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), v);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    for (; i + 16 <= size; i += 16) {
+        uint8x16_t v = vld1q_u8(src + i);
+        vst1q_u8(dst + i, v);
+    }
+#endif
+    if (i < size) {
+        strings::memcpy_inlined(dst + i, src + i, size - i);
+    }
+}
+} // namespace
+
 template <typename T>
 void BinaryColumnBase<T>::check_or_die() const {
     CHECK_EQ(_bytes.size(), _offsets.back());
@@ -251,7 +288,8 @@ StatusOr<MutableColumnPtr> BinaryColumnBase<T>::replicate(const Buffer<uint32_t>
     for (auto i = 0; i < src_size; ++i) {
         auto bytes_size = _offsets[i + 1] - _offsets[i];
         for (auto j = offsets[i]; j < offsets[i + 1]; ++j) {
-            strings::memcpy_inlined(dest_bytes.data() + pos, _bytes.data() + _offsets[i], bytes_size);
+            simd_copy_bytes(reinterpret_cast<uint8_t*>(dest_bytes.data() + pos),
+                            reinterpret_cast<const uint8_t*>(_bytes.data() + _offsets[i]), bytes_size);
             pos += bytes_size;
             dest_offsets[j + 1] = pos;
         }
