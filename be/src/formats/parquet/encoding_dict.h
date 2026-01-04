@@ -173,10 +173,11 @@ public:
                 }
             }
 #endif
-            // process tail elements
+            // process tail elements - only read from src_data when not null
             for (; i < count; ++i) {
-                dst_data[i] = src_data[cnt];
-                cnt += !nulls[i];
+                if (!nulls[i]) {
+                    dst_data[i] = src_data[cnt++];
+                }
             }
             DCHECK_EQ(cnt, num_non_nulls) << "count:" << count << " null_cnt:" << count - num_non_nulls;
         } else {
