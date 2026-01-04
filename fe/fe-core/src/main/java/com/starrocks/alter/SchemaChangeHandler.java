@@ -88,7 +88,7 @@ import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.lake.LakeTable;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.persist.ModifyColumnCommentLog;
-import com.starrocks.persist.TableAddOrDropColumnsInfo;
+import com.starrocks.persist.TableColumnAlterInfo;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.ShowResultSet;
 import com.starrocks.server.GlobalStateMgr;
@@ -1127,7 +1127,17 @@ public class SchemaChangeHandler extends AlterHandler {
             fastSchemaEvolution = false;
         }
 
-        if (newColumn.getDefaultValue() != null && newColumn.getDefaultExpr() != null) {
+        if (newColumn.getDefaultExpr() != null && newColumn.getDefaultExpr().hasExprObject()) {
+            if (!fastSchemaEvolution) {
+                throw new DdlException(
+                        "Complex type (ARRAY/MAP/STRUCT) default values require fast schema evolution. " +
+                                "Table '" + olapTable.getName() + "' has fast_schema_evolution=false. " +
+                                "This property can only be set during table creation and cannot be modified later.");
+            }
+        }
+
+        if (newColumn.getDefaultValue() != null && newColumn.getDefaultExpr() != null
+                && newColumn.getDefaultExpr().getExpr() != null) {
             fastSchemaEvolution = false;
         }
         if (newColumn.getDefaultExpr() != null && newColumn.getDefaultValueType() == Column.DefaultValueType.CONST) {
@@ -2133,8 +2143,8 @@ public class SchemaChangeHandler extends AlterHandler {
 
         if (!fastSchemaEvolution) {
             return createJob(schemaChangeData);
-        } else if (RunMode.isSharedNothingMode()) {
-            fastSchemaEvolutionInShareNothingMode(schemaChangeData);
+        } else if (RunMode.isSharedNothingMode() || ((LakeTable) olapTable).isFastSchemaEvolutionV2()) {
+            updateCatalogForFastSchemaEvolution(schemaChangeData);
             return null;
         } else {
             return createFastSchemaEvolutionJobInSharedDataMode(schemaChangeData);
@@ -2756,46 +2766,44 @@ public class SchemaChangeHandler extends AlterHandler {
         TableProperty tableProperty = olapTable.getTableProperty();
 
         boolean hasChanged = false;
-        if (tableProperty != null) {
-            if (properties.containsKey(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT)) {
-                try {
-                    List<UniqueConstraint> newUniqueConstraints = PropertyAnalyzer.analyzeUniqueConstraint(properties, db,
-                            olapTable);
-                    List<UniqueConstraint> originalUniqueConstraints = tableProperty.getUniqueConstraints();
-                    if (originalUniqueConstraints == null
-                            || !newUniqueConstraints.toString().equals(originalUniqueConstraints.toString())) {
-                        hasChanged = true;
-                        String newProperty = newUniqueConstraints
-                                .stream().map(UniqueConstraint::toString).collect(Collectors.joining(";"));
-                        properties.put(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT, newProperty);
-                    } else {
-                        LOG.warn("unique constraint is the same as origin");
-                    }
-                } catch (SemanticException e) {
-                    throw new DdlException(
-                            String.format("analyze table unique constraint:%s failed, msg: %s",
-                                    properties.get(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT), e.getDetailMsg()), e);
+        if (properties.containsKey(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT)) {
+            try {
+                List<UniqueConstraint> newUniqueConstraints
+                        = PropertyAnalyzer.analyzeUniqueConstraint(properties, db, olapTable);
+                List<UniqueConstraint> originalUniqueConstraints = tableProperty.getUniqueConstraints();
+                if (originalUniqueConstraints == null
+                        || !newUniqueConstraints.toString().equals(originalUniqueConstraints.toString())) {
+                    hasChanged = true;
+                    String newProperty = newUniqueConstraints
+                            .stream().map(UniqueConstraint::toString).collect(Collectors.joining(";"));
+                    properties.put(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT, newProperty);
+                } else {
+                    LOG.warn("unique constraint is the same as origin");
                 }
+            } catch (SemanticException e) {
+                throw new DdlException(
+                        String.format("analyze table unique constraint:%s failed, msg: %s",
+                                properties.get(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT), e.getDetailMsg()), e);
             }
-            if (properties.containsKey(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT)) {
-                try {
-                    List<ForeignKeyConstraint> newForeignKeyConstraints =
-                            PropertyAnalyzer.analyzeForeignKeyConstraint(properties, db, olapTable);
-                    List<ForeignKeyConstraint> originalForeignKeyConstraints = tableProperty.getForeignKeyConstraints();
-                    if (originalForeignKeyConstraints == null
-                            || !newForeignKeyConstraints.toString().equals(originalForeignKeyConstraints.toString())) {
-                        hasChanged = true;
-                        String newProperty = newForeignKeyConstraints
-                                .stream().map(ForeignKeyConstraint::toString).collect(Collectors.joining(";"));
-                        properties.put(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT, newProperty);
-                    } else {
-                        LOG.warn("foreign constraint is the same as origin");
-                    }
-                } catch (SemanticException e) {
-                    throw new DdlException(
-                            String.format("analyze table foreign key constraint:%s failed, msg: %s",
-                                    properties.get(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT), e.getDetailMsg()), e);
+        }
+        if (properties.containsKey(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT)) {
+            try {
+                List<ForeignKeyConstraint> newForeignKeyConstraints =
+                        PropertyAnalyzer.analyzeForeignKeyConstraint(properties, db, olapTable);
+                List<ForeignKeyConstraint> originalForeignKeyConstraints = tableProperty.getForeignKeyConstraints();
+                if (originalForeignKeyConstraints == null
+                        || !newForeignKeyConstraints.toString().equals(originalForeignKeyConstraints.toString())) {
+                    hasChanged = true;
+                    String newProperty = newForeignKeyConstraints
+                            .stream().map(ForeignKeyConstraint::toString).collect(Collectors.joining(";"));
+                    properties.put(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT, newProperty);
+                } else {
+                    LOG.warn("foreign constraint is the same as origin");
                 }
+            } catch (SemanticException e) {
+                throw new DdlException(
+                        String.format("analyze table foreign key constraint:%s failed, msg: %s",
+                                properties.get(PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT), e.getDetailMsg()), e);
             }
         }
 
@@ -2806,7 +2814,7 @@ public class SchemaChangeHandler extends AlterHandler {
         Locker locker = new Locker();
         locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(olapTable.getId()), LockType.WRITE);
         try {
-            GlobalStateMgr.getCurrentState().getLocalMetastore().modifyTableConstraint(db, tableName, properties);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().modifyTableConstraint(db, olapTable, properties);
         } finally {
             locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(olapTable.getId()), LockType.WRITE);
         }
@@ -2874,7 +2882,8 @@ public class SchemaChangeHandler extends AlterHandler {
         IndexDef indexDef = alterClause.getIndexDef();
         Index newIndex;
         // Only assign meaningful indexId for OlapTable
-        if (olapTable.isOlapTableOrMaterializedView()) {
+        if (olapTable.isOlapTableOrMaterializedView() ||
+                (olapTable.isCloudNativeTableOrMaterializedView() && indexDef.getIndexType() != IndexDef.IndexType.VECTOR)) {
             long indexId = IndexDef.IndexType.isCompatibleIndex(indexDef.getIndexType()) ? 
                     olapTable.incAndGetMaxIndexId() : -1;
             newIndex = new Index(indexId, indexDef.getIndexName(),
@@ -2974,15 +2983,18 @@ public class SchemaChangeHandler extends AlterHandler {
     // the invoker should keep write lock
     // this function will update the table index meta according to the `indexSchemaMap` and the
     // `indexSchemaMap` keep the latest column set for each index.
-    // there are two scenarios:
-    //   1. add/drop column with fast schema evolution in shared-nothing mode
-    //   2. add/drop field for a struct colum with fast schema evolution in shared-nothing mode(modify column actually)
+    // This function is used for fast schema evolution scenarios where only FE metadata needs to be updated.
+    // It supports the following operations:
+    //   1. add/drop column with fast schema evolution (in shared-nothing mode, or shared-data mode with fast schema evolution v2 enabled)
+    //   2. add/drop field for a struct column with fast schema evolution (modify column actually)
+    //   3. modify column type with fast schema evolution (in shared-data mode with fast schema evolution v2 enabled)
     // e.g:
     //   origin table schema: {c1: int, c2: int, c3: Struct<v1 int, v2 int>}
     //       a. add a new column `c4 int` and the table schema will be set {c1: int, c2: int, c3: Struct<v1 int, v2 int>, c4: int}
     //       b. add a new field `v3 int` into `c3` column and the table schema will be set"
     //          {c1: int, c2: int, c3: Struct<v1 int, v2 int, v3 int>}
-    public void modifyTableAddOrDrop(Database db, OlapTable olapTable,
+    //       c. modify column `c1` from INT to BIGINT (when fast schema evolution v2 is enabled in shared-data mode)
+    public void applyFastSchemaEvolutionMetaChange(Database db, OlapTable olapTable,
                                      Map<Long, List<Column>> indexSchemaMap,
                                      List<Index> indexes, long jobId,
                                      Map<Long, Long> indexToNewSchemaId, boolean isReplay, long replayedTxnId)
@@ -3044,6 +3056,7 @@ public class SchemaChangeHandler extends AlterHandler {
                 if (indexToNewSchemaId != null) {
                     currentIndexMeta.setSchemaId(indexToNewSchemaId.get(idx));
                 }
+                olapTable.renameColumnNamePrefix(idx);
 
                 schemaChangeJob.addIndexSchema(idx, idx, olapTable.getIndexNameByMetaId(idx), newSchemaVersion,
                         currentIndexMeta.getSchemaHash(), currentIndexMeta.getShortKeyColumnCount(),
@@ -3059,7 +3072,7 @@ public class SchemaChangeHandler extends AlterHandler {
             if (!isReplay) {
                 txnId = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr()
                         .getTransactionIDGenerator().getNextTransactionId();
-                TableAddOrDropColumnsInfo info = new TableAddOrDropColumnsInfo(db.getId(), olapTable.getId(),
+                TableColumnAlterInfo info = new TableColumnAlterInfo(db.getId(), olapTable.getId(),
                         indexSchemaMap, indexes, jobId, txnId, indexToNewSchemaId);
                 LOG.debug("logModifyTableAddOrDrop info:{}", info);
                 GlobalStateMgr.getCurrentState().getEditLog().logModifyTableAddOrDrop(info);
@@ -3073,7 +3086,7 @@ public class SchemaChangeHandler extends AlterHandler {
             this.addAlterJobV2(schemaChangeJob);
 
             olapTable.lastSchemaUpdateTime.set(System.nanoTime());
-            LOG.info("finished modify table's add or drop column(field). table: {}, is replay: {}", olapTable.getName(),
+            LOG.info("finished applying fast schema evolution meta change. table: {}, is replay: {}", olapTable.getName(),
                     isReplay);
         } finally {
             olapTable.setState(OlapTableState.NORMAL);
@@ -3081,7 +3094,7 @@ public class SchemaChangeHandler extends AlterHandler {
         }
     }
 
-    public void replayModifyTableAddOrDrop(TableAddOrDropColumnsInfo info) throws
+    public void replayFastSchemaEvolutionMetaChange(TableColumnAlterInfo info) throws
             MetaNotFoundException {
         LOG.debug("info:{}", info);
         long dbId = info.getDbId();
@@ -3099,10 +3112,11 @@ public class SchemaChangeHandler extends AlterHandler {
         Locker locker = new Locker();
         try {
             locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(olapTable.getId()), LockType.WRITE);
-            modifyTableAddOrDrop(db, olapTable, indexSchemaMap, indexes, jobId, indexToNewSchemaId, true, info.getTxnId());
+            applyFastSchemaEvolutionMetaChange(
+                    db, olapTable, indexSchemaMap, indexes, jobId, indexToNewSchemaId, true, info.getTxnId());
         } catch (DdlException e) {
             // should not happen
-            LOG.warn("failed to replay modify table add or drop columns", e);
+            LOG.warn("failed to replay fast schema evolution meta change", e);
         } catch (NotImplementedException e) {
             LOG.error("InternalError", e);
         } finally {
@@ -3110,9 +3124,15 @@ public class SchemaChangeHandler extends AlterHandler {
         }
     }
 
-    private void fastSchemaEvolutionInShareNothingMode(SchemaChangeData schemaChangeData)
+    /**
+     * Updates catalog only for fast schema evolution without creating an async job.
+     * This is used in shared-nothing mode or shared-data mode with fast schema evolution v2 enabled,
+     * where the schema change can be completed immediately by only updating FE metadata.
+     * 
+     * @param schemaChangeData the schema change data containing the new schema information
+     */
+    private void updateCatalogForFastSchemaEvolution(SchemaChangeData schemaChangeData)
             throws DdlException, NotImplementedException {
-        Preconditions.checkState(RunMode.isSharedNothingMode());
         GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
         long jobId = globalStateMgr.getNextId();
         // for schema change add/drop value column optimize, direct modify table meta.
@@ -3125,7 +3145,7 @@ public class SchemaChangeHandler extends AlterHandler {
         // for schema change add/drop value column optimize, direct modify table meta.
         // when modify this, please also pay attention to the OlapTable#copyOnlyForQuery() operation.
         // try to copy first before modifying, avoiding in-place changes.
-        modifyTableAddOrDrop(schemaChangeData.getDatabase(), schemaChangeData.getTable(),
+        applyFastSchemaEvolutionMetaChange(schemaChangeData.getDatabase(), schemaChangeData.getTable(),
                 schemaChangeData.getNewIndexSchema(), schemaChangeData.getIndexes(), jobId,
                 indexToNewSchemaId, false, -1);
     }

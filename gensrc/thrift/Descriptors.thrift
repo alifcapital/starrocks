@@ -228,6 +228,14 @@ enum TIndexType {
   VECTOR,
 }
 
+// Not define UNKNOWN type for better compatibility with
+// DistributionInfo.DistributionInfoType definition
+enum TOlapTableDistributionType {
+    HASH,
+    RANDOM,
+    RANGE,
+}
+
 // Mapping from names defined by Avro to the enum.
 // We permit gzip and bzip2 in addition.
 const map<string, THdfsCompression> COMPRESSION_MAP = {
@@ -259,7 +267,11 @@ struct TColumn {
     // For fixed-length column, this value may be ignored by BE when creating a tablet.
     20: optional i32 index_len                 
     // column type. If this field is set, the |column_type| will be ignored.
-    21: optional Types.TTypeDesc type_desc         
+    21: optional Types.TTypeDesc type_desc
+    // Default value expression for complex types (array/map/struct).
+    // If set, BE will evaluate this expression and convert to JSON string for storage.
+    // For simple types, use |default_value| (field 6) instead.
+    22: optional Exprs.TExpr default_expr
 }
 
 // Key information for locating a specific table schema version.
@@ -319,6 +331,8 @@ struct TOlapTablePartitionParam {
     8: optional list<Exprs.TExpr> partition_exprs
 
     9: optional bool enable_automatic_partition
+
+    10: optional TOlapTableDistributionType distribution_type
 }
 
 struct TOlapTableColumnParam {

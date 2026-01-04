@@ -647,6 +647,7 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
                         .setSelectPartitionNames(node.getPartitionNames() == null ? Collections.emptyList() :
                                 node.getPartitionNames().getPartitionNames())
                         .setSelectedIndexId(((OlapTable) node.getTable()).getBaseIndexMetaId())
+                        .setHintsTabletIds(node.getTabletIds())
                         .build();
             } else if (!isMVPlanner) {
                 scanOperator = LogicalOlapScanOperator.builder()
@@ -1096,7 +1097,9 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
         if (node.getSkewColumn() != null) {
             skewColumn = SqlToScalarOperatorTranslator.translate(node.getSkewColumn(),
                     expressionMapping, columnRefFactory,
-                    session, cteContext, leftOpt, null, false);
+                    session, cteContext,
+                    new OptExprBuilder(null, Lists.newArrayList(leftOpt, rightOpt), expressionMapping),
+                    null, false);
         }
 
         List<ScalarOperator> skewValues = Lists.newArrayList();

@@ -305,7 +305,7 @@ public class PlanFragmentBuilder {
         // Create a fake table sink here, replaced it after created the MV
         PartitionInfo partitionInfo = LocalMetastore.buildPartitionInfo(createStmt, null);
         long mvId = GlobalStateMgr.getCurrentState().getNextId();
-        long dbId = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(createStmt.getTableName().getDb()).getId();
+        long dbId = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(createStmt.getDbName()).getId();
         MaterializedView view = GlobalStateMgr.getCurrentState().getMaterializedViewMgr()
                 .createSinkTable(createStmt, partitionInfo, mvId, dbId);
         TupleDescriptor tupleDesc = buildTupleDesc(execPlan, view);
@@ -365,7 +365,9 @@ public class PlanFragmentBuilder {
                 && (execPlan.getScanNodes().stream().map(d -> ((OlapScanNode) d).getScanTabletIds().size())
                 .reduce(Integer::sum).orElse(2) <= 1)) || execPlan.isShortCircuit()) {
             inputFragment.setOutputExprs(outputExprs);
-            inputFragment.setSingleTabletGatherOutputFragment(true);
+            for (PlanFragment fragment : execPlan.getFragments()) {
+                fragment.setSingleTabletGatherOutputFragment(true);
+            }
             return;
         }
 
@@ -1097,7 +1099,7 @@ public class PlanFragmentBuilder {
 
             MetaScanNode scanNode = new MetaScanNode(context.getNextNodeId(),
                     tupleDescriptor, (OlapTable) scan.getTable(), scan.getAggColumnIdToColumns(),
-                    scan.getSelectPartitionNames(), scan.getSelectedIndexId(),
+                    scan.getSelectPartitionNames(), scan.getHintsTabletIds(), scan.getSelectedIndexId(),
                     context.getConnectContext().getCurrentComputeResource());
 
             scanNode.setColumnAccessPaths(scan.getColumnAccessPaths());

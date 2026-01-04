@@ -45,6 +45,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.ToNumberPolicy;
 import com.starrocks.catalog.InternalCatalog;
+import com.starrocks.common.Config;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.FeConstants;
@@ -1030,6 +1031,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_INSERT_SELECT_EXTERNAL_AUTO_REFRESH = "enable_insert_select_external_auto_refresh";
 
     public static final String PUSH_DOWN_HEAVY_EXPRS = "push_down_heavy_exprs";
+
+    public static final String ARROW_FLIGHT_PROXY = "arrow_flight_proxy";
+    public static final String ARROW_FLIGHT_PROXY_ENABLED = "arrow_flight_proxy_enabled";
 
     public static final String ENABLE_PRE_AGG_TOP_N_PUSH_DOWN = "enable_pre_agg_top_n_push_down";
 
@@ -2147,6 +2151,11 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = PUSH_DOWN_HEAVY_EXPRS)
     private boolean pushDownHeavyExprs = true;
 
+    @VarAttr(name = ARROW_FLIGHT_PROXY)
+    private String arrowFlightProxy = "";
+    @VarAttr(name = ARROW_FLIGHT_PROXY_ENABLED)
+    private boolean arrowFlightProxyEnabled = true;
+
     @VarAttr(name = ENABLE_PRE_AGG_TOP_N_PUSH_DOWN, flag = VariableMgr.INVISIBLE)
     private boolean enablePreAggTopNPushDown = true;
 
@@ -2324,12 +2333,17 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     }
 
     public void setExecMode(String execMode) {
+        final SessionVariable sv = DEFAULT_SESSION_VARIABLE;
         if (execMode.equalsIgnoreCase(SessionVariableConstants.ETL)) {
+            setEnableWaitDependentEvent(true);
             setEnablePhasedScheduler(true);
             setEnableSpill(true);
+            setEnableQueryQueue(Config.enable_query_queue_v2);
         } else {
-            setEnablePhasedScheduler(false);
-            setEnableSpill(false);
+            setEnableWaitDependentEvent(sv.enableWaitDependentEvent);
+            setEnablePhasedScheduler(sv.enablePhasedScheduler);
+            setEnableSpill(sv.enableSpill);
+            setEnableQueryQueue(sv.enableQueryQueue);
         }
         this.execMode = execMode;
     }
@@ -2348,6 +2362,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableParallelMerge(boolean enableParallelMerge) {
         this.enableParallelMerge = enableParallelMerge;
+    }
+
+    public void setEnableQueryQueue(boolean enableQueryQueue) {
+        this.enableQueryQueue = enableQueryQueue;
     }
 
     public boolean isEnableQueryQueue() {
@@ -3082,6 +3100,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setPhasedSchedulerMaxConcurrency(int phasedSchedulerMaxConcurrency) {
         this.phasedSchedulerMaxConcurrency = phasedSchedulerMaxConcurrency;
+    }
+
+    public boolean enableWaitDependentEvent() {
+        return enableWaitDependentEvent;
+    }
+
+    public void setEnableWaitDependentEvent(boolean enableWaitDependentEvent) {
+        this.enableWaitDependentEvent = enableWaitDependentEvent;
     }
 
     public boolean enablePhasedScheduler() {
@@ -5218,7 +5244,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     }
 
     public boolean isEnableShortCircuit() {
-        return enableShortCircuit;
+        return enableShortCircuit && !RunMode.isSharedDataMode();
     }
 
     public boolean isEnablePrepareStmt() {
@@ -5673,6 +5699,22 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isPushDownHeavyExprs() {
         return this.pushDownHeavyExprs;
+    }
+
+    public void setArrowFlightProxy(String proxy) {
+        this.arrowFlightProxy = proxy;
+    }
+
+    public String getArrowFlightProxy() {
+        return this.arrowFlightProxy;
+    }
+
+    public void setArrowFlightProxyEnabled(boolean flag) {
+        this.arrowFlightProxyEnabled = flag;
+    }
+
+    public boolean isArrowFlightProxyEnabled() {
+        return this.arrowFlightProxyEnabled;
     }
 
     public void setEnablePreAggTopNPushDown(boolean enablePreAggTopNPushDown) {

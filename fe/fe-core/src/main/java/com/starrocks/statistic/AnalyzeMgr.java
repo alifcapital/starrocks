@@ -42,6 +42,7 @@ import com.starrocks.persist.metablock.SRMetaBlockWriter;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.transaction.InsertTxnCommitAttachment;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TxnCommitAttachment;
@@ -540,9 +541,10 @@ public class AnalyzeMgr implements Writable {
         for (Map.Entry<StatsMetaKey, ExternalBasicStatsMeta> entry : externalBasicStatsMetaMap.entrySet()) {
             StatsMetaKey tableKey = entry.getKey();
             try {
-                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                        .getTable(new ConnectContext(), tableKey.getCatalogName(), tableKey.getDbName(), tableKey.getTableName());
-                if (table == null) {
+                boolean exists = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                        .tableExists(new ConnectContext(), tableKey.getCatalogName(), tableKey.getDbName(),
+                                tableKey.getTableName());
+                if (!exists) {
                     LOG.warn("Table {}.{}.{} not exists, clear it's statistics", tableKey.getCatalogName(),
                             tableKey.getDbName(), tableKey.getTableName());
                     droppedTables.add(tableKey);
@@ -1100,9 +1102,9 @@ public class AnalyzeMgr implements Writable {
     public static class MultiColumnStatsKey {
         private final long tableId;
         private final Set<Integer> columnIds;
-        private final List<StatsConstants.StatisticsType> statisticsTypes;
+        private final List<StatisticsType> statisticsTypes;
 
-        public MultiColumnStatsKey(long tableId, Set<Integer> columnIds, List<StatsConstants.StatisticsType> statisticsTypes) {
+        public MultiColumnStatsKey(long tableId, Set<Integer> columnIds, List<StatisticsType> statisticsTypes) {
             this.tableId = tableId;
             this.columnIds = columnIds;
             this.statisticsTypes = statisticsTypes;
@@ -1116,7 +1118,7 @@ public class AnalyzeMgr implements Writable {
             return columnIds;
         }
 
-        public List<StatsConstants.StatisticsType> getStatisticsTypes() {
+        public List<StatisticsType> getStatisticsTypes() {
             return statisticsTypes;
         }
 

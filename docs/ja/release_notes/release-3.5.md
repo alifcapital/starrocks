@@ -6,7 +6,7 @@ displayed_sidebar: docs
 
 :::warning
 
-- StarRocks を v3.5 にアップグレードした後、直接 v3.4.0 ~ v3.4.4 にダウングレードしないでください。そうするとメタデータの非互換性を引き起こす。問題を防ぐために、クラスタを v3.4.5 以降にダウングレードする必要があります。
+- StarRocks を v3.5 にアップグレードした後、直接 v3.4.0 ~ v3.4.5 にダウングレードしないでください。そうするとメタデータの非互換性を引き起こす。問題を防ぐために、クラスタを v3.4.6 以降にダウングレードする必要があります。
 - StarRocks を v3.5.2 以降にアップグレードした後、v3.5.0 および v3.5.1 にダウングレードしないでください。そうすると FE がクラッシュします。
 
 :::
@@ -235,7 +235,7 @@ displayed_sidebar: docs
 - フラグメントインスタンス実行状態レポートにスレッドプールのメトリクスを追加しました。アクティブスレッド数、キュー数、実行中スレッド数を含みます。 [#63067](https://github.com/StarRocks/starrocks/pull/63067)
 - 共有データクラスターで S3 パススタイルアクセスをサポートし、MinIO などの S3 互換ストレージとの互換性を向上しました。ストレージボリューム作成時に `aws.s3.enable_path_style_access` を `true` に設定して有効化できます。 [#62591](https://github.com/StarRocks/starrocks/pull/62591)
 - `ALTER TABLE <table_name> AUTO_INCREMENT = 10000;` による AUTO_INCREMENT 値の開始位置リセットをサポートしました。 [#62767](https://github.com/StarRocks/starrocks/pull/62767)
-- グループプロバイダーで Distinguished Name (DN) を使用したグループマッチングをサポートし、LDAP/Microsoft Active Directory 環境でのグループ解決を改善しました。 [#62711](https://github.com/StarRocks/starrocks/pull/62711)
+- Group Provider で Distinguished Name (DN) を使用したグループマッチングをサポートし、LDAP/Microsoft Active Directory 環境でのグループ解決を改善しました。 [#62711](https://github.com/StarRocks/starrocks/pull/62711)
 - Azure Data Lake Storage Gen2 に対して Azure Workload Identity 認証をサポートしました。 [#62754](https://github.com/StarRocks/starrocks/pull/62754)
 - `information_schema.loads` ビューにトランザクションエラーメッセージを追加し、障害診断を容易にしました。 [#61364](https://github.com/StarRocks/starrocks/pull/61364)
 - 複雑な CASE WHEN 式を含む Scan プレディケートで共通式の再利用をサポートし、重複計算を削減しました。 [#62779](https://github.com/StarRocks/starrocks/pull/62779)

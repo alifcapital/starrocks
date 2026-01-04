@@ -100,8 +100,8 @@ public class OperationType {
     @IgnorableOnReplayFailed
     public static final short OP_DELETE_AUTO_INCREMENT_ID = 106;
 
-    // light schema change for add and drop columns
-    public static final short OP_MODIFY_TABLE_ADD_OR_DROP_COLUMNS = 107;
+    // fast schema evolution for alter columns
+    public static final short OP_FAST_ALTER_TABLE_COLUMNS = 107;
 
     @IgnorableOnReplayFailed
     public static final short OP_ALTER_ROUTINE_LOAD_JOB = 111;
@@ -617,6 +617,11 @@ public class OperationType {
     public static final short OP_ADD_SQL_QUERY_BLACK_LIST = 13520;
     @IgnorableOnReplayFailed
     public static final short OP_DELETE_SQL_QUERY_BLACK_LIST = 13521;
+
+    @IgnorableOnReplayFailed
+    public static final short OP_ADD_SQL_DIGEST_BLACK_LIST = 13522;
+    @IgnorableOnReplayFailed
+    public static final short OP_DELETE_SQL_DIGEST_BLACK_LIST = 13523;
 
     @IgnorableOnReplayFailed
     public static final short OP_CREATE_GROUP_PROVIDER = 13530;

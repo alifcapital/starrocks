@@ -18,6 +18,7 @@
 #include "column/chunk.h"
 #include "exprs/expr.h"
 #include "runtime/mem_pool.h"
+#include "storage/metadata_util.h"
 #include "storage/tablet_schema.h"
 #include "types/constexpr.h"
 #include "util/string_parser.hpp"
@@ -169,7 +170,15 @@ Status OlapTableSchemaParam::init(const TOlapTableSchemaParam& tschema, RuntimeS
 
         if (t_index.__isset.column_param) {
             auto col_param = _obj_pool.add(new OlapTableColumnParam());
-            for (auto& tcolumn_desc : t_index.column_param.columns) {
+            std::vector<TColumn> columns_copy = t_index.column_param.columns;
+            Status preprocess_status = preprocess_default_expr_for_tcolumns(columns_copy);
+            if (!preprocess_status.ok()) {
+                LOG(WARNING) << "Failed to preprocess default_expr in OlapTableSchemaParam::init: "
+                             << preprocess_status.to_string();
+                columns_copy = t_index.column_param.columns;
+            }
+
+            for (auto& tcolumn_desc : columns_copy) {
                 TabletColumn* tc = _obj_pool.add(new TabletColumn());
                 tc->init_from_thrift(tcolumn_desc);
                 col_param->columns.emplace_back(tc);
@@ -271,6 +280,12 @@ Status OlapTablePartitionParam::init(RuntimeState* state) {
             return Status::InternalError("state is null when partition_exprs is not empty");
         }
         RETURN_IF_ERROR(Expr::create_expr_trees(&_obj_pool, _t_param.partition_exprs, &_partitions_expr_ctxs, state));
+    }
+
+    if (_t_param.__isset.distribution_type) {
+        _distribution_type = _t_param.distribution_type;
+    } else {
+        _distribution_type = std::nullopt;
     }
 
     // initial partitions
@@ -689,8 +704,9 @@ Status OlapTablePartitionParam::find_tablets(Chunk* chunk, std::vector<OlapTable
         if (!_partitions_expr_ctxs.empty()) {
             for (size_t i = 0; i < partition_columns.size(); ++i) {
                 ASSIGN_OR_RETURN(auto partition_column, _partitions_expr_ctxs[i]->evaluate(chunk));
-                partition_columns[i] = ColumnHelper::unfold_const_column(_partition_slot_descs[i]->type(), num_rows,
-                                                                         std::move(partition_column));
+                partition_columns[i] =
+                        ColumnHelper::unfold_const_column(_partition_slot_descs[i]->type(), num_rows, partition_column)
+                                ->as_mutable_ptr();
             }
         } else {
             for (size_t i = 0; i < partition_columns.size(); ++i) {
@@ -733,13 +749,12 @@ void OlapTablePartitionParam::_compute_hashes(const Chunk* chunk, std::vector<ui
     size_t num_rows = chunk->num_rows();
     hashes->assign(num_rows, 0);
 
-    for (size_t i = 0; i < _distributed_slot_descs.size(); ++i) {
-        _distributed_columns[i] = chunk->get_column_by_slot_id(_distributed_slot_descs[i]->id()).get();
-        _distributed_columns[i]->crc32_hash(&(*hashes)[0], 0, num_rows);
-    }
-
-    // if no distributed columns, use random distribution
-    if (_distributed_slot_descs.size() == 0) {
+    if (is_hash_distribution()) {
+        for (size_t i = 0; i < _distributed_slot_descs.size(); ++i) {
+            _distributed_columns[i] = chunk->get_column_by_slot_id(_distributed_slot_descs[i]->id()).get();
+            _distributed_columns[i]->crc32_hash(&(*hashes)[0], 0, num_rows);
+        }
+    } else if (is_random_distribution()) {
         uint32_t r = _rand.Next();
         for (auto i = 0; i < num_rows; ++i) {
             (*hashes)[i] = r++;

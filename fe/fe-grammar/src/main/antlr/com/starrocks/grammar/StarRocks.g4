@@ -253,6 +253,11 @@ statement
     | showSqlBlackListStatement
     | showWhiteListStatement
 
+    // Sql Digest BlackList Statement
+    | addSqlDigestBlackListStatement
+    | delSqlDigestBlackListStatement
+    | showSqlDigestBlackListStatement
+
     // Backend BlackList
     | addBackendBlackListStatement
     | delBackendBlackListStatement
@@ -453,7 +458,7 @@ charsetName
     ;
 
 defaultDesc
-    : DEFAULT (string | NULL | CURRENT_TIMESTAMP ('(' (INTEGER_VALUE)? ')')? | '(' qualifiedName '(' ')' ')')
+    : DEFAULT (string | NULL | CURRENT_TIMESTAMP ('(' (INTEGER_VALUE)? ')')? | '(' qualifiedName '(' ')' ')' | expression)
     ;
 
 generatedColumnDesc
@@ -760,7 +765,7 @@ adminShowReplicaStatusStatement
     ;
 
 adminRepairTableStatement
-    : ADMIN REPAIR TABLE qualifiedName partitionNames?
+    : ADMIN REPAIR TABLE qualifiedName partitionNames? properties?
     ;
 
 adminCancelRepairTableStatement
@@ -851,7 +856,7 @@ dropStorageVolumeStatement
     ;
 
 alterStorageVolumeStatement
-    : ALTER STORAGE VOLUME identifierOrString alterStorageVolumeClause (',' alterStorageVolumeClause)*
+    : ALTER STORAGE VOLUME (IF EXISTS)? identifierOrString alterStorageVolumeClause (',' alterStorageVolumeClause)*
     ;
 
 alterStorageVolumeClause
@@ -1991,6 +1996,21 @@ showWhiteListStatement
     : SHOW WHITELIST
     ;
 
+// ------------------------------------------- Sql Digest BlackList Statement ------------------------------------------
+
+addSqlDigestBlackListStatement
+    : ADD SQL DIGEST BLACKLIST identifier
+    ;
+
+delSqlDigestBlackListStatement
+    : DELETE SQL DIGEST BLACKLIST identifier (',' identifier)*
+    ;
+
+showSqlDigestBlackListStatement
+    : SHOW SQL DIGEST BLACKLIST
+    ;
+
+
 // ------------------------------------ backend BlackList Statement ---------------------------------------------------
 
 addBackendBlackListStatement
@@ -2497,7 +2517,7 @@ outerAndSemiJoinType
 
 bracketHint
     : '[' identifier (',' identifier)* ']'
-    | '[' identifier '|' primaryExpression literalExpressionList']'
+    | '[' identifier '|' primaryExpression generalLiteralExpressionList']'
     ;
 
 hintMap
@@ -2687,6 +2707,12 @@ literalExpression
     | unitBoundary                                                                        #unitBoundaryLiteral
     | binary                                                                              #binaryLiteral
     | PARAMETER                                                                           #Parameter
+    ;
+
+// can represents negative number along with other literal expression
+generalLiteralExpression
+    : literalExpression
+    | MINUS_SYMBOL number
     ;
 
 functionCall
@@ -2898,6 +2924,10 @@ integerList
 
 literalExpressionList
     : '(' literalExpression (',' literalExpression)* ')'
+    ;
+
+generalLiteralExpressionList
+    : '(' generalLiteralExpression (',' generalLiteralExpression)* ')'
     ;
 
 rangePartitionDesc
@@ -3194,7 +3224,7 @@ nonReserved
     | CACHE | CALL | CAST | CANCEL | CATALOG | CATALOGS | CEIL | CHAIN | CHARSET | CLEAN | CLEAR | CLUSTER | CLUSTERS | CNGROUP | CNGROUPS | CURRENT | COLLATION | COLUMNS
     | CUME_DIST | CUMULATIVE | COMMENT | COMMIT | COMMITTED | COMPUTE | CONNECTION | CONNECTIONS | CONSISTENT | COSTS | COUNT
     | CONFIG | COMPACT
-    | DATA | DATE | DATACACHE | DATETIME | DAY | DAYS | DECOMMISSION | DIALECT | DISABLE | DISK | DISTRIBUTION | DUPLICATE | DYNAMIC | DISTRIBUTED | DICTIONARY | DICTIONARY_GET | DEALLOCATE
+    | DATA | DATE | DATACACHE | DATETIME | DAY | DAYS | DECOMMISSION | DIALECT | DIGEST | DISABLE | DISK | DISTRIBUTION | DUPLICATE | DYNAMIC | DISTRIBUTED | DICTIONARY | DICTIONARY_GET | DEALLOCATE
     | ENABLE | END | ENGINE | ENGINES | ERRORS | EVENTS | EXECUTE | EXTERNAL | EXTRACT | EVERY | ENCLOSE | ESCAPE | EXPORT
     | FAILPOINT | FAILPOINTS | FIELDS | FILE | FILTER | FIRST | FLOOR | FOLLOWING | FORMAT | FN | FRONTEND | FRONTENDS | FOLLOWER | FREE
     | FUNCTIONS
@@ -3213,7 +3243,7 @@ nonReserved
     | REASON | REMOVE | REWRITE | RANDOM | RANK | RECOVER | REFRESH | REPAIR | REPEATABLE | REPLACE_IF_NOT_NULL | REPLICA | REPOSITORY
     | REPOSITORIES
     | RESOURCE | RESOURCES | RESTORE | RESUME | RETAIN | RETENTION | RETURNS | RETRY | REVERT | ROLE | ROLES | ROLLUP | ROLLBACK | ROUTINE | ROW | RUNNING | RULE | RULES
-    | SAMPLE | SCHEDULE | SCHEDULER | SECOND | SECURITY | SEPARATOR | SERIALIZABLE |SEMI | SESSION | SETS | SIGNED | SNAPSHOT | SNAPSHOTS | SPLIT | SQLBLACKLIST | START | STARROCKS
+    | SAMPLE | SCHEDULE | SCHEDULER | SECOND | SECURITY | SEPARATOR | SERIALIZABLE |SEMI | SESSION | SETS | SIGNED | SNAPSHOT | SNAPSHOTS | SPLIT | SQL | SQLBLACKLIST | START | STARROCKS
     | STREAM | SUM | STATUS | STOP | SKIP_HEADER | SWAP
     | STORAGE| STRING | STRUCT | STATS | SUBMIT | SUSPEND | SYNC | SYSTEM | SYSTEM_TIME
     | TABLES | TABLET | TABLETS | TAG | TASK | TEMPORARY | TIMESTAMP | TIMESTAMPADD | TIMESTAMPDIFF | THAN | TIME | TIMES | TRANSACTION | TRACE | TRANSLATE

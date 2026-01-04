@@ -53,6 +53,8 @@ public:
     DictEncoder() = default;
     ~DictEncoder() override = default;
 
+    std::string to_string() const override { return fmt::format("DictEncoder<{}>", typeid(T).name()); }
+
     Status append(const uint8_t* vals, size_t count) override {
         const T* ptr = (const T*)vals;
         for (int i = 0; i < count; ++i) {
@@ -103,6 +105,8 @@ class CacheAwareDictDecoder : public Decoder {
 public:
     CacheAwareDictDecoder() { _dict_size_threshold = CpuInfo::get_l2_cache_size(); }
     ~CacheAwareDictDecoder() override = default;
+
+    std::string to_string() const override { return "CacheAwareDictDecoder"; }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
         switch (content_type) {
@@ -221,6 +225,8 @@ class DictDecoder final : public CacheAwareDictDecoder {
 public:
     DictDecoder() = default;
     ~DictDecoder() override = default;
+
+    std::string to_string() const override { return fmt::format("DictDecoder<{}>", typeid(T).name()); }
 
     // initialize dictionary
     Status set_dict(int chunk_size, size_t num_values, Decoder* decoder) override {
@@ -399,6 +405,8 @@ class DictDecoder<Slice> final : public CacheAwareDictDecoder {
 public:
     DictDecoder() = default;
     ~DictDecoder() override = default;
+
+    std::string to_string() const override { return fmt::format("DictDecoder<Slice>"); }
 
     Status set_dict(int chunk_size, size_t num_values, Decoder* decoder) override {
         auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(num_values * sizeof(Slice));

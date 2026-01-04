@@ -439,8 +439,8 @@ CONF_mInt32(pk_index_parallel_compaction_threadpool_max_threads, "4");
 CONF_mInt32(pk_index_parallel_compaction_threadpool_size, "1048576");
 // The splitting threshold for PK index compaction tasks — when the total size of the files involved in a task is
 // smaller than this threshold, the task will not be split.
-// Default is 100MB.
-CONF_mInt64(pk_index_parallel_compaction_task_split_threshold_bytes, "104857600");
+// Default is 32MB.
+CONF_mInt64(pk_index_parallel_compaction_task_split_threshold_bytes, "33554432");
 // Target file size for primary key index in shared-data mode.
 // Default is 64MB.
 CONF_mInt64(pk_index_target_file_size, "67108864");
@@ -448,8 +448,8 @@ CONF_mInt64(pk_index_target_file_size, "67108864");
 // E.g. if we have N fileset, the compaction score will be N * pk_index_compaction_score_ratio
 // Default is 1.5.
 CONF_mDouble(pk_index_compaction_score_ratio, "1.5");
-// Ingest sst compaction threshold for primary key index in shared-data mode.
-CONF_mInt32(pk_index_ingest_sst_compaction_threshold, "5");
+// early sst compaction threshold for primary key index in shared-data mode.
+CONF_mInt32(pk_index_early_sst_compaction_threshold, "5");
 // Whether enable parallel compaction for primary key index in shared-data mode.
 CONF_mBool(enable_pk_index_parallel_compaction, "false");
 // Whether enable parallel get for primary key index in shared-data mode.
@@ -463,13 +463,17 @@ CONF_mInt32(pk_index_parallel_get_threadpool_size, "1048576");
 // Memtable flush threadpool max thread num for pk index in shared-data mode.
 CONF_mInt32(pk_index_memtable_flush_threadpool_max_threads, "4");
 // The queue size for pk index memtable flush threadpool in shared-data mode.
-CONF_mInt32(pk_index_memtable_flush_threadpool_size, "1048576");
+CONF_mInt32(pk_index_memtable_flush_threadpool_size, "2048");
 // The maximum number of memtables for pk index in shared-data mode.
-CONF_mInt32(pk_index_memtable_max_count, "3");
+CONF_mInt32(pk_index_memtable_max_count, "1");
+// The maximum wait flush timeout for pk index memtable in shared-data mode, in milliseconds.
+CONF_mInt64(pk_index_memtable_max_wait_flush_timeout_ms, "30000");
 // The parameters for pk index size-tiered compaction strategy.
 CONF_mInt64(pk_index_size_tiered_min_level_size, "131072");
 CONF_mInt64(pk_index_size_tiered_level_multiplier, "10");
 CONF_mInt64(pk_index_size_tiered_max_level, "5");
+// Used to control the sampling interval size for SSTable files.
+CONF_mInt64(pk_index_sstable_sample_interval_bytes, "16777216");
 // We support real-time compaction strategy for primary key tables in shared-data mode.
 // This real-time compaction strategy enables compacting rowsets across multiple levels simultaneously.
 // The parameter `size_tiered_max_compaction_level` defines the maximum compaction level allowed in a single compaction task.
@@ -1837,10 +1841,14 @@ CONF_mBool(enable_load_spill, "true");
 CONF_mInt64(load_spill_max_chunk_bytes, "10485760");
 // Max merge input bytes during spill merge. Default is 1024MB.
 CONF_mInt64(load_spill_max_merge_bytes, "1073741824");
+// Max memory usage per merge during spill merge. Default is 1024MB.
+CONF_mInt64(load_spill_memory_usage_per_merge, "1073741824");
 // Max memory used for merge load spill blocks.
 CONF_mInt64(load_spill_merge_memory_limit_percent, "30");
 // Upper bound of spill merge thread count
 CONF_mInt64(load_spill_merge_max_thread, "16");
+// Enable parallel spill merge inside single tablet
+CONF_mBool(enable_load_spill_parallel_merge, "true");
 // Do lazy load when PK column larger than this threshold. Default is 300MB.
 CONF_mInt64(pk_column_lazy_load_threshold_bytes, "314572800");
 // Batch size for column mode partial update when processing insert rows.
@@ -1897,7 +1905,12 @@ CONF_mInt64(max_batch_num_per_fetch_operator, "8");
 CONF_mInt64(max_chunk_num_per_fetch_batch, "8");
 CONF_mBool(enable_fetch_local_pass_through, "true");
 CONF_mInt64(max_lookup_batch_request, "8");
-
 // For table schema service: max retry attempts for fetching schema from FE.
 CONF_mInt32(table_schema_service_max_retries, "3");
+
+// Enable cow optimization for column operations, used to avoid the overhead of reference counting when accessing columns.
+CONF_mBool(enable_cow_optimization, "true");
+// The diagnose level for cow optimization, 0 means no diagnose, 1 means diagnose when use_count > 1, 2 means diagnose when use_count > 2.
+CONF_Int32(cow_optimization_diagnose_level, "0");
+
 } // namespace starrocks::config

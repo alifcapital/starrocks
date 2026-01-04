@@ -223,6 +223,7 @@ set(STORAGE_FILES
     lake/lake_persistent_index_size_tiered_compaction_strategy.cpp
     lake/persistent_index_sstable_fileset.cpp
     lake/lake_persistent_index_key_value_merger.cpp
+    lake/tablet_internal_parallel_merge_task.cpp
     load_spill_block_manager.cpp
     load_chunk_spiller.cpp
     sstable/block_builder.cpp
@@ -286,7 +287,12 @@ set(STORAGE_FILES
     index/vector/tenann/tenann_index_utils.cpp
     record_predicate/record_predicate_helper.cpp
     record_predicate/column_hash_is_congruent.cpp
-    lake/table_schema_service.cpp)
+    lake/table_schema_service.cpp
+    index/inverted/builtin/builtin_plugin.cpp
+    index/inverted/builtin/builtin_inverted_writer.cpp
+    index/inverted/builtin/builtin_inverted_reader.cpp
+    index/inverted/builtin/builtin_inverted_index_iterator.cpp
+    index/inverted/builtin/builtin_simple_analyzer.cpp)
 
 if (NOT BUILD_FORMAT_LIB)
     list(APPEND STORAGE_FILES  lake/starlet_location_provider.cpp)

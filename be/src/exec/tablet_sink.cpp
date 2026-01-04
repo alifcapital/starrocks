@@ -50,6 +50,7 @@
 #include "common/statusor.h"
 #include "common/tracer.h"
 #include "exec/pipeline/query_context.h"
+#include "exec/range_tablet_sink_sender.h"
 #include "exec/tablet_sink_colocate_sender.h"
 #include "exprs/expr.h"
 #include "gutil/strings/fastmem.h"
@@ -318,7 +319,11 @@ Status OlapTableSink::prepare(RuntimeState* state) {
                 _load_id, _txn_id, std::move(index_id_to_tablet_be_map), _vectorized_partition,
                 std::move(index_channels), std::move(node_channels), _output_expr_ctxs, _enable_replicated_storage,
                 _write_quorum_type, _num_repicas);
-
+    } else if (_vectorized_partition->is_range_distribution()) {
+        _tablet_sink_sender = std::make_unique<RangeTabletSinkSender>(
+                _load_id, _txn_id, std::move(index_id_to_tablet_be_map), _vectorized_partition,
+                std::move(index_channels), std::move(node_channels), _output_expr_ctxs, _enable_replicated_storage,
+                _write_quorum_type, _num_repicas);
     } else {
         _tablet_sink_sender = std::make_unique<TabletSinkSender>(
                 _load_id, _txn_id, std::move(index_id_to_tablet_be_map), _vectorized_partition,
@@ -895,7 +900,8 @@ Status OlapTableSink::close_wait(RuntimeState* state, Status close_status) {
     return status;
 }
 
-void OlapTableSink::_print_varchar_error_msg(RuntimeState* state, const Slice& str, SlotDescriptor* desc) {
+void OlapTableSink::_print_varchar_error_msg(RuntimeState* state, const Slice& str, SlotDescriptor* desc, Chunk* chunk,
+                                             int32_t row_index) {
     if (state->has_reached_max_error_msg_num()) {
         return;
     }
@@ -908,39 +914,29 @@ void OlapTableSink::_print_varchar_error_msg(RuntimeState* state, const Slice& s
     }
     std::string error_msg = strings::Substitute("String '$0'(length=$1) is too long. The max length of '$2' is $3",
                                                 error_str, str.get_size(), desc->col_name(), desc->type().len);
-#if BE_TEST
-    LOG(INFO) << error_msg;
-#else
-    state->append_error_msg_to_file("", error_msg);
-#endif
+    state->append_error_msg_to_file(chunk->debug_row(row_index), error_msg);
 }
 
-void OlapTableSink::_print_decimal_error_msg(RuntimeState* state, const DecimalV2Value& decimal, SlotDescriptor* desc) {
+void OlapTableSink::_print_decimal_error_msg(RuntimeState* state, const DecimalV2Value& decimal, SlotDescriptor* desc,
+                                             Chunk* chunk, int32_t row_index) {
     if (state->has_reached_max_error_msg_num()) {
         return;
     }
     std::string error_msg = strings::Substitute("Decimal '$0' is out of range. The type of '$1' is $2'",
                                                 decimal.to_string(), desc->col_name(), desc->type().debug_string());
-#if BE_TEST
-    LOG(INFO) << error_msg;
-#else
-    state->append_error_msg_to_file("", error_msg);
-#endif
+    state->append_error_msg_to_file(chunk->debug_row(row_index), error_msg);
 }
 
 template <LogicalType LT, typename CppType = RunTimeCppType<LT>>
-void _print_decimalv3_error_msg(RuntimeState* state, const CppType& decimal, const SlotDescriptor* desc) {
+void _print_decimalv3_error_msg(RuntimeState* state, const CppType& decimal, const SlotDescriptor* desc, Chunk* chunk,
+                                int32_t row_index) {
     if (state->has_reached_max_error_msg_num()) {
         return;
     }
     auto decimal_str = DecimalV3Cast::to_string<CppType>(decimal, desc->type().precision, desc->type().scale);
     std::string error_msg = strings::Substitute("Decimal '$0' is out of range. The type of '$1' is $2'", decimal_str,
                                                 desc->col_name(), desc->type().debug_string());
-#if BE_TEST
-    LOG(INFO) << error_msg;
-#else
-    state->append_error_msg_to_file("", error_msg);
-#endif
+    state->append_error_msg_to_file(chunk->debug_row(row_index), error_msg);
 }
 
 template <LogicalType LT>
@@ -961,7 +957,7 @@ void OlapTableSink::_validate_decimal(RuntimeState* state, Chunk* chunk, Column*
             const auto& datum = data[i];
             if (datum > max_decimal || datum < min_decimal) {
                 (*validate_selection)[i] = VALID_SEL_FAILED;
-                _print_decimalv3_error_msg<LT>(state, datum, desc);
+                _print_decimalv3_error_msg<LT>(state, datum, desc, chunk, i);
                 if (state->enable_log_rejected_record()) {
                     auto decimal_str =
                             DecimalV3Cast::to_string<CppType>(datum, desc->type().precision, desc->type().scale);
@@ -980,7 +976,7 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
     size_t num_rows = chunk->num_rows();
     for (int i = 0; i < _output_tuple_desc->slots().size(); ++i) {
         SlotDescriptor* desc = _output_tuple_desc->slots()[i];
-        auto* column_ptr = chunk->get_column_raw_ptr_by_slot_id(desc->id());
+        auto& column_ptr = chunk->get_column_by_slot_id(desc->id());
 
         // change validation selection value back to OK/FAILED
         // because in previous run, some validation selection value could
@@ -1015,7 +1011,7 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
 
         // update_column for auto increment column.
         if (_has_auto_increment && _auto_increment_slot_id == desc->id() && column_ptr->is_nullable()) {
-            auto* nullable = down_cast<NullableColumn*>(column_ptr);
+            auto* nullable = down_cast<NullableColumn*>(column_ptr->as_mutable_raw_ptr());
             // If nullable->has_null() && _null_expr_in_auto_increment == true, it means that user specify a
             // null value in auto increment column, we abort the all rows with null.
             // Because be know nothing about whether this row is specified by the user as null or setted during planning.
@@ -1040,11 +1036,9 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
                     }
                 }
             }
-            chunk->update_column(nullable->data_column(), desc->id());
+            chunk->update_column(std::move(nullable->data_column()), desc->id());
         }
-
-        // since column_ptr is moved in the previous step, we need to get it again
-        column_ptr = chunk->get_column_raw_ptr_by_slot_id(desc->id());
+        column_ptr = chunk->get_column_by_slot_id(desc->id());
 
         // Validate column nullable info
         // Column nullable info need to respect slot nullable info
@@ -1055,7 +1049,7 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
             // Auto increment column is not nullable but use NullableColumn to implement. We should skip the check for it.
         } else if (!desc->is_nullable() && column_ptr->is_nullable() &&
                    (!_has_auto_increment || _auto_increment_slot_id != desc->id())) {
-            auto* nullable = down_cast<NullableColumn*>(column_ptr);
+            auto* nullable = down_cast<NullableColumn*>(column_ptr->as_mutable_raw_ptr());
             // Non-nullable column shouldn't have null value,
             // If there is null value, which means expr compute has a error.
             if (nullable->has_null()) {
@@ -1078,9 +1072,9 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
                     }
                 }
             }
-            chunk->update_column(nullable->data_column(), desc->id());
+            chunk->update_column(std::move(nullable->data_column()), desc->id());
         } else if (column_ptr->has_null()) {
-            auto* nullable = down_cast<NullableColumn*>(column_ptr);
+            auto* nullable = down_cast<NullableColumn*>(column_ptr->as_mutable_raw_ptr());
             NullData& nulls = nullable->null_column_data();
             for (size_t j = 0; j < num_rows; ++j) {
                 if (nulls[j] && _validate_selection[j] != VALID_SEL_FAILED) {
@@ -1107,7 +1101,7 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
                 if (_validate_selection[j] == VALID_SEL_OK) {
                     if (offset[j + 1] - offset[j] > len) {
                         _validate_selection[j] = VALID_SEL_FAILED;
-                        _print_varchar_error_msg(state, binary->get_slice(j), desc);
+                        _print_varchar_error_msg(state, binary->get_slice(j), desc, chunk, j);
                         if (state->enable_log_rejected_record()) {
                             std::string error_msg =
                                     strings::Substitute("String (length=$0) is too long. The max length of '$1' is $2",
@@ -1132,7 +1126,7 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
 
                     if (datas[j] > _max_decimalv2_val[i] || datas[j] < _min_decimalv2_val[i]) {
                         _validate_selection[j] = VALID_SEL_FAILED;
-                        _print_decimal_error_msg(state, datas[j], desc);
+                        _print_decimal_error_msg(state, datas[j], desc, chunk, j);
                         if (state->enable_log_rejected_record()) {
                             std::string error_msg = strings::Substitute(
                                     "Decimal '$0' is out of range. The type of '$1' is $2'", datas[j].to_string(),

@@ -68,7 +68,9 @@ import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SelectListItem;
 import com.starrocks.sql.ast.SelectRelation;
+import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.ast.ValuesRelation;
+import com.starrocks.sql.ast.expression.CastExpr;
 import com.starrocks.sql.ast.expression.DefaultValueExpr;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.LiteralExpr;
@@ -292,6 +294,13 @@ public class InsertPlanner {
             outputFullSchema = targetTable.getFullSchema();
         }
 
+        if (targetTable.isIcebergTable()) {
+            outputBaseSchema = outputBaseSchema.stream().filter(col ->
+                    !IcebergTable.ICEBERG_META_COLUMNS.contains(col.getName())).toList();
+            outputFullSchema = outputFullSchema.stream().filter(col ->
+                    !IcebergTable.ICEBERG_META_COLUMNS.contains(col.getName())).toList();
+        }
+
         refreshExternalTable(insertStmt.getQueryStatement(), session);
 
         //1. Process the literal value of the insert values type and cast it into the type of the target table
@@ -444,7 +453,8 @@ public class InsertPlanner {
                 session.getSessionVariable().setPreferComputeNode(false);
                 session.getSessionVariable().setUseComputeNodes(0);
                 OlapTableSink olapTableSink = (OlapTableSink) dataSink;
-                TableName catalogDbTable = insertStmt.getTableName();
+                TableRef tableRef = insertStmt.getTableRef();
+                TableName catalogDbTable = TableName.fromTableRef(tableRef);
                 Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(session, catalogDbTable.getCatalog(),
                         catalogDbTable.getDb());
                 try {
@@ -673,7 +683,15 @@ public class InsertPlanner {
                     if (defaultValueType == Column.DefaultValueType.NULL || targetColumn.isAutoIncrement()) {
                         scalarOperator = ConstantOperator.createNull(targetColumn.getType());
                     } else if (defaultValueType == Column.DefaultValueType.CONST) {
-                        scalarOperator = ConstantOperator.createVarchar(targetColumn.calculatedDefaultValue());
+                        if (targetColumn.getDefaultExpr() != null && targetColumn.getDefaultExpr().getExprObject() != null) {
+                            Expr expr = targetColumn.getDefaultExpr().obtainExpr();
+                            if (!expr.getType().equals(targetColumn.getType())) {
+                                expr = new CastExpr(targetColumn.getType(), expr);
+                            }
+                            scalarOperator = SqlToScalarOperatorTranslator.translate(expr);
+                        } else {
+                            scalarOperator = ConstantOperator.createVarchar(targetColumn.calculatedDefaultValue());
+                        }
                     } else if (defaultValueType == Column.DefaultValueType.VARY) {
                         if (isValidDefaultFunction(targetColumn.getDefaultExpr().getExpr())) {
                             scalarOperator = SqlToScalarOperatorTranslator.
@@ -715,8 +733,11 @@ public class InsertPlanner {
                 ExpressionAnalyzer.analyzeExpression(expr,
                         new AnalyzeState(), new Scope(RelationId.anonymous(), new RelationFields(
                                 insertStatement.getTargetTable().getBaseSchema().stream()
-                                        .map(col -> new Field(col.getName(),
-                                                col.getType(), insertStatement.getTableName(), null))
+                                        .map(col -> {
+                                            TableRef tableRef = insertStatement.getTableRef();
+                                            TableName tableName = TableName.fromTableRef(tableRef);
+                                            return new Field(col.getName(), col.getType(), tableName, null);
+                                        })
                                         .collect(Collectors.toList()))), session);
 
                 List<SlotRef> slots = new ArrayList<>();

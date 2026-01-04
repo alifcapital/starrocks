@@ -689,6 +689,10 @@ struct TLakeScanNode {
   42: optional i64 back_pressure_num_rows
 
   43: optional Descriptors.TTableSchemaKey schema_key
+
+  // inverted index
+  44: optional bool enable_prune_column_after_index_filter
+  45: optional bool enable_gin_filter
 }
 
 struct TEqJoinCondition {
@@ -1290,7 +1294,9 @@ struct TMetaScanNode {
     2: optional list<Descriptors.TColumn> columns
     3: optional i32 low_cardinality_threshold
     4: optional list<TColumnAccessPath> column_access_paths
+    // deprecated. use schema key instead
     5: optional i64 schema_id
+    6: optional Descriptors.TTableSchemaKey schema_key
 }
 
 struct TDecodeNode {

@@ -605,6 +605,18 @@ Status ExecEnv::init(const std::vector<StorePath>& store_paths, bool as_cn) {
                             .set_max_threads(1)
                             .set_max_queue_size(std::numeric_limits<int>::max())
                             .build(&_put_aggregate_metadata_thread_pool));
+    _parallel_compact_mgr = std::make_unique<lake::LakePersistentIndexParallelCompactMgr>(_lake_tablet_manager);
+    RETURN_IF_ERROR_WITH_WARN(_parallel_compact_mgr->init(), "init ParallelCompactMgr failed");
+    RETURN_IF_ERROR(ThreadPoolBuilder("pk_index_get")
+                            .set_min_threads(1)
+                            .set_max_threads(1)
+                            .set_max_queue_size(std::numeric_limits<int>::max())
+                            .build(&_pk_index_get_thread_pool));
+    RETURN_IF_ERROR(ThreadPoolBuilder("pk_index_flush")
+                            .set_min_threads(1)
+                            .set_max_threads(1)
+                            .set_max_queue_size(std::numeric_limits<int>::max())
+                            .build(&_pk_index_memtable_flush_thread_pool));
 #endif
 
     _agent_server = new AgentServer(this, false);
@@ -621,6 +633,8 @@ Status ExecEnv::init(const std::vector<StorePath>& store_paths, bool as_cn) {
 
     _spill_dir_mgr = std::make_shared<spill::DirManager>();
     RETURN_IF_ERROR(_spill_dir_mgr->init(config::spill_local_storage_dir));
+
+    _global_spill_manager = std::make_shared<spill::GlobalSpillManager>();
 
     _diagnose_daemon = new DiagnoseDaemon();
     RETURN_IF_ERROR(_diagnose_daemon->init());
@@ -862,6 +876,8 @@ void ExecEnv::destroy() {
     SAFE_DELETE(_query_rpc_pool);
     SAFE_DELETE(_datacache_rpc_pool);
     _load_rpc_pool.reset();
+    SAFE_DELETE(_stream_mgr);
+    SAFE_DELETE(_query_context_mgr);
     _workgroup_manager->destroy();
     _workgroup_manager.reset();
     SAFE_DELETE(_thread_pool);
@@ -872,7 +888,6 @@ void ExecEnv::destroy() {
         _lake_tablet_manager->prune_metacache();
     }
 
-    SAFE_DELETE(_query_context_mgr);
     // WorkGroupManager should release MemTracker of WorkGroups belongs to itself before deallocate
     // _query_pool_mem_tracker.
     SAFE_DELETE(_runtime_filter_cache);
@@ -891,7 +906,6 @@ void ExecEnv::destroy() {
     SAFE_DELETE(_backend_client_cache);
     SAFE_DELETE(_result_queue_mgr);
     SAFE_DELETE(_result_mgr);
-    SAFE_DELETE(_stream_mgr);
     SAFE_DELETE(_lookup_dispatcher_mgr);
     SAFE_DELETE(_batch_write_mgr);
     SAFE_DELETE(_external_scan_context_mgr);

@@ -145,7 +145,7 @@ public class AlterJobExecutor implements AstVisitorExtendInterface<Void, Connect
 
     @Override
     public Void visitAlterTableStatement(AlterTableStmt statement, ConnectContext context) {
-        TableName tableName = statement.getTbl();
+        TableName tableName = com.starrocks.catalog.TableName.fromTableRef(statement.getTableRef());
         this.tableName = tableName;
 
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(tableName.getDb());
@@ -208,23 +208,18 @@ public class AlterJobExecutor implements AstVisitorExtendInterface<Void, Connect
     @Override
     public Void visitAlterTableModifyDefaultBucketsClause(AlterTableModifyDefaultBucketsClause clause,
                                                          ConnectContext context) {
-        if (clause instanceof AlterTableModifyDefaultBucketsClause) {
-            // apply synchronously: update default distribution bucket num
-            AlterTableModifyDefaultBucketsClause c = (AlterTableModifyDefaultBucketsClause) clause;
-            if (table instanceof OlapTable) {
-                OlapTable olap = (OlapTable) table;
-                if (olap.getDefaultDistributionInfo() instanceof HashDistributionInfo) {
-                    try (AutoCloseableLock ignore =
-                                    new AutoCloseableLock(new Locker(), db.getId(),
-                                            Lists.newArrayList(table.getId()), LockType.WRITE)) {
-                        ((HashDistributionInfo) olap.getDefaultDistributionInfo())
-                                .setBucketNum(c.getBucketNum());
-                        // persist change
-                        ModifyTablePropertyOperationLog log =
-                                new ModifyTablePropertyOperationLog(db.getId(), table.getId());
-                        log.getProperties().put("default_bucket_num", String.valueOf(c.getBucketNum()));
-                        GlobalStateMgr.getCurrentState().getEditLog().logModifyDefaultBucketNum(log);
-                    }
+        // apply synchronously: update default distribution bucket num
+        if (table instanceof OlapTable olap) {
+            if (olap.getDefaultDistributionInfo() instanceof HashDistributionInfo) {
+                try (AutoCloseableLock ignore = new AutoCloseableLock(
+                        new Locker(), db.getId(), Lists.newArrayList(table.getId()), LockType.WRITE)) {
+                    // persist change
+                    ModifyTablePropertyOperationLog log =
+                            new ModifyTablePropertyOperationLog(db.getId(), table.getId());
+                    log.getProperties().put("default_bucket_num", String.valueOf(clause.getBucketNum()));
+                    GlobalStateMgr.getCurrentState().getEditLog().logModifyDefaultBucketNum(log, wal -> {
+                        olap.getDefaultDistributionInfo().setBucketNum(clause.getBucketNum());
+                    });
                 }
             }
         }
@@ -233,7 +228,7 @@ public class AlterJobExecutor implements AstVisitorExtendInterface<Void, Connect
 
     @Override
     public Void visitAlterViewStatement(AlterViewStmt statement, ConnectContext context) {
-        TableName tableName = statement.getTableName();
+        com.starrocks.catalog.TableName tableName = com.starrocks.catalog.TableName.fromTableRef(statement.getTableRef());
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(tableName.getDb());
         Table table = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(tableName.getDb(), tableName.getTbl());
         if (table == null) {
@@ -261,17 +256,17 @@ public class AlterJobExecutor implements AstVisitorExtendInterface<Void, Connect
     @Override
     public Void visitAlterMaterializedViewStatement(AlterMaterializedViewStmt stmt, ConnectContext context) {
         // check db
-        final TableName mvName = stmt.getMvName();
+        com.starrocks.catalog.TableName mvName = com.starrocks.catalog.TableName.fromTableRef(stmt.getMvTableRef());
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(mvName.getDb());
         if (db == null || !db.isExist()) {
             throw new SemanticException("Database %s is not found", mvName.getCatalogAndDb());
         }
         Table table = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(mvName.getDb(), mvName.getTbl());
         if (table == null) {
-            throw new SemanticException("Materialized view %s is not found", mvName);
+            throw new SemanticException("Materialized view %s is not found", mvName.toString());
         }
         if (!table.isMaterializedView()) {
-            throw new SemanticException("The specified table [" + mvName + "] is not a view");
+            throw new SemanticException("The specified table [" + mvName.toString() + "] is not a view");
         }
         this.db = db;
         this.table = table;
