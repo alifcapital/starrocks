@@ -17,8 +17,10 @@
 #include <fmt/core.h>
 #include <glog/logging.h>
 
-#ifdef __AVX2__
+#if defined(__AVX2__) && defined(__POPCNT__)
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include <algorithm>
@@ -296,7 +298,7 @@ size_t StoredColumnReaderImpl::count_not_null(level_t* def_levels, size_t num_pa
     size_t i = 0;
 
 #if defined(__AVX2__) && defined(__POPCNT__)
-    // SIMD path: compare 16 int16_t elements at a time
+    // AVX2 path: compare 16 int16_t elements at a time
     const __m256i v_max = _mm256_set1_epi16(max_def_level);
     for (; i + 16 <= num_parsed_levels; i += 16) {
         __m256i v_data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(def_levels + i));
@@ -305,6 +307,17 @@ size_t StoredColumnReaderImpl::count_not_null(level_t* def_levels, size_t num_pa
         uint32_t mask = _mm256_movemask_epi8(v_cmp);
         // Each match produces 2 bits (since int16 = 2 bytes), so divide popcount by 2
         count += __builtin_popcount(mask) >> 1;
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    // NEON path: compare 8 int16_t elements at a time
+    const int16x8_t v_max = vdupq_n_s16(max_def_level);
+    for (; i + 8 <= num_parsed_levels; i += 8) {
+        int16x8_t v_data = vld1q_s16(def_levels + i);
+        uint16x8_t v_cmp = vceqq_s16(v_data, v_max);
+        // Sum all 1s (0xFFFF becomes 1 when we right-shift by 15)
+        // Use horizontal add to count matches
+        uint16x8_t v_ones = vshrq_n_u16(v_cmp, 15);
+        count += vaddvq_u16(v_ones);
     }
 #endif
 

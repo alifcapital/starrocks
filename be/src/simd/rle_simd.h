@@ -20,6 +20,8 @@
 
 #if defined(__AVX512F__) || defined(__AVX2__) || defined(__SSE4_1__)
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include "simd/multi_version.h"
@@ -27,7 +29,102 @@
 namespace starrocks {
 
 // ============================================================================
-// SIMD-optimized fill operation for RLE repeated values
+// SIMD-optimized fill operation for RLE repeated values (int16_t)
+// Used for Parquet level decoding (def_level, rep_level are int16_t)
+// ============================================================================
+
+#if defined(__AVX512F__)
+MFV_AVX512F(void simd_fill_int16_avx512(int16_t* __restrict dst, int16_t value, int32_t count) {
+    using v32s = __m512i;
+    const v32s v_value = _mm512_set1_epi16(value);
+
+    int32_t i = 0;
+    // Process 128 elements per iteration (4x unroll of 32-element vectors)
+    for (; i + 128 <= count; i += 128) {
+        _mm512_storeu_si512((v32s*)(dst + i), v_value);
+        _mm512_storeu_si512((v32s*)(dst + i + 32), v_value);
+        _mm512_storeu_si512((v32s*)(dst + i + 64), v_value);
+        _mm512_storeu_si512((v32s*)(dst + i + 96), v_value);
+    }
+    // Process 32 elements at a time
+    for (; i + 32 <= count; i += 32) {
+        _mm512_storeu_si512((v32s*)(dst + i), v_value);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dst[i] = value;
+    }
+})
+#endif
+
+#if defined(__AVX2__)
+MFV_AVX2(void simd_fill_int16_avx2(int16_t* __restrict dst, int16_t value, int32_t count) {
+    using v16s = __m256i;
+    const v16s v_value = _mm256_set1_epi16(value);
+
+    int32_t i = 0;
+    // Process 64 elements per iteration (4x unroll of 16-element vectors)
+    for (; i + 64 <= count; i += 64) {
+        _mm256_storeu_si256((v16s*)(dst + i), v_value);
+        _mm256_storeu_si256((v16s*)(dst + i + 16), v_value);
+        _mm256_storeu_si256((v16s*)(dst + i + 32), v_value);
+        _mm256_storeu_si256((v16s*)(dst + i + 48), v_value);
+    }
+    // Process 16 elements at a time
+    for (; i + 16 <= count; i += 16) {
+        _mm256_storeu_si256((v16s*)(dst + i), v_value);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dst[i] = value;
+    }
+})
+#endif
+
+#if defined(__ARM_NEON) && defined(__aarch64__)
+inline void simd_fill_int16_neon(int16_t* __restrict dst, int16_t value, int32_t count) {
+    const int16x8_t v_value = vdupq_n_s16(value);
+
+    int32_t i = 0;
+    // Process 32 elements per iteration (4x unroll)
+    for (; i + 32 <= count; i += 32) {
+        vst1q_s16(dst + i, v_value);
+        vst1q_s16(dst + i + 8, v_value);
+        vst1q_s16(dst + i + 16, v_value);
+        vst1q_s16(dst + i + 24, v_value);
+    }
+    // Process 8 elements at a time
+    for (; i + 8 <= count; i += 8) {
+        vst1q_s16(dst + i, v_value);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dst[i] = value;
+    }
+}
+#endif
+
+MFV_DEFAULT(void simd_fill_int16_default(int16_t* __restrict dst, int16_t value, int32_t count) {
+    for (int32_t i = 0; i < count; ++i) {
+        dst[i] = value;
+    }
+})
+
+// Main entry point for int16_t fill
+inline void simd_fill_int16(int16_t* __restrict dst, int16_t value, int32_t count) {
+#if defined(__AVX512F__)
+    simd_fill_int16_avx512(dst, value, count);
+#elif defined(__AVX2__)
+    simd_fill_int16_avx2(dst, value, count);
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    simd_fill_int16_neon(dst, value, count);
+#else
+    simd_fill_int16_default(dst, value, count);
+#endif
+}
+
+// ============================================================================
+// SIMD-optimized fill operation for RLE repeated values (int32_t)
 // Fills an array with a single repeated value using broadcast + store
 // ============================================================================
 
@@ -79,6 +176,29 @@ MFV_AVX2(void simd_fill_int32_avx2(int32_t* __restrict dst, int32_t value, int32
 })
 #endif
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
+inline void simd_fill_int32_neon(int32_t* __restrict dst, int32_t value, int32_t count) {
+    const int32x4_t v_value = vdupq_n_s32(value);
+
+    int32_t i = 0;
+    // Process 16 elements per iteration (4x unroll)
+    for (; i + 16 <= count; i += 16) {
+        vst1q_s32(dst + i, v_value);
+        vst1q_s32(dst + i + 4, v_value);
+        vst1q_s32(dst + i + 8, v_value);
+        vst1q_s32(dst + i + 12, v_value);
+    }
+    // Process 4 elements at a time
+    for (; i + 4 <= count; i += 4) {
+        vst1q_s32(dst + i, v_value);
+    }
+    // Scalar tail
+    for (; i < count; ++i) {
+        dst[i] = value;
+    }
+}
+#endif
+
 MFV_DEFAULT(void simd_fill_int32_default(int32_t* __restrict dst, int32_t value, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dst[i] = value;
@@ -91,6 +211,8 @@ inline void simd_fill_int32(int32_t* __restrict dst, int32_t value, int32_t coun
     simd_fill_int32_avx512(dst, value, count);
 #elif defined(__AVX2__)
     simd_fill_int32_avx2(dst, value, count);
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    simd_fill_int32_neon(dst, value, count);
 #else
     simd_fill_int32_default(dst, value, count);
 #endif

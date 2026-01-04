@@ -430,7 +430,18 @@ inline bool RleDecoder<T>::GetBatch(T* vals, size_t batch_num) {
 
         if (PREDICT_TRUE(repeat_count_ > 0)) {
             read_this_time = std::min((size_t)repeat_count_, read_this_time);
-            std::fill(vals, vals + read_this_time, current_value_);
+            // Use SIMD-optimized fill for 16-bit types (level_t) and 32-bit types
+            if constexpr (sizeof(T) == 2) {
+                simd_fill_int16(reinterpret_cast<int16_t*>(vals),
+                                static_cast<int16_t>(current_value_),
+                                static_cast<int32_t>(read_this_time));
+            } else if constexpr (sizeof(T) == 4) {
+                simd_fill_int32(reinterpret_cast<int32_t*>(vals),
+                                static_cast<int32_t>(current_value_),
+                                static_cast<int32_t>(read_this_time));
+            } else {
+                std::fill(vals, vals + read_this_time, current_value_);
+            }
             vals += read_this_time;
             repeat_count_ -= read_this_time;
             read_num += read_this_time;
