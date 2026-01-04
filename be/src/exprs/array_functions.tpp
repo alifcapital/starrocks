@@ -12,11 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-#endif
+#include "simd/string_length_filter.h"
 
 #include <chrono>
 #include <memory>
@@ -2236,44 +2232,34 @@ private:
         const uint32_t target_len = static_cast<uint32_t>(target.size);
 
         size_t j = 0;
+        constexpr int kSimdWidth = SIMD::kStringLenSimdWidth;
 
-#ifdef __AVX2__
-        const __m256i target_len_vec = _mm256_set1_epi32(target_len);
-
-        // Process 8 elements at a time
-        for (; j + 8 <= array_size; j += 8) {
+        // Process SIMD-width elements at a time
+        for (; j + kSimdWidth <= array_size; j += kSimdWidth) {
             size_t base = array_offset + j;
 
             // Quick null check for batch
             if constexpr (CheckNull) {
                 bool all_null = true;
-                for (int k = 0; k < 8; k++) {
+                for (int k = 0; k < kSimdWidth; k++) {
                     if (elements_null_data[base + k] == 0) {
                         all_null = false;
                         break;
                     }
                 }
                 if (all_null) {
-                    continue; // All 8 are NULL
+                    continue;
                 }
             }
 
-            // Compute 8 string lengths via offset subtraction
-            __m256i off_curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&str_offsets[base]));
-            __m256i off_next = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&str_offsets[base + 1]));
-            __m256i lengths = _mm256_sub_epi32(off_next, off_curr);
-
-            // Compare lengths with target length
-            __m256i len_match = _mm256_cmpeq_epi32(lengths, target_len_vec);
-            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(len_match));
-
+            uint32_t mask = SIMD::length_eq_mask(str_offsets.data(), base, target_len);
             if (mask == 0) {
-                continue; // All 8 lengths mismatch - skip memcmp
+                continue;
             }
 
             // Process only length-matched elements
             while (mask) {
-                int bit = __builtin_ctz(mask);
+                uint32_t bit = __builtin_ctz(mask);
                 size_t elem_idx = base + bit;
 
                 // Skip if null
@@ -2292,52 +2278,6 @@ private:
                 mask &= (mask - 1);
             }
         }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const uint32x4_t target_len_vec = vdupq_n_u32(target_len);
-
-        // Process 4 elements at a time
-        for (; j + 4 <= array_size; j += 4) {
-            size_t base = array_offset + j;
-
-            // Quick null check
-            if constexpr (CheckNull) {
-                bool all_null = true;
-                for (int k = 0; k < 4; k++) {
-                    if (elements_null_data[base + k] == 0) {
-                        all_null = false;
-                        break;
-                    }
-                }
-                if (all_null) {
-                    continue;
-                }
-            }
-
-            // Compute 4 string lengths
-            uint32x4_t off_curr = vld1q_u32(&str_offsets[base]);
-            uint32x4_t off_next = vld1q_u32(&str_offsets[base + 1]);
-            uint32x4_t lengths = vsubq_u32(off_next, off_curr);
-
-            // Compare lengths
-            uint32x4_t len_match = vceqq_u32(lengths, target_len_vec);
-            uint32_t match_arr[4];
-            vst1q_u32(match_arr, len_match);
-
-            for (int k = 0; k < 4; k++) {
-                if (match_arr[k] == 0) continue;
-
-                size_t elem_idx = base + k;
-                if constexpr (CheckNull) {
-                    if (elements_null_data[elem_idx]) continue;
-                }
-
-                const char* elem_ptr = str_bytes + str_offsets[elem_idx];
-                if (memcmp(elem_ptr, target.data, target_len) == 0) {
-                    return j + k + 1;
-                }
-            }
-        }
-#endif
         // Scalar tail
         for (; j < array_size; j++) {
             size_t elem_idx = array_offset + j;

@@ -17,12 +17,6 @@
 #include <cstdint>
 #include <cstring>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 #include "column/column_helper.h"
 #include "column/const_column.h"
 #include "column/fixed_length_column.h"
@@ -30,6 +24,7 @@
 #include "column/type_traits.h"
 #include "exprs/function_helper.h"
 #include "simd/simd.h"
+#include "simd/string_length_filter.h"
 #include "typeinfo"
 #include "types/logical_type.h"
 
@@ -207,25 +202,17 @@ public:
         // Initialize all results to 0 (false)
         memset(result_data, 0, size);
 
-#ifdef __AVX2__
-        const __m256i target_len_vec = _mm256_set1_epi32(target_len);
         int i = 0;
+        constexpr int kSimdWidth = SIMD::kStringLenSimdWidth;
 
-        for (; i + 8 <= size; i += 8) {
-            // SIMD: compute 8 string lengths at once
-            __m256i off_curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i]));
-            __m256i off_next = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i + 1]));
-            __m256i lengths = _mm256_sub_epi32(off_next, off_curr);
+        for (; i + kSimdWidth <= size; i += kSimdWidth) {
+            uint32_t mask = SIMD::length_eq_mask(offsets.data(), i, target_len);
 
-            // SIMD: compare lengths with target_len
-            __m256i len_match = _mm256_cmpeq_epi32(lengths, target_len_vec);
-            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(len_match));
-
-            if (mask == 0) continue;  // All 8 lengths mismatch - skip!
+            if (mask == 0) continue;  // All lengths mismatch - skip!
 
             // Only for length matches, do memcmp
             while (mask) {
-                int bit = __builtin_ctz(mask);
+                uint32_t bit = __builtin_ctz(mask);
                 int idx = i + bit;
 
                 const char* str_ptr = bytes + offsets[idx];
@@ -242,48 +229,6 @@ public:
                 result_data[i] = (memcmp(bytes + offsets[i], target_data, target_len) == 0) ? 1 : 0;
             }
         }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const uint32x4_t target_len_vec = vdupq_n_u32(target_len);
-        int i = 0;
-
-        for (; i + 4 <= size; i += 4) {
-            // NEON: compute 4 string lengths at once
-            uint32x4_t off_curr = vld1q_u32(&offsets[i]);
-            uint32x4_t off_next = vld1q_u32(&offsets[i + 1]);
-            uint32x4_t lengths = vsubq_u32(off_next, off_curr);
-
-            // NEON: compare lengths with target_len
-            uint32x4_t len_match = vceqq_u32(lengths, target_len_vec);
-
-            // Extract mask - check if any lane matches
-            uint32_t mask_arr[4];
-            vst1q_u32(mask_arr, len_match);
-
-            for (int j = 0; j < 4; ++j) {
-                if (mask_arr[j]) {
-                    int idx = i + j;
-                    const char* str_ptr = bytes + offsets[idx];
-                    result_data[idx] = (memcmp(str_ptr, target_data, target_len) == 0) ? 1 : 0;
-                }
-            }
-        }
-
-        // Scalar tail
-        for (; i < size; ++i) {
-            uint32_t len = offsets[i + 1] - offsets[i];
-            if (len == target_len) {
-                result_data[i] = (memcmp(bytes + offsets[i], target_data, target_len) == 0) ? 1 : 0;
-            }
-        }
-#else
-        // Scalar fallback
-        for (int i = 0; i < size; ++i) {
-            uint32_t len = offsets[i + 1] - offsets[i];
-            if (len == target_len) {
-                result_data[i] = (memcmp(bytes + offsets[i], target_data, target_len) == 0) ? 1 : 0;
-            }
-        }
-#endif
 
         return result;
     }

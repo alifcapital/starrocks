@@ -14,16 +14,11 @@
 
 #include <utility>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 #include "column/column.h"
 #include "column/nullable_column.h"
 #include "gutil/casts.h"
 #include "olap_type_infra.h"
+#include "simd/string_length_filter.h"
 #include "storage/column_predicate.h"
 #include "storage/in_predicate_utils.h"
 #include "storage/rowset/bitmap_index_reader.h"
@@ -227,86 +222,38 @@ public:
 
         if (!column->has_null()) {
             size_t i = from;
-#ifdef __AVX2__
-            // SIMD batch length filtering: process 8 strings at a time
-            // For NOT IN: if length is outside [min_len, max_len], result is 1 (not in set)
-            const __m256i min_len_vec = _mm256_set1_epi32(_min_len);
-            const __m256i max_len_vec = _mm256_set1_epi32(_max_len);
+            constexpr int kSimdWidth = SIMD::kStringLenSimdWidth;
+            constexpr uint32_t kMask = SIMD::kStringLenSimdMask;
 
-            for (; i + 8 <= to; i += 8) {
-                // Load 9 offsets to compute 8 lengths
-                __m256i off_curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i]));
-                __m256i off_next = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i + 1]));
-                __m256i lengths = _mm256_sub_epi32(off_next, off_curr);
-
-                // Check length in range [min_len, max_len]
-                __m256i ge_min = _mm256_cmpgt_epi32(lengths, _mm256_sub_epi32(min_len_vec, _mm256_set1_epi32(1)));
-                __m256i le_max = _mm256_cmpgt_epi32(_mm256_add_epi32(max_len_vec, _mm256_set1_epi32(1)), lengths);
-                __m256i in_range = _mm256_and_si256(ge_min, le_max);
-                int mask = _mm256_movemask_ps(_mm256_castsi256_ps(in_range));
+            for (; i + kSimdWidth <= to; i += kSimdWidth) {
+                uint32_t mask = SIMD::length_in_range_mask(offsets.data(), i, _min_len, _max_len);
 
                 if (mask == 0) {
-                    // All 8 lengths outside range - all are NOT IN set (result = 1)
-                    for (size_t j = i; j < i + 8; j++) {
+                    // All lengths outside range - all are NOT IN set (result = 1)
+                    for (size_t j = i; j < i + kSimdWidth; j++) {
                         sel[j] = Op::apply(sel[j], 1);
                     }
                     continue;
                 }
 
-                // Compute masks before processing
-                int in_range_mask = mask;
-                int out_of_range_mask = (~mask) & 0xFF;
+                uint32_t in_range_mask = mask;
+                uint32_t out_of_range_mask = (~mask) & kMask;
 
                 // Strings with lengths in range need hash lookup
                 while (in_range_mask) {
-                    int bit = __builtin_ctz(in_range_mask);
+                    uint32_t bit = __builtin_ctz(in_range_mask);
                     size_t idx = i + bit;
                     sel[idx] = Op::apply(sel[idx], (uint8_t)(!(_slices.contains(binary_column->get_slice(idx)))));
                     in_range_mask &= (in_range_mask - 1);
                 }
                 // Strings with lengths outside range are NOT IN (result = 1)
                 while (out_of_range_mask) {
-                    int bit = __builtin_ctz(out_of_range_mask);
+                    uint32_t bit = __builtin_ctz(out_of_range_mask);
                     size_t idx = i + bit;
                     sel[idx] = Op::apply(sel[idx], 1);
                     out_of_range_mask &= (out_of_range_mask - 1);
                 }
             }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-            // NEON batch length filtering: process 4 strings at a time
-            const uint32x4_t min_len_vec = vdupq_n_u32(_min_len);
-            const uint32x4_t max_len_vec = vdupq_n_u32(_max_len);
-
-            for (; i + 4 <= to; i += 4) {
-                uint32x4_t off_curr = vld1q_u32(&offsets[i]);
-                uint32x4_t off_next = vld1q_u32(&offsets[i + 1]);
-                uint32x4_t lengths = vsubq_u32(off_next, off_curr);
-
-                // Check length in range
-                uint32x4_t ge_min = vcgeq_u32(lengths, min_len_vec);
-                uint32x4_t le_max = vcleq_u32(lengths, max_len_vec);
-                uint32x4_t in_range = vandq_u32(ge_min, le_max);
-
-                uint32_t mask_arr[4];
-                vst1q_u32(mask_arr, in_range);
-
-                bool all_out_of_range = (mask_arr[0] == 0 && mask_arr[1] == 0 && mask_arr[2] == 0 && mask_arr[3] == 0);
-                if (all_out_of_range) {
-                    for (size_t j = i; j < i + 4; j++) {
-                        sel[j] = Op::apply(sel[j], 1);
-                    }
-                    continue;
-                }
-
-                for (int j = 0; j < 4; j++) {
-                    if (mask_arr[j]) {
-                        sel[i + j] = Op::apply(sel[i + j], (uint8_t)(!(_slices.contains(binary_column->get_slice(i + j)))));
-                    } else {
-                        sel[i + j] = Op::apply(sel[i + j], 1);
-                    }
-                }
-            }
-#endif
             // Scalar tail
             for (; i < to; i++) {
                 sel[i] = Op::apply(sel[i], (uint8_t)(!(_slices.contains(binary_column->get_slice(i)))));
@@ -316,107 +263,56 @@ public:
             const uint8_t* null_data = down_cast<const NullableColumn*>(column)->immutable_null_column_data().data();
             size_t i = from;
 
-#ifdef __AVX2__
-            // Combined null check + length filtering
-            const __m256i min_len_vec = _mm256_set1_epi32(_min_len);
-            const __m256i max_len_vec = _mm256_set1_epi32(_max_len);
+            constexpr int kSimdWidth = SIMD::kStringLenSimdWidth;
+            constexpr uint32_t kMask = SIMD::kStringLenSimdMask;
 
-            for (; i + 8 <= to; i += 8) {
-                // Build non-null mask from 8 null flag bytes
-                int non_null_mask = 0;
-                for (int j = 0; j < 8; j++) {
+            for (; i + kSimdWidth <= to; i += kSimdWidth) {
+                uint32_t non_null_mask = 0;
+                for (int j = 0; j < kSimdWidth; j++) {
                     if (null_data[i + j] == 0) {
-                        non_null_mask |= (1 << j);
+                        non_null_mask |= (1u << j);
                     }
                 }
 
                 if (non_null_mask == 0) {
-                    // All 8 are NULL - result is 0 for NOT IN
-                    for (size_t j = i; j < i + 8; j++) {
+                    // All are NULL - result is 0 for NOT IN
+                    for (size_t j = i; j < i + kSimdWidth; j++) {
                         sel[j] = Op::apply(sel[j], 0);
                     }
                     continue;
                 }
 
-                // Compute lengths
-                __m256i off_curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i]));
-                __m256i off_next = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&offsets[i + 1]));
-                __m256i lengths = _mm256_sub_epi32(off_next, off_curr);
-
-                // Check length in range
-                __m256i ge_min = _mm256_cmpgt_epi32(lengths, _mm256_sub_epi32(min_len_vec, _mm256_set1_epi32(1)));
-                __m256i le_max = _mm256_cmpgt_epi32(_mm256_add_epi32(max_len_vec, _mm256_set1_epi32(1)), lengths);
-                __m256i in_range = _mm256_and_si256(ge_min, le_max);
-                int len_mask = _mm256_movemask_ps(_mm256_castsi256_ps(in_range));
+                uint32_t len_mask = SIMD::length_in_range_mask(offsets.data(), i, _min_len, _max_len);
 
                 // Non-null AND length in range -> need hash lookup
-                int need_lookup_mask = len_mask & non_null_mask;
+                uint32_t need_lookup_mask = len_mask & non_null_mask;
                 // Non-null AND length out of range -> result is 1
-                int out_of_range_mask = (~len_mask) & non_null_mask & 0xFF;
+                uint32_t out_of_range_mask = (~len_mask) & non_null_mask & kMask;
                 // NULL -> result is 0
-                int null_mask = (~non_null_mask) & 0xFF;
+                uint32_t null_mask = (~non_null_mask) & kMask;
 
                 // Process elements needing hash lookup
                 while (need_lookup_mask) {
-                    int bit = __builtin_ctz(need_lookup_mask);
+                    uint32_t bit = __builtin_ctz(need_lookup_mask);
                     size_t idx = i + bit;
                     sel[idx] = Op::apply(sel[idx], (uint8_t)(!(_slices.contains(binary_column->get_slice(idx)))));
                     need_lookup_mask &= (need_lookup_mask - 1);
                 }
                 // Elements with length out of range (and non-null) are NOT IN
                 while (out_of_range_mask) {
-                    int bit = __builtin_ctz(out_of_range_mask);
+                    uint32_t bit = __builtin_ctz(out_of_range_mask);
                     size_t idx = i + bit;
                     sel[idx] = Op::apply(sel[idx], 1);
                     out_of_range_mask &= (out_of_range_mask - 1);
                 }
                 // NULL elements get 0
                 while (null_mask) {
-                    int bit = __builtin_ctz(null_mask);
+                    uint32_t bit = __builtin_ctz(null_mask);
                     size_t idx = i + bit;
                     sel[idx] = Op::apply(sel[idx], 0);
                     null_mask &= (null_mask - 1);
                 }
             }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-            const uint32x4_t min_len_vec = vdupq_n_u32(_min_len);
-            const uint32x4_t max_len_vec = vdupq_n_u32(_max_len);
-
-            for (; i + 4 <= to; i += 4) {
-                // Check for all nulls
-                bool all_null = true;
-                for (int j = 0; j < 4; j++) {
-                    if (null_data[i + j] == 0) all_null = false;
-                }
-                if (all_null) {
-                    for (size_t j = i; j < i + 4; j++) {
-                        sel[j] = Op::apply(sel[j], 0);
-                    }
-                    continue;
-                }
-
-                uint32x4_t off_curr = vld1q_u32(&offsets[i]);
-                uint32x4_t off_next = vld1q_u32(&offsets[i + 1]);
-                uint32x4_t lengths = vsubq_u32(off_next, off_curr);
-
-                uint32x4_t ge_min = vcgeq_u32(lengths, min_len_vec);
-                uint32x4_t le_max = vcleq_u32(lengths, max_len_vec);
-                uint32x4_t in_range = vandq_u32(ge_min, le_max);
-
-                uint32_t range_arr[4];
-                vst1q_u32(range_arr, in_range);
-
-                for (int j = 0; j < 4; j++) {
-                    if (null_data[i + j]) {
-                        sel[i + j] = Op::apply(sel[i + j], 0);
-                    } else if (range_arr[j]) {
-                        sel[i + j] = Op::apply(sel[i + j], (uint8_t)(!(_slices.contains(binary_column->get_slice(i + j)))));
-                    } else {
-                        sel[i + j] = Op::apply(sel[i + j], 1);
-                    }
-                }
-            }
-#endif
             // Scalar tail
             for (; i < to; i++) {
                 sel[i] =
