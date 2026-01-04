@@ -14,6 +14,12 @@
 
 #include <type_traits>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/column.h"
 #include "column/column_helper.h"
 #include "column/nullable_column.h"
@@ -50,7 +56,73 @@ public:
             }
         } else {
             const uint8_t* null_data = down_cast<const NullableColumn*>(column)->immutable_null_column_data().data();
-            for (size_t i = from; i < to; i++) {
+            size_t i = from;
+
+#ifdef __AVX2__
+            // SIMD batch null check: process 32 elements at a time
+            // Skip expensive hash lookups for batches where all elements are NULL
+            const __m256i zero = _mm256_setzero_si256();
+            for (; i + 32 <= to; i += 32) {
+                __m256i nulls = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(null_data + i));
+                __m256i non_null_mask = _mm256_cmpeq_epi8(nulls, zero);
+                int mask = _mm256_movemask_epi8(non_null_mask);
+
+                if (mask == 0) {
+                    // All 32 elements are NULL - apply Op with 0 for all
+                    for (size_t j = i; j < i + 32; j++) {
+                        sel[j] = Op::apply(sel[j], 0);
+                    }
+                    continue;
+                }
+
+                // Process only non-null elements
+                uint32_t bits = static_cast<uint32_t>(mask);
+                while (bits) {
+                    int bit = __builtin_ctz(bits);
+                    size_t idx = i + bit;
+                    sel[idx] = Op::apply(sel[idx], (uint8_t)(_values.contains(v[idx])));
+                    bits &= (bits - 1);
+                }
+                // NULL elements get Op::apply with 0
+                uint32_t null_bits = ~static_cast<uint32_t>(mask);
+                while (null_bits) {
+                    int bit = __builtin_ctz(null_bits);
+                    size_t idx = i + bit;
+                    sel[idx] = Op::apply(sel[idx], 0);
+                    null_bits &= (null_bits - 1);
+                }
+            }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+            // NEON batch null check: process 16 elements at a time
+            const uint8x16_t zero = vdupq_n_u8(0);
+            for (; i + 16 <= to; i += 16) {
+                uint8x16_t nulls = vld1q_u8(null_data + i);
+                uint8x16_t non_null_cmp = vceqq_u8(nulls, zero);
+
+                // Check if all are NULL
+                uint64x2_t as64 = vreinterpretq_u64_u8(non_null_cmp);
+                if (vgetq_lane_u64(as64, 0) == 0 && vgetq_lane_u64(as64, 1) == 0) {
+                    // All 16 elements are NULL
+                    for (size_t j = i; j < i + 16; j++) {
+                        sel[j] = Op::apply(sel[j], 0);
+                    }
+                    continue;
+                }
+
+                // Extract mask and process
+                uint8_t mask_arr[16];
+                vst1q_u8(mask_arr, non_null_cmp);
+                for (int j = 0; j < 16; j++) {
+                    if (mask_arr[j]) {
+                        sel[i + j] = Op::apply(sel[i + j], (uint8_t)(_values.contains(v[i + j])));
+                    } else {
+                        sel[i + j] = Op::apply(sel[i + j], 0);
+                    }
+                }
+            }
+#endif
+            // Scalar tail
+            for (; i < to; i++) {
                 sel[i] = Op::apply(sel[i], (uint8_t)(!null_data[i] && _values.contains(v[i])));
             }
         }
