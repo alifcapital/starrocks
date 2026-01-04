@@ -11,6 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <chrono>
 #include <memory>
 
@@ -2216,6 +2223,128 @@ private:
         return is_scalar_logical_type(type) || type == TYPE_ARRAY || type == TYPE_MAP || type == TYPE_STRUCT;
     }
 
+    // SIMD-optimized string search within array elements
+    // Returns position (1-based) if found, 0 if not found
+    template <bool CheckNull>
+    static size_t _find_string_in_array_simd(const BinaryColumn* str_column,
+                                              const NullColumn::ValueType* elements_null_data, size_t array_offset,
+                                              size_t array_size, const Slice& target) {
+        if (array_size == 0) return 0;
+
+        const auto& str_offsets = str_column->get_offset();
+        const char* str_bytes = str_column->get_bytes().data();
+        const uint32_t target_len = static_cast<uint32_t>(target.size);
+
+        size_t j = 0;
+
+#ifdef __AVX2__
+        const __m256i target_len_vec = _mm256_set1_epi32(target_len);
+
+        // Process 8 elements at a time
+        for (; j + 8 <= array_size; j += 8) {
+            size_t base = array_offset + j;
+
+            // Quick null check for batch
+            if constexpr (CheckNull) {
+                uint64_t null_word;
+                memcpy(&null_word, elements_null_data + base, 8);
+                if (null_word == 0xFFFFFFFFFFFFFFFFULL) {
+                    continue; // All 8 are NULL
+                }
+            }
+
+            // Compute 8 string lengths via offset subtraction
+            __m256i off_curr = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&str_offsets[base]));
+            __m256i off_next = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&str_offsets[base + 1]));
+            __m256i lengths = _mm256_sub_epi32(off_next, off_curr);
+
+            // Compare lengths with target length
+            __m256i len_match = _mm256_cmpeq_epi32(lengths, target_len_vec);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(len_match));
+
+            if (mask == 0) {
+                continue; // All 8 lengths mismatch - skip memcmp
+            }
+
+            // Process only length-matched elements
+            while (mask) {
+                int bit = __builtin_ctz(mask);
+                size_t elem_idx = base + bit;
+
+                // Skip if null
+                if constexpr (CheckNull) {
+                    if (elements_null_data[elem_idx]) {
+                        mask &= (mask - 1);
+                        continue;
+                    }
+                }
+
+                // Length matches, do memcmp
+                const char* elem_ptr = str_bytes + str_offsets[elem_idx];
+                if (memcmp(elem_ptr, target.data, target_len) == 0) {
+                    return j + bit + 1; // 1-based position
+                }
+                mask &= (mask - 1);
+            }
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        const uint32x4_t target_len_vec = vdupq_n_u32(target_len);
+
+        // Process 4 elements at a time
+        for (; j + 4 <= array_size; j += 4) {
+            size_t base = array_offset + j;
+
+            // Quick null check
+            if constexpr (CheckNull) {
+                uint32_t null_word;
+                memcpy(&null_word, elements_null_data + base, 4);
+                if (null_word == 0xFFFFFFFF) {
+                    continue;
+                }
+            }
+
+            // Compute 4 string lengths
+            uint32x4_t off_curr = vld1q_u32(&str_offsets[base]);
+            uint32x4_t off_next = vld1q_u32(&str_offsets[base + 1]);
+            uint32x4_t lengths = vsubq_u32(off_next, off_curr);
+
+            // Compare lengths
+            uint32x4_t len_match = vceqq_u32(lengths, target_len_vec);
+            uint32_t match_arr[4];
+            vst1q_u32(match_arr, len_match);
+
+            for (int k = 0; k < 4; k++) {
+                if (match_arr[k] == 0) continue;
+
+                size_t elem_idx = base + k;
+                if constexpr (CheckNull) {
+                    if (elements_null_data[elem_idx]) continue;
+                }
+
+                const char* elem_ptr = str_bytes + str_offsets[elem_idx];
+                if (memcmp(elem_ptr, target.data, target_len) == 0) {
+                    return j + k + 1;
+                }
+            }
+        }
+#endif
+        // Scalar tail
+        for (; j < array_size; j++) {
+            size_t elem_idx = array_offset + j;
+            if constexpr (CheckNull) {
+                if (elements_null_data[elem_idx]) continue;
+            }
+            uint32_t elem_len = str_offsets[elem_idx + 1] - str_offsets[elem_idx];
+            if (elem_len == target_len) {
+                const char* elem_ptr = str_bytes + str_offsets[elem_idx];
+                if (memcmp(elem_ptr, target.data, target_len) == 0) {
+                    return j + 1;
+                }
+            }
+        }
+        return 0;
+    }
+
     static void _build_hash_table(const ColumnPtr& column, ArrayContainsState* state) {
         DCHECK(!column->is_constant() && !column->is_nullable());
         const ArrayColumn* array_column = down_cast<const ArrayColumn*>(column.get());
@@ -2307,6 +2436,16 @@ private:
         result_column->resize(num_rows);
         auto* result_data = result_column->get_data().data();
 
+        // For STRING type with const target, use SIMD length filtering
+        [[maybe_unused]] const BinaryColumn* str_column = nullptr;
+        [[maybe_unused]] Slice const_target;
+        if constexpr (lt_is_string<LT>) {
+            if (is_const_target && !NullableTarget) {
+                str_column = down_cast<const BinaryColumn*>(elements.get());
+                const_target = targets_data[0]; // Cache const target
+            }
+        }
+
         for (size_t i = 0; i < num_rows; i++) {
             if constexpr (NullableArray) {
                 bool is_array_null = is_const_array ? arrays_null_data[0] : arrays_null_data[i];
@@ -2336,7 +2475,17 @@ private:
                 }
             }
 
-            // check non-null value one by one
+            // Use SIMD path for STRING with const non-null target
+            if constexpr (lt_is_string<LT>) {
+                if (is_const_target && !NullableTarget && str_column != nullptr) {
+                    position = _find_string_in_array_simd<true>(str_column, elements_null_data, offset, array_size,
+                                                                 const_target);
+                    result_data[i] = PositionEnabled ? position : (position != 0);
+                    continue;
+                }
+            }
+
+            // Fallback: check non-null value one by one
             size_t target_idx = is_const_target ? 0 : i;
             for (size_t j = 0; j < array_size; j++) {
                 if (!elements_null_data[offset + j] && elements_data[offset + j] == targets_data[target_idx]) {
