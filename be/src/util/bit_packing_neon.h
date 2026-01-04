@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #if defined(__ARM_NEON) && defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -83,24 +85,22 @@ static inline void unpack9to16_uint32(const uint8_t* __restrict__ in, uint32_t* 
     const uint32_t mask = kMask[bit_width];
     auto writeEnd = out + num_values;
 
-    // For 9-16 bit widths, we need up to 16 bytes for 8 values
+    // For 9-16 bit widths, we need exactly bit_width bytes for 8 values
     while (out + 8 <= writeEnd) {
-        // Load 16 bytes
-        uint8x16_t packed_bytes = vld1q_u8(in);
+        // Safe load: only read exactly bit_width bytes (8 values * bit_width bits / 8)
+        uint64_t lo = 0, hi = 0;
+        memcpy(&lo, in, std::min(8, bit_width));
+        if (bit_width > 8) {
+            memcpy(&hi, in + 8, bit_width - 8);
+        }
 
-        // Convert to two 64-bit values for easier bit manipulation
-        uint64_t lo, hi;
-        vst1_u8(reinterpret_cast<uint8_t*>(&lo), vget_low_u8(packed_bytes));
-        vst1_u8(reinterpret_cast<uint8_t*>(&hi), vget_high_u8(packed_bytes));
-
-        // Extract values - handle cross-boundary values
+        // Extract values using bit positions
         int bit_pos = 0;
         uint32_t values[8];
         for (int i = 0; i < 8; ++i) {
             int byte_idx = bit_pos / 8;
             int bit_offset = bit_pos % 8;
 
-            // Get value spanning potentially two bytes
             uint64_t src = (byte_idx < 8) ? lo : hi;
             int local_byte = byte_idx % 8;
             uint64_t shifted = src >> (local_byte * 8 + bit_offset);
@@ -121,7 +121,7 @@ static inline void unpack9to16_uint32(const uint8_t* __restrict__ in, uint32_t* 
         vst1q_u32(out, vec_lo);
         vst1q_u32(out + 4, vec_hi);
 
-        in += bit_width;  // Advance by bit_width bytes (8 values * bit_width bits / 8)
+        in += bit_width;
         out += 8;
     }
 }
@@ -133,7 +133,10 @@ static inline void unpack17to24_uint32(const uint8_t* __restrict__ in, uint32_t*
     auto writeEnd = out + num_values;
 
     while (out + 8 <= writeEnd) {
-        // For larger bit widths, use scalar extraction with NEON store
+        // Safe load: read all bit_width bytes at once into buffer
+        uint8_t buffer[32] = {0};  // Max 24 bytes needed, pad for safety
+        memcpy(buffer, in, bit_width);
+
         uint32_t values[8];
         int bit_pos = 0;
 
@@ -141,9 +144,9 @@ static inline void unpack17to24_uint32(const uint8_t* __restrict__ in, uint32_t*
             int byte_idx = bit_pos / 8;
             int bit_offset = bit_pos % 8;
 
-            // Load 4 bytes starting from byte_idx
+            // Safe read from buffer (no overflow possible)
             uint32_t word;
-            memcpy(&word, in + byte_idx, sizeof(uint32_t));
+            memcpy(&word, buffer + byte_idx, sizeof(uint32_t));
             values[i] = (word >> bit_offset) & mask;
 
             bit_pos += bit_width;
@@ -167,6 +170,10 @@ static inline void unpack25to32_uint32(const uint8_t* __restrict__ in, uint32_t*
     auto writeEnd = out + num_values;
 
     while (out + 8 <= writeEnd) {
+        // Safe load: read all bit_width bytes at once into buffer
+        uint8_t buffer[40] = {0};  // Max 32 bytes needed + padding for safe reads
+        memcpy(buffer, in, bit_width);
+
         uint32_t values[8];
         int bit_pos = 0;
 
@@ -174,9 +181,9 @@ static inline void unpack25to32_uint32(const uint8_t* __restrict__ in, uint32_t*
             int byte_idx = bit_pos / 8;
             int bit_offset = bit_pos % 8;
 
-            // Load 5 bytes to handle up to 32 bits with offset
+            // Safe read from buffer
             uint64_t qword;
-            memcpy(&qword, in + byte_idx, 5);  // 5 bytes = 40 bits, enough for 32 + 7 bit offset
+            memcpy(&qword, buffer + byte_idx, 5);
             values[i] = (qword >> bit_offset) & mask;
 
             bit_pos += bit_width;
@@ -256,6 +263,10 @@ static inline void unpack9to16_uint16(const uint8_t* __restrict__ in, uint16_t* 
     auto writeEnd = out + num_values;
 
     while (out + 8 <= writeEnd) {
+        // Safe load: copy all bit_width bytes into buffer to avoid overread
+        uint8_t buffer[20] = {0};  // Max 16 bytes needed + padding for safe 4-byte reads
+        memcpy(buffer, in, bit_width);
+
         uint16_t values[8];
         int bit_pos = 0;
 
@@ -263,8 +274,9 @@ static inline void unpack9to16_uint16(const uint8_t* __restrict__ in, uint16_t* 
             int byte_idx = bit_pos / 8;
             int bit_offset = bit_pos % 8;
 
+            // Safe read from buffer (no overflow possible)
             uint32_t word;
-            memcpy(&word, in + byte_idx, sizeof(uint32_t));
+            memcpy(&word, buffer + byte_idx, sizeof(uint32_t));
             values[i] = (word >> bit_offset) & mask;
 
             bit_pos += bit_width;
@@ -349,6 +361,11 @@ inline void unpack(int bit_width, const uint8_t* __restrict__ in, int64_t in_byt
 template <typename OutType>
 std::pair<const uint8_t*, int64_t> UnpackValues(int bit_width, const uint8_t* __restrict__ in, int64_t in_bytes,
                                                 int64_t num_values, OutType* __restrict__ out) {
+    // Handle bit_width=0 (valid for constant columns) - delegate to default to avoid divide-by-zero
+    if (bit_width == 0) {
+        return starrocks::util::bitpacking_default::UnpackValues(bit_width, in, in_bytes, num_values, out);
+    }
+
     const int64_t values_to_read =
             starrocks::util::bitpacking_default::NumValuesToUnpack(bit_width, in_bytes, num_values);
     constexpr int BATCH_SIZE = 8;
