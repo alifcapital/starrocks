@@ -340,6 +340,48 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+
+        // SIMD-optimized path for string equality with constant
+        if constexpr ((lt_is_string<Type> || lt_is_binary<Type>) &&
+                      std::is_same_v<OP, BinaryPredFunc<EvalEq<Type>>>) {
+            // Handle only_null cases
+            if (l->only_null() || r->only_null()) {
+                return ColumnHelper::create_const_null_column(l->size());
+            }
+
+            // vector = const case
+            if (!l->is_constant() && r->is_constant()) {
+                const ColumnPtr& data1 = FunctionHelper::get_data_column_of_nullable(l);
+                const ColumnPtr& data2 = FunctionHelper::get_data_column_of_nullable(
+                        ColumnHelper::as_raw_column<ConstColumn>(r)->data_column());
+
+                ColumnPtr data_result = StringEqVectorConst::evaluate<Type>(data1, data2);
+
+                if (l->has_null()) {
+                    NullColumnPtr null_flags = FunctionHelper::union_nullable_column(l, r);
+                    return FunctionHelper::merge_column_and_null_column(std::move(data_result),
+                                                                        std::move(null_flags));
+                }
+                return data_result;
+            }
+
+            // const = vector case (symmetric)
+            if (l->is_constant() && !r->is_constant()) {
+                const ColumnPtr& data1 = FunctionHelper::get_data_column_of_nullable(r);
+                const ColumnPtr& data2 = FunctionHelper::get_data_column_of_nullable(
+                        ColumnHelper::as_raw_column<ConstColumn>(l)->data_column());
+
+                ColumnPtr data_result = StringEqVectorConst::evaluate<Type>(data1, data2);
+
+                if (r->has_null()) {
+                    NullColumnPtr null_flags = FunctionHelper::union_nullable_column(l, r);
+                    return FunctionHelper::merge_column_and_null_column(std::move(data_result),
+                                                                        std::move(null_flags));
+                }
+                return data_result;
+            }
+        }
+
         return VectorizedStrictBinaryFunction<OP>::template evaluate<Type, TYPE_BOOLEAN>(l, r);
     }
 #ifdef STARROCKS_JIT_ENABLE
