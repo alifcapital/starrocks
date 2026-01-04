@@ -36,7 +36,7 @@ static bool substring_with_index(const Slice& haystack, const Slice& delimiter, 
             int32_t num = 0;
             while (num < part_number) {
                 size_t n = haystack.size - offset - 1;
-                char* pos = reinterpret_cast<char*>(memchr(haystack.data + offset + 1, delimiter.data[0], n));
+                const char* pos = reinterpret_cast<const char*>(memchr(haystack.data + offset + 1, delimiter.data[0], n));
                 if (pos != nullptr) {
                     offset = pos - haystack.data;
                     num++;
@@ -58,7 +58,7 @@ static bool substring_with_index(const Slice& haystack, const Slice& delimiter, 
             int32_t num = 0;
             while (num < part_number) {
                 size_t n = haystack.size - offset - delimiter.size;
-                char* pos = reinterpret_cast<char*>(
+                const char* pos = reinterpret_cast<const char*>(
                         memmem(haystack.data + offset + delimiter.size, n, delimiter.data, delimiter.size));
                 if (pos != nullptr) {
                     offset = pos - haystack.data;
