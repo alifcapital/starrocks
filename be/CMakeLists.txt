@@ -108,13 +108,23 @@ else()
     set(WITH_IO_URING OFF)
 endif()
 
+if (${WITH_IO_URING})
+    find_library(URING_LIBRARY NAMES uring PATHS ${STARROCKS_THIRDPARTY}/lib ${STARROCKS_THIRDPARTY}/lib64 NO_DEFAULT_PATH)
+    if (NOT URING_LIBRARY)
+        find_library(URING_LIBRARY NAMES uring)
+    endif()
+    if (NOT URING_LIBRARY)
+        message(FATAL_ERROR "WITH_IO_URING=ON but liburing not found. Install liburing-dev or set -DWITH_IO_URING=OFF")
+    endif()
+endif()
+
 if (${WITH_TENANN} STREQUAL "ON")
     add_definitions(-DWITH_TENANN)
 endif()
 
 if (${WITH_IO_URING})
     add_definitions(-DWITH_IO_URING)
-    message(STATUS "io_uring support enabled for async spill I/O")
+    message(STATUS "io_uring support enabled for async spill I/O (using ${URING_LIBRARY})")
 endif()
 
 # The StarRocks module enables dynamic linking. This is a developer option.

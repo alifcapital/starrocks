@@ -356,7 +356,8 @@ include_directories(${JAVA_HOME}/include)
 include_directories(${JAVA_HOME}/include/linux)
 
 # io_uring support (Linux only)
-if (NOT APPLE AND ${WITH_IO_URING})
+# URING_LIBRARY is set by find_library in CMakeLists.txt if liburing is available
+if (NOT APPLE AND ${WITH_IO_URING} AND URING_LIBRARY)
     add_library(uring STATIC IMPORTED GLOBAL)
-    set_target_properties(uring PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/liburing.a)
+    set_target_properties(uring PROPERTIES IMPORTED_LOCATION ${URING_LIBRARY})
 endif()
