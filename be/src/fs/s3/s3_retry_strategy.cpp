@@ -14,7 +14,9 @@
 
 #include "fs/s3/s3_retry_strategy.h"
 
+#include <aws/core/client/AWSError.h>
 #include <aws/core/http/HttpResponse.h>
+#include <aws/core/utils/Outcome.h>
 
 #include <algorithm>
 #include <chrono>
