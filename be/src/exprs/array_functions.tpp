@@ -2228,7 +2228,7 @@ private:
         if (array_size == 0) return 0;
 
         const auto& str_offsets = str_column->get_offset();
-        const char* str_bytes = str_column->get_bytes().data();
+        const char* str_bytes = reinterpret_cast<const char*>(str_column->get_bytes().data());
         const uint32_t target_len = static_cast<uint32_t>(target.size);
 
         size_t j = 0;
