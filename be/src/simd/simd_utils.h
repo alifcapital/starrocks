@@ -21,6 +21,8 @@
 #ifdef __AVX2__
 #include <emmintrin.h>
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 namespace starrocks {
@@ -67,6 +69,52 @@ public:
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(dest + i), v_value);
             }
             // Scalar tail
+            for (; i < count; ++i) {
+                dest[i] = value;
+            }
+            return;
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        if constexpr (sizeof(T) == 1) {
+            const uint8x16_t v_value = vdupq_n_u8(static_cast<uint8_t>(value));
+            size_t i = 0;
+            for (; i + 16 <= count; i += 16) {
+                vst1q_u8(reinterpret_cast<uint8_t*>(dest + i), v_value);
+            }
+            for (; i < count; ++i) {
+                dest[i] = value;
+            }
+            return;
+        } else if constexpr (sizeof(T) == 2) {
+            const uint16x8_t v_value = vdupq_n_u16(static_cast<uint16_t>(value));
+            size_t i = 0;
+            for (; i + 8 <= count; i += 8) {
+                vst1q_u16(reinterpret_cast<uint16_t*>(dest + i), v_value);
+            }
+            for (; i < count; ++i) {
+                dest[i] = value;
+            }
+            return;
+        } else if constexpr (sizeof(T) == 4) {
+            uint32_t v_bits = 0;
+            memcpy(&v_bits, &value, sizeof(v_bits));
+            const uint32x4_t v_value = vdupq_n_u32(v_bits);
+            size_t i = 0;
+            for (; i + 4 <= count; i += 4) {
+                vst1q_u32(reinterpret_cast<uint32_t*>(dest + i), v_value);
+            }
+            for (; i < count; ++i) {
+                dest[i] = value;
+            }
+            return;
+        } else if constexpr (sizeof(T) == 8) {
+            uint64_t v_bits = 0;
+            memcpy(&v_bits, &value, sizeof(v_bits));
+            const uint64x2_t v_value = vdupq_n_u64(v_bits);
+            size_t i = 0;
+            for (; i + 2 <= count; i += 2) {
+                vst1q_u64(reinterpret_cast<uint64_t*>(dest + i), v_value);
+            }
             for (; i < count; ++i) {
                 dest[i] = value;
             }

@@ -2246,9 +2246,14 @@ private:
 
             // Quick null check for batch
             if constexpr (CheckNull) {
-                uint64_t null_word;
-                memcpy(&null_word, elements_null_data + base, 8);
-                if (null_word == 0xFFFFFFFFFFFFFFFFULL) {
+                bool all_null = true;
+                for (int k = 0; k < 8; k++) {
+                    if (elements_null_data[base + k] == 0) {
+                        all_null = false;
+                        break;
+                    }
+                }
+                if (all_null) {
                     continue; // All 8 are NULL
                 }
             }
@@ -2296,9 +2301,14 @@ private:
 
             // Quick null check
             if constexpr (CheckNull) {
-                uint32_t null_word;
-                memcpy(&null_word, elements_null_data + base, 4);
-                if (null_word == 0xFFFFFFFF) {
+                bool all_null = true;
+                for (int k = 0; k < 4; k++) {
+                    if (elements_null_data[base + k] == 0) {
+                        all_null = false;
+                        break;
+                    }
+                }
+                if (all_null) {
                     continue;
                 }
             }

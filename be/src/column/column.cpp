@@ -18,6 +18,8 @@
 
 #ifdef __AVX2__
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include "column/column_hash/column_hash.h"
@@ -112,6 +114,31 @@ bool Column::empty_null_in_complex_column(const ImmBuffer<uint8_t>& null_data, c
                     need_empty = true;
                 }
                 null_mask &= null_mask - 1;  // Clear lowest set bit
+            }
+        }
+        // Scalar tail
+        for (; i < size && !need_empty; ++i) {
+            if (null_data[i] && offsets[i + 1] != offsets[i]) {
+                need_empty = true;
+            }
+        }
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    // SIMD optimization: scan 16 null bytes at a time, check offsets only for null positions
+    {
+        size_t i = 0;
+        for (; i + 16 <= size && !need_empty; i += 16) {
+            uint8x16_t v_null = vld1q_u8(null_data.data() + i);
+            if (vmaxvq_u8(v_null) == 0) {
+                continue; // no nulls in this block
+            }
+            uint8_t nulls[16];
+            vst1q_u8(nulls, v_null);
+            for (int j = 0; j < 16 && !need_empty; ++j) {
+                size_t idx = i + j;
+                if (nulls[j] && offsets[idx + 1] != offsets[idx]) {
+                    need_empty = true;
+                }
             }
         }
         // Scalar tail

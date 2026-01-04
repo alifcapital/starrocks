@@ -82,12 +82,12 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
             const uint8_t* null_data = nullable_column->immutable_null_column_data().data();
             uint16_t i = from;
 
-#ifdef __AVX2__
-            // SIMD batch: process 8 elements at a time
+            // Batch: process 8 elements at a time
             // Skip batches where all 8 are already filtered out
             for (; i + 8 <= to; i += 8) {
-                uint64_t sel_byte = *reinterpret_cast<const uint64_t*>(selection + i);
-                if (sel_byte == 0) continue;  // All 8 already filtered
+                uint64_t sel_byte;
+                memcpy(&sel_byte, selection + i, sizeof(sel_byte));
+                if (sel_byte == 0) continue; // All 8 already filtered
 
                 // Process each element (gather is unsafe for byte arrays)
                 for (int j = 0; j < 8; j++) {
@@ -99,7 +99,6 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
                     }
                 }
             }
-#endif
             // Scalar tail
             for (; i < to; i++) {
                 if (!selection[i]) continue;
@@ -112,10 +111,10 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
         } else {
             uint16_t i = from;
 
-#ifdef __AVX2__
             // Skip batches where all 8 are already filtered out
             for (; i + 8 <= to; i += 8) {
-                uint64_t sel_byte = *reinterpret_cast<const uint64_t*>(selection + i);
+                uint64_t sel_byte;
+                memcpy(&sel_byte, selection + i, sizeof(sel_byte));
                 if (sel_byte == 0) continue;
 
                 for (int j = 0; j < 8; j++) {
@@ -124,7 +123,6 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
                     }
                 }
             }
-#endif
             for (; i < to; i++) {
                 if (!selection[i]) continue;
                 selection[i] = result_data[dict_codes[i]];
@@ -135,10 +133,10 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
         const int32_t* dict_codes = data.data();
         uint16_t i = from;
 
-#ifdef __AVX2__
         // Skip batches where all 8 are already filtered out
         for (; i + 8 <= to; i += 8) {
-            uint64_t sel_byte = *reinterpret_cast<const uint64_t*>(selection + i);
+            uint64_t sel_byte;
+            memcpy(&sel_byte, selection + i, sizeof(sel_byte));
             if (sel_byte == 0) continue;
 
             for (int j = 0; j < 8; j++) {
@@ -147,7 +145,6 @@ Status DictColumnRuntimeFilterPredicate::evaluate(Chunk* chunk, uint8_t* selecti
                 }
             }
         }
-#endif
         for (; i < to; i++) {
             if (!selection[i]) continue;
             selection[i] = result_data[dict_codes[i]];
