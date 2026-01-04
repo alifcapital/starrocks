@@ -76,8 +76,8 @@ struct EvalCmpZero {
 
         // Pre-allocate space instead of appending one by one
         output->resize_uninitialized(size);
-        auto* dst = output->data_column()->get_data().data();
-        auto* nulls = output->null_column()->get_data().data();
+        auto* dst = output->data_column_raw_ptr()->get_data().data();
+        auto* nulls = output->null_column_raw_ptr()->get_data().data();
         const auto* src = cmp_values.data();
 
         // Fill null flags with 0 (all not null)
