@@ -997,9 +997,32 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
         // because in previous run, some validation selection value could
         // already be changed to VALID_SEL_OK_AND_NULL, and if we don't change back
         // to OK/FAILED, some rows can not be discarded any more.
+#ifdef __AVX2__
+        const __m256i and_mask = _mm256_set1_epi8(0x1);
+        size_t j = 0;
+        for (; j + 32 <= num_rows; j += 32) {
+            __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(_validate_selection.data() + j));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(_validate_selection.data() + j),
+                                _mm256_and_si256(data, and_mask));
+        }
+        for (; j < num_rows; j++) {
+            _validate_selection[j] &= 0x1;
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        const uint8x16_t and_mask = vdupq_n_u8(0x1);
+        size_t j = 0;
+        for (; j + 16 <= num_rows; j += 16) {
+            uint8x16_t data = vld1q_u8(_validate_selection.data() + j);
+            vst1q_u8(_validate_selection.data() + j, vandq_u8(data, and_mask));
+        }
+        for (; j < num_rows; j++) {
+            _validate_selection[j] &= 0x1;
+        }
+#else
         for (size_t j = 0; j < num_rows; j++) {
             _validate_selection[j] &= 0x1;
         }
+#endif
 
         // update_column for auto increment column.
         if (_has_auto_increment && _auto_increment_slot_id == desc->id() && column_ptr->is_nullable()) {
@@ -1171,7 +1194,6 @@ void OlapTableSink::_padding_char_column(Chunk* chunk) {
             Bytes& bytes = binary->get_bytes();
 
             // Padding 0 to CHAR field, the storage bitmap index and zone map need it.
-            // TODO(kks): we could improve this if there are many null values
             auto new_binary = BinaryColumn::create();
             Offsets& new_offset = new_binary->get_offset();
             Bytes& new_bytes = new_binary->get_bytes();
@@ -1179,10 +1201,36 @@ void OlapTableSink::_padding_char_column(Chunk* chunk) {
             new_bytes.assign(num_rows * len, 0); // padding 0
 
             uint32_t from = 0;
-            for (size_t j = 0; j < num_rows; ++j) {
-                uint32_t copy_data_len = std::min(len, offset[j + 1] - offset[j]);
-                strings::memcpy_inlined(new_bytes.data() + from, bytes.data() + offset[j], copy_data_len);
-                from += len; // no copy data will be 0
+            // Optimization: skip memcpy for null rows when there are many nulls
+            // The buffer is pre-zeroed, so null rows already have valid padding
+            if (desc->is_nullable()) {
+                auto* nullable_column = down_cast<NullableColumn*>(column);
+                const uint8_t* null_data = nullable_column->null_column()->get_data().data();
+                size_t null_count = SIMD::count_nonzero(null_data, num_rows);
+                // Only use sparse iteration if more than 12.5% of rows are null
+                if (null_count > num_rows / 8) {
+                    for (size_t j = 0; j < num_rows; ++j) {
+                        if (!null_data[j]) {
+                            uint32_t copy_data_len = std::min(len, offset[j + 1] - offset[j]);
+                            strings::memcpy_inlined(new_bytes.data() + from, bytes.data() + offset[j], copy_data_len);
+                        }
+                        from += len;
+                    }
+                } else {
+                    // Low null ratio: original loop without branch
+                    for (size_t j = 0; j < num_rows; ++j) {
+                        uint32_t copy_data_len = std::min(len, offset[j + 1] - offset[j]);
+                        strings::memcpy_inlined(new_bytes.data() + from, bytes.data() + offset[j], copy_data_len);
+                        from += len;
+                    }
+                }
+            } else {
+                // Non-nullable: original loop
+                for (size_t j = 0; j < num_rows; ++j) {
+                    uint32_t copy_data_len = std::min(len, offset[j + 1] - offset[j]);
+                    strings::memcpy_inlined(new_bytes.data() + from, bytes.data() + offset[j], copy_data_len);
+                    from += len;
+                }
             }
 
             for (size_t j = 1; j <= num_rows; ++j) {
