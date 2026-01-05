@@ -251,9 +251,10 @@ TEST_F(SharedBufferedInputStreamTest, test_orc) {
     ASSERT_EQ(22420420 - 22420223, sb.value()->raw_size);
 
     // check debug function
+    // Note: buffer_capacity equals size because parallel read pre-allocates the buffer
     ASSERT_EQ(
             "SharedBuffer raw_offset=22420223, raw_size=197, offset=22282240, size=262144, ref_count=2, "
-            "buffer_capacity=0",
+            "buffer_capacity=262144",
             sb.value()->debug_string());
 }
 
@@ -439,6 +440,12 @@ TEST_F(SharedBufferedInputStreamTest, test_io_statistics) {
     auto underlying = std::make_shared<MockDelayedInputStream>(data);
 
     auto sb_stream = std::make_shared<SharedBufferedInputStream>(underlying, "test", file_size);
+
+    // Set max_buffer_size to 2MB to prevent coalescing of adjacent ranges
+    // (default 8MB would merge [0,2MB) and [2MB,4MB) into single SharedBuffer)
+    SharedBufferedInputStream::CoalesceOptions opts;
+    opts.max_buffer_size = 2 * MB;
+    sb_stream->set_coalesce_options(opts);
 
     // Set IO ranges
     std::vector<SharedBufferedInputStream::IORange> ranges;
