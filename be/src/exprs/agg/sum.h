@@ -14,6 +14,12 @@
 
 #pragma once
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/runtime_type_traits.h"
 #include "exprs/agg/aggregate.h"
 #include "gutil/casts.h"
@@ -119,11 +125,66 @@ public:
     void get_values(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* dst, size_t start,
                     size_t end) const override {
         DCHECK_GT(end, start);
+        if (end <= start) {
+            return;
+        }
         ResultType result = this->data(state).sum;
         auto* column = down_cast<ResultColumnType*>(dst);
-        for (size_t i = start; i < end; ++i) {
-            column->get_data()[i] = result;
+        auto* data = column->get_data().data();
+        size_t count = end - start;
+#ifdef __AVX2__
+        if constexpr (std::is_same_v<ResultType, int64_t>) {
+            const __m256i val_vec = _mm256_set1_epi64x(result);
+            size_t i = 0;
+            for (; i + 4 <= count; i += 4) {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + start + i), val_vec);
+            }
+            for (; i < count; ++i) {
+                data[start + i] = result;
+            }
+        } else if constexpr (std::is_same_v<ResultType, double>) {
+            const __m256d val_vec = _mm256_set1_pd(result);
+            size_t i = 0;
+            for (; i + 4 <= count; i += 4) {
+                _mm256_storeu_pd(data + start + i, val_vec);
+            }
+            for (; i < count; ++i) {
+                data[start + i] = result;
+            }
+        } else {
+            for (size_t i = start; i < end; ++i) {
+                data[i] = result;
+            }
         }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        if constexpr (std::is_same_v<ResultType, int64_t>) {
+            const int64x2_t val_vec = vdupq_n_s64(result);
+            size_t i = 0;
+            for (; i + 2 <= count; i += 2) {
+                vst1q_s64(reinterpret_cast<int64_t*>(data + start + i), val_vec);
+            }
+            for (; i < count; ++i) {
+                data[start + i] = result;
+            }
+        } else if constexpr (std::is_same_v<ResultType, double>) {
+            const float64x2_t val_vec = vdupq_n_f64(result);
+            size_t i = 0;
+            for (; i + 2 <= count; i += 2) {
+                vst1q_f64(data + start + i, val_vec);
+            }
+            for (; i < count; ++i) {
+                data[start + i] = result;
+            }
+        } else {
+            for (size_t i = start; i < end; ++i) {
+                data[i] = result;
+            }
+        }
+#else
+        for (size_t i = start; i < end; ++i) {
+            data[i] = result;
+        }
+#endif
     }
 
     void serialize_to_column([[maybe_unused]] FunctionContext* ctx, ConstAggDataPtr __restrict state,

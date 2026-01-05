@@ -16,6 +16,7 @@
 
 #include <type_traits>
 
+#include "base/simd/simd.h"
 #include "column/column.h"
 #include "column/nullable_column.h"
 #include "runtime/current_thread.h"
@@ -413,10 +414,22 @@ public:
 
     void update_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
                                   AggDataPtr* states, const Filter& filter) const override {
-        for (size_t i = 0; i < chunk_size; i++) {
-            // TODO: optimize with simd ?
-            if (filter[i] == 0) {
-                static_cast<const Derived*>(this)->update(ctx, columns, states[i] + state_offset, i);
+        // Adaptive SIMD: for sparse filters, use find_zero to skip; for dense, iterate all
+        if (SIMD::count_zero(filter.data(), chunk_size) > chunk_size / 8) {
+            // Dense: more than 12.5% rows pass filter, iterate all
+            for (size_t i = 0; i < chunk_size; i++) {
+                if (filter[i] == 0) {
+                    static_cast<const Derived*>(this)->update(ctx, columns, states[i] + state_offset, i);
+                }
+            }
+        } else {
+            // Sparse: use SIMD to find zero positions
+            size_t idx = 0;
+            while (idx < chunk_size) {
+                idx = SIMD::find_zero(filter, idx, chunk_size - idx);
+                if (idx >= chunk_size) break;
+                static_cast<const Derived*>(this)->update(ctx, columns, states[idx] + state_offset, idx);
+                ++idx;
             }
         }
     }
@@ -447,9 +460,22 @@ public:
     void merge_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column* column,
                                  AggDataPtr* states, const Filter& filter) const override {
         auto merge_selectively = [&](const Column* merge_column) {
-            for (size_t i = 0; i < chunk_size; ++i) {
-                if (filter[i] == 0) {
-                    static_cast<const Derived*>(this)->merge(ctx, merge_column, states[i] + state_offset, i);
+            // Mirror update_batch_selectively's adaptive SIMD: for sparse filters skip via
+            // find_zero, otherwise iterate. Cheap branch on count_zero ratio amortises
+            // away when the filter is dense.
+            if (SIMD::count_zero(filter.data(), chunk_size) > chunk_size / 8) {
+                for (size_t i = 0; i < chunk_size; ++i) {
+                    if (filter[i] == 0) {
+                        static_cast<const Derived*>(this)->merge(ctx, merge_column, states[i] + state_offset, i);
+                    }
+                }
+            } else {
+                size_t idx = 0;
+                while (idx < chunk_size) {
+                    idx = SIMD::find_zero(filter, idx, chunk_size - idx);
+                    if (idx >= chunk_size) break;
+                    static_cast<const Derived*>(this)->merge(ctx, merge_column, states[idx] + state_offset, idx);
+                    ++idx;
                 }
             }
         };
