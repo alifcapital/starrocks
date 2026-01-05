@@ -96,6 +96,7 @@ static bool split_index(const Slice& haystack, const Slice& delimiter, int32_t p
                     pre_offset = offset;
                     offset = offset - 1;
                 } else {
+                    offset = -1;
                     break;
                 }
             }
