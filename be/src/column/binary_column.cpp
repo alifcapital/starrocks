@@ -16,6 +16,8 @@
 
 #ifdef __x86_64__
 #include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #include "base/container/raw_container.h"
@@ -30,6 +32,43 @@
 #include "gutil/strings/substitute.h"
 
 namespace starrocks {
+
+namespace {
+inline void simd_copy_bytes(uint8_t* __restrict dst, const uint8_t* __restrict src, size_t size) {
+#if defined(__AVX2__)
+    constexpr size_t kMinSimdCopy = 32;
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    constexpr size_t kMinSimdCopy = 16;
+#else
+    constexpr size_t kMinSimdCopy = 0;
+#endif
+    if (size < kMinSimdCopy) {
+        strings::memcpy_inlined(dst, src, size);
+        return;
+    }
+
+    size_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 32 <= size; i += 32) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+    }
+    for (; i + 16 <= size; i += 16) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), v);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    for (; i + 16 <= size; i += 16) {
+        uint8x16_t v = vld1q_u8(src + i);
+        vst1q_u8(dst + i, v);
+    }
+#endif
+    if (i < size) {
+        strings::memcpy_inlined(dst + i, src + i, size - i);
+    }
+}
+} // namespace
+
 template <typename T>
 BinaryColumnBase<T>::BinaryColumnBase(ContainerResource resource, Offsets offsets)
         : _bytes(), _offsets(std::move(offsets)), _resource(std::move(resource)) {
@@ -74,12 +113,50 @@ void BinaryColumnBase<T>::_append_binary_impl(const BinaryColumnBase<SrcOffset>&
     // new_offsets[i] = src_offsets[offset + i + 1] + delta
     // where delta = dst_last_offset - src_offsets[offset]
     if constexpr (std::is_same_v<T, SrcOffset>) {
-        // Same offset width: bulk-copy then adjust.
+        // Same offset width: bulk-copy then SIMD-add the delta.
         strings::memcpy_inlined(new_offsets, src_offsets.data() + offset + 1, count * sizeof(Offset));
         const auto delta = _offsets[num_prev_offsets - 1] - src_offsets[offset];
+#ifdef __AVX2__
+        if constexpr (sizeof(T) == 4) {
+            const __m256i delta_vec = _mm256_set1_epi32(static_cast<int32_t>(delta));
+            size_t i = 0;
+            for (; i + 8 <= count; i += 8) {
+                __m256i off = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(new_offsets + i));
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(new_offsets + i), _mm256_add_epi32(off, delta_vec));
+            }
+            for (; i < count; i++) new_offsets[i] += delta;
+        } else {
+            const __m256i delta_vec = _mm256_set1_epi64x(static_cast<int64_t>(delta));
+            size_t i = 0;
+            for (; i + 4 <= count; i += 4) {
+                __m256i off = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(new_offsets + i));
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(new_offsets + i), _mm256_add_epi64(off, delta_vec));
+            }
+            for (; i < count; i++) new_offsets[i] += delta;
+        }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        if constexpr (sizeof(T) == 4) {
+            const uint32x4_t delta_vec = vdupq_n_u32(static_cast<uint32_t>(delta));
+            size_t i = 0;
+            for (; i + 4 <= count; i += 4) {
+                uint32x4_t off = vld1q_u32(reinterpret_cast<const uint32_t*>(new_offsets + i));
+                vst1q_u32(reinterpret_cast<uint32_t*>(new_offsets + i), vaddq_u32(off, delta_vec));
+            }
+            for (; i < count; i++) new_offsets[i] += delta;
+        } else {
+            const uint64x2_t delta_vec = vdupq_n_u64(static_cast<uint64_t>(delta));
+            size_t i = 0;
+            for (; i + 2 <= count; i += 2) {
+                uint64x2_t off = vld1q_u64(reinterpret_cast<const uint64_t*>(new_offsets + i));
+                vst1q_u64(reinterpret_cast<uint64_t*>(new_offsets + i), vaddq_u64(off, delta_vec));
+            }
+            for (; i < count; i++) new_offsets[i] += delta;
+        }
+#else
         for (size_t i = 0; i < count; i++) {
             new_offsets[i] += delta;
         }
+#endif
     } else {
         // Different offset width (uint32_t -> uint64_t): convert element by element.
         const auto delta =
@@ -240,7 +317,8 @@ StatusOr<MutableColumnPtr> BinaryColumnBase<T>::replicate(const Buffer<uint32_t>
     for (auto i = 0; i < src_size; ++i) {
         auto bytes_size = _offsets[i + 1] - _offsets[i];
         for (auto j = offsets[i]; j < offsets[i + 1]; ++j) {
-            strings::memcpy_inlined(dest_bytes.data() + pos, src_bytes + _offsets[i], bytes_size);
+            // _data_base() returns _resource for zero-copy columns where _bytes is empty.
+            simd_copy_bytes(reinterpret_cast<uint8_t*>(dest_bytes.data() + pos), src_bytes + _offsets[i], bytes_size);
             pos += bytes_size;
             dest_offsets[j + 1] = pos;
         }
@@ -584,17 +662,45 @@ void BinaryColumnBase<T>::assign(size_t n, size_t idx) {
     invalidate_slice_cache();
 }
 
-//TODO(kks): improve this
+// Optimized in-place implementation - avoids creating temporary column
 template <typename T>
 void BinaryColumnBase<T>::remove_first_n_values(size_t count) {
     DCHECK_LE(count, _offsets.size() - 1);
-    size_t remain_size = _offsets.size() - 1 - count;
+    if (count == 0) {
+        return;
+    }
 
-    MutableColumnPtr column = cut(count, remain_size);
-    auto* binary_column = down_cast<BinaryColumnBase<T>*>(column.get());
-    _offsets = std::move(binary_column->_offsets);
-    _bytes = std::move(binary_column->get_bytes());
-    _resource.reset();
+    size_t remain_size = _offsets.size() - 1 - count;
+    if (remain_size == 0) {
+        // Drop the zero-copy backing so the column doesn't keep an external owner
+        // alive while reporting itself empty.
+        _resource = {};
+        _bytes.clear();
+        _offsets.resize(1);
+        _offsets[0] = 0;
+        invalidate_slice_cache();
+        return;
+    }
+
+    // In-place memmove writes into _bytes, so unshare from any zero-copy backing first.
+    _ensure_materialized();
+
+    T bytes_to_remove = _offsets[count];
+    T total_bytes = _offsets.back();
+    T remaining_bytes = total_bytes - bytes_to_remove;
+
+    // Move bytes in-place using memmove (handles overlapping regions)
+    if (remaining_bytes > 0) {
+        memmove(_bytes.data(), _bytes.data() + bytes_to_remove, remaining_bytes);
+    }
+    _bytes.resize(remaining_bytes);
+
+    // Adjust offsets in-place: shift and subtract delta
+    for (size_t i = 0; i <= remain_size; ++i) {
+        _offsets[i] = _offsets[i + count] - bytes_to_remove;
+    }
+    _offsets.resize(remain_size + 1);
+
     invalidate_slice_cache();
 }
 
