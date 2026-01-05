@@ -101,30 +101,8 @@ option(WITH_TENANN "Build with TENANN" OFF)
 
 option(WITH_RELATIVE_SRC_PATH "Build source file with relative path" ON)
 
-# io_uring for async spill I/O (Linux only, requires kernel >= 5.10)
-if (NOT APPLE)
-    option(WITH_IO_URING "Build with io_uring support for async spill I/O" ON)
-else()
-    set(WITH_IO_URING OFF)
-endif()
-
-if (${WITH_IO_URING})
-    find_library(URING_LIBRARY NAMES uring PATHS ${STARROCKS_THIRDPARTY}/lib ${STARROCKS_THIRDPARTY}/lib64 NO_DEFAULT_PATH)
-    if (NOT URING_LIBRARY)
-        find_library(URING_LIBRARY NAMES uring)
-    endif()
-    if (NOT URING_LIBRARY)
-        message(FATAL_ERROR "WITH_IO_URING=ON but liburing not found. Install liburing-dev or set -DWITH_IO_URING=OFF")
-    endif()
-endif()
-
 if (${WITH_TENANN} STREQUAL "ON")
     add_definitions(-DWITH_TENANN)
-endif()
-
-if (${WITH_IO_URING})
-    add_definitions(-DWITH_IO_URING)
-    message(STATUS "io_uring support enabled for async spill I/O (using ${URING_LIBRARY})")
 endif()
 
 # The StarRocks module enables dynamic linking. This is a developer option.
@@ -576,13 +554,6 @@ if (${WITH_TENANN} STREQUAL "ON")
     set(STARROCKS_DEPENDENCIES
         ${STARROCKS_DEPENDENCIES}
         tenann
-    )
-endif()
-
-if (${WITH_IO_URING})
-    set(STARROCKS_DEPENDENCIES
-        ${STARROCKS_DEPENDENCIES}
-        uring
     )
 endif()
 

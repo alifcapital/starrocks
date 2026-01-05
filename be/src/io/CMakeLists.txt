@@ -17,7 +17,7 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_DIR}/src/io")
 # where to put generated binaries
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_DIR}/src/io")
 
-set(IO_SRCS
+add_library(IO STATIC
         array_input_stream.cpp
         compressed_input_stream.cpp
         fd_output_stream.cpp
@@ -33,15 +33,3 @@ set(IO_SRCS
         async_flush_output_stream.cpp
         direct_s3_output_stream.cpp
         )
-
-# Add io_uring sources if enabled
-if (WITH_IO_URING)
-    list(APPEND IO_SRCS
-        io_uring_context.cpp
-        io_uring_manager.cpp
-        io_uring_input_stream.cpp
-        io_uring_buffer_pool.cpp
-        )
-endif()
-
-add_library(IO STATIC ${IO_SRCS})

@@ -354,10 +354,3 @@ FILE(GLOB_RECURSE LIB_JVM ${JAVA_HOME}/lib/*/libjvm.so)
 set_target_properties(jvm PROPERTIES IMPORTED_LOCATION ${LIB_JVM})
 include_directories(${JAVA_HOME}/include)
 include_directories(${JAVA_HOME}/include/linux)
-
-# io_uring support (Linux only)
-# URING_LIBRARY is set by find_library in CMakeLists.txt if liburing is available
-if (NOT APPLE AND ${WITH_IO_URING} AND URING_LIBRARY)
-    add_library(uring STATIC IMPORTED GLOBAL)
-    set_target_properties(uring PROPERTIES IMPORTED_LOCATION ${URING_LIBRARY})
-endif()
