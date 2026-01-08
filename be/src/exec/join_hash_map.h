@@ -27,14 +27,87 @@
 #include "column/chunk.h"
 #include "column/column_hash.h"
 #include "column/column_helper.h"
+#include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "column/vectorized_fwd.h"
 #include "simd/simd.h"
+#include "types/logical_type.h"
 #include "util/phmap/phmap.h"
+
+#include <cmath>
 
 #if defined(__aarch64__)
 #include "arm_acle.h"
 #endif
 namespace starrocks {
+
+// IEEE-754 canonical quiet NaN values (same as Java's Float/Double.floatToIntBits for NaN)
+// Used for Iceberg equality deletes where NaN == NaN must be true
+constexpr uint32_t CANONICAL_FLOAT_NAN_BITS = 0x7FC00000u;
+constexpr uint64_t CANONICAL_DOUBLE_NAN_BITS = 0x7FF8000000000000ULL;
+
+// Normalize NaN values in float/double columns to canonical form for null-safe equality comparison.
+// This is needed for Iceberg equality deletes where NaN == NaN must be true (like NULL == NULL).
+template <typename T>
+ColumnPtr normalize_nan_in_column(const ColumnPtr& col) {
+    using ColumnType = FixedLengthColumn<T>;
+    const ColumnType* data_col = nullptr;
+    NullColumn* null_col = nullptr;
+
+    if (col->is_nullable()) {
+        auto* nullable = down_cast<NullableColumn*>(col.get());
+        data_col = down_cast<const ColumnType*>(nullable->data_column().get());
+        null_col = nullable->null_column().get();
+    } else {
+        data_col = down_cast<const ColumnType*>(col.get());
+    }
+
+    const auto& data = data_col->get_data();
+    bool has_nan = false;
+    for (size_t i = 0; i < data.size(); i++) {
+        if (std::isnan(data[i])) {
+            has_nan = true;
+            break;
+        }
+    }
+
+    if (!has_nan) {
+        return col;
+    }
+
+    // Create a copy with normalized NaN values
+    auto new_data_col = ColumnType::create();
+    new_data_col->reserve(data.size());
+    for (size_t i = 0; i < data.size(); i++) {
+        if (std::isnan(data[i])) {
+            T canonical_nan;
+            if constexpr (std::is_same_v<T, float>) {
+                uint32_t bits = CANONICAL_FLOAT_NAN_BITS;
+                std::memcpy(&canonical_nan, &bits, sizeof(float));
+            } else {
+                uint64_t bits = CANONICAL_DOUBLE_NAN_BITS;
+                std::memcpy(&canonical_nan, &bits, sizeof(double));
+            }
+            new_data_col->append(canonical_nan);
+        } else {
+            new_data_col->append(data[i]);
+        }
+    }
+
+    if (null_col) {
+        return NullableColumn::create(std::move(new_data_col), NullColumn::create(*null_col));
+    }
+    return new_data_col;
+}
+
+inline ColumnPtr normalize_float_nan(const ColumnPtr& col, LogicalType type) {
+    if (type == TYPE_FLOAT) {
+        return normalize_nan_in_column<float>(col);
+    } else if (type == TYPE_DOUBLE) {
+        return normalize_nan_in_column<double>(col);
+    }
+    return col;
+}
 
 class ColumnRef;
 

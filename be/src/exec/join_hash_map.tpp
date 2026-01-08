@@ -138,7 +138,8 @@ void FixedSizeJoinBuildFunc<LT>::construct_hash_table(RuntimeState* state, JoinH
     NullColumns null_columns;
     for (size_t i = 0; i < table_items->key_columns.size(); i++) {
         if (table_items->join_keys[i].is_null_safe_equal) {
-            data_columns.emplace_back(table_items->key_columns[i]);
+            auto col = normalize_float_nan(table_items->key_columns[i], table_items->join_keys[i].type->type);
+            data_columns.emplace_back(col);
         } else if (table_items->key_columns[i]->is_nullable()) {
             auto* nullable_column = ColumnHelper::as_raw_column<NullableColumn>(table_items->key_columns[i]);
             data_columns.emplace_back(nullable_column->data_column());
@@ -314,10 +315,11 @@ void FixedSizeJoinProbeFunc<LT>::lookup_init(const JoinHashTableItems& table_ite
 
     for (size_t i = 0; i < probe_state->key_columns->size(); i++) {
         if (table_items.join_keys[i].is_null_safe_equal) {
-            if ((*probe_state->key_columns)[i]->is_nullable()) {
-                data_columns.emplace_back((*probe_state->key_columns)[i]);
+            auto col = normalize_float_nan((*probe_state->key_columns)[i], table_items.join_keys[i].type->type);
+            if (col->is_nullable()) {
+                data_columns.emplace_back(col);
             } else {
-                auto tmp_column = NullableColumn::create((*probe_state->key_columns)[i],
+                auto tmp_column = NullableColumn::create(col,
                                                          NullColumn::create(probe_state->probe_row_count, 0));
                 data_columns.emplace_back(tmp_column);
             }
