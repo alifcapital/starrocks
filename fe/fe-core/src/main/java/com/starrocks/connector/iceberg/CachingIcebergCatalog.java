@@ -142,15 +142,17 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
         ConnectContext context = ConnectContext.get();
 
-        if (context != null &&
-                context.getCommand() == MysqlCommand.COM_QUERY) {
+        boolean isQuery = context != null && context.getCommand() == MysqlCommand.COM_QUERY;
+        if (isQuery) {
             tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
         }
 
         if (tables.getIfPresent(icebergTableName) != null) {
             Table icebergTable = tables.getIfPresent(icebergTableName);
-            // prolong table cache
-            tables.put(icebergTableName, icebergTable);
+            if (isQuery) {
+                // prolong table cache only for user queries
+                tables.put(icebergTableName, icebergTable);
+            }
             return icebergTable;
         }
 
