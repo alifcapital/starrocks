@@ -89,7 +89,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         this.databases = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
         this.tables = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
-                enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
+                enableCache ? 1000 : NEVER_CACHE).build();
         this.partitionNames = newCacheBuilder(icebergProperties.getIcebergTableCacheTtlSec(),
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
         this.dataFileCache = enableCache ?
