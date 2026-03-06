@@ -62,6 +62,10 @@ public class StatisticAutoCollector extends FrontendDaemon {
             return;
         }
 
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
+
         // check statistic table state
         if (!StatisticUtils.checkStatisticTableStateNormal()) {
             LOG.warn("Statistic table state check failed, skip auto collection");

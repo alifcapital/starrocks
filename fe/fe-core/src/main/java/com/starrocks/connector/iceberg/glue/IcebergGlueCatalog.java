@@ -79,7 +79,7 @@ public class IcebergGlueCatalog implements IcebergCatalog {
 
     @Override
     public boolean tableExists(String dbName, String tableName) throws StarRocksConnectorException {
-        return delegate.tableExists(TableIdentifier.of(dbName, tableName));
+        return listTables(dbName).contains(tableName);
     }
 
     @Override

@@ -335,10 +335,6 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(StatsConstants.EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME);
 
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
-
         RepoCreator.getInstance().run();
     }
 
