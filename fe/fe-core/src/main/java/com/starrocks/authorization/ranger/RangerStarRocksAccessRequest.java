@@ -15,6 +15,7 @@
 package com.starrocks.authorization.ranger;
 
 import com.starrocks.catalog.UserIdentity;
+import com.starrocks.qe.ConnectContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequestImpl;
@@ -42,6 +43,14 @@ public class RangerStarRocksAccessRequest extends RangerAccessRequestImpl {
         request.setClientType("starrocks");
         request.setClusterName("starrocks");
         request.setAccessTime(new Date());
+
+        // Propagate the StarRocks query_id into Ranger's requestData so audit logs can be
+        // correlated with fe.audit.log. ConnectContext is thread-local and may be absent
+        // for background tasks (e.g. checkpoint thread) — leave requestData unset in that case.
+        ConnectContext ctx = ConnectContext.get();
+        if (ctx != null && ctx.getQueryId() != null) {
+            request.setRequestData(ctx.getQueryId().toString());
+        }
 
         LOG.debug("RangerStarRocksAccessRequest | " + request);
 
