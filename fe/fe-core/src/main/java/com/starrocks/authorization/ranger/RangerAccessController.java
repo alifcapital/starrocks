@@ -14,6 +14,7 @@
 package com.starrocks.authorization.ranger;
 
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.ExternalAccessController;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.Column;
@@ -33,6 +34,7 @@ import org.apache.ranger.plugin.service.RangerBasePlugin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 
@@ -113,6 +115,12 @@ public abstract class RangerAccessController extends ExternalAccessController im
     protected void hasPermission(RangerAccessResourceImpl resource, UserIdentity user, Set<String> groups,
                                  PrivilegeType privilegeType)
             throws AccessDeniedException {
+        hasPermission(resource, user, groups, privilegeType, EnumSet.noneOf(ColumnAccessKind.class));
+    }
+
+    protected void hasPermission(RangerAccessResourceImpl resource, UserIdentity user, Set<String> groups,
+                                 PrivilegeType privilegeType, EnumSet<ColumnAccessKind> usage)
+            throws AccessDeniedException {
         // root user bypasses Ranger authorization entirely
         if (UserIdentity.ROOT.equals(user)) {
             return;
@@ -125,7 +133,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
         }
 
         RangerStarRocksAccessRequest request =
-                RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType);
+                RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType, usage);
         RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
         if (result == null || !result.getIsAllowed()) {
             throw new AccessDeniedException();
