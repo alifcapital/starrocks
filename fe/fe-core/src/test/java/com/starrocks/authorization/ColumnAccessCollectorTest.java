@@ -420,20 +420,23 @@ public class ColumnAccessCollectorTest {
     }
 
     @Test
-    public void inSubqueryInSelectListClassifiesInnerColumn() {
-        // SELECT v4 IN (SELECT v7 FROM t2) FROM t1: optimizer rewrites the Apply into a
-        // SEMI-JOIN + DISTINCT-Aggregate before our walker runs, so v7 surfaces as JOIN_KEY
-        // (and AGG_ARG via the implicit distinct). The Apply→Join rewrite also wires v7 into
-        // a Project expression that reaches root output → PROJECTION leaks too. This is the
-        // "classification follows the plan" trade-off acknowledged in ColumnAccessKind doc.
-        // We assert only that v7 ends up classified (non-empty), not the specific role mix.
+    public void inSubqueryInSelectListClassifiesBothColumns() {
+        // SELECT v4 IN (SELECT v7 FROM t2) FROM t1.
+        // Outer column (t1.v4) is what the user typed in SELECT-list; the boolean result depends
+        // on its value, so for PII auditing we want PROJECTION on it — user "sees" it in the
+        // sense that the output row leaks information about v4.
+        // Inner column (t2.v7) only needs to be classified as something (the optimizer's chosen
+        // rewrite path determines the exact role: JOIN_KEY post-Apply→SEMI-JOIN, FILTER if
+        // Apply survives, sometimes also PROJECTION through Project rewrites). All are
+        // acceptable as long as v7 is not silently dropped from audit.
         Map<String, EnumSet<ColumnAccessKind>> roles =
                 run("SELECT v4 IN (SELECT v7 FROM piidb.t2) FROM piidb.t1");
+        EnumSet<ColumnAccessKind> v4 = roles.getOrDefault("t1.v4", EnumSet.noneOf(ColumnAccessKind.class));
+        assertTrue(v4.contains(ColumnAccessKind.PROJECTION),
+                "outer t1.v4 in `v4 IN (...)` SELECT-list expression must carry PROJECTION, got " + v4);
         EnumSet<ColumnAccessKind> v7 = roles.getOrDefault("t2.v7", EnumSet.noneOf(ColumnAccessKind.class));
         Assertions.assertFalse(v7.isEmpty(),
-                "v7 in IN-subquery should carry at least one role, got empty");
-        assertTrue(v7.contains(ColumnAccessKind.JOIN_KEY),
-                "post-rewrite v7 sits in semi-join on-predicate → JOIN_KEY, got " + v7);
+                "inner t2.v7 must be classified (any non-empty role set), got empty");
     }
 
     @Test
