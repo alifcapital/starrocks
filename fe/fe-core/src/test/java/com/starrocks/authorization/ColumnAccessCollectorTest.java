@@ -458,25 +458,32 @@ public class ColumnAccessCollectorTest {
     }
 
     @Test
-    public void correlatedScalarSubqueryConjunctsClassifiedAsFilter() {
-        // Scalar correlated subquery with aggregate is the canonical form StarRocks supports
-        // ("Not support the subquery!" is thrown for non-aggregated scalar correlated). Depending
-        // on the decorrelation path the optimizer takes, the subquery may surface as:
-        //  - LogicalApplyOperator with subqueryOperator referencing v7 directly (Apply.output
-        //    propagates v7's bases → root output adds PROJECTION on v7), or
-        //  - decorrelated join + aggregate (v7 only carries AGG_ARG via the aggregate handler).
-        // Both are valid "classification follows the plan" outcomes. We assert AGG_ARG is present
-        // (the aggregate handler always runs) and that the correlation column gets a non-visible
-        // role; we do not assert on whether PROJECTION leaks because that is plan-dependent.
+    public void correlatedScalarSubqueryWithMaxClassifiesAllColumns() {
+        // SELECT v5, (SELECT max(t2.v7) FROM t2 WHERE t2.v4 = t1.v4) FROM t1.
+        // What the user sees:
+        //   - t1.v5 directly        → PROJECTION
+        //   - the max-value of t2.v7 → user sees one verbatim v7 value (max is a value-returning
+        //     aggregate per our whitelist), so t2.v7 must be PROJECTION + AGG_ARG.
+        // The correlation column on the outer side (t1.v4) participates in the correlation
+        // predicate and may surface as FILTER (if Apply survives) or JOIN_KEY (if decorrelated
+        // into a join); both are valid non-PROJECTION audit signals.
         Map<String, EnumSet<ColumnAccessKind>> roles = run(
                 "SELECT v5, (SELECT max(t2.v7) FROM piidb.t2 WHERE t2.v4 = t1.v4) "
                         + "FROM piidb.t1");
+
+        EnumSet<ColumnAccessKind> t1v5 = roles.getOrDefault("t1.v5", EnumSet.noneOf(ColumnAccessKind.class));
+        assertTrue(t1v5.contains(ColumnAccessKind.PROJECTION),
+                "t1.v5 in SELECT-list must be PROJECTION, got " + t1v5);
+
         EnumSet<ColumnAccessKind> t1v4 = roles.getOrDefault("t1.v4", EnumSet.noneOf(ColumnAccessKind.class));
         assertTrue(t1v4.contains(ColumnAccessKind.FILTER) || t1v4.contains(ColumnAccessKind.JOIN_KEY),
-                "Outer correlation column t1.v4 should carry FILTER or JOIN_KEY, got " + t1v4);
+                "outer correlation column t1.v4 should carry FILTER or JOIN_KEY, got " + t1v4);
+
         EnumSet<ColumnAccessKind> t2v7 = roles.getOrDefault("t2.v7", EnumSet.noneOf(ColumnAccessKind.class));
         assertTrue(t2v7.contains(ColumnAccessKind.AGG_ARG),
-                "max(t2.v7) → v7 must be AGG_ARG, got " + t2v7);
+                "max(t2.v7) — v7 is an aggregate arg, must be AGG_ARG, got " + t2v7);
+        assertTrue(t2v7.contains(ColumnAccessKind.PROJECTION),
+                "max is a value-returning aggregate — user sees a real v7 value, must be PROJECTION, got " + t2v7);
     }
 
     @Test
