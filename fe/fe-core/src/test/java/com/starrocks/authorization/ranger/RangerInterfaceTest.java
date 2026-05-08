@@ -873,24 +873,24 @@ public class RangerInterfaceTest {
     }
 
     /**
-     * Regression test for the silent-drop minor item: when ScanColumnCollector hits a
+     * Regression test for the silent-drop minor item: when ColumnAccessCollector hits a
      * scan node whose Table is not present in tableObjToTableName (which happens after
      * a view/MV is expanded by the optimizer), it must skip silently instead of
      * inserting a {@code null} key into scanColumns or throwing NPE. Privilege for
      * views/MVs is handled separately by checkViewPrivilege / checkMaterializedViewAction.
      */
     @Test
-    public void testScanColumnCollectorSkipsNullTableName() {
+    public void testColumnAccessCollectorSkipsNullTableName() {
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb("db");
         Table t1 = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "t1");
 
         // Empty mapping — simulates the case where the scan table was expanded from a
         // view/MV and was therefore never recorded by TableNameCollector.
         Map<Table, TableName> emptyTableObjToTableName = new HashMap<>();
-        Map<TableName, Set<String>> scanColumns = new HashMap<>();
+        Map<TableName, Map<String, java.util.EnumSet<com.starrocks.authorization.ColumnAccessKind>>> scanColumns = new HashMap<>();
 
-        ColumnPrivilege.ScanColumnCollector collector =
-                new ColumnPrivilege.ScanColumnCollector(emptyTableObjToTableName, scanColumns);
+        ColumnPrivilege.ColumnAccessCollector collector =
+                new ColumnPrivilege.ColumnAccessCollector(emptyTableObjToTableName, scanColumns);
 
         OptExpression scanExpr = new OptExpression(new LogicalOlapScanOperator(t1));
 

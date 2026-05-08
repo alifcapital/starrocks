@@ -22,6 +22,7 @@ import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.authorization.AccessControlProvider;
 import com.starrocks.authorization.AccessController;
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.ObjectType;
 import com.starrocks.authorization.PEntryObject;
 import com.starrocks.authorization.PrivilegeType;
@@ -54,6 +55,7 @@ import com.starrocks.warehouse.Warehouse;
 import org.apache.commons.collections4.ListUtils;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -196,6 +198,15 @@ public class Authorizer {
                                          PrivilegeType privilegeType) throws AccessDeniedException {
         getInstance().getAccessControlOrDefault(tableName.getCatalog()).checkColumnAction(context,
                 tableName, column, privilegeType);
+    }
+
+    public static void checkColumnAction(ConnectContext context,
+                                         TableName tableName, String column,
+                                         PrivilegeType privilegeType,
+                                         EnumSet<ColumnAccessKind> usage)
+            throws AccessDeniedException {
+        getInstance().getAccessControlOrDefault(tableName.getCatalog()).checkColumnAction(context,
+                tableName, column, privilegeType, usage);
     }
 
     public static void checkViewAction(ConnectContext context, TableName tableName,

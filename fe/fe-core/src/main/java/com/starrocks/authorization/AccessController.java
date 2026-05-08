@@ -23,6 +23,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.pipe.PipeName;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 
@@ -75,6 +76,18 @@ public interface AccessController {
     default void checkColumnAction(ConnectContext context, TableName tableName,
                                    String column, PrivilegeType privilegeType) throws AccessDeniedException {
         throw new AccessDeniedException();
+    }
+
+    /**
+     * Same as {@link #checkColumnAction(ConnectContext, TableName, String, PrivilegeType)} but with
+     * the column's plan-level usage roles. External controllers (e.g. Ranger) can pass {@code usage}
+     * into audit so consumers can tell whether the user actually saw the value (PROJECTION) versus
+     * touched it indirectly (AGG_ARG/JOIN_KEY/FILTER). Default delegates to the legacy overload.
+     */
+    default void checkColumnAction(ConnectContext context, TableName tableName,
+                                   String column, PrivilegeType privilegeType,
+                                   EnumSet<ColumnAccessKind> usage) throws AccessDeniedException {
+        checkColumnAction(context, tableName, column, privilegeType);
     }
 
     default void checkViewAction(ConnectContext context, TableName tableName, PrivilegeType privilegeType)

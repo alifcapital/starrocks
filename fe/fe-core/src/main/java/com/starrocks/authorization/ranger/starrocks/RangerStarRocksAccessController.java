@@ -16,6 +16,7 @@ package com.starrocks.authorization.ranger.starrocks;
 
 import com.google.common.collect.Maps;
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.authorization.ranger.RangerAccessController;
 import com.starrocks.catalog.Column;
@@ -30,6 +31,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.pipe.PipeName;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 
@@ -158,6 +160,13 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     @Override
     public void checkColumnAction(ConnectContext context, TableName tableName,
                                   String column, PrivilegeType privilegeType) throws AccessDeniedException {
+        checkColumnAction(context, tableName, column, privilegeType, EnumSet.noneOf(ColumnAccessKind.class));
+    }
+
+    @Override
+    public void checkColumnAction(ConnectContext context, TableName tableName,
+                                  String column, PrivilegeType privilegeType,
+                                  EnumSet<ColumnAccessKind> usage) throws AccessDeniedException {
         hasPermission(RangerStarRocksResource.builder()
                         .setCatalog(tableName.getCatalog())
                         .setDatabase(tableName.getDb())
@@ -165,7 +174,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setColumn(column)
                         .build(),
                 context.getCurrentUserIdentity(),
-                context.getGroups(), privilegeType);
+                context.getGroups(), privilegeType, usage);
     }
 
     @Override
