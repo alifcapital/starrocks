@@ -185,6 +185,9 @@ struct TBrokerRangeDesc {
     12: optional string jsonpaths
     13: optional string json_root
     14: optional Types.TCompressionType compression_type
+    // If true, the file path will be exposed as an additional column
+    // The path column comes after columns_from_path in the schema
+    17: optional bool include_file_path_column
 }
 
 enum TObjectStoreType {
