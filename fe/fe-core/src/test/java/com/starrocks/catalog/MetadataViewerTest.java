@@ -50,6 +50,7 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.system.SystemInfoService;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -176,7 +177,8 @@ public class MetadataViewerTest {
                 minTimes = 0;
                 result = warehouseId;
 
-                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAllComputeNodeIds(anyLong);
+                GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                        .getWorkerGroupComputeNodeIds((ComputeResource) any);
                 minTimes = 0;
                 result = Lists.newArrayList(10003L, 10004L, 10005L);
             }

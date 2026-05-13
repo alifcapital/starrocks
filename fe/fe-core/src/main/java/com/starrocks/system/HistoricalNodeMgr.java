@@ -178,6 +178,14 @@ public class HistoricalNodeMgr {
         ComputeResourceProvider computeResourceProvider = warehouseManager.getComputeResourceProvider();
         ComputeResource computeResource = computeResourceProvider.ofComputeResource(computeResourceId.first,
                 computeResourceId.second);
-        return computeResourceProvider.isResourceAvailable(computeResource);
+        // Universe view: this gate decides whether the historical record stays in the image.
+        // "Is the physical workerGroup alive?" — not "is the default cnGroup alive?". Otherwise
+        // a warehouse with only custom-cnGroup nodes would lose its historical inventory on
+        // image save, defeating the cross-cnGroup data-cache-sharing intent.
+        try {
+            return !computeResourceProvider.getAliveWorkerGroupComputeNodes(computeResource).isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

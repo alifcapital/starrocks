@@ -217,7 +217,7 @@ public class KafkaUtil {
                 }
                 List<Long> computeNodeIds = null;
                 try {
-                    computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                    computeNodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
                 } catch (ErrorReportException e) {
                     throw new LoadException(
                             String.format("Failed to send get kafka partition info request. err: %s", e.getMessage()));

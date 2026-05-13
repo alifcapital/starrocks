@@ -38,6 +38,7 @@ import com.starrocks.authentication.UserAuthenticationInfo;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.analyzer.SetStmtAnalyzer;
 import com.starrocks.sql.ast.SetListItem;
 import com.starrocks.sql.ast.SetPassVar;
@@ -99,6 +100,8 @@ public class SetExecutor {
                     SystemVariable systemVariable = (SystemVariable) var;
                     if (SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
                         handleSetWarehouse(systemVariable);
+                    } else if (SessionVariable.CNGROUP_NAME.equalsIgnoreCase(systemVariable.getVariable())) {
+                        handleSetCnGroup(systemVariable);
                     } else {
                         setVariablesOfAllType(var);
                     }
@@ -133,5 +136,15 @@ public class SetExecutor {
         } else {
             ctx.resetComputeResource();
         }
+    }
+
+    private void handleSetCnGroup(SystemVariable var) throws DdlException {
+        if (!RunMode.isSharedDataMode()) {
+            throw new DdlException("CNGroup is only supported in shared-data mode");
+        }
+        // Existence is not validated here: SET cngroup = DEFAULT leaves resolvedExpression null,
+        // and a missing group surfaces on the first query through WarehouseComputeResourceProvider.
+        setVariablesOfAllType(var);
+        ctx.resetComputeResource();
     }
 }

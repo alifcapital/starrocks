@@ -16,7 +16,9 @@ package com.starrocks.warehouse.cngroup;
 
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -29,21 +31,27 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class LazyComputeResource implements ComputeResource {
     private static final Logger LOG = LogManager.getLogger(LazyComputeResource.class);
 
+    @SerializedName("warehouseId")
     private final long warehouseId;
-    private final Supplier<ComputeResource> lazy;
-    /**
-     * Thread-safe flag to track whether the compute resource has been materialized.
-     * Uses AtomicBoolean to ensure proper memory visibility and atomicity across threads.
-     */
-    private final AtomicBoolean initialized = new AtomicBoolean(false);
+    @SerializedName("cnGroupName")
+    private final String cnGroupName;
+    // Supplier and runtime flag are not part of persisted state — at replay time the
+    // lazy supplier is unavailable; get() falls back to a fresh acquire via WarehouseManager.
+    private transient Supplier<ComputeResource> lazy;
+    private transient AtomicBoolean initialized = new AtomicBoolean(false);
 
-    private LazyComputeResource(long warehouseId, Supplier<ComputeResource> lazy) {
+    private LazyComputeResource(long warehouseId, String cnGroupName, Supplier<ComputeResource> lazy) {
         this.warehouseId = warehouseId;
-        this.lazy = Suppliers.memoize(lazy);
+        this.cnGroupName = cnGroupName;
+        this.lazy = lazy == null ? null : Suppliers.memoize(lazy);
     }
 
     public static LazyComputeResource of(long warehouseId, Supplier<ComputeResource> lazy) {
-        return new LazyComputeResource(warehouseId, lazy);
+        return new LazyComputeResource(warehouseId, CnGroupComputeResource.DEFAULT_GROUP_NAME, lazy);
+    }
+
+    public static LazyComputeResource of(long warehouseId, String cnGroupName, Supplier<ComputeResource> lazy) {
+        return new LazyComputeResource(warehouseId, cnGroupName, lazy);
     }
 
     public ComputeResource get() {
@@ -52,15 +60,30 @@ public class LazyComputeResource implements ComputeResource {
             LOG.debug("Materializing ComputeResource in LazyComputeResource, queryId: {}", queryId);
         }
 
+        if (lazy == null) {
+            // Post-deserialize path (edit-log replay, image load): the original supplier
+            // closure is gone, so re-acquire through the warehouse manager using the
+            // persisted warehouseId/cnGroupName. Falling back to WarehouseComputeResource
+            // keeps replay alive even if the warehouse is temporarily unavailable.
+            try {
+                return GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                        .acquireComputeResource(warehouseId, this);
+            } catch (Exception e) {
+                LOG.warn("post-deserialize acquireComputeResource failed for warehouseId={}, cnGroupName={}: {}",
+                        warehouseId, cnGroupName, e.getMessage());
+                return WarehouseComputeResource.of(warehouseId);
+            }
+        }
+
         ComputeResource result = lazy.get();
-        if (result != null) {
+        if (result != null && initialized != null) {
             initialized.set(true);
         }
         return result;
     }
 
     public boolean isInitialized() {
-        return initialized.get();
+        return initialized != null && initialized.get();
     }
 
     @Override
@@ -74,8 +97,14 @@ public class LazyComputeResource implements ComputeResource {
     }
 
     @Override
+    public String getCnGroupName() {
+        return cnGroupName;
+    }
+
+    @Override
     public String toString() {
         return "{warehouseId=" + warehouseId +
+                ", cnGroupName=" + cnGroupName +
                 ", computeResource=" + (isInitialized() ? get().toString() : "not initialized") +
                 "}";
     }

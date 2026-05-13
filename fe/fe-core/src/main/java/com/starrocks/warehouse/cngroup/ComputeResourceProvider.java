@@ -23,6 +23,27 @@ import java.util.Optional;
 /**
  * {@code ComputeResourceProvider} is responsible to provide an available compute resource for a job scheduler
  * based on the current warehouse's load status or strategy.
+ *
+ * <h2>Node enumeration: workerGroup universe vs cnGroup eligibility</h2>
+ *
+ * In shared-data mode the FE-only cnGroup filter sits on top of the StarOS workerGroup.
+ * Two distinct views of the node set are required at different call sites, and each
+ * has a dedicated method pair so callers must pick consciously:
+ *
+ * <ul>
+ *   <li>{@link #getWorkerGroupComputeNodeIds(ComputeResource)} /
+ *       {@link #getAliveWorkerGroupComputeNodes(ComputeResource)} — every node in the
+ *       workerGroup, no cnGroup filter. Use when the caller has to reach a specific
+ *       shard owner (write coordination, {@code nodes_info}, replica distribution,
+ *       historical inventory, WorkerProvider's storage-view set, maintenance daemon
+ *       acquire/capacity). StarOS shard placement is not cnGroup-aware, so universe
+ *       is the only honest answer.
+ *   <li>{@link #getEligibleComputeNodeIds(ComputeResource)} /
+ *       {@link #getAliveEligibleComputeNodes(ComputeResource)} — workerGroup nodes
+ *       filtered by the resource's cnGroupName. Use for compute scheduling
+ *       decisions (scan fragment placement, query worker pool, isResourceAvailable,
+ *       routine-load endpoint pool). This is where workload isolation is enforced.
+ * </ul>
  */
 public interface ComputeResourceProvider {
     /**
@@ -53,22 +74,44 @@ public interface ComputeResourceProvider {
 
     /**
      * Check the resource is available or not; this method will not throw exception.
+     * Availability is checked against the eligible (cnGroup-filtered) view —
+     * "is there at least one alive node that compute scheduling can use".
      * @param computeResource: the ComputeResource to check
      * @return: true if the resource is available, false otherwise
      */
     boolean isResourceAvailable(ComputeResource computeResource);
 
     /**
-     * Get all compute node ids in the ComputeResource without checking its alive status
-     * @param computeResource: the ComputeResource to get the compute node ids from
-     * @return: a list of compute node ids, empty if the ComputeResource is not available
+     * Get every node in the workerGroup of the given resource, ignoring cnGroup
+     * filtering. Use for storage-view / shard-owner visibility paths.
+     * @param computeResource: the ComputeResource whose workerGroup will be enumerated
+     * @return: a list of compute node ids in the workerGroup, empty if unavailable
      */
-    List<Long> getAllComputeNodeIds(ComputeResource computeResource);
+    List<Long> getWorkerGroupComputeNodeIds(ComputeResource computeResource);
 
     /**
-     * Get all alive compute nodes in the ComputeResource
-     * @param computeResource: the ComputeResource to get the alive compute nodes from
-     * @return: a list of alive compute nodes, empty if the ComputeResource is not available
+     * Get alive nodes in the workerGroup of the given resource, ignoring cnGroup
+     * filtering. Use for storage-view callers that also need an aliveness check
+     * (e.g. {@code HistoricalNodeMgr.isResourceAvailable} or maintenance capacity calc).
+     * @param computeResource: the ComputeResource whose workerGroup will be enumerated
+     * @return: a list of alive compute nodes in the workerGroup, empty if unavailable
      */
-    List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource);
+    List<ComputeNode> getAliveWorkerGroupComputeNodes(ComputeResource computeResource);
+
+    /**
+     * Get cnGroup-filtered node ids for the given resource. Use for compute
+     * scheduling decisions — only nodes eligible to run the session's workload.
+     * @param computeResource: the ComputeResource carrying the cnGroupName filter
+     * @return: a list of eligible compute node ids, empty if unavailable
+     */
+    List<Long> getEligibleComputeNodeIds(ComputeResource computeResource);
+
+    /**
+     * Get cnGroup-filtered alive compute nodes for the given resource. Use for
+     * compute scheduling decisions that also need aliveness (worker provider's
+     * available set, isResourceAvailable, routine-load endpoint selection).
+     * @param computeResource: the ComputeResource carrying the cnGroupName filter
+     * @return: a list of alive eligible compute nodes, empty if unavailable
+     */
+    List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource);
 }

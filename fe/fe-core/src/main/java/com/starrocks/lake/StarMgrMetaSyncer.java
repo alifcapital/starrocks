@@ -193,7 +193,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
                     }
                 }
             }
-            ComputeNode cn = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+            ComputeNode cn = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
             if (cn != null) {
                 shardIdsByBeMap.put(cn.getId(), Sets.newHashSet(shardIds));
             }

@@ -26,6 +26,8 @@ import com.starrocks.catalog.SchemaInfo;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.ErrorCode;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.Status;
 import com.starrocks.common.TimeoutException;
 import com.starrocks.common.util.ThreadUtil;
@@ -316,28 +318,28 @@ public class TabletTaskExecutor {
     }
 
     /**
-     * Get the compute node id for a tablet. Falls back to a random alive node if the assigned
-     * node is unavailable and retry is enabled.
+     * Pick a compute node to receive the CREATE TABLET (warm-up) RPC for {@code tabletId}.
+     *
+     * <p>The warm-up just registers tablet metadata in shared storage and primes a local file
+     * cache slot — any CN with access to the storage volume can perform it (BE side does not
+     * require ownership; see {@code lake_tablet_manager()->create_tablet}). We therefore pick
+     * an alive eligible node from the session's cnGroup so the cache slot lives where regular
+     * reads from this session will later land. Conversion pipelines (rollup, schema change,
+     * delete) that follow primary-owner placement use {@code getComputeNodeAssignedToTablet}
+     * directly and are not affected by this change.
+     *
+     * <p>This applies to {@link com.starrocks.server.LocalMetastore#buildPartitions} —
+     * CREATE TABLE, add partition, add sub-partition, truncate / temp partition init —
+     * because they all flow through this helper.
      */
     // Visible for testing
     static long getNodeIdForTablet(WarehouseManager warehouseManager, ComputeResource computeResource, long tabletId) {
-        try {
-            return warehouseManager.getComputeNodeAssignedToTablet(computeResource, tabletId).getId();
-        } catch (Exception e) {
-            // When retry is disabled, propagate the exception immediately.
-            // When retry is enabled, fallback to a random alive node so that the task can be
-            // created and sent. If this node also fails, the retry mechanism will reassign it.
-            if (Config.lake_create_tablet_max_retries <= 0) {
-                throw e;
-            }
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
-            if (aliveNodes.isEmpty()) {
-                throw e;
-            }
-            long nodeId = aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size())).getId();
-            LOG.debug("failed to get assigned node for tablet {}, fallback to node {}", tabletId, nodeId);
-            return nodeId;
+        List<ComputeNode> aliveNodes = warehouseManager.getAliveEligibleComputeNodes(computeResource);
+        if (aliveNodes.isEmpty()) {
+            throw ErrorReportException.report(ErrorCode.ERR_NO_NODES_IN_WAREHOUSE,
+                    warehouseManager.getWarehouse(computeResource.getWarehouseId()).getName());
         }
+        return aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size())).getId();
     }
 
     private static void sendCreateReplicaTasksAndWaitForFinished(List<CreateReplicaTask> tasks, long timeout,
@@ -397,7 +399,7 @@ public class TabletTaskExecutor {
                     retry + 1, failedTasks.size(), excludeNodes);
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
+            List<ComputeNode> aliveNodes = warehouseManager.getAliveEligibleComputeNodes(computeResource);
             List<ComputeNode> candidates = aliveNodes.stream()
                     .filter(n -> !excludeNodes.contains(n.getId()))
                     .collect(Collectors.toList());

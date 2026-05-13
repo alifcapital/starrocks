@@ -592,7 +592,7 @@ public class OlapScanNode extends AbstractOlapTableScanNode {
         // frontend if there are many calls per request (e.g. one per partition when there are many partitions).
         if (RunMode.getCurrentRunMode() == RunMode.SHARED_DATA) {
             WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            if (CollectionUtils.isEmpty(warehouseManager.getAliveComputeNodes(computeResource))) {
+            if (CollectionUtils.isEmpty(warehouseManager.getAliveEligibleComputeNodes(computeResource))) {
                 Warehouse warehouse = warehouseManager.getWarehouse(computeResource.getWarehouseId());
                 throw ErrorReportException.report(ErrorCode.ERR_NO_NODES_IN_WAREHOUSE, warehouse.getName());
             }

@@ -23,11 +23,15 @@ import com.starrocks.common.ErrorReport;
 import com.starrocks.common.proc.BaseProcResult;
 import com.starrocks.common.proc.ProcResult;
 import com.starrocks.lake.StarOSAgent;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.warehouse.cngroup.AlterCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.CreateCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.DropCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.EnableDisableCnGroupStmt;
+import com.starrocks.system.Backend;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,29 +60,60 @@ public class DefaultWarehouse extends Warehouse {
 
     @Override
     public void addNodeToCNGroup(ComputeNode node, String cnGroupName) throws DdlException {
-        if (!Strings.isNullOrEmpty(cnGroupName)) {
-            // NOTE: NOT IMPLEMENTED, so the cnGroupName must be empty!
+        if (node instanceof Backend && !Strings.isNullOrEmpty(cnGroupName)) {
+            // CNGroup applies only to compute nodes.
             ErrorReport.reportDdlException(ErrorCode.ERR_CNGROUP_NOT_IMPLEMENTED);
+        }
+        if (CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName)) {
+            // ALL_GROUPS ("*") is a reserved internal sentinel for forSystemTask. Persisting it
+            // as a user CNGroup would make the node unreachable from user sessions (acquireComputeResource
+            // sanitizes "*" back to default) while still leaking it into internal all-groups paths.
+            throw new DdlException("CNGroup name '" + CnGroupComputeResource.ALL_GROUPS + "' is reserved");
         }
         node.setWorkerGroupId(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
         node.setWarehouseId(getId());
+        String groupName = Strings.isNullOrEmpty(cnGroupName)
+                ? CnGroupComputeResource.DEFAULT_GROUP_NAME : cnGroupName;
+        node.setCnGroupName(groupName);
     }
 
     @Override
     public void validateRemoveNodeFromCNGroup(ComputeNode node, String cnGroupName) throws DdlException {
-        if (!Strings.isNullOrEmpty(cnGroupName)) {
-            // NOTE: NOT IMPLEMENTED, so the cnGroupName must be empty!
+        if (node instanceof Backend && !Strings.isNullOrEmpty(cnGroupName)) {
+            // CNGroup applies only to compute nodes.
             ErrorReport.reportDdlException(ErrorCode.ERR_CNGROUP_NOT_IMPLEMENTED);
+        }
+        if (CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName)) {
+            throw new DdlException("CNGroup name '" + CnGroupComputeResource.ALL_GROUPS + "' is reserved");
+        }
+        if (!Strings.isNullOrEmpty(cnGroupName)) {
+            String currentGroup = node.getCnGroupName();
+            if (currentGroup == null) {
+                currentGroup = CnGroupComputeResource.DEFAULT_GROUP_NAME;
+            }
+            if (!cnGroupName.equals(currentGroup)) {
+                throw new DdlException("Node " + node.getId() + " is not in CNGroup '" + cnGroupName +
+                        "', it is in '" + currentGroup + "'");
+            }
         }
     }
 
     @Override
     public List<String> getWarehouseInfo() {
+        // Physical-inventory node count across all cnGroups in this workerGroup.
+        long nodeCount = 0;
+        try {
+            nodeCount = GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                    .getWorkerGroupComputeNodeIds(WarehouseComputeResource.of(getId())).size();
+        } catch (Exception e) {
+            // Ignore errors, return 0
+        }
+
         return Lists.newArrayList(
                 String.valueOf(getId()),
                 getName(),
                 "AVAILABLE",
-                String.valueOf(0L),
+                String.valueOf(nodeCount),
                 String.valueOf(1L),
                 String.valueOf(1L),
                 String.valueOf(1L),

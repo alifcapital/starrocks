@@ -166,7 +166,7 @@ public class EsScanNode extends ScanNode {
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
         if (RunMode.isSharedDataMode()) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
             nodes = computeNodeIds.stream()
                     .map(id -> systemInfoService.getBackendOrComputeNode(id)).collect(Collectors.toList());
         } else {

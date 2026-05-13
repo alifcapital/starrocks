@@ -207,7 +207,13 @@ public class SystemInfoService implements GsonPostProcessable {
             ComputeResourceProvider computeResourceProvider = warehouseManager.getComputeResourceProvider();
             ComputeResource computeResource = computeResourceProvider.ofComputeResource(warehouseId, workerGroupId);
             try {
-                computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                // Universe view: historical inventory records the physical workerGroup, not the
+                // session cnGroup. Data cache sharing uses this list to let a new node fetch warm
+                // cache from any previous owner — including owners in other cnGroups. This is a
+                // deliberate trade-off: cache locality (warmer cold-start across cnGroups) at the
+                // price of soft isolation in BE-to-BE IO traffic. Compute scheduling itself stays
+                // session-cnGroup-scoped via DefaultSharedDataWorkerProvider.
+                computeNodeIds = warehouseManager.getWorkerGroupComputeNodeIds(computeResource);
             } catch (Exception e) {
                 computeNodeIds = new ArrayList<>();
                 LOG.warn("fail to get compute node ids when updating historical compute nodes");
@@ -314,7 +320,9 @@ public class SystemInfoService implements GsonPostProcessable {
             ComputeResource computeResource = computeResourceProvider.ofComputeResource(warehouseId, workerGroupId);
             List<Long> computeNodeIds;
             try {
-                computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                // Universe view: see updateHistoricalComputeNodes — same cross-cnGroup
+                // cache-locality trade-off applies.
+                computeNodeIds = warehouseManager.getWorkerGroupComputeNodeIds(computeResource);
             } catch (Exception e) {
                 computeNodeIds = new ArrayList<>();
                 LOG.warn("fail to get compute node ids when updating historical backends");
@@ -1352,6 +1360,7 @@ public class SystemInfoService implements GsonPostProcessable {
             // remove from BackendCoreStat
             BackendResourceStat.getInstance().removeBe(backend.getWarehouseId(), backend.getId());
         }
+
         return backend;
     }
 

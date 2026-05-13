@@ -342,9 +342,6 @@ public class OlapTableSink extends DataSink {
         tSink.setIs_multi_statements_txn(isMultiStatementTxn);
 
         // Acquire read lock to protect partition data access.
-        // During planning, the PlannerMetaLocker may release locks for performance,
-        // so we need to acquire lock here to ensure consistent reads of partition info.
-        // Only lock when accessing partition-related data structures (HashMap not thread-safe).
         long dbId = tSink.getDb_id();
         long tableId = dstTable.getId();
         Locker locker = new Locker();
@@ -368,8 +365,13 @@ public class OlapTableSink extends DataSink {
             TOlapTablePartitionParam partitionParam = createPartition(tSink.getDb_id(), dstTable, tupleDescriptor,
                     enableAutomaticPartition, automaticBucketSize, getOpenPartitions(), txnState);
             tSink.setPartition(partitionParam);
+            // createLocation reaches StarOS shard owners via the universe-by-nature
+            // shard-owner-lookup APIs (getComputeNodeAssignedToTablet etc.), so the session
+            // resource is fine here. nodes_info needs the universe view explicitly so BE
+            // can route to any shard owner regardless of cnGroup.
             tSink.setLocation(createLocation(dstTable, partitionParam, enableReplicatedStorage, computeResource, txnState));
-            tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(computeResource, getSystemInfoService(dstTable)));
+            tSink.setNodes_info(GlobalStateMgr.getCurrentState().createWorkerGroupNodesInfo(
+                    computeResource, getSystemInfoService(dstTable)));
             tSink.setPartial_update_mode(this.partialUpdateMode);
             tSink.setAutomatic_bucket_size(automaticBucketSize);
             if (canUseColocateMVIndex(dstTable)) {
@@ -1006,6 +1008,10 @@ public class OlapTableSink extends DataSink {
         if (RunMode.isSharedDataMode()) {
             // NOTE: shared-nothing workerProvider.allowUsingBackupNode() == false, so don't bother to create it
             WorkerProvider.Factory workerProviderFactory = new DefaultSharedDataWorkerProvider.Factory();
+            // Pass the session resource. The provider builds a dual snapshot internally —
+            // universe id2ComputeNode (so primary owners outside the session cnGroup remain
+            // visible for selectBackupWorker) and eligibility availableID2ComputeNode (so
+            // backup buddies are picked from the session group).
             WorkerProvider workerProvider = workerProviderFactory.captureAvailableWorkers(
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo(), false, 0,
                     SessionVariableConstants.ComputationFragmentSchedulingPolicy.ALL_NODES, computeResource);

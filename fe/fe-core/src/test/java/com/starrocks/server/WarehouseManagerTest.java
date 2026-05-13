@@ -89,7 +89,7 @@ public class WarehouseManagerTest {
         ExceptionChecker.expectThrowsWithMsg(ErrorReportException.class, "Warehouse id: 1 not exist.",
                 () -> mgr.getWarehouse(1L));
         ExceptionChecker.expectThrowsWithMsg(ErrorReportException.class, "Warehouse id: 1 not exist.",
-                () -> mgr.getAllComputeNodeIds(WarehouseComputeResource.of(1L)));
+                () -> mgr.getEligibleComputeNodeIds(WarehouseComputeResource.of(1L)));
         ExceptionChecker.expectThrowsWithMsg(ErrorReportException.class, "Warehouse id: 1 not exist.",
                 () -> mgr.getComputeNodeId(WarehouseComputeResource.of(1L), 0));
         ExceptionChecker.expectThrowsWithMsg(ErrorReportException.class, "Warehouse id: 1 not exist.",
@@ -145,10 +145,10 @@ public class WarehouseManagerTest {
         WarehouseManager mgr = new WarehouseManager();
         mgr.initDefaultWarehouse();
 
-        List<Long> nodeIds = mgr.getAllComputeNodeIds(WarehouseManager.DEFAULT_RESOURCE);
+        List<Long> nodeIds = mgr.getEligibleComputeNodeIds(WarehouseManager.DEFAULT_RESOURCE);
         Assertions.assertEquals(2, nodeIds.size());
 
-        List<ComputeNode> nodes = mgr.getAliveComputeNodes(WarehouseManager.DEFAULT_RESOURCE);
+        List<ComputeNode> nodes = mgr.getAliveEligibleComputeNodes(WarehouseManager.DEFAULT_RESOURCE);
         Assertions.assertEquals(1, nodes.size());
 
         LakeTablet tablet = new LakeTablet(1L);
@@ -213,7 +213,7 @@ public class WarehouseManagerTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
+            public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
                 if (computeResource.getWarehouseId() == WarehouseManager.DEFAULT_WAREHOUSE_ID) {
                     return new ArrayList<>(Arrays.asList(b1));
                 }
@@ -290,7 +290,7 @@ public class WarehouseManagerTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
+            public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
                 return Lists.newArrayList();
             }
 
@@ -384,7 +384,7 @@ public class WarehouseManagerTest {
             {
                 // This is the point of the test -- we only want to call this once even though we're calling
                 // addScanRangeLocations multiple times.
-                mockWarehouseMgr.getAliveComputeNodes(WarehouseManager.DEFAULT_RESOURCE);
+                mockWarehouseMgr.getAliveEligibleComputeNodes(WarehouseManager.DEFAULT_RESOURCE);
                 times = 1;
                 result = Lists.newArrayList(livingCn);
             }

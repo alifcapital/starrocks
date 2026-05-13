@@ -246,7 +246,7 @@ public class AutovacuumDaemon extends FrontendDaemon {
                     }
                 }
             }
-            ComputeNode pickNode = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+            ComputeNode pickNode = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
             if (pickNode == null) {
                 return;
             }

@@ -397,6 +397,7 @@ import com.starrocks.warehouse.Warehouse;
 import com.starrocks.warehouse.WarehouseInfo;
 import com.starrocks.warehouse.cngroup.CRAcquireContext;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -1944,9 +1945,13 @@ public class FrontendServiceImpl implements FrontendService.Iface {
                     .orElse(WarehouseManager.DEFAULT_WAREHOUSE_ID);
         }
         // TODO(ComputeResource): support more better compute resource acquiring.
+        // Prefer the transaction's compute resource so loads in a custom cnGroup keep running
+        // there for subpartition warm-up; fall back to default acquisition for legacy txns.
         final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-        final CRAcquireContext acquireContext = CRAcquireContext.of(warehouseId);
-        final ComputeResource computeResource = warehouseManager.acquireComputeResource(acquireContext);
+        ComputeResource computeResource = txnState.getComputeResource();
+        if (computeResource == null) {
+            computeResource = warehouseManager.acquireComputeResource(CRAcquireContext.of(warehouseId));
+        }
 
         // immute partitions and create new sub partitions
         for (Long id : request.partition_ids) {
@@ -2012,7 +2017,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
 
         // build nodes
         // TODO(ComputeResource): support more better compute resource acquiring.
-        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createNodesInfo(WarehouseManager.DEFAULT_RESOURCE,
+        // Universe view: buildTablets() resolves owners via getAliveComputeNodeId which does NOT
+        // filter by cnGroup, so nodes_info must include every shard owner regardless of group
+        // or BE cannot route to owners in custom cnGroups.
+        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createWorkerGroupNodesInfo(
+                computeResource,
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
         result.setNodes(nodesInfo.nodes);
         result.setStatus(new TStatus(OK));
@@ -2470,8 +2479,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         result.setPartitions(partitions);
         result.setTablets(tablets);
 
-        // build nodes
-        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createNodesInfo(txnState.getComputeResource(),
+        // build nodes — universe view, see OlapTableSink: tablets[] primary owners come from
+        // getAliveComputeNodeId which does NOT filter by cnGroup, so nodes_info must include
+        // every shard owner in the warehouse or BE cannot route to default-group owners.
+        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createWorkerGroupNodesInfo(
+                computeResource,
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
         result.setNodes(nodesInfo.nodes);
         result.setStatus(new TStatus(OK));
@@ -2884,7 +2896,11 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             response.setLocation(OlapTableSink.createLocation(
                     dictTable, partitionParam, dictTable.enableReplicatedStorage(), null));
             // TODO(ComputeResource): support more better compute resource acquiring.
-            response.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(WarehouseManager.DEFAULT_RESOURCE,
+            // Universe view: dict_query runtime fetch must reach every shard owner of the dict table
+            // (shard ownership is not cnGroup-aware); a default-only resource would hide owners in
+            // custom cnGroups and break BE routing.
+            response.setNodes_info(GlobalStateMgr.getCurrentState().createWorkerGroupNodesInfo(
+                    WarehouseComputeResource.of(WarehouseManager.DEFAULT_WAREHOUSE_ID),
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()));
         } catch (StarRocksException e) {
             SemanticException semanticException = new SemanticException("build DictQueryParams error in dict_query_expr.");

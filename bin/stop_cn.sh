@@ -30,8 +30,12 @@
 curdir=`dirname "$0"`
 curdir=`cd "$curdir"; pwd`
 
-export STARROCKS_HOME=`cd "$curdir/.."; pwd`
-export PID_DIR=`cd "$curdir"; pwd`
+if [ -z "$STARROCKS_HOME" ]; then
+    export STARROCKS_HOME=`cd "$curdir/.."; pwd`
+fi
+if [ -z "$PID_DIR" ]; then
+    export PID_DIR=`cd "$curdir"; pwd`
+fi
 
 source $STARROCKS_HOME/bin/common.sh
 

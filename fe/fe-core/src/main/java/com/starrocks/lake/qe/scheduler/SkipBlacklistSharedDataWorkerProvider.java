@@ -30,7 +30,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * SkipBlacklistSharedDataWorkerProvider extends DefaultSharedDataWorkerProvider and skips backend blacklist verification.
@@ -60,16 +59,36 @@ public class SkipBlacklistSharedDataWorkerProvider extends DefaultSharedDataWork
                 ComputeResource computeResource) {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
-            computeNodeIds.forEach(nodeId -> builder.put(nodeId,
-                    GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
-            ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
+            final SystemInfoService clusterInfo =
+                    GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+
+            // Universe for shard-owner visibility (selectBackupWorker guard).
+            final List<Long> universeNodeIds = warehouseManager.getWorkerGroupComputeNodeIds(computeResource);
+            final ImmutableMap.Builder<Long, ComputeNode> universeBuilder = ImmutableMap.builder();
+            universeNodeIds.forEach(nodeId -> {
+                ComputeNode node = clusterInfo.getBackendOrComputeNode(nodeId);
+                if (node != null) {
+                    universeBuilder.put(nodeId, node);
+                }
+            });
+            ImmutableMap<Long, ComputeNode> idToComputeNode = universeBuilder.build();
+
+            // Eligibility-alive for compute scheduling. Blacklist intentionally NOT applied here —
+            // that is the whole point of this provider.
+            final ImmutableMap.Builder<Long, ComputeNode> eligibleBuilder = ImmutableMap.builder();
+            warehouseManager.getAliveEligibleComputeNodes(computeResource).forEach(node -> {
+                if (node != null) {
+                    eligibleBuilder.put(node.getId(), node);
+                }
+            });
+            ImmutableMap<Long, ComputeNode> availableComputeNodes = eligibleBuilder.build();
+
             if (LOG.isDebugEnabled()) {
-                LOG.debug("SkipBlacklistSharedDataWorkerProvider - idToComputeNode: {}", idToComputeNode);
+                LOG.debug("SkipBlacklistSharedDataWorkerProvider - idToComputeNode (universe): {}, "
+                                + "availableComputeNodes (eligible+alive): {}",
+                        idToComputeNode, availableComputeNodes);
             }
 
-            ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkersSkipBlacklist(idToComputeNode);
             if (availableComputeNodes.isEmpty()) {
                 Warehouse warehouse = warehouseManager.getWarehouse(computeResource.getWarehouseId());
                 throw ErrorReportException.report(ErrorCode.ERR_NO_NODES_IN_WAREHOUSE, warehouse.getName());
@@ -77,18 +96,6 @@ public class SkipBlacklistSharedDataWorkerProvider extends DefaultSharedDataWork
 
             return new SkipBlacklistSharedDataWorkerProvider(idToComputeNode, availableComputeNodes, computeResource,
                     blacklistBackupRoutingPolicy);
-        }
-
-        private static ImmutableMap<Long, ComputeNode> filterAvailableWorkersSkipBlacklist(
-                ImmutableMap<Long, ComputeNode> workers) {
-            ImmutableMap.Builder<Long, ComputeNode> builder = new ImmutableMap.Builder<>();
-            for (Map.Entry<Long, ComputeNode> entry : workers.entrySet()) {
-                // Only check if worker is alive, skip blacklist verification
-                if (entry.getValue().isAlive()) {
-                    builder.put(entry);
-                }
-            }
-            return builder.build();
         }
     }
 

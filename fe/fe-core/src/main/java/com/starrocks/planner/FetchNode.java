@@ -63,7 +63,7 @@ public class FetchNode extends PlanNode {
         rowPosDescs.forEach((tupleId, rowPosDescs) -> {
             msg.fetch_node.row_pos_descs.put(tupleId.asInt(), rowPosDescs.toThrift());
         });
-        msg.fetch_node.nodes_info = GlobalStateMgr.getCurrentState().createNodesInfo(computeResource,
+        msg.fetch_node.nodes_info = GlobalStateMgr.getCurrentState().createEligibleComputeNodesInfo(computeResource,
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
     }
 

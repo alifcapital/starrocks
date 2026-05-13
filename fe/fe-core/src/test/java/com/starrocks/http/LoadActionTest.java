@@ -327,7 +327,7 @@ public class LoadActionTest extends StarRocksHttpTestCase {
 
         new Expectations() {
             {
-                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAllComputeNodeIds((ComputeResource) any);
+                GlobalStateMgr.getCurrentState().getWarehouseMgr().getEligibleComputeNodeIds((ComputeResource) any);
                 result = nodeIds;
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
                 result = service;
@@ -476,7 +476,7 @@ public class LoadActionTest extends StarRocksHttpTestCase {
             }
 
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource resource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource resource) {
                 return Lists.newArrayList(1L);
             }
 

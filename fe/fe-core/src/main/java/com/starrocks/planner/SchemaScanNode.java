@@ -342,7 +342,7 @@ public class SchemaScanNode extends ScanNode {
         List<ComputeNode> nodeList;
         if (RunMode.getCurrentRunMode() == RunMode.SHARED_DATA) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
 
             nodeList = computeNodeIds.stream()
                     .map(id -> GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(id))

@@ -33,6 +33,7 @@ import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -92,16 +93,40 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
                 ComputeResource computeResource) {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
-            computeNodeIds.forEach(nodeId -> builder.put(nodeId,
-                    GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
-            ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();
+            final SystemInfoService clusterInfo =
+                    GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+
+            // Universe: every node in the workerGroup. Needed for shard-owner visibility so
+            // selectBackupWorker()'s containsKey(workerId) guard recognises a tablet's primary
+            // owner even when that owner sits outside the session cnGroup.
+            final List<Long> universeNodeIds = warehouseManager.getWorkerGroupComputeNodeIds(computeResource);
+            final ImmutableMap.Builder<Long, ComputeNode> universeBuilder = ImmutableMap.builder();
+            universeNodeIds.forEach(nodeId -> {
+                ComputeNode node = clusterInfo.getBackendOrComputeNode(nodeId);
+                if (node != null) {
+                    universeBuilder.put(nodeId, node);
+                }
+            });
+            ImmutableMap<Long, ComputeNode> idToComputeNode = universeBuilder.build();
+
+            // Eligibility: cnGroup-filtered alive nodes. The actual compute pool we schedule
+            // fragments on — workload isolation lives here.
+            final ImmutableMap.Builder<Long, ComputeNode> eligibleBuilder = ImmutableMap.builder();
+            warehouseManager.getAliveEligibleComputeNodes(computeResource).forEach(node -> {
+                if (node != null) {
+                    eligibleBuilder.put(node.getId(), node);
+                }
+            });
+            ImmutableMap<Long, ComputeNode> eligibleAliveNodes = eligibleBuilder.build();
+            // Also apply the blacklist / extra availability filter on top of eligibility+alive.
+            ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkers(eligibleAliveNodes);
+
             if (LOG.isDebugEnabled()) {
-                LOG.debug("idToComputeNode: {}", idToComputeNode);
+                LOG.debug("idToComputeNode (universe): {}, availableComputeNodes (eligible+alive): {}, "
+                                + "cnGroupName: {}",
+                        idToComputeNode, availableComputeNodes, computeResource.getCnGroupName());
             }
 
-            ImmutableMap<Long, ComputeNode> availableComputeNodes = filterAvailableWorkers(idToComputeNode);
             if (availableComputeNodes.isEmpty()) {
                 Warehouse warehouse = warehouseManager.getWarehouse(computeResource.getWarehouseId());
                 throw ErrorReportException.report(ErrorCode.ERR_NO_NODES_IN_WAREHOUSE, warehouse.getName());
@@ -132,6 +157,9 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     private final ComputeResource computeResource;
 
     private final BlacklistBackupRoutingPolicy blacklistBackupRoutingPolicy;
+
+    // Track backup worker usage count for profiling
+    private final AtomicInteger backupWorkerUsageCount = new AtomicInteger(0);
 
     @VisibleForTesting
     public DefaultSharedDataWorkerProvider(ImmutableMap<Long, ComputeNode> id2ComputeNode,
@@ -237,9 +265,15 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     }
 
     private void reportWorkerNotFoundException(String errorMessagePrefix, long workerId) throws NonRecoverableException {
-        throw new NonRecoverableException(
-                errorMessagePrefix + FeConstants.getNodeNotFoundError(true) + " nodeId: " + workerId + " " +
-                        computeNodesToString(false));
+        String cnGroupName = CnGroupComputeResource.getEffectiveName(computeResource.getCnGroupName());
+        String errorMsg;
+        if (!CnGroupComputeResource.DEFAULT_GROUP_NAME.equals(cnGroupName) && id2ComputeNode.isEmpty()) {
+            errorMsg = errorMessagePrefix + "CNGroup '" + cnGroupName + "' has no available compute nodes";
+        } else {
+            errorMsg = errorMessagePrefix + FeConstants.getNodeNotFoundError(true)
+                    + " nodeId: " + workerId + " " + computeNodesToString(false);
+        }
+        throw new NonRecoverableException(errorMsg);
     }
 
     @Override
@@ -249,14 +283,19 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
 
     @Override
     public long selectBackupWorker(long workerId) {
+        long buddy;
         if (blacklistBackupRoutingPolicy == BlacklistBackupRoutingPolicy.CIRCULAR) {
-            return selectBackupWorkerCircular(workerId);
+            buddy = selectBackupWorkerCircular(workerId);
         } else if (blacklistBackupRoutingPolicy == BlacklistBackupRoutingPolicy.RANDOM) {
-            return selectBackupWorkerRandom(workerId);
+            buddy = selectBackupWorkerRandom(workerId);
         } else {
             throw new IllegalArgumentException("Invalid blacklist backup routing policy: "
                     + blacklistBackupRoutingPolicy);
         }
+        if (buddy != -1) {
+            backupWorkerUsageCount.incrementAndGet();
+        }
+        return buddy;
     }
 
     /**
@@ -329,6 +368,17 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
     @Override
     public ComputeResource getComputeResource() {
         return computeResource;
+    }
+
+    @Override
+    public int getBackupWorkerUsageCount() {
+        return backupWorkerUsageCount.get();
+    }
+
+    @Override
+    public String getBackupWorkerUsageDetails() {
+        int count = backupWorkerUsageCount.get();
+        return count == 0 ? "" : "count=" + count;
     }
 
     private String computeNodesToString(boolean allowNormalNodes) {

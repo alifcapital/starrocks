@@ -92,7 +92,7 @@ public class SkipBlacklistSharedDataWorkerProviderTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 return Arrays.asList(10L, 11L, 12L, 13L, 14L);
             }
         };
@@ -157,7 +157,7 @@ public class SkipBlacklistSharedDataWorkerProviderTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 return Arrays.asList(10L, 11L, 12L, 13L, 14L);
             }
         };

@@ -170,7 +170,7 @@ public class PulsarUtil {
                         computeResource = computeResourceProvider.ofComputeResource(
                                 req.pulsarInfo.warehouseId, req.pulsarInfo.workgroupId);
                     }
-                    nodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                    nodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
                     if (nodeIds.isEmpty()) {
                         throw new LoadException("Failed to send proxy request. No alive backends or computeNodes");
                     }

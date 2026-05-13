@@ -50,6 +50,7 @@ public class CurrentGlobalQueryStatisticsProcDirTest {
             .withExecProgress("100%")
             .withExecState("FINISHED")
             .withWareHouseName("default_warehouse")
+            .withCnGroupName("default")
             .withCustomQueryId("")
             .withResourceGroupName("wg1");
 
@@ -70,6 +71,7 @@ public class CurrentGlobalQueryStatisticsProcDirTest {
             .withExecProgress("100%")
             .withExecState("FINISHED")
             .withWareHouseName("default_warehouse")
+            .withCnGroupName("analytics")
             .withCustomQueryId("")
             .withResourceGroupName("wg2");
 
@@ -89,6 +91,7 @@ public class CurrentGlobalQueryStatisticsProcDirTest {
             .withExecProgress("100%")
             .withExecState("FINISHED")
             .withWareHouseName("default_warehouse")
+            .withCnGroupName("default")
             .withCustomQueryId("")
             .withResourceGroupName("wg3");
 
@@ -109,6 +112,7 @@ public class CurrentGlobalQueryStatisticsProcDirTest {
             .withExecProgress("100%")
             .withExecState("FINISHED")
             .withWareHouseName("default_warehouse")
+            .withCnGroupName("etl")
             .withCustomQueryId("")
             .withResourceGroupName("wg");
 

@@ -142,7 +142,7 @@ public class TabletTaskExecutorTest {
         WarehouseManager warehouseManager = new WarehouseManager();
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
+            public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
                 return aliveNodes;
             }
         };
@@ -329,7 +329,7 @@ public class TabletTaskExecutorTest {
                 throw new RuntimeException("no assigned node");
             }
             @Mock
-            public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
+            public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
                 return List.of(aliveNode);
             }
         };

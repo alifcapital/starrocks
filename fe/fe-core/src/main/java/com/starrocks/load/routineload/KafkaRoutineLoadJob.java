@@ -319,7 +319,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         if (RunMode.isSharedDataMode()) {
             aliveNodeNum = 0;
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
             for (long nodeId : computeIds) {
                 ComputeNode node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
                 if (node != null && node.isAlive()) {

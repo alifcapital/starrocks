@@ -96,6 +96,7 @@ import com.starrocks.thrift.TPipelineProfileLevel;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.thrift.TWorkGroup;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import com.starrocks.warehouse.cngroup.LazyComputeResource;
 import org.apache.commons.collections4.MapUtils;
@@ -110,6 +111,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1110,7 +1112,16 @@ public class ConnectContext {
         // try to acquire cn group id once the warehouse is set
         final long warehouseId = this.getCurrentWarehouseId();
         final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
-        this.computeResource = LazyComputeResource.of(warehouseId, () ->
+        // Get cnGroupName from session variable for workload isolation.
+        // ALL_GROUPS ("*") is reserved for internal system tasks (forSystemTask) — sanitize
+        // here so user-supplied "*" cannot survive in LazyComputeResource.getCnGroupName()
+        // and bypass workload isolation in worker providers.
+        String cnGroupName = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+        if (CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName)) {
+            cnGroupName = null;
+        }
+        final String finalCnGroupName = cnGroupName;
+        this.computeResource = LazyComputeResource.of(warehouseId, finalCnGroupName, () ->
                 warehouseManager.acquireComputeResource(warehouseId, this.computeResource));
     }
 
@@ -1135,10 +1146,21 @@ public class ConnectContext {
                 this.resetComputeResource();
                 throw new RuntimeException(errMsg);
             }
-            // Re-acquire if the cached compute resource belongs to a different warehouse than the
-            // current session warehouse. This can happen when a query-scope warehouse hint modifies
-            // the session variable but the compute resource is not properly restored afterwards.
-            if (computeResource.getWarehouseId() != this.getCurrentWarehouseId()) {
+            // Re-acquire if the cached compute resource belongs to a different warehouse OR
+            // a different cnGroup than the current session. The former covers query-scope
+            // warehouse hint leak; the latter covers SET cngroup='xxx'. Both are explicit user
+            // config changes, so we re-acquire even without the state.isRunning() guard.
+            // Apply the same ALL_GROUPS sanitization as acquireComputeResource() so user-supplied
+            // "*" doesn't trigger an endless re-acquire loop against the sanitized resource.
+            String rawSessionCnGroup = sessionVariable != null ? sessionVariable.getCnGroupName() : null;
+            if (CnGroupComputeResource.ALL_GROUPS.equals(rawSessionCnGroup)) {
+                rawSessionCnGroup = null;
+            }
+            String currentCnGroup = CnGroupComputeResource.getEffectiveName(rawSessionCnGroup);
+            String resourceCnGroup = CnGroupComputeResource.getEffectiveName(computeResource.getCnGroupName());
+            boolean warehouseMismatch = computeResource.getWarehouseId() != this.getCurrentWarehouseId();
+            boolean cnGroupMismatch = !Objects.equals(currentCnGroup, resourceCnGroup);
+            if (warehouseMismatch || cnGroupMismatch) {
                 this.resetComputeResource();
                 acquireComputeResource();
             } else if (!warehouseManager.isResourceAvailable(computeResource)) {
@@ -1167,16 +1189,23 @@ public class ConnectContext {
      * @return: the name of the current compute resource, or empty string if not set.
      */
     public String getCurrentComputeResourceName() {
-        if (!RunMode.isSharedDataMode() || this.computeResource == null) {
+        if (!RunMode.isSharedDataMode()) {
             return "";
         }
-        try {
-            final WarehouseManager warehouseManager = globalStateMgr.getWarehouseMgr();
-            return warehouseManager.getComputeResourceName(this.computeResource);
-        } catch (Exception e) {
-            LOG.warn("get compute resource name failed, resource: {}", this.computeResource, e);
-            return "";
+        // Prefer the cnGroup pinned on the cached compute resource (covers lazily-acquired
+        // resources too); fall back to the session variable for cases where the resource is
+        // not yet materialized (e.g. SHOW PROCESSLIST on idle connections).
+        String cnGroupName = this.computeResource != null ? this.computeResource.getCnGroupName() : null;
+        if (cnGroupName == null && sessionVariable != null) {
+            cnGroupName = sessionVariable.getCnGroupName();
         }
+        // ALL_GROUPS ("*") is sanitized to "default" in acquireComputeResource, but the raw
+        // session variable may still hold it for sessions that ran SET cngroup='*'. Reflect
+        // the effective routing (default) in processlist / audit / query statistics output.
+        if (CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName)) {
+            cnGroupName = null;
+        }
+        return CnGroupComputeResource.getEffectiveName(cnGroupName);
     }
 
     /**

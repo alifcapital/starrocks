@@ -37,8 +37,8 @@ package com.starrocks.common.util;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.warehouse.Warehouse;
-import com.starrocks.warehouse.cngroup.CRAcquireContext;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -84,10 +84,13 @@ public class FrontendDaemon extends Daemon {
     }
 
     protected void acquireBackgroundComputeResource() {
+        // Background daemons are maintenance: their RPCs reach StarOS primary owners
+        // (universe-by-architecture). A default-cnGroup availability gate would only block the
+        // daemon when the default pool is empty without preventing those RPCs from landing on
+        // custom-cnGroup nodes — bookkeeping isolation that buys nothing. Construct a bare
+        // workerGroup resource and let each daemon's actual call-site enforce its own policy.
         final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
         final Warehouse warehouse = warehouseManager.getBackgroundWarehouse();
-        final CRAcquireContext acquireContext = CRAcquireContext.of(warehouse.getId(), computeResource);
-        // check resource before each run
-        this.computeResource = warehouseManager.acquireComputeResource(acquireContext);
+        this.computeResource = WarehouseComputeResource.of(warehouse.getId());
     }
 }

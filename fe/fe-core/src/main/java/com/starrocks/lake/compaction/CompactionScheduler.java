@@ -268,8 +268,12 @@ public class CompactionScheduler extends Daemon {
         if (Config.lake_compaction_max_tasks >= 0) {
             return Config.lake_compaction_max_tasks;
         }
+        // Universe capacity: compact-RPC ends up on the StarOS primary owner of each shard
+        // regardless of cnGroup (placement is universe-by-architecture). The concurrency budget
+        // must reflect that — counting only default-cnGroup nodes would silently freeze
+        // compaction in warehouses whose shards live in custom cnGroups.
         List<ComputeNode> aliveComputeNodes =
-                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAliveComputeNodes(computeResource);
+                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAliveWorkerGroupComputeNodes(computeResource);
         return aliveComputeNodes.size() * 16;
     }
 
@@ -493,7 +497,7 @@ public class CompactionScheduler extends Daemon {
         }
 
         // 2. pick aggregator node and build lake service
-        ComputeNode aggregatorNode = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+        ComputeNode aggregatorNode = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
         if (aggregatorNode == null) {
             throw new NoAliveBackendException("No alive compute node available for aggregate compaction");
         }

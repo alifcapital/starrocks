@@ -176,6 +176,7 @@ import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowBrokerStmt;
 import com.starrocks.sql.ast.ShowCatalogsStmt;
 import com.starrocks.sql.ast.ShowCharsetStmt;
+import com.starrocks.sql.ast.ShowCnGroupsStmt;
 import com.starrocks.sql.ast.ShowCollationStmt;
 import com.starrocks.sql.ast.ShowColumnStmt;
 import com.starrocks.sql.ast.ShowComputeNodeBlackListStmt;
@@ -280,6 +281,7 @@ import com.starrocks.thrift.TTableInfo;
 import com.starrocks.transaction.GlobalTransactionMgr;
 import com.starrocks.type.TypeFactory;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -2802,6 +2804,25 @@ public class ShowExecutor {
         @Override
         public ShowResultSet visitShowResourceGroupStatement(ShowResourceGroupStmt statement, ConnectContext context) {
             List<List<String>> rows = GlobalStateMgr.getCurrentState().getResourceGroupMgr().showResourceGroup(statement);
+            return new ShowResultSet(showResultMetaFactory.getMetadata(statement), rows);
+        }
+
+        @Override
+        public ShowResultSet visitShowCnGroupsStatement(ShowCnGroupsStmt statement, ConnectContext context) {
+            SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+            Map<String, List<Long>> groupToNodeIds = new TreeMap<>();
+            Stream.concat(systemInfo.getBackends().stream(), systemInfo.getComputeNodes().stream())
+                    .forEach(node -> {
+                        String group = CnGroupComputeResource.getEffectiveName(node.getCnGroupName());
+                        groupToNodeIds.computeIfAbsent(group, k -> new ArrayList<>()).add(node.getId());
+                    });
+            List<List<String>> rows = new ArrayList<>();
+            for (Map.Entry<String, List<Long>> entry : groupToNodeIds.entrySet()) {
+                rows.add(Lists.newArrayList(
+                        entry.getKey(),
+                        String.valueOf(entry.getValue().size()),
+                        entry.getValue().stream().map(String::valueOf).collect(Collectors.joining(", "))));
+            }
             return new ShowResultSet(showResultMetaFactory.getMetadata(statement), rows);
         }
 

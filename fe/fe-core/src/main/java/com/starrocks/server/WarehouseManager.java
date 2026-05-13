@@ -226,7 +226,7 @@ public class WarehouseManager implements Writable {
     /**
      * Get the warehouse and compute resource name for the given compute resource.
      * @param computeResource: the compute resource to get the warehouse name from
-     * @return: the warehouse name, empty if the compute resource is not available
+     * @return: the warehouse name with cngroup (e.g., "warehouse_name" or "warehouse_name (cngroup: group_name)")
      */
     public String getWarehouseComputeResourceName(ComputeResource computeResource) {
         if (!RunMode.isSharedDataMode()) {
@@ -234,7 +234,13 @@ public class WarehouseManager implements Writable {
         }
         try {
             final Warehouse warehouse = getWarehouse(computeResource.getWarehouseId());
-            return String.format("%s", warehouse.getName());
+            String warehouseName = warehouse.getName();
+            String cnGroupName = computeResource.getCnGroupName();
+            String effectiveCnGroup = com.starrocks.warehouse.cngroup.CnGroupComputeResource.getEffectiveName(cnGroupName);
+            if (!com.starrocks.warehouse.cngroup.CnGroupComputeResource.DEFAULT_GROUP_NAME.equals(effectiveCnGroup)) {
+                return String.format("%s (cngroup: %s)", warehouseName, effectiveCnGroup);
+            }
+            return warehouseName;
         } catch (Exception e) {
             LOG.warn("Failed to get warehouse name for computeResource: {}", computeResource, e);
             return "";
@@ -263,46 +269,51 @@ public class WarehouseManager implements Writable {
     }
 
     /**
-     * Get all compute node ids in the warehouse.
-     * @param warehouseId: the id of the warehouse
-     * @return: a list of compute node ids in the warehouse, empty if the warehouse is not available
+     * Universe view: every node in the resource's workerGroup, no cnGroup filter.
+     * See {@link ComputeResourceProvider} class javadoc for when to use this vs
+     * {@link #getEligibleComputeNodeIds(ComputeResource)}.
      */
-    public List<Long> getAllComputeNodeIds(long warehouseId) {
-        // check warehouse exists
-        if (!warehouseExists(warehouseId)) {
-            throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
-                    String.format("id: %d", warehouseId));
-        }
-        WarehouseComputeResource warehouseComputeResource = WarehouseComputeResource.of(warehouseId);
-        return getAllComputeNodeIds(warehouseComputeResource);
-    }
-
-    /**
-     * Get all compute node ids in the warehouse.
-     * @param computeResource: the compute resource to get the compute node ids from
-     * @return: a list of compute node ids in the warehouse, empty if the compute resource is not available
-     */
-    public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
-        // check warehouse exists
+    public List<Long> getWorkerGroupComputeNodeIds(ComputeResource computeResource) {
         if (!warehouseExists(computeResource.getWarehouseId())) {
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
                     String.format("id: %d", computeResource.getWarehouseId()));
         }
-        return computeResourceProvider.getAllComputeNodeIds(computeResource);
+        return computeResourceProvider.getWorkerGroupComputeNodeIds(computeResource);
     }
 
     /**
-     * Get all alive compute nodes in the warehouse.
-     * @param computeResource: the compute resource to get the alive compute nodes from
-     * @return: a list of alive compute nodes in the warehouse, empty if the compute resource is not available
+     * Universe view + alive. Storage-view callers that need an aliveness check
+     * (e.g. {@code HistoricalNodeMgr.isResourceAvailable} or maintenance capacity calc).
      */
-    public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
-        // check warehouse exists
+    public List<ComputeNode> getAliveWorkerGroupComputeNodes(ComputeResource computeResource) {
         if (!warehouseExists(computeResource.getWarehouseId())) {
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
                     String.format("id: %d", computeResource.getWarehouseId()));
         }
-        return computeResourceProvider.getAliveComputeNodes(computeResource);
+        return computeResourceProvider.getAliveWorkerGroupComputeNodes(computeResource);
+    }
+
+    /**
+     * Eligibility view: workerGroup nodes filtered by the resource's cnGroupName.
+     * Use for compute scheduling decisions.
+     */
+    public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
+        if (!warehouseExists(computeResource.getWarehouseId())) {
+            throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
+                    String.format("id: %d", computeResource.getWarehouseId()));
+        }
+        return computeResourceProvider.getEligibleComputeNodeIds(computeResource);
+    }
+
+    /**
+     * Eligibility view + alive. Use for compute scheduling that also needs aliveness.
+     */
+    public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
+        if (!warehouseExists(computeResource.getWarehouseId())) {
+            throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
+                    String.format("id: %d", computeResource.getWarehouseId()));
+        }
+        return computeResourceProvider.getAliveEligibleComputeNodes(computeResource);
     }
 
     public Long getComputeNodeId(ComputeResource computeResource, long tabletId) {
@@ -409,13 +420,12 @@ public class WarehouseManager implements Writable {
     }
 
     public ComputeResource getBackgroundComputeResource() {
-        final Warehouse warehouse = getBackgroundWarehouse();
-        return acquireComputeResource(CRAcquireContext.of(warehouse.getId()));
+        // Universe-acquire: see FrontendDaemon.acquireBackgroundComputeResource for the rationale.
+        return WarehouseComputeResource.of(getBackgroundWarehouse().getId());
     }
 
     public ComputeResource getBackgroundComputeResource(long tableId) {
-        final Warehouse warehouse = getBackgroundWarehouse(tableId);
-        return acquireComputeResource(CRAcquireContext.of(warehouse.getId()));
+        return WarehouseComputeResource.of(getBackgroundWarehouse(tableId).getId());
     }
 
     public long getWarehouseResumeTime(long warehouseId) {

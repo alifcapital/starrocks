@@ -58,6 +58,7 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 
 import java.text.DecimalFormat;
 import java.util.Collections;
@@ -306,7 +307,10 @@ public class MetadataViewer {
             // check warehouse
             long warehouseId = ConnectContext.get().getCurrentWarehouseId();
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<Long> computeNodeIs = warehouseManager.getAllComputeNodeIds(warehouseId);
+            // Universe — ADMIN SHOW REPLICA DISTRIBUTION reports physical tablet owners,
+            // which can live in any CNGroup (shard ownership is not CNGroup-aware).
+            List<Long> computeNodeIs = warehouseManager.getWorkerGroupComputeNodeIds(
+                    WarehouseComputeResource.of(warehouseId));
             if (computeNodeIs.isEmpty()) {
                 final Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(warehouseId);
                 throw new DdlException("no available compute nodes in warehouse " + warehouse.getName());

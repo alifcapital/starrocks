@@ -93,7 +93,7 @@ public class LoadAction extends RestBaseAction {
         List<Long> nodeIds = new ArrayList<>();
         if (RunMode.isSharedDataMode()) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
             for (long nodeId : computeIds) {
                 ComputeNode node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
                 if (node != null && node.isAvailable()) {

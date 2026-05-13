@@ -77,7 +77,7 @@ public class PulsarUtilTest {
     public void testNoAliveComputeNode() throws StarRocksException {
         new MockUp<MockedWarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 return Lists.newArrayList();
             }
         };
@@ -92,7 +92,7 @@ public class PulsarUtilTest {
     public void testWithAliveComputeNode() throws StarRocksException, RpcException {
         new MockUp<MockedWarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 return Lists.newArrayList(1L);
             }
         };

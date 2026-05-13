@@ -558,11 +558,16 @@ public class GlobalStateMgr {
         return journalObservable;
     }
 
-    public TNodesInfo createNodesInfo(ComputeResource computeResource, SystemInfoService systemInfoService) {
+    /**
+     * Universe-view {@code nodes_info} factory — every node in the workerGroup,
+     * no cnGroup filter. Use for write coordination / shard-owner-routing {@code nodes_info},
+     * where StarOS primary owners may live in any cnGroup and must be reachable from BE.
+     */
+    public TNodesInfo createWorkerGroupNodesInfo(ComputeResource computeResource, SystemInfoService systemInfoService) {
         TNodesInfo nodesInfo = new TNodesInfo();
         if (RunMode.isSharedDataMode()) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getWorkerGroupComputeNodeIds(computeResource);
             for (Long cnId : computeNodeIds) {
                 ComputeNode cn = systemInfoService.getBackendOrComputeNode(cnId);
                 nodesInfo.addToNodes(new TNodeInfo(cnId, 0, cn.getIP(), cn.getBrpcPort()));
@@ -573,7 +578,28 @@ public class GlobalStateMgr {
                 nodesInfo.addToNodes(new TNodeInfo(backend.getId(), 0, backend.getIP(), backend.getBrpcPort()));
             }
         }
+        return nodesInfo;
+    }
 
+    /**
+     * Eligibility-view variant of {@link #createNodesInfo} — cnGroup-filtered.
+     * Use for compute-scheduling {@code nodes_info} (FetchNode, SchemaTableSink, etc.).
+     */
+    public TNodesInfo createEligibleComputeNodesInfo(ComputeResource computeResource, SystemInfoService systemInfoService) {
+        TNodesInfo nodesInfo = new TNodesInfo();
+        if (RunMode.isSharedDataMode()) {
+            final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+            final List<Long> computeNodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
+            for (Long cnId : computeNodeIds) {
+                ComputeNode cn = systemInfoService.getBackendOrComputeNode(cnId);
+                nodesInfo.addToNodes(new TNodeInfo(cnId, 0, cn.getIP(), cn.getBrpcPort()));
+            }
+        } else {
+            for (Long id : systemInfoService.getBackendIds(false)) {
+                Backend backend = systemInfoService.getBackend(id);
+                nodesInfo.addToNodes(new TNodeInfo(backend.getId(), 0, backend.getIP(), backend.getBrpcPort()));
+            }
+        }
         return nodesInfo;
     }
 

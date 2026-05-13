@@ -320,6 +320,14 @@ public class FeExecuteCoordinator extends Coordinator {
         return "";
     }
 
+    @Override
+    public String getCnGroupName() {
+        if (connectContext == null) {
+            return "";
+        }
+        return connectContext.getCurrentComputeResourceName();
+    }
+
     public boolean isShortCircuit() {
         return false;
     }

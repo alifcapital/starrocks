@@ -79,10 +79,10 @@ public class LakeAggregatorTest {
     // resolved locally via the staros worker cache.
     @Test
     public void testPickFromAliveCandidate() {
-        when(mockManager.getAliveComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB, nodeC));
+        when(mockManager.getAliveEligibleComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB, nodeC));
 
         // Only nodeA is both in candidates and alive → it must be chosen.
-        ComputeNode picked = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L),
+        ComputeNode picked = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L),
                 Lists.newArrayList(nodeA, nodeDead));
         Assertions.assertNotNull(picked);
         Assertions.assertEquals(nodeA.getId(), picked.getId());
@@ -92,10 +92,10 @@ public class LakeAggregatorTest {
     // rather than a random alive non-candidate like nodeC.
     @Test
     public void testPickFromAliveCandidateMultiple() {
-        when(mockManager.getAliveComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB, nodeC));
+        when(mockManager.getAliveEligibleComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB, nodeC));
 
         for (int i = 0; i < 10; i++) {
-            ComputeNode picked = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L),
+            ComputeNode picked = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L),
                     Lists.newArrayList(nodeA, nodeB));
             Assertions.assertNotNull(picked);
             Assertions.assertTrue(picked.getId() == nodeA.getId() || picked.getId() == nodeB.getId(),
@@ -107,10 +107,10 @@ public class LakeAggregatorTest {
     // warehouse. We should still get a usable aggregator, not null.
     @Test
     public void testFallbackWhenNoLiveCandidate() {
-        when(mockManager.getAliveComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB));
+        when(mockManager.getAliveEligibleComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA, nodeB));
 
         // nodeDead is the only candidate but it is not in the alive list.
-        ComputeNode picked = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L),
+        ComputeNode picked = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L),
                 Lists.newArrayList(nodeDead));
         Assertions.assertNotNull(picked);
         Assertions.assertTrue(picked.getId() == nodeA.getId() || picked.getId() == nodeB.getId());
@@ -120,14 +120,14 @@ public class LakeAggregatorTest {
     // random alive node.
     @Test
     public void testFallbackWhenNoCandidate() {
-        when(mockManager.getAliveComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA));
+        when(mockManager.getAliveEligibleComputeNodes(any())).thenReturn(Lists.newArrayList(nodeA));
 
-        ComputeNode picked = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L),
+        ComputeNode picked = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L),
                 Lists.newArrayList());
         Assertions.assertNotNull(picked);
         Assertions.assertEquals(nodeA.getId(), picked.getId());
 
-        ComputeNode pickedNull = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L), null);
+        ComputeNode pickedNull = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L), null);
         Assertions.assertNotNull(pickedNull);
         Assertions.assertEquals(nodeA.getId(), pickedNull.getId());
     }
@@ -137,11 +137,11 @@ public class LakeAggregatorTest {
     @Test
     public void testCandidateNotAliveIsSkipped() {
         // nodeC is alive but not a candidate; nodeDead is a candidate but not alive.
-        when(mockManager.getAliveComputeNodes(any())).thenReturn(Lists.newArrayList(nodeB, nodeC));
+        when(mockManager.getAliveEligibleComputeNodes(any())).thenReturn(Lists.newArrayList(nodeB, nodeC));
 
         List<ComputeNode> candidates = Lists.newArrayList(nodeDead, nodeB);
         for (int i = 0; i < 10; i++) {
-            ComputeNode picked = LakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(0L), candidates);
+            ComputeNode picked = LakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(0L), candidates);
             Assertions.assertNotNull(picked);
             // nodeDead must never be chosen since it is not alive.
             Assertions.assertNotEquals(nodeDead.getId(), picked.getId());

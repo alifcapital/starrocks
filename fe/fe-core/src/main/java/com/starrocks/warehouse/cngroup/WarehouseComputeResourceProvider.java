@@ -63,9 +63,34 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
                     String.format("id: %d", warehouseId));
         }
-        WarehouseComputeResource computeResource = WarehouseComputeResource.of(warehouseId);
+        // Use cnGroupName from prevComputeResource if available
+        ComputeResource prevResource = acquireContext.getPrevComputeResource();
+        String cnGroupName = prevResource != null ? prevResource.getCnGroupName() : null;
+
+        // ALL_GROUPS ("*") is reserved for internal system tasks (forSystemTask). Treat any
+        // user-supplied "*" as default so workload isolation can't be bypassed via SET or
+        // user property.
+        if (CnGroupComputeResource.ALL_GROUPS.equals(cnGroupName)) {
+            cnGroupName = null;
+        }
+
+        ComputeResource computeResource;
+        if (cnGroupName != null && !cnGroupName.equals(CnGroupComputeResource.DEFAULT_GROUP_NAME)) {
+            // User specified a custom cngroup via SET cngroup='xxx'
+            computeResource = CnGroupComputeResource.of(warehouseId, cnGroupName);
+        } else {
+            computeResource = WarehouseComputeResource.of(warehouseId);
+        }
+
         if (!isResourceAvailable(computeResource)) {
-            LOG.warn("failed to get alive compute nodes from warehouse {}", warehouse.getName());
+            String effectiveCnGroup = CnGroupComputeResource.getEffectiveName(cnGroupName);
+            if (!CnGroupComputeResource.DEFAULT_GROUP_NAME.equals(effectiveCnGroup)) {
+                // User specified a custom cngroup that has no available nodes
+                throw ErrorReportException.report(ErrorCode.ERR_WAREHOUSE_UNAVAILABLE,
+                        String.format("%s (cngroup '%s' has no available compute nodes)",
+                                warehouse.getName(), effectiveCnGroup));
+            }
+            LOG.warn("No alive compute nodes in warehouse '{}'", warehouse.getName());
             return Optional.empty();
         }
         return Optional.of(computeResource);
@@ -80,35 +105,83 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
             return true;
         }
         try {
-            final long availableWorkerGroupIdSize =
-                    Optional.ofNullable(getAliveComputeNodes(computeResource)).map(List::size).orElse(0);
-            return availableWorkerGroupIdSize > 0;
+            final long availableEligibleSize =
+                    Optional.ofNullable(getAliveEligibleComputeNodes(computeResource)).map(List::size).orElse(0);
+            return availableEligibleSize > 0;
         } catch (Exception e) {
             LOG.warn("Failed to get alive compute nodes from starMgr : {}", e.getMessage());
             return false;
         }
     }
 
+    /**
+     * Universe: every node StarOS knows about in this resource's workerGroup,
+     * without cnGroup filtering. Storage-view callers.
+     */
     @Override
-    public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+    public List<Long> getWorkerGroupComputeNodeIds(ComputeResource computeResource) {
+        return fetchWorkerGroupNodeIds(computeResource);
+    }
+
+    @Override
+    public List<ComputeNode> getAliveWorkerGroupComputeNodes(ComputeResource computeResource) {
+        return aliveNodesFromIds(fetchWorkerGroupNodeIds(computeResource));
+    }
+
+    /**
+     * Eligibility: workerGroup universe filtered by the resource's cnGroupName.
+     * Compute-scheduling callers. This is the single point where cnGroup isolation
+     * is enforced.
+     */
+    @Override
+    public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
+        List<Long> universe = fetchWorkerGroupNodeIds(computeResource);
+        if (universe.isEmpty()) {
+            return universe;
+        }
+        String effectiveCnGroupName =
+                CnGroupComputeResource.getEffectiveName(computeResource.getCnGroupName());
+        SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
+        return universe.stream()
+                .filter(nodeId -> {
+                    ComputeNode node = systemInfoService.getBackendOrComputeNode(nodeId);
+                    return node != null && matchesCnGroup(node, effectiveCnGroupName);
+                })
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<ComputeNode> getAliveEligibleComputeNodes(ComputeResource computeResource) {
+        return aliveNodesFromIds(getEligibleComputeNodeIds(computeResource));
+    }
+
+    private List<Long> fetchWorkerGroupNodeIds(ComputeResource computeResource) {
         try {
-            return GlobalStateMgr.getCurrentState().getStarOSAgent().getWorkersByWorkerGroup(computeResource.getWorkerGroupId());
+            return GlobalStateMgr.getCurrentState().getStarOSAgent()
+                    .getWorkersByWorkerGroup(computeResource.getWorkerGroupId());
         } catch (StarRocksException e) {
             LOG.warn("Fail to get compute node ids from starMgr : {}", e.getMessage());
             return new ArrayList<>();
         }
     }
 
-    @Override
-    public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
-        List<Long> computeNodeIds = getAllComputeNodeIds(computeResource);
-        if (CollectionUtils.isEmpty(computeNodeIds)) {
+    private List<ComputeNode> aliveNodesFromIds(List<Long> nodeIds) {
+        if (CollectionUtils.isEmpty(nodeIds)) {
             return Lists.newArrayList();
         }
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
-        List<ComputeNode> nodes = computeNodeIds.stream()
-                .map(id -> systemInfoService.getBackendOrComputeNode(id))
-                .filter(ComputeNode::isAlive).collect(Collectors.toList());
-        return nodes;
+        return nodeIds.stream()
+                .map(systemInfoService::getBackendOrComputeNode)
+                .filter(node -> node != null && node.isAlive())
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Check if a compute node matches the specified CNGroup.
+     * Nodes with null/empty cnGroupName are considered to be in "default" group.
+     */
+    private boolean matchesCnGroup(ComputeNode node, String cnGroupName) {
+        String nodeGroup = CnGroupComputeResource.getEffectiveName(node.getCnGroupName());
+        return cnGroupName.equals(nodeGroup);
     }
 }

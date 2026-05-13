@@ -201,6 +201,7 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
                     .fragmentInstanceInfos(info.getCoord().getFragmentInstanceInfos())
                     .profile(info.getCoord().getQueryProfile())
                     .warehouseName(info.coord.getWarehouseName())
+                    .cnGroupName(info.coord.getCnGroupName())
                     .resourceGroupName(info.coord.getResourceGroupName())
                     .execState(execState)
                     .build();

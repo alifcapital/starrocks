@@ -173,7 +173,9 @@ import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import com.starrocks.warehouse.DefaultWarehouse;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.CnGroupComputeResource;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.LazyComputeResource;
 import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 
 import java.time.LocalDateTime;
@@ -420,7 +422,9 @@ public class RuntimeTypeAdapterTypes {
 
         final RuntimeTypeAdapterFactory<ComputeResource> compute_resource_runtime_type_adapter_factory =
                 RuntimeTypeAdapterFactory.of(ComputeResource.class, "clazz")
-                        .registerSubtype(WarehouseComputeResource.class, "WarehouseComputeResource", true);
+                        .registerSubtype(WarehouseComputeResource.class, "WarehouseComputeResource", true)
+                        .registerSubtype(CnGroupComputeResource.class, "CnGroupComputeResource")
+                        .registerSubtype(LazyComputeResource.class, "LazyComputeResource");
         CLAZZ_TO_RUNTIME_TYPE_ADAPTOR_FACTORIES.put(ComputeResource.class,
                 compute_resource_runtime_type_adapter_factory);
 

@@ -78,6 +78,7 @@ import com.starrocks.transaction.TxnCommitAttachment;
 import com.starrocks.warehouse.Warehouse;
 import com.starrocks.warehouse.WarehouseLoadInfoBuilder;
 import com.starrocks.warehouse.WarehouseLoadStatusInfo;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -227,7 +228,12 @@ public class RoutineLoadMgr implements Writable, MemoryTrackable {
             if (RunMode.isSharedDataMode()) {
                 final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
                 for (Warehouse warehouse : warehouseManager.getAllWarehouses()) {
-                    List<Long> allComputeNodeIds = warehouseManager.getAllComputeNodeIds(warehouse.getId());
+                    // Default-only: routine-load slot accounting lives in the default cnGroup
+                    // pool so custom cnGroups stay dedicated to user workloads. Using the
+                    // eligibility view of a plain warehouse resource achieves that (cnGroupName
+                    // null -> "default").
+                    List<Long> allComputeNodeIds = warehouseManager.getEligibleComputeNodeIds(
+                            WarehouseComputeResource.of(warehouse.getId()));
                     List<Long> aliveNodeIds = new ArrayList<>();
                     for (long nodeId : allComputeNodeIds) {
                         ComputeNode node =

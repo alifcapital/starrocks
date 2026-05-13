@@ -113,7 +113,7 @@ public abstract class LoadScanNode extends ScanNode {
         // TODO: need to refactor after be split into cn + dn
         if (RunMode.isSharedDataMode()) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getEligibleComputeNodeIds(computeResource);
             for (long cnId : computeNodeIds) {
                 ComputeNode cn = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(cnId);
                 if (cn != null && cn.isAvailable() && !SimpleScheduler.isInBlocklist(cnId)) {

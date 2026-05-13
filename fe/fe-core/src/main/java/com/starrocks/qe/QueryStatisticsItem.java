@@ -38,6 +38,7 @@ public final class QueryStatisticsItem {
     private final RuntimeProfile queryProfile;
     private final TUniqueId executionId;
     private final String warehouseName;
+    private final String cnGroupName;
     private final String resourceGroupName;
     // PENDING/RUNNING/FINISHED
     private final String execState;
@@ -54,6 +55,7 @@ public final class QueryStatisticsItem {
         this.queryProfile = builder.queryProfile;
         this.executionId = builder.executionId;
         this.warehouseName = builder.warehouseName;
+        this.cnGroupName = builder.cnGroupName;
         this.resourceGroupName = builder.resourceGroupName;
         this.execState = builder.execState;
     }
@@ -107,6 +109,10 @@ public final class QueryStatisticsItem {
         return warehouseName;
     }
 
+    public String getCnGroupName() {
+        return cnGroupName;
+    }
+
     public String getResourceGroupName() {
         return resourceGroupName;
     }
@@ -127,6 +133,7 @@ public final class QueryStatisticsItem {
         private RuntimeProfile queryProfile;
         private TUniqueId executionId;
         private String warehouseName;
+        private String cnGroupName;
         private String resourceGroupName;
         private String execState;
 
@@ -186,6 +193,11 @@ public final class QueryStatisticsItem {
 
         public Builder warehouseName(String warehouseName) {
             this.warehouseName = warehouseName;
+            return this;
+        }
+
+        public Builder cnGroupName(String cnGroupName) {
+            this.cnGroupName = cnGroupName;
             return this;
         }
 

@@ -20,5 +20,7 @@
 
 curdir=`dirname "$0"`
 curdir=`cd "$curdir"; pwd`
-export STARROCKS_HOME=`cd "$curdir/.."; pwd`
+if [ -z "$STARROCKS_HOME" ]; then
+    export STARROCKS_HOME=`cd "$curdir/.."; pwd`
+fi
 exec ${STARROCKS_HOME}/bin/start_backend.sh --cn $@

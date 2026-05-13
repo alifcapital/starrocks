@@ -31,7 +31,7 @@ import java.util.Optional;
 /**
  * {@code WarehouseComputeResource} represents a compute node resource associated with a specific warehouse.
  */
-public final class WarehouseComputeResource implements ComputeResource {
+public class WarehouseComputeResource implements ComputeResource {
     private static final Logger LOG = LogManager.getLogger(WarehouseComputeResource.class);
     // The warehouseId is used to identify the warehouse.
     @SerializedName("warehouseId")
@@ -72,6 +72,16 @@ public final class WarehouseComputeResource implements ComputeResource {
         return Optional.of(ids.get(0));
     }
 
+    /**
+     * WarehouseComputeResource uses the default CNGroup.
+     * System tasks (stats collection, MV refresh, etc.) will run on nodes in "default" group,
+     * leaving other CNGroups (etl, analytics, etc.) for dedicated workloads.
+     */
+    @Override
+    public String getCnGroupName() {
+        return CnGroupComputeResource.DEFAULT_GROUP_NAME;
+    }
+
     @Override
     public String toString() {
         return "{warehouseId=" + warehouseId + "}";
@@ -87,7 +97,10 @@ public final class WarehouseComputeResource implements ComputeResource {
         if (this == obj) {
             return true;
         }
-        if (!(obj instanceof WarehouseComputeResource)) {
+        // Strict type match — CnGroupComputeResource has its own equals/hashCode that
+        // includes cnGroupName, so we must not treat a plain warehouse resource as equal
+        // to a cngroup-scoped one (which would break Object.equals symmetry).
+        if (obj == null || getClass() != obj.getClass()) {
             return false;
         }
         WarehouseComputeResource other = (WarehouseComputeResource) obj;

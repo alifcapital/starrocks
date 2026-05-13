@@ -153,7 +153,7 @@ public class KuduScanNode extends ScanNode {
                 computeResource = ConnectContext.get().getCurrentComputeResource();
             }
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            allNodes = warehouseManager.getAliveComputeNodes(computeResource)
+            allNodes = warehouseManager.getAliveEligibleComputeNodes(computeResource)
                     .stream()
                     .map(ComputeNode::getId)
                     .collect(Collectors.toList());

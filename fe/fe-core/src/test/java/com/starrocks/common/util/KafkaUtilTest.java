@@ -84,7 +84,7 @@ public class KafkaUtilTest {
                 BackendServiceClient.getInstance();
                 minTimes = 0;
                 result = client;
-                warehouseManager.getAllComputeNodeIds((ComputeResource) any);
+                warehouseManager.getEligibleComputeNodeIds((ComputeResource) any);
                 minTimes = 0;
                 result = Lists.newArrayList(1L, 2L);
             }
@@ -248,7 +248,7 @@ public class KafkaUtilTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 List<Long> nodes = new ArrayList<>();
                 nodes.add(1234L);
                 return nodes;
@@ -339,7 +339,7 @@ public class KafkaUtilTest {
 
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 List<Long> nodes = new ArrayList<>();
                 nodes.add(1234L);
                 return nodes;
@@ -395,7 +395,7 @@ public class KafkaUtilTest {
         };
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getEligibleComputeNodeIds(ComputeResource computeResource) {
                 List<Long> nodes = new ArrayList<>();
                 nodes.add(1234L);
                 return nodes;

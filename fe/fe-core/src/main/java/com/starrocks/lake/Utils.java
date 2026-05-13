@@ -366,7 +366,7 @@ public class Utils {
         // resolved locally via the staros worker cache (no extra get-shard-info RPC).
         // The compute-node ids are embedded in the request (see createSubRequestForAggregatePublish).
         Set<ComputeNode> candidateAggregatorNodes = collectCandidateAggregatorNodes(request);
-        ComputeNode aggregatorNode = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+        ComputeNode aggregatorNode = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
         if (aggregatorNode == null) {
             throw new NoAliveBackendException("No alive compute node for handle aggregate publish version");
         }

@@ -76,7 +76,7 @@ public class WarehouseComputeResourceProviderTest extends WarehouseTestBase {
     @Test
     public void testProviderGetAllComputeNodeIds() {
         ComputeResource computeResource = acquireDefaultWarehouseResource();
-        List<Long> result = provider.getAllComputeNodeIds(computeResource);
+        List<Long> result = provider.getEligibleComputeNodeIds(computeResource);
         assertThat(result).isEqualTo(Lists.newArrayList(10001L));
     }
 
@@ -84,7 +84,7 @@ public class WarehouseComputeResourceProviderTest extends WarehouseTestBase {
     public void testProviderGetAllComputeNodeIdsBad() {
         ComputeResource computeResource = WarehouseComputeResource.of(1);
         try {
-            provider.getAllComputeNodeIds(computeResource);
+            provider.getEligibleComputeNodeIds(computeResource);
             Assertions.fail();
         } catch (ErrorReportException e) {
             assertThat(e.getMessage()).contains("Warehouse id: 1 not exist");
@@ -94,7 +94,7 @@ public class WarehouseComputeResourceProviderTest extends WarehouseTestBase {
     @Test
     public void testProviderGetAliveComputeNodes() {
         ComputeResource computeResource = acquireDefaultWarehouseResource();
-        List<ComputeNode> result = provider.getAliveComputeNodes(computeResource);
+        List<ComputeNode> result = provider.getAliveEligibleComputeNodes(computeResource);
         assertThat(result.isEmpty()).isFalse();
     }
 
@@ -102,7 +102,7 @@ public class WarehouseComputeResourceProviderTest extends WarehouseTestBase {
     public void testProviderGetAliveComputeNodesBad() {
         ComputeResource computeResource = WarehouseComputeResource.of(1);
         try {
-            provider.getAliveComputeNodes(computeResource);
+            provider.getAliveEligibleComputeNodes(computeResource);
             Assertions.fail();
         } catch (ErrorReportException e) {
             assertThat(e.getMessage()).contains("Warehouse id: 1 not exist");

@@ -14,7 +14,6 @@
 
 package com.starrocks.lake;
 
-import com.starrocks.common.StarRocksException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
@@ -43,35 +42,49 @@ public class LakeAggregator {
     //
     // Prefer picking an aggregator that already owns at least one tablet of the batch so
     // that the first tablet id can be resolved locally without an extra RPC. Fall back to
-    // the original "random alive node" / "seq-chosen node" strategy only when no candidate
-    // is available or alive.
-    public static ComputeNode chooseAggregatorNode(ComputeResource computeResource,
-                                                   Collection<ComputeNode> candidateNodes) {
-        try {
-            WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
-            if (aliveNodes != null && !aliveNodes.isEmpty()
-                    && candidateNodes != null && !candidateNodes.isEmpty()) {
-                Set<Long> aliveIds = aliveNodes.stream().map(ComputeNode::getId).collect(Collectors.toSet());
-                List<ComputeNode> preferred = candidateNodes.stream()
-                        .filter(n -> n != null && aliveIds.contains(n.getId()))
-                        .distinct()
-                        .collect(Collectors.toList());
-                if (!preferred.isEmpty()) {
-                    return preferred.get(ThreadLocalRandom.current().nextInt(preferred.size()));
-                }
-                LOG.debug("no candidate node is alive in warehouse {}, fall back to random alive node",
-                        computeResource);
-            }
-            if (aliveNodes != null && !aliveNodes.isEmpty()) {
-                return aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size()));
-            }
-            Long nodeId = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
-                            .getNodeSelector().seqChooseBackendOrComputeId();
-            return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
-                    .getBackendOrComputeNode(nodeId);
-        } catch (StarRocksException e) {
+    // a random alive node only when no candidate is available or alive.
+
+    /**
+     * Pick a query/file-bundling aggregator from the session's eligible compute pool.
+     * Used by query write coordination (OlapTableSink file_bundling) — the aggregator runs
+     * as part of the user query/load, so it must respect cnGroup isolation. Returns
+     * {@code null} when no eligible alive node exists; the caller decides how to fail.
+     */
+    public static ComputeNode chooseQueryAggregatorNode(ComputeResource computeResource,
+                                                        Collection<ComputeNode> candidateNodes) {
+        WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        return pickAggregator(warehouseManager.getAliveEligibleComputeNodes(computeResource), candidateNodes);
+    }
+
+    /**
+     * Pick a maintenance aggregator from the workerGroup universe. Used by background
+     * paths (autovacuum, StarMgrMetaSyncer batched drops) whose RPCs already land on
+     * StarOS primary owners regardless of cnGroup — restricting the aggregator to the
+     * default pool only buys bookkeeping isolation and breaks the daemon when default
+     * is empty. Returns {@code null} when no alive node exists in the workerGroup.
+     */
+    public static ComputeNode chooseMaintenanceAggregatorNode(ComputeResource computeResource,
+                                                              Collection<ComputeNode> candidateNodes) {
+        WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        return pickAggregator(warehouseManager.getAliveWorkerGroupComputeNodes(computeResource), candidateNodes);
+    }
+
+    private static ComputeNode pickAggregator(List<ComputeNode> aliveNodes,
+                                              Collection<ComputeNode> candidateNodes) {
+        if (aliveNodes == null || aliveNodes.isEmpty()) {
             return null;
         }
+        if (candidateNodes != null && !candidateNodes.isEmpty()) {
+            Set<Long> aliveIds = aliveNodes.stream().map(ComputeNode::getId).collect(Collectors.toSet());
+            List<ComputeNode> preferred = candidateNodes.stream()
+                    .filter(n -> n != null && aliveIds.contains(n.getId()))
+                    .distinct()
+                    .collect(Collectors.toList());
+            if (!preferred.isEmpty()) {
+                return preferred.get(ThreadLocalRandom.current().nextInt(preferred.size()));
+            }
+            LOG.debug("no candidate node is alive in the chosen pool, fall back to random alive node");
+        }
+        return aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size()));
     }
 }
