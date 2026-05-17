@@ -645,6 +645,23 @@ public:
     DEFINE_VECTORIZED_FN(levenshtein_ratio);
 
     /**
+     * Weighted Levenshtein for Tajik/Cyrillic names. Vowels are cheap to swap,
+     * ж↔ч (Ҷ↔Ч confusion) gets a soft cost. Codepoint-level.
+     *
+     * @param: [string_value, string_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (weighted edit distance)
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_tj_distance);
+
+    /**
+     * @functionName: levenshtein_tj_ratio
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (similarity in [0, 1])
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_tj_ratio);
+
+    /**
      * @functionName: norm_tj
      * @paramType: [BinaryColumn]
      * @return: BinaryColumn (normalized Tajik text: lowercase + transliteration)

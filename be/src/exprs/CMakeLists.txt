@@ -110,6 +110,7 @@ set(EXPR_FILES
   dictionary_get_expr.cpp
   ngram.cpp
   levenshtein.cpp
+  levenshtein_tj.cpp
   norm_tj.cpp
   lat_to_cyr.cpp
   match_expr.cpp

@@ -424,6 +424,10 @@ vectorized_functions = [
     # Latin-to-Cyrillic transliteration for Tajik/Uzbek/English-spelled names
     [30448, 'lat_to_cyr', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::lat_to_cyr'],
 
+    # Weighted Levenshtein for Tajik names: vowel-soft, ж↔ч soft, codepoint-level
+    [30460, 'levenshtein_tj_distance', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_distance'],
+    [30461, 'levenshtein_tj_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_ratio'],
+
     [30450, 'field', True, False, 'INT', ['VARCHAR', '...'], 'StringFunctions::field<TYPE_VARCHAR>',
      'StringFunctions::field_prepare<TYPE_VARCHAR>', 'StringFunctions::field_close<TYPE_VARCHAR>'],
     [30451, 'field', True, False, 'INT', ['BOOLEAN', '...'], 'StringFunctions::field<TYPE_BOOLEAN>',

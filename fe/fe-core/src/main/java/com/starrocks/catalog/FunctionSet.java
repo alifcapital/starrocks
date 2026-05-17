@@ -573,6 +573,8 @@ public class FunctionSet {
     public static final String NGRAM_SEARCH_CASE_INSENSITIVE = "ngram_search_case_insensitive";
     public static final String LEVENSHTEIN_DISTANCE = "levenshtein_distance";
     public static final String LEVENSHTEIN_RATIO = "levenshtein_ratio";
+    public static final String LEVENSHTEIN_TJ_DISTANCE = "levenshtein_tj_distance";
+    public static final String LEVENSHTEIN_TJ_RATIO = "levenshtein_tj_ratio";
     public static final String NORM_TJ = "norm_tj";
     public static final String LAT_TO_CYR = "lat_to_cyr";
 
