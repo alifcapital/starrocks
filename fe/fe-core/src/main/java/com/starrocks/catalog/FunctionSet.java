@@ -574,6 +574,7 @@ public class FunctionSet {
     public static final String LEVENSHTEIN_DISTANCE = "levenshtein_distance";
     public static final String LEVENSHTEIN_RATIO = "levenshtein_ratio";
     public static final String NORM_TJ = "norm_tj";
+    public static final String LAT_TO_CYR = "lat_to_cyr";
 
     // JSON functions
     public static final Function JSON_QUERY_FUNC = new Function(

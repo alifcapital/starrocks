@@ -651,6 +651,13 @@ public:
      */
     DEFINE_VECTORIZED_FN(norm_tj);
 
+    /**
+     * @functionName: lat_to_cyr
+     * @paramType: [BinaryColumn]
+     * @return: BinaryColumn (Latin-to-Cyrillic transliteration for Tajik/Uzbek/English-spelled names)
+     */
+    DEFINE_VECTORIZED_FN(lat_to_cyr);
+
     DEFINE_VECTORIZED_FN_TEMPLATE(field);
     template <LogicalType Type>
     static Status field_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);

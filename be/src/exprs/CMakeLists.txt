@@ -111,6 +111,7 @@ set(EXPR_FILES
   ngram.cpp
   levenshtein.cpp
   norm_tj.cpp
+  lat_to_cyr.cpp
   match_expr.cpp
   bit_functions.cpp
   hash_functions.cpp

@@ -421,6 +421,9 @@ vectorized_functions = [
     # Tajik text normalization (lowercase + transliteration to Russian Cyrillic)
     [30447, 'norm_tj', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::norm_tj'],
 
+    # Latin-to-Cyrillic transliteration for Tajik/Uzbek/English-spelled names
+    [30448, 'lat_to_cyr', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::lat_to_cyr'],
+
     [30450, 'field', True, False, 'INT', ['VARCHAR', '...'], 'StringFunctions::field<TYPE_VARCHAR>',
      'StringFunctions::field_prepare<TYPE_VARCHAR>', 'StringFunctions::field_close<TYPE_VARCHAR>'],
     [30451, 'field', True, False, 'INT', ['BOOLEAN', '...'], 'StringFunctions::field<TYPE_BOOLEAN>',
