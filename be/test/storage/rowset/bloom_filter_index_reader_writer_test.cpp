@@ -371,7 +371,7 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_ascii_case_insensitive) {
     std::unique_ptr<BloomFilter> bf;
     ASSERT_OK(iter->read_bloom_filter(0, &bf));
 
-    // ASCII fast path: Slice::tolower turns "HELLO" into "hello"; trigrams are 3 bytes each.
+    // ASCII input goes through utf8_tolower; for pure ASCII it produces "hello"; trigrams are 3 bytes each.
     EXPECT_TRUE(bf->test_bytes("hel", 3));
     EXPECT_TRUE(bf->test_bytes("ell", 3));
     EXPECT_TRUE(bf->test_bytes("llo", 3));

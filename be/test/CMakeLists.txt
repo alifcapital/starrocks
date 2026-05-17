@@ -172,7 +172,6 @@ set(EXEC_FILES
         ./exprs/encryption_functions_test.cpp
         ./exprs/function_call_expr_test.cpp
         ./exprs/geography_functions_test.cpp
-        ./exprs/ngram_search_test.cpp
         ./exprs/gin_functions_test.cpp
         ./exprs/hash_functions_test.cpp
         ./exprs/hyperloglog_functions_test.cpp
@@ -190,6 +189,7 @@ set(EXEC_FILES
         ./exprs/map_expr_test.cpp
         ./exprs/map_functions_test.cpp
         ./exprs/math_functions_test.cpp
+        ./exprs/ngram_search_test.cpp
         ./exprs/null_if_expr_test.cpp
         ./exprs/percentile_functions_test.cpp
         ./exprs/string_fn_concat_test.cpp

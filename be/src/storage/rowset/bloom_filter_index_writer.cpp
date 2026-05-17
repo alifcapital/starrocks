@@ -210,6 +210,10 @@ public:
     void add_values(const void* values, size_t count) override {
         size_t gram_num = this->_bf_options.gram_num;
         const auto* cur_slice = reinterpret_cast<const Slice*>(values);
+        // Writer does not validate UTF-8 — invalid rows still get indexed via utf8_tolower on their
+        // raw bytes. The pushdown reader (VectorizedFunctionCallExpr::ngram_bloom_filter) rejects
+        // invalid-UTF-8 needles with a full-scan fallback, so a malformed needle can never query
+        // this index. Valid-UTF-8 needles need only match valid-UTF-8 rows, which they will.
         for (int i = 0; i < count; ++i) {
             std::vector<size_t> index;
             size_t slice_gram_num = get_utf8_index(*cur_slice, &index);
