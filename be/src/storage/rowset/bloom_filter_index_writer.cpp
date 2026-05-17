@@ -226,9 +226,9 @@ public:
                     if (this->_bf_options.case_sensitive) {
                         _values.insert(get_value<field_type>(&cur_ngram, this->_typeinfo, &this->_pool));
                     } else {
-                        // todo::exist two copy of ngram, need to optimize
                         std::string lower_ngram;
-                        Slice lower_ngram_slice = cur_ngram.tolower(lower_ngram);
+                        utf8_tolower(cur_ngram.get_data(), cur_ngram.get_size(), lower_ngram);
+                        Slice lower_ngram_slice(lower_ngram.data(), lower_ngram.size());
                         _values.insert(get_value<field_type>(&lower_ngram_slice, this->_typeinfo, &this->_pool));
                     }
                 }
