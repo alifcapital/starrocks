@@ -110,6 +110,7 @@ set(EXPR_FILES
   dictionary_get_expr.cpp
   ngram.cpp
   levenshtein.cpp
+  norm_tj.cpp
   match_expr.cpp
   bit_functions.cpp
   hash_functions.cpp

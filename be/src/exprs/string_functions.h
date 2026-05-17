@@ -644,6 +644,13 @@ public:
      */
     DEFINE_VECTORIZED_FN(levenshtein_ratio);
 
+    /**
+     * @functionName: norm_tj
+     * @paramType: [BinaryColumn]
+     * @return: BinaryColumn (normalized Tajik text: lowercase + transliteration)
+     */
+    DEFINE_VECTORIZED_FN(norm_tj);
+
     DEFINE_VECTORIZED_FN_TEMPLATE(field);
     template <LogicalType Type>
     static Status field_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
