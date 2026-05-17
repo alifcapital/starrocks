@@ -136,6 +136,12 @@ under the License.
 
         <dependency>
             <groupId>com.starrocks</groupId>
+            <artifactId>hadoop-ext</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.starrocks</groupId>
             <artifactId>spark-dpp</artifactId>
         </dependency>
 

@@ -14,38 +14,82 @@
 
 package org.apache.iceberg;
 
+import org.apache.iceberg.data.GenericRecord;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionMap;
 import org.apache.iceberg.util.PartitionUtil;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.apache.iceberg.util.Pair;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
 
-public final class PartitionStatsScanHelper {
-    private static final Logger LOG = LogManager.getLogger(PartitionStatsScanHelper.class);
+// Lives in org.apache.iceberg to access ManifestReader.entries() and BaseScan.scanColumns(),
+// which are package-private in iceberg 1.10. Lives in the shared hadoop-ext module so both the
+// FE provider (IcebergPartitionStatsProvider) and the BE scanner
+// (com.starrocks.connector.iceberg.IcebergPartitionsTableScanner) read stats and merge
+// incremental manifests through one implementation. Apache iceberg's own equivalent
+// (PartitionStatsHandler.computeAndMergeStatsIncremental + partitionDataToRecord) is
+// private/package-private in 1.10, so we mirror it here.
+public final class IcebergPartitionStatsHelper {
+    private IcebergPartitionStatsHelper() {
+    }
 
-    private PartitionStatsScanHelper() {}
-
-    public static PartitionMap<PartitionStats> computeStatsFromManifests(
-            Table table, List<ManifestFile> manifests, Types.StructType partitionType, boolean incremental) {
-        long startMs = System.currentTimeMillis();
-        ScanMetrics metrics = new ScanMetrics();
+    // Loads a PartitionStatisticsFile into a PartitionMap keyed by (specId, GenericRecord
+    // partition). Wraps apache PartitionStatsHandler.readPartitionStatsFile (which only returns
+    // a CloseableIterable) and resolves the stats schema for the table's current format version.
+    public static PartitionMap<PartitionStats> readPartitionStatsFileAsMap(
+            Table table, String statsFilePath, Types.StructType partitionType) {
+        Schema schema = PartitionStatsHandler.schema(partitionType, TableUtil.formatVersion(table));
         PartitionMap<PartitionStats> statsMap = PartitionMap.create(table.specs());
-        for (ManifestFile manifest : manifests) {
-            mergePartitionMap(collectStatsForManifest(table, manifest, partitionType, incremental, metrics), statsMap);
+        try (CloseableIterable<PartitionStats> iter =
+                     PartitionStatsHandler.readPartitionStatsFile(schema, table.io().newInputFile(statsFilePath))) {
+            for (PartitionStats stats : iter) {
+                statsMap.put(stats.specId(), stats.partition(), stats);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
-        LOG.debug("Iceberg partitions stats scan manifests. manifests={}, entries={}, live_entries={}, added_entries={}, "
-                        + "deleted_entries={}, incremental={}, elapsed_ms={}",
-                manifests.size(), metrics.entries, metrics.liveEntries, metrics.addedEntries,
-                metrics.deletedEntries, incremental, System.currentTimeMillis() - startMs);
         return statsMap;
     }
 
+    public static PartitionMap<PartitionStats> computeStatsFromManifests(
+            Table table, List<ManifestFile> manifests, Types.StructType partitionType, boolean incremental) {
+        PartitionMap<PartitionStats> statsMap = PartitionMap.create(table.specs());
+        for (ManifestFile manifest : manifests) {
+            mergePartitionMap(collectStatsForManifest(table, manifest, partitionType, incremental), statsMap);
+        }
+        return statsMap;
+    }
+
+    // Merges an incremental stats map (delta) into base. Base map was populated from a stats file
+    // through PartitionStatsHandler.readPartitionStatsFile and so its partition keys are
+    // GenericRecord; delta map was built from manifest entries and its keys are PartitionData.
+    // GenericRecord.equals(PartitionData) is false, so a raw merge would create duplicate entries
+    // for the same logical partition and downstream aggregation would drop one set of counters.
+    // Normalize the delta key to GenericRecord before merging.
+    public static void mergeIncrementalStats(
+            PartitionMap<PartitionStats> base, PartitionMap<PartitionStats> delta) {
+        delta.forEach((key, value) -> base.merge(
+                Pair.of(key.first(), partitionDataToRecord((PartitionData) key.second())),
+                value,
+                (existing, fresh) -> {
+                    existing.appendStats(fresh);
+                    return existing;
+                }));
+    }
+
+    public static GenericRecord partitionDataToRecord(PartitionData data) {
+        GenericRecord record = GenericRecord.create(data.getPartitionType());
+        for (int index = 0; index < record.size(); index++) {
+            record.set(index, data.get(index));
+        }
+        return record;
+    }
+
     private static PartitionMap<PartitionStats> collectStatsForManifest(
-            Table table, ManifestFile manifest, Types.StructType partitionType, boolean incremental, ScanMetrics metrics) {
+            Table table, ManifestFile manifest, Types.StructType partitionType, boolean incremental) {
         List<String> projection = BaseScan.scanColumns(manifest.content());
         try (ManifestReader<?> reader = ManifestFiles.open(manifest, table.io()).select(projection)) {
             PartitionMap<PartitionStats> statsMap = PartitionMap.create(table.specs());
@@ -54,7 +98,6 @@ public final class PartitionStatsScanHelper {
             PartitionData keyTemplate = new PartitionData(partitionType);
 
             for (ManifestEntry<?> entry : reader.entries()) {
-                metrics.entries++;
                 ContentFile<?> file = entry.file();
                 StructLike coercedPartition =
                         PartitionUtil.coercePartition(partitionType, spec, file.partition());
@@ -67,6 +110,10 @@ public final class PartitionStatsScanHelper {
                                 () -> new PartitionStats(key, specId));
                 if (snapshot == null) {
                     // Preserve snapshotId for change detection even if the snapshot is expired.
+                    // Index 11 = lastUpdatedSnapshotId per PartitionStats schema position
+                    // (partition, specId, dataRC, dataFC, dataSize, posDelRC, posDelFC, eqDelRC,
+                    // eqDelFC, totalRC, lastUpdatedAt, lastUpdatedSnapshotId). Any reorder in
+                    // upstream iceberg breaks this — update the index if PartitionStats moves it.
                     Long currentSnapshotId = stats.lastUpdatedSnapshotId();
                     long entrySnapshotId = entry.snapshotId();
                     if (currentSnapshotId == null || currentSnapshotId < entrySnapshotId) {
@@ -74,13 +121,10 @@ public final class PartitionStatsScanHelper {
                     }
                 }
                 if (entry.isLive()) {
-                    metrics.liveEntries++;
                     if (!incremental || entry.status() == ManifestEntry.Status.ADDED) {
-                        metrics.addedEntries++;
                         stats.liveEntry(file, snapshot);
                     }
                 } else {
-                    metrics.deletedEntries++;
                     if (incremental) {
                         stats.deletedEntryForIncrementalCompute(file, snapshot);
                     } else {
@@ -93,13 +137,6 @@ public final class PartitionStatsScanHelper {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    private static class ScanMetrics {
-        long entries;
-        long liveEntries;
-        long addedEntries;
-        long deletedEntries;
     }
 
     private static void mergePartitionMap(
