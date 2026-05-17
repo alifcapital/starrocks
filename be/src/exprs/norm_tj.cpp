@@ -32,6 +32,62 @@ static inline void emit_zh(uint8_t* dst, size_t& di) {
     }
 }
 
+// Lowercase Cyrillic consonants (after normalize_tj_fast has lowercased).
+static inline bool is_cyr_consonant_lower(uint8_t b0, uint8_t b1) {
+    if (b0 == 0xD0) {
+        // б B1, в B2, г B3, д B4, ж B6, з B7, к BA, л BB, м BC, н BD, п BF
+        return b1 == 0xB1 || b1 == 0xB2 || b1 == 0xB3 || b1 == 0xB4 || b1 == 0xB6 || b1 == 0xB7 || b1 == 0xBA ||
+               b1 == 0xBB || b1 == 0xBC || b1 == 0xBD || b1 == 0xBF;
+    }
+    if (b0 == 0xD1) {
+        // р 80, с 81, т 82, ф 84, х 85, ц 86, ч 87, ш 88, щ 89
+        return b1 == 0x80 || b1 == 0x81 || b1 == 0x82 || b1 == 0x84 || b1 == 0x85 || b1 == 0x86 || b1 == 0x87 ||
+               b1 == 0x88 || b1 == 0x89;
+    }
+    return false;
+}
+
+// Collapse consecutive identical Cyrillic consonants (Хассан→Хасан,
+// Мухаммад→Мухамад). In-place since w <= r always.
+static inline size_t dedup_doubled_consonants(uint8_t* dst, size_t len) {
+    size_t r = 0;
+    size_t w = 0;
+    while (r < len) {
+        uint8_t b0 = dst[r];
+        if ((b0 == 0xD0 || b0 == 0xD1) && r + 1 < len) {
+            uint8_t b1 = dst[r + 1];
+            if (w >= 2 && dst[w - 2] == b0 && dst[w - 1] == b1 && is_cyr_consonant_lower(b0, b1)) {
+                r += 2;
+                continue;
+            }
+            dst[w++] = b0;
+            dst[w++] = b1;
+            r += 2;
+            continue;
+        }
+        if (b0 < 0x80) {
+            dst[w++] = b0;
+            r++;
+            continue;
+        }
+        if ((b0 & 0xF0) == 0xE0 && r + 2 < len) {
+            dst[w++] = dst[r++];
+            dst[w++] = dst[r++];
+            dst[w++] = dst[r++];
+            continue;
+        }
+        if ((b0 & 0xF8) == 0xF0 && r + 3 < len) {
+            dst[w++] = dst[r++];
+            dst[w++] = dst[r++];
+            dst[w++] = dst[r++];
+            dst[w++] = dst[r++];
+            continue;
+        }
+        dst[w++] = dst[r++];
+    }
+    return w;
+}
+
 static inline size_t normalize_tj_fast(const uint8_t* __restrict src, size_t src_len, uint8_t* __restrict dst) {
     size_t si = 0;
     size_t di = 0;
@@ -256,6 +312,7 @@ StatusOr<ColumnPtr> StringFunctions::norm_tj(FunctionContext* context, const Col
 
         uint8_t* dst_ptr = result_bytes.data() + dst_offset;
         size_t written = normalize_tj_fast(src_ptr, src_len, dst_ptr);
+        written = dedup_doubled_consonants(dst_ptr, written);
 
         dst_offset += written;
         result_offsets[row + 1] = dst_offset;
