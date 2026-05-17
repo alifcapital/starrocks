@@ -20,6 +20,18 @@
 
 namespace starrocks {
 
+// Canonicalize ж/Ж variants by collapsing дж → ж on emit. Both Ҷ→дж and
+// "Дж/дж" written natively converge on a single ж byte pair, so e.g.
+// Раҷабов / Раджабов / Ражабов all normalize to one stem.
+static inline void emit_zh(uint8_t* dst, size_t& di) {
+    if (di >= 2 && dst[di - 2] == 0xD0 && dst[di - 1] == 0xB4) {
+        dst[di - 1] = 0xB6; // overwrite previous д with ж
+    } else {
+        dst[di++] = 0xD0;
+        dst[di++] = 0xB6;
+    }
+}
+
 static inline size_t normalize_tj_fast(const uint8_t* __restrict src, size_t src_len, uint8_t* __restrict dst) {
     size_t si = 0;
     size_t di = 0;
@@ -68,6 +80,12 @@ static inline size_t normalize_tj_fast(const uint8_t* __restrict src, size_t src
                     si += 2;
                     continue;
                 }
+                // Ж (D0 96) → ж with дж→ж compression
+                if (UNLIKELY(b1 == 0x96)) {
+                    emit_zh(dst, di);
+                    si += 2;
+                    continue;
+                }
                 // А-П (D0 90-9F) → а-п (D0 B0-BF): +0x20
                 if (b1 <= 0x9F) {
                     dst[di++] = 0xD0;
@@ -79,6 +97,12 @@ static inline size_t normalize_tj_fast(const uint8_t* __restrict src, size_t src
                 if (b1 <= 0xAF) {
                     dst[di++] = 0xD1;
                     dst[di++] = b1 - 0x20;
+                    si += 2;
+                    continue;
+                }
+                // ж (D0 B6): already lowercase, but apply дж→ж compression
+                if (UNLIKELY(b1 == 0xB6)) {
+                    emit_zh(dst, di);
                     si += 2;
                     continue;
                 }
@@ -147,11 +171,10 @@ static inline size_t normalize_tj_fast(const uint8_t* __restrict src, size_t src
                     si += 2;
                     continue;
                 case 0x04B6:
-                case 0x04B7: // Ҷ/ҷ → дж
+                case 0x04B7: // Ҷ/ҷ → дж (will collapse to ж via emit_zh)
                     dst[di++] = 0xD0;
                     dst[di++] = 0xB4;
-                    dst[di++] = 0xD0;
-                    dst[di++] = 0xB6;
+                    emit_zh(dst, di);
                     si += 2;
                     continue;
                 }
