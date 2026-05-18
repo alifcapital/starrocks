@@ -347,10 +347,9 @@ SZ_PUBLIC sz_ordering_t sz_order_skylake(sz_cptr_t a, sz_size_t a_length, sz_cpt
     b_vec.zmm = _mm512_maskz_loadu_epi8(head_mask, b);
     __mmask64 mask_not_equal = _mm512_cmpneq_epi8_mask(a_vec.zmm, b_vec.zmm);
     if (mask_not_equal != 0) {
+        // Reload from original memory (L1 cached) to avoid ZMM-to-stack spill.
         sz_u64_t first_diff = _tzcnt_u64(mask_not_equal);
-        char a_char = a_vec.u8s[first_diff];
-        char b_char = b_vec.u8s[first_diff];
-        return sz_order_scalars_(a_char, b_char);
+        return sz_order_scalars_(a[first_diff], b[first_diff]);
     }
     else if (head_length == a_length && head_length == b_length) { return sz_equal_k; }
     else { a += head_length, b += head_length, a_length -= head_length, b_length -= head_length; }
@@ -362,10 +361,9 @@ SZ_PUBLIC sz_ordering_t sz_order_skylake(sz_cptr_t a, sz_size_t a_length, sz_cpt
         b_vec.zmm = _mm512_loadu_si512(b);
         mask_not_equal = _mm512_cmpneq_epi8_mask(a_vec.zmm, b_vec.zmm);
         if (mask_not_equal != 0) {
+            // Reload from original memory (L1 cached) to avoid ZMM-to-stack spill.
             sz_u64_t first_diff = _tzcnt_u64(mask_not_equal);
-            char a_char = a_vec.u8s[first_diff];
-            char b_char = b_vec.u8s[first_diff];
-            return sz_order_scalars_(a_char, b_char);
+            return sz_order_scalars_(a[first_diff], b[first_diff]);
         }
         a += 64, b += 64, a_length -= 64, b_length -= 64;
     }
@@ -376,15 +374,16 @@ SZ_PUBLIC sz_ordering_t sz_order_skylake(sz_cptr_t a, sz_size_t a_length, sz_cpt
         b_mask = sz_u64_clamp_mask_until_(b_length);
         a_vec.zmm = _mm512_maskz_loadu_epi8(a_mask, a);
         b_vec.zmm = _mm512_maskz_loadu_epi8(b_mask, b);
-        // The AVX-512 `_mm512_mask_cmpneq_epi8_mask` intrinsics are generally handy in such environments.
-        // They, however, have latency 3 on most modern CPUs. Using AVX2: `_mm256_cmpeq_epi8` would have
-        // been cheaper, if we didn't have to apply `_mm256_movemask_epi8` afterwards.
-        mask_not_equal = _mm512_cmpneq_epi8_mask(a_vec.zmm, b_vec.zmm);
+        // Restrict the comparison to bytes valid in both strings. The masked loads zero out lanes
+        // past each string's end, so an unmasked compare would see spurious mismatches against
+        // those zeros in the longer string's tail and read out of bounds for the shorter one
+        // (e.g. `sz_order("\0baa", 4, "", 0)` would dereference `b[1]`).
+        __mmask64 const common_mask = a_mask & b_mask;
+        mask_not_equal = _mm512_mask_cmpneq_epi8_mask(common_mask, a_vec.zmm, b_vec.zmm);
         if (mask_not_equal != 0) {
+            // Reload from original memory (L1 cached) to avoid ZMM-to-stack spill.
             sz_u64_t first_diff = _tzcnt_u64(mask_not_equal);
-            char a_char = a_vec.u8s[first_diff];
-            char b_char = b_vec.u8s[first_diff];
-            return sz_order_scalars_(a_char, b_char);
+            return sz_order_scalars_(a[first_diff], b[first_diff]);
         }
         // From logic perspective, the hardest cases are "abc\0" and "abc".
         // The result must be `sz_greater_k`, as the latter is shorter.

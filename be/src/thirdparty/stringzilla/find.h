@@ -205,6 +205,41 @@ SZ_PUBLIC sz_cptr_t sz_find_byteset_neon(sz_cptr_t haystack, sz_size_t length, s
 SZ_PUBLIC sz_cptr_t sz_rfind_byteset_neon(sz_cptr_t haystack, sz_size_t length, sz_byteset_t const *set);
 #endif
 
+/**
+ *  @brief  Finds the first occurrence of a UTF-8 whitespace or punctuation character in a string.
+ *
+ *  Delimiters include all of the above, plus common "punctuation" characters, "symbols", and "separators",
+ *  as defined by the "Unicode UAX #29" word segmentation standard and implemented in the ICU.
+ *  - around 30 ASCII characters
+ *  - around 130 2-byte characters
+ *  - around 4.3k 3-byte characters
+ *  - around 4.1k 4-byte characters
+ *
+ *  @param[in] text String to be scanned.
+ *  @param[in] length Number of bytes in the string.
+ *  @param[out] matched_length Number of bytes in the matched newline delimiter.
+ *  @return Pointer to the first matching newline character from @p text.
+ */
+SZ_DYNAMIC sz_cptr_t sz_find_delimiter_utf8(sz_cptr_t text, sz_size_t length, sz_size_t *matched_length);
+
+/** @copydoc sz_find_delimiters_utf8 */
+SZ_PUBLIC sz_cptr_t sz_find_delimiters_utf8_serial(sz_cptr_t text, sz_size_t length, sz_size_t *matched_length);
+
+#if SZ_USE_HASWELL
+/** @copydoc sz_find_delimiters_utf8 */
+SZ_PUBLIC sz_cptr_t sz_find_delimiters_utf8_haswell(sz_cptr_t text, sz_size_t length, sz_size_t *matched_length);
+#endif
+
+#if SZ_USE_ICE
+/** @copydoc sz_find_delimiters_utf8 */
+SZ_PUBLIC sz_cptr_t sz_find_delimiters_utf8_ice(sz_cptr_t text, sz_size_t length, sz_size_t *matched_length);
+#endif
+
+#if SZ_USE_NEON
+/** @copydoc sz_find_delimiters_utf8 */
+SZ_PUBLIC sz_cptr_t sz_find_delimiters_utf8_neon(sz_cptr_t text, sz_size_t length, sz_size_t *matched_length);
+#endif
+
 #pragma endregion // Core API
 
 #pragma region Helper Shortcuts
@@ -342,32 +377,36 @@ SZ_PUBLIC sz_cptr_t sz_rfind_byteset_serial(sz_cptr_t text, sz_size_t length, sz
  *  This implementation uses hardware-agnostic SWAR technique, to process 8 characters at a time.
  *  Identical to `memchr(haystack, needle[0], haystack_length)`.
  */
-SZ_PUBLIC sz_cptr_t sz_find_byte_serial(sz_cptr_t h, sz_size_t h_length, sz_cptr_t n) {
+SZ_PUBLIC sz_cptr_t sz_find_byte_serial(sz_cptr_t h_chars, sz_size_t h_length, sz_cptr_t n_chars) {
 
     if (!h_length) return SZ_NULL_CHAR;
-    sz_cptr_t const h_end = h + h_length;
+    // Reinterpret as unsigned bytes so the SWAR broadcast below cannot sign-extend
+    // on platforms where `char` is signed (e.g. `-fsigned-char`). See issue #306.
+    sz_u8_t const *h = (sz_u8_t const *)h_chars;
+    sz_u8_t const *const n = (sz_u8_t const *)n_chars;
+    sz_u8_t const *const h_end = h + h_length;
 
 #if !SZ_IS_BIG_ENDIAN_       // Use SWAR only on little-endian platforms for brevity.
 #if !SZ_USE_MISALIGNED_LOADS // Process the misaligned head, to void UB on unaligned 64-bit loads.
     for (; ((sz_size_t)h & 7ull) && h < h_end; ++h)
-        if (*h == *n) return h;
+        if (*h == *n) return (sz_cptr_t)h;
 #endif
 
     // Broadcast the n into every byte of a 64-bit integer to use SWAR
     // techniques and process eight characters at a time.
     sz_u64_vec_t h_vec, n_vec, match_vec;
     match_vec.u64 = 0;
-    n_vec.u64 = (sz_u64_t)n[0] * 0x0101010101010101ull;
+    n_vec.u64 = (sz_u64_t)*n * 0x0101010101010101ull;
     for (; h + 8 <= h_end; h += 8) {
         h_vec.u64 = *(sz_u64_t const *)h;
         match_vec = sz_u64_each_byte_equal_(h_vec, n_vec);
-        if (match_vec.u64) return h + sz_u64_ctz(match_vec.u64) / 8;
+        if (match_vec.u64) return (sz_cptr_t)(h + sz_u64_ctz(match_vec.u64) / 8);
     }
 #endif
 
     // Handle the misaligned tail.
     for (; h < h_end; ++h)
-        if (*h == *n) return h;
+        if (*h == *n) return (sz_cptr_t)h;
     return SZ_NULL_CHAR;
 }
 
@@ -375,33 +414,36 @@ SZ_PUBLIC sz_cptr_t sz_find_byte_serial(sz_cptr_t h, sz_size_t h_length, sz_cptr
  *  This implementation uses hardware-agnostic SWAR technique, to process 8 characters at a time.
  *  Identical to `memrchr(haystack, needle[0], haystack_length)`.
  */
-sz_cptr_t sz_rfind_byte_serial(sz_cptr_t h, sz_size_t h_length, sz_cptr_t n) {
+sz_cptr_t sz_rfind_byte_serial(sz_cptr_t h_chars, sz_size_t h_length, sz_cptr_t n_chars) {
 
     if (!h_length) return SZ_NULL_CHAR;
-    sz_cptr_t const h_start = h;
+    // Reinterpret as unsigned bytes so the SWAR broadcast below cannot sign-extend
+    // on platforms where `char` is signed (e.g. `-fsigned-char`). See issue #306.
+    sz_u8_t const *const h_start = (sz_u8_t const *)h_chars;
+    sz_u8_t const *const n = (sz_u8_t const *)n_chars;
 
     // Reposition the `h` pointer to the end, as we will be walking backwards.
-    h = h + h_length - 1;
+    sz_u8_t const *h = h_start + h_length - 1;
 
 #if !SZ_IS_BIG_ENDIAN_       // Use SWAR only on little-endian platforms for brevity.
 #if !SZ_USE_MISALIGNED_LOADS // Process the misaligned head, to void UB on unaligned 64-bit loads.
     for (; ((sz_size_t)(h + 1) & 7ull) && h >= h_start; --h)
-        if (*h == *n) return h;
+        if (*h == *n) return (sz_cptr_t)h;
 #endif
 
     // Broadcast the n into every byte of a 64-bit integer to use SWAR
     // techniques and process eight characters at a time.
     sz_u64_vec_t h_vec, n_vec, match_vec;
-    n_vec.u64 = (sz_u64_t)n[0] * 0x0101010101010101ull;
+    n_vec.u64 = (sz_u64_t)*n * 0x0101010101010101ull;
     for (; h >= h_start + 7; h -= 8) {
         h_vec.u64 = *(sz_u64_t const *)(h - 7);
         match_vec = sz_u64_each_byte_equal_(h_vec, n_vec);
-        if (match_vec.u64) return h - sz_u64_clz(match_vec.u64) / 8;
+        if (match_vec.u64) return (sz_cptr_t)(h - sz_u64_clz(match_vec.u64) / 8);
     }
 #endif
 
     for (; h >= h_start; --h)
-        if (*h == *n) return h;
+        if (*h == *n) return (sz_cptr_t)h;
     return SZ_NULL_CHAR;
 }
 
@@ -1097,17 +1139,34 @@ SZ_PUBLIC sz_cptr_t sz_find_byteset_haswell(sz_cptr_t text, sz_size_t length, sz
 
     // Let's unzip even and odd elements and replicate them into both lanes of the YMM register.
     // That way when we invoke `_mm256_shuffle_epi8` we can use the same mask for both lanes.
+    // Load the 32-byte filter as two 16-byte halves, separate even/odd bytes, pack, and broadcast to YMM.
+    sz_u128_vec_t byte_mask_vec;
+    sz_u128_vec_t filter_lo_vec, filter_hi_vec;
+    sz_u128_vec_t lo_evens_vec, hi_evens_vec;
+    sz_u128_vec_t lo_odds_vec, hi_odds_vec;
+    sz_u128_vec_t evens_xmm_vec, odds_xmm_vec;
     sz_u256_vec_t filter_even_vec, filter_odd_vec;
-    for (sz_size_t i = 0; i != 16; ++i)
-        filter_even_vec.u8s[i] = filter->_u8s[i * 2], filter_odd_vec.u8s[i] = filter->_u8s[i * 2 + 1];
-    filter_even_vec.xmms[1] = filter_even_vec.xmms[0];
-    filter_odd_vec.xmms[1] = filter_odd_vec.xmms[0];
 
     sz_u256_vec_t text_vec;
     sz_u256_vec_t matches_vec;
     sz_u256_vec_t lower_nibbles_vec, higher_nibbles_vec;
     sz_u256_vec_t bitset_even_vec, bitset_odd_vec;
     sz_u256_vec_t bitmask_vec, bitmask_lookup_vec;
+
+    byte_mask_vec.xmm = _mm_set1_epi16(0x00ff);
+
+    filter_lo_vec.xmm = _mm_lddqu_si128((__m128i const *)(filter));
+    filter_hi_vec.xmm = _mm_lddqu_si128((__m128i const *)(filter) + 1);
+    lo_evens_vec.xmm = _mm_and_si128(filter_lo_vec.xmm, byte_mask_vec.xmm);
+    hi_evens_vec.xmm = _mm_and_si128(filter_hi_vec.xmm, byte_mask_vec.xmm);
+    lo_odds_vec.xmm = _mm_srli_epi16(filter_lo_vec.xmm, 8);
+    hi_odds_vec.xmm = _mm_srli_epi16(filter_hi_vec.xmm, 8);
+
+    evens_xmm_vec.xmm = _mm_packus_epi16(lo_evens_vec.xmm, hi_evens_vec.xmm);
+    odds_xmm_vec.xmm = _mm_packus_epi16(lo_odds_vec.xmm, hi_odds_vec.xmm);
+    filter_even_vec.ymm = _mm256_set_m128i(evens_xmm_vec.xmm, evens_xmm_vec.xmm);
+    filter_odd_vec.ymm = _mm256_set_m128i(odds_xmm_vec.xmm, odds_xmm_vec.xmm);
+
     bitmask_lookup_vec.ymm = _mm256_set_epi8(                       //
         -128, 64, 32, 16, 8, 4, 2, 1, -128, 64, 32, 16, 8, 4, 2, 1, //
         -128, 64, 32, 16, 8, 4, 2, 1, -128, 64, 32, 16, 8, 4, 2, 1);
@@ -1322,6 +1381,7 @@ SZ_PUBLIC sz_cptr_t sz_find_skylake(sz_cptr_t h, sz_size_t h_length, sz_cptr_t n
                 _mm512_cmpeq_epi8_mask(h_first_vec.zmm, n_first_vec.zmm),
                 _mm512_cmpeq_epi8_mask(h_mid_vec.zmm, n_mid_vec.zmm)),
             _mm512_cmpeq_epi8_mask(h_last_vec.zmm, n_last_vec.zmm));
+        matches &= mask;
         while (matches) {
             int potential_offset = sz_u64_ctz(matches);
             if (n_length <= 3 || sz_equal_skylake(h + potential_offset, n, n_length)) return h + potential_offset;
@@ -1404,6 +1464,7 @@ SZ_PUBLIC sz_cptr_t sz_rfind_skylake(sz_cptr_t h, sz_size_t h_length, sz_cptr_t 
                 _mm512_cmpeq_epi8_mask(h_first_vec.zmm, n_first_vec.zmm),
                 _mm512_cmpeq_epi8_mask(h_mid_vec.zmm, n_mid_vec.zmm)),
             _mm512_cmpeq_epi8_mask(h_last_vec.zmm, n_last_vec.zmm));
+        matches &= mask;
         while (matches) {
             int potential_offset = sz_u64_clz(matches);
             if (n_length <= 3 || sz_equal_skylake(h + 64 - potential_offset - 1, n, n_length))

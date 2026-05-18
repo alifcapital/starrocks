@@ -8,7 +8,7 @@
 
 #include <thread> // `std::thread::hardware_concurrency`
 
-#include "thirdparty/stringzilla/types.hpp"
+#include "stringzilla/types.hpp"
 
 namespace ashvardanian {
 namespace stringzillas {
