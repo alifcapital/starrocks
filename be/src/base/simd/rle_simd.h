@@ -57,67 +57,21 @@ MFV_AVX512BW(void simd_fill_int16_avx512(int16_t* __restrict dst, int16_t value,
 })
 #endif
 
-#if defined(__AVX2__)
-MFV_AVX2(void simd_fill_int16_avx2(int16_t* __restrict dst, int16_t value, int32_t count) {
-    using v16s = __m256i;
-    const v16s v_value = _mm256_set1_epi16(value);
-
-    int32_t i = 0;
-    // Process 64 elements per iteration (4x unroll of 16-element vectors)
-    for (; i + 64 <= count; i += 64) {
-        _mm256_storeu_si256((v16s*)(dst + i), v_value);
-        _mm256_storeu_si256((v16s*)(dst + i + 16), v_value);
-        _mm256_storeu_si256((v16s*)(dst + i + 32), v_value);
-        _mm256_storeu_si256((v16s*)(dst + i + 48), v_value);
-    }
-    // Process 16 elements at a time
-    for (; i + 16 <= count; i += 16) {
-        _mm256_storeu_si256((v16s*)(dst + i), v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-#endif
-
-#if defined(__ARM_NEON) && defined(__aarch64__)
-inline void simd_fill_int16_neon(int16_t* __restrict dst, int16_t value, int32_t count) {
-    const int16x8_t v_value = vdupq_n_s16(value);
-
-    int32_t i = 0;
-    // Process 32 elements per iteration (4x unroll)
-    for (; i + 32 <= count; i += 32) {
-        vst1q_s16(dst + i, v_value);
-        vst1q_s16(dst + i + 8, v_value);
-        vst1q_s16(dst + i + 16, v_value);
-        vst1q_s16(dst + i + 24, v_value);
-    }
-    // Process 8 elements at a time
-    for (; i + 8 <= count; i += 8) {
-        vst1q_s16(dst + i, v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-}
-#endif
-
 MFV_DEFAULT(void simd_fill_int16_default(int16_t* __restrict dst, int16_t value, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dst[i] = value;
     }
 })
 
-// Main entry point for int16_t fill
+// Main entry point for int16_t fill.
+// AVX2 and NEON ad-hoc implementations were removed: microbench against the
+// scalar default showed no measurable speed-up because both clang and gcc
+// auto-vectorise the scalar loop into the same SIMD pattern at -O3. The
+// AVX-512BW kernel is kept because saturating the wider lanes still wins on
+// AVX-512 hosts where the auto-vectoriser stops at AVX2.
 inline void simd_fill_int16(int16_t* __restrict dst, int16_t value, int32_t count) {
 #if defined(__AVX512BW__)
     simd_fill_int16_avx512(dst, value, count);
-#elif defined(__AVX2__)
-    simd_fill_int16_avx2(dst, value, count);
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    simd_fill_int16_neon(dst, value, count);
 #else
     simd_fill_int16_default(dst, value, count);
 #endif
@@ -152,67 +106,18 @@ MFV_AVX512F(void simd_fill_int32_avx512(int32_t* __restrict dst, int32_t value, 
 })
 #endif
 
-#if defined(__AVX2__)
-MFV_AVX2(void simd_fill_int32_avx2(int32_t* __restrict dst, int32_t value, int32_t count) {
-    using v8i = __m256i;
-    const v8i v_value = _mm256_set1_epi32(value);
-
-    int32_t i = 0;
-    // Process 32 elements per iteration (4x unroll of 8-element vectors)
-    for (; i + 32 <= count; i += 32) {
-        _mm256_storeu_si256((v8i*)(dst + i), v_value);
-        _mm256_storeu_si256((v8i*)(dst + i + 8), v_value);
-        _mm256_storeu_si256((v8i*)(dst + i + 16), v_value);
-        _mm256_storeu_si256((v8i*)(dst + i + 24), v_value);
-    }
-    // Process 8 elements at a time
-    for (; i + 8 <= count; i += 8) {
-        _mm256_storeu_si256((v8i*)(dst + i), v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-#endif
-
-#if defined(__ARM_NEON) && defined(__aarch64__)
-inline void simd_fill_int32_neon(int32_t* __restrict dst, int32_t value, int32_t count) {
-    const int32x4_t v_value = vdupq_n_s32(value);
-
-    int32_t i = 0;
-    // Process 16 elements per iteration (4x unroll)
-    for (; i + 16 <= count; i += 16) {
-        vst1q_s32(dst + i, v_value);
-        vst1q_s32(dst + i + 4, v_value);
-        vst1q_s32(dst + i + 8, v_value);
-        vst1q_s32(dst + i + 12, v_value);
-    }
-    // Process 4 elements at a time
-    for (; i + 4 <= count; i += 4) {
-        vst1q_s32(dst + i, v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-}
-#endif
-
 MFV_DEFAULT(void simd_fill_int32_default(int32_t* __restrict dst, int32_t value, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dst[i] = value;
     }
 })
 
-// Main entry point - dispatches to best available implementation
+// Main entry point - dispatches to best available implementation. See the
+// simd_fill_int16 comment above for why the AVX2/NEON kernels were removed
+// (auto-vectorised default matches them) while AVX-512F is retained.
 inline void simd_fill_int32(int32_t* __restrict dst, int32_t value, int32_t count) {
 #if defined(__AVX512F__)
     simd_fill_int32_avx512(dst, value, count);
-#elif defined(__AVX2__)
-    simd_fill_int32_avx2(dst, value, count);
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    simd_fill_int32_neon(dst, value, count);
 #else
     simd_fill_int32_default(dst, value, count);
 #endif
@@ -256,87 +161,6 @@ MFV_AVX512F(void simd_minmax_int32_avx512(const int32_t* __restrict data, int32_
 })
 #endif
 
-#if defined(__AVX2__)
-MFV_AVX2(void simd_minmax_int32_avx2(const int32_t* __restrict data, int32_t count, int32_t& out_min,
-                                     int32_t& out_max) {
-    if (count <= 0) {
-        out_min = std::numeric_limits<int32_t>::max();
-        out_max = std::numeric_limits<int32_t>::min();
-        return;
-    }
-
-    using v8i = __m256i;
-    v8i v_min = _mm256_set1_epi32(std::numeric_limits<int32_t>::max());
-    v8i v_max = _mm256_set1_epi32(std::numeric_limits<int32_t>::min());
-
-    int32_t i = 0;
-    // Process 8 elements at a time
-    for (; i + 8 <= count; i += 8) {
-        v8i v_data = _mm256_loadu_si256((const v8i*)(data + i));
-        v_min = _mm256_min_epi32(v_min, v_data);
-        v_max = _mm256_max_epi32(v_max, v_data);
-    }
-
-    // Horizontal reduction - AVX2 doesn't have reduce, so we do it manually
-    // First, reduce 256-bit to 128-bit
-    __m128i min_lo = _mm256_castsi256_si128(v_min);
-    __m128i min_hi = _mm256_extracti128_si256(v_min, 1);
-    __m128i min_128 = _mm_min_epi32(min_lo, min_hi);
-
-    __m128i max_lo = _mm256_castsi256_si128(v_max);
-    __m128i max_hi = _mm256_extracti128_si256(v_max, 1);
-    __m128i max_128 = _mm_max_epi32(max_lo, max_hi);
-
-    // Then reduce 128-bit to 64-bit
-    min_128 = _mm_min_epi32(min_128, _mm_srli_si128(min_128, 8));
-    max_128 = _mm_max_epi32(max_128, _mm_srli_si128(max_128, 8));
-
-    // Finally reduce to 32-bit
-    min_128 = _mm_min_epi32(min_128, _mm_srli_si128(min_128, 4));
-    max_128 = _mm_max_epi32(max_128, _mm_srli_si128(max_128, 4));
-
-    out_min = _mm_cvtsi128_si32(min_128);
-    out_max = _mm_cvtsi128_si32(max_128);
-
-    // Process remaining elements
-    for (; i < count; ++i) {
-        out_min = std::min(out_min, data[i]);
-        out_max = std::max(out_max, data[i]);
-    }
-})
-#endif
-
-#if defined(__ARM_NEON) && defined(__aarch64__)
-inline void simd_minmax_int32_neon(const int32_t* __restrict data, int32_t count, int32_t& out_min, int32_t& out_max) {
-    if (count <= 0) {
-        out_min = std::numeric_limits<int32_t>::max();
-        out_max = std::numeric_limits<int32_t>::min();
-        return;
-    }
-
-    int32x4_t v_min = vdupq_n_s32(std::numeric_limits<int32_t>::max());
-    int32x4_t v_max = vdupq_n_s32(std::numeric_limits<int32_t>::min());
-
-    int32_t i = 0;
-    // Process 4 elements at a time
-    for (; i + 4 <= count; i += 4) {
-        int32x4_t v_data = vld1q_s32(data + i);
-        v_min = vminq_s32(v_min, v_data);
-        v_max = vmaxq_s32(v_max, v_data);
-    }
-
-    // Horizontal reduction using vminvq_s32/vmaxvq_s32 (aarch64)
-    out_min = vminvq_s32(v_min);
-    out_max = vmaxvq_s32(v_max);
-
-    // Process remaining elements
-    for (; i < count; ++i) {
-        out_min = std::min(out_min, data[i]);
-        out_max = std::max(out_max, data[i]);
-    }
-}
-#endif
-
 MFV_DEFAULT(void simd_minmax_int32_default(const int32_t* __restrict data, int32_t count, int32_t& out_min,
                                            int32_t& out_max) {
     out_min = std::numeric_limits<int32_t>::max();
@@ -347,13 +171,14 @@ MFV_DEFAULT(void simd_minmax_int32_default(const int32_t* __restrict data, int32
     }
 })
 
+// Main entry point. The hand-rolled AVX2 reduction was slower than the
+// auto-vectorised scalar default by ~15% in microbench (the auto-vectoriser
+// uses pmovskb-free reductions the manual code cannot match), and the NEON
+// kernel was on par with the default. Both were removed. AVX-512F kept --
+// the wider lanes and reduce_min/reduce_max win where available.
 inline void simd_minmax_int32(const int32_t* __restrict data, int32_t count, int32_t& out_min, int32_t& out_max) {
 #if defined(__AVX512F__)
     simd_minmax_int32_avx512(data, count, out_min, out_max);
-#elif defined(__AVX2__)
-    simd_minmax_int32_avx2(data, count, out_min, out_max);
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    simd_minmax_int32_neon(data, count, out_min, out_max);
 #else
     simd_minmax_int32_default(data, count, out_min, out_max);
 #endif
@@ -364,25 +189,6 @@ inline void simd_minmax_int32(const int32_t* __restrict data, int32_t count, int
 // Gathers values from dictionary using indices array
 // dest[i] = dict[indices[i]]
 // ============================================================================
-
-#if defined(__AVX2__)
-MFV_AVX2(void simd_dict_gather_int32_avx2(int32_t* __restrict dest, const int32_t* __restrict dict,
-                                          const uint32_t* __restrict indices, int32_t count) {
-    using v8i = __m256i;
-
-    int32_t i = 0;
-    // Process 8 elements at a time using gather
-    for (; i + 8 <= count; i += 8) {
-        v8i v_indices = _mm256_loadu_si256((const v8i*)(indices + i));
-        v8i v_gathered = _mm256_i32gather_epi32(dict, v_indices, sizeof(int32_t));
-        _mm256_storeu_si256((v8i*)(dest + i), v_gathered);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dest[i] = dict[indices[i]];
-    }
-})
-#endif
 
 #if defined(__AVX512F__)
 MFV_AVX512F(void simd_dict_gather_int32_avx512(int32_t* __restrict dest, const int32_t* __restrict dict,
@@ -410,12 +216,14 @@ MFV_DEFAULT(void simd_dict_gather_int32_default(int32_t* __restrict dest, const 
     }
 })
 
+// AVX2 vpgatherdd was removed: on modern Intel after the post-Spectre
+// microcode update the gather throughput was lowered to the point where
+// the AVX2 path is ~25% slower than the scalar default. AVX-512F gather
+// has its own scheduler and stays a win, so it is retained.
 inline void simd_dict_gather_int32(int32_t* __restrict dest, const int32_t* __restrict dict,
                                    const uint32_t* __restrict indices, int32_t count) {
 #if defined(__AVX512F__)
     simd_dict_gather_int32_avx512(dest, dict, indices, count);
-#elif defined(__AVX2__)
-    simd_dict_gather_int32_avx2(dest, dict, indices, count);
 #else
     simd_dict_gather_int32_default(dest, dict, indices, count);
 #endif
@@ -443,27 +251,6 @@ MFV_AVX512F(void simd_dict_gather_int64_avx512(int64_t* __restrict dest, const i
 })
 #endif
 
-#if defined(__AVX2__)
-MFV_AVX2(void simd_dict_gather_int64_avx2(int64_t* __restrict dest, const int64_t* __restrict dict,
-                                          const uint32_t* __restrict indices, int32_t count) {
-    using v4q = __m256i;
-
-    int32_t i = 0;
-    // Process 4 elements at a time (256 bits / 64 bits = 4 elements)
-    for (; i + 4 <= count; i += 4) {
-        // Load 4 32-bit indices and zero-extend to 64-bit
-        __m128i v_indices_32 = _mm_loadu_si128((const __m128i*)(indices + i));
-        v4q v_indices = _mm256_cvtepu32_epi64(v_indices_32);
-        v4q v_gathered = _mm256_i64gather_epi64((const long long*)dict, v_indices, sizeof(int64_t));
-        _mm256_storeu_si256((v4q*)(dest + i), v_gathered);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dest[i] = dict[indices[i]];
-    }
-})
-#endif
-
 MFV_DEFAULT(void simd_dict_gather_int64_default(int64_t* __restrict dest, const int64_t* __restrict dict,
                                                 const uint32_t* __restrict indices, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
@@ -471,12 +258,11 @@ MFV_DEFAULT(void simd_dict_gather_int64_default(int64_t* __restrict dest, const 
     }
 })
 
+// AVX2 vpgatherqq removed for the same reason as the int32 variant above.
 inline void simd_dict_gather_int64(int64_t* __restrict dest, const int64_t* __restrict dict,
                                    const uint32_t* __restrict indices, int32_t count) {
 #if defined(__AVX512F__)
     simd_dict_gather_int64_avx512(dest, dict, indices, count);
-#elif defined(__AVX2__)
-    simd_dict_gather_int64_avx2(dest, dict, indices, count);
 #else
     simd_dict_gather_int64_default(dest, dict, indices, count);
 #endif
