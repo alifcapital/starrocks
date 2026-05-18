@@ -19,6 +19,12 @@
 #include <numeric>
 #include <set>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "column/column_helper.h"
 #include "column/fixed_length_column.h"
 #include "column/mysql_row_buffer.h"
@@ -393,8 +399,12 @@ size_t MapColumn::filter_range(const Filter& filter, size_t from, size_t to) {
                 // ```
                 auto delta = offsets[check_offset] - offsets[result_offset];
                 memmove(offsets + result_offset + 1, offsets + check_offset + 1, kBatchSize * sizeof(offsets[0]));
-                for (int i = 0; i < kBatchSize; i++) {
-                    offsets[result_offset + i + 1] -= delta;
+                // SIMD-optimized offset delta subtraction (kBatchSize = 32, process 8 uint32_t per iteration)
+                const __m256i delta_vec = _mm256_set1_epi32(static_cast<int32_t>(delta));
+                for (int i = 0; i < kBatchSize; i += 8) {
+                    __m256i off = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offsets + result_offset + i + 1));
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(offsets + result_offset + i + 1),
+                                        _mm256_sub_epi32(off, delta_vec));
                 }
             }
             result_offset += kBatchSize;
@@ -413,6 +423,44 @@ size_t MapColumn::filter_range(const Filter& filter, size_t from, size_t to) {
                 zero_count = Bits::CountTrailingZeros32(mask);
                 result_offset += 1;
                 i += (zero_count + 1);
+            }
+        }
+        check_offset += kBatchSize;
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    const uint8_t* f_data = filter.data();
+
+    constexpr size_t kBatchSize = /*width of NEON registers*/ 128 / 8;
+
+    while (check_offset + kBatchSize < to) {
+        uint8x16_t f = vld1q_u8(f_data + check_offset);
+        uint8_t maxv = vmaxvq_u8(f);
+
+        if (maxv == 0) {
+            // all no hit, pass
+        } else if (vminvq_u8(f) != 0) {
+            // all hit, copy all
+            auto element_size = offsets[check_offset + kBatchSize] - offsets[check_offset];
+            memset(element_filter.data() + offsets[check_offset], 1, element_size);
+            if (result_offset != check_offset) {
+                DCHECK_LE(offsets[result_offset], offsets[check_offset]);
+                auto delta = offsets[check_offset] - offsets[result_offset];
+                memmove(offsets + result_offset + 1, offsets + check_offset + 1, kBatchSize * sizeof(offsets[0]));
+                const uint32x4_t delta_vec = vdupq_n_u32(delta);
+                for (int i = 0; i < kBatchSize; i += 4) {
+                    uint32x4_t off = vld1q_u32(offsets + result_offset + i + 1);
+                    vst1q_u32(offsets + result_offset + i + 1, vsubq_u32(off, delta_vec));
+                }
+            }
+            result_offset += kBatchSize;
+        } else {
+            for (size_t i = 0; i < kBatchSize; ++i) {
+                if (f_data[check_offset + i]) {
+                    auto array_size = offsets[check_offset + i + 1] - offsets[check_offset + i];
+                    memset(element_filter.data() + offsets[check_offset + i], 1, array_size);
+                    offsets[result_offset + 1] = offsets[result_offset] + array_size;
+                    result_offset += 1;
+                }
             }
         }
         check_offset += kBatchSize;
