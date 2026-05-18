@@ -269,7 +269,7 @@ static void BM_FillDefault_Int32_Scalar(benchmark::State& state) {
     int hit_ratio = static_cast<int>(state.range(0));
     fill_byte_mask(filter.data(), n, 100 - hit_ratio, 0xCAFE);
     for (auto _ : state) {
-        fill_default_scalar(data.data(), filter.data(), n, 0xCAFEBABE);
+        fill_default_scalar<int32_t>(data.data(), filter.data(), n, static_cast<int32_t>(0xCAFEBABE));
         benchmark::DoNotOptimize(data.data());
     }
 }
@@ -281,7 +281,7 @@ static void BM_FillDefault_Int32_SIMD(benchmark::State& state) {
     int hit_ratio = static_cast<int>(state.range(0));
     fill_byte_mask(filter.data(), n, 100 - hit_ratio, 0xCAFE);
     for (auto _ : state) {
-        fill_default_simd<int32_t>(data.data(), filter.data(), n, 0xCAFEBABE);
+        fill_default_simd<int32_t>(data.data(), filter.data(), n, static_cast<int32_t>(0xCAFEBABE));
         benchmark::DoNotOptimize(data.data());
     }
 }
