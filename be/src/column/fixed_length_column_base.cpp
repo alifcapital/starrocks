@@ -16,6 +16,7 @@
 
 #include "base/hash/hash_util.hpp"
 #include "base/simd/gather.h"
+#include "base/simd/simd_utils.h"
 #include "base/types/decimal12.h"
 #include "base/types/int128.h"
 #include "base/types/int256.h"
@@ -114,7 +115,7 @@ void FixedLengthColumnBase<T>::append_default(size_t count) {
     datas.resize(datas.size() + count, DefaultValueGenerator<ValueType>::next_value());
 }
 
-//TODO(fzh): optimize copy using SIMD
+// SIMD-optimized replicate: uses AVX2 broadcast+store for filling repeated values
 template <typename T>
 StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint32_t>& offsets) {
     auto dest = this->clone_empty();
@@ -124,10 +125,11 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
     const auto datas = this->immutable_data();
     dest_datas.resize(offsets.back());
     size_t orig_size = offsets.size() - 1; // this->size() may be large than offsets->size() -1
-    for (auto i = 0; i < orig_size; ++i) {
-        for (auto j = offsets[i]; j < offsets[i + 1]; ++j) {
-            dest_datas[j] = datas[i];
-        }
+
+    T* dest_ptr = dest_datas.data();
+    for (size_t i = 0; i < orig_size; ++i) {
+        size_t fill_count = offsets[i + 1] - offsets[i];
+        SIMDUtils::simd_fill(dest_ptr + offsets[i], datas[i], fill_count);
     }
     return dest;
 }
@@ -135,12 +137,13 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
 template <typename T>
 void FixedLengthColumnBase<T>::fill_default(const Filter& filter) {
     auto& datas = get_data();
-
     T val = DefaultValueGenerator<T>::next_value();
-    for (size_t i = 0; i < filter.size(); i++) {
-        if (filter[i] == 1) {
-            datas[i] = val;
-        }
+    const size_t size = filter.size();
+    const uint8_t* f = filter.data();
+    T* data = datas.data();
+
+    for (size_t i = 0; i < size; i++) {
+        if (f[i] == 1) data[i] = val;
     }
 }
 

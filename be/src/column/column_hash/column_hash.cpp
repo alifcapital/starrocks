@@ -20,6 +20,7 @@
 #include <typeindex>
 
 #include "base/hash/hash_util.hpp"
+#include "base/simd/simd.h"
 #include "column/adaptive_nullable_column.h"
 #include "column/array_column.h"
 #include "column/column_visitor_adapter.h"
@@ -273,21 +274,24 @@ public:
             }
         };
 
-        // TODO: optimize performance for sparse nulls
+        // SIMD optimization: use find_zero/find_nonzero to quickly locate run boundaries
         // Fast path: no selection arrays involved, so we can work on continuous ranges.
         if constexpr (std::is_same_v<SelectorType, SelectorRange> || std::is_same_v<SelectorType, SelectorSelection>) {
             uint32_t cursor = _selector.from;
             while (cursor < _selector.to) {
-                uint32_t next = cursor + 1;
-                while (next < _selector.to && null_data[next] == null_data[cursor]) {
-                    ++next;
-                }
+                uint32_t next;
                 if (null_data[cursor]) {
+                    // Current is null, find next non-null (zero in null_data)
+                    next = SIMD::find_zero(null_data, cursor + 1, _selector.to - cursor - 1);
+                    // Handle null run
                     for (uint32_t idx = cursor; idx < next; ++idx) {
                         if (!_selector.select(idx)) continue;
                         mix_null(idx);
                     }
                 } else {
+                    // Current is not null, find next null (non-zero in null_data)
+                    next = SIMD::find_nonzero(null_data, cursor + 1, _selector.to - cursor - 1);
+                    // Handle non-null run by delegating to data column
                     SelectorType new_selector = _selector;
                     new_selector.from = cursor;
                     new_selector.to = next;
