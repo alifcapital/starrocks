@@ -333,8 +333,8 @@ static void BM_LengthEqMask_SIMD(benchmark::State& state) {
     }
     for (auto _ : state) {
         uint32_t agg = 0;
-        for (size_t base = 0; base + kStringLenSimdWidth <= n_strings; base += kStringLenSimdWidth) {
-            agg ^= length_eq_mask(offsets.data(), base, 5);
+        for (size_t base = 0; base + SIMD::kStringLenSimdWidth <= n_strings; base += SIMD::kStringLenSimdWidth) {
+            agg ^= SIMD::length_eq_mask(offsets.data(), base, 5);
         }
         benchmark::DoNotOptimize(agg);
     }
