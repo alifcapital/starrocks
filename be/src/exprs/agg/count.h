@@ -14,12 +14,6 @@
 
 #pragma once
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 #include "base/simd/simd.h"
 #include "column/nullable_column.h"
 #include "exprs/agg/aggregate.h"
@@ -111,31 +105,9 @@ public:
         auto* column = down_cast<Int64Column*>(dst);
         int64_t* data = column->get_data().data();
         const int64_t count_val = this->data(state).count;
-        const size_t count = end - start;
-        // SIMD-optimized fill with constant value
-#ifdef __AVX2__
-        const __m256i val_vec = _mm256_set1_epi64x(count_val);
-        size_t i = 0;
-        for (; i + 4 <= count; i += 4) {
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + start + i), val_vec);
-        }
-        for (; i < count; ++i) {
-            data[start + i] = count_val;
-        }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const int64x2_t val_vec = vdupq_n_s64(count_val);
-        size_t i = 0;
-        for (; i + 2 <= count; i += 2) {
-            vst1q_s64(data + start + i, val_vec);
-        }
-        for (; i < count; ++i) {
-            data[start + i] = count_val;
-        }
-#else
         for (size_t i = start; i < end; ++i) {
             data[i] = count_val;
         }
-#endif
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
@@ -371,31 +343,9 @@ public:
         auto* column = down_cast<Int64Column*>(dst);
         int64_t* data = column->get_data().data();
         const int64_t count_val = this->data(state).count;
-        const size_t count = end - start;
-        // SIMD-optimized fill with constant value
-#ifdef __AVX2__
-        const __m256i val_vec = _mm256_set1_epi64x(count_val);
-        size_t i = 0;
-        for (; i + 4 <= count; i += 4) {
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + start + i), val_vec);
-        }
-        for (; i < count; ++i) {
-            data[start + i] = count_val;
-        }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const int64x2_t val_vec = vdupq_n_s64(count_val);
-        size_t i = 0;
-        for (; i + 2 <= count; i += 2) {
-            vst1q_s64(data + start + i, val_vec);
-        }
-        for (; i < count; ++i) {
-            data[start + i] = count_val;
-        }
-#else
         for (size_t i = start; i < end; ++i) {
             data[i] = count_val;
         }
-#endif
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
