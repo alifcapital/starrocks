@@ -65,6 +65,13 @@ static bool scalar_memequal(const uint8_t* p1, size_t s1, const uint8_t* p2, siz
 #if defined(__AVX2__)
 static bool simd_memequal_avx2(const uint8_t* p1, size_t size1, const uint8_t* p2, size_t size2) {
     if (size1 != size2) return false;
+    // Mirror production path in column_hash.h: above 128 bytes std::memcmp
+    // (libc ERMS / REP MOVSB) is faster than the AVX2 loop. Without this
+    // bailout the bench would still report the pre-fix regression at 512+.
+    constexpr size_t kMemcmpThreshold = 128;
+    if (size1 >= kMemcmpThreshold) {
+        return std::memcmp(p1, p2, size1) == 0;
+    }
     size_t offset = 0;
     for (; offset + 32 <= size1; offset += 32) {
         __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p1 + offset));
