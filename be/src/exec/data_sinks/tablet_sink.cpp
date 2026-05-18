@@ -997,32 +997,10 @@ void OlapTableSink::_validate_data(RuntimeState* state, Chunk* chunk) {
         // because in previous run, some validation selection value could
         // already be changed to VALID_SEL_OK_AND_NULL, and if we don't change back
         // to OK/FAILED, some rows can not be discarded any more.
-#ifdef __AVX2__
-        const __m256i and_mask = _mm256_set1_epi8(0x1);
-        size_t j = 0;
-        for (; j + 32 <= num_rows; j += 32) {
-            __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(_validate_selection.data() + j));
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(_validate_selection.data() + j),
-                                _mm256_and_si256(data, and_mask));
-        }
-        for (; j < num_rows; j++) {
-            _validate_selection[j] &= 0x1;
-        }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const uint8x16_t and_mask = vdupq_n_u8(0x1);
-        size_t j = 0;
-        for (; j + 16 <= num_rows; j += 16) {
-            uint8x16_t data = vld1q_u8(_validate_selection.data() + j);
-            vst1q_u8(_validate_selection.data() + j, vandq_u8(data, and_mask));
-        }
-        for (; j < num_rows; j++) {
-            _validate_selection[j] &= 0x1;
-        }
-#else
+        // Compiler auto-vectorises this bytewise AND.
         for (size_t j = 0; j < num_rows; j++) {
             _validate_selection[j] &= 0x1;
         }
-#endif
 
         // update_column for auto increment column.
         if (_has_auto_increment && _auto_increment_slot_id == desc->id() && column_ptr->is_nullable()) {

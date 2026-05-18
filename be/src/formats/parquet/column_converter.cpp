@@ -25,12 +25,6 @@
 #include <utility>
 #include <vector>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 #include "base/bit/bit_util.h"
 #include "base/decimal_types.h"
 #include "base/time/timezone_utils.h"
@@ -693,35 +687,10 @@ Status parquet::Int32ToDateConverter::convert(const Column* src, Column* dst) {
     const int32_t* src_ptr = src_data.data();
     int32_t* dst_ptr = reinterpret_cast<int32_t*>(dst_data.data());
     const int32_t epoch = date::UNIX_EPOCH_JULIAN;
-#ifdef __AVX2__
-    {
-        const __m256i epoch_vec = _mm256_set1_epi32(epoch);
-        size_t i = 0;
-        for (; i + 8 <= size; i += 8) {
-            __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_ptr + i));
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst_ptr + i), _mm256_add_epi32(src_vec, epoch_vec));
-        }
-        for (; i < size; i++) {
-            dst_ptr[i] = src_ptr[i] + epoch;
-        }
-    }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    {
-        const int32x4_t epoch_vec = vdupq_n_s32(epoch);
-        size_t i = 0;
-        for (; i + 4 <= size; i += 4) {
-            int32x4_t src_vec = vld1q_s32(src_ptr + i);
-            vst1q_s32(dst_ptr + i, vaddq_s32(src_vec, epoch_vec));
-        }
-        for (; i < size; i++) {
-            dst_ptr[i] = src_ptr[i] + epoch;
-        }
-    }
-#else
+    // Compiler auto-vectorises the broadcast-add.
     for (size_t i = 0; i < size; i++) {
         dst_ptr[i] = src_ptr[i] + epoch;
     }
-#endif
     dst_nullable_column->set_has_null(src_nullable_column->has_null());
     return Status::OK();
 }

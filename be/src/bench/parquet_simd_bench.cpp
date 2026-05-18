@@ -257,52 +257,8 @@ static void BM_CountNotNull_SIMD(benchmark::State& state) {
 BENCHMARK(BM_CountNotNull_Scalar)->Arg(0)->Arg(10)->Arg(50)->Arg(90)->Arg(100);
 BENCHMARK(BM_CountNotNull_SIMD)->Arg(0)->Arg(10)->Arg(50)->Arg(90)->Arg(100);
 
-// =====================================================================
-// column_converter :: Int32ToDateConverter (offset add)
-// =====================================================================
-//
-// Pre-PR: for (i) dst[i] = src[i] + UNIX_EPOCH_JULIAN;
-// Post-PR: AVX2 (8/iter) or NEON (4/iter) add of a broadcast constant.
-
-static constexpr int32_t kJulianOffset = 2440588; // UNIX_EPOCH_JULIAN
-
-static void BM_Int32ToDate_Scalar(benchmark::State& state) {
-    size_t n = static_cast<size_t>(state.range(0));
-    std::vector<int32_t> src(n), dst(n);
-    std::iota(src.begin(), src.end(), 0);
-    for (auto _ : state) {
-        for (size_t i = 0; i < n; ++i) dst[i] = src[i] + kJulianOffset;
-        benchmark::DoNotOptimize(dst.data());
-    }
-}
-
-static void BM_Int32ToDate_SIMD(benchmark::State& state) {
-    size_t n = static_cast<size_t>(state.range(0));
-    std::vector<int32_t> src(n), dst(n);
-    std::iota(src.begin(), src.end(), 0);
-    for (auto _ : state) {
-        size_t i = 0;
-#ifdef __AVX2__
-        const __m256i v_off = _mm256_set1_epi32(kJulianOffset);
-        for (; i + 8 <= n; i += 8) {
-            __m256i v_src = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src.data() + i));
-            __m256i v_dst = _mm256_add_epi32(v_src, v_off);
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst.data() + i), v_dst);
-        }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-        const int32x4_t v_off = vdupq_n_s32(kJulianOffset);
-        for (; i + 4 <= n; i += 4) {
-            int32x4_t v_src = vld1q_s32(src.data() + i);
-            vst1q_s32(dst.data() + i, vaddq_s32(v_src, v_off));
-        }
-#endif
-        for (; i < n; ++i) dst[i] = src[i] + kJulianOffset;
-        benchmark::DoNotOptimize(dst.data());
-    }
-}
-
-BENCHMARK(BM_Int32ToDate_Scalar)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
-BENCHMARK(BM_Int32ToDate_SIMD)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
+// Note: BM_Int32ToDate_* was removed -- scalar broadcast-add is auto-
+// vectorised by gcc/clang, microbench showed scalar == SIMD across all sizes.
 
 } // namespace starrocks
 

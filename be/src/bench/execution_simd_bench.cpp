@@ -285,58 +285,8 @@ DEFINE_COMPARE_BENCH(int8_t, Int8)
 DEFINE_COMPARE_BENCH(int32_t, Int32)
 DEFINE_COMPARE_BENCH(int64_t, Int64)
 
-// =====================================================================
-// data_sinks/tablet_sink.cpp :: _validate_data selection normalize
-// =====================================================================
-//
-// Pre-PR: for (j) validate_selection[j] &= 0x1;
-// Post-PR (AVX2): 32-byte broadcast-AND. NEON: 16-byte.
-//
-// Used to mask validation bits back to {0,1} between validation passes.
-
-static void normalize_selection_scalar(uint8_t* sel, size_t n) {
-    for (size_t i = 0; i < n; ++i) sel[i] &= 0x1;
-}
-
-static void normalize_selection_simd(uint8_t* sel, size_t n) {
-    size_t i = 0;
-#ifdef __AVX2__
-    const __m256i and_mask = _mm256_set1_epi8(0x1);
-    for (; i + 32 <= n; i += 32) {
-        __m256i data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sel + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(sel + i), _mm256_and_si256(data, and_mask));
-    }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    const uint8x16_t and_mask = vdupq_n_u8(0x1);
-    for (; i + 16 <= n; i += 16) {
-        vst1q_u8(sel + i, vandq_u8(vld1q_u8(sel + i), and_mask));
-    }
-#endif
-    for (; i < n; ++i) sel[i] &= 0x1;
-}
-
-static void BM_NormalizeSelection_Scalar(benchmark::State& state) {
-    std::vector<uint8_t> sel(kChunk);
-    fill_byte_mask(sel.data(), kChunk, 50, 0xAB);
-    for (auto _ : state) {
-        std::vector<uint8_t> s = sel;
-        normalize_selection_scalar(s.data(), kChunk);
-        benchmark::DoNotOptimize(s.data());
-    }
-}
-
-static void BM_NormalizeSelection_SIMD(benchmark::State& state) {
-    std::vector<uint8_t> sel(kChunk);
-    fill_byte_mask(sel.data(), kChunk, 50, 0xAB);
-    for (auto _ : state) {
-        std::vector<uint8_t> s = sel;
-        normalize_selection_simd(s.data(), kChunk);
-        benchmark::DoNotOptimize(s.data());
-    }
-}
-
-BENCHMARK(BM_NormalizeSelection_Scalar);
-BENCHMARK(BM_NormalizeSelection_SIMD);
+// Note: BM_NormalizeSelection_* (validate_selection &= 0x1) was removed --
+// scalar == SIMD in microbench, the loop is auto-vectorised by gcc/clang.
 
 } // namespace starrocks
 
