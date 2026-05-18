@@ -249,11 +249,11 @@ BENCHMARK(BM_MergeSelectively_Adaptive)->Arg(0)->Arg(1)->Arg(5)->Arg(12)->Arg(13
 // "compiler auto-vectorisation of a scalar loop" tends to be small but
 // non-zero, so the sweep makes any regression at width=8 obvious.
 
-static void broadcast_scalar(int64_t* data, size_t start, size_t end, int64_t value) {
+static void broadcast_int64_scalar(int64_t* data, size_t start, size_t end, int64_t value) {
     for (size_t i = start; i < end; ++i) data[i] = value;
 }
 
-static void broadcast_simd(int64_t* data, size_t start, size_t end, int64_t value) {
+static void broadcast_int64_simd(int64_t* data, size_t start, size_t end, int64_t value) {
     size_t count = end - start;
 #ifdef __AVX2__
     const __m256i val_vec = _mm256_set1_epi64x(value);
@@ -274,26 +274,71 @@ static void broadcast_simd(int64_t* data, size_t start, size_t end, int64_t valu
 #endif
 }
 
-static void BM_GetValues_Broadcast_Scalar(benchmark::State& state) {
+static void broadcast_double_scalar(double* data, size_t start, size_t end, double value) {
+    for (size_t i = start; i < end; ++i) data[i] = value;
+}
+
+static void broadcast_double_simd(double* data, size_t start, size_t end, double value) {
+    size_t count = end - start;
+#ifdef __AVX2__
+    const __m256d val_vec = _mm256_set1_pd(value);
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        _mm256_storeu_pd(data + start + i, val_vec);
+    }
+    for (; i < count; ++i) data[start + i] = value;
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    const float64x2_t val_vec = vdupq_n_f64(value);
+    size_t i = 0;
+    for (; i + 2 <= count; i += 2) {
+        vst1q_f64(data + start + i, val_vec);
+    }
+    for (; i < count; ++i) data[start + i] = value;
+#else
+    for (size_t i = start; i < end; ++i) data[i] = value;
+#endif
+}
+
+static void BM_GetValues_Broadcast_Int64_Scalar(benchmark::State& state) {
     size_t n = static_cast<size_t>(state.range(0));
     std::vector<int64_t> data(n);
     for (auto _ : state) {
-        broadcast_scalar(data.data(), 0, n, 0x0123456789ABCDEFLL);
+        broadcast_int64_scalar(data.data(), 0, n, 0x0123456789ABCDEFLL);
         benchmark::DoNotOptimize(data.data());
     }
 }
 
-static void BM_GetValues_Broadcast_SIMD(benchmark::State& state) {
+static void BM_GetValues_Broadcast_Int64_SIMD(benchmark::State& state) {
     size_t n = static_cast<size_t>(state.range(0));
     std::vector<int64_t> data(n);
     for (auto _ : state) {
-        broadcast_simd(data.data(), 0, n, 0x0123456789ABCDEFLL);
+        broadcast_int64_simd(data.data(), 0, n, 0x0123456789ABCDEFLL);
         benchmark::DoNotOptimize(data.data());
     }
 }
 
-BENCHMARK(BM_GetValues_Broadcast_Scalar)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
-BENCHMARK(BM_GetValues_Broadcast_SIMD)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
+static void BM_GetValues_Broadcast_Double_Scalar(benchmark::State& state) {
+    size_t n = static_cast<size_t>(state.range(0));
+    std::vector<double> data(n);
+    for (auto _ : state) {
+        broadcast_double_scalar(data.data(), 0, n, 3.141592653589793);
+        benchmark::DoNotOptimize(data.data());
+    }
+}
+
+static void BM_GetValues_Broadcast_Double_SIMD(benchmark::State& state) {
+    size_t n = static_cast<size_t>(state.range(0));
+    std::vector<double> data(n);
+    for (auto _ : state) {
+        broadcast_double_simd(data.data(), 0, n, 3.141592653589793);
+        benchmark::DoNotOptimize(data.data());
+    }
+}
+
+BENCHMARK(BM_GetValues_Broadcast_Int64_Scalar)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
+BENCHMARK(BM_GetValues_Broadcast_Int64_SIMD)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
+BENCHMARK(BM_GetValues_Broadcast_Double_Scalar)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
+BENCHMARK(BM_GetValues_Broadcast_Double_SIMD)->Arg(8)->Arg(64)->Arg(256)->Arg(1024)->Arg(4096);
 
 } // namespace starrocks
 
