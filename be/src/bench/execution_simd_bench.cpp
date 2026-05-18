@@ -46,14 +46,6 @@ namespace starrocks {
 
 constexpr size_t kChunk = 4096;
 
-static void fill_byte_mask(uint8_t* data, size_t n, int zero_ratio_percent, uint64_t seed) {
-    std::mt19937_64 rng(seed);
-    std::uniform_int_distribution<int> d(0, 99);
-    for (size_t i = 0; i < n; ++i) {
-        data[i] = (d(rng) < zero_ratio_percent) ? 0 : 1;
-    }
-}
-
 // =====================================================================
 // sorting/compare_column.cpp :: compare_integral_column_simd (int8)
 // =====================================================================
