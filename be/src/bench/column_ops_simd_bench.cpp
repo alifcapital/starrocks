@@ -118,100 +118,11 @@ static void BM_MemEqual_SIMD(benchmark::State& state) {
 BENCHMARK(BM_MemEqual_Scalar)->Arg(8)->Arg(16)->Arg(32)->Arg(64)->Arg(128)->Arg(512)->Arg(4096);
 BENCHMARK(BM_MemEqual_SIMD)->Arg(8)->Arg(16)->Arg(32)->Arg(64)->Arg(128)->Arg(512)->Arg(4096);
 
-// =====================================================================
-// column_helper.cpp :: merge_two_filters (AND), or_two_filters (OR),
-//                      merge_nullable_filter (ANDN)
-// =====================================================================
-//
-// Pre-PR: for (i) data[i] = data[i] OP selected[i];
-// Post-PR (AVX2): 32-byte AND/OR/ANDN; NEON: 16-byte.
-
-static void scalar_and(uint8_t* a, const uint8_t* b, size_t n) {
-    for (size_t i = 0; i < n; ++i) a[i] = a[i] & b[i];
-}
-static void simd_and(uint8_t* a, const uint8_t* b, size_t n) {
-    size_t i = 0;
-#ifdef __AVX2__
-    for (; i + 32 <= n; i += 32) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(a + i), _mm256_and_si256(va, vb));
-    }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    for (; i + 16 <= n; i += 16) {
-        vst1q_u8(a + i, vandq_u8(vld1q_u8(a + i), vld1q_u8(b + i)));
-    }
-#endif
-    for (; i < n; ++i) a[i] = a[i] & b[i];
-}
-
-static void scalar_or(uint8_t* a, const uint8_t* b, size_t n) {
-    for (size_t i = 0; i < n; ++i) a[i] = a[i] | b[i];
-}
-static void simd_or(uint8_t* a, const uint8_t* b, size_t n) {
-    size_t i = 0;
-#ifdef __AVX2__
-    for (; i + 32 <= n; i += 32) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(a + i), _mm256_or_si256(va, vb));
-    }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    for (; i + 16 <= n; i += 16) {
-        vst1q_u8(a + i, vorrq_u8(vld1q_u8(a + i), vld1q_u8(b + i)));
-    }
-#endif
-    for (; i < n; ++i) a[i] = a[i] | b[i];
-}
-
-// merge_nullable_filter: selected &= !nulls -> ANDN(nulls, selected)
-static void scalar_andn(uint8_t* selected, const uint8_t* nulls, size_t n) {
-    for (size_t i = 0; i < n; ++i) selected[i] = selected[i] & !nulls[i];
-}
-static void simd_andn(uint8_t* selected, const uint8_t* nulls, size_t n) {
-    size_t i = 0;
-#ifdef __AVX2__
-    for (; i + 32 <= n; i += 32) {
-        __m256i vs = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(selected + i));
-        __m256i vn = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(nulls + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(selected + i), _mm256_andnot_si256(vn, vs));
-    }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-    for (; i + 16 <= n; i += 16) {
-        vst1q_u8(selected + i, vbicq_u8(vld1q_u8(selected + i), vld1q_u8(nulls + i)));
-    }
-#endif
-    for (; i < n; ++i) selected[i] = selected[i] & !nulls[i];
-}
-
 constexpr size_t kFilterChunk = 4096;
 
-#define DEFINE_FILTER_BENCH(NAME, FN)                       \
-    static void BM_Filter_##NAME(benchmark::State& state) { \
-        size_t n = kFilterChunk;                            \
-        std::vector<uint8_t> a(n), b(n);                    \
-        fill_byte_mask(a.data(), n, 50, 0xAAAA);            \
-        fill_byte_mask(b.data(), n, 50, 0xBBBB);            \
-        for (auto _ : state) {                              \
-            std::vector<uint8_t> ac = a;                    \
-            FN(ac.data(), b.data(), n);                     \
-            benchmark::DoNotOptimize(ac.data());            \
-        }                                                   \
-    }
-
-DEFINE_FILTER_BENCH(And_Scalar, scalar_and)
-DEFINE_FILTER_BENCH(And_SIMD, simd_and)
-DEFINE_FILTER_BENCH(Or_Scalar, scalar_or)
-DEFINE_FILTER_BENCH(Or_SIMD, simd_or)
-DEFINE_FILTER_BENCH(Andn_Scalar, scalar_andn)
-DEFINE_FILTER_BENCH(Andn_SIMD, simd_andn)
-
-BENCHMARK(BM_Filter_And_Scalar);
-BENCHMARK(BM_Filter_And_SIMD);
-BENCHMARK(BM_Filter_Or_Scalar);
-BENCHMARK(BM_Filter_Or_SIMD);
-BENCHMARK(BM_Filter_Andn_Scalar);
-BENCHMARK(BM_Filter_Andn_SIMD);
+// Note: merge_two_filters / or_two_filters / merge_nullable_filter benches
+// were removed -- microbench showed scalar == SIMD because the bytewise
+// AND/OR/ANDN over uint8_t is auto-vectorised by gcc/clang.
 
 // =====================================================================
 // fixed_length_column_base.cpp :: fill_default
