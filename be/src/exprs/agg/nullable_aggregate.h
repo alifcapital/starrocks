@@ -296,16 +296,19 @@ public:
 
     void merge_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column* column,
                                  AggDataPtr* states, const Filter& filter) const override {
-        // Adaptive SIMD: for sparse filters, use find_zero to skip; for dense, iterate all
-        if (SIMD::count_zero(filter.data(), chunk_size) > chunk_size / 8) {
-            // Dense: more than 12.5% rows pass filter, iterate all
+        // Lazy-probe adaptive: see aggregate.h::update_batch_selectively for
+        // the rationale (avoid the up-front count_zero(n) that pessimises
+        // dense filters by ~100 ns per call).
+        constexpr size_t kProbe = 256;
+        const size_t probe_n = std::min(chunk_size, kProbe);
+        const bool sparse = SIMD::count_zero(filter.data(), probe_n) <= probe_n / 8;
+        if (!sparse) {
             for (size_t i = 0; i < chunk_size; i++) {
                 if (filter[i] == 0) {
                     merge(ctx, column, states[i] + state_offset, i);
                 }
             }
         } else {
-            // Sparse: use SIMD to find zero positions
             size_t idx = 0;
             while (idx < chunk_size) {
                 idx = SIMD::find_zero(filter, idx, chunk_size - idx);

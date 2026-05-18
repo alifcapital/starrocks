@@ -202,7 +202,13 @@ static inline void merge_selectively_scalar(const BenchFilter& filter, size_t n,
 
 template <typename Callback>
 static inline void merge_selectively_adaptive(const BenchFilter& filter, size_t n, Callback&& cb) {
-    if (SIMD::count_zero(filter.data(), n) > n / 8) {
+    // Lazy probe over first kProbe bytes -- avoids the O(n) count_zero(n) the
+    // first version paid up-front (~100 ns @ 4096 bytes) which destroyed the
+    // dense-filter path. Mirrors the fix in aggregate.h.
+    constexpr size_t kProbe = 256;
+    const size_t probe_n = std::min(n, kProbe);
+    const bool sparse = SIMD::count_zero(filter.data(), probe_n) <= probe_n / 8;
+    if (!sparse) {
         for (size_t i = 0; i < n; ++i) {
             if (filter[i] == 0) cb(i);
         }
