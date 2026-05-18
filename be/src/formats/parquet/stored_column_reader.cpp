@@ -17,6 +17,12 @@
 #include <fmt/core.h>
 #include <glog/logging.h>
 
+#if defined(__AVX2__) && defined(__POPCNT__)
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <algorithm>
 #include <sstream>
 #include <string>
@@ -227,9 +233,9 @@ Status RepeatedStoredColumnReader::_delimit_rows(const level_t* rep_levels, size
         _meet_first_record = false;
         DCHECK_EQ(0, rep_levels[levels_pos]);
     } // else {
-      //  means  rows_read < *num_rows, levels_pos >= _levels_decoded,
-      //  so we need to decode more levels to obtain a complete line or
-      //  we have read all the records in this column chunk.
+    //  means  rows_read < *num_rows, levels_pos >= _levels_decoded,
+    //  so we need to decode more levels to obtain a complete line or
+    //  we have read all the records in this column chunk.
     // }
 
     VLOG_ROW << "rows_reader=" << rows_read << ", level_parsed=" << levels_pos;
@@ -298,9 +304,32 @@ Status StoredColumnReader::create(const ColumnReaderOptions& opts, const Parquet
 
 size_t StoredColumnReaderImpl::count_not_null(level_t* def_levels, size_t num_parsed_levels, level_t max_def_level) {
     size_t count = 0;
-    for (int i = 0; i < num_parsed_levels; ++i) {
-        level_t def_level = def_levels[i];
-        if (def_level == max_def_level) {
+    size_t i = 0;
+
+#if defined(__AVX2__) && defined(__POPCNT__)
+    // 16 x int16 cmpeq per iteration; movemask returns 32-bit byte mask where
+    // each matching int16 contributes two set bits, so popcount/2 = matches.
+    const __m256i v_max = _mm256_set1_epi16(max_def_level);
+    for (; i + 16 <= num_parsed_levels; i += 16) {
+        __m256i v_data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(def_levels + i));
+        __m256i v_cmp = _mm256_cmpeq_epi16(v_data, v_max);
+        uint32_t mask = _mm256_movemask_epi8(v_cmp);
+        count += __builtin_popcount(mask) >> 1;
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    // 8 x int16 cmpeq per iteration; shift-right-15 reduces each 0xFFFF match
+    // to 1 and addv gives the per-batch count.
+    const int16x8_t v_max = vdupq_n_s16(max_def_level);
+    for (; i + 8 <= num_parsed_levels; i += 8) {
+        int16x8_t v_data = vld1q_s16(def_levels + i);
+        uint16x8_t v_cmp = vceqq_s16(v_data, v_max);
+        uint16x8_t v_ones = vshrq_n_u16(v_cmp, 15);
+        count += vaddvq_u16(v_ones);
+    }
+#endif
+
+    for (; i < num_parsed_levels; ++i) {
+        if (def_levels[i] == max_def_level) {
             count++;
         }
     }
