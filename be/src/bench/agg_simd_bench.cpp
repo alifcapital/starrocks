@@ -43,9 +43,13 @@
 #include <vector>
 
 #include "base/simd/simd.h"
-#include "column/vectorized_fwd.h"
 
 namespace starrocks {
+
+// Filter type used by aggregate.h is std::vector<uint8_t, ColumnAllocator<uint8_t>>;
+// for microbench purposes the allocator is irrelevant -- bench the algorithm, not
+// the allocator -- so use the vanilla std::vector here.
+using BenchFilter = std::vector<uint8_t>;
 
 constexpr size_t kChunkSize = 4096;
 
@@ -190,14 +194,14 @@ BENCHMARK(BM_BoolOr_SIMD)->Arg(0)->Arg(1)->Arg(50)->Arg(100);
 // scalar aggregators.
 
 template <typename Callback>
-static inline void merge_selectively_scalar(const Filter& filter, size_t n, Callback&& cb) {
+static inline void merge_selectively_scalar(const BenchFilter& filter, size_t n, Callback&& cb) {
     for (size_t i = 0; i < n; ++i) {
         if (filter[i] == 0) cb(i);
     }
 }
 
 template <typename Callback>
-static inline void merge_selectively_adaptive(const Filter& filter, size_t n, Callback&& cb) {
+static inline void merge_selectively_adaptive(const BenchFilter& filter, size_t n, Callback&& cb) {
     if (SIMD::count_zero(filter.data(), n) > n / 8) {
         for (size_t i = 0; i < n; ++i) {
             if (filter[i] == 0) cb(i);
@@ -214,7 +218,7 @@ static inline void merge_selectively_adaptive(const Filter& filter, size_t n, Ca
 }
 
 static void BM_MergeSelectively_Scalar(benchmark::State& state) {
-    Filter filter(kChunkSize);
+    BenchFilter filter(kChunkSize);
     fill_byte_mask(filter.data(), filter.size(), static_cast<int>(state.range(0)), 0xABCDEF01ull);
     uint64_t acc = 0;
     for (auto _ : state) {
@@ -224,7 +228,7 @@ static void BM_MergeSelectively_Scalar(benchmark::State& state) {
 }
 
 static void BM_MergeSelectively_Adaptive(benchmark::State& state) {
-    Filter filter(kChunkSize);
+    BenchFilter filter(kChunkSize);
     fill_byte_mask(filter.data(), filter.size(), static_cast<int>(state.range(0)), 0xABCDEF01ull);
     uint64_t acc = 0;
     for (auto _ : state) {
