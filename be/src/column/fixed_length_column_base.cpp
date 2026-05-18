@@ -14,8 +14,15 @@
 
 #include "column/fixed_length_column_base.h"
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "base/hash/hash_util.hpp"
 #include "base/simd/gather.h"
+#include "base/simd/simd_utils.h"
 #include "base/types/decimal12.h"
 #include "base/types/int128.h"
 #include "base/types/int256.h"
@@ -114,7 +121,7 @@ void FixedLengthColumnBase<T>::append_default(size_t count) {
     datas.resize(datas.size() + count, DefaultValueGenerator<ValueType>::next_value());
 }
 
-//TODO(fzh): optimize copy using SIMD
+// SIMD-optimized replicate: uses AVX2 broadcast+store for filling repeated values
 template <typename T>
 StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint32_t>& offsets) {
     auto dest = this->clone_empty();
@@ -124,10 +131,11 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
     const auto datas = this->immutable_data();
     dest_datas.resize(offsets.back());
     size_t orig_size = offsets.size() - 1; // this->size() may be large than offsets->size() -1
-    for (auto i = 0; i < orig_size; ++i) {
-        for (auto j = offsets[i]; j < offsets[i + 1]; ++j) {
-            dest_datas[j] = datas[i];
-        }
+
+    T* dest_ptr = dest_datas.data();
+    for (size_t i = 0; i < orig_size; ++i) {
+        size_t fill_count = offsets[i + 1] - offsets[i];
+        SIMDUtils::simd_fill(dest_ptr + offsets[i], datas[i], fill_count);
     }
     return dest;
 }
@@ -135,13 +143,95 @@ StatusOr<MutableColumnPtr> FixedLengthColumnBase<T>::replicate(const Buffer<uint
 template <typename T>
 void FixedLengthColumnBase<T>::fill_default(const Filter& filter) {
     auto& datas = get_data();
-
     T val = DefaultValueGenerator<T>::next_value();
-    for (size_t i = 0; i < filter.size(); i++) {
-        if (filter[i] == 1) {
-            datas[i] = val;
+    const size_t size = filter.size();
+    const uint8_t* f = filter.data();
+    T* data = datas.data();
+
+#ifdef __AVX2__
+    if constexpr (sizeof(T) == 4) {
+        int32_t val_bits;
+        memcpy(&val_bits, &val, sizeof(val_bits));
+        const __m256i val_vec = _mm256_set1_epi32(val_bits);
+        const __m256i zero = _mm256_setzero_si256();
+        size_t i = 0;
+        for (; i + 8 <= size; i += 8) {
+            // Load 8 filter bytes, expand to 32-bit mask
+            __m256i flt = _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(f + i)));
+            __m256i mask = _mm256_cmpgt_epi32(flt, zero);
+            __m256i cur = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), _mm256_blendv_epi8(cur, val_vec, mask));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else if constexpr (sizeof(T) == 8) {
+        int64_t val_bits;
+        memcpy(&val_bits, &val, sizeof(val_bits));
+        const __m256i val_vec = _mm256_set1_epi64x(val_bits);
+        const __m256i zero = _mm256_setzero_si256();
+        size_t i = 0;
+        for (; i + 4 <= size; i += 4) {
+            // AVX2: manually expand 4 bytes to 4 int64
+            uint32_t f4;
+            memcpy(&f4, f + i, sizeof(f4));
+            __m256i flt = _mm256_set_epi64x((f4 >> 24) & 0xFF, (f4 >> 16) & 0xFF, (f4 >> 8) & 0xFF, f4 & 0xFF);
+            __m256i mask = _mm256_cmpgt_epi64(flt, zero);
+            __m256i cur = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(data + i), _mm256_blendv_epi8(cur, val_vec, mask));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else {
+        for (size_t i = 0; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
         }
     }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    if constexpr (sizeof(T) == 4) {
+        uint32_t val_bits;
+        memcpy(&val_bits, &val, sizeof(val_bits));
+        const uint32x4_t val_vec = vdupq_n_u32(val_bits);
+        size_t i = 0;
+        for (; i + 4 <= size; i += 4) {
+            // Load exactly 4 filter bytes, expand to 32-bit
+            uint32_t f4;
+            memcpy(&f4, f + i, sizeof(f4));
+            uint32x4_t flt32 = {f4 & 0xFF, (f4 >> 8) & 0xFF, (f4 >> 16) & 0xFF, (f4 >> 24) & 0xFF};
+            uint32x4_t mask = vcgtq_u32(flt32, vdupq_n_u32(0));
+            uint32x4_t cur = vld1q_u32(reinterpret_cast<const uint32_t*>(data + i));
+            vst1q_u32(reinterpret_cast<uint32_t*>(data + i), vbslq_u32(mask, val_vec, cur));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else if constexpr (sizeof(T) == 8) {
+        uint64_t val_bits;
+        memcpy(&val_bits, &val, sizeof(val_bits));
+        const uint64x2_t val_vec = vdupq_n_u64(val_bits);
+        size_t i = 0;
+        for (; i + 2 <= size; i += 2) {
+            uint16_t f01;
+            memcpy(&f01, f + i, sizeof(f01));
+            uint64x2_t flt64 = {static_cast<uint64_t>(f01 & 0xFF), static_cast<uint64_t>((f01 >> 8) & 0xFF)};
+            uint64x2_t mask = vcgtq_u64(flt64, vdupq_n_u64(0));
+            uint64x2_t cur = vld1q_u64(reinterpret_cast<const uint64_t*>(data + i));
+            vst1q_u64(reinterpret_cast<uint64_t*>(data + i), vbslq_u64(mask, val_vec, cur));
+        }
+        for (; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    } else {
+        for (size_t i = 0; i < size; i++) {
+            if (f[i] == 1) data[i] = val;
+        }
+    }
+#else
+    for (size_t i = 0; i < size; i++) {
+        if (f[i] == 1) data[i] = val;
+    }
+#endif
 }
 
 template <typename T>
