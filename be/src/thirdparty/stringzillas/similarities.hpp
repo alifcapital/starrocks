@@ -69,9 +69,9 @@
 #ifndef STRINGZILLAS_SIMILARITIES_HPP_
 #define STRINGZILLAS_SIMILARITIES_HPP_
 
-#include "thirdparty/stringzilla/types.hpp"  // `sz::error_cost_t`
-#include "thirdparty/stringzilla/memory.h"   // `sz_move_serial`
-#include "thirdparty/stringzillas/types.hpp" // `sz::executor_like`
+#include "stringzilla/types.hpp"  // `sz::error_cost_t`
+#include "stringzilla/memory.h"   // `sz_move_serial`
+#include "stringzillas/types.hpp" // `sz::executor_like`
 
 #include <atomic>      // `std::atomic` to synchronize threads
 #include <type_traits> // `std::enable_if_t` for meta-programming
