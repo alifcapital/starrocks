@@ -148,7 +148,10 @@ void FixedLengthColumnBase<T>::fill_default(const Filter& filter) {
     const uint8_t* f = filter.data();
     T* data = datas.data();
 
-#ifdef __AVX2__
+    // On AVX-512 builds the compiler auto-vectorises the scalar fallback to
+    // 16-lane AVX-512 blend, which beats the hand-written 8-lane AVX2 blend.
+    // Only opt into the hand-written AVX2 path on AVX2-only builds.
+#if defined(__AVX2__) && !defined(__AVX512F__)
     if constexpr (sizeof(T) == 4) {
         int32_t val_bits;
         memcpy(&val_bits, &val, sizeof(val_bits));

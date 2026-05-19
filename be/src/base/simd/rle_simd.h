@@ -309,7 +309,10 @@ MFV_DEFAULT(void simd_widen_int8_to_int32_default(int32_t* __restrict dest, cons
 })
 
 inline void simd_widen_int8_to_int32(int32_t* __restrict dest, const int8_t* __restrict src, int32_t count) {
-#if defined(__AVX2__)
+    // On AVX-512 builds the compiler auto-vectorises the scalar default to
+    // 16-lane AVX-512 widen, which matches or beats the hand-written 8-lane
+    // AVX2 path. We only opt into the hand-written path on AVX2-only builds.
+#if defined(__AVX2__) && !defined(__AVX512F__)
     simd_widen_int8_to_int32_avx2(dest, src, count);
 #else
     simd_widen_int8_to_int32_default(dest, src, count);
@@ -341,7 +344,8 @@ MFV_DEFAULT(void simd_widen_int16_to_int32_default(int32_t* __restrict dest, con
 })
 
 inline void simd_widen_int16_to_int32(int32_t* __restrict dest, const int16_t* __restrict src, int32_t count) {
-#if defined(__AVX2__)
+    // See simd_widen_int8_to_int32 above for the rationale.
+#if defined(__AVX2__) && !defined(__AVX512F__)
     simd_widen_int16_to_int32_avx2(dest, src, count);
 #else
     simd_widen_int16_to_int32_default(dest, src, count);
