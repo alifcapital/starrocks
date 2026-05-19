@@ -77,11 +77,23 @@ static void compare_integral_simd(int8_t* cmp_vector, const T* lhs, T rhs, size_
 template <>
 void compare_integral_simd<int8_t>(int8_t* cmp_vector, const int8_t* lhs, int8_t rhs, size_t n) {
     size_t i = 0;
-    // Mirror the gate in compare_integral_column_simd (compare_column.cpp):
-    // on AVX-512 builds the auto-vectorised scalar fallback beats the
-    // hand-written AVX2 block-skip path, so we only opt into hand-SIMD
-    // on AVX2-only builds.
-#if defined(__AVX2__) && !defined(__AVX512F__)
+    // Mirrors the AVX-512BW / AVX2 / NEON cascade in compare_integral_column_simd.
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    constexpr size_t kBlock = 64;
+    const __m512i rhs_vec = _mm512_set1_epi8(rhs);
+    const __m512i zero = _mm512_setzero_si512();
+    for (; i + kBlock <= n; i += kBlock) {
+        __m512i cmp_bytes = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(cmp_vector + i));
+        __mmask64 still_eq = _mm512_cmpeq_epi8_mask(cmp_bytes, zero);
+        if (still_eq == 0) continue;
+        __m512i lhs_v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs + i));
+        __mmask64 gt = _mm512_mask_cmpgt_epi8_mask(still_eq, lhs_v, rhs_vec);
+        __mmask64 lt = _mm512_mask_cmplt_epi8_mask(still_eq, lhs_v, rhs_vec);
+        __m512i out = _mm512_maskz_set1_epi8(gt, 1);
+        out = _mm512_mask_set1_epi8(out, lt, -1);
+        _mm512_mask_storeu_epi8(cmp_vector + i, still_eq, out);
+    }
+#elif defined(__AVX2__)
     constexpr size_t kBlock = 32;
     const __m256i zero = _mm256_setzero_si256();
     const __m256i rhs_vec = _mm256_set1_epi8(rhs);
@@ -136,8 +148,21 @@ void compare_integral_simd<int8_t>(int8_t* cmp_vector, const int8_t* lhs, int8_t
 template <>
 void compare_integral_simd<int32_t>(int8_t* cmp_vector, const int32_t* lhs, int32_t rhs, size_t n) {
     size_t i = 0;
-    // See compare_integral_simd<int8_t> above for the gate rationale.
-#if defined(__AVX2__) && !defined(__AVX512F__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    constexpr size_t kBlock = 16;
+    const __m512i rhs_vec = _mm512_set1_epi32(rhs);
+    for (; i + kBlock <= n; i += kBlock) {
+        __m128i cmp_bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(cmp_vector + i));
+        __mmask16 still_eq = _mm_cmpeq_epi8_mask(cmp_bytes, _mm_setzero_si128());
+        if (still_eq == 0) continue;
+        __m512i lhs_v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs + i));
+        __mmask16 gt = _mm512_mask_cmpgt_epi32_mask(still_eq, lhs_v, rhs_vec);
+        __mmask16 lt = _mm512_mask_cmplt_epi32_mask(still_eq, lhs_v, rhs_vec);
+        __m128i out = _mm_maskz_set1_epi8(gt, 1);
+        out = _mm_mask_set1_epi8(out, lt, -1);
+        _mm_mask_storeu_epi8(cmp_vector + i, still_eq, out);
+    }
+#elif defined(__AVX2__)
     constexpr size_t kBlock = 8;
     const __m256i rhs_vec = _mm256_set1_epi32(rhs);
     const __m256i ones = _mm256_set1_epi32(1);
@@ -191,8 +216,22 @@ void compare_integral_simd<int32_t>(int8_t* cmp_vector, const int32_t* lhs, int3
 template <>
 void compare_integral_simd<int64_t>(int8_t* cmp_vector, const int64_t* lhs, int64_t rhs, size_t n) {
     size_t i = 0;
-    // See compare_integral_simd<int8_t> above for the gate rationale.
-#if defined(__AVX2__) && !defined(__AVX512F__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    constexpr size_t kBlock = 8;
+    const __m512i rhs_vec = _mm512_set1_epi64(rhs);
+    for (; i + kBlock <= n; i += kBlock) {
+        __m128i cmp_bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(cmp_vector + i));
+        __mmask16 still_eq16 = _mm_cmpeq_epi8_mask(cmp_bytes, _mm_setzero_si128());
+        __mmask8 still_eq = static_cast<__mmask8>(still_eq16 & 0xFFu);
+        if (still_eq == 0) continue;
+        __m512i lhs_v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs + i));
+        __mmask8 gt = _mm512_mask_cmpgt_epi64_mask(still_eq, lhs_v, rhs_vec);
+        __mmask8 lt = _mm512_mask_cmplt_epi64_mask(still_eq, lhs_v, rhs_vec);
+        __m128i out = _mm_maskz_set1_epi8(gt, 1);
+        out = _mm_mask_set1_epi8(out, lt, -1);
+        _mm_mask_storeu_epi8(cmp_vector + i, static_cast<__mmask16>(still_eq), out);
+    }
+#elif defined(__AVX2__)
     constexpr size_t kBlock = 4;
     const __m256i rhs_vec = _mm256_set1_epi64x(rhs);
     const __m256i ones = _mm256_set1_epi64x(1);
