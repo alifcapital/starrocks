@@ -151,7 +151,10 @@ static void fill_default_simd(T* data, const uint8_t* filter, size_t n, T val);
 template <>
 void fill_default_simd<int32_t>(int32_t* data, const uint8_t* f, size_t n, int32_t val) {
     size_t i = 0;
-#ifdef __AVX2__
+    // Mirror the gate in FixedLengthColumnBase::fill_default: on AVX-512
+    // builds the auto-vectorised scalar tail beats the hand-rolled AVX2
+    // blend, so the hand-rolled path is only used on AVX2-only builds.
+#if defined(__AVX2__) && !defined(__AVX512F__)
     int32_t val_bits;
     std::memcpy(&val_bits, &val, sizeof(val_bits));
     const __m256i val_vec = _mm256_set1_epi32(val_bits);
