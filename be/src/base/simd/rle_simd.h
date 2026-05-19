@@ -57,7 +57,7 @@ MFV_AVX512BW(void simd_fill_int16_avx512(int16_t* __restrict dst, int16_t value,
 })
 #endif
 
-MFV_DEFAULT(void simd_fill_int16_default(int16_t* __restrict dst, int16_t value, int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_fill_int16_default(int16_t* __restrict dst, int16_t value, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dst[i] = value;
     }
@@ -106,7 +106,7 @@ MFV_AVX512F(void simd_fill_int32_avx512(int32_t* __restrict dst, int32_t value, 
 })
 #endif
 
-MFV_DEFAULT(void simd_fill_int32_default(int32_t* __restrict dst, int32_t value, int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_fill_int32_default(int32_t* __restrict dst, int32_t value, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dst[i] = value;
     }
@@ -161,8 +161,8 @@ MFV_AVX512F(void simd_minmax_int32_avx512(const int32_t* __restrict data, int32_
 })
 #endif
 
-MFV_DEFAULT(void simd_minmax_int32_default(const int32_t* __restrict data, int32_t count, int32_t& out_min,
-                                           int32_t& out_max) {
+MFV_AUTOVEC_STATIC(void simd_minmax_int32_default(const int32_t* __restrict data, int32_t count, int32_t& out_min,
+                                                  int32_t& out_max) {
     out_min = std::numeric_limits<int32_t>::max();
     out_max = std::numeric_limits<int32_t>::min();
     for (int32_t i = 0; i < count; ++i) {
@@ -209,8 +209,8 @@ MFV_AVX512F(void simd_dict_gather_int32_avx512(int32_t* __restrict dest, const i
 })
 #endif
 
-MFV_DEFAULT(void simd_dict_gather_int32_default(int32_t* __restrict dest, const int32_t* __restrict dict,
-                                                const uint32_t* __restrict indices, int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_dict_gather_int32_default(int32_t* __restrict dest, const int32_t* __restrict dict,
+                                                       const uint32_t* __restrict indices, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dest[i] = dict[indices[i]];
     }
@@ -251,8 +251,8 @@ MFV_AVX512F(void simd_dict_gather_int64_avx512(int64_t* __restrict dest, const i
 })
 #endif
 
-MFV_DEFAULT(void simd_dict_gather_int64_default(int64_t* __restrict dest, const int64_t* __restrict dict,
-                                                const uint32_t* __restrict indices, int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_dict_gather_int64_default(int64_t* __restrict dest, const int64_t* __restrict dict,
+                                                       const uint32_t* __restrict indices, int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dest[i] = dict[indices[i]];
     }
@@ -301,8 +301,8 @@ MFV_AVX2(void simd_widen_int8_to_int32_avx2(int32_t* __restrict dest, const int8
 })
 #endif
 
-MFV_DEFAULT(void simd_widen_int8_to_int32_default(int32_t* __restrict dest, const int8_t* __restrict src,
-                                                  int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_widen_int8_to_int32_default(int32_t* __restrict dest, const int8_t* __restrict src,
+                                                         int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dest[i] = static_cast<int32_t>(src[i]);
     }
@@ -336,8 +336,8 @@ MFV_AVX2(void simd_widen_int16_to_int32_avx2(int32_t* __restrict dest, const int
 })
 #endif
 
-MFV_DEFAULT(void simd_widen_int16_to_int32_default(int32_t* __restrict dest, const int16_t* __restrict src,
-                                                   int32_t count) {
+MFV_AUTOVEC_STATIC(void simd_widen_int16_to_int32_default(int32_t* __restrict dest, const int16_t* __restrict src,
+                                                          int32_t count) {
     for (int32_t i = 0; i < count; ++i) {
         dest[i] = static_cast<int32_t>(src[i]);
     }
