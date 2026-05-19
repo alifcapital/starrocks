@@ -93,106 +93,12 @@ static inline size_t compare_integral_column_simd(CompareVector& cmp_vector, con
 
     if (SIMD::count_zero(cmp_vector) > size / 8) {
         size_t i = 0;
-        // Three SIMD paths in priority order:
-        //   AVX-512BW: native mask-flow. Block-skip via __mmaskN cmpeq, masked
-        //     cmpgt produces gt/lt masks restricted to still-tied rows, mask-
-        //     store writes only those rows. Wins on both dense and sparse.
-        //   AVX2:      2-step block-skip + per-block fallback to scalar tail.
-        //     Used on AVX2-only builds where AVX-512 is unavailable.
-        //   NEON:      same shape as AVX2 path.
-#if defined(__AVX512F__) && defined(__AVX512BW__)
-        if constexpr (sizeof(T) == 1) {
-            constexpr size_t kBlock = 64;
-            const __m512i rhs_vec = _mm512_set1_epi8(static_cast<int8_t>(rhs_data));
-            const __m512i zero = _mm512_setzero_si512();
-            for (; i + kBlock <= size; i += kBlock) {
-                __m512i cmp_bytes = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(cmp_vector.data() + i));
-                __mmask64 still_eq = _mm512_cmpeq_epi8_mask(cmp_bytes, zero);
-                if (still_eq == 0) continue;
-                __m512i lhs = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs_data + i));
-                __mmask64 gt, lt;
-                if constexpr (std::is_unsigned_v<T>) {
-                    gt = _mm512_mask_cmpgt_epu8_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epu8_mask(still_eq, lhs, rhs_vec);
-                } else {
-                    gt = _mm512_mask_cmpgt_epi8_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epi8_mask(still_eq, lhs, rhs_vec);
-                }
-                __mmask64 pos_mask = sort_order < 0 ? lt : gt;
-                __mmask64 neg_mask = sort_order < 0 ? gt : lt;
-                __m512i out = _mm512_maskz_set1_epi8(pos_mask, 1);
-                out = _mm512_mask_set1_epi8(out, neg_mask, -1);
-                _mm512_mask_storeu_epi8(cmp_vector.data() + i, still_eq, out);
-            }
-        } else if constexpr (sizeof(T) == 2) {
-            constexpr size_t kBlock = 32;
-            const __m512i rhs_vec = _mm512_set1_epi16(static_cast<int16_t>(rhs_data));
-            for (; i + kBlock <= size; i += kBlock) {
-                __m256i cmp_bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(cmp_vector.data() + i));
-                __mmask32 still_eq = _mm256_cmpeq_epi8_mask(cmp_bytes, _mm256_setzero_si256());
-                if (still_eq == 0) continue;
-                __m512i lhs = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs_data + i));
-                __mmask32 gt, lt;
-                if constexpr (std::is_unsigned_v<T>) {
-                    gt = _mm512_mask_cmpgt_epu16_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epu16_mask(still_eq, lhs, rhs_vec);
-                } else {
-                    gt = _mm512_mask_cmpgt_epi16_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epi16_mask(still_eq, lhs, rhs_vec);
-                }
-                __mmask32 pos_mask = sort_order < 0 ? lt : gt;
-                __mmask32 neg_mask = sort_order < 0 ? gt : lt;
-                __m256i out = _mm256_maskz_set1_epi8(pos_mask, 1);
-                out = _mm256_mask_set1_epi8(out, neg_mask, -1);
-                _mm256_mask_storeu_epi8(cmp_vector.data() + i, still_eq, out);
-            }
-        } else if constexpr (sizeof(T) == 4) {
-            constexpr size_t kBlock = 16;
-            const __m512i rhs_vec = _mm512_set1_epi32(static_cast<int32_t>(rhs_data));
-            for (; i + kBlock <= size; i += kBlock) {
-                __m128i cmp_bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(cmp_vector.data() + i));
-                __mmask16 still_eq = _mm_cmpeq_epi8_mask(cmp_bytes, _mm_setzero_si128());
-                if (still_eq == 0) continue;
-                __m512i lhs = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs_data + i));
-                __mmask16 gt, lt;
-                if constexpr (std::is_unsigned_v<T>) {
-                    gt = _mm512_mask_cmpgt_epu32_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epu32_mask(still_eq, lhs, rhs_vec);
-                } else {
-                    gt = _mm512_mask_cmpgt_epi32_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epi32_mask(still_eq, lhs, rhs_vec);
-                }
-                __mmask16 pos_mask = sort_order < 0 ? lt : gt;
-                __mmask16 neg_mask = sort_order < 0 ? gt : lt;
-                __m128i out = _mm_maskz_set1_epi8(pos_mask, 1);
-                out = _mm_mask_set1_epi8(out, neg_mask, -1);
-                _mm_mask_storeu_epi8(cmp_vector.data() + i, still_eq, out);
-            }
-        } else if constexpr (sizeof(T) == 8) {
-            constexpr size_t kBlock = 8;
-            const __m512i rhs_vec = _mm512_set1_epi64(static_cast<int64_t>(rhs_data));
-            for (; i + kBlock <= size; i += kBlock) {
-                __m128i cmp_bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(cmp_vector.data() + i));
-                __mmask16 still_eq16 = _mm_cmpeq_epi8_mask(cmp_bytes, _mm_setzero_si128());
-                __mmask8 still_eq = static_cast<__mmask8>(still_eq16 & 0xFFu);
-                if (still_eq == 0) continue;
-                __m512i lhs = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lhs_data + i));
-                __mmask8 gt, lt;
-                if constexpr (std::is_unsigned_v<T>) {
-                    gt = _mm512_mask_cmpgt_epu64_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epu64_mask(still_eq, lhs, rhs_vec);
-                } else {
-                    gt = _mm512_mask_cmpgt_epi64_mask(still_eq, lhs, rhs_vec);
-                    lt = _mm512_mask_cmplt_epi64_mask(still_eq, lhs, rhs_vec);
-                }
-                __mmask8 pos_mask = sort_order < 0 ? lt : gt;
-                __mmask8 neg_mask = sort_order < 0 ? gt : lt;
-                __m128i out = _mm_maskz_set1_epi8(pos_mask, 1);
-                out = _mm_mask_set1_epi8(out, neg_mask, -1);
-                _mm_mask_storeu_epi8(cmp_vector.data() + i, static_cast<__mmask16>(still_eq), out);
-            }
-        }
-#elif defined(__AVX2__)
+        // On AVX-512 builds the compiler auto-vectorises the scalar fallback
+        // (the simple `if (cmp_vector[i] == 0) cmp_vector[i] = scalar_cmp(i);`
+        // loop below) to wider AVX-512 mask-merge code that beats the
+        // hand-written AVX2 block-skip path. Only opt into the hand-written
+        // SIMD on AVX2-only builds.
+#if defined(__AVX2__) && !defined(__AVX512F__)
         if constexpr (sizeof(T) == 1) {
             constexpr size_t kBlock = 32;
             const __m256i zero = _mm256_setzero_si256();
