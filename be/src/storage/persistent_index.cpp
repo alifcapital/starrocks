@@ -18,6 +18,18 @@
 #include <numeric>
 #include <utility>
 
+// Architecture-specific intrinsic headers must be included at file scope
+// (outside any namespace) so their declarations land in the global namespace
+// where the standard expects them; including them under `namespace starrocks`
+// is undefined behaviour across compilers.
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include "base/bit/bit_util.h"
 #include "base/coding.h"
 #include "base/concurrency/stopwatch.hpp"
@@ -2401,8 +2413,6 @@ Status ShardByLengthMutableIndex::create_index_file(std::string& path) {
 
 #ifdef __AVX2__
 
-#include <immintrin.h>
-
 size_t get_matched_tag_idxes(const uint8_t* tags, size_t ntag, uint8_t tag, uint8_t* matched_idxes) {
     size_t nmatched = 0;
     auto tests = _mm256_set1_epi8(tag);
@@ -2431,8 +2441,6 @@ size_t get_matched_tag_idxes(const uint8_t* tags, size_t ntag, uint8_t tag, uint
 
 #elif defined(__SSE2__)
 
-#include <emmintrin.h>
-
 size_t get_matched_tag_idxes(const uint8_t* tags, size_t ntag, uint8_t tag, uint8_t* matched_idxes) {
     size_t nmatched = 0;
     auto tests = _mm_set1_epi8(tag);
@@ -2452,8 +2460,6 @@ size_t get_matched_tag_idxes(const uint8_t* tags, size_t ntag, uint8_t tag, uint
 }
 
 #elif defined(__ARM_NEON) && defined(__aarch64__)
-
-#include <arm_neon.h>
 
 size_t get_matched_tag_idxes(const uint8_t* tags, size_t ntag, uint8_t tag, uint8_t* matched_idxes) {
     size_t nmatched = 0;

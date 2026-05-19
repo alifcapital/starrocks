@@ -26,8 +26,13 @@
 // PR #73290 and rle_page's batch-decode is covered by the existing
 // parquet_dict_decode_bench end-to-end.)
 
-#ifdef __AVX2__
+#if defined(__AVX2__)
 #include <immintrin.h>
+#elif defined(__SSE2__)
+// scalar_get_matched_sse2() uses _mm_* intrinsics under #if defined(__SSE2__);
+// on `-msse2 -mno-avx2` builds __SSE2__ is set but __AVX2__ is not, so the
+// AVX2-gated include above isn't enough. Pull in <emmintrin.h> for that case.
+#include <emmintrin.h>
 #elif defined(__ARM_NEON) && defined(__aarch64__)
 #include <arm_neon.h>
 #endif
