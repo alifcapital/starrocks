@@ -163,12 +163,17 @@ MFV_AVX512F(void simd_minmax_int32_avx512(const int32_t* __restrict data, int32_
 
 MFV_AUTOVEC_STATIC(void simd_minmax_int32_default(const int32_t* __restrict data, int32_t count, int32_t& out_min,
                                                   int32_t& out_max) {
-    out_min = std::numeric_limits<int32_t>::max();
-    out_max = std::numeric_limits<int32_t>::min();
+    // Reduce into locals so the compiler can hoist the running min/max into
+    // registers; writing to the reference parameters inside the loop blocks
+    // auto-vectorisation because `data` may alias `&out_min`/`&out_max`.
+    int32_t local_min = std::numeric_limits<int32_t>::max();
+    int32_t local_max = std::numeric_limits<int32_t>::min();
     for (int32_t i = 0; i < count; ++i) {
-        out_min = std::min(out_min, data[i]);
-        out_max = std::max(out_max, data[i]);
+        local_min = std::min(local_min, data[i]);
+        local_max = std::max(local_max, data[i]);
     }
+    out_min = local_min;
+    out_max = local_max;
 })
 
 // Main entry point. The hand-rolled AVX2 reduction was slower than the
