@@ -33,94 +33,12 @@ namespace starrocks {
 // Used for Parquet level decoding (def_level, rep_level are int16_t)
 // ============================================================================
 
-#if defined(__AVX512BW__)
-MFV_AVX512BW(void simd_fill_int16_avx512(int16_t* __restrict dst, int16_t value, int32_t count) {
-    using v32s = __m512i;
-    const v32s v_value = _mm512_set1_epi16(value);
-
-    int32_t i = 0;
-    // Process 128 elements per iteration (4x unroll of 32-element vectors)
-    for (; i + 128 <= count; i += 128) {
-        _mm512_storeu_si512((v32s*)(dst + i), v_value);
-        _mm512_storeu_si512((v32s*)(dst + i + 32), v_value);
-        _mm512_storeu_si512((v32s*)(dst + i + 64), v_value);
-        _mm512_storeu_si512((v32s*)(dst + i + 96), v_value);
-    }
-    // Process 32 elements at a time
-    for (; i + 32 <= count; i += 32) {
-        _mm512_storeu_si512((v32s*)(dst + i), v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-#endif
-
-MFV_AUTOVEC_STATIC(void simd_fill_int16_default(int16_t* __restrict dst, int16_t value, int32_t count) {
-    for (int32_t i = 0; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-
-// Main entry point for int16_t fill.
-// AVX2 and NEON ad-hoc implementations were removed: microbench against the
-// scalar default showed no measurable speed-up because both clang and gcc
-// auto-vectorise the scalar loop into the same SIMD pattern at -O3. The
-// AVX-512BW kernel is kept because saturating the wider lanes still wins on
-// AVX-512 hosts where the auto-vectoriser stops at AVX2.
 inline void simd_fill_int16(int16_t* __restrict dst, int16_t value, int32_t count) {
-#if defined(__AVX512BW__)
-    simd_fill_int16_avx512(dst, value, count);
-#else
-    simd_fill_int16_default(dst, value, count);
-#endif
+    std::fill_n(dst, count, value);
 }
 
-// ============================================================================
-// SIMD-optimized fill operation for RLE repeated values (int32_t)
-// Fills an array with a single repeated value using broadcast + store
-// ============================================================================
-
-#if defined(__AVX512F__)
-MFV_AVX512F(void simd_fill_int32_avx512(int32_t* __restrict dst, int32_t value, int32_t count) {
-    using v16i = __m512i;
-    const v16i v_value = _mm512_set1_epi32(value);
-
-    int32_t i = 0;
-    // Process 64 elements per iteration (4x unroll of 16-element vectors)
-    for (; i + 64 <= count; i += 64) {
-        _mm512_storeu_si512((v16i*)(dst + i), v_value);
-        _mm512_storeu_si512((v16i*)(dst + i + 16), v_value);
-        _mm512_storeu_si512((v16i*)(dst + i + 32), v_value);
-        _mm512_storeu_si512((v16i*)(dst + i + 48), v_value);
-    }
-    // Process 16 elements at a time
-    for (; i + 16 <= count; i += 16) {
-        _mm512_storeu_si512((v16i*)(dst + i), v_value);
-    }
-    // Scalar tail
-    for (; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-#endif
-
-MFV_AUTOVEC_STATIC(void simd_fill_int32_default(int32_t* __restrict dst, int32_t value, int32_t count) {
-    for (int32_t i = 0; i < count; ++i) {
-        dst[i] = value;
-    }
-})
-
-// Main entry point - dispatches to best available implementation. See the
-// simd_fill_int16 comment above for why the AVX2/NEON kernels were removed
-// (auto-vectorised default matches them) while AVX-512F is retained.
 inline void simd_fill_int32(int32_t* __restrict dst, int32_t value, int32_t count) {
-#if defined(__AVX512F__)
-    simd_fill_int32_avx512(dst, value, count);
-#else
-    simd_fill_int32_default(dst, value, count);
-#endif
+    std::fill_n(dst, count, value);
 }
 
 // ============================================================================
@@ -235,21 +153,11 @@ MFV_AVX2(void simd_dict_gather_int32_avx2(int32_t* __restrict dest, const int32_
 })
 #endif
 
-// Dispatcher prefers the AVX2 path on Intel Ice Lake. Microbench on m6i shows
-// vpgatherdd ymm beats both auto-vectorised scalar (1.5-2.3x) and the AVX-512
-// vpgatherdd zmm (~1.5x): the wider AVX-512 gather still serialises into 16
-// loads on one gather port and the AVX-512 frequency licence cuts core clock,
-// while AVX2 gather hits the port natively.
-//
-// Earlier comment claimed "AVX2 gather slow on modern Intel after post-Spectre
-// microcode" -- that turned out to be specific to AWS Graviton / Aliyun hosts
-// with the GDS mitigation applied. AWS Intel m6i / m7i do not apply that
-// mitigation and AVX2 gather is the fastest path here.
-//
-// References:
-//   * stdpain's review on PR #73287 calling out the AWS-Intel case
-//   * Intel GDS technical note:
-//     https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/gather-data-sampling.html
+// Dispatcher prefers the AVX2 path: vpgatherdd ymm beats both auto-vectorised
+// scalar and the AVX-512 vpgatherdd zmm on Intel Ice Lake, where the wider
+// gather still serialises through one gather port at lower AVX-512 clock.
+// On hosts with the Intel GDS mitigation applied (e.g. some Aliyun Intel
+// SKUs), AVX2 gather is throttled; switch the dispatch to _default there.
 inline void simd_dict_gather_int32(int32_t* __restrict dest, const int32_t* __restrict dict,
                                    const uint32_t* __restrict indices, int32_t count) {
 #if defined(__AVX2__)
@@ -315,14 +223,9 @@ inline void simd_dict_gather_int64(int64_t* __restrict dest, const int64_t* __re
 #endif
 }
 
-// Float / double versions. Earlier this just pointer-punned float*/double*
-// to int32_t*/int64_t* and called the integer gather -- that's strict-aliasing
-// UB and the scalar default loop (`dest[i] = dict[indices[i]]`) read float
-// objects through an int lvalue, which can miscompile under -O2/-O3.
-//
-// Use the typed gather intrinsics directly so each implementation reads/writes
-// through its own type.
-
+// Float / double versions. Typed gather intrinsics keep dest/dict reads and
+// writes in their declared type -- punning float*/double* to int32_t*/int64_t*
+// to share the integer gather is strict-aliasing UB.
 #if defined(__AVX2__)
 MFV_AVX2(void simd_dict_gather_float_avx2(float* __restrict dest, const float* __restrict dict,
                                           const uint32_t* __restrict indices, int32_t count) {
