@@ -67,6 +67,28 @@ public:
 
     virtual bool is_exception_safe() const { return true; }
 
+    // Opt-in: aggregate may receive a full chunk via `update_batch`
+    // instead of the wrapper's per-row `update()` calls in the
+    // NullableAggregateFunctionUnary all-not-null fast path.
+    //
+    // Set to true ONLY when (a) the aggregate ships an `update_batch`
+    // override that beats the base helper's row-loop, AND (b) that
+    // override produces the same observable state as a per-row loop.
+    //
+    // Default is FALSE: a new sequence-dependent aggregate (one that
+    // stashes `row_num` as a seq-counter, or whose state mutates
+    // non-commutatively) silently keeps the per-row path -- no perf,
+    // but also no semantic change.
+    //
+    // Today the opt-in set is the 5 aggregates with real update_batch
+    // overrides: count, sum, min, max, avg.  The remaining ~41 inherit
+    // the base helper's row-loop update_batch; marking them true would
+    // cost a forward + base-helper row-loop instead of a direct row-
+    // loop -- same speed, more boilerplate.  When one of them ships its
+    // own update_batch override (e.g. SIMD group_concat), it flips this
+    // bit at that time.
+    virtual bool batch_safe() const { return false; }
+
     // Reset the aggregation state, for aggregate window functions
     virtual void reset(FunctionContext* ctx, const Columns& args, AggDataPtr __restrict state) const {}
 
