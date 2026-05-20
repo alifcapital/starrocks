@@ -1620,17 +1620,26 @@ typename HashVariantType::Type Aggregator::_try_to_apply_compressed_key_opt(type
                 // 16 bits: skip the slice_cx4 path (phmap<SliceKey4> with
                 // per-row bitcompress_serialize) and route to a 65 536-cell
                 // direct-array map keyed by (value - min) -> uint16.
-                const bool single_int_range_to_uint16 = group_by_keys == 1 &&
-                                                        _group_by_types[0].result_type.type == TYPE_INT &&
-                                                        new_max_bit_size > 8 && new_max_bit_size <= 16;
-                if (single_int_range_to_uint16) {
-                    if (_group_by_types[0].is_nullable) {
-                        type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_null_int32_range_uint16
-                                                         : HashVariantType::Type::phase2_null_int32_range_uint16;
-                    } else {
-                        type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_int32_range_uint16
-                                                         : HashVariantType::Type::phase2_int32_range_uint16;
+                // int32_range_uint16 only exists in AggHashMapVariant
+                // (GROUP BY); DISTINCT-only Sets fall through to slice_cx*.
+                bool routed_int32_range = false;
+                if constexpr (std::is_same_v<HashVariantType, AggHashMapVariant>) {
+                    const bool single_int_range_to_uint16 = group_by_keys == 1 &&
+                                                            _group_by_types[0].result_type.type == TYPE_INT &&
+                                                            new_max_bit_size > 8 && new_max_bit_size <= 16;
+                    if (single_int_range_to_uint16) {
+                        if (_group_by_types[0].is_nullable) {
+                            type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_null_int32_range_uint16
+                                                             : HashVariantType::Type::phase2_null_int32_range_uint16;
+                        } else {
+                            type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_int32_range_uint16
+                                                             : HashVariantType::Type::phase2_int32_range_uint16;
+                        }
+                        routed_int32_range = true;
                     }
+                }
+                if (routed_int32_range) {
+                    // already routed
                 } else if (new_max_bit_size <= 8) {
                     type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_slice_cx1
                                                      : HashVariantType::Type::phase2_slice_cx1;
