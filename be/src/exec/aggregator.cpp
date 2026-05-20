@@ -1616,7 +1616,22 @@ typename HashVariantType::Type Aggregator::_try_to_apply_compressed_key_opt(type
         if (could_apply_bitcompress_opt(_group_by_types, _ranges, bases, used_bits, &new_max_bit_size,
                                         &has_null_column)) {
             if (_group_by_types.size() > 0) {
-                if (new_max_bit_size <= 8) {
+                // Single-INT GROUP BY with FE-supplied range that fits in
+                // 16 bits: skip the slice_cx4 path (phmap<SliceKey4> with
+                // per-row bitcompress_serialize) and route to a 65 536-cell
+                // direct-array map keyed by (value - min) -> uint16.
+                const bool single_int_range_to_uint16 = group_by_keys == 1 &&
+                                                        _group_by_types[0].result_type.type == TYPE_INT &&
+                                                        new_max_bit_size > 8 && new_max_bit_size <= 16;
+                if (single_int_range_to_uint16) {
+                    if (_group_by_types[0].is_nullable) {
+                        type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_null_int32_range_uint16
+                                                         : HashVariantType::Type::phase2_null_int32_range_uint16;
+                    } else {
+                        type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_int32_range_uint16
+                                                         : HashVariantType::Type::phase2_int32_range_uint16;
+                    }
+                } else if (new_max_bit_size <= 8) {
                     type = _aggr_phase == AggrPhase1 ? HashVariantType::Type::phase1_slice_cx1
                                                      : HashVariantType::Type::phase2_slice_cx1;
                 } else if (new_max_bit_size <= 4 * 8) {
@@ -1649,6 +1664,12 @@ void Aggregator::_build_hash_variant(HashVariantType& hash_variant, typename Has
             variant->offsets = std::move(context.offsets);
             variant->used_bits = std::move(context.used_bits);
             variant->bases = std::move(context.bases);
+        } else if constexpr (is_compressible_int_key<std::decay_t<decltype(*variant)>>) {
+            // The compressible-int wrapper only needs the min offset from
+            // bases[0] (single-column gate); offsets / used_bits are
+            // slice-shape state it does not consume.
+            DCHECK(!context.bases.empty());
+            variant->set_min(std::any_cast<int32_t>(context.bases[0]));
         }
     });
 }

@@ -115,6 +115,13 @@ using LowCardDictAggHashMapWithKey = AggHashMapWithOneLowCardDictKey<LowCardDict
 template <PhmapSeed seed>
 using NullLowCardDictAggHashMapWithKey = AggHashMapWithOneNullableLowCardDictKey<LowCardDictUInt8AggHashMap<seed>>;
 
+// INT GROUP BY with FE-supplied range that fits in 16 bits -> 65 536-cell
+// direct-array map keyed by (value - min) narrowed to uint16.
+template <PhmapSeed seed>
+using CompressibleInt32AggHashMap = AggHashMapWithOneCompressibleInt32Key<RangeUInt16AggHashMap<seed>>;
+template <PhmapSeed seed>
+using NullCompressibleInt32AggHashMap = AggHashMapWithOneNullableCompressibleInt32Key<RangeUInt16AggHashMap<seed>>;
+
 // fixed compress key
 template <PhmapSeed seed>
 using CompressedFixedSize1AggHashMap = AggHashMapWithCompressedKeyFixedSize<Int8AggHashMap<seed>>;
@@ -259,6 +266,23 @@ struct CompressedFixedSizeKey<AggHashSetCompressedFixedSize<HashSet>> {
 template <typename HashMapOrSetWithKey>
 inline constexpr bool is_compressed_fixed_size_key = CompressedFixedSizeKey<HashMapOrSetWithKey>::value;
 
+// Trait for AggHashMapWithCompressibleInt32Key, which receives `min`
+// from the aggregator's CompressKeyContext::bases[0] instead of the
+// slice-shaped (bases / offsets / used_bits) tuple consumed by
+// AggHashMapWithCompressedKeyFixedSize.
+template <typename HashMapWithKey>
+struct CompressibleIntKey {
+    static auto constexpr value = false;
+};
+
+template <typename HashMap, bool is_nullable>
+struct CompressibleIntKey<AggHashMapWithCompressibleInt32Key<HashMap, is_nullable>> {
+    static auto constexpr value = true;
+};
+
+template <typename HashMapWithKey>
+inline constexpr bool is_compressible_int_key = CompressibleIntKey<HashMapWithKey>::value;
+
 // 1) For different group by columns type, size, cardinality, volume, we should choose different
 // hash functions and different hashmaps.
 // When runtime, we will only have one hashmap.
@@ -312,6 +336,8 @@ using AggHashMapWithKeyPtr = std::variant<
         std::unique_ptr<CompressedFixedSize16AggHashMap<PhmapSeed1>>,
         std::unique_ptr<LowCardDictAggHashMapWithKey<PhmapSeed1>>,
         std::unique_ptr<NullLowCardDictAggHashMapWithKey<PhmapSeed1>>,
+        std::unique_ptr<CompressibleInt32AggHashMap<PhmapSeed1>>,
+        std::unique_ptr<NullCompressibleInt32AggHashMap<PhmapSeed1>>,
         std::unique_ptr<UInt8AggHashMapWithOneNumberKey<PhmapSeed2>>,
         std::unique_ptr<Int8AggHashMapWithOneNumberKey<PhmapSeed2>>,
         std::unique_ptr<Int16AggHashMapWithOneNumberKey<PhmapSeed2>>,
@@ -350,7 +376,9 @@ using AggHashMapWithKeyPtr = std::variant<
         std::unique_ptr<CompressedFixedSize8AggHashMap<PhmapSeed2>>,
         std::unique_ptr<CompressedFixedSize16AggHashMap<PhmapSeed2>>,
         std::unique_ptr<LowCardDictAggHashMapWithKey<PhmapSeed2>>,
-        std::unique_ptr<NullLowCardDictAggHashMapWithKey<PhmapSeed2>>>;
+        std::unique_ptr<NullLowCardDictAggHashMapWithKey<PhmapSeed2>>,
+        std::unique_ptr<CompressibleInt32AggHashMap<PhmapSeed2>>,
+        std::unique_ptr<NullCompressibleInt32AggHashMap<PhmapSeed2>>>;
 
 using AggHashSetWithKeyPtr = std::variant<
         std::unique_ptr<UInt8AggHashSetOfOneNumberKey<PhmapSeed1>>,
@@ -475,6 +503,10 @@ struct AggHashMapVariant {
         phase1_low_card_dict_uint8,
         phase1_null_low_card_dict_uint8,
 
+        // INT GROUP BY with FE-supplied range fitting in 16 bits
+        phase1_int32_range_uint16,
+        phase1_null_int32_range_uint16,
+
         phase2_uint8,
         phase2_int8,
         phase2_int16,
@@ -518,6 +550,9 @@ struct AggHashMapVariant {
 
         phase2_low_card_dict_uint8,
         phase2_null_low_card_dict_uint8,
+
+        phase2_int32_range_uint16,
+        phase2_null_int32_range_uint16,
     };
 
     detail::AggHashMapWithKeyPtr hash_map_with_key;
