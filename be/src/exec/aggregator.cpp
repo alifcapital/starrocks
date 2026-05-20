@@ -165,7 +165,7 @@ Status init_udaf_context(int64_t fid, const std::string& url, const std::string&
 
 int64_t Aggregator::get_two_level_threahold() {
     if (config::two_level_memory_threshold < 0) {
-        return agg::two_level_memory_threshold;
+        return static_cast<int64_t>(agg::two_level_memory_threshold());
     }
     return config::two_level_memory_threshold;
 }
@@ -470,6 +470,7 @@ Status Aggregator::prepare(RuntimeState* state, RuntimeProfile* runtime_profile)
     if (!_params->sql_aggregate_functions.empty()) {
         _runtime_profile->add_info_string("AggregateFunctions", _params->sql_aggregate_functions);
     }
+    _runtime_profile->add_info_string("TwoLevelThresholdBytes", std::to_string(get_two_level_threahold()));
 
     bool has_outer_join_child = _params->has_outer_join_child;
 
