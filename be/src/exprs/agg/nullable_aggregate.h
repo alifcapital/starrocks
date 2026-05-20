@@ -352,6 +352,24 @@ public:
         this->nested_function->update(ctx, data_columns, this->data(state).mutable_nest_state(), row_num);
     }
 
+    // Byte offset from the wrapper state to the nested state within it.
+    // Computed once on a sentinel instance so we don't depend on the
+    // standard-layout-only `offsetof` macro -- the State here inherits
+    // from a base depending on IsWindowFunc and may not be POD.  Used by
+    // the all-not-null fast path to forward to the nested function's
+    // update_batch with an adjusted state_offset.
+    static size_t _nested_state_offset_within_wrapper() {
+        alignas(State) static const size_t cached = []() -> size_t {
+            alignas(State) char buf[sizeof(State)];
+            auto* s = new (buf) State();
+            const auto off =
+                    static_cast<size_t>(reinterpret_cast<char*>(s->mutable_nest_state()) - reinterpret_cast<char*>(s));
+            s->~State();
+            return off;
+        }();
+        return cached;
+    }
+
     // TODO(kks): abstract the AVX2 filter process later
     void update_batch(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
                       AggDataPtr* states) const override {
@@ -363,12 +381,27 @@ public:
             const uint8_t* f_data = column->immutable_null_column_data().data();
             int offset = 0;
 
-            // all not null
+            // all not null -- forward to the nested function's batch path
+            // when it opts in via batch_safe(), so it can hoist its own
+            // down_cast + data pointer out of the row loop.  Aggregates
+            // that depend on per-row dispatch for side effects (e.g.
+            // future seq-counter or non-commutative state mutation) keep
+            // the historical row-by-row path.  See AggregateFunction::
+            // batch_safe()'s contract in aggregate.h.
             if (!columns[0]->has_null()) {
-                for (size_t i = 0; i < chunk_size; i++) {
-                    this->data(states[i] + state_offset).is_null = false;
-                    this->nested_function->update(ctx, &data_column,
-                                                  this->data(states[i] + state_offset).mutable_nest_state(), i);
+                if (this->nested_function->batch_safe()) {
+                    for (size_t i = 0; i < chunk_size; i++) {
+                        this->data(states[i] + state_offset).is_null = false;
+                    }
+                    this->nested_function->update_batch(ctx, chunk_size,
+                                                        state_offset + _nested_state_offset_within_wrapper(),
+                                                        &data_column, states);
+                } else {
+                    for (size_t i = 0; i < chunk_size; i++) {
+                        this->data(states[i] + state_offset).is_null = false;
+                        this->nested_function->update(ctx, &data_column,
+                                                      this->data(states[i] + state_offset).mutable_nest_state(), i);
+                    }
                 }
                 return;
             }

@@ -51,6 +51,8 @@ public:
     using InputColumnType = RunTimeColumnType<LT>;
     using ResultColumnType = RunTimeColumnType<ResultLT>;
 
+    bool batch_safe() const override { return true; }
+
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
         this->data(state).sum = {};
     }
@@ -77,6 +79,34 @@ public:
         const auto* data = column->immutable_data().data();
         for (size_t i = 0; i < chunk_size; ++i) {
             this->data(state).sum += data[i];
+        }
+    }
+
+    // GROUP BY hot path: hoist the down_cast + immutable_data() pointer out
+    // of the row loop so the per-row work collapses to a scatter store.  The
+    // CRTP base helper's `update_batch` does the call-per-row shape that
+    // forces re-evaluating the cast on every iteration -- this override fires
+    // when this aggregate is the raw (non-NullableAggregateFunctionUnary)
+    // registration, i.e. when the column is non-nullable.
+    void update_batch(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                      AggDataPtr* states) const override {
+        DCHECK(!columns[0]->is_nullable());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto* data = column->immutable_data().data();
+        for (size_t i = 0; i < chunk_size; ++i) {
+            this->data(states[i] + state_offset).sum += data[i];
+        }
+    }
+
+    void update_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                                  AggDataPtr* states, const Filter& filter) const override {
+        DCHECK(!columns[0]->is_nullable());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto* data = column->immutable_data().data();
+        for (size_t i = 0; i < chunk_size; ++i) {
+            if (filter[i] == 0) {
+                this->data(states[i] + state_offset).sum += data[i];
+            }
         }
     }
 
