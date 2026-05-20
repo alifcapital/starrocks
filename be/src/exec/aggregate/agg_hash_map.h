@@ -105,6 +105,10 @@ auto get_immutable_data(T* obj) {
 }
 
 static_assert(sizeof(AggDataPtr) == sizeof(size_t));
+// The `prefetch_dist` argument is read once and stashed into a const local
+// so the inner loop sees a register read.  We also capture it as
+// `__prefetch_dist` separately so AGG_HASH_MAP_PREFETCH_HASH_VALUE can
+// short-circuit when the operator set the knob to 0 (disable).
 #define AGG_HASH_MAP_PRECOMPUTE_HASH_VALUES(column, prefetch_dist)              \
     size_t const column_size = column->size();                                  \
     size_t* hash_values = reinterpret_cast<size_t*>(agg_states->data());        \
@@ -115,10 +119,11 @@ static_assert(sizeof(AggDataPtr) == sizeof(size_t));
             hash_values[i] = hashval;                                           \
         }                                                                       \
     }                                                                           \
-    size_t __prefetch_index = prefetch_dist;
+    const size_t __prefetch_dist = prefetch_dist;                               \
+    size_t __prefetch_index = __prefetch_dist;
 
 #define AGG_HASH_MAP_PREFETCH_HASH_VALUE()                             \
-    if (__prefetch_index < column_size) {                              \
+    if (__prefetch_dist != 0 && __prefetch_index < column_size) {      \
         this->hash_map.prefetch_hash(hash_values[__prefetch_index++]); \
     }
 
@@ -974,10 +979,11 @@ struct AggHashMapWithSerializedKeyFixedSize
             caches[i].hashval = this->hash_map.hash_function()(caches[i].key);
         }
 
-        size_t __prefetch_index = agg_hash_map_default_prefetch_dist();
+        const size_t __prefetch_dist = agg_hash_map_default_prefetch_dist();
+        size_t __prefetch_index = __prefetch_dist;
 
         for (size_t i = 0; i < chunk_size; ++i) {
-            if (__prefetch_index < chunk_size) {
+            if (__prefetch_dist != 0 && __prefetch_index < chunk_size) {
                 this->hash_map.prefetch_hash(caches[__prefetch_index++].hashval);
             }
             FixedSizeSliceKey& key = caches[i].key;
@@ -1174,9 +1180,10 @@ struct AggHashMapWithCompressedKeyFixedSize
             hashs[i] = this->hash_map.hash_function()(fixed_keys[i]);
         }
 
-        size_t prefetch_index = agg_hash_map_default_prefetch_dist();
+        const size_t prefetch_dist = agg_hash_map_default_prefetch_dist();
+        size_t prefetch_index = prefetch_dist;
         for (size_t i = 0; i < chunk_size; ++i) {
-            if (prefetch_index < chunk_size) {
+            if (prefetch_dist != 0 && prefetch_index < chunk_size) {
                 this->hash_map.prefetch_hash(hashs[prefetch_index++]);
             }
             if constexpr (HTBuildOp::process_limit) {
