@@ -171,6 +171,8 @@ class MaxMinAggregateFunction final
 public:
     using InputColumnType = RunTimeColumnType<LT>;
 
+    bool batch_safe() const override { return true; }
+
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
         this->data(state).reset();
     }
@@ -181,6 +183,37 @@ public:
         const auto& column = down_cast<const InputColumnType&>(*columns[0]);
         T value = column.immutable_data()[row_num];
         OP()(this->data(state), value);
+    }
+
+    // GROUP BY hot path: hoist the down_cast + column reference out of the
+    // row loop so the per-row body is OP() against state[i].  Uses the
+    // container's operator[] (not .data() raw pointer) so this compiles for
+    // both Buffer<T>-backed numeric columns and ObjectColumn::ImmContainer-
+    // backed types (TYPE_JSON).  The string specialization at the bottom of
+    // this file uses a different OP shape (memcompare) and keeps the base
+    // helper's per-row dispatch.
+    void update_batch(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                      AggDataPtr* states) const override {
+        DCHECK(!columns[0]->is_nullable() && !columns[0]->is_binary());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto& data = column->immutable_data();
+        OP op;
+        for (size_t i = 0; i < chunk_size; ++i) {
+            op(this->data(states[i] + state_offset), data[i]);
+        }
+    }
+
+    void update_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                                  AggDataPtr* states, const Filter& filter) const override {
+        DCHECK(!columns[0]->is_nullable() && !columns[0]->is_binary());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto& data = column->immutable_data();
+        OP op;
+        for (size_t i = 0; i < chunk_size; ++i) {
+            if (filter[i] == 0) {
+                op(this->data(states[i] + state_offset), data[i]);
+            }
+        }
     }
 
     void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,

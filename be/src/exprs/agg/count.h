@@ -36,6 +36,11 @@ template <bool IsWindowFunc>
 class CountAggregateFunction final : public AggregateFunctionBatchHelper<AggregateCountFunctionState<IsWindowFunc>,
                                                                          CountAggregateFunction<IsWindowFunc>> {
 public:
+    // count's update_batch override (below) iterates i=0..chunk_size-1
+    // exactly like a per-row update() loop -- safe for the nullable
+    // wrapper's batch forward.
+    bool batch_safe() const override { return true; }
+
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
         this->data(state).count = 0;
         if constexpr (IsWindowFunc) {

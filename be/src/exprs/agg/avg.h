@@ -72,6 +72,8 @@ class AvgAggregateFunction final
         : public AggregateFunctionBatchHelper<AvgAggregateState<ImmediateType>,
                                               AvgAggregateFunction<LT, T, ImmediateLT, ImmediateType>> {
 public:
+    bool batch_safe() const override { return true; }
+
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
         this->data(state).sum = {};
         this->data(state).count = 0;
@@ -122,6 +124,51 @@ public:
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
         do_update<true>(ctx, columns, state, row_num);
+    }
+
+    // GROUP BY hot path: hoist the down_cast + immutable_data() pointer out
+    // of the row loop.  Per-row body is two field writes (sum += data[i] and
+    // count++).  The branch on LT collapses at compile time to a single
+    // scalar add for arithmetic / decimal LTs.
+    void update_batch(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                      AggDataPtr* states) const override {
+        DCHECK(!columns[0]->is_nullable());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto* data = column->immutable_data().data();
+        for (size_t i = 0; i < chunk_size; ++i) {
+            auto& s = this->data(states[i] + state_offset);
+            if constexpr (lt_is_datetime<LT>) {
+                s.sum += data[i].to_unix_second();
+            } else if constexpr (lt_is_date<LT>) {
+                s.sum += data[i].julian();
+            } else if constexpr (lt_is_decimalv2<LT> || lt_is_arithmetic<LT> || lt_is_decimal<LT>) {
+                s.sum += data[i];
+            } else {
+                DCHECK(false) << "Invalid LogicalTypes for avg function";
+            }
+            s.count++;
+        }
+    }
+
+    void update_batch_selectively(FunctionContext* ctx, size_t chunk_size, size_t state_offset, const Column** columns,
+                                  AggDataPtr* states, const Filter& filter) const override {
+        DCHECK(!columns[0]->is_nullable());
+        const auto* column = down_cast<const InputColumnType*>(columns[0]);
+        const auto* data = column->immutable_data().data();
+        for (size_t i = 0; i < chunk_size; ++i) {
+            if (filter[i] != 0) continue;
+            auto& s = this->data(states[i] + state_offset);
+            if constexpr (lt_is_datetime<LT>) {
+                s.sum += data[i].to_unix_second();
+            } else if constexpr (lt_is_date<LT>) {
+                s.sum += data[i].julian();
+            } else if constexpr (lt_is_decimalv2<LT> || lt_is_arithmetic<LT> || lt_is_decimal<LT>) {
+                s.sum += data[i];
+            } else {
+                DCHECK(false) << "Invalid LogicalTypes for avg function";
+            }
+            s.count++;
+        }
     }
 
     AggStateTableKind agg_state_table_kind(bool is_append_only) const override {
