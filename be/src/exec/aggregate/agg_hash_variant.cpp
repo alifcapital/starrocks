@@ -100,17 +100,17 @@
     M(phase2_slice_cx1)               \
     M(phase2_slice_cx4)               \
     M(phase2_slice_cx8)               \
-    M(phase2_slice_cx16)              \
-    M(phase1_int32_range_uint16)      \
-    M(phase1_null_int32_range_uint16) \
-    M(phase2_int32_range_uint16)      \
-    M(phase2_null_int32_range_uint16)
+    M(phase2_slice_cx16)
 
-#define APPLY_FOR_AGG_MAP_VARIANT_EXTRA(M) \
-    M(phase1_low_card_dict_uint8)          \
-    M(phase1_null_low_card_dict_uint8)     \
-    M(phase2_low_card_dict_uint8)          \
-    M(phase2_null_low_card_dict_uint8)
+#define APPLY_FOR_AGG_MAP_VARIANT_EXTRA(M)     \
+    M(phase1_low_card_dict_uint8)              \
+    M(phase1_null_low_card_dict_uint8)         \
+    M(phase2_low_card_dict_uint8)              \
+    M(phase2_null_low_card_dict_uint8)         \
+    M(phase1_int32_range_uint16)               \
+    M(phase1_null_int32_range_uint16)          \
+    M(phase2_int32_range_uint16)               \
+    M(phase2_null_int32_range_uint16)
 
 #define APPLY_FOR_AGG_MAP_VARIANT_ALL(M) \
     APPLY_FOR_AGG_VARIANT_ALL(M)         \
