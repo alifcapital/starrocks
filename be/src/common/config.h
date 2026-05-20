@@ -1708,6 +1708,11 @@ CONF_mInt64(streaming_agg_limited_memory_size, "134217728");
 CONF_mInt64(partition_hash_join_probe_limit_size, "134217728");
 // pipeline streaming aggregate chunk buffer size
 CONF_mInt32(streaming_agg_chunk_buffer_size, "1024");
+// Software prefetch distance (in rows) for the agg hash-map / hash-set
+// probe loop.  Default 16 is empirical for L3-resident tables; raise on
+// DRAM-resident workloads, lower (or 0) on L1-resident ones.  Read once
+// per chunk; changes take effect on the next chunk.
+CONF_mInt32(agg_hash_map_prefetch_dist, "16");
 // sink buffer memory limit per driver
 CONF_mInt64(sink_buffer_mem_limit_per_driver, "134217728");
 

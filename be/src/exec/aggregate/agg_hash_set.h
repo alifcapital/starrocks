@@ -24,6 +24,7 @@
 #include "column/hash_set.h"
 #include "column/runtime_type_traits.h"
 #include "column/vectorized_fwd.h"
+#include "common/config_exec_flow_fwd.h"
 #include "exec/aggregate/agg_consec_keys_cache.h"
 #include "exec/aggregate/agg_profile.h"
 #include "gutil/casts.h"
@@ -33,23 +34,29 @@ namespace starrocks {
 DECLARE_FAIL_POINT(agg_hash_set_bad_alloc);
 
 const constexpr int32_t prefetch_threhold = 8192;
-// This is just an empirical value based on benchmark, and you can tweak it if more proper value is found.
-static constexpr size_t AGG_HASH_MAP_DEFAULT_PREFETCH_DIST = 16;
+// Read once per chunk from config::agg_hash_map_prefetch_dist (default 16).
+// The macros below capture it into __prefetch_dist so each inner-loop
+// iteration is a register read, not an atomic load.
+inline size_t agg_hash_map_default_prefetch_dist() {
+    const int32_t v = config::agg_hash_map_prefetch_dist;
+    return v > 0 ? static_cast<size_t>(v) : 0;
+}
 
 #define AGG_HASH_SET_PRECOMPUTE_HASH_VALS()                  \
     hashes.reserve(chunk_size);                              \
     for (size_t i = 0; i < chunk_size; i++) {                \
         hashes[i] = this->hash_set.hash_function()(keys[i]); \
+    }                                                        \
+    const size_t __prefetch_dist = agg_hash_map_default_prefetch_dist();
+
+#define AGG_HASH_SET_PREFETCH_HASH_VAL()                            \
+    if (__prefetch_dist != 0 && i + __prefetch_dist < chunk_size) { \
+        this->hash_set.prefetch_hash(hashes[i + __prefetch_dist]);  \
     }
 
-#define AGG_HASH_SET_PREFETCH_HASH_VAL()                                              \
-    if (i + AGG_HASH_MAP_DEFAULT_PREFETCH_DIST < chunk_size) {                        \
-        this->hash_set.prefetch_hash(hashes[i + AGG_HASH_MAP_DEFAULT_PREFETCH_DIST]); \
-    }
-
-#define AGG_STRING_HASH_SET_PREFETCH_HASH_VAL()                                           \
-    if (i + AGG_HASH_MAP_DEFAULT_PREFETCH_DIST < chunk_size) {                            \
-        this->hash_set.prefetch_hash(cache[i + AGG_HASH_MAP_DEFAULT_PREFETCH_DIST].hash); \
+#define AGG_STRING_HASH_SET_PREFETCH_HASH_VAL()                        \
+    if (__prefetch_dist != 0 && i + __prefetch_dist < chunk_size) {    \
+        this->hash_set.prefetch_hash(cache[i + __prefetch_dist].hash); \
     }
 
 // =====================
@@ -506,6 +513,7 @@ struct AggHashSetOfOneStringKey : public AggHashSet<HashSet, AggHashSetOfOneStri
         }
 
         [[maybe_unused]] const bool use_cache = _consecutive_key_cache.is_enabled();
+        const size_t __prefetch_dist = agg_hash_map_default_prefetch_dist();
         for (size_t i = 0; i < chunk_size; ++i) {
             AGG_STRING_HASH_SET_PREFETCH_HASH_VAL();
             const auto& key = cache[i];
@@ -654,6 +662,7 @@ struct AggHashSetOfOneNullableStringKey : public AggHashSet<HashSet, AggHashSetO
             cache[i] = KeyType(data_column->get_slice(i));
         }
         [[maybe_unused]] const bool use_cache = _consecutive_key_cache.is_enabled();
+        const size_t __prefetch_dist = agg_hash_map_default_prefetch_dist();
         for (size_t i = 0; i < chunk_size; ++i) {
             AGG_STRING_HASH_SET_PREFETCH_HASH_VAL();
             const auto& key = cache[i];
@@ -818,6 +827,7 @@ struct AggHashSetOfSerializedKey : public AggHashSet<HashSet, AggHashSetOfSerial
         }
 
         [[maybe_unused]] const bool use_cache = _consecutive_key_cache.is_enabled();
+        const size_t __prefetch_dist = agg_hash_map_default_prefetch_dist();
         for (size_t i = 0; i < chunk_size; ++i) {
             AGG_STRING_HASH_SET_PREFETCH_HASH_VAL();
             const auto& key = cache[i];
