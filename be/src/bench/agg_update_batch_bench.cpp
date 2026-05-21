@@ -256,7 +256,32 @@ public:
 // rotations between SUM/MIN/MAX/AVG don't perturb pool growth.
 inline constexpr size_t kAggStateBytes = 32;
 
-template <typename Wrapper, typename AggFn>
+// A/B trait: BaseHelperOf<AggFn>::type names the CRTP base from
+// aggregate.h that ships the row-loop update_batch we want to bypass
+// override and call non-virtually for the baseline timings.
+template <typename AggFnT>
+struct BaseHelperOf;
+template <LogicalType LT, typename T, LogicalType ResultLT, typename ResultType>
+struct BaseHelperOf<SumAggregateFunction<LT, T, ResultLT, ResultType>> {
+    using type = AggregateFunctionBatchHelper<SumAggregateState<ResultType>,
+                                              SumAggregateFunction<LT, T, ResultLT, ResultType>>;
+};
+template <LogicalType LT, typename T, LogicalType ImmediateLT, typename ImmediateType>
+struct BaseHelperOf<AvgAggregateFunction<LT, T, ImmediateLT, ImmediateType>> {
+    using type = AggregateFunctionBatchHelper<AvgAggregateState<ImmediateType>,
+                                              AvgAggregateFunction<LT, T, ImmediateLT, ImmediateType>>;
+};
+template <LogicalType LT, typename State, typename OP, typename T>
+struct BaseHelperOf<MaxMinAggregateFunction<LT, State, OP, T>> {
+    using type = AggregateFunctionBatchHelper<State, MaxMinAggregateFunction<LT, State, OP, T>>;
+};
+template <bool IsWindowFunc>
+struct BaseHelperOf<CountAggregateFunction<IsWindowFunc>> {
+    using type = AggregateFunctionBatchHelper<AggregateCountFunctionState<IsWindowFunc>,
+                                              CountAggregateFunction<IsWindowFunc>>;
+};
+
+template <typename Wrapper, typename AggFn, bool kBatchOverride = true>
 static void run_groupby_update_batch(benchmark::State& state, Distribution dist) {
     const int distinct = static_cast<int>(state.range(0));
     BenchSuite suite;
@@ -285,7 +310,18 @@ static void run_groupby_update_batch(benchmark::State& state, Distribution dist)
             wrapper->build_hash_map(kBenchChunkSize, key_columns, suite._mem_pool.get(), alloc, &agg_states);
 
             const Column* value_cols[1] = {stream.value_chunks()[ci].get()};
-            agg_fn.update_batch(fn_ctx, kBenchChunkSize, /*state_offset=*/0, value_cols, agg_states.data());
+            if constexpr (kBatchOverride) {
+                // Production path: hits the override that hoists down_cast +
+                // immutable_data() out of the row loop.
+                agg_fn.update_batch(fn_ctx, kBenchChunkSize, /*state_offset=*/0, value_cols, agg_states.data());
+            } else {
+                // Baseline path: qualified Base::update_batch call bypasses
+                // the derived override at compile time and runs the CRTP
+                // helper's per-row update() loop -- the pre-P1.A shape.
+                using Base = typename BaseHelperOf<AggFn>::type;
+                static_cast<Base&>(agg_fn).Base::update_batch(fn_ctx, kBenchChunkSize, /*state_offset=*/0, value_cols,
+                                                              agg_states.data());
+            }
 
             total_rows += kBenchChunkSize;
         }
@@ -363,6 +399,29 @@ using CountFn = CountAggregateFunction<false>;
 
 static void BM_CountBigInt_Random(benchmark::State& state) {
     run_groupby_update_batch<PhmapInt64Wrapper, CountFn>(state, Distribution::Random);
+}
+
+// ============================================================================
+// A/B baseline: same 5 aggregates, but the bench bypasses the P1.A override
+// at compile time via static_cast<Base&>(agg_fn).Base::update_batch(...).
+// Same workload, same key path; only the inner update_batch impl differs.
+// Compare each BM_*_Random_Baseline against the production BM_*_Random
+// above to read the speedup off the override at constant distinct count.
+// ============================================================================
+static void BM_SumBigInt_Random_Baseline(benchmark::State& state) {
+    run_groupby_update_batch<PhmapInt64Wrapper, SumBigIntFn, /*kBatchOverride=*/false>(state, Distribution::Random);
+}
+static void BM_AvgBigInt_Random_Baseline(benchmark::State& state) {
+    run_groupby_update_batch<PhmapInt64Wrapper, AvgBigIntFn, /*kBatchOverride=*/false>(state, Distribution::Random);
+}
+static void BM_MaxBigInt_Random_Baseline(benchmark::State& state) {
+    run_groupby_update_batch<PhmapInt64Wrapper, MaxBigIntFn, /*kBatchOverride=*/false>(state, Distribution::Random);
+}
+static void BM_MinBigInt_Random_Baseline(benchmark::State& state) {
+    run_groupby_update_batch<PhmapInt64Wrapper, MinBigIntFn, /*kBatchOverride=*/false>(state, Distribution::Random);
+}
+static void BM_CountBigInt_Random_Baseline(benchmark::State& state) {
+    run_groupby_update_batch<PhmapInt64Wrapper, CountFn, /*kBatchOverride=*/false>(state, Distribution::Random);
 }
 
 // ============================================================================
@@ -476,6 +535,13 @@ BENCHMARK(BM_AvgBigInt_Clustered64)->Apply(RegisterArgs)->Unit(benchmark::kMilli
 BENCHMARK(BM_MaxBigInt_Random)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_MinBigInt_Random)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_CountBigInt_Random)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
+
+// A/B baselines (same RegisterArgs so distinct sweep matches).
+BENCHMARK(BM_SumBigInt_Random_Baseline)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_AvgBigInt_Random_Baseline)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_MaxBigInt_Random_Baseline)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_MinBigInt_Random_Baseline)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_CountBigInt_Random_Baseline)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_SumBigInt_Nullable_Random)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
 BENCHMARK(BM_AvgBigInt_Nullable_Random)->Apply(RegisterArgs)->Unit(benchmark::kMillisecond);
