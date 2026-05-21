@@ -71,6 +71,11 @@ using LowCardDictUInt8AggHashMap = SmallFixedSizeHashMap<uint8_t, AggDataPtr, se
 // GROUP BY when FE-supplied min/max says max-min fits in 16 bits.
 template <PhmapSeed seed>
 using RangeUInt16AggHashMap = SmallFixedSizeHashMap<uint16_t, AggDataPtr, seed>;
+// 256-cell direct-array hash map keyed by uint8 -- backing for INT GROUP BY
+// when FE-supplied min/max says max-min fits in 8 bits (range <= 256).
+// Shares AggHashMapWithCompressibleInt32Key with the uint16 variant.
+template <PhmapSeed seed>
+using RangeUInt8AggHashMap = SmallFixedSizeHashMap<uint8_t, AggDataPtr, seed>;
 template <PhmapSeed seed>
 using Int32AggHashMap = phmap::flat_hash_map<int32_t, AggDataPtr, StdHashWithSeed<int32_t, seed>>;
 template <PhmapSeed seed>

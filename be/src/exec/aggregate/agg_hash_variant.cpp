@@ -110,7 +110,11 @@
     M(phase1_int32_range_uint16)               \
     M(phase1_null_int32_range_uint16)          \
     M(phase2_int32_range_uint16)               \
-    M(phase2_null_int32_range_uint16)
+    M(phase2_null_int32_range_uint16)          \
+    M(phase1_int32_range_uint8)                \
+    M(phase1_null_int32_range_uint8)           \
+    M(phase2_int32_range_uint8)                \
+    M(phase2_null_int32_range_uint8)
 
 #define APPLY_FOR_AGG_MAP_VARIANT_ALL(M) \
     APPLY_FOR_AGG_VARIANT_ALL(M)         \
@@ -167,6 +171,8 @@ DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx8, CompressedFixedSize8A
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx16, CompressedFixedSize16AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int32_range_uint16, CompressibleInt32AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int32_range_uint16, NullCompressibleInt32AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int32_range_uint8, CompressibleInt32Uint8AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int32_range_uint8, NullCompressibleInt32Uint8AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_uint8, UInt8AggHashMapWithOneNumberKey<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int8, Int8AggHashMapWithOneNumberKey<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int16, Int16AggHashMapWithOneNumberKey<PhmapSeed2>);
@@ -207,6 +213,8 @@ DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx8, CompressedFixedSize8A
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx16, CompressedFixedSize16AggHashMap<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int32_range_uint16, CompressibleInt32AggHashMap<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int32_range_uint16, NullCompressibleInt32AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int32_range_uint8, CompressibleInt32Uint8AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int32_range_uint8, NullCompressibleInt32Uint8AggHashMap<PhmapSeed2>);
 
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_low_card_dict_uint8, LowCardDictAggHashMapWithKey<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_low_card_dict_uint8, NullLowCardDictAggHashMapWithKey<PhmapSeed1>);
