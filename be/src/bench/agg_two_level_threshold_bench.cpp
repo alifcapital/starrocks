@@ -171,7 +171,6 @@ static void BM_TwoLevelThreshold(benchmark::State& state) {
         for (auto& chunk : stream.chunks()) {
             Columns cols;
             cols.emplace_back(chunk);
-            BenchAllocate alloc{suite._mem_pool.get()};
             variant.visit([&](auto& wrapper) {
                 // Only the Slice-keyed flat / two-level wrappers see real
                 // BinaryColumn input here; the other variants would fail
@@ -180,7 +179,14 @@ static void BM_TwoLevelThreshold(benchmark::State& state) {
                 using W = std::decay_t<decltype(*wrapper)>;
                 using KT = typename W::HashMapType::key_type;
                 if constexpr (std::is_same_v<KT, Slice>) {
-                    wrapper->build_hash_map(kBenchChunkSize, cols, suite._mem_pool.get(), alloc, &agg_states);
+                    // Pass a fresh temporary so Func deduces as
+                    // BenchAllocate (rvalue), not BenchAllocate&;
+                    // AggHashMapWithSerializedKey internally
+                    // `std::move`s the allocator into helper
+                    // routines and that fails to bind a
+                    // non-const lvalue reference.
+                    wrapper->build_hash_map(kBenchChunkSize, cols, suite._mem_pool.get(),
+                                            BenchAllocate{suite._mem_pool.get()}, &agg_states);
                 }
             });
 
