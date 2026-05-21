@@ -125,9 +125,21 @@ public:
     std::unique_ptr<AggStatistics> _agg_stat;
 };
 
+// AggHashMapVariant::visit instantiates the lambda body for every
+// wrapper in the variant -- int64 / decimal / date / Slice / ... --
+// and each wrapper's CRTP build_hash_map enforces an
+// `AllocFunc<Impl>` concept on the allocator's call operator. Use a
+// templated `operator()` so the concept is satisfied for every
+// KeyType; this bench only ever invokes the path under the Slice
+// wrappers (phase1_string -> phase1_string_two_level) but the
+// substitution must succeed for the others or the visit lambda
+// itself will not compile.
 struct BenchAllocate {
     MemPool* pool;
-    AggDataPtr operator()(const Slice&) { return pool->allocate(kAggStateBytes); }
+    template <typename K>
+    AggDataPtr operator()(const K&) {
+        return pool->allocate(kAggStateBytes);
+    }
     AggDataPtr operator()(std::nullptr_t) { return pool->allocate(kAggStateBytes); }
 };
 
@@ -161,7 +173,15 @@ static void BM_TwoLevelThreshold(benchmark::State& state) {
             cols.emplace_back(chunk);
             BenchAllocate alloc{suite._mem_pool.get()};
             variant.visit([&](auto& wrapper) {
-                wrapper->build_hash_map(kBenchChunkSize, cols, suite._mem_pool.get(), alloc, &agg_states);
+                // Only the Slice-keyed flat / two-level wrappers see real
+                // BinaryColumn input here; the other variants would fail
+                // their down_cast at runtime. The visit body still needs
+                // to compile for every variant in the std::variant.
+                using W = std::decay_t<decltype(*wrapper)>;
+                using KT = typename W::HashMapType::key_type;
+                if constexpr (std::is_same_v<KT, Slice>) {
+                    wrapper->build_hash_map(kBenchChunkSize, cols, suite._mem_pool.get(), alloc, &agg_states);
+                }
             });
 
             if (!converted) {
