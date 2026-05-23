@@ -140,29 +140,43 @@ protected:
         return nullptr;
     }
 
+    // The compression const arg, recovered in the RAW merge path. RAW exchange
+    // records carry no compression and a raw (mean, weight) point cannot supply
+    // one; FE injects compression as the last argument, so at the merge phase it
+    // is the rightmost forwarded constant (compact is a new-only format, so there
+    // is no legacy 3-arg form to disambiguate).
+    static ColumnPtr compression_const_from_ctx(FunctionContext* ctx) {
+        for (int i = ctx->get_num_args() - 1; i >= 0; --i) {
+            auto col = ctx->get_constant_column(i);
+            if (col != nullptr) {
+                return col; // rightmost const = compression
+            }
+        }
+        return nullptr;
+    }
+
 public:
     virtual double get_compression_factor(FunctionContext* ctx) const = 0;
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        double compression = get_compression_factor(ctx);
-        // Lazy initialization of compression factor on first merge
-        if (UNLIKELY(!data(state).compression_initialized)) {
-            data(state).reinit_with_compression(compression);
-        }
-
         const auto* binary_column = down_cast<const BinaryColumn*>(column);
         Slice src = binary_column->get_slice(row_num);
         int64_t prev_memory = data(state).mem_usage();
 
         if (is_raw_record(src)) {
             // [RECORD_RAW][mean:f32][weight:f32]: one transient pass-through
-            // sample. The quantile is not embedded; recover it from ctx -- only
-            // exchange records are RAW, and the merge phase always carries the
-            // const quantile there.
+            // sample. Neither quantile nor compression is embedded; recover both
+            // from ctx -- only exchange records are RAW, and the merge phase
+            // always carries the const quantile (second from right) and
+            // compression (rightmost).
             float mean;
             float weight;
             memcpy(&mean, src.data + 1, sizeof(float));
             memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
+            if (UNLIKELY(!data(state).compression_initialized)) {
+                data(state).reinit_with_compression(clamp_compression_factor(
+                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
+            }
             // TDigest::add rejects non-finite mean and weight <= 0.
             data(state).percentile->add(mean, weight);
             if (data(state).targetQuantiles.empty()) {
@@ -177,11 +191,16 @@ public:
             }
             double quantile;
             memcpy(&quantile, src.data, sizeof(double));
-            PercentileApproxState src_percentile(compression);
+            PercentileApproxState src_percentile;
             if (UNLIKELY(!src_percentile.percentile->deserialize(src.data + sizeof(double),
                                                                  src.size - sizeof(double)))) {
                 ctx->set_error("percentile_approx: malformed intermediate record", false);
                 return;
+            }
+            // Compression travels inside the serialized digest; adopt it instead
+            // of re-deriving from ctx (arity is unreliable at the merge phase).
+            if (UNLIKELY(!data(state).compression_initialized)) {
+                data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile->compression()));
             }
             merge_digest_into(data(state), src_percentile);
             if (data(state).targetQuantiles.empty()) {
@@ -545,12 +564,6 @@ public:
     // the const ARRAY arg), or legacy self-contained
     // [count:4][q1..qn:8n][PercentileValue blob] for persisted/agg_state values.
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        double compression = get_compression_factor(ctx);
-        // Lazy initialization of compression factor on first merge
-        if (UNLIKELY(!data(state).compression_initialized)) {
-            data(state).reinit_with_compression(compression);
-        }
-
         const auto* binary_column = down_cast<const BinaryColumn*>(column);
         Slice src = binary_column->get_slice(row_num);
         int64_t prev_memory = data(state).mem_usage();
@@ -560,6 +573,10 @@ public:
             float weight;
             memcpy(&mean, src.data + 1, sizeof(float));
             memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
+            if (UNLIKELY(!data(state).compression_initialized)) {
+                data(state).reinit_with_compression(clamp_compression_factor(
+                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
+            }
             data(state).percentile->add(mean, weight);
             if (UNLIKELY(data(state).targetQuantiles.empty())) {
                 assign_target_quantiles_from_const_array(data(state), quantile_const_from_ctx(ctx).get());
@@ -583,10 +600,15 @@ public:
             data(state).targetQuantiles.resize(count);
             memcpy(data(state).targetQuantiles.data(), (char*)src.data + sizeof(uint32_t), count * sizeof(double));
         }
-        PercentileApproxState src_percentile(compression);
+        PercentileApproxState src_percentile;
         if (UNLIKELY(!src_percentile.percentile->deserialize(src.data + header, src.size - header))) {
             ctx->set_error("percentile_approx: malformed intermediate record", false);
             return;
+        }
+        // Compression travels inside the serialized digest; adopt it instead of
+        // re-deriving from ctx (arity is unreliable at the merge phase).
+        if (UNLIKELY(!data(state).compression_initialized)) {
+            data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile->compression()));
         }
         merge_digest_into(data(state), src_percentile);
         ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
@@ -723,12 +745,6 @@ public:
     // the const ARRAY arg), or legacy self-contained
     // [count:4][q1..qn:8n][PercentileValue blob] for persisted/agg_state values.
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        double compression = get_compression_factor(ctx);
-        // Lazy initialization of compression factor on first merge
-        if (UNLIKELY(!data(state).compression_initialized)) {
-            data(state).reinit_with_compression(compression);
-        }
-
         const auto* binary_column = down_cast<const BinaryColumn*>(column);
         Slice src = binary_column->get_slice(row_num);
         int64_t prev_memory = data(state).mem_usage();
@@ -738,6 +754,10 @@ public:
             float weight;
             memcpy(&mean, src.data + 1, sizeof(float));
             memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
+            if (UNLIKELY(!data(state).compression_initialized)) {
+                data(state).reinit_with_compression(clamp_compression_factor(
+                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
+            }
             data(state).percentile->add(mean, weight);
             if (UNLIKELY(data(state).targetQuantiles.empty())) {
                 assign_target_quantiles_from_const_array(data(state), quantile_const_from_ctx(ctx).get());
@@ -761,10 +781,15 @@ public:
             data(state).targetQuantiles.resize(count);
             memcpy(data(state).targetQuantiles.data(), (char*)src.data + sizeof(uint32_t), count * sizeof(double));
         }
-        PercentileApproxState src_percentile(compression);
+        PercentileApproxState src_percentile;
         if (UNLIKELY(!src_percentile.percentile->deserialize(src.data + header, src.size - header))) {
             ctx->set_error("percentile_approx: malformed intermediate record", false);
             return;
+        }
+        // Compression travels inside the serialized digest; adopt it instead of
+        // re-deriving from ctx (arity is unreliable at the merge phase).
+        if (UNLIKELY(!data(state).compression_initialized)) {
+            data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile->compression()));
         }
         merge_digest_into(data(state), src_percentile);
         ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
