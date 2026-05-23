@@ -449,21 +449,20 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         partitionCache.get(updatedIcebergTableName);
 
         TableMetadata updatedTableMetadata = updatedTable.operations().current();
+        // Drop length/hasAddedFiles filters that were upstream's defaults: they silently
+        // skipped small/short-lived manifests we'd rather cache. Keep the per-manifest
+        // dataFileCache miss filter — refreshDataFileCache resets each passed manifest to
+        // an empty set and re-reads it from object storage, so passing already-cached
+        // manifests would cause redundant IO.
         List<ManifestFile> manifestFiles = updatedTable.currentSnapshot().dataManifests(updatedTable.io()).stream()
                 .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()) != null)
                 .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()).timestampMillis() > latestRefreshTime)
+                .filter(f -> dataFileCache.getIfPresent(f.path()) == null)
                 .collect(Collectors.toList());
 
-        boolean alreadyCached = !manifestFiles.isEmpty() &&
-                manifestFiles.stream().allMatch(f -> dataFileCache.getIfPresent(f.path()) != null);
-
-        if (manifestFiles.isEmpty() || alreadyCached) {
-            LOG.debug("Not caching manifests on the table {}.{}: {}",
-                    dbName, tableName, alreadyCached ? "all manifests already cached" : "no manifests to cache");
-            if (alreadyCached) {
-                tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
-                tableLatestSnapshotTime.put(keyWithoutSnap, updatedSnapshotTime);
-            }
+        if (manifestFiles.isEmpty()) {
+            tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
+            tableLatestSnapshotTime.put(keyWithoutSnap, updatedSnapshotTime);
             return;
         }
 
