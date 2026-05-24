@@ -163,6 +163,19 @@ void TDigest::finalize_cumulative() {
     updateCumulative();
 }
 
+void TDigest::merge_one(const TDigest* other) {
+    // Single-digest fast path: skip the priority-queue + batch-vector setup that
+    // add(iter,end) builds for the multi-digest case. For one input that machinery
+    // just yields a single batch == {other}, so calling mergeProcessed /
+    // mergeUnprocessed / processIfNecessary directly is bit-identical while
+    // avoiding two per-call heap allocations (the queue and the batch vector).
+    std::vector<const TDigest*> batch{other};
+    mergeProcessed(batch);
+    mergeUnprocessed(batch);
+    processIfNecessary();
+    updateCumulative();
+}
+
 const std::vector<Centroid>& TDigest::processed() const {
     return _processed;
 }

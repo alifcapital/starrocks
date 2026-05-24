@@ -92,6 +92,18 @@ static void BM_PerMergeDeferred(benchmark::State& st) {
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
+static void BM_PerMergeOne(benchmark::State& st) {
+    const double c = static_cast<double>(st.range(0));
+    auto parts = make_partials(c);
+    auto ptrs = ptrs_of(parts);
+    for (auto _ : st) {
+        TDigest target(c);
+        for (const auto* p : ptrs) target.merge_one(p);
+        benchmark::DoNotOptimize(&target);
+    }
+    st.SetItemsProcessed(st.iterations() * kRows);
+}
+
 static void BM_BatchAdd(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
     auto parts = make_partials(c);
@@ -106,6 +118,7 @@ static void BM_BatchAdd(benchmark::State& st) {
 
 BENCHMARK(BM_PerMerge)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_PerMergeDeferred)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_PerMergeOne)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_BatchAdd)->Arg(1000)->Arg(10000);
 
 } // namespace starrocks

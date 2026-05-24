@@ -146,6 +146,9 @@ public:
     // of O(n * processed) cumulative rebuilds.
     void merge_deferred(const TDigest* other);
     void finalize_cumulative();
+    // Single-digest merge that avoids add(iter,end)'s priority-queue/batch-vector
+    // allocations. Bit-identical to merge(other).
+    void merge_one(const TDigest* other);
     const std::vector<Centroid>& processed() const;
     const std::vector<Centroid>& unprocessed() const;
     Index maxUnprocessed() const;
