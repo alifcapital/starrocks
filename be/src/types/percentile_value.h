@@ -31,6 +31,15 @@ public:
         (void)deserialize(src.data, src.size);
     }
 
+    // Reset to an empty digest with a new compression, in place. Produces the
+    // same state as constructing a fresh PercentileValue(compression) but reuses
+    // this object: the inline TDigest's centroid vectors are empty (compression
+    // is applied before any value is added), so move-assigning a freshly
+    // constructed TDigest touches only scalar fields and does no heap work. Used
+    // on the first update/merge of every aggregation group to avoid a wasted
+    // per-group reallocation.
+    void set_compression(double compression) { _tdigest = TDigest(compression); }
+
     void add(float value) { _tdigest.add(value); }
 
     void add(float value, int64_t weight) { _tdigest.add(value, static_cast<float>(weight)); }
