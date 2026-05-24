@@ -139,6 +139,13 @@ public:
 
     // merge in another t-digest
     void merge(const TDigest* other);
+    // Same as merge() but skips the O(processed) updateCumulative() rebuild. The
+    // cumulative array is only read by quantile()/cdf()/serialize(), never during
+    // merging, so a caller merging many digests can defer it and call
+    // finalize_cumulative() once at the end -- bit-identical result, O(n) instead
+    // of O(n * processed) cumulative rebuilds.
+    void merge_deferred(const TDigest* other);
+    void finalize_cumulative();
     const std::vector<Centroid>& processed() const;
     const std::vector<Centroid>& unprocessed() const;
     Index maxUnprocessed() const;
@@ -147,7 +154,8 @@ public:
     // merge in a vector of tdigests in the most efficient manner possible
     // in constant space
     // works for any value of kHighWater
-    void add(std::vector<const TDigest*>::const_iterator iter, std::vector<const TDigest*>::const_iterator end);
+    void add(std::vector<const TDigest*>::const_iterator iter, std::vector<const TDigest*>::const_iterator end,
+             bool update_cumulative = true);
     Weight processedWeight() const;
     Weight unprocessedWeight() const;
     bool haveUnprocessed() const;

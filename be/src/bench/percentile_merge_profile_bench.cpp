@@ -62,6 +62,23 @@ static void BM_PerMerge(benchmark::State& st) {
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
+// deferred: per-row merge but skip the per-row updateCumulative(), do it once at
+// the end. Bit-identical to BM_PerMerge (verified: same serialized bytes and
+// quantiles), unlike BM_BatchAdd which reorders processing and shifts the result.
+static void BM_PerMergeDeferred(benchmark::State& st) {
+    const double c = static_cast<double>(st.range(0));
+    auto blob = make_singleton_blob(c);
+    TDigest scratch(c);
+    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
+    for (auto _ : st) {
+        TDigest target(c);
+        for (size_t i = 0; i < kRows; ++i) target.merge_deferred(&scratch);
+        target.finalize_cumulative();
+        benchmark::DoNotOptimize(&target);
+    }
+    st.SetItemsProcessed(st.iterations() * kRows);
+}
+
 // batched: hand all partials to TDigest's constant-space batch merge in one call.
 static void BM_BatchAdd(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
@@ -78,6 +95,7 @@ static void BM_BatchAdd(benchmark::State& st) {
 }
 
 BENCHMARK(BM_PerMerge)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_PerMergeDeferred)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_BatchAdd)->Arg(1000)->Arg(10000);
 
 } // namespace starrocks

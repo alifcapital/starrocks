@@ -154,6 +154,15 @@ void TDigest::merge(const TDigest* other) {
     add(others.cbegin(), others.cend());
 }
 
+void TDigest::merge_deferred(const TDigest* other) {
+    std::vector<const TDigest*> others{other};
+    add(others.cbegin(), others.cend(), /*update_cumulative=*/false);
+}
+
+void TDigest::finalize_cumulative() {
+    updateCumulative();
+}
+
 const std::vector<Centroid>& TDigest::processed() const {
     return _processed;
 }
@@ -174,7 +183,8 @@ void TDigest::add(const std::vector<const TDigest*>& digests) {
     add(digests.cbegin(), digests.cend());
 }
 
-void TDigest::add(std::vector<const TDigest*>::const_iterator iter, std::vector<const TDigest*>::const_iterator end) {
+void TDigest::add(std::vector<const TDigest*>::const_iterator iter, std::vector<const TDigest*>::const_iterator end,
+                  bool update_cumulative) {
     if (iter != end) {
         auto size = std::distance(iter, end);
         TDigestQueue pq(TDigestComparator{});
@@ -198,7 +208,9 @@ void TDigest::add(std::vector<const TDigest*>::const_iterator iter, std::vector<
                 totalSize = 0;
             }
         }
-        updateCumulative();
+        if (update_cumulative) {
+            updateCumulative();
+        }
     }
 }
 
