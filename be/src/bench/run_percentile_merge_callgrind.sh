@@ -13,7 +13,7 @@ PASSES="${2:-20}"
 MODE="${3:-0}" # 0=merge(), 1=batch add(), 2=merge_one()
 
 # No benchmark dependency here; pure tdigest. Just need the shim + be/src.
-"$CXX" -O2 -g -fno-omit-frame-pointer -std=c++17 -mavx2 -DNDEBUG \
+"$CXX" -O2 -g -fno-omit-frame-pointer -std=c++17 -mavx2 -DNDEBUG -static-libstdc++ -static-libgcc \
     -I "$SHIM" -I be/src \
     be/src/bench/percentile_merge_callgrind.cpp be/src/types/tdigest.cpp \
     -o "$OUT"

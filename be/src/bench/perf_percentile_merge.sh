@@ -19,7 +19,7 @@ done
 
 # -O2 -g -fno-omit-frame-pointer: keep release-ish codegen but with symbols +
 # dwarf inline info so perf can attribute inlined TDigest helpers.
-"$CXX" -O2 -g -fno-omit-frame-pointer -std=c++17 -mavx2 -DNDEBUG \
+"$CXX" -O2 -g -fno-omit-frame-pointer -std=c++17 -mavx2 -DNDEBUG -static-libstdc++ -static-libgcc \
     -I "$SHIM" -I be/src -I"$TPI/include" \
     be/src/bench/percentile_merge_profile_bench.cpp be/src/types/tdigest.cpp \
     -L"$TPI/lib" -L"$TPI/lib64" -lbenchmark -lpthread -lrt -o "$OUT"
