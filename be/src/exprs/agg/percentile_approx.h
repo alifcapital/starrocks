@@ -15,6 +15,8 @@
 #pragma once
 
 #include <cmath>
+#include <cstdlib>
+#include <memory>
 
 #include "column/array_column.h"
 #include "column/column_helper.h"
@@ -46,7 +48,16 @@ public:
     // high-cardinality pass-through path. set_compression yields the identical
     // empty-at-compression state without the churn.
     void reinit_with_compression(double compression) {
-        percentile->set_compression(compression);
+        // BENCH-ONLY A/B toggle (NOT for the PR): one binary exercises both the
+        // in-place reset and the old realloc path so the per-group allocation can
+        // be measured without a second multi-hour rebuild. Set PCT_REALLOC=1 to
+        // force the old make_unique path; unset uses the in-place reset. Read once.
+        static const bool realloc_path = std::getenv("PCT_REALLOC") != nullptr;
+        if (realloc_path) {
+            percentile = std::make_unique<PercentileValue>(compression);
+        } else {
+            percentile->set_compression(compression);
+        }
         compression_initialized = true;
     }
 
