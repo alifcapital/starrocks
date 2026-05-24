@@ -14,24 +14,30 @@
 
 // Where percentile_approx merge time actually goes.
 //
-// The earlier breakdown showed scratch alloc / deserialize / mem-accounting are
-// all noise (<=2%); ~96% is the tdigest merge math. This bench drills into that:
-// TDigest::merge(other) -> add({other}) runs updateCumulative() (O(processed))
-// on EVERY call, and process() runs it again. updateCumulative is only needed
-// before quantile()/serialize(), so per-row merge is O(rows * processed) when it
-// could be O(rows + processed).
+// TDigest::merge(other) -> add({other}) runs, per call: a priority-queue setup,
+// mergeProcessed/mergeUnprocessed, processIfNecessary, and updateCumulative()
+// (O(processed)). Doing this once per row (vs once per batch) is the suspected
+// cost. Variants:
 //
-//   PerMerge : kRows x target.merge(&scratch)            -- current code path
-//   BatchAdd : target.add(begin,end) once over kRows ptrs -- TDigest's own
-//              "merge in the most efficient manner" batch API: one updateCumulative.
+//   PerMerge        : kRows x target.merge(p)              -- current code path
+//   PerMergeDeferred: kRows x target.merge_deferred(p) + finalize_cumulative()
+//                     -- skips the per-row updateCumulative; BIT-IDENTICAL to
+//                        PerMerge (same bytes + quantiles, verified).
+//   BatchAdd        : target.add(begin,end) once           -- TDigest's own batch
+//                        API; faster but REORDERS processing -> shifts the result.
+//
+// Partials carry VARIED values (normal dist) so the digest actually grows to
+// ~compression centroids like a real high-cardinality merge. (Identical values
+// collapse to a single centroid and measure nothing.)
 //
 // Arg(0) = TDigest compression (1000 = TDigest() default; 10000 =
-// percentile_approx DEFAULT_COMPRESSION_FACTOR). Partial = a singleton centroid
-// (the common high-cardinality pass-through shape). Per-row ns = Time / kRows.
+// percentile_approx DEFAULT_COMPRESSION_FACTOR). Per-row ns = Time / kRows.
 
 #include <benchmark/benchmark.h>
 
 #include <cstdint>
+#include <memory>
+#include <random>
 #include <vector>
 
 #include "types/tdigest.h"
@@ -40,52 +46,56 @@ namespace starrocks {
 
 static constexpr size_t kRows = 4096;
 
-static std::vector<uint8_t> make_singleton_blob(double compression) {
-    TDigest t(compression);
-    t.add(42.0f);
-    std::vector<uint8_t> b(t.serialize_size());
-    t.serialize(b.data());
-    return b;
+// kRows varied single-centroid partials (one per incoming merge row).
+static std::vector<std::unique_ptr<TDigest>> make_partials(double compression) {
+    std::mt19937_64 rng(0x9E3779B97F4A7C15ull);
+    std::normal_distribution<double> dist(100.0, 30.0);
+    std::vector<std::unique_ptr<TDigest>> parts;
+    parts.reserve(kRows);
+    for (size_t i = 0; i < kRows; ++i) {
+        auto t = std::make_unique<TDigest>(compression);
+        t->add(static_cast<float>(dist(rng)));
+        parts.push_back(std::move(t));
+    }
+    return parts;
 }
 
-// current: merge the partial in one row at a time.
+static std::vector<const TDigest*> ptrs_of(const std::vector<std::unique_ptr<TDigest>>& parts) {
+    std::vector<const TDigest*> p;
+    p.reserve(parts.size());
+    for (const auto& up : parts) p.push_back(up.get());
+    return p;
+}
+
 static void BM_PerMerge(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
-    auto blob = make_singleton_blob(c);
-    TDigest scratch(c);
-    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
+    auto parts = make_partials(c);
+    auto ptrs = ptrs_of(parts);
     for (auto _ : st) {
         TDigest target(c);
-        for (size_t i = 0; i < kRows; ++i) target.merge(&scratch);
+        for (const auto* p : ptrs) target.merge(p);
         benchmark::DoNotOptimize(&target);
     }
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
-// deferred: per-row merge but skip the per-row updateCumulative(), do it once at
-// the end. Bit-identical to BM_PerMerge (verified: same serialized bytes and
-// quantiles), unlike BM_BatchAdd which reorders processing and shifts the result.
 static void BM_PerMergeDeferred(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
-    auto blob = make_singleton_blob(c);
-    TDigest scratch(c);
-    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
+    auto parts = make_partials(c);
+    auto ptrs = ptrs_of(parts);
     for (auto _ : st) {
         TDigest target(c);
-        for (size_t i = 0; i < kRows; ++i) target.merge_deferred(&scratch);
+        for (const auto* p : ptrs) target.merge_deferred(p);
         target.finalize_cumulative();
         benchmark::DoNotOptimize(&target);
     }
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
-// batched: hand all partials to TDigest's constant-space batch merge in one call.
 static void BM_BatchAdd(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
-    auto blob = make_singleton_blob(c);
-    TDigest scratch(c);
-    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
-    std::vector<const TDigest*> ptrs(kRows, &scratch);
+    auto parts = make_partials(c);
+    auto ptrs = ptrs_of(parts);
     for (auto _ : st) {
         TDigest target(c);
         target.add(ptrs.cbegin(), ptrs.cend());
