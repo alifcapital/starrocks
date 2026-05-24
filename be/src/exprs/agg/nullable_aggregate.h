@@ -306,6 +306,26 @@ public:
 
     void merge_batch_single_state(FunctionContext* ctx, AggDataPtr __restrict state, const Column* column, size_t start,
                                   size_t size) const override {
+        // No-null fast path mirroring update_batch_single_state: delegate the
+        // whole run to the nested function in one call so its devirtualised,
+        // vectorisable batch loop runs instead of a per-row virtual merge. Only
+        // taken when the input carries no nulls, so the per-row null/process_null
+        // handling below is untouched.
+        if (size > 0) {
+            if (!column->is_nullable()) {
+                this->data(state).is_null = false;
+                nested_function->merge_batch_single_state(ctx, this->data(state).mutable_nest_state(), column, start,
+                                                          size);
+                return;
+            }
+            const auto* nullable_column = down_cast<const NullableColumn*>(column);
+            if (!nullable_column->has_null()) {
+                this->data(state).is_null = false;
+                nested_function->merge_batch_single_state(ctx, this->data(state).mutable_nest_state(),
+                                                          nullable_column->data_column().get(), start, size);
+                return;
+            }
+        }
         for (size_t i = start; i < start + size; ++i) {
             merge(ctx, column, state, i);
         }
@@ -933,11 +953,18 @@ public:
     void merge_batch_single_state(FunctionContext* ctx, AggDataPtr __restrict state, const Column* column, size_t start,
                                   size_t size) const override {
         auto fast_call_path = [&](const Column* data_column) {
-            for (size_t i = start; i < start + size; ++i) {
-                auto& state_data = this->data(state);
-                state_data.is_null = false;
-                this->nested_function->merge(ctx, data_column, state_data.mutable_nest_state(), i);
+            // No nulls in the input: hand the whole run to the nested function in
+            // a single call, mirroring update_batch_single_state's fast path. The
+            // nested batch loop is devirtualised and vectorisable, whereas the
+            // per-row nested_function->merge below dispatches virtually on every
+            // row and blocks vectorisation of cheap reducers (sum/min/max).
+            if (size == 0) {
+                return;
             }
+            auto& state_data = this->data(state);
+            state_data.is_null = false;
+            this->nested_function->merge_batch_single_state(ctx, state_data.mutable_nest_state(), data_column, start,
+                                                            size);
         };
         auto slow_call_path = [&](const ImmutableNullData& null_data, const Column* data_column) {
             for (size_t i = start; i < start + size; ++i) {
