@@ -523,7 +523,14 @@ void TDigest::mergeUnprocessed(const std::vector<const TDigest*>& tdigests) {
         total += td->_unprocessed.size();
     }
 
-    _unprocessed.reserve(total);
+    // Grow geometrically. A plain reserve(total) with total == size()+1 -- the
+    // single-digest merge() path -- forces a reallocation (and a relocate of all
+    // existing centroids) on every call, turning a stream of merges into O(n^2).
+    // Only enlarge when needed, doubling so incremental merges stay amortized
+    // O(1) while a large batch still gets a single reservation.
+    if (total > _unprocessed.capacity()) {
+        _unprocessed.reserve(std::max(total, _unprocessed.capacity() * 2));
+    }
     for (auto& td : tdigests) {
         _unprocessed.insert(_unprocessed.end(), td->_unprocessed.cbegin(), td->_unprocessed.cend());
         _unprocessed_weight += td->_unprocessed_weight;
