@@ -104,6 +104,26 @@ static void BM_PerMergeOne(benchmark::State& st) {
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
+// Models #73749's compact RAW pass-through merge: instead of deserializing a
+// per-row digest and merge()-ing it, the merge phase extracts (mean,weight) from
+// the compact record and adds the centroid directly via TDigest::add(x,w), which
+// emplace_backs into _unprocessed (geometric growth) and never touches
+// mergeUnprocessed's reserve. This is the #73749 baseline to compare the main
+// reserve-fix against.
+static void BM_AddValueWeight(benchmark::State& st) {
+    const double c = static_cast<double>(st.range(0));
+    std::mt19937_64 rng(0x9E3779B97F4A7C15ull);
+    std::normal_distribution<double> dist(100.0, 30.0);
+    std::vector<float> vals(kRows);
+    for (auto& v : vals) v = static_cast<float>(dist(rng));
+    for (auto _ : st) {
+        TDigest target(c);
+        for (float v : vals) target.add(v, 1.0f);
+        benchmark::DoNotOptimize(&target);
+    }
+    st.SetItemsProcessed(st.iterations() * kRows);
+}
+
 static void BM_BatchAdd(benchmark::State& st) {
     const double c = static_cast<double>(st.range(0));
     auto parts = make_partials(c);
@@ -119,6 +139,7 @@ static void BM_BatchAdd(benchmark::State& st) {
 BENCHMARK(BM_PerMerge)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_PerMergeDeferred)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_PerMergeOne)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_AddValueWeight)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_BatchAdd)->Arg(1000)->Arg(10000);
 
 } // namespace starrocks
