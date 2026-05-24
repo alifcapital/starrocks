@@ -130,6 +130,42 @@ static void run_roundtrip(benchmark::State& state, bool compact) {
     tls_agg_state_allocator = nullptr;
 }
 
+// High-cardinality pass-through merge: every record belongs to a distinct group,
+// so the merge phase allocates a state and applies a single record to it. Isolates
+// the per-group cost (create + first-merge compression init + destroy) that
+// dominates when aggregation barely reduces the row count -- the scenario the
+// compact format targets. Records are built once; only the merge loop is timed.
+static void run_highcard_merge(benchmark::State& state, bool compact) {
+    CountingAllocatorWithHook allocator;
+    tls_agg_state_allocator = &allocator;
+    const size_t n = state.range(0);
+    const AggregateFunction* fn = percentile_fn();
+
+    TQueryOptions opts;
+    opts.__set_enable_percentile_compact_intermediate(compact);
+    RuntimeState rs(TUniqueId(), opts, TQueryGlobals(), nullptr);
+    auto ctx = make_ctx(&rs);
+    auto quantile = ColumnHelper::create_const_column<TYPE_DOUBLE>(0.5, 1);
+    Columns src{make_values(n), quantile, ColumnHelper::create_const_column<TYPE_DOUBLE>(2048, 1)};
+
+    MutableColumnPtr out = BinaryColumn::create();
+    fn->convert_to_exchange_format(ctx.get(), src, n, out);
+
+    for (auto _ : state) {
+        MemPool pool;
+        for (size_t i = 0; i < out->size(); ++i) {
+            AggDataPtr agg_state = pool.allocate_aligned(fn->size(), fn->alignof_size());
+            fn->create(ctx.get(), agg_state);
+            fn->merge(ctx.get(), out.get(), agg_state, i);
+            fn->destroy(ctx.get(), agg_state);
+        }
+        benchmark::DoNotOptimize(out);
+    }
+    state.counters["rows_per_s"] =
+            benchmark::Counter(static_cast<double>(n) * state.iterations(), benchmark::Counter::kIsRate);
+    tls_agg_state_allocator = nullptr;
+}
+
 static void BM_PercentileConvert_Legacy(benchmark::State& state) {
     run_convert(state, /*compact=*/false);
 }
@@ -142,11 +178,19 @@ static void BM_PercentileRoundtrip_Legacy(benchmark::State& state) {
 static void BM_PercentileRoundtrip_Compact(benchmark::State& state) {
     run_roundtrip(state, /*compact=*/true);
 }
+static void BM_PercentileHighCardMerge_Legacy(benchmark::State& state) {
+    run_highcard_merge(state, /*compact=*/false);
+}
+static void BM_PercentileHighCardMerge_Compact(benchmark::State& state) {
+    run_highcard_merge(state, /*compact=*/true);
+}
 
 BENCHMARK(BM_PercentileConvert_Legacy)->Arg(1024)->Arg(4096);
 BENCHMARK(BM_PercentileConvert_Compact)->Arg(1024)->Arg(4096);
 BENCHMARK(BM_PercentileRoundtrip_Legacy)->Arg(1024)->Arg(4096);
 BENCHMARK(BM_PercentileRoundtrip_Compact)->Arg(1024)->Arg(4096);
+BENCHMARK(BM_PercentileHighCardMerge_Legacy)->Arg(1024)->Arg(4096);
+BENCHMARK(BM_PercentileHighCardMerge_Compact)->Arg(1024)->Arg(4096);
 
 } // namespace starrocks
 
