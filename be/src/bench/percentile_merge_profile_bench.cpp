@@ -12,22 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Honest time breakdown of PercentileApproxAggregateFunction::merge() per row.
-// Every variant grows `target` identically (kRows merges of the same partial),
-// so the delta between adjacent variants isolates one component:
+// Where percentile_approx merge time actually goes.
 //
-//   A  MergeOnly      : target.merge(prebuilt scratch)         -> irreducible tdigest math
-//   B  Deserialize    : scratch.deserialize(blob); merge       -> B-A = deserialize cost
-//   C  AllocDeser     : make_unique scratch; deserialize; merge-> C-B = per-row scratch alloc
-//   D  MemAccount     : B + 2x mem_usage() + add_mem_usage      -> D-B = mem-accounting cost
+// The earlier breakdown showed scratch alloc / deserialize / mem-accounting are
+// all noise (<=2%); ~96% is the tdigest merge math. This bench drills into that:
+// TDigest::merge(other) -> add({other}) runs updateCumulative() (O(processed))
+// on EVERY call, and process() runs it again. updateCumulative is only needed
+// before quantile()/serialize(), so per-row merge is O(rows * processed) when it
+// could be O(rows + processed).
 //
-// Read per-row ns = Time / kRows. Arg(0) = centroids per partial blob
-// (1 = pass-through singleton, the common high-cardinality shape).
+//   PerMerge : kRows x target.merge(&scratch)            -- current code path
+//   BatchAdd : target.add(begin,end) once over kRows ptrs -- TDigest's own
+//              "merge in the most efficient manner" batch API: one updateCumulative.
+//
+// Arg(0) = TDigest compression (1000 = TDigest() default; 10000 =
+// percentile_approx DEFAULT_COMPRESSION_FACTOR). Partial = a singleton centroid
+// (the common high-cardinality pass-through shape). Per-row ns = Time / kRows.
 
 #include <benchmark/benchmark.h>
 
 #include <cstdint>
-#include <memory>
 #include <vector>
 
 #include "types/tdigest.h"
@@ -35,88 +39,46 @@
 namespace starrocks {
 
 static constexpr size_t kRows = 4096;
-static constexpr double kC = 10000.0;
 
-static std::vector<uint8_t> make_blob(int ncent) {
-    TDigest t(kC);
-    for (int i = 0; i < ncent; ++i) t.add(static_cast<float>((i * 7) % 1000));
+static std::vector<uint8_t> make_singleton_blob(double compression) {
+    TDigest t(compression);
+    t.add(42.0f);
     std::vector<uint8_t> b(t.serialize_size());
     t.serialize(b.data());
     return b;
 }
 
-// A: pure merge math (scratch built once, merged kRows times).
-static void BM_A_MergeOnly(benchmark::State& st) {
-    auto blob = make_blob(static_cast<int>(st.range(0)));
+// current: merge the partial in one row at a time.
+static void BM_PerMerge(benchmark::State& st) {
+    const double c = static_cast<double>(st.range(0));
+    auto blob = make_singleton_blob(c);
+    TDigest scratch(c);
+    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
     for (auto _ : st) {
-        TDigest target(kC);
-        TDigest scratch(kC);
-        scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
+        TDigest target(c);
         for (size_t i = 0; i < kRows; ++i) target.merge(&scratch);
         benchmark::DoNotOptimize(&target);
     }
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
-// B: + per-row deserialize into a reused scratch.
-static void BM_B_Deserialize(benchmark::State& st) {
-    auto blob = make_blob(static_cast<int>(st.range(0)));
-    const char* d = reinterpret_cast<const char*>(blob.data());
+// batched: hand all partials to TDigest's constant-space batch merge in one call.
+static void BM_BatchAdd(benchmark::State& st) {
+    const double c = static_cast<double>(st.range(0));
+    auto blob = make_singleton_blob(c);
+    TDigest scratch(c);
+    scratch.deserialize(reinterpret_cast<const char*>(blob.data()));
+    std::vector<const TDigest*> ptrs(kRows, &scratch);
     for (auto _ : st) {
-        TDigest target(kC);
-        TDigest scratch(kC);
-        for (size_t i = 0; i < kRows; ++i) {
-            scratch.deserialize(d);
-            target.merge(&scratch);
-        }
+        TDigest target(c);
+        target.add(ptrs.cbegin(), ptrs.cend());
         benchmark::DoNotOptimize(&target);
     }
     st.SetItemsProcessed(st.iterations() * kRows);
 }
 
-// C: + per-row scratch allocation (this is the current merge() code).
-static void BM_C_AllocDeser(benchmark::State& st) {
-    auto blob = make_blob(static_cast<int>(st.range(0)));
-    const char* d = reinterpret_cast<const char*>(blob.data());
-    for (auto _ : st) {
-        TDigest target(kC);
-        for (size_t i = 0; i < kRows; ++i) {
-            auto src = std::make_unique<TDigest>(kC);
-            src->deserialize(d);
-            target.merge(src.get());
-        }
-        benchmark::DoNotOptimize(&target);
-    }
-    st.SetItemsProcessed(st.iterations() * kRows);
-}
-
-// D: B + the per-row mem-usage accounting merge() does
-// (prev = mem_usage(); merge; add_mem_usage(mem_usage() - prev)).
-// mem_usage() == 1 + tdigest.serialize_size().
-static void BM_D_MemAccount(benchmark::State& st) {
-    auto blob = make_blob(static_cast<int>(st.range(0)));
-    const char* d = reinterpret_cast<const char*>(blob.data());
-    int64_t mem_counter = 0;
-    for (auto _ : st) {
-        TDigest target(kC);
-        TDigest scratch(kC);
-        for (size_t i = 0; i < kRows; ++i) {
-            scratch.deserialize(d);
-            int64_t prev = 1 + static_cast<int64_t>(target.serialize_size());
-            target.merge(&scratch);
-            int64_t after = 1 + static_cast<int64_t>(target.serialize_size());
-            mem_counter += after - prev;
-        }
-        benchmark::DoNotOptimize(&target);
-        benchmark::DoNotOptimize(mem_counter);
-    }
-    st.SetItemsProcessed(st.iterations() * kRows);
-}
-
-BENCHMARK(BM_A_MergeOnly)->Arg(1)->Arg(100);
-BENCHMARK(BM_B_Deserialize)->Arg(1)->Arg(100);
-BENCHMARK(BM_C_AllocDeser)->Arg(1)->Arg(100);
-BENCHMARK(BM_D_MemAccount)->Arg(1)->Arg(100);
+BENCHMARK(BM_PerMerge)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_BatchAdd)->Arg(1000)->Arg(10000);
 
 } // namespace starrocks
 
