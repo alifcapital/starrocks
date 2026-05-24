@@ -2,10 +2,22 @@
 // tdigest.h references Slice only in an unused ctor; this avoids pulling
 // base/string/memcmp.h -> gutil/strings/fastmem.h. Used ONLY via the explicit -I
 // in run_percentile_merge_scratch_bench.sh; never on the normal cmake build path.
+//
+// Mirrors the stdlib includes of the real base/string/slice.h so headers that
+// rely on it transitively (e.g. tdigest.h using uint64_t) still compile under
+// libstdc++ (which, unlike libc++, does not pull <cstdint> in for free).
 #pragma once
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <iostream>
+#include <map>
+#include <ostream>
 #include <string>
+#include <string_view>
+#include <vector>
 namespace starrocks {
 struct Slice {
     const char* data = nullptr;
