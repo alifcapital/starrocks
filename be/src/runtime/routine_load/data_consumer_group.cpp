@@ -341,7 +341,9 @@ Status PulsarDataConsumerGroup::start_all(StreamLoadContext* ctx) {
     //improve performance
     Status (PulsarConsumerPipe::*append_data)(const char* data, size_t size, char row_delimiter);
     char row_delimiter = '\n';
-    if (ctx->format == TFileFormatType::FORMAT_JSON) {
+    if (ctx->format == TFileFormatType::FORMAT_JSON || ctx->format == TFileFormatType::FORMAT_AVRO) {
+        // Avro, like JSON, needs one message per buffer (no row delimiter) so the scanner can decode
+        // each Confluent-framed message individually.
         append_data = &PulsarConsumerPipe::append_json;
     } else {
         append_data = &PulsarConsumerPipe::append_with_row_delimiter;

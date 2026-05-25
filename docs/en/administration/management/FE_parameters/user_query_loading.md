@@ -217,6 +217,15 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Description: Whether to enable automatic collection for the NDV information of the ARRAY type.
 - Introduced in: v4.0
 
+### `enable_avro_routine_load_native_reader`
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: The default Avro reader for Routine Load jobs that do not set the `avro.use_native_reader` property. When `true`, such jobs use the native (avrocpp) reader, which loads Avro `record`/`map` fields as `STRUCT`/`MAP` columns and interprets Avro logical types (`date` → DATE, `timestamp` → DATETIME, `decimal` → DECIMAL); when `false`, the legacy reader is used. The reader choice is resolved when a job is created, so changing this item only affects newly created jobs, not existing ones.
+- Introduced in: -
+
 ### `enable_backup_materialized_view`
 
 - Default: false

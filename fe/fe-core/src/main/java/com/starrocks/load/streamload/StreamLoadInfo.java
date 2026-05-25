@@ -90,6 +90,8 @@ public class StreamLoadInfo {
     private int loadParallelRequestNum = 0;
     private boolean enableReplicatedStorage = false;
     private String confluentSchemaRegistryUrl;
+    // null = not set by the user, fall back to the BE config default.
+    private Boolean useNativeAvroReader;
     private long logRejectedRecordNum = 0;
     private TPartialUpdateMode partialUpdateMode = TPartialUpdateMode.ROW_MODE;
     private ComputeResource computeResource = WarehouseManager.DEFAULT_RESOURCE;
@@ -123,6 +125,10 @@ public class StreamLoadInfo {
 
     public void setConfluentSchemaRegistryUrl(String confluentSchemaRegistryUrl) {
         this.confluentSchemaRegistryUrl = confluentSchemaRegistryUrl;
+    }
+
+    public Boolean getUseNativeAvroReader() {
+        return useNativeAvroReader;
     }
 
     public TUniqueId getId() {
@@ -473,6 +479,7 @@ public class StreamLoadInfo {
                     routineLoadJob.getSessionVariables().get(SessionVariable.LOAD_TRANSMISSION_COMPRESSION_TYPE));
         }
         confluentSchemaRegistryUrl = routineLoadJob.getConfluentSchemaRegistryUrl();
+        useNativeAvroReader = routineLoadJob.getUseNativeAvroReader();
         trimSpace = routineLoadJob.isTrimspace();
         enclose = routineLoadJob.getEnclose();
         escape = routineLoadJob.getEscape();

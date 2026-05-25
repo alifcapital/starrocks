@@ -303,6 +303,9 @@ struct TBrokerScanRangeParams {
     32: optional bool flexible_column_mapping
     33: optional TFileScanType file_scan_type
     34: optional bool schema_sample_types = true
+    // Per-job override for avro routine load: use the avrocpp-based scanner (STRUCT/MAP support).
+    // When unset, the BE config enable_avro_routine_load_native_reader decides.
+    35: optional bool use_native_avro_reader
 }
 
 // Broker scan range

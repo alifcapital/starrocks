@@ -243,6 +243,9 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback
     protected long maxBatchSizeBytes = Config.max_routine_load_batch_size;
 
     private String confluentSchemaRegistryUrl;
+    // null = not set by the user, fall back to the FE config default.
+    @SerializedName("nar")
+    private Boolean useNativeAvroReader;
 
     protected int currentTaskConcurrentNum;
     @SerializedName("p")
@@ -431,6 +434,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback
                 jobProperties.put(CreateRoutineLoadStmt.JSONPATHS, "");
             }
             this.confluentSchemaRegistryUrl = stmt.getConfluentSchemaRegistryUrl();
+            this.useNativeAvroReader = stmt.getUseNativeAvroReader();
         } else {
             throw new StarRocksException("Invalid format type.");
         }
@@ -487,6 +491,10 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback
 
     public void setConfluentSchemaRegistryUrl(String confluentSchemaRegistryUrl) {
         this.confluentSchemaRegistryUrl = confluentSchemaRegistryUrl;
+    }
+
+    public Boolean getUseNativeAvroReader() {
+        return useNativeAvroReader;
     }
 
     @Override
