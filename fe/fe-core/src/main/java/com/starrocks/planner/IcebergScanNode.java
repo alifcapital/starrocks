@@ -158,7 +158,7 @@ public class IcebergScanNode extends ScanNode {
         if (morParams != IcebergMORParams.EMPTY) {
             boolean needToCheckEqualityIds = tableFullMORParams.size() != 3;
             IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(
-                    remoteFileInfoSource, morParams, needToCheckEqualityIds);
+                    remoteFileInfoSource, morParams, needToCheckEqualityIds, icebergTable.getNativeTable().specs());
             Deque<RemoteFileInfo> remoteFileInfoDeque = trigger.getQueue(morParams);
             remoteFileInfoSource = new QueueIcebergRemoteFileInfoSource(trigger, remoteFileInfoDeque);
         }
@@ -232,7 +232,7 @@ public class IcebergScanNode extends ScanNode {
             if (morParams != IcebergMORParams.EMPTY) {
                 boolean needToCheckEqualityIds = tableFullMORParams.size() != 3;
                 IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(
-                        remoteFileInfoSource, morParams, needToCheckEqualityIds);
+                        remoteFileInfoSource, morParams, needToCheckEqualityIds, icebergTable.getNativeTable().specs());
                 Deque<RemoteFileInfo> remoteFileInfoDeque = trigger.getQueue(morParams);
                 remoteFileInfoSource = new QueueIcebergRemoteFileInfoSource(trigger, remoteFileInfoDeque);
             }
