@@ -253,10 +253,14 @@ private:
 
             // Re-partition on the next radix level so the sub-partition totals shrink. The
             // key is re-hashed with a per-level salt, so each level redistributes groups
-            // independently instead of relying on a fixed slice of hash bits.
+            // independently instead of relying on a fixed slice of hash bits. The salt is
+            // (level+1)-based: a pushed partition arrives at level 0 already split by
+            // bucket() = _mix(key), so a salt of level*0 would reproduce that exact split (a
+            // wasted pass that only bumps the level); offsetting by one makes the first
+            // re-partition actually redistribute.
             std::vector<Partition> sub(_fanout);
             for (const auto& g : p.groups) {
-                const size_t b = _mix(g.key + static_cast<uint64_t>(p.level) * 0x9E3779B97F4A7C15ull) % _fanout;
+                const size_t b = _mix(g.key + static_cast<uint64_t>(p.level + 1) * 0x9E3779B97F4A7C15ull) % _fanout;
                 sub[b].groups.push_back(g);
                 sub[b].upper_bound += g.count;
             }

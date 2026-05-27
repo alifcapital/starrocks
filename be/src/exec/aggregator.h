@@ -303,19 +303,25 @@ public:
         return _cache_conscious_ca ? static_cast<int64_t>(_cache_conscious_ca->physical_tuples_bytes()) : 0;
     }
     bool cache_conscious_ca_spilled() const { return _cache_conscious_ca_spilled; }
-    // On memory pressure: move every CA partition's tuples out to the spiller as (key, partial)
-    // chunks and free the RAM (the logical stats stay, so prune still works). The partition stays
-    // routable — later misses refill it and can be spilled again (cyclic).
+    // On memory pressure: spill the CA partitions' tuples to the spiller as (key, partial) chunks
+    // and free the RAM (the logical stats stay, so prune still works). Spills inline while the
+    // spiller is not full, then hands the remainder to the spill channel so backpressure
+    // (need_input gates on is_full / has_task) paces it instead of bursting past the mem-table
+    // pool. The partition stays routable — later misses refill it and can be spilled again (cyclic).
     Status spill_cache_conscious_ca(RuntimeState* state);
     // Called once after the sink is complete: prune the cold tail against FA and build the
     // exact local top-n (≤ k rows) into a result chunk. The source emits that chunk instead of
     // the normal convert path. Pruned cold partitions are never resolved (that is the win).
-    // If the CA spilled, this defers to restore_and_finalize_cache_conscious_ca on the source.
+    // If the CA spilled, this returns OK and the source drives restore + finalize instead.
     Status finalize_cache_conscious_topn(RuntimeState* state);
-    // Source side when the CA spilled: restore every spilled (key, partial) chunk back into its
-    // CA partition, then prune + build the result chunk. Survivors-only restore is a future
-    // optimization; here every spilled tuple is read back, then prune drops the losers.
-    Status restore_and_finalize_cache_conscious_ca(RuntimeState* state);
+    // Source side when the CA spilled, pull-driven (one chunk per call): restore the next spilled
+    // (key, partial) chunk and re-route it into its CA partition without re-counting the stat.
+    // Call while !is_spilled_eos(); gate each call on spiller()->has_output_data() so the reader
+    // stream is ready (never touch a not-yet-acquired stream) and the prefetch is buffered (never
+    // spin on empty restores).
+    Status restore_cache_conscious_chunk(RuntimeState* state);
+    // Source side once is_spilled_eos(): prune FA + the restored CA and build the result chunk.
+    Status finalize_cache_conscious_ca(RuntimeState* state);
     // The source drives emission: a ready result is pulled exactly once, then EOS.
     bool cache_conscious_result_ready() const { return _cache_conscious_result_ready; }
     bool cache_conscious_result_emitted() const { return _cache_conscious_result_emitted; }
@@ -670,6 +676,13 @@ protected:
                                  bool use_intermediate);
     // Materialize the pruned local top-n (key, count) pairs into the result chunk.
     Status _build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result);
+    // Shared tail of both finalize paths (in-memory and post-restore): read the frozen FA out of
+    // the hash map, prune it against the CA, build the result chunk, and release the CA.
+    Status _emit_cache_conscious_local_topn();
+    // Resumable generator yielding the CA partitions' tuples as (key, partial) intermediate
+    // chunks (or EndOfFile when drained). The caller spills the returned chunks; the spill
+    // channel drives the same generator for whatever did not fit inline (backpressure).
+    std::function<StatusOr<ChunkPtr>()> _build_cache_conscious_ca_spill_task(RuntimeState* state);
 
     void _set_passthrough(bool flag) { _is_passthrough = flag; }
     bool is_passthrough() const { return _is_passthrough; }

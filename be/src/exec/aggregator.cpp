@@ -1910,38 +1910,12 @@ Status Aggregator::finalize_cache_conscious_topn(RuntimeState* state) {
         return Status::OK();
     }
     // If the CA spilled, its tuples are on disk and can only be read back on the source side
-    // (the spiller restores after the sink is complete). Defer the whole prune to the source's
-    // restore_and_finalize_cache_conscious_ca; keep the CA alive (do not reset here).
+    // (the spiller restores after the sink is complete). The source drives restore + finalize
+    // pull-driven; keep the CA alive (do not reset here).
     if (_cache_conscious_ca_spilled) {
         return Status::OK();
     }
-    auto reset_mode = DeferOp([this]() {
-        _cache_conscious_ca.reset();
-        _cache_conscious_active = false;
-    });
-
-    // FA: exact (key, count) read straight from the frozen hash map.
-    std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
-    if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
-        return Status::OK(); // unsupported key slipped through; the normal convert still emits FA
-    }
-    std::vector<CacheConsciousTopN::Group> fa;
-    fa.reserve(fa_pairs.size());
-    for (const auto& [key, count] : fa_pairs) {
-        fa.push_back({key, count});
-    }
-
-    // CA was partitioned incrementally on push. finalize prunes FA + CA partitions against the
-    // k-th highest exact FA count and resolves only survivors — the result is the exact local
-    // top-n (≤ k rows) the source emits. Pruned partitions are never resolved: that is the win.
-    auto top = _cache_conscious_ca->finalize(std::move(fa));
-
-    std::vector<std::pair<uint64_t, int64_t>> result;
-    result.reserve(top.size());
-    for (const auto& g : top) {
-        result.emplace_back(g.key, g.count);
-    }
-    return _build_cache_conscious_result_chunk(result);
+    return _emit_cache_conscious_local_topn();
 }
 
 Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result) {
@@ -1968,26 +1942,37 @@ Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pa
     return Status::OK();
 }
 
-Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
-    if (!_cache_conscious_active || _cache_conscious_ca == nullptr) {
-        return Status::OK();
-    }
+std::function<StatusOr<ChunkPtr>()> Aggregator::_build_cache_conscious_ca_spill_task(RuntimeState* state) {
+    // Resumable drain cursor over the CA partitions. take_partition_tuples empties a partition and
+    // leaves its logical stat behind (so prune still works and the partition is routable again);
+    // `pid` is the next partition to drain, `drained`/`pos` the tuples taken from the current one
+    // not yet emitted. Each call yields one intermediate (key, partial) chunk; the pid is not
+    // preserved — restore re-buckets by key — so partitions share a chunk, avoiding tiny chunks.
     const LogicalType key_lt = _group_by_types[0].result_type.type;
-    auto& spiller = _spiller;
     const size_t fanout = _cache_conscious_ca->fanout();
     const size_t batch_rows = state->chunk_size();
-
-    // Collect tuples across all partitions into chunk_size batches and spill each as an
-    // intermediate-layout (key, partial-count) chunk. The pid is not preserved — restore
-    // re-buckets by key — so partitions share a chunk, avoiding one tiny chunk per partition.
-    // The logical stats stay in the CA (take_ left them), so prune still works; the partitions
-    // are now empty and routable again (cyclic spill). The spiller's own mem-table coalesces
-    // these chunks into blocks, the same way the hash-map spill path relies on it.
-    std::vector<CacheConsciousTopN::Group> batch;
-    batch.reserve(batch_rows);
-    auto flush_batch = [&]() -> Status {
+    return [this, key_lt, fanout, batch_rows, pid = size_t{0}, drained = std::vector<CacheConsciousTopN::Group>{},
+            pos = size_t{0}]() mutable -> StatusOr<ChunkPtr> {
+        std::vector<CacheConsciousTopN::Group> batch;
+        batch.reserve(batch_rows);
+        while (batch.size() < batch_rows) {
+            if (pos >= drained.size()) {
+                drained.clear();
+                pos = 0;
+                while (pid < fanout && drained.empty()) {
+                    drained = _cache_conscious_ca->take_partition_tuples(pid);
+                    ++pid;
+                }
+                if (drained.empty()) {
+                    break; // all partitions consumed
+                }
+            }
+            while (pos < drained.size() && batch.size() < batch_rows) {
+                batch.push_back(drained[pos++]);
+            }
+        }
         if (batch.empty()) {
-            return Status::OK();
+            return Status::EndOfFile("cache-conscious CA drained");
         }
         const size_t n = batch.size();
         MutableColumns group_by_columns = _create_group_by_columns(n);
@@ -1998,79 +1983,106 @@ Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
             RETURN_IF_ERROR(append_group_key(key_col, key_lt, g.key));
             count_col->get_data().push_back(g.count);
         }
-        ChunkPtr chunk = _build_output_chunk(std::move(group_by_columns), std::move(agg_result_columns),
-                                             /*use_intermediate_as_output=*/true);
-        RETURN_IF_ERROR(spiller->spill(state, chunk, TRACKER_WITH_SPILLER_GUARD(state, spiller)));
-        batch.clear();
-        return Status::OK();
+        return _build_output_chunk(std::move(group_by_columns), std::move(agg_result_columns),
+                                   /*use_intermediate_as_output=*/true);
     };
+}
 
-    for (size_t pid = 0; pid < fanout; ++pid) {
-        std::vector<CacheConsciousTopN::Group> tuples = _cache_conscious_ca->take_partition_tuples(pid);
-        for (const auto& g : tuples) {
-            batch.push_back(g);
-            if (batch.size() >= batch_rows) {
-                RETURN_IF_ERROR(flush_batch());
-            }
+Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
+    if (!_cache_conscious_active || _cache_conscious_ca == nullptr) {
+        return Status::OK();
+    }
+    // Mark spilled synchronously: set_finishing and the source key off this, and it must hold even
+    // when the remainder is still draining in the channel.
+    _cache_conscious_ca_spilled = true;
+    auto& spiller = _spiller;
+    auto task = _build_cache_conscious_ca_spill_task(state);
+    // Spill inline while the spiller has room (honors the spill() !is_full contract); the moment it
+    // fills, hand the same generator to the spill channel so the SpillProcessOperator drains the
+    // rest with yield/backpressure. need_input gates on is_full / has_task, so push pauses while the
+    // channel drains and never races it for the CA partitions.
+    while (!spiller->is_full()) {
+        auto chunk_st = task();
+        if (chunk_st.ok()) {
+            RETURN_IF_ERROR(spiller->spill(state, chunk_st.value(), TRACKER_WITH_SPILLER_GUARD(state, spiller)));
+        } else if (chunk_st.status().is_end_of_file()) {
+            return Status::OK();
+        } else {
+            return chunk_st.status();
         }
     }
-    RETURN_IF_ERROR(flush_batch());
-    _cache_conscious_ca_spilled = true;
+    _spill_channel->add_spill_task({std::move(task)});
     return Status::OK();
 }
 
-Status Aggregator::restore_and_finalize_cache_conscious_ca(RuntimeState* state) {
-    auto reset_mode = DeferOp([this]() {
-        _cache_conscious_ca.reset();
-        _cache_conscious_active = false;
-    });
-
-    // Read every spilled (key, partial) chunk back and re-route it into its CA partition. The
-    // stat was already counted on the original route, so restore_tuple appends without bumping it.
-    // The spill chunks are intermediate layout, so read them the same way the live merge path does.
-    const LogicalType key_lt = _group_by_types[0].result_type.type;
+Status Aggregator::restore_cache_conscious_chunk(RuntimeState* state) {
+    // Restore one spilled (key, partial) chunk and re-route it into its CA partition. The stat was
+    // already counted on the original route, so restore_tuple appends without bumping it. The
+    // caller gates on spiller()->has_output_data(), so the reader stream is acquired and the
+    // prefetch is buffered; an empty chunk here just means nothing this turn.
     auto& spiller = _spiller;
-    while (!is_spilled_eos()) {
-        ASSIGN_OR_RETURN(ChunkPtr chunk, spiller->restore(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller)));
-        if (chunk == nullptr || chunk->is_empty()) {
-            continue;
-        }
-        // Read the spilled intermediate chunk directly by column position ([key, count]) instead
-        // of evaluate_agg_fn_exprs: a 1-phase colocate count(*) has no intermediate agg ctx, so the
-        // evaluate path would not resolve. The spiller preserves column order on restore.
-        const size_t n = chunk->num_rows();
-        const Column* key_col = ColumnHelper::get_data_column(chunk->get_column_by_index(0).get());
-        const auto* cnt_col =
-                down_cast<const Int64Column*>(ColumnHelper::get_data_column(chunk->get_column_by_index(1).get()));
-        switch (key_lt) {
-        case TYPE_BOOLEAN:
-        case TYPE_TINYINT:
-            restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
-            break;
-        case TYPE_SMALLINT:
-            restore_cold_tuples<Int16Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
-            break;
-        case TYPE_INT:
-            restore_cold_tuples<Int32Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
-            break;
-        case TYPE_BIGINT:
-            restore_cold_tuples<Int64Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
-            break;
-        default:
-            return Status::InternalError("cache-conscious top-n: unexpected group key type");
-        }
+    ASSIGN_OR_RETURN(ChunkPtr chunk, spiller->restore(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller)));
+    if (chunk == nullptr || chunk->is_empty()) {
+        return Status::OK();
     }
+    // Read the spilled intermediate chunk directly by column position ([key, count]) instead of
+    // evaluate_agg_fn_exprs: a 1-phase colocate count(*) has no intermediate agg ctx, so the
+    // evaluate path would not resolve. The spiller preserves column order on restore.
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    const size_t n = chunk->num_rows();
+    const Column* key_col = ColumnHelper::get_data_column(chunk->get_column_by_index(0).get());
+    const auto* cnt_col =
+            down_cast<const Int64Column*>(ColumnHelper::get_data_column(chunk->get_column_by_index(1).get()));
+    switch (key_lt) {
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+        restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+        break;
+    case TYPE_SMALLINT:
+        restore_cold_tuples<Int16Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+        break;
+    case TYPE_INT:
+        restore_cold_tuples<Int32Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+        break;
+    case TYPE_BIGINT:
+        restore_cold_tuples<Int64Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+        break;
+    default:
+        return Status::InternalError("cache-conscious top-n: unexpected group key type");
+    }
+    return Status::OK();
+}
 
+Status Aggregator::finalize_cache_conscious_ca(RuntimeState* state) {
+    // Called once the source has restored every spilled chunk (is_spilled_eos()); the CA now holds
+    // all cold tuples again (restored + any RAM tail), so prune + build the result like the
+    // in-memory path.
+    return _emit_cache_conscious_local_topn();
+}
+
+Status Aggregator::_emit_cache_conscious_local_topn() {
+    // Free the CA tuples once the result is built, but keep _cache_conscious_active set: the
+    // source's has_output/is_finished stay on the cache-conscious branch (which reports
+    // emitted -> finished). Clearing active would drop a spilled-CA source into the normal
+    // spilled-source path after emit, which would mishandle the already-finished stream.
+    auto reset_mode = DeferOp([this]() { _cache_conscious_ca.reset(); });
+
+    // FA: exact (key, count) read straight from the frozen hash map.
     std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
     if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
-        return Status::OK();
+        return Status::OK(); // unsupported key slipped through; the normal convert still emits FA
     }
     std::vector<CacheConsciousTopN::Group> fa;
     fa.reserve(fa_pairs.size());
     for (const auto& [key, count] : fa_pairs) {
         fa.push_back({key, count});
     }
+
+    // CA was partitioned incrementally on push. finalize prunes FA + CA partitions against the
+    // k-th highest exact FA count and resolves only survivors — the result is the exact local
+    // top-n (≤ k rows) the source emits. Pruned partitions are never resolved: that is the win.
     auto top = _cache_conscious_ca->finalize(std::move(fa));
+
     std::vector<std::pair<uint64_t, int64_t>> result;
     result.reserve(top.size());
     for (const auto& g : top) {

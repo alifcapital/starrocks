@@ -70,12 +70,12 @@ protected:
     AggregatorPtr _aggregator = nullptr;
     bool _agg_group_by_with_limit = false;
 
-    // Cache-conscious top-n flip decision. When the live hash table first grows past the
-    // per-core L2 budget, the group counts are checked for skew once; if a small candidate
-    // set dominates this aggregation can keep only those exact and prune the tail. The
-    // rerouting of cold groups is layered on later; for now this only records the verdict.
-    // Hardcoded L2 estimate (real L2 is ~256 KiB-2 MiB across CPUs); revisit only if tuning
-    // shows it matters.
+    // Cache-conscious top-n flip decision. When the live hash table first grows past this
+    // budget, the group counts are checked for skew once; on a skewed verdict the table is
+    // frozen as the exact FA and later cold groups route to the pruned CA tail.
+    // This is the FA budget, not the full per-core L2: the frozen table is ~this size, and a
+    // real L2 (~256 KiB-2 MiB across CPUs) leaves room beside it for the CA working set. Kept
+    // safely below the smallest L2; revisit only if tuning shows it matters.
     static constexpr int64_t kCacheConsciousL2TargetBytes = 512 * 1024;
     bool _cache_conscious_evaluated = false;
     bool _cache_conscious_skewed = false;
