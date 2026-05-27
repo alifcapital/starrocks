@@ -115,6 +115,7 @@ import com.starrocks.sql.optimizer.rule.tree.ExtractAggregateColumn;
 import com.starrocks.sql.optimizer.rule.tree.InlineCteProjectPruneRule;
 import com.starrocks.sql.optimizer.rule.tree.JoinLocalShuffleRule;
 import com.starrocks.sql.optimizer.rule.tree.JsonPathRewriteRule;
+import com.starrocks.sql.optimizer.rule.tree.MarkCacheConsciousTopnRule;
 import com.starrocks.sql.optimizer.rule.tree.MarkParentRequiredDistributionRule;
 import com.starrocks.sql.optimizer.rule.tree.PhysicalDistributionAggOptRule;
 import com.starrocks.sql.optimizer.rule.tree.PreAggregateTurnOnRule;
@@ -1019,6 +1020,13 @@ public class QueryOptimizer extends Optimizer {
 
         // Rewrite Exchange on top of Sort to Final Sort
         result = new ExchangeSortToMergeRule().rewrite(result, rootTaskContext);
+
+        // Flag a global aggregation feeding a small TopN(ORDER BY count(*) DESC) so the
+        // backend can fuse them into a cache-conscious top-n aggregation. Pure annotation,
+        // no tree restructure; gated off by default during bring-up.
+        if (rootTaskContext.getOptimizerContext().getSessionVariable().isEnableCacheConsciousTopn()) {
+            result = new MarkCacheConsciousTopnRule().rewrite(result, rootTaskContext);
+        }
         result = new PruneAggregateNodeRule().rewrite(result, rootTaskContext);
         result = new PruneShuffleDistributionNodeRule().rewrite(result, rootTaskContext);
         result = new PruneShuffleColumnRule().rewrite(result, rootTaskContext);

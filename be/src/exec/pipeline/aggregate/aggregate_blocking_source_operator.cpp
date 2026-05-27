@@ -47,6 +47,13 @@ Status AggregateBlockingSourceOperator::prepare(RuntimeState* state) {
 StatusOr<ChunkPtr> AggregateBlockingSourceOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_CANCELLED(state);
 
+    // Cache-conscious top-n: emit the prebuilt local top-n result chunk once, then EOS.
+    // Conjuncts / runtime-filter eval are intentionally skipped: the flip is gated to no HAVING
+    // and the result is already the finalized top-n. TODO: revisit if HAVING is ever allowed.
+    if (_aggregator->cache_conscious_result_ready()) {
+        return _aggregator->pull_cache_conscious_result_chunk();
+    }
+
     const auto chunk_size = state->chunk_size();
     ChunkPtr chunk = std::make_shared<Chunk>();
 

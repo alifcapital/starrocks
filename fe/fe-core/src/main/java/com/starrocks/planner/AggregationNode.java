@@ -119,6 +119,11 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
     private SortInfo topNSortInfo;
     private long topNLimit = -1;
 
+    // used for cache-conscious top-n aggregation: when set, the backend fuses the
+    // downstream TopN and keeps only the candidate top-n groups exact.
+    private boolean cacheConsciousTopn = false;
+    private long cacheConsciousTopnLimit = -1;
+
     /**
      * Create an agg node that is not an intermediate node.
      * isIntermediate is true if it is a slave node in a 2-part agg plan.
@@ -232,6 +237,11 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
 
     public SortInfo getTopNSortInfo() {
         return topNSortInfo;
+    }
+
+    public void setCacheConsciousTopn(long limit) {
+        this.cacheConsciousTopn = true;
+        this.cacheConsciousTopnLimit = limit;
     }
 
     public void setTopNLimit(long topNLimit) {
@@ -350,6 +360,11 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
                 useStreamingPreagg && ConnectContext.get().getSessionVariable().isInterpolatePassthrough());
         msg.agg_node.setEnable_pipeline_share_limit(
                 ConnectContext.get().getSessionVariable().getEnableAggregationPipelineShareLimit());
+
+        if (cacheConsciousTopn) {
+            msg.agg_node.setEnable_cache_conscious_topn(true);
+            msg.agg_node.setCache_conscious_topn_limit(cacheConsciousTopnLimit);
+        }
     }
 
     protected String getDisplayLabelDetail() {

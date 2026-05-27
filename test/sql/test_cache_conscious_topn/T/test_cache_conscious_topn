@@ -1,0 +1,48 @@
+-- name: test_cache_conscious_topn
+-- Verifies the cache-conscious top-n aggregation (enable_cache_conscious_topn) returns the
+-- exact same top-n as the normal plan, on both physical shapes:
+--   * shuffle  (DISTRIBUTED BY HASH on a non-group column) -> 2-phase global agg
+--   * colocate (DISTRIBUTED BY HASH on the group key)      -> 1-phase global count(*)
+-- The data is high-cardinality (well over an L2 worth of groups) and value-skewed so the flip
+-- triggers; pipeline_dop=1 keeps every group on one instance so the L2 threshold is actually
+-- crossed regardless of parallelism.
+create database test_cct_${uuid0};
+use test_cct_${uuid0};
+
+create table t_shuffle (k int not null, v int not null)
+    duplicate key(k) distributed by hash(v) properties('replication_num' = '1');
+create table t_colocate (k int not null, v int not null)
+    duplicate key(k) distributed by hash(k) properties('replication_num' = '1');
+
+-- 80k cold keys (count 1 each, keys >= 1000) + three hot keys (< 1000) with distinct,
+-- well-separated counts so the top-3 order is deterministic (no ties at the boundary).
+insert into t_shuffle select x, x from table(generate_series(1000, 80999)) as g(x);
+insert into t_shuffle select 1, x from table(generate_series(1, 50000)) as g(x);
+insert into t_shuffle select 2, x from table(generate_series(1, 30000)) as g(x);
+insert into t_shuffle select 7, x from table(generate_series(1, 10000)) as g(x);
+insert into t_colocate select * from t_shuffle;
+
+set pipeline_dop = 1;
+
+-- feature ON: top-3 must be the hot keys, on both distributions.
+set enable_cache_conscious_topn = true;
+[ORDER]select k, count(*) c from t_shuffle group by k order by c desc limit 3;
+[ORDER]select k, count(*) c from t_colocate group by k order by c desc limit 3;
+-- boundary k = 1.
+[ORDER]select k, count(*) c from t_shuffle group by k order by c desc limit 1;
+
+-- feature OFF: identical results (equivalence with the normal plan / fallback path).
+set enable_cache_conscious_topn = false;
+[ORDER]select k, count(*) c from t_shuffle group by k order by c desc limit 3;
+[ORDER]select k, count(*) c from t_colocate group by k order by c desc limit 3;
+
+-- low-cardinality: stays far below the L2 threshold so it never flips, still correct.
+create table t_small (k int not null, v int not null)
+    duplicate key(k) distributed by hash(k) properties('replication_num' = '1');
+insert into t_small select 1, x from table(generate_series(1, 300)) as g(x);
+insert into t_small select 2, x from table(generate_series(1, 200)) as g(x);
+insert into t_small select 3, x from table(generate_series(1, 100)) as g(x);
+set enable_cache_conscious_topn = true;
+[ORDER]select k, count(*) c from t_small group by k order by c desc limit 2;
+
+drop database test_cct_${uuid0};

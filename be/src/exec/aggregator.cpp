@@ -19,6 +19,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "base/utility/defer_op.h"
 #include "column/chunk.h"
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
@@ -29,6 +30,7 @@
 #include "exec/agg_runtime_filter_builder.h"
 #include "exec/aggregate/agg_hash_variant.h"
 #include "exec/aggregate/agg_profile.h"
+#include "exec/cache_conscious_topn.h"
 #include "exec/exec_node.h"
 #include "exec/pipeline/operator.h"
 #include "exprs/agg/aggregate_factory.h"
@@ -193,6 +195,10 @@ AggregatorParamsPtr convert_to_aggregator_params(const TPlanNode& tnode) {
                 tnode.agg_node.__isset.enable_pipeline_share_limit ? tnode.agg_node.enable_pipeline_share_limit : false;
         params->grouping_min_max =
                 tnode.agg_node.__isset.group_by_min_max ? tnode.agg_node.group_by_min_max : std::vector<TExpr>{};
+        params->enable_cache_conscious_topn =
+                tnode.agg_node.__isset.enable_cache_conscious_topn && tnode.agg_node.enable_cache_conscious_topn;
+        params->cache_conscious_topn_limit =
+                tnode.agg_node.__isset.cache_conscious_topn_limit ? tnode.agg_node.cache_conscious_topn_limit : -1;
 
         break;
     }
@@ -1726,6 +1732,226 @@ void Aggregator::build_hash_map_with_selection_and_allocation(size_t chunk_size,
                                                                         AllocateState<MapType>(this), &_tmp_agg_states,
                                                                         &_streaming_selection);
     });
+}
+
+void Aggregator::collect_cache_conscious_topn_counts(std::vector<int64_t>* counts) {
+    counts->clear();
+    counts->reserve(_hash_map_variant.size());
+    // The group state blob lays the aggregate states out at _agg_states_offsets; for a single
+    // count(*) the first one is the int64 running count.
+    const size_t count_offset = _agg_states_offsets.empty() ? 0 : _agg_states_offsets[0];
+    auto it = _state_allocator.begin();
+    const auto end = _state_allocator.end();
+    while (it != end) {
+        const uint8_t* value = it.value();
+        counts->push_back(*reinterpret_cast<const int64_t*>(value + count_offset));
+        it.next();
+    }
+}
+
+bool Aggregator::collect_cache_conscious_topn_groups(std::vector<std::pair<uint64_t, int64_t>>* groups) {
+    const size_t count_offset = _agg_states_offsets.empty() ? 0 : _agg_states_offsets[0];
+    bool supported = true;
+    // The group state blob lays the key out at its front and the aggregate states at
+    // _agg_states_offsets; mirror the iteration used by convert_hash_map_to_chunk.
+    auto st = _hash_map_variant.visit([&](auto& variant_value) {
+        using HashMapWithKey = std::remove_reference_t<decltype(*variant_value)>;
+        using KeyType = typename HashMapWithKey::KeyType;
+        if constexpr (std::is_integral_v<KeyType>) {
+            groups->reserve(_hash_map_variant.size());
+            auto it = _state_allocator.begin();
+            const auto end = _state_allocator.end();
+            while (it != end) {
+                uint8_t* value = it.value();
+                const auto key = *reinterpret_cast<const KeyType*>(value);
+                const int64_t count = *reinterpret_cast<const int64_t*>(value + count_offset);
+                groups->emplace_back(static_cast<uint64_t>(key), count);
+                it.next();
+            }
+        } else {
+            supported = false;
+        }
+        return Status::OK();
+    });
+    return supported && st.ok();
+}
+
+bool Aggregator::cache_conscious_group_key_supported() const {
+    // A nullable key has its NULL group stored outside the state allocator, so FA extraction
+    // would silently drop it; require a single non-nullable integral key.
+    // TODO: widen group-key support (each step is contained, no algorithm change):
+    //  - int-backed fixed types (date/datetime, decimal32/64): cheap, add to the switch +
+    //    a to-uint64 conversion;
+    //  - LARGEINT/decimal128 and string/Slice/multi-column keys: need a templated key in the
+    //    engine (identity by the real key, radix by its hash) and copying keys out of the
+    //    hash-table arena;
+    //  - nullable keys: handle the NULL group explicitly instead of excluding it here.
+    if (_group_by_types.size() != 1 || _has_nullable_key) {
+        return false;
+    }
+    switch (_group_by_types[0].result_type.type) {
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+    case TYPE_SMALLINT:
+    case TYPE_INT:
+    case TYPE_BIGINT:
+        return true; // exact in a uint64
+    default:
+        return false; // LARGEINT (int128), decimals, strings, multi-column: unsupported for now
+    }
+}
+
+namespace {
+template <typename KeyColumn>
+void read_cold_groups(const Column* key_col, const Int64Column* cnt_col, size_t n,
+                      std::vector<CacheConsciousTopN::Group>* out) {
+    const auto& keys = down_cast<const KeyColumn*>(key_col)->get_data();
+    if (cnt_col != nullptr) {
+        // 2-phase plan: merge the partial count carried in the input column.
+        const auto& counts = cnt_col->get_data();
+        for (size_t i = 0; i < n; ++i) {
+            out->push_back({static_cast<uint64_t>(keys[i]), counts[i]});
+        }
+    } else {
+        // 1-phase (colocate) count(*): no input column, each row contributes 1 to its group.
+        for (size_t i = 0; i < n; ++i) {
+            out->push_back({static_cast<uint64_t>(keys[i]), 1});
+        }
+    }
+}
+} // namespace
+
+Status Aggregator::finalize_cache_conscious_topn(RuntimeState* state) {
+    // TODO: the whole multi-level prune runs synchronously here. For a large cold tail this can
+    // monopolize the driver thread, which breaks the pipeline's cooperative scheduling (each
+    // call is expected to do ~one chunk of work and yield). Slice it into a pull-driven source
+    // state machine (one partition / radix level per pull, like the partitionwise spill source)
+    // before relying on it under load. Correct as-is; this is a scheduling-fairness concern.
+    if (!_cache_conscious_active) {
+        return Status::OK();
+    }
+    auto reset_mode = DeferOp([this]() {
+        _cache_conscious_cold_chunks.clear();
+        _cache_conscious_active = false;
+    });
+
+    // FA: exact (key, count) read straight from the frozen hash map.
+    std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
+    if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
+        return Status::OK(); // unsupported key slipped through; the normal convert still emits FA
+    }
+    std::vector<CacheConsciousTopN::Group> fa;
+    fa.reserve(fa_pairs.size());
+    for (const auto& [key, count] : fa_pairs) {
+        fa.push_back({key, count});
+    }
+
+    // CA: cold (key, partial-count) rows. The buffered chunks are the operator's own INPUT
+    // (filtered to the post-flip misses), so re-evaluating the group-by and aggregate-input
+    // exprs reproduces the key column and the partial-count column in input layout, avoiding
+    // the intermediate-tuple slot-id mismatch.
+    // TODO: assumes a single count(*) aggregate (the FE flag guarantees it), so the partial is
+    // one int64 column. SUM(Y>=0) / MAX will need their own input column handling and bound.
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    // Read the cold count exactly as the live path consumes input (compute_batch_agg_states):
+    // pick the ctx set via _use_intermediate_as_input() and split update-vs-merge the same way.
+    // A 1-phase (colocate) count(*) takes the update branch with no input column (each row = 1);
+    // a 2-phase plan merges the partial count from the first input column.
+    const bool use_intermediate = _use_intermediate_as_input();
+    const bool merge_input = _is_merge_funcs[0] || use_intermediate;
+    std::vector<CacheConsciousTopN::Group> cold;
+    for (const auto& chunk : _cache_conscious_cold_chunks) {
+        const size_t n = chunk->num_rows();
+        if (n == 0) {
+            continue;
+        }
+        // Re-evaluation writes into the shared _group_by_columns / _agg_input_columns, and the
+        // latter is cached per chunk; reset first so every cold chunk is read, not just the first.
+        _reset_exprs();
+        RETURN_IF_ERROR(evaluate_groupby_exprs(chunk.get()));
+        const Int64Column* cnt_col = nullptr;
+        if (merge_input) {
+            RETURN_IF_ERROR(evaluate_agg_fn_exprs(chunk.get()));
+            cnt_col = down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()));
+        }
+        const Column* key_col = ColumnHelper::get_data_column(_group_by_columns[0].get());
+        switch (key_lt) {
+        case TYPE_BOOLEAN:
+        case TYPE_TINYINT:
+            read_cold_groups<Int8Column>(key_col, cnt_col, n, &cold);
+            break;
+        case TYPE_SMALLINT:
+            read_cold_groups<Int16Column>(key_col, cnt_col, n, &cold);
+            break;
+        case TYPE_INT:
+            read_cold_groups<Int32Column>(key_col, cnt_col, n, &cold);
+            break;
+        case TYPE_BIGINT:
+            read_cold_groups<Int64Column>(key_col, cnt_col, n, &cold);
+            break;
+        default:
+            return Status::OK();
+        }
+    }
+
+    // Best-first multi-level prune: rank() keeps FA exact, prunes cold partitions whose total
+    // is below the k-th highest exact count, and resolves only the survivors. The result is the
+    // exact local top-n (FA winners + resolved cold winners) — at most k rows, which is exactly
+    // what the source emits. Pruned partitions are never resolved, so the cold tail's cost is
+    // just the partition bookkeeping, not a full aggregation.
+    const int64_t k = cache_conscious_topn_limit();
+    const size_t resolve_cap = std::max<size_t>(fa.size(), 1);
+    CacheConsciousTopN engine(k, resolve_cap, /*fanout=*/256);
+    auto top = engine.rank(std::move(fa), std::move(cold));
+
+    std::vector<std::pair<uint64_t, int64_t>> result;
+    result.reserve(top.size());
+    for (const auto& g : top) {
+        result.emplace_back(g.key, g.count);
+    }
+    return _build_cache_conscious_result_chunk(result);
+}
+
+Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result) {
+    const size_t n = result.size();
+    MutableColumns group_by_columns = _create_group_by_columns(n);
+    // The flip is gated to a finalizing, non-pre-cache operator (see the sink's flip guard), so
+    // it always emits the final result layout; build the count column finalized, not serialized.
+    MutableColumns agg_result_columns = _create_agg_result_columns(n, /*use_intermediate=*/false);
+
+    // count(*) result column is a non-nullable int64.
+    auto* count_col = down_cast<Int64Column*>(ColumnHelper::get_data_column(agg_result_columns[0].get()));
+    // The group key was gated to a single non-nullable integral type, so append it as the
+    // exact value of that fixed-length column.
+    Column* key_col = ColumnHelper::get_data_column(group_by_columns[0].get());
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    for (const auto& [key, count] : result) {
+        switch (key_lt) {
+        case TYPE_BOOLEAN:
+            down_cast<UInt8Column*>(key_col)->get_data().push_back(static_cast<uint8_t>(key));
+            break;
+        case TYPE_TINYINT:
+            down_cast<Int8Column*>(key_col)->get_data().push_back(static_cast<int8_t>(key));
+            break;
+        case TYPE_SMALLINT:
+            down_cast<Int16Column*>(key_col)->get_data().push_back(static_cast<int16_t>(key));
+            break;
+        case TYPE_INT:
+            down_cast<Int32Column*>(key_col)->get_data().push_back(static_cast<int32_t>(key));
+            break;
+        case TYPE_BIGINT:
+            down_cast<Int64Column*>(key_col)->get_data().push_back(static_cast<int64_t>(key));
+            break;
+        default:
+            return Status::InternalError("cache-conscious top-n: unexpected group key type");
+        }
+        count_col->get_data().push_back(count);
+    }
+
+    _cache_conscious_result_chunk = _build_output_chunk(std::move(group_by_columns), std::move(agg_result_columns),
+                                                        /*use_intermediate_as_output=*/false);
+    _cache_conscious_result_ready = true;
+    return Status::OK();
 }
 
 Status Aggregator::convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk,

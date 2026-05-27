@@ -99,6 +99,7 @@ set(EXEC_FILES
         ./exec/sink/sink_io_buffer_test.cpp
         ./exec/tablet_info_test.cpp
         ./exec/agg_hash_map_test.cpp
+        ./exec/cache_conscious_topn_test.cpp
         ./exec/hash_variant_test.cpp
         ./exec/pipeline/olap_scan_operator_test.cpp
         ./exec/analytor_test.cpp

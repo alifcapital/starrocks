@@ -591,6 +591,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String GLOBAL_RUNTIME_FILTER_RPC_TIMEOUT = "global_runtime_filter_rpc_timeout";
     public static final String RUNTIME_FILTER_EARLY_RETURN_SELECTIVITY = "runtime_filter_early_return_selectivity";
     public static final String ENABLE_TOPN_RUNTIME_FILTER = "enable_topn_runtime_filter";
+    public static final String ENABLE_CACHE_CONSCIOUS_TOPN = "enable_cache_conscious_topn";
     public static final String AGG_IN_FILTER_LIMIT = "agg_in_filter_limit";
     public static final String GLOBAL_RUNTIME_FILTER_RPC_HTTP_MIN_SIZE = "global_runtime_filter_rpc_http_min_size";
     public static final String ENABLE_JOIN_RUNTIME_FILTER_PUSH_DOWN = "enable_join_runtime_filter_push_down";
@@ -1968,6 +1969,13 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VariableMgr.VarAttr(name = ENABLE_TOPN_RUNTIME_FILTER)
     private boolean enableTopNRuntimeFilter = true;
+
+    // Gates the cache-conscious top-n aggregation: a global aggregation feeding a
+    // small TopN(ORDER BY agg DESC) keeps only the candidate top-n groups exact and
+    // prunes the tail via partition bounds, instead of fully aggregating every group.
+    // Off by default while the operator is being brought up.
+    @VariableMgr.VarAttr(name = ENABLE_CACHE_CONSCIOUS_TOPN)
+    private boolean enableCacheConsciousTopn = false;
 
     @VariableMgr.VarAttr(name = AGG_IN_FILTER_LIMIT, flag = VariableMgr.INVISIBLE)
     private int aggInFilterLimit = 1024;
@@ -4539,6 +4547,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean getEnableTopNRuntimeFilter() {
         return enableTopNRuntimeFilter;
+    }
+
+    public boolean isEnableCacheConsciousTopn() {
+        return enableCacheConsciousTopn;
+    }
+
+    public void setEnableCacheConsciousTopn(boolean enableCacheConsciousTopn) {
+        this.enableCacheConsciousTopn = enableCacheConsciousTopn;
     }
 
     public int getAggInFilterLimit() {

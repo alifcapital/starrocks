@@ -23,6 +23,7 @@
 #include "column/vectorized_fwd.h"
 #include "common/status.h"
 #include "exec/agg_runtime_filter_builder.h"
+#include "exec/cache_conscious_topn.h"
 #include "runtime/current_thread.h"
 #include "runtime/runtime_filter_worker.h"
 #include "runtime/runtime_state.h"
@@ -69,7 +70,15 @@ Status AggregateBlockingSinkOperator::set_finishing(RuntimeState* state) {
         return Status::OK();
     }
 
-    if (!_aggregator->is_none_group_by_exprs()) {
+    // Prune the cold tail into the local top-n result chunk before the source emits.
+    if (_aggregator->cache_conscious_topn_active()) {
+        RETURN_IF_ERROR(_aggregator->finalize_cache_conscious_topn(state));
+    }
+
+    if (_aggregator->cache_conscious_result_ready()) {
+        // The source emits the prebuilt top-n result chunk, not the hash map, so skip the
+        // normal iterator setup.
+    } else if (!_aggregator->is_none_group_by_exprs()) {
         COUNTER_SET(_aggregator->hash_table_size(), (int64_t)_aggregator->hash_map_variant().size());
         // If hash map is empty, we don't need to return value
         if (_aggregator->hash_map_variant().size() == 0) {
@@ -107,16 +116,23 @@ Status AggregateBlockingSinkOperator::push_chunk(RuntimeState* state, const Chun
 
     SCOPED_TIMER(_aggregator->agg_compute_timer());
     TRY_CATCH_ALLOC_SCOPE_START()
-    // try to build hash table if has group by keys
-    if (!_aggregator->is_none_group_by_exprs()) {
-        _aggregator->build_hash_map(chunk_size, _shared_limit_countdown, _agg_group_by_with_limit);
-        _aggregator->try_convert_to_two_level_map();
-    }
-
-    // batch compute aggregate states
     if (_aggregator->is_none_group_by_exprs()) {
         RETURN_IF_ERROR(_aggregator->compute_single_agg_state(chunk.get(), chunk_size));
+    } else if (_aggregator->cache_conscious_topn_active()) {
+        // Post-flip: FA is frozen. Probe-only (build_hash_map_with_selection does not insert
+        // misses), aggregate the hits into FA, and buffer the miss rows as a CA cold chunk for
+        // the source to prune. The cold chunk is the operator's own input filtered to misses,
+        // so the source can re-evaluate / replay it in input layout.
+        _aggregator->build_hash_map_with_selection(chunk_size);
+        ChunkPtr cold = chunk->clone_unique();
+        const size_t cold_rows = cold->filter(_aggregator->streaming_selection());
+        if (cold_rows > 0) {
+            _aggregator->buffer_cache_conscious_cold_chunk(std::move(cold));
+        }
+        RETURN_IF_ERROR(_aggregator->compute_batch_agg_states_with_selection(chunk.get(), chunk_size));
     } else {
+        _aggregator->build_hash_map(chunk_size, _shared_limit_countdown, _agg_group_by_with_limit);
+        _aggregator->try_convert_to_two_level_map();
         if (_agg_group_by_with_limit) {
             // use `_aggregator->streaming_selection()` here to mark whether needs to filter key when compute agg states,
             // it's generated in `build_hash_map`
@@ -135,7 +151,45 @@ Status AggregateBlockingSinkOperator::push_chunk(RuntimeState* state, const Chun
     _aggregator->update_num_input_rows(chunk_size);
     RETURN_IF_ERROR(_aggregator->check_has_error());
 
+    _maybe_evaluate_cache_conscious_topn();
+
     return Status::OK();
+}
+
+void AggregateBlockingSinkOperator::_maybe_evaluate_cache_conscious_topn() {
+    // Evaluate the flip verdict exactly once, the first time the hash table outgrows the L2
+    // budget. Gated off by default; only meaningful for a grouped single count(*) feeding a
+    // small TopN over an integral key, which the FE flag and the key-support check guarantee.
+    // On a skewed verdict the aggregator flips: the live map freezes as FA and later misses
+    // route to CA (see push_chunk).
+    if (!_aggregator->enable_cache_conscious_topn() || _cache_conscious_evaluated ||
+        _aggregator->is_none_group_by_exprs() || !_aggregator->cache_conscious_group_key_supported()) {
+        return;
+    }
+    // Pruning the tail is only sound where this operator owns complete groups, i.e. it
+    // finalizes the aggregate. If it emits an intermediate (partial) result for a later phase,
+    // a partition bound is not an upper bound on the global value and a true winner could be
+    // pruned. Don't flip there; the normal plan handles it.
+    if (!_aggregator->needs_finalize() || _aggregator->is_pre_cache()) {
+        return;
+    }
+    if (_aggregator->hash_map_memory_usage() <= kCacheConsciousL2TargetBytes) {
+        return;
+    }
+    _cache_conscious_evaluated = true;
+
+    std::vector<int64_t> counts;
+    _aggregator->collect_cache_conscious_topn_counts(&counts);
+    const int64_t k = _aggregator->cache_conscious_topn_limit();
+    // FA candidate capacity: how many per-group slots fit half the L2 budget at a 0.5
+    // open-addressing load factor. The slot is the full group state blob (key + count state).
+    const size_t slot_bytes = std::max<size_t>(16, _aggregator->state_allocator().aggregate_key_size);
+    const size_t fa_capacity =
+            std::max<size_t>(static_cast<size_t>(k), (kCacheConsciousL2TargetBytes / 2) / slot_bytes / 2);
+    _cache_conscious_skewed = CacheConsciousTopN::is_skewed(counts, k, fa_capacity);
+    if (_cache_conscious_skewed) {
+        _aggregator->activate_cache_conscious_topn();
+    }
 }
 
 void AggregateBlockingSinkOperator::_build_in_runtime_filters(RuntimeState* state) {

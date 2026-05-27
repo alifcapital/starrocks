@@ -953,6 +953,14 @@ struct TAggregationNode {
 
   31: optional list<Exprs.TExpr> group_by_min_max
 
+  // When set, the global aggregation fuses the downstream TopN and runs a
+  // cache-conscious top-n aggregation: only the (likely) top-n groups are kept
+  // exact while the tail is held as pruned partition bounds. The fused limit is
+  // carried here because the LIMIT lives on the SortNode above the agg, not on
+  // this node's TPlanNode.limit.
+  32: optional bool enable_cache_conscious_topn = false
+  33: optional i64 cache_conscious_topn_limit
+
 }
 
 struct TRepeatNode {

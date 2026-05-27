@@ -83,6 +83,12 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     private long localLimit = DEFAULT_LIMIT;
 
+    // Set when a small TopN(ORDER BY agg DESC) above this global aggregation is fused
+    // into a cache-conscious top-n aggregation. cacheConsciousTopnLimit carries the
+    // downstream LIMIT k, which lives on the SortNode rather than on this operator.
+    private boolean cacheConsciousTopn = false;
+    private long cacheConsciousTopnLimit = DEFAULT_LIMIT;
+
     private List<Pair<ConstantOperator, ConstantOperator>> groupByMinMaxStatistic = Lists.newArrayList();
 
     public PhysicalHashAggregateOperator(AggType type,
@@ -124,6 +130,8 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         this.forcePreAggregation = aggregateOperator.forcePreAggregation;
         this.withLocalShuffle = aggregateOperator.withLocalShuffle;
         this.localLimit = aggregateOperator.localLimit;
+        this.cacheConsciousTopn = aggregateOperator.cacheConsciousTopn;
+        this.cacheConsciousTopnLimit = aggregateOperator.cacheConsciousTopnLimit;
     }
 
     public List<ColumnRefOperator> getGroupBys() {
@@ -174,6 +182,19 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     public void setTopNSortInfo(LogicalTopNOperator.TopNSortInfo topNSortInfo) {
         this.topNSortInfo = topNSortInfo;
+    }
+
+    public boolean isCacheConsciousTopn() {
+        return cacheConsciousTopn;
+    }
+
+    public long getCacheConsciousTopnLimit() {
+        return cacheConsciousTopnLimit;
+    }
+
+    public void setCacheConsciousTopn(long limit) {
+        this.cacheConsciousTopn = true;
+        this.cacheConsciousTopnLimit = limit;
     }
 
     public List<ColumnRefOperator> getPartitionByColumns() {

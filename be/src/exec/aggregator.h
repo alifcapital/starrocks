@@ -225,6 +225,12 @@ struct AggregatorParams {
     std::vector<TExpr> intermediate_aggr_exprs;
     std::vector<TExpr> grouping_min_max;
 
+    // Cache-conscious top-n aggregation: when enabled, the global aggregation fuses
+    // the downstream TopN and keeps only the candidate top-n groups exact. The limit
+    // is the fused TopN's k (it lives on the SortNode, not on this node's limit).
+    bool enable_cache_conscious_topn = false;
+    int64_t cache_conscious_topn_limit = -1;
+
     // Incremental MV
     // Whether it's testing, use MemStateTable in testing, instead use IMTStateTable.
     bool is_testing;
@@ -273,6 +279,33 @@ public:
     const std::vector<std::vector<ExprContext*>>& agg_expr_ctxs() { return _agg_expr_ctxs; }
     int64_t limit() { return _limit; }
     bool needs_finalize() { return _needs_finalize; }
+    // Cache-conscious top-n: the gated extension point for the blocking/spillable agg
+    // operators. When enabled, the global aggregation keeps only the candidate top-n
+    // groups exact and prunes the tail; the limit is the fused TopN's k.
+    bool enable_cache_conscious_topn() const { return _params->enable_cache_conscious_topn; }
+    int64_t cache_conscious_topn_limit() const { return _params->cache_conscious_topn_limit; }
+    // After the flip, the live hash map is frozen as FA and cold miss chunks are buffered here
+    // as CA; the source emits the pruned top-n from FA + CA via emit_cache_conscious_topn().
+    bool cache_conscious_topn_active() const { return _cache_conscious_active; }
+    void activate_cache_conscious_topn() { _cache_conscious_active = true; }
+    void buffer_cache_conscious_cold_chunk(ChunkPtr chunk) {
+        _cache_conscious_cold_chunks.emplace_back(std::move(chunk));
+    }
+    // True only for a single integral group-by key that fits a uint64 exactly (so the engine
+    // can use it as a group id without collisions). LARGEINT/strings are unsupported.
+    bool cache_conscious_group_key_supported() const;
+    // Called once after the sink is complete: prune the cold tail against FA and build the
+    // exact local top-n (≤ k rows) into a result chunk. The source emits that chunk instead of
+    // the normal convert path. Pruned cold partitions are never resolved (that is the win).
+    Status finalize_cache_conscious_topn(RuntimeState* state);
+    // The source drives emission: a ready result is pulled exactly once, then EOS.
+    bool cache_conscious_result_ready() const { return _cache_conscious_result_ready; }
+    bool cache_conscious_result_emitted() const { return _cache_conscious_result_emitted; }
+    ChunkPtr pull_cache_conscious_result_chunk() {
+        _cache_conscious_result_emitted = true;
+        set_ht_eos();
+        return std::move(_cache_conscious_result_chunk);
+    }
     bool is_ht_eos() { return _is_ht_eos; }
     void set_ht_eos() { _is_ht_eos = true; }
     bool is_sink_complete() { return _is_sink_complete.load(std::memory_order_acquire); }
@@ -469,6 +502,19 @@ protected:
     AggHashSetVariant _hash_set_variant;
     std::any _it_hash;
 
+    // Cache-conscious top-n state (see enable_cache_conscious_topn). Once the sink flips, the
+    // hash map above is frozen as FA and post-flip cold miss chunks accumulate here as CA.
+    // finalize_cache_conscious_topn prunes them into the local top-n result chunk the source
+    // emits in place of the normal convert path.
+    // TODO: these cold chunks accumulate in RAM with no memory accounting and no spill fallback.
+    // A large cold tail can blow the query memory budget — track their bytes against the mem
+    // tracker and spill (or cap and fall back to plain aggregation) when they exceed a bound.
+    bool _cache_conscious_active = false;
+    std::vector<ChunkPtr> _cache_conscious_cold_chunks;
+    ChunkPtr _cache_conscious_result_chunk;
+    bool _cache_conscious_result_ready = false;
+    bool _cache_conscious_result_emitted = false;
+
     // The offset of the n-th aggregate function in a row of aggregate functions.
     std::vector<size_t> _agg_states_offsets;
     // The total size of the row for the aggregate function state.
@@ -547,6 +593,18 @@ public:
     Status convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk,
                                      bool force_use_intermediate_as_output = false);
 
+    // Read the current per-group count(*) values straight out of the live hash table, used by
+    // the cache-conscious top-n flip decision. Only valid for a single count(*) aggregate
+    // (the FE gating guarantees this); the count state is the int64 at the first agg offset.
+    // The optional NULL-key group is skipped — one group cannot change the skew verdict.
+    void collect_cache_conscious_topn_counts(std::vector<int64_t>* counts);
+
+    // Read (group key, count) pairs out of the live hash table, used to seed the frozen FA
+    // and to emit. Only integral group keys are supported (the key is exact as a uint64, so
+    // there are no identity collisions); returns false for string/serialized keys, letting
+    // the operator fall back to plain aggregation. NULL-key group is skipped.
+    bool collect_cache_conscious_topn_groups(std::vector<std::pair<uint64_t, int64_t>>* groups);
+
     void build_hash_set(size_t chunk_size);
     void build_hash_set_with_selection(size_t chunk_size);
     void convert_hash_set_to_chunk(int32_t chunk_size, ChunkPtr* chunk);
@@ -590,6 +648,8 @@ protected:
                                  bool use_intermediate);
     ChunkPtr _build_output_chunk(MutableColumns&& group_by_columns, MutableColumns&& agg_result_columns,
                                  bool use_intermediate);
+    // Materialize the pruned local top-n (key, count) pairs into the result chunk.
+    Status _build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result);
 
     void _set_passthrough(bool flag) { _is_passthrough = flag; }
     bool is_passthrough() const { return _is_passthrough; }
