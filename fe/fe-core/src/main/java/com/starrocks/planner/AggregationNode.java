@@ -407,6 +407,10 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
         if (useSortAgg) {
             output.append(detailPrefix).append("sorted streaming: true\n");
         }
+        if (cacheConsciousTopn) {
+            output.append(detailPrefix).append("cache-conscious topn: limit=").append(cacheConsciousTopnLimit)
+                    .append("\n");
+        }
         if (detailLevel == TExplainLevel.VERBOSE && !AUTO.equalsIgnoreCase(streamingPreaggregationMode)) {
             output.append(detailPrefix).append("streaming preaggregation mode: ")
                     .append(streamingPreaggregationMode).append("\n");
