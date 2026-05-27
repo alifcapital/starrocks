@@ -168,7 +168,11 @@ Status SpillableAggregateBlockingSinkOperator::push_chunk(RuntimeState* state, c
     // take the hash-map spill path — the hash map is the frozen FA and must stay for finalize.
     if (_aggregator->cache_conscious_topn_active()) {
         RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
-        RETURN_IF_ERROR(_aggregator->spill_cache_conscious_ca(state));
+        // Accumulate the CA in RAM and only shed it once it outgrows the spill mem-table budget,
+        // mirroring the hash-map path's accumulate-then-spill — not a spill on every chunk.
+        if (_aggregator->cache_conscious_revocable_bytes() > static_cast<int64_t>(state->spill_mem_table_size())) {
+            RETURN_IF_ERROR(_aggregator->spill_cache_conscious_ca(state));
+        }
         set_revocable_mem_bytes(_aggregator->cache_conscious_revocable_bytes());
         return Status::OK();
     }

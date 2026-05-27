@@ -1975,28 +1975,46 @@ Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
     const LogicalType key_lt = _group_by_types[0].result_type.type;
     auto& spiller = _spiller;
     const size_t fanout = _cache_conscious_ca->fanout();
-    for (size_t pid = 0; pid < fanout; ++pid) {
-        std::vector<CacheConsciousTopN::Group> tuples = _cache_conscious_ca->take_partition_tuples(pid);
-        if (tuples.empty()) {
-            continue;
+    const size_t batch_rows = state->chunk_size();
+
+    // Collect tuples across all partitions into chunk_size batches and spill each as an
+    // intermediate-layout (key, partial-count) chunk. The pid is not preserved — restore
+    // re-buckets by key — so partitions share a chunk, avoiding one tiny chunk per partition.
+    // The logical stats stay in the CA (take_ left them), so prune still works; the partitions
+    // are now empty and routable again (cyclic spill). The spiller's own mem-table coalesces
+    // these chunks into blocks, the same way the hash-map spill path relies on it.
+    std::vector<CacheConsciousTopN::Group> batch;
+    batch.reserve(batch_rows);
+    auto flush_batch = [&]() -> Status {
+        if (batch.empty()) {
+            return Status::OK();
         }
-        // Spill the partition's tuples as an intermediate-layout (key, partial-count) chunk, so the
-        // spiller's group-by sort exprs resolve against real slot ids. The logical stat stays in
-        // the CA partition (take_ left it), so prune still works; the partition is now empty and
-        // routable again — later misses refill it and it can be spilled again (cyclic).
-        const size_t n = tuples.size();
+        const size_t n = batch.size();
         MutableColumns group_by_columns = _create_group_by_columns(n);
         MutableColumns agg_result_columns = _create_agg_result_columns(n, /*use_intermediate=*/true);
         auto* count_col = down_cast<Int64Column*>(ColumnHelper::get_data_column(agg_result_columns[0].get()));
         Column* key_col = ColumnHelper::get_data_column(group_by_columns[0].get());
-        for (const auto& g : tuples) {
+        for (const auto& g : batch) {
             RETURN_IF_ERROR(append_group_key(key_col, key_lt, g.key));
             count_col->get_data().push_back(g.count);
         }
         ChunkPtr chunk = _build_output_chunk(std::move(group_by_columns), std::move(agg_result_columns),
                                              /*use_intermediate_as_output=*/true);
         RETURN_IF_ERROR(spiller->spill(state, chunk, TRACKER_WITH_SPILLER_GUARD(state, spiller)));
+        batch.clear();
+        return Status::OK();
+    };
+
+    for (size_t pid = 0; pid < fanout; ++pid) {
+        std::vector<CacheConsciousTopN::Group> tuples = _cache_conscious_ca->take_partition_tuples(pid);
+        for (const auto& g : tuples) {
+            batch.push_back(g);
+            if (batch.size() >= batch_rows) {
+                RETURN_IF_ERROR(flush_batch());
+            }
+        }
     }
+    RETURN_IF_ERROR(flush_batch());
     _cache_conscious_ca_spilled = true;
     return Status::OK();
 }
