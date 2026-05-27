@@ -303,6 +303,13 @@ public:
     int64_t partition_upper_bound(size_t pid) const { return _partitions[pid].upper_bound; }
     size_t fanout() const { return _engine.fanout(); }
 
+    // Spill support: move a partition's physical tuples out (to spill them) and back in (on
+    // restore). The logical upper-bound stat stays in the partition either way, so prune keeps
+    // working while the tuples are on disk. The operator owns the actual block I/O; a partition
+    // left empty after take_ is simply skipped by finalize (e.g. a pruned one never restored).
+    std::vector<Group> take_partition_tuples(size_t pid) { return std::move(_partitions[pid].groups); }
+    void set_partition_tuples(size_t pid, std::vector<Group> tuples) { _partitions[pid].groups = std::move(tuples); }
+
     std::vector<Group> finalize(std::vector<Group> fa, size_t* pruned = nullptr) {
         return _engine.rank_partitions(std::move(fa), std::move(_partitions), pruned);
     }
