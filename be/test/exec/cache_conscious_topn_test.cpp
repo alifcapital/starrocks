@@ -235,6 +235,140 @@ TEST(CacheConsciousCaTest, FuzzStreamMatchesBruteForce) {
     }
 }
 
+// The spill primitives the operator relies on (take/restore + the logical stat that drives prune
+// while tuples are on disk). take_ moves tuples out without touching the stat; restore_ appends
+// without bumping it; physical_tuples_bytes tracks only the in-RAM tuples (the revocable size).
+TEST(CacheConsciousCaTest, SpillStatAndBytesInvariants) {
+    CacheConsciousCa ca(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/16);
+    constexpr int n = 1000;
+    for (int i = 0; i < n; ++i) {
+        ca.route(100 + i % 50, 1); // 50 distinct keys, n routed rows total
+    }
+    auto total_ub = [&]() {
+        int64_t s = 0;
+        for (size_t pid = 0; pid < ca.fanout(); ++pid) s += ca.partition_upper_bound(pid);
+        return s;
+    };
+    // After routing: stat == rows, physical bytes == rows * sizeof(Group).
+    EXPECT_EQ(total_ub(), n);
+    EXPECT_EQ(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
+
+    // Spill every partition out: the stat stays (prune still works), the RAM bytes drop to zero.
+    std::vector<std::pair<uint64_t, int64_t>> spilled;
+    for (size_t pid = 0; pid < ca.fanout(); ++pid) {
+        for (const auto& g : ca.take_partition_tuples(pid)) spilled.emplace_back(g.key, g.count);
+    }
+    EXPECT_EQ(total_ub(), n);                  // stat unchanged by take_
+    EXPECT_EQ(ca.physical_tuples_bytes(), 0u); // tuples gone from RAM
+
+    // Restore: bytes come back, the stat is NOT double-counted (restore_ does not bump it).
+    for (const auto& [key, partial] : spilled) ca.restore_tuple(key, partial);
+    EXPECT_EQ(total_ub(), n);
+    EXPECT_EQ(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
+}
+
+// Spilling the CA (take_) then restoring it must not change the local top-n: identical to a run
+// that never spilled.
+TEST(CacheConsciousCaTest, TakeRestoreRoundtripMatchesNoSpill) {
+    std::mt19937_64 rng(0x5EED);
+    for (int trial = 0; trial < 200; ++trial) {
+        const int64_t k = 1 + static_cast<int64_t>(rng() % 16);
+        const size_t fa_cap = 1 + rng() % 32;
+        const size_t fanout = 2 + rng() % 16;
+        std::vector<Group> fa;
+        for (uint64_t i = 0, fa_n = rng() % (fa_cap + 1); i < fa_n; ++i) {
+            fa.push_back({i, 1 + static_cast<int64_t>(rng() % 500)});
+        }
+        std::vector<std::pair<uint64_t, int64_t>> cold;
+        for (size_t i = 0, cold_rows = rng() % 3000; i < cold_rows; ++i) {
+            cold.emplace_back(1000 + rng() % 3000, 1 + static_cast<int64_t>(rng() % 4));
+        }
+
+        CacheConsciousCa no_spill(k, fa_cap, fanout);
+        CacheConsciousCa spilled(k, fa_cap, fanout);
+        for (const auto& [key, partial] : cold) {
+            no_spill.route(key, partial);
+            spilled.route(key, partial);
+        }
+        // Round-trip the spilled CA through take_/restore_ (every partition).
+        std::vector<std::pair<uint64_t, int64_t>> out;
+        for (size_t pid = 0; pid < spilled.fanout(); ++pid) {
+            for (const auto& g : spilled.take_partition_tuples(pid)) out.emplace_back(g.key, g.count);
+        }
+        for (const auto& [key, partial] : out) spilled.restore_tuple(key, partial);
+
+        expect_same(spilled.finalize(fa), no_spill.finalize(fa));
+    }
+}
+
+// Cyclic spill: route, spill (take_), keep routing into the now-empty partitions (the stat keeps
+// accumulating across disk + RAM), then restore the spilled tuples. finalize must match a brute
+// force over every routed row plus FA.
+TEST(CacheConsciousCaTest, CyclicSpillRouteAfterTake) {
+    CacheConsciousCa ca(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/32);
+    std::vector<Group> fa;
+    std::vector<std::pair<uint64_t, int64_t>> events;
+    for (uint64_t h = 1; h <= 5; ++h) {
+        fa.push_back({h, 1000});
+        events.emplace_back(h, 1000);
+    }
+    // Batch 1.
+    for (uint64_t i = 0; i < 20000; ++i) {
+        ca.route(1000 + i % 4000, 1);
+        events.emplace_back(1000 + i % 4000, 1);
+    }
+    // Spill batch 1 out.
+    std::vector<std::pair<uint64_t, int64_t>> spilled;
+    for (size_t pid = 0; pid < ca.fanout(); ++pid) {
+        for (const auto& g : ca.take_partition_tuples(pid)) spilled.emplace_back(g.key, g.count);
+    }
+    // Batch 2 routed into the emptied partitions (cyclic) — overlapping and new keys.
+    for (uint64_t i = 0; i < 15000; ++i) {
+        ca.route(1000 + i % 6000, 1);
+        events.emplace_back(1000 + i % 6000, 1);
+    }
+    // Late heavy key only in CA, above the FA k-th count -> must win.
+    for (int i = 0; i < 1500; ++i) {
+        ca.route(999999, 1);
+        events.emplace_back(999999, 1);
+    }
+    // Restore batch 1.
+    for (const auto& [key, partial] : spilled) ca.restore_tuple(key, partial);
+
+    expect_same(ca.finalize(fa), brute_force_stream_top_n(events, 5));
+}
+
+// Fuzz the full spill cycle: random FA + cold stream, spill the whole CA out and back, compare to
+// a from-scratch brute force.
+TEST(CacheConsciousCaTest, FuzzTakeRestoreRoundtrip) {
+    std::mt19937_64 rng(0xD00D);
+    for (int trial = 0; trial < 300; ++trial) {
+        const int64_t k = 1 + static_cast<int64_t>(rng() % 20);
+        const size_t fa_cap = 1 + rng() % 32;
+        const size_t fanout = 2 + rng() % 16;
+        std::vector<Group> fa;
+        std::vector<std::pair<uint64_t, int64_t>> events;
+        for (uint64_t i = 0, fa_n = rng() % (fa_cap + 1); i < fa_n; ++i) {
+            const int64_t c = 1 + static_cast<int64_t>(rng() % 1000);
+            fa.push_back({i, c});
+            events.emplace_back(i, c);
+        }
+        CacheConsciousCa ca(k, fa_cap, fanout);
+        for (size_t i = 0, cold_rows = rng() % 4000; i < cold_rows; ++i) {
+            const uint64_t key = 1000 + rng() % 4000;
+            const int64_t partial = 1 + static_cast<int64_t>(rng() % 4);
+            ca.route(key, partial);
+            events.emplace_back(key, partial);
+        }
+        std::vector<std::pair<uint64_t, int64_t>> spilled;
+        for (size_t pid = 0; pid < ca.fanout(); ++pid) {
+            for (const auto& g : ca.take_partition_tuples(pid)) spilled.emplace_back(g.key, g.count);
+        }
+        for (const auto& [key, partial] : spilled) ca.restore_tuple(key, partial);
+        expect_same(ca.finalize(fa), brute_force_stream_top_n(events, k));
+    }
+}
+
 TEST(CacheConsciousTopNTest, FuzzMatchesBruteForce) {
     std::mt19937_64 rng(0xC0FFEE);
     for (int trial = 0; trial < 200; ++trial) {

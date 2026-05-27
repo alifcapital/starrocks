@@ -32,6 +32,8 @@ public class CacheConsciousTopnPlanTest extends PlanTestBase {
     @AfterEach
     public void resetSessionVar() {
         connectContext.getSessionVariable().setEnableCacheConsciousTopn(false);
+        connectContext.getSessionVariable().setEnableSpill(false);
+        connectContext.getSessionVariable().setSpillPartitionWiseAgg(false);
     }
 
     @Test
@@ -91,6 +93,35 @@ public class CacheConsciousTopnPlanTest extends PlanTestBase {
     public void testRejectNoLimit() throws Exception {
         connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
         String plan = getFragmentPlan("select v1, count(*) c from t0 group by v1 order by c desc");
+        assertNotContains(plan, MARKER);
+    }
+
+    @Test
+    public void testRejectSingleNonCountAggregate() throws Exception {
+        // Only count(*) is in scope; a lone sum (or any other aggregate) must not flip.
+        connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
+        String plan = getFragmentPlan("select v1, sum(v2) s from t0 group by v1 order by s desc limit 10");
+        assertNotContains(plan, MARKER);
+    }
+
+    @Test
+    public void testRejectOrderByGroupKey() throws Exception {
+        // Ordering by the group key (not the aggregate) is the PushDownTopNToPreAgg case, handled
+        // by the key-membership runtime filter, not the value-bound prune.
+        connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
+        String plan = getFragmentPlan("select v1, count(*) c from t0 group by v1 order by v1 desc limit 10");
+        assertNotContains(plan, MARKER);
+    }
+
+    @Test
+    public void testIncompatibleWithPartitionWiseSpill() throws Exception {
+        // The partition-wise agg spill operator wraps the blocking agg and would corrupt the
+        // in-place flip, so the two are mutually exclusive: when partition-wise spill is on, the
+        // cache-conscious flag must not be set even with the feature enabled.
+        connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
+        connectContext.getSessionVariable().setEnableSpill(true);
+        connectContext.getSessionVariable().setSpillPartitionWiseAgg(true);
+        String plan = getFragmentPlan("select v1, count(*) c from t0 group by v1 order by c desc limit 10");
         assertNotContains(plan, MARKER);
     }
 }
