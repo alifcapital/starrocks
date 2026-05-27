@@ -157,76 +157,81 @@ TEST(CacheConsciousTopNTest, FewerGroupsThanK) {
     expect_same(got, brute_force_top_n(groups, 10));
 }
 
-TEST(CacheConsciousAccumulatorTest, LateColdKeyBelowThresholdIsPruned) {
-    // Hot keys arrive first and fill FA; a key that shows up only after the flip stays in CA.
-    // Here its total is below the k-th FA count, so it is correctly pruned and excluded.
+TEST(CacheConsciousCaTest, LateColdKeyBelowThresholdIsPruned) {
+    // FA holds the frozen hot keys (exact). A key seen only in CA after the flip totals below
+    // the k-th FA count, so it is correctly pruned and excluded. `events` mirrors FA + CA for
+    // the brute-force reference (aggregated by key).
+    std::vector<Group> fa;
     std::vector<std::pair<uint64_t, int64_t>> events;
-    for (int r = 0; r < 300; ++r) {
-        for (uint64_t h = 1; h <= 5; ++h) {
-            events.push_back({h, 1}); // keys 1..5 -> 300 each
-        }
+    for (uint64_t h = 1; h <= 5; ++h) {
+        fa.push_back({h, 300}); // hot keys 1..5 -> 300 each
+        events.push_back({h, 300});
     }
+    CacheConsciousCa ca(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/64);
     for (uint64_t i = 0; i < 50000; ++i) {
-        events.push_back({i + 1000, 1}); // long cold tail
+        ca.route(i + 1000, 1); // long cold tail
+        events.push_back({i + 1000, 1});
     }
     for (int r = 0; r < 250; ++r) {
-        events.push_back({999999, 1}); // late key, 250 < 300 -> not a winner
-    }
-    CacheConsciousTopnAccumulator acc(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/64);
-    for (const auto& e : events) {
-        acc.add(e.first, e.second);
+        ca.route(999999, 1); // late key, 250 < 300 -> not a winner
+        events.push_back({999999, 1});
     }
     size_t pruned = 0;
-    auto got = acc.finalize(&pruned);
+    auto got = ca.finalize(fa, &pruned);
     expect_same(got, brute_force_stream_top_n(events, 5));
     EXPECT_GT(pruned, 0u);
 }
 
-TEST(CacheConsciousAccumulatorTest, LateColdKeyAboveThresholdWins) {
+TEST(CacheConsciousCaTest, LateColdKeyAboveThresholdWins) {
     // Same shape, but the late CA key dominates: it must survive pruning and rank first.
+    std::vector<Group> fa;
     std::vector<std::pair<uint64_t, int64_t>> events;
-    for (int r = 0; r < 300; ++r) {
-        for (uint64_t h = 1; h <= 5; ++h) {
-            events.push_back({h, 1});
-        }
+    for (uint64_t h = 1; h <= 5; ++h) {
+        fa.push_back({h, 300});
+        events.push_back({h, 300});
     }
+    CacheConsciousCa ca(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/64);
     for (uint64_t i = 0; i < 50000; ++i) {
+        ca.route(i + 1000, 1);
         events.push_back({i + 1000, 1});
     }
     for (int r = 0; r < 500; ++r) {
-        events.push_back({999999, 1}); // late key, 500 > 300 -> top-1
+        ca.route(999999, 1); // late key, 500 > 300 -> top-1
+        events.push_back({999999, 1});
     }
-    CacheConsciousTopnAccumulator acc(/*k=*/5, /*fa_capacity=*/64, /*fanout=*/64);
-    for (const auto& e : events) {
-        acc.add(e.first, e.second);
-    }
-    auto got = acc.finalize();
+    auto got = ca.finalize(fa);
     expect_same(got, brute_force_stream_top_n(events, 5));
     ASSERT_FALSE(got.empty());
     EXPECT_EQ(got[0].key, 999999u);
     EXPECT_EQ(got[0].count, 500);
 }
 
-TEST(CacheConsciousAccumulatorTest, FuzzStreamMatchesBruteForce) {
+TEST(CacheConsciousCaTest, FuzzStreamMatchesBruteForce) {
     std::mt19937_64 rng(0xBADF00D);
     for (int trial = 0; trial < 300; ++trial) {
-        std::uniform_int_distribution<int> events_dist(1, 8000);
-        std::uniform_int_distribution<int64_t> k_dist(1, 20);
-        std::uniform_int_distribution<uint64_t> key_dist(1, 400); // repeats force re-aggregation
-        std::uniform_int_distribution<int64_t> count_dist(1, 4);
+        const int64_t k = 1 + static_cast<int64_t>(rng() % 20);
+        const size_t fa_cap = 1 + rng() % 32;
+        const size_t fanout = 2 + rng() % 16;
 
-        const int m = events_dist(rng);
-        const int64_t k = k_dist(rng);
+        // FA: frozen exact groups with distinct keys in [0, fa_cap); CA: cold rows with keys
+        // disjoint from FA (>= 1000) and repeats to force re-aggregation.
+        std::vector<Group> fa;
         std::vector<std::pair<uint64_t, int64_t>> events;
-        events.reserve(m);
-        for (int i = 0; i < m; ++i) {
-            events.push_back({key_dist(rng), count_dist(rng)});
+        const size_t fa_n = rng() % (fa_cap + 1);
+        for (uint64_t i = 0; i < fa_n; ++i) {
+            const int64_t c = 1 + static_cast<int64_t>(rng() % 1000);
+            fa.push_back({i, c});
+            events.push_back({i, c});
         }
-        CacheConsciousTopnAccumulator acc(k, /*fa_capacity=*/32, /*fanout=*/16);
-        for (const auto& e : events) {
-            acc.add(e.first, e.second);
+        CacheConsciousCa ca(k, fa_cap, fanout);
+        const size_t cold_rows = rng() % 4000;
+        for (size_t i = 0; i < cold_rows; ++i) {
+            const uint64_t key = 1000 + rng() % 4000;
+            const int64_t partial = 1 + static_cast<int64_t>(rng() % 4);
+            ca.route(key, partial);
+            events.push_back({key, partial});
         }
-        expect_same(acc.finalize(), brute_force_stream_top_n(events, k));
+        expect_same(ca.finalize(fa), brute_force_stream_top_n(events, k));
     }
 }
 

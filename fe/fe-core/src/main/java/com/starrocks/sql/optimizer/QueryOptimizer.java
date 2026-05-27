@@ -1024,7 +1024,11 @@ public class QueryOptimizer extends Optimizer {
         // Flag a global aggregation feeding a small TopN(ORDER BY count(*) DESC) so the
         // backend can fuse them into a cache-conscious top-n aggregation. Pure annotation,
         // no tree restructure; gated off by default during bring-up.
-        if (rootTaskContext.getOptimizerContext().getSessionVariable().isEnableCacheConsciousTopn()) {
+        // Not combined with partition-wise agg spill: that operator wraps the blocking agg
+        // and drives its own partition spill/restore, which the flip inside the wrapped
+        // operator would corrupt. The two are mutually exclusive for now.
+        SessionVariable sv = rootTaskContext.getOptimizerContext().getSessionVariable();
+        if (sv.isEnableCacheConsciousTopn() && !(sv.isEnableSpill() && sv.getSpillPartitionWiseAgg())) {
             result = new MarkCacheConsciousTopnRule().rewrite(result, rootTaskContext);
         }
         result = new PruneAggregateNodeRule().rewrite(result, rootTaskContext);

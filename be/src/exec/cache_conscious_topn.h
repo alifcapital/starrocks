@@ -42,8 +42,26 @@ public:
         int64_t count;
     };
 
+    // A coarse partition: the logical upper bound stat (`upper_bound` = sum of contained counts) and the
+    // physical tuples. In the operator the stat lives in RAM always while the tuples may
+    // spill; here both are in memory, but prune only ever consults `upper_bound`.
+    struct Partition {
+        int64_t upper_bound = 0; // sum of group counts; an upper bound on any single group inside
+        int level = 0;           // radix level already consumed
+        std::vector<Group> groups;
+        // max-heap by upper bound
+        bool operator<(const Partition& o) const { return upper_bound < o.upper_bound; }
+    };
+
     CacheConsciousTopN(int64_t k, size_t fa_capacity, size_t partition_fanout)
             : _k(k), _fa_capacity(fa_capacity), _fanout(std::max<size_t>(1, partition_fanout)) {}
+
+    size_t fanout() const { return _fanout; }
+
+    // Level-0 bucket for a key: the operator uses this to route a miss row to its partition
+    // at push time. Re-partitioning at deeper levels re-salts (see _prune), so a key stays
+    // in one bucket per level but redistributes across passes.
+    size_t bucket(uint64_t key) const { return _mix(key) % _fanout; }
 
     // Skew test = the flip decision. `counts` are the exact (prefix) counts observed at the
     // flip point. Returns true iff the candidate set {count >= k-th highest count} fits the
@@ -109,85 +127,36 @@ public:
         return rank(std::move(fa), std::move(cold), pruned_groups);
     }
 
-    // Exact top-n given an already-chosen FA set (exact groups) and the cold tail. The cold
-    // tail is best-first multi-level pruned against the k-th highest exact count.
-    // Used directly by the streaming accumulator, where FA is the frozen hot set and cold is
-    // whatever routed to CA after the flip.
+    // Exact top-n given an already-chosen FA set (exact groups) and the cold tail as a flat
+    // vector. Builds a single seed partition from the tail and prunes it best-first.
     std::vector<Group> rank(std::vector<Group> fa, std::vector<Group> cold, size_t* pruned_groups = nullptr) const {
-        std::vector<Group> resolved = std::move(fa);
-        // Min-heap holding the k largest exact counts seen so far; its top is the k-th
-        // highest exact value = the sound prune threshold.
-        std::priority_queue<int64_t, std::vector<int64_t>, std::greater<int64_t>> kheap;
-        for (const auto& g : resolved) {
-            _push_kheap(kheap, g.count);
-        }
-
-        struct Partition {
-            int64_t ub = 0; // sum of group counts = upper bound on any single group inside
-            int level = 0;  // radix level already consumed
-            std::vector<Group> groups;
-            bool operator<(const Partition& o) const { return ub < o.ub; } // max-heap by ub
-        };
-        std::priority_queue<Partition> pq;
+        std::vector<Partition> seed;
         if (!cold.empty()) {
             Partition c;
             for (const auto& g : cold) {
-                c.ub += g.count;
+                c.upper_bound += g.count;
             }
             c.groups = std::move(cold);
-            pq.push(std::move(c));
+            seed.push_back(std::move(c));
         }
+        return _prune(std::move(fa), std::move(seed), pruned_groups);
+    }
 
-        while (!pq.empty()) {
-            const int64_t threshold = (kheap.size() >= static_cast<size_t>(_k)) ? kheap.top() : INT64_MIN;
-            // Best-first: the top of pq has the largest UB, so if it cannot reach the
-            // threshold neither can anything else still queued.
-            if (pq.top().ub < threshold) {
-                if (pruned_groups != nullptr) {
-                    while (!pq.empty()) {
-                        *pruned_groups += pq.top().groups.size();
-                        pq.pop();
-                    }
-                }
-                break;
-            }
-            Partition p = pq.top();
-            pq.pop();
-
-            // Resolve exactly when small enough to aggregate, or when the radix is exhausted.
-            // A key always hashes to the same bucket at every level, so all of its rows are
-            // in this partition: aggregating by key here yields its exact count even when the
-            // cold tail carried a key as several separate rows.
-            if (p.groups.size() <= _resolve_threshold() || p.level >= _max_level()) {
-                std::unordered_map<uint64_t, int64_t> exact;
-                for (const auto& g : p.groups) {
-                    exact[g.key] += g.count;
-                }
-                for (const auto& [key, count] : exact) {
-                    resolved.push_back({key, count});
-                    _push_kheap(kheap, count);
-                }
-                continue;
-            }
-
-            // Re-partition on the next radix level so the sub-partition totals shrink. The
-            // key is re-hashed with a per-level salt, so each level redistributes groups
-            // independently instead of relying on a fixed slice of hash bits.
-            std::vector<Partition> sub(_fanout);
-            for (const auto& g : p.groups) {
-                const size_t b = _mix(g.key + static_cast<uint64_t>(p.level) * 0x9E3779B97F4A7C15ull) % _fanout;
-                sub[b].groups.push_back(g);
-                sub[b].ub += g.count;
-            }
-            for (auto& s : sub) {
-                if (!s.groups.empty()) {
-                    s.level = p.level + 1;
-                    pq.push(std::move(s));
-                }
+    // Exact top-n given an FA set and the cold tail already partitioned at push time (the
+    // two-layer CA: each partition carries its logical upper bound stat and its tuples). This is the
+    // path the operator uses — partitioning happened on push, not here. Empty partitions are
+    // skipped; the prune core is identical to the flat-vector rank().
+    std::vector<Group> rank_partitions(std::vector<Group> fa, std::vector<Partition> partitions,
+                                       size_t* pruned_groups = nullptr) const {
+        std::vector<Partition> seed;
+        seed.reserve(partitions.size());
+        for (auto& p : partitions) {
+            if (!p.groups.empty()) {
+                p.level = 0;
+                seed.push_back(std::move(p));
             }
         }
-
-        return _full_top_n(resolved);
+        return _prune(std::move(fa), std::move(seed), pruned_groups);
     }
 
 private:
@@ -227,51 +196,120 @@ private:
         return out;
     }
 
+    // Best-first multi-level prune shared by rank()/rank_partitions(): expand the partition
+    // with the largest upper bound first, prune when even that cannot reach the k-th highest exact
+    // count, resolve small/exhausted partitions exactly, re-partition the rest on the next
+    // radix level (re-salted) so their totals shrink.
+    std::vector<Group> _prune(std::vector<Group> fa, std::vector<Partition> seed, size_t* pruned_groups) const {
+        if (pruned_groups != nullptr) {
+            *pruned_groups = 0;
+        }
+        std::vector<Group> resolved = std::move(fa);
+        // Min-heap holding the k largest exact counts seen so far; its top is the k-th
+        // highest exact value = the sound prune threshold.
+        std::priority_queue<int64_t, std::vector<int64_t>, std::greater<int64_t>> kheap;
+        for (const auto& g : resolved) {
+            _push_kheap(kheap, g.count);
+        }
+
+        std::priority_queue<Partition> pq;
+        for (auto& p : seed) {
+            if (!p.groups.empty()) {
+                pq.push(std::move(p));
+            }
+        }
+
+        while (!pq.empty()) {
+            const int64_t threshold = (kheap.size() >= static_cast<size_t>(_k)) ? kheap.top() : INT64_MIN;
+            // Best-first: the top of pq has the largest upper bound, so if it cannot reach the
+            // threshold neither can anything else still queued.
+            if (pq.top().upper_bound < threshold) {
+                if (pruned_groups != nullptr) {
+                    while (!pq.empty()) {
+                        *pruned_groups += pq.top().groups.size();
+                        pq.pop();
+                    }
+                }
+                break;
+            }
+            Partition p = pq.top();
+            pq.pop();
+
+            // Resolve exactly when small enough to aggregate, or when the radix is exhausted.
+            // A key always hashes to the same bucket at every level, so all of its rows are
+            // in this partition: aggregating by key here yields its exact count even when the
+            // cold tail carried a key as several separate rows.
+            if (p.groups.size() <= _resolve_threshold() || p.level >= _max_level()) {
+                std::unordered_map<uint64_t, int64_t> exact;
+                for (const auto& g : p.groups) {
+                    exact[g.key] += g.count;
+                }
+                for (const auto& [key, count] : exact) {
+                    resolved.push_back({key, count});
+                    _push_kheap(kheap, count);
+                }
+                continue;
+            }
+
+            // Re-partition on the next radix level so the sub-partition totals shrink. The
+            // key is re-hashed with a per-level salt, so each level redistributes groups
+            // independently instead of relying on a fixed slice of hash bits.
+            std::vector<Partition> sub(_fanout);
+            for (const auto& g : p.groups) {
+                const size_t b = _mix(g.key + static_cast<uint64_t>(p.level) * 0x9E3779B97F4A7C15ull) % _fanout;
+                sub[b].groups.push_back(g);
+                sub[b].upper_bound += g.count;
+            }
+            for (auto& s : sub) {
+                if (!s.groups.empty()) {
+                    s.level = p.level + 1;
+                    pq.push(std::move(s));
+                }
+            }
+        }
+
+        return _full_top_n(resolved);
+    }
+
     int64_t _k;
     size_t _fa_capacity;
     size_t _fanout;
 };
 
-// Streaming form of the algorithm, mirroring the operator's data flow after the flip: the
-// first fa_capacity distinct keys form FA (the hot set frozen at the flip) and keep exact
-// counts; every later key routes to CA as a buffered cold row. finalize() prunes the cold
-// tail against the FA exacts. FA and CA keys are disjoint (an FA key is updated in place and
-// never routed out), and a cold key is re-aggregated on resolve, so repeats are summed.
-class CacheConsciousTopnAccumulator {
+// Coarse-grained aggregates as two layers: a logical
+// per-partition stat (the count upper bound, always in RAM, the only thing prune consults) and the
+// physical tuples (here in RAM; the operator layer spills these on memory pressure). The
+// crux is that partitioning happens at routing time — route() is called per miss row on
+// push — so the upper bound is maintained incrementally and is available without ever reading the
+// tuples. finalize() hands the partitions to the engine's prune core.
+class CacheConsciousCa {
 public:
     using Group = CacheConsciousTopN::Group;
+    using Partition = CacheConsciousTopN::Partition;
 
-    CacheConsciousTopnAccumulator(int64_t k, size_t fa_capacity, size_t fanout)
-            : _engine(k, fa_capacity, fanout), _fa_capacity(fa_capacity) {}
+    CacheConsciousCa(int64_t k, size_t fa_capacity, size_t fanout)
+            : _engine(k, fa_capacity, fanout), _partitions(_engine.fanout()) {}
 
-    void add(uint64_t key, int64_t count) {
-        auto it = _fa.find(key);
-        if (it != _fa.end()) {
-            it->second += count;
-        } else if (_fa.size() < _fa_capacity) {
-            _fa.emplace(key, count);
-        } else {
-            _cold.push_back({key, count});
-        }
+    // Route a miss row to its level-0 partition: bump the logical upper bound stat and append the
+    // tuple. The tuple is what spills; the stat is what stays and drives prune.
+    void route(uint64_t key, int64_t partial) {
+        const size_t pid = _engine.bucket(key);
+        _partitions[pid].upper_bound += partial;
+        _partitions[pid].groups.push_back({key, partial});
     }
 
-    std::vector<Group> finalize(size_t* pruned = nullptr) {
-        std::vector<Group> fa;
-        fa.reserve(_fa.size());
-        for (const auto& [key, count] : _fa) {
-            fa.push_back({key, count});
-        }
-        return _engine.rank(std::move(fa), std::move(_cold), pruned);
-    }
+    // Logical upper bound of a partition without touching its tuples — what the spill path
+    // reports and what prune compares against the threshold.
+    int64_t partition_upper_bound(size_t pid) const { return _partitions[pid].upper_bound; }
+    size_t fanout() const { return _engine.fanout(); }
 
-    size_t fa_size() const { return _fa.size(); }
-    size_t cold_size() const { return _cold.size(); }
+    std::vector<Group> finalize(std::vector<Group> fa, size_t* pruned = nullptr) {
+        return _engine.rank_partitions(std::move(fa), std::move(_partitions), pruned);
+    }
 
 private:
     CacheConsciousTopN _engine;
-    size_t _fa_capacity;
-    std::unordered_map<uint64_t, int64_t> _fa;
-    std::vector<Group> _cold;
+    std::vector<Partition> _partitions;
 };
 
 } // namespace starrocks
