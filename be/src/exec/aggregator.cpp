@@ -1746,7 +1746,15 @@ void Aggregator::collect_cache_conscious_topn_counts(std::vector<int64_t>* count
     const auto end = _state_allocator.end();
     while (it != end) {
         const uint8_t* value = it.value();
-        counts->push_back(*reinterpret_cast<const int64_t*>(value + count_offset));
+        const int64_t cnt = *reinterpret_cast<const int64_t*>(value + count_offset);
+        if (cnt > 100000) {
+            // TEMP DEBUG (flip-time bisection): dump the blob key field at the moment of the flip,
+            // to compare against the finalize-time dump in collect_cache_conscious_topn_groups. If
+            // b0 is the true key here but the allocation index at finalize, the corruption is
+            // post-flip; if already wrong here, it is during the (pre-flip) build.
+            LOG(WARNING) << "CCDBG flip b0=" << *reinterpret_cast<const int64_t*>(value) << " count=" << cnt;
+        }
+        counts->push_back(cnt);
         it.next();
     }
 }
