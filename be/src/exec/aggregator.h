@@ -297,10 +297,25 @@ public:
     // True only for a single integral group-by key that fits a uint64 exactly (so the engine
     // can use it as a group id without collisions). LARGEINT/strings are unsupported.
     bool cache_conscious_group_key_supported() const;
+    // Bytes of CA physical tuples held in RAM — the operator reports this as revocable. The
+    // logical stats are O(fanout) and stay (prune needs them), so they are not revocable.
+    int64_t cache_conscious_revocable_bytes() const {
+        return _cache_conscious_ca ? static_cast<int64_t>(_cache_conscious_ca->physical_tuples_bytes()) : 0;
+    }
+    bool cache_conscious_ca_spilled() const { return _cache_conscious_ca_spilled; }
+    // On memory pressure: move every CA partition's tuples out to the spiller as (key, partial)
+    // chunks and free the RAM (the logical stats stay, so prune still works). The partition stays
+    // routable — later misses refill it and can be spilled again (cyclic).
+    Status spill_cache_conscious_ca(RuntimeState* state);
     // Called once after the sink is complete: prune the cold tail against FA and build the
     // exact local top-n (≤ k rows) into a result chunk. The source emits that chunk instead of
     // the normal convert path. Pruned cold partitions are never resolved (that is the win).
+    // If the CA spilled, this defers to restore_and_finalize_cache_conscious_ca on the source.
     Status finalize_cache_conscious_topn(RuntimeState* state);
+    // Source side when the CA spilled: restore every spilled (key, partial) chunk back into its
+    // CA partition, then prune + build the result chunk. Survivors-only restore is a future
+    // optimization; here every spilled tuple is read back, then prune drops the losers.
+    Status restore_and_finalize_cache_conscious_ca(RuntimeState* state);
     // The source drives emission: a ready result is pulled exactly once, then EOS.
     bool cache_conscious_result_ready() const { return _cache_conscious_result_ready; }
     bool cache_conscious_result_emitted() const { return _cache_conscious_result_emitted; }
@@ -514,6 +529,7 @@ protected:
     // tracker and spill the physical tuples per partition (the logical stat stays in RAM and
     // keeps prune working) when enable_spill is on; the spillable operator owns that path.
     bool _cache_conscious_active = false;
+    bool _cache_conscious_ca_spilled = false;
     std::unique_ptr<CacheConsciousCa> _cache_conscious_ca;
     ChunkPtr _cache_conscious_result_chunk;
     bool _cache_conscious_result_ready = false;

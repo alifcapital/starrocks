@@ -1823,10 +1823,48 @@ void route_cold_rows(CacheConsciousCa* ca, const Column* key_col, const Int64Col
         }
     }
 }
+
+// Re-route every row of a restored spill chunk back into its CA partition. Unlike routing on
+// push, restore always carries an explicit count column (the spill chunk stored it), and there
+// is no selection — every restored row belongs to the CA. restore_tuple does not bump the stat.
+template <typename KeyColumn>
+void restore_cold_tuples(CacheConsciousCa* ca, const Column* key_col, const Int64Column* cnt_col, size_t n) {
+    const auto& keys = down_cast<const KeyColumn*>(key_col)->get_data();
+    const auto& counts = cnt_col->get_data();
+    for (size_t i = 0; i < n; ++i) {
+        ca->restore_tuple(static_cast<uint64_t>(keys[i]), counts[i]);
+    }
+}
+
+// Append an integral group key into its fixed-length column by logical type. The key was gated
+// to a single non-nullable integral type, so it round-trips through a uint64 exactly.
+Status append_group_key(Column* key_col, LogicalType key_lt, uint64_t key) {
+    switch (key_lt) {
+    case TYPE_BOOLEAN:
+        down_cast<UInt8Column*>(key_col)->get_data().push_back(static_cast<uint8_t>(key));
+        break;
+    case TYPE_TINYINT:
+        down_cast<Int8Column*>(key_col)->get_data().push_back(static_cast<int8_t>(key));
+        break;
+    case TYPE_SMALLINT:
+        down_cast<Int16Column*>(key_col)->get_data().push_back(static_cast<int16_t>(key));
+        break;
+    case TYPE_INT:
+        down_cast<Int32Column*>(key_col)->get_data().push_back(static_cast<int32_t>(key));
+        break;
+    case TYPE_BIGINT:
+        down_cast<Int64Column*>(key_col)->get_data().push_back(static_cast<int64_t>(key));
+        break;
+    default:
+        return Status::InternalError("cache-conscious top-n: unexpected group key type");
+    }
+    return Status::OK();
+}
 } // namespace
 
 void Aggregator::activate_cache_conscious_topn(size_t fa_capacity) {
     _cache_conscious_active = true;
+    _cache_conscious_ca_spilled = false;
     _cache_conscious_ca = std::make_unique<CacheConsciousCa>(cache_conscious_topn_limit(), fa_capacity, /*fanout=*/256);
 }
 
@@ -1869,6 +1907,12 @@ Status Aggregator::finalize_cache_conscious_topn(RuntimeState* state) {
     // partitionwise spill source) before relying on it under load. Correct as-is; this is a
     // scheduling-fairness concern.
     if (!_cache_conscious_active) {
+        return Status::OK();
+    }
+    // If the CA spilled, its tuples are on disk and can only be read back on the source side
+    // (the spiller restores after the sink is complete). Defer the whole prune to the source's
+    // restore_and_finalize_cache_conscious_ca; keep the CA alive (do not reset here).
+    if (_cache_conscious_ca_spilled) {
         return Status::OK();
     }
     auto reset_mode = DeferOp([this]() {
@@ -1914,25 +1958,7 @@ Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pa
     Column* key_col = ColumnHelper::get_data_column(group_by_columns[0].get());
     const LogicalType key_lt = _group_by_types[0].result_type.type;
     for (const auto& [key, count] : result) {
-        switch (key_lt) {
-        case TYPE_BOOLEAN:
-            down_cast<UInt8Column*>(key_col)->get_data().push_back(static_cast<uint8_t>(key));
-            break;
-        case TYPE_TINYINT:
-            down_cast<Int8Column*>(key_col)->get_data().push_back(static_cast<int8_t>(key));
-            break;
-        case TYPE_SMALLINT:
-            down_cast<Int16Column*>(key_col)->get_data().push_back(static_cast<int16_t>(key));
-            break;
-        case TYPE_INT:
-            down_cast<Int32Column*>(key_col)->get_data().push_back(static_cast<int32_t>(key));
-            break;
-        case TYPE_BIGINT:
-            down_cast<Int64Column*>(key_col)->get_data().push_back(static_cast<int64_t>(key));
-            break;
-        default:
-            return Status::InternalError("cache-conscious top-n: unexpected group key type");
-        }
+        RETURN_IF_ERROR(append_group_key(key_col, key_lt, key));
         count_col->get_data().push_back(count);
     }
 
@@ -1940,6 +1966,99 @@ Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pa
                                                         /*use_intermediate_as_output=*/false);
     _cache_conscious_result_ready = true;
     return Status::OK();
+}
+
+Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
+    if (!_cache_conscious_active || _cache_conscious_ca == nullptr) {
+        return Status::OK();
+    }
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    auto& spiller = _spiller;
+    const size_t fanout = _cache_conscious_ca->fanout();
+    for (size_t pid = 0; pid < fanout; ++pid) {
+        std::vector<CacheConsciousTopN::Group> tuples = _cache_conscious_ca->take_partition_tuples(pid);
+        if (tuples.empty()) {
+            continue;
+        }
+        // Spill the partition's tuples as an intermediate-layout (key, partial-count) chunk, so the
+        // spiller's group-by sort exprs resolve against real slot ids. The logical stat stays in
+        // the CA partition (take_ left it), so prune still works; the partition is now empty and
+        // routable again — later misses refill it and it can be spilled again (cyclic).
+        const size_t n = tuples.size();
+        MutableColumns group_by_columns = _create_group_by_columns(n);
+        MutableColumns agg_result_columns = _create_agg_result_columns(n, /*use_intermediate=*/true);
+        auto* count_col = down_cast<Int64Column*>(ColumnHelper::get_data_column(agg_result_columns[0].get()));
+        Column* key_col = ColumnHelper::get_data_column(group_by_columns[0].get());
+        for (const auto& g : tuples) {
+            RETURN_IF_ERROR(append_group_key(key_col, key_lt, g.key));
+            count_col->get_data().push_back(g.count);
+        }
+        ChunkPtr chunk = _build_output_chunk(std::move(group_by_columns), std::move(agg_result_columns),
+                                             /*use_intermediate_as_output=*/true);
+        RETURN_IF_ERROR(spiller->spill(state, chunk, TRACKER_WITH_SPILLER_GUARD(state, spiller)));
+    }
+    _cache_conscious_ca_spilled = true;
+    return Status::OK();
+}
+
+Status Aggregator::restore_and_finalize_cache_conscious_ca(RuntimeState* state) {
+    auto reset_mode = DeferOp([this]() {
+        _cache_conscious_ca.reset();
+        _cache_conscious_active = false;
+    });
+
+    // Read every spilled (key, partial) chunk back and re-route it into its CA partition. The
+    // stat was already counted on the original route, so restore_tuple appends without bumping it.
+    // The spill chunks are intermediate layout, so read them the same way the live merge path does.
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    auto& spiller = _spiller;
+    while (!is_spilled_eos()) {
+        ASSIGN_OR_RETURN(ChunkPtr chunk, spiller->restore(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller)));
+        if (chunk == nullptr || chunk->is_empty()) {
+            continue;
+        }
+        // Read the spilled intermediate chunk directly by column position ([key, count]) instead
+        // of evaluate_agg_fn_exprs: a 1-phase colocate count(*) has no intermediate agg ctx, so the
+        // evaluate path would not resolve. The spiller preserves column order on restore.
+        const size_t n = chunk->num_rows();
+        const Column* key_col = ColumnHelper::get_data_column(chunk->get_column_by_index(0).get());
+        const auto* cnt_col =
+                down_cast<const Int64Column*>(ColumnHelper::get_data_column(chunk->get_column_by_index(1).get()));
+        switch (key_lt) {
+        case TYPE_BOOLEAN:
+        case TYPE_TINYINT:
+            restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+            break;
+        case TYPE_SMALLINT:
+            restore_cold_tuples<Int16Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+            break;
+        case TYPE_INT:
+            restore_cold_tuples<Int32Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+            break;
+        case TYPE_BIGINT:
+            restore_cold_tuples<Int64Column>(_cache_conscious_ca.get(), key_col, cnt_col, n);
+            break;
+        default:
+            return Status::InternalError("cache-conscious top-n: unexpected group key type");
+        }
+    }
+
+    std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
+    if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
+        return Status::OK();
+    }
+    std::vector<CacheConsciousTopN::Group> fa;
+    fa.reserve(fa_pairs.size());
+    for (const auto& [key, count] : fa_pairs) {
+        fa.push_back({key, count});
+    }
+    auto top = _cache_conscious_ca->finalize(std::move(fa));
+    std::vector<std::pair<uint64_t, int64_t>> result;
+    result.reserve(top.size());
+    for (const auto& g : top) {
+        result.emplace_back(g.key, g.count);
+    }
+    return _build_cache_conscious_result_chunk(result);
 }
 
 Status Aggregator::convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk,

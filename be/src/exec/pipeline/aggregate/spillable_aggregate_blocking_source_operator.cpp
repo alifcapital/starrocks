@@ -39,6 +39,10 @@ bool SpillableAggregateBlockingSourceOperator::has_output() const {
     if (_is_finished) {
         return false;
     }
+    // Cache-conscious with a spilled CA: one result chunk to emit once the sink is complete.
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        return _aggregator->is_sink_complete() && !_aggregator->cache_conscious_result_emitted();
+    }
     bool has_spilled = _aggregator->spiller()->spilled();
 
     if (!has_spilled && AggregateBlockingSourceOperator::has_output()) {
@@ -67,6 +71,9 @@ bool SpillableAggregateBlockingSourceOperator::is_finished() const {
     if (_is_finished) {
         return true;
     }
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        return _aggregator->cache_conscious_result_emitted();
+    }
     if (!_aggregator->spiller()->spilled()) {
         return AggregateBlockingSourceOperator::is_finished();
     }
@@ -94,6 +101,15 @@ Status SpillableAggregateBlockingSourceOperator::set_finished(RuntimeState* stat
 
 StatusOr<ChunkPtr> SpillableAggregateBlockingSourceOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_aggregator->spiller()->task_status());
+    // Cache-conscious with a spilled CA: restore the CA from the spiller, prune against FA, and
+    // emit the local top-n once, then EOS. (A non-spilled CA is finalized in the sink and emitted
+    // by the base pull_chunk's cache_conscious_result_ready path.)
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        if (!_aggregator->cache_conscious_result_ready()) {
+            RETURN_IF_ERROR(_aggregator->restore_and_finalize_cache_conscious_ca(state));
+        }
+        return _aggregator->pull_cache_conscious_result_chunk();
+    }
     if (!_aggregator->spiller()->spilled()) {
         return AggregateBlockingSourceOperator::pull_chunk(state);
     }

@@ -310,6 +310,22 @@ public:
     std::vector<Group> take_partition_tuples(size_t pid) { return std::move(_partitions[pid].groups); }
     void set_partition_tuples(size_t pid, std::vector<Group> tuples) { _partitions[pid].groups = std::move(tuples); }
 
+    // Re-append a previously spilled tuple to its partition WITHOUT bumping the stat — the stat
+    // was already accumulated by route() before the spill, so restore must not double-count it.
+    void restore_tuple(uint64_t key, int64_t partial) {
+        _partitions[_engine.bucket(key)].groups.push_back({key, partial});
+    }
+
+    // Total bytes of physical tuples held in RAM across partitions — what the operator reports
+    // as revocable and sheds on spill. The logical stats are O(fanout) and non-revocable.
+    size_t physical_tuples_bytes() const {
+        size_t rows = 0;
+        for (const auto& p : _partitions) {
+            rows += p.groups.size();
+        }
+        return rows * sizeof(Group);
+    }
+
     std::vector<Group> finalize(std::vector<Group> fa, size_t* pruned = nullptr) {
         return _engine.rank_partitions(std::move(fa), std::move(_partitions), pruned);
     }

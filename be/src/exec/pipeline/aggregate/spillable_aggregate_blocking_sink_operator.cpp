@@ -64,6 +64,32 @@ Status SpillableAggregateBlockingSinkOperator::set_finishing(RuntimeState* state
         _aggregator->spiller()->cancel();
     }
 
+    // Cache-conscious with a spilled CA: the CA (key, partial) chunks are already in the spiller.
+    // Just flush them so the source can restore; do NOT queue the hash-map spill task — the hash
+    // map is the frozen FA and the source needs it intact for finalize after restoring the CA.
+    // The base set_finishing (whose finalize defers to the source when the CA spilled) runs in the
+    // flush callback.
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        auto flush_function = [this](RuntimeState* state) {
+            auto& spiller = _aggregator->spiller();
+            return spiller->flush(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller));
+        };
+        _aggregator->ref();
+        auto set_call_back_function = [this](RuntimeState* state) {
+            return _aggregator->spiller()->set_flush_all_call_back(
+                    [this, state]() {
+                        auto defer = DeferOp([&]() { _aggregator->unref(state); });
+                        RETURN_IF_ERROR(AggregateBlockingSinkOperator::set_finishing(state));
+                        return Status::OK();
+                    },
+                    state, TRACKER_WITH_SPILLER_READER_GUARD(state, _aggregator->spiller()));
+        };
+        SpillProcessTasksBuilder task_builder(state);
+        task_builder.then(flush_function).finally(set_call_back_function);
+        RETURN_IF_ERROR(_aggregator->spill_channel()->execute(task_builder));
+        return Status::OK();
+    }
+
     if (!_aggregator->spiller()->spilled() && _streaming_chunks.empty()) {
         RETURN_IF_ERROR(AggregateBlockingSinkOperator::set_finishing(state));
         return Status::OK();
@@ -129,7 +155,21 @@ Status SpillableAggregateBlockingSinkOperator::push_chunk(RuntimeState* state, c
 
     if (_spill_strategy == spill::SpillStrategy::NO_SPILL) {
         RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
-        set_revocable_mem_bytes(_aggregator->hash_map_memory_usage());
+        // The base push may flip into cache-conscious top-n; once it has, the CA physical tuples
+        // are the revocable memory, not the hash map (which is now the frozen, tiny FA).
+        set_revocable_mem_bytes(_aggregator->cache_conscious_topn_active()
+                                        ? _aggregator->cache_conscious_revocable_bytes()
+                                        : _aggregator->hash_map_memory_usage());
+        return Status::OK();
+    }
+
+    // Under spill pressure: if cache-conscious flipped, it owns its own CA spill. Keep routing on
+    // push (FA stays frozen, misses route to CA) and shed the CA tuples to the spiller; do not
+    // take the hash-map spill path — the hash map is the frozen FA and must stay for finalize.
+    if (_aggregator->cache_conscious_topn_active()) {
+        RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
+        RETURN_IF_ERROR(_aggregator->spill_cache_conscious_ca(state));
+        set_revocable_mem_bytes(_aggregator->cache_conscious_revocable_bytes());
         return Status::OK();
     }
 
