@@ -364,6 +364,8 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
         if (cacheConsciousTopn) {
             msg.agg_node.setEnable_cache_conscious_topn(true);
             msg.agg_node.setCache_conscious_topn_limit(cacheConsciousTopnLimit);
+            msg.agg_node.setCache_conscious_topn_force_flip(
+                    ConnectContext.get().getSessionVariable().isCacheConsciousTopnForceFlip());
         }
     }
 

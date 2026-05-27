@@ -231,6 +231,8 @@ struct AggregatorParams {
     // is the fused TopN's k (it lives on the SortNode, not on this node's limit).
     bool enable_cache_conscious_topn = false;
     int64_t cache_conscious_topn_limit = -1;
+    // Test/debug only: force the flip past the limit, bypassing the L2-budget and skew gates.
+    bool cache_conscious_topn_force_flip = false;
 
     // Incremental MV
     // Whether it's testing, use MemStateTable in testing, instead use IMTStateTable.
@@ -285,6 +287,7 @@ public:
     // groups exact and prunes the tail; the limit is the fused TopN's k.
     bool enable_cache_conscious_topn() const { return _params->enable_cache_conscious_topn; }
     int64_t cache_conscious_topn_limit() const { return _params->cache_conscious_topn_limit; }
+    bool cache_conscious_topn_force_flip() const { return _params->cache_conscious_topn_force_flip; }
     // After the flip the live hash map is frozen as FA; post-flip miss rows are routed into CA
     // partitions (a logical count stat + physical tuples) on push. finalize prunes FA + CA into
     // the local top-n the source emits in place of the normal convert path.

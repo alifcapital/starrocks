@@ -199,6 +199,8 @@ AggregatorParamsPtr convert_to_aggregator_params(const TPlanNode& tnode) {
                 tnode.agg_node.__isset.enable_cache_conscious_topn && tnode.agg_node.enable_cache_conscious_topn;
         params->cache_conscious_topn_limit =
                 tnode.agg_node.__isset.cache_conscious_topn_limit ? tnode.agg_node.cache_conscious_topn_limit : -1;
+        params->cache_conscious_topn_force_flip = tnode.agg_node.__isset.cache_conscious_topn_force_flip &&
+                                                  tnode.agg_node.cache_conscious_topn_force_flip;
 
         break;
     }
@@ -2078,10 +2080,31 @@ Status Aggregator::_emit_cache_conscious_local_topn() {
         fa.push_back({key, count});
     }
 
+    {
+        // TEMP DEBUG (cache-conscious off-by-one hunt): log the highest-count FA entries straight
+        // out of collect_cache_conscious_topn_groups, before finalize touches anything.
+        std::vector<CacheConsciousTopN::Group> dbg(fa);
+        const size_t dn = std::min<size_t>(5, dbg.size());
+        std::partial_sort(dbg.begin(), dbg.begin() + dn, dbg.end(),
+                          [](const auto& a, const auto& b) { return a.count > b.count; });
+        for (size_t i = 0; i < dn; ++i) {
+            LOG(WARNING) << "CCDBG fa[" << i << "] key=" << dbg[i].key << " count=" << dbg[i].count
+                         << " fa_size=" << fa.size();
+        }
+    }
+
     // CA was partitioned incrementally on push. finalize prunes FA + CA partitions against the
     // k-th highest exact FA count and resolves only survivors — the result is the exact local
     // top-n (≤ k rows) the source emits. Pruned partitions are never resolved: that is the win.
     auto top = _cache_conscious_ca->finalize(std::move(fa));
+
+    {
+        // TEMP DEBUG: log the engine's result keys (after FA+CA prune) to bisect FA-read vs engine.
+        const size_t dn = std::min<size_t>(5, top.size());
+        for (size_t i = 0; i < dn; ++i) {
+            LOG(WARNING) << "CCDBG top[" << i << "] key=" << top[i].key << " count=" << top[i].count;
+        }
+    }
 
     std::vector<std::pair<uint64_t, int64_t>> result;
     result.reserve(top.size());

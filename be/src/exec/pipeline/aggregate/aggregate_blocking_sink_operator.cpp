@@ -169,20 +169,30 @@ void AggregateBlockingSinkOperator::_maybe_evaluate_cache_conscious_topn() {
     if (!_aggregator->needs_finalize() || _aggregator->is_pre_cache()) {
         return;
     }
-    if (_aggregator->hash_map_memory_usage() <= kCacheConsciousL2TargetBytes) {
+    const int64_t k = _aggregator->cache_conscious_topn_limit();
+    // Force path (test/debug): flip the moment the live table holds more than k groups, so FA
+    // freezes an early slice and later distinct keys route to CA -- the fused emit path runs on
+    // small data. Otherwise the natural gate: flip only once the table outgrows the L2 budget.
+    const bool force = _aggregator->cache_conscious_topn_force_flip();
+    if (force) {
+        if (_aggregator->size() <= static_cast<size_t>(std::max<int64_t>(k, 1))) {
+            return;
+        }
+    } else if (_aggregator->hash_map_memory_usage() <= kCacheConsciousL2TargetBytes) {
         return;
     }
     _cache_conscious_evaluated = true;
 
     std::vector<int64_t> counts;
     _aggregator->collect_cache_conscious_topn_counts(&counts);
-    const int64_t k = _aggregator->cache_conscious_topn_limit();
     // FA candidate capacity: how many per-group slots fit half the L2 budget at a 0.5
     // open-addressing load factor. The slot is the full group state blob (key + count state).
     const size_t slot_bytes = std::max<size_t>(16, _aggregator->state_allocator().aggregate_key_size);
     const size_t fa_capacity =
             std::max<size_t>(static_cast<size_t>(k), (kCacheConsciousL2TargetBytes / 2) / slot_bytes / 2);
-    _cache_conscious_skewed = CacheConsciousTopN::is_skewed(counts, k, fa_capacity);
+    // Force bypasses the skew gate too: the operator must return the exact top-n regardless of skew
+    // (prune just won't help), which is exactly what the test asserts against the normal plan.
+    _cache_conscious_skewed = force || CacheConsciousTopN::is_skewed(counts, k, fa_capacity);
     if (_cache_conscious_skewed) {
         _aggregator->activate_cache_conscious_topn(fa_capacity);
     }

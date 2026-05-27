@@ -960,6 +960,9 @@ struct TAggregationNode {
   // this node's TPlanNode.limit.
   32: optional bool enable_cache_conscious_topn = false
   33: optional i64 cache_conscious_topn_limit
+  // Test/debug only: force the runtime flip past the limit, bypassing the L2-budget and skew
+  // gates, so the fused emit path runs deterministically on small data.
+  34: optional bool cache_conscious_topn_force_flip = false
 
 }
 
