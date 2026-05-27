@@ -1761,14 +1761,21 @@ bool Aggregator::collect_cache_conscious_topn_groups(std::vector<std::pair<uint6
         using KeyType = typename HashMapWithKey::KeyType;
         if constexpr (std::is_integral_v<KeyType>) {
             groups->reserve(_hash_map_variant.size());
-            auto it = _state_allocator.begin();
-            const auto end = _state_allocator.end();
-            while (it != end) {
-                uint8_t* value = it.value();
-                const auto key = *reinterpret_cast<const KeyType*>(value);
-                const int64_t count = *reinterpret_cast<const int64_t*>(value + count_offset);
-                groups->emplace_back(static_cast<uint64_t>(key), count);
-                it.next();
+            // Read the key from the hash map slot (entry.first), the authoritative source, rather
+            // than from the state blob's front: once the table converts to a two-level map the
+            // blob-front key read came back off by one on this path. The count lives in the blob.
+            for (const auto& entry : variant_value->hash_map) {
+                const KeyType map_key = entry.first;
+                const auto* state = reinterpret_cast<const uint8_t*>(entry.second);
+                const int64_t count = *reinterpret_cast<const int64_t*>(state + count_offset);
+                if (count > 100000) {
+                    // TEMP DEBUG: compare the map-slot key against the blob-front key on heavy
+                    // entries to confirm where the off-by-one was introduced.
+                    const KeyType blob_key = *reinterpret_cast<const KeyType*>(state);
+                    LOG(WARNING) << "CCDBG collect map_key=" << static_cast<int64_t>(map_key)
+                                 << " blob_key=" << static_cast<int64_t>(blob_key) << " count=" << count;
+                }
+                groups->emplace_back(static_cast<uint64_t>(map_key), count);
             }
         } else {
             supported = false;
