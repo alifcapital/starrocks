@@ -67,11 +67,16 @@ public class CacheConsciousTopnPlanTest extends PlanTestBase {
     }
 
     @Test
-    public void testRejectMultipleAggregations() throws Exception {
+    public void testFlagOnDecomposedCountTopnBranch() throws Exception {
+        // count(*),sum(v2) ordered by count is decomposed by the optimizer into "find the top-10
+        // v1 by count, then join back to compute sum(v2) for those winners". The isolated count(*)
+        // top-n branch is structurally a plain count-topn the fused operator handles correctly --
+        // ranking is by count alone, sum is computed only for the surviving winners -- so that
+        // branch is flagged.
         connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
         String plan = getFragmentPlan(
                 "select v1, count(*) c, sum(v2) s from t0 group by v1 order by c desc limit 10");
-        assertNotContains(plan, MARKER);
+        assertContains(plan, MARKER + ": limit=10");
     }
 
     @Test
@@ -83,10 +88,13 @@ public class CacheConsciousTopnPlanTest extends PlanTestBase {
     }
 
     @Test
-    public void testRejectOffset() throws Exception {
+    public void testFlagWithOffsetFoldsOffsetIntoLimit() throws Exception {
+        // `limit 5, 10` is split into a partial top-n (offset 0, limit 15 = offset+limit) that the
+        // merge then skips 5 / takes 10 on. The fused operator computes the local top-15 by count;
+        // applying the offset at the merge is correct and free, so the flag is set with limit=15.
         connectContext.getSessionVariable().setEnableCacheConsciousTopn(true);
         String plan = getFragmentPlan("select v1, count(*) c from t0 group by v1 order by c desc limit 5, 10");
-        assertNotContains(plan, MARKER);
+        assertContains(plan, MARKER + ": limit=15");
     }
 
     @Test
