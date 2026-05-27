@@ -1803,35 +1803,76 @@ bool Aggregator::cache_conscious_group_key_supported() const {
 
 namespace {
 template <typename KeyColumn>
-void read_cold_groups(const Column* key_col, const Int64Column* cnt_col, size_t n,
-                      std::vector<CacheConsciousTopN::Group>* out) {
+void route_cold_rows(CacheConsciousCa* ca, const Column* key_col, const Int64Column* cnt_col, const Filter& selection,
+                     size_t n) {
     const auto& keys = down_cast<const KeyColumn*>(key_col)->get_data();
     if (cnt_col != nullptr) {
-        // 2-phase plan: merge the partial count carried in the input column.
+        // 2-phase plan: route the partial count carried in the input column.
         const auto& counts = cnt_col->get_data();
         for (size_t i = 0; i < n; ++i) {
-            out->push_back({static_cast<uint64_t>(keys[i]), counts[i]});
+            if (selection[i]) {
+                ca->route(static_cast<uint64_t>(keys[i]), counts[i]);
+            }
         }
     } else {
-        // 1-phase (colocate) count(*): no input column, each row contributes 1 to its group.
+        // 1-phase (colocate) count(*): no input column, each miss row contributes 1 to its group.
         for (size_t i = 0; i < n; ++i) {
-            out->push_back({static_cast<uint64_t>(keys[i]), 1});
+            if (selection[i]) {
+                ca->route(static_cast<uint64_t>(keys[i]), 1);
+            }
         }
     }
 }
 } // namespace
 
+void Aggregator::activate_cache_conscious_topn(size_t fa_capacity) {
+    _cache_conscious_active = true;
+    _cache_conscious_ca = std::make_unique<CacheConsciousCa>(cache_conscious_topn_limit(), fa_capacity, /*fanout=*/256);
+}
+
+void Aggregator::route_cache_conscious_cold_rows(size_t chunk_size) {
+    // Called on push after build_hash_map_with_selection marked misses (selection == 1) and the
+    // live group-by / aggregate-input columns were evaluated. Route each miss row to its CA
+    // partition, mirroring how the live path reads input (compute_batch_agg_states): a 2-phase
+    // plan merges the partial count from the first input column, a 1-phase colocate count(*) has
+    // no input column so each row counts as 1.
+    const LogicalType key_lt = _group_by_types[0].result_type.type;
+    const bool merge_input = _is_merge_funcs[0] || _use_intermediate_as_input();
+    const Int64Column* cnt_col =
+            merge_input ? down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()))
+                        : nullptr;
+    const Column* key_col = ColumnHelper::get_data_column(_group_by_columns[0].get());
+    CacheConsciousCa* ca = _cache_conscious_ca.get();
+    switch (key_lt) {
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+        route_cold_rows<Int8Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
+        break;
+    case TYPE_SMALLINT:
+        route_cold_rows<Int16Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
+        break;
+    case TYPE_INT:
+        route_cold_rows<Int32Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
+        break;
+    case TYPE_BIGINT:
+        route_cold_rows<Int64Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
+        break;
+    default:
+        break; // unsupported key gated out at flip time
+    }
+}
+
 Status Aggregator::finalize_cache_conscious_topn(RuntimeState* state) {
-    // TODO: the whole multi-level prune runs synchronously here. For a large cold tail this can
-    // monopolize the driver thread, which breaks the pipeline's cooperative scheduling (each
-    // call is expected to do ~one chunk of work and yield). Slice it into a pull-driven source
-    // state machine (one partition / radix level per pull, like the partitionwise spill source)
-    // before relying on it under load. Correct as-is; this is a scheduling-fairness concern.
+    // TODO: the multi-level prune runs synchronously here. For a large CA this can monopolize the
+    // driver thread, which breaks the pipeline's cooperative scheduling. Slice it into a
+    // pull-driven source state machine (one partition / radix level per pull, like the
+    // partitionwise spill source) before relying on it under load. Correct as-is; this is a
+    // scheduling-fairness concern.
     if (!_cache_conscious_active) {
         return Status::OK();
     }
     auto reset_mode = DeferOp([this]() {
-        _cache_conscious_cold_chunks.clear();
+        _cache_conscious_ca.reset();
         _cache_conscious_active = false;
     });
 
@@ -1846,63 +1887,10 @@ Status Aggregator::finalize_cache_conscious_topn(RuntimeState* state) {
         fa.push_back({key, count});
     }
 
-    // CA: cold (key, partial-count) rows. The buffered chunks are the operator's own INPUT
-    // (filtered to the post-flip misses), so re-evaluating the group-by and aggregate-input
-    // exprs reproduces the key column and the partial-count column in input layout, avoiding
-    // the intermediate-tuple slot-id mismatch.
-    // TODO: assumes a single count(*) aggregate (the FE flag guarantees it), so the partial is
-    // one int64 column. SUM(Y>=0) / MAX will need their own input column handling and bound.
-    const LogicalType key_lt = _group_by_types[0].result_type.type;
-    // Read the cold count exactly as the live path consumes input (compute_batch_agg_states):
-    // pick the ctx set via _use_intermediate_as_input() and split update-vs-merge the same way.
-    // A 1-phase (colocate) count(*) takes the update branch with no input column (each row = 1);
-    // a 2-phase plan merges the partial count from the first input column.
-    const bool use_intermediate = _use_intermediate_as_input();
-    const bool merge_input = _is_merge_funcs[0] || use_intermediate;
-    std::vector<CacheConsciousTopN::Group> cold;
-    for (const auto& chunk : _cache_conscious_cold_chunks) {
-        const size_t n = chunk->num_rows();
-        if (n == 0) {
-            continue;
-        }
-        // Re-evaluation writes into the shared _group_by_columns / _agg_input_columns, and the
-        // latter is cached per chunk; reset first so every cold chunk is read, not just the first.
-        _reset_exprs();
-        RETURN_IF_ERROR(evaluate_groupby_exprs(chunk.get()));
-        const Int64Column* cnt_col = nullptr;
-        if (merge_input) {
-            RETURN_IF_ERROR(evaluate_agg_fn_exprs(chunk.get()));
-            cnt_col = down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()));
-        }
-        const Column* key_col = ColumnHelper::get_data_column(_group_by_columns[0].get());
-        switch (key_lt) {
-        case TYPE_BOOLEAN:
-        case TYPE_TINYINT:
-            read_cold_groups<Int8Column>(key_col, cnt_col, n, &cold);
-            break;
-        case TYPE_SMALLINT:
-            read_cold_groups<Int16Column>(key_col, cnt_col, n, &cold);
-            break;
-        case TYPE_INT:
-            read_cold_groups<Int32Column>(key_col, cnt_col, n, &cold);
-            break;
-        case TYPE_BIGINT:
-            read_cold_groups<Int64Column>(key_col, cnt_col, n, &cold);
-            break;
-        default:
-            return Status::OK();
-        }
-    }
-
-    // Best-first multi-level prune: rank() keeps FA exact, prunes cold partitions whose total
-    // is below the k-th highest exact count, and resolves only the survivors. The result is the
-    // exact local top-n (FA winners + resolved cold winners) — at most k rows, which is exactly
-    // what the source emits. Pruned partitions are never resolved, so the cold tail's cost is
-    // just the partition bookkeeping, not a full aggregation.
-    const int64_t k = cache_conscious_topn_limit();
-    const size_t resolve_cap = std::max<size_t>(fa.size(), 1);
-    CacheConsciousTopN engine(k, resolve_cap, /*fanout=*/256);
-    auto top = engine.rank(std::move(fa), std::move(cold));
+    // CA was partitioned incrementally on push. finalize prunes FA + CA partitions against the
+    // k-th highest exact FA count and resolves only survivors — the result is the exact local
+    // top-n (≤ k rows) the source emits. Pruned partitions are never resolved: that is the win.
+    auto top = _cache_conscious_ca->finalize(std::move(fa));
 
     std::vector<std::pair<uint64_t, int64_t>> result;
     result.reserve(top.size());

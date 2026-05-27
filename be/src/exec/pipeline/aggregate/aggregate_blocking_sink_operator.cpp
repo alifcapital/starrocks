@@ -120,16 +120,12 @@ Status AggregateBlockingSinkOperator::push_chunk(RuntimeState* state, const Chun
         RETURN_IF_ERROR(_aggregator->compute_single_agg_state(chunk.get(), chunk_size));
     } else if (_aggregator->cache_conscious_topn_active()) {
         // Post-flip: FA is frozen. Probe-only (build_hash_map_with_selection does not insert
-        // misses), aggregate the hits into FA, and buffer the miss rows as a CA cold chunk for
-        // the source to prune. The cold chunk is the operator's own input filtered to misses,
-        // so the source can re-evaluate / replay it in input layout.
+        // misses), aggregate the hits into FA, then route the miss rows into their CA partitions
+        // (bumping each partition's logical count stat). compute_batch_agg_states_with_selection
+        // leaves the group-by / aggregate-input columns evaluated, which the router then reads.
         _aggregator->build_hash_map_with_selection(chunk_size);
-        ChunkPtr cold = chunk->clone_unique();
-        const size_t cold_rows = cold->filter(_aggregator->streaming_selection());
-        if (cold_rows > 0) {
-            _aggregator->buffer_cache_conscious_cold_chunk(std::move(cold));
-        }
         RETURN_IF_ERROR(_aggregator->compute_batch_agg_states_with_selection(chunk.get(), chunk_size));
+        _aggregator->route_cache_conscious_cold_rows(chunk_size);
     } else {
         _aggregator->build_hash_map(chunk_size, _shared_limit_countdown, _agg_group_by_with_limit);
         _aggregator->try_convert_to_two_level_map();
@@ -188,7 +184,7 @@ void AggregateBlockingSinkOperator::_maybe_evaluate_cache_conscious_topn() {
             std::max<size_t>(static_cast<size_t>(k), (kCacheConsciousL2TargetBytes / 2) / slot_bytes / 2);
     _cache_conscious_skewed = CacheConsciousTopN::is_skewed(counts, k, fa_capacity);
     if (_cache_conscious_skewed) {
-        _aggregator->activate_cache_conscious_topn();
+        _aggregator->activate_cache_conscious_topn(fa_capacity);
     }
 }
 

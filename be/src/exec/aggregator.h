@@ -31,6 +31,7 @@
 #include "exec/aggregate/agg_hash_variant.h"
 #include "exec/aggregate/agg_profile.h"
 #include "exec/aggregator_fwd.h"
+#include "exec/cache_conscious_topn.h"
 #include "exec/limited_pipeline_chunk_buffer.h"
 #include "exec/pipeline/context_with_dependency.h"
 #include "exec/pipeline/spill_process_channel.h"
@@ -284,13 +285,15 @@ public:
     // groups exact and prunes the tail; the limit is the fused TopN's k.
     bool enable_cache_conscious_topn() const { return _params->enable_cache_conscious_topn; }
     int64_t cache_conscious_topn_limit() const { return _params->cache_conscious_topn_limit; }
-    // After the flip, the live hash map is frozen as FA and cold miss chunks are buffered here
-    // as CA; the source emits the pruned top-n from FA + CA via emit_cache_conscious_topn().
+    // After the flip the live hash map is frozen as FA; post-flip miss rows are routed into CA
+    // partitions (a logical count stat + physical tuples) on push. finalize prunes FA + CA into
+    // the local top-n the source emits in place of the normal convert path.
     bool cache_conscious_topn_active() const { return _cache_conscious_active; }
-    void activate_cache_conscious_topn() { _cache_conscious_active = true; }
-    void buffer_cache_conscious_cold_chunk(ChunkPtr chunk) {
-        _cache_conscious_cold_chunks.emplace_back(std::move(chunk));
-    }
+    // Freeze FA and create the CA sized to the given FA candidate capacity.
+    void activate_cache_conscious_topn(size_t fa_capacity);
+    // Route post-flip miss rows (streaming_selection == 1) to their CA partitions, bumping each
+    // partition's logical count stat. Called per chunk on push.
+    void route_cache_conscious_cold_rows(size_t chunk_size);
     // True only for a single integral group-by key that fits a uint64 exactly (so the engine
     // can use it as a group id without collisions). LARGEINT/strings are unsupported.
     bool cache_conscious_group_key_supported() const;
@@ -506,11 +509,12 @@ protected:
     // hash map above is frozen as FA and post-flip cold miss chunks accumulate here as CA.
     // finalize_cache_conscious_topn prunes them into the local top-n result chunk the source
     // emits in place of the normal convert path.
-    // TODO: these cold chunks accumulate in RAM with no memory accounting and no spill fallback.
+    // TODO: the CA physical tuples accumulate in RAM with no memory accounting and no spill.
     // A large cold tail can blow the query memory budget — track their bytes against the mem
-    // tracker and spill (or cap and fall back to plain aggregation) when they exceed a bound.
+    // tracker and spill the physical tuples per partition (the logical stat stays in RAM and
+    // keeps prune working) when enable_spill is on; the spillable operator owns that path.
     bool _cache_conscious_active = false;
-    std::vector<ChunkPtr> _cache_conscious_cold_chunks;
+    std::unique_ptr<CacheConsciousCa> _cache_conscious_ca;
     ChunkPtr _cache_conscious_result_chunk;
     bool _cache_conscious_result_ready = false;
     bool _cache_conscious_result_emitted = false;
