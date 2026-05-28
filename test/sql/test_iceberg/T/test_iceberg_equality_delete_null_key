@@ -1,0 +1,19 @@
+-- name: test_iceberg_equality_delete_null_key @sequential @native
+-- Iceberg spec: a NULL value in an equality-delete column matches a row whose value is also NULL.
+-- Without null-safe equality (the EQ -> EQ_FOR_NULL switch in IcebergEqualityDeleteRewriteRule) the
+-- anti-join evaluates NULL = NULL -> UNKNOWN and the NULL-key rows resurrect. Fixture is a v2 table
+-- (id,data) with 10 rows (incl. two NULL-id rows), one data file, and two equality-delete files (keys
+-- {3,6} and the NULL key); with the fix exactly 6 rows stay visible -- the two NULL-id rows are deleted.
+-- The fixture embeds absolute paths under /tmp/sr_eq_fixture/warehouse, so it is copied to that fixed
+-- path (hence @sequential); FE and BE must share the local filesystem.
+shell: rm -rf /tmp/sr_eq_fixture && mkdir -p /tmp/sr_eq_fixture/warehouse && cp -r ${root_path}/sql/test_iceberg/data/eq_delete_convert/* /tmp/sr_eq_fixture/warehouse/ > /dev/null || echo "exit 0" > /dev/null
+
+create external catalog iceberg_eqnull_${uuid0} PROPERTIES ("type"="iceberg", "iceberg.catalog.type"="hadoop", "iceberg.catalog.warehouse"="file:///tmp/sr_eq_fixture/warehouse");
+
+set new_planner_optimize_timeout = 30000;
+
+-- equality deletes hide keys {3,6} and the two NULL-id rows -> 6 visible rows (NULL-key delete applied)
+select * from iceberg_eqnull_${uuid0}.eq_delete_db.eq_del_convert order by id;
+
+drop catalog iceberg_eqnull_${uuid0};
+shell: rm -rf /tmp/sr_eq_fixture > /dev/null || echo "exit 0" > /dev/null
