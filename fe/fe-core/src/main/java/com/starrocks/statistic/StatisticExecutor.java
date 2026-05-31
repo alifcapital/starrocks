@@ -19,6 +19,9 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.Database;
@@ -40,6 +43,7 @@ import com.starrocks.metric.MetricRepo;
 import com.starrocks.planner.ScanNode;
 import com.starrocks.qe.AuditInternalLog;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SimpleExecutor;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.StatementPlanner;
@@ -61,6 +65,7 @@ import com.starrocks.thrift.TStatisticData;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.type.JsonType;
 import com.starrocks.type.Type;
+import io.netty.buffer.Unpooled;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.logging.log4j.LogManager;
@@ -71,6 +76,7 @@ import org.apache.thrift.protocol.TCompactProtocol;
 import org.jetbrains.annotations.NotNull;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
@@ -143,6 +149,40 @@ public class StatisticExecutor {
 
         String sql = StatisticSQLBuilder.buildMultiColumnCombinedStatisticsSQL(queryTableIds);
         return executeStatisticDQL(context, sql);
+    }
+
+    public List<TStatisticData> queryExternalMultiColumnCombinedStats(ConnectContext context, List<String> tableUUIDs) {
+        if (tableUUIDs == null || tableUUIDs.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String sql = StatisticSQLBuilder.buildExternalMultiColumnCombinedStatisticsSQL(tableUUIDs);
+        return executeStatisticDQL(context, sql);
+    }
+
+    // Lists [catalog_name, db_name, table_name, column_names, update_time] rows of
+    // external_multi_column_statistics for SHOW MULTIPLE COLUMNS STATS META. External multi-column statistics
+    // keep no in-memory meta, so the statistics table itself is queried as the source of truth.
+    public static List<List<String>> queryExternalMultiColumnStatsMetaRows() {
+        if (!StatisticUtils.checkStatisticTables(
+                List.of(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME))) {
+            return Collections.emptyList();
+        }
+        String sql = "SELECT catalog_name, db_name, table_name, column_names, cast(update_time as varchar) FROM "
+                + StatsConstants.STATISTICS_DB_NAME + "." + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME;
+        List<TResultBatch> batches = SimpleExecutor.getRepoExecutor().executeDQL(sql);
+        List<List<String>> rows = Lists.newArrayList();
+        for (TResultBatch batch : ListUtils.emptyIfNull(batches)) {
+            for (ByteBuffer buffer : batch.getRows()) {
+                String jsonString = Unpooled.copiedBuffer(buffer).toString(Charset.defaultCharset());
+                JsonArray data = JsonParser.parseString(jsonString).getAsJsonObject().get("data").getAsJsonArray();
+                List<String> row = Lists.newArrayList();
+                for (JsonElement element : data) {
+                    row.add(element.getAsString());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private static Table lookupTable(Long dbId, Long tableId) {

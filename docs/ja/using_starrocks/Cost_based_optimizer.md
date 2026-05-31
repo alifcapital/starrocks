@@ -86,7 +86,7 @@ v3.5.0 以降、StarRocks は複数列の共同統計収集をサポートして
 - Agg ノードの評価。
 - 集約プッシュダウン戦略に適用する。
 
-現在、複数列の結合統計量収集は手動収集のみをサポートしています。デフォルトのタイプはサンプリング収集です。多列統計は、各 StarRocks クラスタの `_statistics_` データベースの `multi_column_statistics` テーブルに格納されます。クエリを実行すると、以下のような情報が返されます：
+現在、複数列の結合統計量収集は手動収集のみをサポートしています。デフォルトのタイプはサンプリング収集です。多列統計は、各 StarRocks クラスタの `_statistics_` データベースの `multi_column_statistics` テーブルに格納されます。外部テーブルの複数列の結合統計情報は、同じデータベースの `external_multi_column_statistics` テーブルに格納されます。クエリを実行すると、以下のような情報が返されます：
 
 ```sql
 mysql> select * from _statistics_.multi_column_statistics \G
@@ -646,9 +646,9 @@ KILL ANALYZE <ID>
 
 ## 外部テーブルの統計情報を収集する
 
-v3.2.0 以降、StarRocks は Hive、Iceberg、Hudi テーブルの統計情報の収集をサポートしています。構文は StarRocks 内部テーブルの収集と似ています。**ただし、手動完全収集、手動ヒストグラム収集（v3.2.7 以降）、および自動完全収集のみがサポートされています。** v3.3.0 以降、StarRocks は Delta Lake テーブルの統計情報と STRUCT のサブフィールドの統計情報の収集をサポートしています。v3.4.0 以降、StarRocks はクエリトリガーによる ANALYZE タスクを介した自動統計収集をサポートしています。v3.4.0以降、StarRocks では外部テーブルに対する手動サンプル収集（`ANALYZE TABLE ... SAMPLE`）もサポートされています。ヒストグラムの収集は、現時点では Hive 外部テーブルでのみサポートされています。
+v3.2.0 以降、StarRocks は Hive、Iceberg、Hudi テーブルの統計情報の収集をサポートしています。構文は StarRocks 内部テーブルの収集と似ています。**ただし、手動完全収集、手動ヒストグラム収集（v3.2.7 以降）、および自動完全収集のみがサポートされています。** v3.3.0 以降、StarRocks は Delta Lake テーブルの統計情報と STRUCT のサブフィールドの統計情報の収集をサポートしています。v3.4.0 以降、StarRocks はクエリトリガーによる ANALYZE タスクを介した自動統計収集をサポートしています。v3.4.0以降、StarRocks では外部テーブルに対する手動サンプル収集（`ANALYZE TABLE ... SAMPLE`）もサポートされています。ヒストグラムの収集は、現時点では Hive 外部テーブルでのみサポートされています。また、外部テーブルに対する複数列の結合統計情報の手動完全収集（`ANALYZE FULL TABLE ... MULTIPLE COLUMNS`）もサポートされています。外部テーブルでは複数列の結合統計情報のサンプル収集はサポートされていません。
 
-収集された統計情報は `default_catalog` の `_statistics_` の `external_column_statistics` テーブルに保存されます。Hive Metastore には保存されず、他の検索エンジンと共有することはできません。Hive/Iceberg/Hudi テーブルの統計情報が収集されているかどうかを確認するために、`default_catalog._statistics_.external_column_statistics` テーブルからデータをクエリできます。
+収集された統計情報は `default_catalog` の `_statistics_` の `external_column_statistics` テーブルに保存されます。Hive Metastore には保存されず、他の検索エンジンと共有することはできません。Hive/Iceberg/Hudi テーブルの統計情報が収集されているかどうかを確認するために、`default_catalog._statistics_.external_column_statistics` テーブルからデータをクエリできます。外部テーブルの複数列の結合統計情報は `default_catalog._statistics_.external_multi_column_statistics` テーブルに保存され、`SHOW MULTIPLE COLUMNS STATS META` の結果に表示されます。
 
 以下は `external_column_statistics` から統計データをクエリする例です。
 
@@ -675,7 +675,7 @@ partition_name:
 外部テーブルの統計情報を収集する際には、以下の制限が適用されます：
 
 - Hive、Iceberg、Hudi、および Delta Lake（v3.3.0 以降）テーブルの統計情報のみを収集できます。
-- サポートされているのは、手動フル収集、手動ヒストグラム収集（v3.2.7 以降）、自動フル収集、クエリによる収集（v3.4.0 以降）、および手動サンプル収集（v3.4.0 以降）のみです。ヒストグラム収集は、Hive 外部テーブルでのみサポートされています。
+- サポートされているのは、手動フル収集、手動ヒストグラム収集（v3.2.7 以降）、自動フル収集、クエリによる収集（v3.4.0 以降）、手動サンプル収集（v3.4.0 以降）、および複数列の結合統計情報の手動フル収集のみです。ヒストグラム収集は、Hive 外部テーブルでのみサポートされています。外部テーブルでは複数列の結合統計情報のサンプル収集はサポートされていません。
 - システムが完全統計を自動的に収集するには、Analyze ジョブを作成する必要があります。これは、StarRocks 内部テーブルの統計を収集する場合とは異なり、システムがデフォルトでバックグラウンドで行います。
 - 自動収集タスクの場合：
   - 特定のテーブルの統計情報のみを収集できます。データベース内のすべてのテーブルの統計情報や外部カタログ内のすべてのデータベースの統計情報を収集することはできません。

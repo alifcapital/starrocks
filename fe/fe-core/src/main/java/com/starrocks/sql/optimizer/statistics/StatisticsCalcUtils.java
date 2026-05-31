@@ -94,6 +94,33 @@ public class StatisticsCalcUtils {
     public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,
                                                                       Statistics.Builder builder,
                                                                       Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        Map<String, ColumnRefOperator> columnNameToRefMap = colRefToColumnMetaMap.keySet().stream()
+                .collect(Collectors.toMap(ColumnRefOperator::getName, Function.identity()));
+
+        // External (connector) tables: combined NDV is keyed by column names (no stable numeric unique id), so map
+        // the names directly to the scan's ColumnRefOperators.
+        if (table.isAnalyzableExternalTable()) {
+            Map<Set<String>, Long> externalMcStats = GlobalStateMgr.getCurrentState().getStatisticStorage()
+                    .getExternalMultiColumnCombinedStatistics(table);
+            for (Map.Entry<Set<String>, Long> entry : externalMcStats.entrySet()) {
+                Set<ColumnRefOperator> mcRefOperators = new HashSet<>(entry.getKey().size());
+                boolean allColumnsFound = true;
+                for (String columnName : entry.getKey()) {
+                    ColumnRefOperator columnRef = columnNameToRefMap.get(columnName);
+                    if (columnRef == null) {
+                        allColumnsFound = false;
+                        break;
+                    }
+                    mcRefOperators.add(columnRef);
+                }
+                if (allColumnsFound) {
+                    builder = builder.addMultiColumnStatistics(mcRefOperators,
+                            new MultiColumnCombinedStats(entry.getValue()));
+                }
+            }
+            return builder;
+        }
+
         if (!table.isNativeTableOrMaterializedView()) {
             return builder;
         }
@@ -103,9 +130,6 @@ public class StatisticsCalcUtils {
         if (cachedMcStats == null || cachedMcStats == MultiColumnCombinedStatistics.EMPTY) {
             return builder;
         }
-
-        Map<String, ColumnRefOperator> columnNameToRefMap = colRefToColumnMetaMap.keySet().stream()
-                .collect(Collectors.toMap(ColumnRefOperator::getName, Function.identity()));
 
         Map<Integer, String> uniqueIdToColumnNameMap = new HashMap<>(table.getBaseSchema().size());
         table.getBaseSchema().forEach(column ->

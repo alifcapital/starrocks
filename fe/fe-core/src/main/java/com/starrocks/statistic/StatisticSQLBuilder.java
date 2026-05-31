@@ -107,6 +107,15 @@ public class StatisticSQLBuilder {
                     + " FROM " + MULTI_COLUMN_STATISTICS_TABLE_NAME
                     + " WHERE $predicate";
 
+    // External tables are keyed by table_uuid and have no numeric db_id/table_id; we fill those two slots with 0 so
+    // the row matches the version-13 layout (db_id, table_id, column_ids, ndv) that BE serializes into TStatisticData.
+    // column_names is placed in the column_ids slot and read back as TStatisticData.columnName.
+    private static final String QUERY_EXTERNAL_MULTI_COLUMNS_COMBINED_STATISTICS_TEMPLATE =
+            "SELECT cast(" + STATISTIC_QUERY_MULTI_COLUMN_VERSION + " as INT), cast(0 as BIGINT), cast(0 as BIGINT),"
+                    + " column_names, ndv"
+                    + " FROM " + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                    + " WHERE $predicate";
+
     private static final VelocityEngine DEFAULT_VELOCITY_ENGINE;
 
     static {
@@ -225,6 +234,13 @@ public class StatisticSQLBuilder {
         context.put("predicate", "table_id in (" +
                 tableIds.stream().map(String::valueOf).collect(Collectors.joining(", ")) + ")");
         return build(context, QUERY_MULTI_COLUMNS_COMBINED_STATISTICS_TEMPLATE);
+    }
+
+    public static String buildExternalMultiColumnCombinedStatisticsSQL(List<String> tableUUIDs) {
+        VelocityContext context = new VelocityContext();
+        context.put("predicate", "table_uuid in (" +
+                tableUUIDs.stream().map(uuid -> "'" + uuid + "'").collect(Collectors.joining(", ")) + ")");
+        return build(context, QUERY_EXTERNAL_MULTI_COLUMNS_COMBINED_STATISTICS_TEMPLATE);
     }
 
     private static Map<String, List<String>> groupByTypes(List<String> columnNames, List<Type> columnTypes,

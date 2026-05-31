@@ -24,6 +24,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public interface StatisticStorage {
@@ -88,6 +89,15 @@ public interface StatisticStorage {
 
     default MultiColumnCombinedStatistics getMultiColumnCombinedStatistics(Long tableId) {
         return MultiColumnCombinedStatistics.EMPTY;
+    }
+
+    // External (connector) tables: combined NDV keyed by the set of column names (external columns have no stable
+    // numeric unique id), looked up by table UUID inside the implementation.
+    default Map<Set<String>, Long> getExternalMultiColumnCombinedStatistics(Table table) {
+        return Map.of();
+    }
+
+    default void expireExternalMultiColumnStatistics(String tableUUID) {
     }
 
     default void expireMultiColumnStatistics(Long tableId) {

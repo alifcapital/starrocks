@@ -579,6 +579,10 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 statistics = StatisticsUtils.buildDefaultStatistics(colRefToColumnMetaMap.keySet());
             }
 
+            Statistics.Builder mcBuilder = Statistics.buildFrom(statistics);
+            mcBuilder = StatisticsCalcUtils.estimateMultiColumnCombinedStats(table, mcBuilder, colRefToColumnMetaMap);
+            statistics = mcBuilder.build();
+
             context.setStatistics(statistics);
             if (node.isLogical()) {
                 boolean hasUnknownColumns = statistics.getColumnStatistics().values().stream()
@@ -607,6 +611,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null,
                     node.getPredicate(), node.getLimit(), TvrTableSnapshot.empty());
+            Statistics.Builder mcBuilder = Statistics.buildFrom(stats);
+            mcBuilder = StatisticsCalcUtils.estimateMultiColumnCombinedStats(table, mcBuilder, columnRefOperatorColumnMap);
+            stats = mcBuilder.build();
             context.setStatistics(stats);
 
             if (node.isLogical()) {
@@ -802,6 +809,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                                                     Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
                                                     long outputRowCount) {
         Statistics.Builder builder = StatisticsCalcUtils.estimateScanColumns(table, colRefToColumnMetaMap, optimizerContext);
+        builder = StatisticsCalcUtils.estimateMultiColumnCombinedStats(table, builder, colRefToColumnMetaMap);
         builder.setOutputRowCount(outputRowCount);
 
         context.setStatistics(builder.build());

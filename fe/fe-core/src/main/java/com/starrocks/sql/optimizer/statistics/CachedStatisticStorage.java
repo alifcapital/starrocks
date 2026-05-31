@@ -49,6 +49,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -81,6 +82,9 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
 
     AsyncLoadingCache<Long, Optional<MultiColumnCombinedStatistics>> multiColumnStats =
             createAsyncLoadingCache(new MultiColumnCombinedStatsCacheLoader());
+
+    AsyncLoadingCache<String, Optional<Map<Set<String>, Long>>> externalMultiColumnStats =
+            createAsyncLoadingCache(new ExternalMultiColumnCombinedStatsCacheLoader());
 
     @Override
     public Map<Long, Optional<Long>> getTableStatistics(Long tableId, Collection<Partition> partitions) {
@@ -703,6 +707,38 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     public void expireMultiColumnStatistics(Long tableId) {
         Preconditions.checkNotNull(tableId);
         multiColumnStats.synchronous().invalidate(tableId);
+    }
+
+    @Override
+    public Map<Set<String>, Long> getExternalMultiColumnCombinedStatistics(Table table) {
+        if (table == null || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return Map.of();
+        }
+
+        try {
+            CompletableFuture<Optional<Map<Set<String>, Long>>> result =
+                    externalMultiColumnStats.get(table.getUUID());
+            if (Config.enable_sync_statistics_load) {
+                result.get();
+            }
+            if (result.isDone()) {
+                return result.get().orElse(Map.of());
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("Failed to load external multi-column combined statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Failed to load external multi-column combined statistics", e);
+        }
+        return Map.of();
+    }
+
+    @Override
+    public void expireExternalMultiColumnStatistics(String tableUUID) {
+        if (tableUUID == null) {
+            return;
+        }
+        externalMultiColumnStats.synchronous().invalidate(tableUUID);
     }
 
     @Override

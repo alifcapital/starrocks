@@ -278,6 +278,19 @@ public class StatisticsCollectJobFactory {
                 StatsConstants.AnalyzeType.FULL, scheduleType, properties);
     }
 
+    public static StatisticsCollectJob buildExternalMultiColumnStatisticsCollectJob(
+            String catalogName, Database db, Table table,
+            List<String> columnNames, List<Type> columnTypes,
+            StatsConstants.AnalyzeType analyzeType, StatsConstants.ScheduleType scheduleType,
+            Map<String, String> properties, List<StatisticsType> statisticsTypes,
+            List<List<String>> columnGroups) {
+        if (columnTypes == null || columnTypes.isEmpty()) {
+            columnTypes = columnNames.stream().map(col -> table.getColumn(col).getType()).collect(Collectors.toList());
+        }
+        return new ExternalMultiColumnStatisticsCollectJob(catalogName, db, table, columnNames, columnTypes,
+                analyzeType, scheduleType, properties, statisticsTypes, columnGroups);
+    }
+
     private static List<String> needCollectStatsColumns(ExternalBasicStatsMeta basicStatsMeta, Table table,
                                                         List<String> columnNames, LocalDateTime tableUpdateTime,
                                                         long timeInterval) {

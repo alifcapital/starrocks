@@ -435,6 +435,17 @@ public class StatisticUtils {
                     new ColumnDef("ndv", new TypeDef(IntegerType.BIGINT)),
                     new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
             );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("column_ids", new TypeDef(TypeFactory.createVarcharType(65530))),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("column_names", new TypeDef(columnNameType)),
+                    new ColumnDef("ndv", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
         } else {
             throw new StarRocksPlannerException("Not support stats table " + tableName, ErrorType.INTERNAL_ERROR);
         }

@@ -86,7 +86,7 @@ update_time: 2023-12-01 15:17:10.274000
 - 评估 Agg 节点.
 - 应用于聚合下推策略。
 
-目前多列联合统计信息仅支持手动采集。手动采集时默认是抽样采集。多列联合统计信息存储在 StarRocks 集群 `_statistics_` 数据库的 `multi_column_statistics` 表中。查询时会返回类似如下信息：
+目前多列联合统计信息仅支持手动采集。手动采集时默认是抽样采集。多列联合统计信息存储在 StarRocks 集群 `_statistics_` 数据库的 `multi_column_statistics` 表中。外表的多列联合统计信息存储在同一数据库的 `external_multi_column_statistics` 表中。查询时会返回类似如下信息：
 
 ```sql
 mysql> select * from _statistics_.multi_column_statistics \G
@@ -634,9 +634,9 @@ KILL ANALYZE <ID>
 
 ## 采集外表的统计信息
 
-从 3.2 版本起，支持采集 Hive、Iceberg、Hudi 表的统计信息。**采集的语法和内表相同，支持手动全量采集、手动直方图采集（自 v3.2.7 起）、自动全量采集**。自 v3.3.0 起，支持采集 Delta Lake 表的统计信息，并支持采集 STRUCT 子列的统计信息。自 v3.4.0 起，支持通过查询触发 ANALYZE 任务自动收集统计信息。自 v3.4.0 起，还支持手动抽样采集（`ANALYZE TABLE ... SAMPLE`）。目前 Histogram 仅支持 Hive 外表。
+从 3.2 版本起，支持采集 Hive、Iceberg、Hudi 表的统计信息。**采集的语法和内表相同，支持手动全量采集、手动直方图采集（自 v3.2.7 起）、自动全量采集**。自 v3.3.0 起，支持采集 Delta Lake 表的统计信息，并支持采集 STRUCT 子列的统计信息。自 v3.4.0 起，支持通过查询触发 ANALYZE 任务自动收集统计信息。自 v3.4.0 起，还支持手动抽样采集（`ANALYZE TABLE ... SAMPLE`）。目前 Histogram 仅支持 Hive 外表。此外，还支持对外表手动全量采集多列联合统计信息（`ANALYZE FULL TABLE ... MULTIPLE COLUMNS`）；外表暂不支持抽样采集多列联合统计信息。
 
-收集的统计信息会写入到 `_statistics_` 数据库的 `external_column_statistics` 表中，不会写入到 Hive Metastore 中，因此无法和其他查询引擎共用。您可以通过查询 `default_catalog._statistics_.external_column_statistics` 表中是否写入了表的统计信息。
+收集的统计信息会写入到 `_statistics_` 数据库的 `external_column_statistics` 表中，不会写入到 Hive Metastore 中，因此无法和其他查询引擎共用。您可以通过查询 `default_catalog._statistics_.external_column_statistics` 表中是否写入了表的统计信息。外表的多列联合统计信息存储在 `default_catalog._statistics_.external_multi_column_statistics` 表中，并会在 `SHOW MULTIPLE COLUMNS STATS META` 的结果中展示。
 
 查询时，会返回如下信息：
 
@@ -663,7 +663,7 @@ partition_name:
 对外表采集统计信息时，有如下限制：
 
 - 目前只支持采集 Hive、Iceberg、Hudi、Delta Lake（自 v3.3.0 起） 表的统计信息。
-- 目前支持手动全量采集、手动直方图采集（自 v3.2.7 起）、自动全量采集、查询触发采集（自 v3.4.0 起）、手动抽样采集（自 v3.4.0 起）。Histogram 仅支持 Hive 外表。
+- 目前支持手动全量采集、手动直方图采集（自 v3.2.7 起）、自动全量采集、查询触发采集（自 v3.4.0 起）、手动抽样采集（自 v3.4.0 起）、手动全量采集多列联合统计信息。Histogram 仅支持 Hive 外表。外表暂不支持抽样采集多列联合统计信息。
 - 全量自动采集，需要创建一个采集任务，系统不会默认自动采集外部数据源的统计信息。
 - 对于自动采集任务：
   - 只支持采集指定表的统计信息，不支持采集所有数据库、数据库下所有表的统计信息。

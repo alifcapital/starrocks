@@ -237,6 +237,7 @@ import com.starrocks.sql.ast.ShowTransactionStmt;
 import com.starrocks.sql.ast.ShowUserPropertyStmt;
 import com.starrocks.sql.ast.ShowUserStmt;
 import com.starrocks.sql.ast.ShowVariablesStmt;
+import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.ast.UserRef;
 import com.starrocks.sql.ast.expression.BinaryPredicate;
@@ -272,7 +273,9 @@ import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
+import com.starrocks.statistic.StatisticExecutor;
 import com.starrocks.statistic.StatisticUtils;
+import com.starrocks.statistic.StatsConstants;
 import com.starrocks.system.Backend;
 import com.starrocks.system.Frontend;
 import com.starrocks.system.SystemInfoService;
@@ -2908,6 +2911,18 @@ public class ShowExecutor {
                 }
             }
 
+            // External tables keep no in-memory multi-column meta; list the statistics table directly.
+            try {
+                for (List<String> meta : StatisticExecutor.queryExternalMultiColumnStatsMetaRows()) {
+                    List<String> result = ShowExecutor.showExternalMultiColumnStatsMeta(context, meta);
+                    if (result != null) {
+                        rows.add(result);
+                    }
+                }
+            } catch (Exception e) {
+                LOG.warn("Failed to list external multi-column combined statistics", e);
+            }
+
             ShowResultSetMetaData showResultSetMetaData = new ShowResultMetaFactory().getMetadata(stmt);
             rows = doPredicate(stmt, showResultSetMetaData, rows);
             rows = doOrderBy(rows, stmt.getOrderByPairs());
@@ -3660,6 +3675,43 @@ public class ShowExecutor {
         row.set(5, meta.getUpdateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
         row.set(6, meta.getProperties() == null ? "{}" : meta.getProperties().toString());
 
+        return row;
+    }
+
+    // meta holds [catalog_name, db_name, table_name, column_names, update_time] read from
+    // external_multi_column_statistics, see StatisticExecutor.queryExternalMultiColumnStatsMetaRows.
+    public static List<String> showExternalMultiColumnStatsMeta(ConnectContext context, List<String> meta) {
+        String catalogName = meta.get(0);
+        String dbName = meta.get(1);
+        String tableName = meta.get(2);
+
+        Database db;
+        Table table;
+        try {
+            db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, catalogName, dbName);
+            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, catalogName, dbName, tableName);
+        } catch (Exception e) {
+            // The catalog(HMS/Glue...) may not be connected, so the table can not be found. Just skip it.
+            return null;
+        }
+        if (db == null || table == null) {
+            return null;
+        }
+        try {
+            Authorizer.checkAnyActionOnTableLikeObject(context, db.getFullName(), table);
+        } catch (AccessDeniedException e) {
+            return null;
+        }
+
+        List<String> row = Lists.newArrayList("", "", "", "", "", "", "");
+        row.set(0, catalogName + "." + dbName);
+        row.set(1, tableName);
+        row.set(2, Arrays.asList(meta.get(3).split(",")).toString());
+        // External multi-column collection is FULL-only and gathers the combined NDV.
+        row.set(3, StatsConstants.AnalyzeType.FULL.name());
+        row.set(4, StatisticsType.MCDISTINCT.name());
+        row.set(5, meta.get(4));
+        row.set(6, "{}");
         return row;
     }
 }

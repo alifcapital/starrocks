@@ -219,8 +219,12 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException(
                             "Analyze external table only support hive, iceberg, deltalake, paimon and odps table",
                             tableName.toString());
-                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc) {
-                    throw new SemanticException("Don't support analyze multi-columns combined statistics on external table");
+                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc && statement.isSample()) {
+                    // Sampled multi-column collection is not implemented for external tables yet (the GEE estimator
+                    // would have to run over a partition sample). Require FULL so we never silently full-scan under
+                    // the default SAMPLE type that multi-column analyze otherwise implies.
+                    throw new SemanticException("Analyze multi-column combined statistics on external table only "
+                            + "supports FULL collection for now, please use ANALYZE FULL TABLE ... MULTIPLE COLUMNS");
                 }
 
                 statement.setExternal(true);
