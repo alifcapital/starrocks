@@ -85,6 +85,15 @@ public abstract class StatisticsCollectJob {
     // partition_id -> tablet_id -> row_count
     protected com.google.common.collect.Table<Long, Long, Long> partitionTabletRowCounts = HashBasedTable.create();
 
+    // Context of a single collect run under the external staggered schedule (see
+    // Config.enable_statistic_auto_collect_staggered_schedule): captured by the factory when this
+    // collect job is instantiated and consumed by ExternalAnalyzeJob when the run finishes. A
+    // collect job instance describes exactly one run, so unlike state on the analyze job itself
+    // this context cannot be overwritten by a concurrent run or a config toggle.
+    private LocalDateTime scheduleSnapshot;
+    private boolean offScheduleCollect;
+    private long effectiveIntervalSeconds;
+
     protected StatisticsCollectJob(Database db, Table table, List<String> columnNames,
                                    StatsConstants.AnalyzeType analyzeType, StatsConstants.ScheduleType scheduleType,
                                    Map<String, String> properties) {
@@ -128,6 +137,25 @@ public abstract class StatisticsCollectJob {
                 .isAnalyzeCancelled(analyzeStatus.getId())) {
             throw new DdlException("USER_CANCEL: kill analyze");
         }
+    }
+
+    public void setStaggeredRunContext(LocalDateTime scheduleSnapshot, boolean offScheduleCollect,
+                                       long effectiveIntervalSeconds) {
+        this.scheduleSnapshot = scheduleSnapshot;
+        this.offScheduleCollect = offScheduleCollect;
+        this.effectiveIntervalSeconds = effectiveIntervalSeconds;
+    }
+
+    public LocalDateTime getScheduleSnapshot() {
+        return scheduleSnapshot;
+    }
+
+    public boolean isOffScheduleCollect() {
+        return offScheduleCollect;
+    }
+
+    public long getEffectiveIntervalSeconds() {
+        return effectiveIntervalSeconds;
     }
 
     public String getCatalogName() {

@@ -200,6 +200,7 @@ StarRocks 提供灵活的信息采集方式，您可以根据业务场景选择�
 | statistic_auto_collect_small_table_size     | LONG    | 5368709120   | 自动全量采集任务的小表阈值，默认 5 GB，单位：Byte。                         |
 | statistic_auto_collect_small_table_interval | LONG    | 0            | 自动全量采集任务的小表采集间隔，单位：秒。                               |
 | statistic_auto_collect_large_table_interval | LONG    | 43200        | 自动全量采集任务的大表采集间隔，默认 12 小时，单位：秒。                               |
+| enable_statistic_auto_collect_staggered_schedule | BOOLEAN | FALSE | 是否将外部表的自动统计信息采集均匀分散到采集间隔内。开启后，每个采集任务首次采集时会在间隔内随机分散其下次采集时间；之后每次采集都安排在实际采集时间加一个间隔之后，使共享同一间隔的多个任务在不同时间点到期，避免同时触发。间隔取任务的 `statistic_auto_collect_interval` 属性（如已设置），否则根据表大小取 `statistic_auto_collect_small_table_interval` 或 `statistic_auto_collect_large_table_interval`。 |
 | statistic_auto_collect_ratio                | DOUBLE  | 0.8          | 触发自动统计信息收集的健康度阈值。如果统计信息的健康度小于该阈值，则触发自动采集。           |
 | statistic_auto_collect_sample_threshold     | DOUBLE  | 0.3          | 触发自动统计信息抽样收集的健康度阈值。如果统计信息的健康度小于该阈值，则触发自动抽样采集。       |
 | statistic_max_full_collect_data_size        | LONG    | 107374182400 | 自动统计信息采集的单次任务最大数据量，默认 100 GB。单位：Byte。如果超过该值，则放弃全量采集，转为对该表进行抽样采集。 |
@@ -883,7 +884,25 @@ PROPERTIES ("statistic_auto_collect_interval" = "5");
 Query OK, 0 rows affected (0.01 sec)
 ```
 
-示例：
+#### 将自动采集均匀分散到采集间隔内
+
+默认情况下，采集任务的下一次采集会在上一次采集结束的一个采集间隔之后到期。如果多个任务曾同时采集过（例如由同一个批处理脚本创建），它们将保持同步：所有任务在同一个采集窗口内同时到期，导致周期性的采集风暴，而间隔内的其余时间处于空闲。
+
+如需将采集均匀分散到间隔内，请将 FE 配置项 `enable_statistic_auto_collect_staggered_schedule` 设为 `true`（动态参数，默认 `false`）。其调度行为如下：
+
+- 任务的首次采集照常运行。成功后，该任务的下次采集时间会被随机设置在一个采集间隔内的某个时间点，使同时采集过的任务彼此错开。
+- 此后，任务在其专属的预定时间点每间隔检查一次：
+  - 如果表自上次采集后发生了变化，则采集统计信息，并将下次检查安排在实际采集时间加一个间隔之后。
+  - 如果表没有变化，则不采集，下次检查推迟一个间隔。
+- 间隔取任务的 `statistic_auto_collect_interval` 属性（如已设置），否则根据表大小取 `statistic_auto_collect_small_table_interval` 或 `statistic_auto_collect_large_table_interval`。当生效的间隔发生变化时，任务的调度会重新随机化一次。
+
+注意事项：
+
+- 仅当生效的采集间隔大于 0 时分散调度才会生效。`statistic_auto_collect_small_table_interval` 默认为 `0`，因此小表（行数小于 `statistic_auto_collect_small_table_rows`）上的任务除非显式设置间隔，否则保持旧行为。对于从未采集过统计信息的大表，在统计信息存在之前行数未知，因此随机分散在第二次采集（而非第一次）后建立。
+- 任务的调度建立后，其计划采集之间至少间隔一个采集间隔。两个例外：首次分散采集与上一次采集之间可能不足一个间隔（这正是随机分散本身）；尚无统计信息的列会在调度之外被立即采集。
+- 统计信息的新鲜度受调度约束：在预定检查之后立即发生的数据变化要等到下一次检查才会被采集，最坏情况下统计信息滞后数据最多两个间隔。
+- 开启该选项后的第一个周期仍按旧调度采集（最后一次同步风暴）；分散效果在每个任务于新调度下完成首次采集后生效。
+- 该调度仅适用于针对具体表的采集任务。手动 `ANALYZE TABLE` 和查询触发的采集任务不影响该调度。尚无统计信息的列会立即采集，无需等待预定时间。
 
 #### 查看 Analyze 任务执行状态
 

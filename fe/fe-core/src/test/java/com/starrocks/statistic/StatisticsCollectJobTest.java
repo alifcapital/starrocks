@@ -645,7 +645,8 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
 
         Assertions.assertEquals("ExternalAnalyzeJob{id=-1, dbName=partitioned_db, tableName=t1, columns=null, " +
                 "type=FULL, scheduleType=SCHEDULE, properties={}, status=FINISH, " +
-                "workTime=2023-01-01T12:00, reason='test'}", externalAnalyzeJob.toString());
+                "workTime=2023-01-01T12:00, reason='test', nextCollectTime=null, collectIntervalUsed=0}",
+                externalAnalyzeJob.toString());
     }
 
     @Test
@@ -703,6 +704,148 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
         externalAnalyzeJob.run(statsConnectCtx, statisticExecutor);
         Assertions.assertEquals(StatsConstants.ScheduleStatus.FAILED, externalAnalyzeJob.getStatus());
         Assertions.assertEquals("mock exception", externalAnalyzeJob.getReason());
+    }
+
+    private void mockExternalBasicStatsMeta(LocalDateTime columnCollectTime, List<String> columns) {
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public Map<AnalyzeMgr.StatsMetaKey, ExternalBasicStatsMeta> getExternalBasicStatsMetaMap() {
+                Map<AnalyzeMgr.StatsMetaKey, ExternalBasicStatsMeta> metaMap = Maps.newHashMap();
+                ExternalBasicStatsMeta meta = new ExternalBasicStatsMeta("hive0", "partitioned_db", "t1", null,
+                        StatsConstants.AnalyzeType.FULL, columnCollectTime, Maps.newHashMap());
+                for (String col : columns) {
+                    meta.addColumnStatsMeta(
+                            new ColumnStatsMeta(col, StatsConstants.AnalyzeType.FULL, columnCollectTime));
+                }
+                metaMap.put(new AnalyzeMgr.StatsMetaKey("hive0", "partitioned_db", "t1"), meta);
+                return metaMap;
+            }
+        };
+    }
+
+    @Test
+    public void testExternalAnalyzeJobStaggeredSchedule() {
+        List<String> allColumns = List.of("c1", "c2", "c3", "par_col");
+        LocalDateTime collectedLongAgo = LocalDateTime.now().minusDays(8);
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public void updateAnalyzeJobWithLog(AnalyzeJob job) {
+            }
+        };
+        new MockUp<StatisticUtils>() {
+            @Mock
+            public LocalDateTime getTableLastUpdateTime(Table table) {
+                return LocalDateTime.now().minusDays(1);
+            }
+        };
+
+        Map<String, String> jobProperties = Maps.newHashMap();
+        jobProperties.put(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "604800");
+        ExternalAnalyzeJob analyzeJob = new ExternalAnalyzeJob("hive0", "partitioned_db", "t1", null, null,
+                StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, jobProperties,
+                StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+
+        Config.enable_statistic_auto_collect_staggered_schedule = true;
+        long savedSmallTableInterval = Config.statistic_auto_collect_small_table_interval;
+        Config.statistic_auto_collect_small_table_interval = 0;
+        try {
+            // 1. no schedule yet: the legacy throttle applies; the table changed after the last
+            // collection -> collect; the run context carries a null snapshot and the interval
+            mockExternalBasicStatsMeta(collectedLongAgo, allColumns);
+            List<StatisticsCollectJob> statsJobs =
+                    StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(1, statsJobs.size());
+            Assertions.assertNull(statsJobs.get(0).getScheduleSnapshot());
+            Assertions.assertFalse(statsJobs.get(0).isOffScheduleCollect());
+            Assertions.assertEquals(604800, statsJobs.get(0).getEffectiveIntervalSeconds());
+
+            // 2. schedule in the future and every column has stats: gated, deadline untouched
+            LocalDateTime future = LocalDateTime.now().plusDays(3);
+            analyzeJob.setNextCollectTime(future);
+            analyzeJob.setCollectIntervalUsed(604800);
+            statsJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(0, statsJobs.size());
+            Assertions.assertEquals(future, analyzeJob.getNextCollectTime());
+
+            // 3. schedule in the future but some columns have no stats at all: collect only them,
+            // marked off-schedule
+            mockExternalBasicStatsMeta(collectedLongAgo, List.of("c1"));
+            statsJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(1, statsJobs.size());
+            Assertions.assertTrue(statsJobs.get(0).isOffScheduleCollect());
+            Assertions.assertFalse(statsJobs.get(0).getColumnNames().contains("c1"));
+            Assertions.assertEquals(future, statsJobs.get(0).getScheduleSnapshot());
+
+            // 4. due and the table changed since the last collection: collect on schedule
+            mockExternalBasicStatsMeta(collectedLongAgo, allColumns);
+            LocalDateTime due = LocalDateTime.now().minusHours(1);
+            analyzeJob.setNextCollectTime(due);
+            statsJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(1, statsJobs.size());
+            Assertions.assertFalse(statsJobs.get(0).isOffScheduleCollect());
+            Assertions.assertEquals(due, statsJobs.get(0).getScheduleSnapshot());
+
+            // 5. due but nothing changed: no collection AND the schedule still advances - by whole
+            // intervals from the old deadline, so overdue jobs keep their distinct phases
+            mockExternalBasicStatsMeta(LocalDateTime.now(), allColumns);
+            analyzeJob.setNextCollectTime(due);
+            statsJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(0, statsJobs.size());
+            Assertions.assertEquals(due.plusSeconds(604800), analyzeJob.getNextCollectTime());
+
+            // 6. the effective interval changed: one-time re-splay
+            analyzeJob.setNextCollectTime(future);
+            analyzeJob.setCollectIntervalUsed(999);
+            StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(604800, analyzeJob.getCollectIntervalUsed());
+            Assertions.assertNotEquals(future, analyzeJob.getNextCollectTime());
+
+            // 7. first collection splays the schedule within (collectTime, collectTime + interval]
+            mockExternalBasicStatsMeta(collectedLongAgo, allColumns);
+            analyzeJob.setNextCollectTime(null);
+            analyzeJob.setCollectIntervalUsed(0);
+            statsJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertEquals(1, statsJobs.size());
+            StatisticsCollectJob statsJob = statsJobs.get(0);
+            analyzeJob.advanceCollectSchedule(statsJob);
+            Assertions.assertNotNull(analyzeJob.getNextCollectTime());
+            Assertions.assertTrue(analyzeJob.getNextCollectTime().isAfter(LocalDateTime.now()));
+            Assertions.assertFalse(analyzeJob.getNextCollectTime()
+                    .isAfter(LocalDateTime.now().plusSeconds(604800).plusMinutes(1)));
+            Assertions.assertEquals(604800, analyzeJob.getCollectIntervalUsed());
+
+            // 8. a due collection slides the schedule by exactly one interval from the collect time
+            LocalDateTime before = LocalDateTime.now().minusHours(1);
+            analyzeJob.setNextCollectTime(before);
+            statsJob.setStaggeredRunContext(before, false, 604800);
+            analyzeJob.advanceCollectSchedule(statsJob);
+            Assertions.assertTrue(analyzeJob.getNextCollectTime()
+                    .isAfter(LocalDateTime.now().plusSeconds(604800).minusMinutes(1)));
+
+            // 9. an off-schedule collection does not advance the schedule
+            analyzeJob.setNextCollectTime(future);
+            statsJob.setStaggeredRunContext(future, true, 604800);
+            analyzeJob.advanceCollectSchedule(statsJob);
+            Assertions.assertEquals(future, analyzeJob.getNextCollectTime());
+
+            // 10. a stale snapshot (a concurrent run already advanced the schedule) is not overwritten
+            statsJob.setStaggeredRunContext(before, false, 604800);
+            analyzeJob.advanceCollectSchedule(statsJob);
+            Assertions.assertEquals(future, analyzeJob.getNextCollectTime());
+
+            // 11. the effective interval dropped to zero (small-table reclassification under the
+            // default zero small-table interval): the dormant schedule is invalidated, so a later
+            // positive interval seeds a fresh splay instead of inheriting clustered deadlines
+            analyzeJob.setNextCollectTime(future);
+            analyzeJob.setCollectIntervalUsed(604800);
+            analyzeJob.getProperties().remove(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
+            StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(analyzeJob);
+            Assertions.assertNull(analyzeJob.getNextCollectTime());
+            Assertions.assertEquals(0, analyzeJob.getCollectIntervalUsed());
+        } finally {
+            Config.enable_statistic_auto_collect_staggered_schedule = false;
+            Config.statistic_auto_collect_small_table_interval = savedSmallTableInterval;
+        }
     }
 
     @Test

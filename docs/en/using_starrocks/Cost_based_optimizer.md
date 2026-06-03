@@ -202,6 +202,7 @@ The following table describes the default settings. If you need to modify them, 
 | statistic_auto_collect_small_table_size     | LONG    | 5368709120   | The threshold for determining whether a table is a small table for automatic full collection. A table whose size is greater than this value is considered a large table, whereas a table whose size is less than or equal to this value is considered a small table. Unit: Byte. Default value: 5368709120 (5 GB).                         |
 | statistic_auto_collect_small_table_interval | LONG    | 0         | The interval for automatically collecting full statistics of small tables. Unit: seconds.                              |
 | statistic_auto_collect_large_table_interval | LONG    | 43200        | The interval for automatically collecting full statistics of large tables. Unit: seconds. Default value: 43200 (12 hours).                               |
+| enable_statistic_auto_collect_staggered_schedule | BOOLEAN | FALSE | Whether to spread automatic statistics collection of external tables evenly across the collect interval. When enabled, the first collection of each analyze job randomly splays the job's next collection time within the interval; afterwards each next collection is scheduled exactly one interval after the actual collection, so jobs sharing the same interval become due at different times instead of all at once. The interval is the job's `statistic_auto_collect_interval` property if set, otherwise `statistic_auto_collect_small_table_interval` or `statistic_auto_collect_large_table_interval` based on the table size. |
 | statistic_auto_collect_ratio          | FLOAT    | 0.8               | The threshold for determining  whether the statistics for automatic collection are healthy. If statistics health is below this threshold, automatic collection is triggered. |
 | statistic_auto_collect_sample_threshold  | DOUBLE | 0.3   | The statistics health threshold for triggering automatic sampled collection. If the health value of statistics is lower than this threshold, automatic sampled collection is triggered. |
 | statistic_max_full_collect_data_size | LONG      | 107374182400      | The data size of the partitions for automatic collection to collect data. Unit: Byte. Default value: 107374182400 (100 GB). If the data size exceeds this value, full collection is discarded and sampled collection is performed instead. |
@@ -894,6 +895,26 @@ PROPERTIES ("statistic_auto_collect_interval" = "5");
 
 Query OK, 0 rows affected (0.01 sec)
 ```
+
+#### Spread automatic collection across the interval
+
+By default, the next collection of an analyze job becomes due one collection interval after its last collection. Jobs that were collected together (for example, created by one batch script) therefore stay synchronized: they all become due in the same collection window, producing a periodic burst of analyze tasks while the rest of the interval stays idle.
+
+To spread the collections evenly across the interval, set the FE configuration item `enable_statistic_auto_collect_staggered_schedule` to `true` (mutable, default `false`). It changes the scheduling as follows:
+
+- The first collection of a job runs as usual. After it succeeds, the job's next collection time is set to a random point within one collection interval, so jobs collected together drift apart permanently.
+- From then on, the job is checked once per interval at its own scheduled time:
+  - If the table has changed since the last collection, statistics are collected, and the next check is scheduled exactly one interval after the actual collection time.
+  - If the table has not changed, nothing is collected and the next check is scheduled one interval later.
+- The interval is the job's `statistic_auto_collect_interval` property if set, otherwise `statistic_auto_collect_small_table_interval` or `statistic_auto_collect_large_table_interval` based on the table size. When the effective interval changes, the job's schedule is re-randomized once.
+
+Notes:
+
+- Staggering takes effect only when the effective interval is greater than 0. The default `statistic_auto_collect_small_table_interval` is `0`, so jobs on small tables (fewer rows than `statistic_auto_collect_small_table_rows`) keep the legacy behavior unless you set an interval explicitly. For a large table whose statistics have never been collected, the row count is unknown until statistics exist, so the splay is established by the second collection rather than the first.
+- After a job's schedule is established, its scheduled collections are at least one interval apart. Two exceptions: the very first staggered collection can follow the previous one by less than an interval (that is the random splay itself), and columns that have no statistics yet are collected immediately, outside the schedule.
+- Statistics freshness is bounded by the schedule: a data change that happens right after a scheduled check is collected at the next one, so in the worst case statistics lag the data by up to two intervals.
+- The first cycle after enabling the option still collects on the legacy schedule (one last synchronized burst); spreading takes effect after each job completes its first collection under the new schedule.
+- The schedule applies only to analyze jobs targeting a specific table. Manual `ANALYZE TABLE` statements and query-triggered tasks do not affect it. Columns that have no statistics yet are collected immediately without waiting for the scheduled time.
 
 #### View the status of an automatic collection task
 

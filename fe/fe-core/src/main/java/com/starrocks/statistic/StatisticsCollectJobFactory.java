@@ -23,7 +23,6 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.common.Config;
 import com.starrocks.connector.ConnectorPartitionTraits;
-import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.monitor.unit.ByteSizeUnit;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
@@ -39,12 +38,14 @@ import org.apache.iceberg.util.PropertyUtil;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -159,6 +160,11 @@ public class StatisticsCollectJobFactory {
         }
     }
 
+    /**
+     * NOT a pure builder: under the staggered schedule this may mutate and journal the analyze
+     * job's schedule (a re-splay when the effective interval changed, or advancing the schedule
+     * of a due job whose table has not changed). See createExternalAnalyzeJob.
+     */
     public static List<StatisticsCollectJob> buildExternalStatisticsCollectJob(ExternalAnalyzeJob externalAnalyzeJob) {
         ConnectContext context = new ConnectContext();
 
@@ -331,36 +337,111 @@ public class StatisticsCollectJobFactory {
         if (columnNames == null || columnNames.isEmpty()) {
             columnNames = StatisticUtils.getCollectibleColumns(table);
         }
+        // the staggered schedule is a single per-job state, so it only fits jobs targeting one
+        // specific table (the only supported form for external auto collection); a job expanded to
+        // several tables stays on the legacy schedule
+        boolean staggeredCandidate = Config.enable_statistic_auto_collect_staggered_schedule
+                && !job.isAnalyzeAllDb() && !job.isAnalyzeAllTable();
+        // computing the interval loads the statistics cache; keep the legacy first-collection path
+        // (no meta, flag off) free of that cost
+        long timeInterval = basicStatsMeta != null || staggeredCandidate ?
+                StatisticUtils.getExternalAutoCollectInterval(table, job.getProperties(), columnNames) : 0;
+        // a non-positive interval (the small-table default is 0) keeps the legacy path: a
+        // zero-length schedule would journal an advance on every no-change pass
+        boolean staggeredSchedule = staggeredCandidate && timeInterval > 0;
+        if (staggeredCandidate && !staggeredSchedule && job.getNextCollectTime() != null) {
+            // the effective interval dropped to zero (e.g. the table was reclassified as small under
+            // the default zero small-table interval): invalidate the dormant schedule. Otherwise
+            // legacy collections keep sliding it with the stale interval, and when the interval
+            // becomes positive again it matches collectIntervalUsed, so the re-splay never runs and
+            // jobs that went through the zero-interval period together stay clustered. With the
+            // schedule invalidated, the first collection after the interval turns positive seeds a
+            // fresh splay.
+            synchronized (job) {
+                job.setNextCollectTime(null);
+                job.setCollectIntervalUsed(0);
+            }
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithLog(job);
+        }
+        // the schedule is read once and the same value feeds the gate and the run context: a
+        // concurrent run may move job.nextCollectTime while this pass is deciding, and a context
+        // stamped with the mover's value would defeat the snapshot guard in advanceCollectSchedule
+        LocalDateTime scheduleSnapshot = job.getNextCollectTime();
+        boolean offScheduleCollect = false;
         List<String> needCollectStatsColumns;
         if (basicStatsMeta != null) {
-            // check table row count
-            List<ConnectorTableColumnStats> columnStatisticList =
-                    GlobalStateMgr.getCurrentState().getStatisticStorage()
-                            .getConnectorTableStatisticsSync(table, columnNames);
-            List<ConnectorTableColumnStats> validColumnStatistics = columnStatisticList.stream().
-                    filter(columnStatistic -> !columnStatistic.isUnknown()).toList();
-
-            // use small table row count as default table row count
-            long tableRowCount = Config.statistic_auto_collect_small_table_rows - 1;
-            if (!validColumnStatistics.isEmpty()) {
-                tableRowCount = validColumnStatistics.get(0).getRowCount();
+            if (staggeredSchedule) {
+                // staggered schedule: the job's nextCollectTime decides when to collect, the
+                // table-update check below decides whether there is anything to collect. The schedule
+                // is created by the job's first successful collection (see ExternalAnalyzeJob), so a
+                // null nextCollectTime passes the gate.
+                if (scheduleSnapshot != null && job.getCollectIntervalUsed() != timeInterval) {
+                    // the effective interval changed (job property, small/large reclassification):
+                    // re-splay so jobs affected by the same change spread out again
+                    synchronized (job) {
+                        job.setCollectIntervalUsed(timeInterval);
+                        job.setNextCollectTime(StatisticUtils.splayNextCollectTime(LocalDateTime.now(),
+                                timeInterval));
+                        scheduleSnapshot = job.getNextCollectTime();
+                    }
+                    GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithLog(job);
+                }
+                if (scheduleSnapshot != null && LocalDateTime.now().isBefore(scheduleSnapshot)) {
+                    // off-schedule: only columns that have no stats at all may bypass the gate; such a
+                    // collection does not advance the schedule (see ExternalAnalyzeJob)
+                    offScheduleCollect = true;
+                    needCollectStatsColumns = columnNames.stream()
+                            .filter(col -> !basicStatsMeta.getColumnStatsMetaMap().containsKey(col))
+                            .collect(Collectors.toList());
+                    if (needCollectStatsColumns.isEmpty()) {
+                        LOG.debug("statistics job for table: {} is not due yet, next collect time: {}",
+                                table.getName(), scheduleSnapshot);
+                        return;
+                    }
+                } else {
+                    // until the first post-enable collection splays the schedule (nextCollectTime is
+                    // still null), keep the legacy interval throttle: enabling the flag must not
+                    // trigger an immediate fleet-wide re-collection
+                    long throttleInterval = scheduleSnapshot == null ? timeInterval : 0;
+                    needCollectStatsColumns = needCollectStatsColumns(basicStatsMeta, table, columnNames,
+                            StatisticUtils.getTableLastUpdateTime(table), throttleInterval);
+                }
+            } else {
+                needCollectStatsColumns = needCollectStatsColumns(basicStatsMeta, table, columnNames,
+                        StatisticUtils.getTableLastUpdateTime(table), timeInterval);
             }
-
-            long defaultInterval = tableRowCount < Config.statistic_auto_collect_small_table_rows ?
-                    Config.statistic_auto_collect_small_table_interval :
-                    Config.statistic_auto_collect_large_table_interval;
-
-            long timeInterval = job.getProperties().get(STATISTIC_AUTO_COLLECT_INTERVAL) != null ?
-                    Long.parseLong(job.getProperties().get(STATISTIC_AUTO_COLLECT_INTERVAL)) :
-                    defaultInterval;
-
-            needCollectStatsColumns = needCollectStatsColumns(basicStatsMeta, table, columnNames,
-                    StatisticUtils.getTableLastUpdateTime(table), timeInterval);
         } else {
+            // no stats meta (first collection or stats dropped): the gate is bypassed, so decide
+            // plannedness from the current deadline - a rebuild ahead of it must not advance the
+            // schedule, or jobs whose stats were dropped together would synchronize again
+            offScheduleCollect = staggeredSchedule && scheduleSnapshot != null
+                    && LocalDateTime.now().isBefore(scheduleSnapshot);
             needCollectStatsColumns = columnNames;
         }
 
         if (needCollectStatsColumns.isEmpty()) {
+            if (staggeredSchedule && scheduleSnapshot != null
+                    && !LocalDateTime.now().isBefore(scheduleSnapshot)) {
+                // a due check with no data change still advances the schedule: the job is visited
+                // once per interval instead of staying "due" forever. Otherwise tables updated in
+                // one synchronized batch would all become collectible at once, recreating the burst
+                // the splay is meant to remove; the price is that a change right after a due check
+                // waits for the next scheduled point.
+                // timeInterval equals job.getCollectIntervalUsed() here - a mismatch would have
+                // re-splayed above - so this advances by the same interval as a collection would.
+                // Advance by whole intervals from the old deadline rather than from now: jobs that
+                // became overdue together (FE downtime, the flag toggled off for a while) keep
+                // their distinct phases instead of clustering on the resumed pass.
+                long intervalsBehind = Duration.between(scheduleSnapshot, LocalDateTime.now())
+                        .getSeconds() / timeInterval + 1;
+                synchronized (job) {
+                    if (Objects.equals(job.getNextCollectTime(), scheduleSnapshot)) {
+                        // do not overwrite a concurrent run's update
+                        job.setNextCollectTime(scheduleSnapshot.plusSeconds(intervalsBehind * timeInterval));
+                    }
+                }
+                GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithLog(job);
+            }
             LOG.info("There are no columns need to collect statistics for table: {}", table.getName());
             return;
         }
@@ -383,39 +464,40 @@ public class StatisticsCollectJobFactory {
                     }).
                     min(LocalDateTime::compareTo).orElse(LocalDateTime.MIN);
         }
+        StatisticsCollectJob statsJob;
         if (job.getAnalyzeType().equals(StatsConstants.AnalyzeType.FULL)) {
-            createExternalFullStatsJob(allTableJobMap, collectColumnStatsTimeMin, job, db, table,
+            statsJob = createExternalFullStatsJob(collectColumnStatsTimeMin, job, db, table,
                     needCollectStatsColumns, needCollectStatsColumnTypes);
         } else {
-            createExternalSampleStatsJob(allTableJobMap, collectColumnStatsTimeMin, job, db, table, needCollectStatsColumns,
+            statsJob = createExternalSampleStatsJob(collectColumnStatsTimeMin, job, db, table, needCollectStatsColumns,
                     needCollectStatsColumnTypes);
         }
+        statsJob.setStaggeredRunContext(scheduleSnapshot, offScheduleCollect, timeInterval);
+        allTableJobMap.add(statsJob);
     }
 
-    private static void createExternalFullStatsJob(List<StatisticsCollectJob> allTableJobMap,
-                                                   LocalDateTime statisticsUpdateTime,
-                                                   ExternalAnalyzeJob job,
-                                                   Database db, Table table, List<String> columnNames,
-                                                   List<Type> columnTypes) {
+    private static StatisticsCollectJob createExternalFullStatsJob(LocalDateTime statisticsUpdateTime,
+                                                                   ExternalAnalyzeJob job,
+                                                                   Database db, Table table, List<String> columnNames,
+                                                                   List<Type> columnTypes) {
         // get updated partitions
         Set<String> updatedPartitions = StatisticUtils.getUpdatedPartitionNames(table, statisticsUpdateTime);
         LOG.info("create external full statistics job for table: {}, partitions: {}",
                 table.getName(), updatedPartitions);
-        allTableJobMap.add(buildExternalStatisticsCollectJob(job.getCatalogName(), db, table,
+        return buildExternalStatisticsCollectJob(job.getCatalogName(), db, table,
                 updatedPartitions == null ? null : Lists.newArrayList(updatedPartitions),
-                columnNames, columnTypes, StatsConstants.AnalyzeType.FULL, job.getScheduleType(), Maps.newHashMap()));
+                columnNames, columnTypes, StatsConstants.AnalyzeType.FULL, job.getScheduleType(), Maps.newHashMap());
     }
-    private static void createExternalSampleStatsJob(List<StatisticsCollectJob> allTableJobMap,
-                                                     LocalDateTime statisticsUpdateTime,
-                                                     ExternalAnalyzeJob job, Database db, Table table,
-                                                     List<String> columnNames, List<Type> columnTypes) {
+    private static StatisticsCollectJob createExternalSampleStatsJob(LocalDateTime statisticsUpdateTime,
+                                                                     ExternalAnalyzeJob job, Database db, Table table,
+                                                                     List<String> columnNames, List<Type> columnTypes) {
         // get updated partitions
         Set<String> updatedPartitions = StatisticUtils.getUpdatedPartitionNames(table, statisticsUpdateTime);
-        LOG.info("create external sa,ple statistics job for table: {}, partitions: {}",
+        LOG.info("create external sample statistics job for table: {}, partitions: {}",
                 table.getName(), updatedPartitions);
-        allTableJobMap.add(buildExternalStatisticsCollectJob(job.getCatalogName(), db, table,
+        return buildExternalStatisticsCollectJob(job.getCatalogName(), db, table,
                 null, columnNames, columnTypes, StatsConstants.AnalyzeType.SAMPLE, job.getScheduleType(),
-                Maps.newHashMap()));
+                Maps.newHashMap());
     }
 
     private static void createJob(List<StatisticsCollectJob> allTableJobMap, NativeAnalyzeJob job,

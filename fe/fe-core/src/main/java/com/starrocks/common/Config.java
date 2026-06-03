@@ -2539,6 +2539,13 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "The interval of auto stats for large tables")
     public static long statistic_auto_collect_large_table_interval = 3600L * 12; // unit: second, default 12h
 
+    @ConfField(mutable = true, comment = "Spread auto stats collection of external tables evenly across " +
+            "the collect interval: each analyze job gets a one-time random splay of its next collect " +
+            "time within the interval, after which collections slide by exactly one interval from the " +
+            "actual collection time. Eliminates synchronized collection bursts when many jobs " +
+            "share the same interval")
+    public static boolean enable_statistic_auto_collect_staggered_schedule = false;
+
     /**
      * Full statistics collection max data size
      */

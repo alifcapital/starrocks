@@ -39,6 +39,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.connector.ConnectorPartitionTraits;
+import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.http.HttpConnectContext;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DmlType;
@@ -84,6 +85,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -278,6 +280,42 @@ public class StatisticUtils {
         }
         Instant instant = updateTime.atZone(Clock.systemDefaultZone().getZone()).toInstant();
         return instant.toEpochMilli();
+    }
+
+    /**
+     * The effective auto-collect interval of an external table: the analyze job property if set,
+     * otherwise the small/large table interval picked by the cached row count.
+     */
+    public static long getExternalAutoCollectInterval(Table table, Map<String, String> jobProperties,
+                                                      List<String> columnNames) {
+        String prop = jobProperties == null ? null : jobProperties.get(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
+        if (prop != null) {
+            return Long.parseLong(prop);
+        }
+        List<ConnectorTableColumnStats> columnStatisticList =
+                GlobalStateMgr.getCurrentState().getStatisticStorage().getConnectorTableStatisticsSync(table, columnNames);
+        List<ConnectorTableColumnStats> validColumnStatistics = columnStatisticList.stream().
+                filter(columnStatistic -> !columnStatistic.isUnknown()).toList();
+
+        // use small table row count as default table row count
+        long tableRowCount = Config.statistic_auto_collect_small_table_rows - 1;
+        if (!validColumnStatistics.isEmpty()) {
+            tableRowCount = validColumnStatistics.get(0).getRowCount();
+        }
+        return tableRowCount < Config.statistic_auto_collect_small_table_rows ?
+                Config.statistic_auto_collect_small_table_interval :
+                Config.statistic_auto_collect_large_table_interval;
+    }
+
+    /**
+     * A random point within (from, from + interval]: the one-time splay that spreads tables across
+     * the collect interval under the staggered schedule.
+     */
+    public static LocalDateTime splayNextCollectTime(LocalDateTime from, long intervalSeconds) {
+        if (intervalSeconds <= 0) {
+            return from;
+        }
+        return from.plusSeconds(ThreadLocalRandom.current().nextLong(intervalSeconds) + 1);
     }
 
     public static Set<String> getUpdatedPartitionNames(Table table, LocalDateTime checkTime) {

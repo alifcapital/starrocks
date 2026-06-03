@@ -16,6 +16,7 @@
 package com.starrocks.statistic;
 
 import com.google.gson.annotations.SerializedName;
+import com.starrocks.common.Config;
 import com.starrocks.common.io.Writable;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
@@ -27,6 +28,7 @@ import com.starrocks.type.Type;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
     @SerializedName("id")
@@ -65,6 +67,20 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
 
     @SerializedName("reason")
     private String reason;
+
+    // Scheduled time of the job's next collection under the staggered schedule (see
+    // Config.enable_statistic_auto_collect_staggered_schedule). Null until the first successful
+    // collection splays it randomly within the collect interval; afterwards each collection slides
+    // it by exactly one interval from the actual collection time.
+    // volatile: read/written by both the auto collector and the immediate-run thread without a
+    // common lock; the snapshot guard in advanceCollectSchedule keeps a lost race benign.
+    @SerializedName("nextCollectTime")
+    private volatile LocalDateTime nextCollectTime;
+
+    // The collect interval nextCollectTime was computed with; a mismatch with the currently
+    // effective interval triggers a re-splay.
+    @SerializedName("collectIntervalUsed")
+    private volatile long collectIntervalUsed;
 
     public ExternalAnalyzeJob(String catalogName, String dbName, String tableName, List<String> columnNames,
                               List<Type> columnTypes, AnalyzeType type,
@@ -178,6 +194,22 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
         return tableName == null;
     }
 
+    public LocalDateTime getNextCollectTime() {
+        return nextCollectTime;
+    }
+
+    public void setNextCollectTime(LocalDateTime nextCollectTime) {
+        this.nextCollectTime = nextCollectTime;
+    }
+
+    public long getCollectIntervalUsed() {
+        return collectIntervalUsed;
+    }
+
+    public void setCollectIntervalUsed(long collectIntervalUsed) {
+        this.collectIntervalUsed = collectIntervalUsed;
+    }
+
     @Override
     public List<StatisticsCollectJob> instantiateJobs() {
         return StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(this);
@@ -190,6 +222,7 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithoutLog(this);
 
         boolean hasFailedCollectJob = false;
+        StatisticsCollectJob succeededCollectJob = null;
         for (StatisticsCollectJob statsJob : jobs) {
             if (!StatisticAutoCollector.checkoutAnalyzeTime()) {
                 break;
@@ -210,12 +243,62 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
                 hasFailedCollectJob = true;
                 break;
             }
+            succeededCollectJob = statsJob;
         }
 
         if (!hasFailedCollectJob) {
             setStatus(ScheduleStatus.FINISH);
             setWorkTime(LocalDateTime.now());
+            if (succeededCollectJob != null) {
+                advanceCollectSchedule(succeededCollectJob);
+            }
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithLog(this);
+        }
+    }
+
+    // synchronized: the snapshot guard below is check-then-act on shared schedule fields; without
+    // mutual exclusion two runs finishing together could both pass it and the second would
+    // overwrite the first one's update (e.g. replace the initial random splay)
+    synchronized void advanceCollectSchedule(StatisticsCollectJob succeededCollectJob) {
+        // jobs expanded to several tables stay on the legacy schedule (see the factory)
+        if (isAnalyzeAllDb() || isAnalyzeAllTable()) {
+            return;
+        }
+        if (!Config.enable_statistic_auto_collect_staggered_schedule && nextCollectTime == null) {
+            return;
+        }
+        if (!Objects.equals(succeededCollectJob.getScheduleSnapshot(), nextCollectTime)) {
+            // a concurrent run of this job already advanced the schedule while we were collecting -
+            // enable_trigger_analyze_job_immediate starts a run on a separate thread right after
+            // CREATE ANALYZE, racing the auto collector. Do not overwrite the other run's update
+            // (it may hold the initial random splay). The worst a lost race can cause is one
+            // redundant collection or one skipped slide; the next due pass repairs the schedule.
+            return;
+        }
+        // an existing schedule keeps sliding even while the flag is off, so re-enabling it later
+        // does not see a stale deadline and re-collect right after a legacy-mode collection
+        LocalDateTime collectTime = LocalDateTime.now();
+        if (nextCollectTime == null) {
+            if (succeededCollectJob.getEffectiveIntervalSeconds() <= 0) {
+                // a zero-length schedule must not exist (the factory keeps such jobs on the legacy
+                // path). This also covers the first collection of a large table without statistics:
+                // its row count is unknown until stats exist, so the interval resolves to the
+                // small-table default of 0 - the splay is then established by the next collection.
+                return;
+            }
+            // first collection: splay the next collect time randomly within the interval, so jobs
+            // created (or collected for the first time) together spread across it instead of staying
+            // synchronized
+            collectIntervalUsed = succeededCollectJob.getEffectiveIntervalSeconds();
+            nextCollectTime = StatisticUtils.splayNextCollectTime(collectTime, collectIntervalUsed);
+        } else if (!succeededCollectJob.isOffScheduleCollect()) {
+            // a due collection slides the schedule by exactly one interval from the actual collect
+            // time. Off-schedule collections (columns that had no stats yet) keep it untouched - the
+            // context is captured at instantiation time, completion may legitimately cross the deadline.
+            // collectIntervalUsed may be stale if the effective interval changed while the stats meta
+            // was absent (no re-splay runs on that path); the next factory pass detects the mismatch
+            // and re-splays.
+            nextCollectTime = collectTime.plusSeconds(collectIntervalUsed);
         }
     }
 
@@ -232,6 +315,8 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
                 ", status=" + status +
                 ", workTime=" + workTime +
                 ", reason='" + reason + '\'' +
+                ", nextCollectTime=" + nextCollectTime +
+                ", collectIntervalUsed=" + collectIntervalUsed +
                 '}';
     }
 }
