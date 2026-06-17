@@ -107,6 +107,14 @@ Status ScanOperator::prepare(RuntimeState* state) {
     _dbg_io_conc_at5_8 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt5_8Ns", TUnit::TIME_NS);
     _dbg_io_conc_at9_16 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt9_16Ns", TUnit::TIME_NS);
 
+    // [DEBUG] why _try_to_trigger_next_scan does not refill to cap
+    _dbg_tc_calls = ADD_COUNTER(_unique_metrics, "DbgTrigCalls", TUnit::UNIT);
+    _dbg_tc_underfull = ADD_COUNTER(_unique_metrics, "DbgTrigUnderfull", TUnit::UNIT);
+    _dbg_tc_unplug = ADD_COUNTER(_unique_metrics, "DbgTrigUnplug", TUnit::UNIT);
+    _dbg_tc_reachlimit = ADD_COUNTER(_unique_metrics, "DbgTrigReachLimit", TUnit::UNIT);
+    _dbg_tc_morselnr = ADD_COUNTER(_unique_metrics, "DbgTrigMorselNotReady", TUnit::UNIT);
+    _dbg_tc_picked = ADD_COUNTER(_unique_metrics, "DbgTrigPicked", TUnit::UNIT);
+
     if (_scan_node->is_enable_topn_filter_back_pressure()) {
         if (auto* runtime_filters = get_factory()->get_runtime_bloom_filters(); runtime_filters != nullptr) {
             auto has_topn_filters =
@@ -163,6 +171,12 @@ void ScanOperator::close(RuntimeState* state) {
         COUNTER_SET(_dbg_io_conc_at5_8, b58);
         COUNTER_SET(_dbg_io_conc_at9_16, b916);
     }
+    COUNTER_SET(_dbg_tc_calls, _dbg_trig_calls);
+    COUNTER_SET(_dbg_tc_underfull, _dbg_trig_underfull);
+    COUNTER_SET(_dbg_tc_unplug, _dbg_trig_unplug);
+    COUNTER_SET(_dbg_tc_reachlimit, _dbg_trig_reachlimit);
+    COUNTER_SET(_dbg_tc_morselnr, _dbg_trig_morsel_nr);
+    COUNTER_SET(_dbg_tc_picked, _dbg_trig_picked);
 
     _merge_chunk_source_profiles(state);
 
@@ -377,12 +391,15 @@ int64_t ScanOperator::global_rf_wait_timeout_ns() const {
 Status ScanOperator::_try_to_trigger_next_scan(RuntimeState* state) {
     // to sure to put it here for updating state.
     // because we want to update state based on raw data.
+    _dbg_trig_calls++; // [DEBUG]
+    if (_num_running_io_tasks < _io_tasks_per_scan_operator) _dbg_trig_underfull++; // [DEBUG] had room
     int total_cnt = available_pickup_morsel_count();
 
     if (_num_running_io_tasks >= _io_tasks_per_scan_operator) {
         return Status::OK();
     }
     if (_unpluging && num_buffered_chunks() >= _buffer_unplug_threshold()) {
+        _dbg_trig_unplug++; // [DEBUG] suppressed by unplug-drain
         return Status::OK();
     }
     // Avoid uneven distribution when io tasks execute very fast, so we start
@@ -397,6 +414,7 @@ Status ScanOperator::_try_to_trigger_next_scan(RuntimeState* state) {
         // check if we can return earlier.
         for (int i = 0; i < _io_tasks_per_scan_operator; i++) {
             if (!_is_io_task_running[i] && _chunk_sources[i] != nullptr && _chunk_sources[i]->reach_limit()) {
+                _dbg_trig_reachlimit++; // [DEBUG] suppressed by chunk-source limit
                 return Status::OK();
             }
         }
@@ -427,10 +445,13 @@ Status ScanOperator::_try_to_trigger_next_scan(RuntimeState* state) {
     // pick up new chunk source.
     ASSIGN_OR_RETURN(auto morsel_ready, _morsel_queue->ready_for_next());
     if (size > 0 && morsel_ready) {
+        _dbg_trig_picked++; // [DEBUG] actually picked up new morsels
         for (int i = 0; i < size; i++) {
             int idx = to_sched[i];
             RETURN_IF_ERROR(_pickup_morsel(state, idx));
         }
+    } else if (size > 0 && !morsel_ready) {
+        _dbg_trig_morsel_nr++; // [DEBUG] wanted slots but morsel queue not ready
     }
 
     _peak_io_tasks_counter->set(_num_running_io_tasks);

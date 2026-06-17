@@ -306,6 +306,20 @@ private:
     RuntimeProfile::Counter* _dbg_io_conc_at5_8 = nullptr;
     RuntimeProfile::Counter* _dbg_io_conc_at9_16 = nullptr;
 
+    // [DEBUG] reasons _try_to_trigger_next_scan (driver-thread only, no lock) does not refill to cap
+    int64_t _dbg_trig_calls = 0;
+    int64_t _dbg_trig_underfull = 0;
+    int64_t _dbg_trig_unplug = 0;
+    int64_t _dbg_trig_reachlimit = 0;
+    int64_t _dbg_trig_morsel_nr = 0;
+    int64_t _dbg_trig_picked = 0;
+    RuntimeProfile::Counter* _dbg_tc_calls = nullptr;
+    RuntimeProfile::Counter* _dbg_tc_underfull = nullptr;
+    RuntimeProfile::Counter* _dbg_tc_unplug = nullptr;
+    RuntimeProfile::Counter* _dbg_tc_reachlimit = nullptr;
+    RuntimeProfile::Counter* _dbg_tc_morselnr = nullptr;
+    RuntimeProfile::Counter* _dbg_tc_picked = nullptr;
+
     RuntimeProfile::Counter* _prepare_chunk_source_timer = nullptr;
     RuntimeProfile::Counter* _submit_io_task_timer = nullptr;
 
