@@ -98,6 +98,15 @@ Status ScanOperator::prepare(RuntimeState* state) {
     _prepare_chunk_source_timer = ADD_TIMER(_unique_metrics, "PrepareChunkSourceTime");
     _submit_io_task_timer = ADD_TIMER(_unique_metrics, "SubmitTaskTime");
 
+    // [DEBUG] io-task concurrency histogram (avg = DbgIOConcIntegralNs / DbgIOConcActiveNs)
+    _dbg_io_conc_integral = ADD_COUNTER(_unique_metrics, "DbgIOConcIntegralNs", TUnit::TIME_NS);
+    _dbg_io_conc_active = ADD_COUNTER(_unique_metrics, "DbgIOConcActiveNs", TUnit::TIME_NS);
+    _dbg_io_conc_at0 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt0Ns", TUnit::TIME_NS);
+    _dbg_io_conc_at1 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt1Ns", TUnit::TIME_NS);
+    _dbg_io_conc_at2_4 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt2_4Ns", TUnit::TIME_NS);
+    _dbg_io_conc_at5_8 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt5_8Ns", TUnit::TIME_NS);
+    _dbg_io_conc_at9_16 = ADD_COUNTER(_unique_metrics, "DbgIOConcAt9_16Ns", TUnit::TIME_NS);
+
     if (_scan_node->is_enable_topn_filter_back_pressure()) {
         if (auto* runtime_filters = get_factory()->get_runtime_bloom_filters(); runtime_filters != nullptr) {
             auto has_topn_filters =
@@ -136,10 +145,43 @@ void ScanOperator::close(RuntimeState* state) {
     COUNTER_SET(_tablets_counter,
                 static_cast<int64_t>(_source_factory()->morsel_queue_factory()->num_original_morsels()));
 
+    // [DEBUG] flush io-task concurrency histogram
+    _account_io_conc(); // close the final interval
+    {
+        std::lock_guard<std::mutex> l(_io_conc_mu);
+        int64_t active = 0;
+        for (int i = 0; i <= 16; i++) active += _io_conc_bucket_ns[i];
+        int64_t b24 = 0, b58 = 0, b916 = 0;
+        for (int i = 2; i <= 4; i++) b24 += _io_conc_bucket_ns[i];
+        for (int i = 5; i <= 8; i++) b58 += _io_conc_bucket_ns[i];
+        for (int i = 9; i <= 16; i++) b916 += _io_conc_bucket_ns[i];
+        COUNTER_SET(_dbg_io_conc_integral, _io_conc_integral_ns);
+        COUNTER_SET(_dbg_io_conc_active, active);
+        COUNTER_SET(_dbg_io_conc_at0, _io_conc_bucket_ns[0]);
+        COUNTER_SET(_dbg_io_conc_at1, _io_conc_bucket_ns[1]);
+        COUNTER_SET(_dbg_io_conc_at2_4, b24);
+        COUNTER_SET(_dbg_io_conc_at5_8, b58);
+        COUNTER_SET(_dbg_io_conc_at9_16, b916);
+    }
+
     _merge_chunk_source_profiles(state);
 
     do_close(state);
     Operator::close(state);
+}
+
+void ScanOperator::_account_io_conc() {
+    int cur = _num_running_io_tasks.load();
+    if (cur < 0) cur = 0;
+    if (cur > 16) cur = 16;
+    std::lock_guard<std::mutex> l(_io_conc_mu);
+    int64_t now = MonotonicNanos();
+    if (_io_conc_last_ns != 0) {
+        int64_t dt = now - _io_conc_last_ns;
+        _io_conc_integral_ns += static_cast<int64_t>(cur) * dt;
+        _io_conc_bucket_ns[cur] += dt;
+    }
+    _io_conc_last_ns = now;
 }
 
 size_t ScanOperator::_buffer_unplug_threshold() const {
@@ -413,6 +455,7 @@ void ScanOperator::_finish_chunk_source_task(RuntimeState* state, int chunk_sour
     _last_growth_cpu_time_ns += cpu_time_ns;
     _last_scan_rows_num += scan_rows;
     _last_scan_bytes += scan_bytes;
+    _account_io_conc(); // [DEBUG] tick before changing concurrency
     _num_running_io_tasks--;
 
     DCHECK(_chunk_sources[chunk_source_index] != nullptr);
@@ -438,6 +481,7 @@ Status ScanOperator::_trigger_next_scan(RuntimeState* state, int chunk_source_in
 
     COUNTER_UPDATE(_submit_task_counter, 1);
     _chunk_sources[chunk_source_index]->pin_chunk_token(std::move(buffer_token));
+    _account_io_conc(); // [DEBUG] tick before changing concurrency
     _num_running_io_tasks++;
     _is_io_task_running[chunk_source_index] = true;
 
@@ -516,6 +560,7 @@ Status ScanOperator::_trigger_next_scan(RuntimeState* state, int chunk_source_in
         _io_task_retry_cnt = 0;
     } else {
         _chunk_sources[chunk_source_index]->unpin_chunk_token();
+        _account_io_conc(); // [DEBUG] tick before changing concurrency
         _num_running_io_tasks--;
         _is_io_task_running[chunk_source_index] = false;
         // TODO(hcf) set a proper retry times

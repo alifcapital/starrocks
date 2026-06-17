@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <mutex>
+
 #include "base/concurrency/race_detect.h"
 #include "base/concurrency/spinlock.h"
 #include "compute_env/pipeline/driver_scan_operator.h"
@@ -286,6 +288,23 @@ private:
     // The total number of the original tablets in this fragment instance.
     RuntimeProfile::Counter* _tablets_counter = nullptr;
     RuntimeProfile::HighWaterMarkCounter* _peak_io_tasks_counter = nullptr;
+
+    // [DEBUG] time-weighted io-task concurrency: attribute every interval to the io-task count
+    // active during it, so avg concurrency = integral / active and the buckets show whether the
+    // operator is starved (time at 0/1) or just bursty (time at 9-16). Ticked at every change of
+    // _num_running_io_tasks (per io-task, not per row) so a single mutex is cheap.
+    void _account_io_conc();
+    std::mutex _io_conc_mu;
+    int64_t _io_conc_last_ns = 0;
+    int64_t _io_conc_integral_ns = 0;
+    int64_t _io_conc_bucket_ns[17] = {0};
+    RuntimeProfile::Counter* _dbg_io_conc_integral = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_active = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_at0 = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_at1 = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_at2_4 = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_at5_8 = nullptr;
+    RuntimeProfile::Counter* _dbg_io_conc_at9_16 = nullptr;
 
     RuntimeProfile::Counter* _prepare_chunk_source_timer = nullptr;
     RuntimeProfile::Counter* _submit_io_task_timer = nullptr;
