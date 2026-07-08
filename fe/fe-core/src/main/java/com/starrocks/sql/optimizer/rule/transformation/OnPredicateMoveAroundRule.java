@@ -35,8 +35,8 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.property.DomainProperty;
 import com.starrocks.sql.optimizer.property.DomainPropertyDeriver;
-import com.starrocks.sql.optimizer.property.RangeExtractor;
 import com.starrocks.sql.optimizer.property.ReplaceShuttle;
+import com.starrocks.sql.optimizer.rewrite.MinMax;
 import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
@@ -255,8 +255,8 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
                 // same safe-target gate as in the EQ branch
                 if (!domainProperty.getValueWrapper(seed).isMonotonicDerived()
                         || isSafeDeriveTarget(offspring, slotDefinitions)) {
-                    RangeExtractor.RangeDescriptor desc = domainProperty.getValueWrapper(seed).getRangeDesc();
-                    rewriteResult = deriveLessPredicate(offspring, desc, toLeft);
+                    MinMax minMax = domainProperty.getValueWrapper(seed).getMinMax();
+                    rewriteResult = deriveLessPredicate(offspring, minMax, toLeft);
                 }
             } else if (enableMonotonicDerive && isSafeDeriveTarget(offspring, slotDefinitions)) {
                 // range comparison in the ON clause, e.g. ON f.load_ts < months_add(e.datadate, 1)
@@ -272,8 +272,8 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
             if (domainProperty.contains(seed)) {
                 if (!domainProperty.getValueWrapper(seed).isMonotonicDerived()
                         || isSafeDeriveTarget(offspring, slotDefinitions)) {
-                    RangeExtractor.RangeDescriptor desc = domainProperty.getValueWrapper(seed).getRangeDesc();
-                    rewriteResult = deriveGreaterPredicate(offspring, desc, toLeft);
+                    MinMax minMax = domainProperty.getValueWrapper(seed).getMinMax();
+                    rewriteResult = deriveGreaterPredicate(offspring, minMax, toLeft);
                 }
             } else if (enableMonotonicDerive && isSafeDeriveTarget(offspring, slotDefinitions)) {
                 // mirror of the LT/LE fallback: offspring > seed >= imageLower, so
@@ -341,9 +341,9 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
      * <li>{@link MonotonicImage#imageRange} folds the seed at both endpoints and returns
      *     ['202403', '202404'], or empty when monotonicity cannot be proven.</li>
      * </ol>
-     * An IN-list domain arrives as its covering range (RangeExtractor turns the value list
-     * into [min, max] when it builds the descriptor). Boolean-call domains have no range and
-     * stop at the getRange() check.
+     * An IN-list domain arrives as its covering range (the descriptor's envelope becomes
+     * the MinMax). Boolean-call domains carry MinMax.ALL and stop at the endpoint check
+     * inside imageRange.
      */
     private Range<ConstantOperator> monotonicImageOfSeed(ScalarOperator seed, DomainProperty domainProperty) {
         Set<ColumnRefOperator> usedColumns = Sets.newHashSet(seed.getColumnRefs());
@@ -356,11 +356,8 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
         if (column.equals(seed) || !domainProperty.contains(column)) {
             return null;
         }
-        RangeExtractor.RangeDescriptor desc = domainProperty.getValueWrapper(column).getRangeDesc();
-        if (desc == null || desc.getRange() == null) {
-            return null;
-        }
-        return MonotonicImage.imageRange(seed, column, desc.getRange()).orElse(null);
+        return MonotonicImage.imageRange(seed, column, domainProperty.getValueWrapper(column).getMinMax())
+                .orElse(null);
     }
 
     /**
@@ -396,11 +393,11 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
 
         DomainPropertyDeriver deriver = new DomainPropertyDeriver();
         DomainProperty newDomainProperty = deriver.derive(rewriteResult);
-        Range<ConstantOperator> existRange = existDomainProperty.getValueWrapper(offspring).getRangeDesc().getRange();
-        Range<ConstantOperator> newRange = newDomainProperty.getValueWrapper(offspring).getRangeDesc().getRange();
-        if (existRange == null) {
-            return newRange == null ? null : rewriteResult;
-        } else if (newRange == null || newRange.encloses(existRange)) {
+        MinMax existMinMax = existDomainProperty.getValueWrapper(offspring).getMinMax();
+        MinMax newMinMax = newDomainProperty.getValueWrapper(offspring).getMinMax();
+        if (existMinMax.isAll()) {
+            return newMinMax.isAll() ? null : rewriteResult;
+        } else if (newMinMax.isAll() || newMinMax.encloses(existMinMax)) {
             return null;
         } else {
             return rewriteResult;
@@ -410,21 +407,11 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
     // join on predicate left_tbl_col < right_tbl_col
     // if we want to derive predicate to left, we need obtain the upper bound value of right_tbl_col
     // if we want to derive predicate to right, we need obtain the lower bound value of left_tbl_col
-    private ScalarOperator deriveLessPredicate(ScalarOperator offspring,
-                                               RangeExtractor.RangeDescriptor desc, boolean toLeft) {
-        if (desc == null) {
-            return null;
-        }
-        Range<ConstantOperator> range = desc.getRange();
-
-        if (range == null) {
-            return null;
-        }
-
-        if (toLeft && range.hasUpperBound()) {
-            return new BinaryPredicateOperator(BinaryType.LE, offspring, range.upperEndpoint());
-        } else if (!toLeft && range.hasLowerBound()) {
-            return new BinaryPredicateOperator(BinaryType.GE, offspring, range.lowerEndpoint());
+    private ScalarOperator deriveLessPredicate(ScalarOperator offspring, MinMax minMax, boolean toLeft) {
+        if (toLeft && minMax.getMax().isPresent()) {
+            return new BinaryPredicateOperator(BinaryType.LE, offspring, minMax.getMax().get());
+        } else if (!toLeft && minMax.getMin().isPresent()) {
+            return new BinaryPredicateOperator(BinaryType.GE, offspring, minMax.getMin().get());
         }
         return null;
     }
@@ -432,20 +419,11 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
     // join on predicate left_tbl_col > right_tbl_col
     // if we want to derive predicate to left, we need obtain the lower bound value of right_tbl_col
     // if we want to derive predicate to right, we need obtain the upper bound value of left_tbl_col
-    private ScalarOperator deriveGreaterPredicate(ScalarOperator offspring,
-                                                  RangeExtractor.RangeDescriptor desc, boolean toLeft) {
-        if (desc == null) {
-            return null;
-        }
-        Range<ConstantOperator> range = desc.getRange();
-
-        if (range == null) {
-            return null;
-        }
-        if (toLeft && range.hasLowerBound()) {
-            return new BinaryPredicateOperator(BinaryType.GE, offspring, range.lowerEndpoint());
-        } else if (!toLeft && range.hasUpperBound()) {
-            return new BinaryPredicateOperator(BinaryType.LE, offspring, range.upperEndpoint());
+    private ScalarOperator deriveGreaterPredicate(ScalarOperator offspring, MinMax minMax, boolean toLeft) {
+        if (toLeft && minMax.getMin().isPresent()) {
+            return new BinaryPredicateOperator(BinaryType.GE, offspring, minMax.getMin().get());
+        } else if (!toLeft && minMax.getMax().isPresent()) {
+            return new BinaryPredicateOperator(BinaryType.LE, offspring, minMax.getMax().get());
         }
         return null;
     }

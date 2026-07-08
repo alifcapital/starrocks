@@ -24,20 +24,20 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.MinMax;
 import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import javax.annotation.Nullable;
 
 /**
  * DomainProperty is used to store the domain of a column or expr.
  * For a sql like `select col_a, col_b, col_c from table where col_a > 10 and col_b + col_c = 20`,
  * we can get the domain property of col_a, col_b + col_c from the where clause like
- * col_a -> {predicateDesc : col_a > 10, rangeDesc : [10, +inf)}
- * col_b + col_c -> {predicateDesc : col_b + col_c = 20, rangeDesc : [20, 20]}
+ * col_a -> {predicateDesc : col_a > 10, minMax : [10, +inf)}
+ * col_b + col_c -> {predicateDesc : col_b + col_c = 20, minMax : [20, 20]}
  */
 public class DomainProperty {
 
@@ -126,12 +126,11 @@ public class DomainProperty {
         }
         ColumnRefOperator column = distinctColumns.iterator().next();
         DomainWrapper columnWrapper = domainMap.get(column);
-        if (columnWrapper == null || columnWrapper.getRangeDesc() == null
-                || columnWrapper.getRangeDesc().getRange() == null) {
+        if (columnWrapper == null) {
             return null;
         }
         Range<ConstantOperator> image =
-                MonotonicImage.imageRange(expr, column, columnWrapper.getRangeDesc().getRange()).orElse(null);
+                MonotonicImage.imageRange(expr, column, columnWrapper.getMinMax()).orElse(null);
         if (image == null) {
             return null;
         }
@@ -185,8 +184,7 @@ public class DomainProperty {
         // OnPredicateMoveAroundRule.isSafeDeriveTarget).
         private final boolean monotonicDerived;
 
-        @Nullable
-        private final RangeExtractor.RangeDescriptor rangeDesc;
+        private final MinMax minMax;
 
 
         public DomainWrapper(ScalarOperator predicateDesc, boolean needDeriveRange) {
@@ -198,9 +196,9 @@ public class DomainProperty {
             this.needDeriveRange = needDeriveRange;
             this.monotonicDerived = monotonicDerived;
             if (needDeriveRange) {
-                this.rangeDesc = deriveRange(predicateDesc);
+                this.minMax = deriveMinMax(predicateDesc);
             } else {
-                this.rangeDesc = new RangeExtractor.RangeDescriptor(ConstantOperator.FALSE);
+                this.minMax = MinMax.ALL;
             }
         }
 
@@ -213,8 +211,8 @@ public class DomainProperty {
             return predicateDesc;
         }
 
-        public RangeExtractor.RangeDescriptor getRangeDesc() {
-            return rangeDesc;
+        public MinMax getMinMax() {
+            return minMax;
         }
 
         public boolean isNeedDeriveRange() {
@@ -235,24 +233,18 @@ public class DomainProperty {
                     monotonicDerived || domainWrapper.monotonicDerived);
         }
 
-        private RangeExtractor.RangeDescriptor deriveRange(ScalarOperator scalarOperator) {
+        // toRange() covers both descriptor kinds: a range descriptor yields its range
+        // (Range.all() when it has none), an in-list yields the closed envelope of its
+        // values (Range.all() when the list is empty, i.e. a contradictory predicate)
+        private MinMax deriveMinMax(ScalarOperator scalarOperator) {
             RangeExtractor extractor = new RangeExtractor();
 
             Map<ScalarOperator, RangeExtractor.ValueDescriptor> res = extractor.apply(scalarOperator, null);
 
             if (res.size() != 1) {
-                return new RangeExtractor.RangeDescriptor(ConstantOperator.FALSE);
-            } else {
-                RangeExtractor.ValueDescriptor desc = res.values().stream().findFirst().get();
-                if (desc instanceof RangeExtractor.MultiValuesDescriptor) {
-                    RangeExtractor.MultiValuesDescriptor multiValues = (RangeExtractor.MultiValuesDescriptor) desc;
-                    RangeExtractor.RangeDescriptor rangeDesc = new RangeExtractor.RangeDescriptor(multiValues.columnRef);
-                    rangeDesc = (RangeExtractor.RangeDescriptor) rangeDesc.union(multiValues);
-                    return rangeDesc;
-                } else {
-                    return (RangeExtractor.RangeDescriptor) desc;
-                }
+                return MinMax.ALL;
             }
+            return MinMax.of(res.values().iterator().next().toRange());
         }
     }
 }

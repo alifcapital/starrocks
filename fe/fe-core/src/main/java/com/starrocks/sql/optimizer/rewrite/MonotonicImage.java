@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rewrite;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -62,16 +61,16 @@ public class MonotonicImage {
     }
 
     /**
-     * Range of {@code expr} values when {@code column} stays inside {@code columnRange}.
+     * Range of {@code expr} values when {@code column} stays inside {@code columnDomain}.
      * Empty when soundness cannot be proven. A refused derivation only loses the
      * optimization; it never fails the query.
      */
     public static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
-                                                               Range<ConstantOperator> columnRange) {
+                                                               MinMax columnDomain) {
         // Need both endpoints. The registry does not say whether the function increases or
         // decreases, so a single endpoint could turn into either a lower or an upper bound.
         // With two endpoints we fold both and sort the results, so direction does not matter.
-        if (!columnRange.hasLowerBound() || !columnRange.hasUpperBound()) {
+        if (columnDomain.getMin().isEmpty() || columnDomain.getMax().isEmpty()) {
             return Optional.empty();
         }
         // The column must occur exactly once. Counter-example with two occurrences:
@@ -97,8 +96,8 @@ public class MonotonicImage {
         // Fold the expression at both endpoints:
         //   date_format('2024-03-05', '%Y%m') -> '202403'
         //   date_format('2024-04-10', '%Y%m') -> '202404'
-        Optional<ConstantOperator> first = foldAt(expr, column, columnRange.lowerEndpoint());
-        Optional<ConstantOperator> second = foldAt(expr, column, columnRange.upperEndpoint());
+        Optional<ConstantOperator> first = foldAt(expr, column, columnDomain.getMin().get());
+        Optional<ConstantOperator> second = foldAt(expr, column, columnDomain.getMax().get());
         if (first.isEmpty() || second.isEmpty()) {
             return Optional.empty();
         }
@@ -119,59 +118,10 @@ public class MonotonicImage {
     }
 
     /**
-     * Which argument the column may sit in, per function. The registry flag only says "this
-     * function is monotonic in some argument", not in which one. Some registered functions
-     * decrease in one argument (datediff in its second), and date_trunc's first argument is a
-     * unit name with no order at all. Functions not listed here are refused.
-     */
-    private static final Map<String, Set<Integer>> MONOTONIC_DATA_ARGS = ImmutableMap.<String, Set<Integer>>builder()
-            .put(FunctionSet.DATE_TRUNC, Set.of(1))
-            .put(FunctionSet.TIME_SLICE, Set.of(0))
-            .put(FunctionSet.DATE_FORMAT, Set.of(0))
-            .put(FunctionSet.STR_TO_DATE, Set.of(0))
-            .put(FunctionSet.STR2DATE, Set.of(0))
-            .put(FunctionSet.FROM_UNIXTIME, Set.of(0))
-            .put(FunctionSet.FROM_UNIXTIME_MS, Set.of(0))
-            .put(FunctionSet.TO_DATETIME, Set.of(0))
-            .put(FunctionSet.TO_DAYS, Set.of(0))
-            .put(FunctionSet.TO_DATE, Set.of(0))
-            // add/sub functions shift a date by a constant amount: monotonic in the date
-            // argument. The column is not allowed in the amount argument: for subs the result
-            // would decrease while the column grows.
-            .put(FunctionSet.YEARS_ADD, Set.of(0))
-            .put(FunctionSet.QUARTERS_ADD, Set.of(0))
-            .put(FunctionSet.MONTHS_ADD, Set.of(0))
-            .put(FunctionSet.ADD_MONTHS, Set.of(0))
-            .put(FunctionSet.WEEKS_ADD, Set.of(0))
-            .put(FunctionSet.DAYS_ADD, Set.of(0))
-            .put(FunctionSet.ADDDATE, Set.of(0))
-            .put(FunctionSet.DATE_ADD, Set.of(0))
-            .put(FunctionSet.HOURS_ADD, Set.of(0))
-            .put(FunctionSet.MINUTES_ADD, Set.of(0))
-            .put(FunctionSet.SECONDS_ADD, Set.of(0))
-            .put(FunctionSet.MILLISECONDS_ADD, Set.of(0))
-            .put(FunctionSet.YEARS_SUB, Set.of(0))
-            .put(FunctionSet.QUARTERS_SUB, Set.of(0))
-            .put(FunctionSet.MONTHS_SUB, Set.of(0))
-            .put(FunctionSet.WEEKS_SUB, Set.of(0))
-            .put(FunctionSet.DAYS_SUB, Set.of(0))
-            .put(FunctionSet.SUBDATE, Set.of(0))
-            .put(FunctionSet.DATE_SUB, Set.of(0))
-            .put(FunctionSet.HOURS_SUB, Set.of(0))
-            .put(FunctionSet.MINUTES_SUB, Set.of(0))
-            .put(FunctionSet.SECONDS_SUB, Set.of(0))
-            .put(FunctionSet.MILLISECONDS_SUB, Set.of(0))
-            .build();
-
-    private static final Set<String> FORMAT_BEARING_FUNCTIONS = Set.of(
-            FunctionSet.DATE_FORMAT, FunctionSet.STR_TO_DATE, FunctionSet.STR2DATE,
-            FunctionSet.FROM_UNIXTIME, FunctionSet.FROM_UNIXTIME_MS, FunctionSet.TO_DATETIME);
-
-    /**
      * True when the expression is a single monotonic chain: at every call exactly one argument
-     * carries the column, that argument is in a position allowed by {@link #MONOTONIC_DATA_ARGS},
-     * all other arguments are constants, every call passes the registry, and every cast is
-     * order-preserving.
+     * carries the column, that argument is in a position allowed by
+     * {@link MonotonicFunctionRegistry#dataArgPositions}, all other arguments are constants,
+     * every call passes the registry, and every cast is order-preserving.
      * <p>
      * For the example the tree is:
      * <pre>
@@ -200,14 +150,14 @@ public class MonotonicImage {
             if (!ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(call)) {
                 return false;
             }
-            String fnName = call.getFnName().toLowerCase();
-            // The registry checks the format only for the two-argument shapes.
+            String fnName = call.getFnName();
+            // The evaluator checks the format only for the two-argument shapes.
             // from_unixtime(ts, '%d/%m/%Y', 'UTC') has three arguments and its day-first
             // format goes through unchecked. So only the two-argument forms are allowed.
-            if (FORMAT_BEARING_FUNCTIONS.contains(fnName) && call.getChildren().size() != 2) {
+            if (MonotonicFunctionRegistry.isFormatBearing(fnName) && call.getChildren().size() != 2) {
                 return false;
             }
-            Set<Integer> admittedArgs = MONOTONIC_DATA_ARGS.get(fnName);
+            Set<Integer> admittedArgs = MonotonicFunctionRegistry.dataArgPositions(fnName);
             if (admittedArgs == null) {
                 return false;
             }
