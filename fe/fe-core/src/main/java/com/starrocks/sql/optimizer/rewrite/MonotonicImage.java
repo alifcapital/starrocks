@@ -234,7 +234,7 @@ public class MonotonicImage {
      * purpose than {@code ScalarOperatorEvaluator.isMonotonicFunction}, which accepts every
      * cast.
      */
-    private static boolean isOrderPreservingCast(CastOperator cast) {
+    public static boolean isOrderPreservingCast(CastOperator cast) {
         Type from = cast.getChild(0).getType();
         Type to = cast.getType();
         // same primitive type (e.g. varchar length change) does not reorder values

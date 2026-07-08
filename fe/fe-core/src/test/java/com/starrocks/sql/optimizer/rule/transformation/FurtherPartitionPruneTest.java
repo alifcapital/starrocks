@@ -213,16 +213,20 @@ class FurtherPartitionPruneTest extends PlanTestBase {
     @MethodSource("exprPrunePartitionSqls")
     @Order(8)
     void testDisableExprPrunePartition(String sql) throws Exception {
-        connectContext.getSessionVariable().setEnableExprPrunePartition(false);
-        String plan = getFragmentPlan(sql);
-        Pattern pattern = Pattern.compile("partitions=.*");
-        Matcher matcher = pattern.matcher(plan);
+        try {
+            connectContext.getSessionVariable().setEnableExprPrunePartition(false);
+            String plan = getFragmentPlan(sql);
+            Pattern pattern = Pattern.compile("partitions=.*");
+            Matcher matcher = pattern.matcher(plan);
 
-        while (matcher.find()) {
-            String matchedLine = matcher.group();
-            System.out.println(matchedLine);
-            String[] values = matchedLine.split("=")[1].split("/");
-            Assertions.assertTrue(Integer.valueOf(values[0]) == Integer.valueOf(values[1]), matchedLine);
+            while (matcher.find()) {
+                String matchedLine = matcher.group();
+                System.out.println(matchedLine);
+                String[] values = matchedLine.split("=")[1].split("/");
+                Assertions.assertTrue(Integer.valueOf(values[0]) == Integer.valueOf(values[1]), matchedLine);
+            }
+        } finally {
+            connectContext.getSessionVariable().setEnableExprPrunePartition(true);
         }
     }
 
@@ -496,6 +500,37 @@ class FurtherPartitionPruneTest extends PlanTestBase {
     @MethodSource("partitionPruneWithLastDay")
     @Order(6)
     void canPrunePredicateSqls2(String sql, String expect) throws Exception {
+        String plan = getFragmentPlan(sql);
+        PlanTestBase.assertContains(plan, expect);
+    }
+
+    private static Stream<Arguments> castExprPruneSqls() {
+        List<Arguments> arguments = Lists.newArrayList();
+        // date -> datetime keeps order on the whole domain, the mapped ranges are always usable
+        arguments.add(Arguments.of("select * from ptest where cast(d2 as datetime) < '2020-01-01 00:00:00'",
+                "partitions=1/4"));
+        arguments.add(Arguments.of("select * from ptest where cast(d2 as datetime) >= '2020-04-01 00:00:00'",
+                "partitions=2/4"));
+        // cast(int as varchar) keeps order only between strings of the same length. Partitions
+        // p2 [100,200), p3 [200,300), p4 [300,400) map to same-length string ranges and can be
+        // pruned; p1 [0,100) maps to '0'..'100' of different lengths and is always kept.
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) >= '100'"
+                + " and cast(k1 as varchar) < '200'", "partitions=2/4"));
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '250'", "partitions=2/4"));
+        // p3 [200,300) maps to the closed string range ['200','300'], and '300' sits on its
+        // upper edge, so p3 is kept too (the same over-keep as for every mapped expression)
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) >= '300'", "partitions=3/4"));
+        // a predicate that only matches p1 keeps p1 (its range is full-scope, never pruned)
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '50'", "partitions=1/4"));
+        // int -> double is not on the whitelist and must not prune
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as double) > 250.5", "partitions=4/4"));
+        return arguments.stream();
+    }
+
+    @ParameterizedTest(name = "sql_{index}: {0}.")
+    @MethodSource("castExprPruneSqls")
+    @Order(10)
+    void testCastExprPrune(String sql, String expect) throws Exception {
         String plan = getFragmentPlan(sql);
         PlanTestBase.assertContains(plan, expect);
     }

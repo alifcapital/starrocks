@@ -95,14 +95,14 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
     public void testMotivatingIntMonthPattern() throws Exception {
         // datadate in ['2024-03-05','2024-04-10'] maps through date_format(..., '%Y%m') to
         // ['202403','202404'], and the equality moves it to cast(datamonth as varchar) on the
-        // fact scan. Partition further-prune drops CastOperator conjuncts, so this stays a
-        // row filter (partitions=6/6) until the pruner supports order-preserving casts.
+        // fact scan. All partition bounds are 6-digit ints, so their string images have equal
+        // length and further-prune can use the cast conjuncts. 3/6 and not 2/6: the February
+        // partition's closed image ['202402','202403'] touches the lower bound, and a
+        // partition whose mapped bounds touch the range is kept (the usual over-keep).
         String plan = getFragmentPlan("select * from fact_month_int f join event_dates e"
                 + " on f.id = e.id and cast(f.datamonth as varchar) = date_format(e.datadate, '%Y%m')"
                 + " where e.datadate between '2024-03-05' and '2024-04-10'");
-        assertContains(plan, "CAST(2: datamonth AS VARCHAR) >= '202403'");
-        assertContains(plan, "CAST(2: datamonth AS VARCHAR) <= '202404'");
-        assertContains(plan, "partitions=6/6");
+        assertContains(plan, "partitions=3/6");
     }
 
     @Test

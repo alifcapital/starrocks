@@ -21,6 +21,7 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -101,29 +102,57 @@ public class PartitionColPredicateExtractor extends ScalarOperatorVisitor<Scalar
         if (ConnectContext.get().getSessionVariable().isEnableExprPrunePartition()
                 && call.getColumnRefs().size() == 1 && partitionColumnSet.containsAll(call.getUsedColumns())
                 && OperatorFunctionChecker.onlyContainMonotonicFunctions(call).first) {
-            BaseScalarOperatorShuttle replaceShuttle = new BaseScalarOperatorShuttle() {
-                @Override
-                public ScalarOperator visitVariableReference(ColumnRefOperator variable, Void context) {
-                    return ConstantOperator.createExampleValueByType(variable.getType());
-                }
-            };
-
-            ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();
-            try {
-                ScalarOperator replaced = call.accept(replaceShuttle, null);
-                ScalarOperator result = rewriter.rewrite(replaced,
-                        Collections.singletonList(new FoldConstantsRule(true)));
-
-                if (result instanceof ConstantOperator) {
-                    return call;
-                } else {
-                    return null;
-                }
-            } catch (Exception e) {
-                return null;
-            }
+            return foldsOnExampleValue(call) ? call : null;
         }
         return null;
+    }
+
+    @Override
+    public ScalarOperator visitCastOperator(CastOperator cast, Void context) {
+        // Casts do not reach visitCall (CastOperator dispatches here), so without this method
+        // a cast conjunct is dropped and never prunes. Two groups are allowed through:
+        // - order-preserving casts (see MonotonicImage.isOrderPreservingCast);
+        // - cast(int as varchar), which keeps order only between strings of equal length;
+        //   the evaluator checks the mapped bounds of each partition for that (a partition
+        //   whose bound images differ in length is not pruned).
+        if (!ConnectContext.get().getSessionVariable().isEnableExprPrunePartition()
+                || cast.getColumnRefs().size() != 1 || !partitionColumnSet.containsAll(cast.getUsedColumns())) {
+            return null;
+        }
+        if (!MonotonicImage.isOrderPreservingCast(cast) && !isIntToStringCast(cast)) {
+            return null;
+        }
+        // the operand must itself be accepted: a bare partition column, a monotonic call,
+        // or another allowed cast
+        ScalarOperator child = cast.getChild(0).accept(this, null);
+        if (child == null || !(child instanceof ColumnRefOperator || child instanceof CallOperator)) {
+            return null;
+        }
+        return foldsOnExampleValue(cast) ? cast : null;
+    }
+
+    static boolean isIntToStringCast(CastOperator cast) {
+        return cast.getChild(0).getType().isIntegerType() && cast.getType().isStringType();
+    }
+
+    // the evaluator can only work with expressions the FE can fold; check on an example value
+    private boolean foldsOnExampleValue(CallOperator call) {
+        BaseScalarOperatorShuttle replaceShuttle = new BaseScalarOperatorShuttle() {
+            @Override
+            public ScalarOperator visitVariableReference(ColumnRefOperator variable, Void context) {
+                return ConstantOperator.createExampleValueByType(variable.getType());
+            }
+        };
+
+        ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();
+        try {
+            ScalarOperator replaced = call.accept(replaceShuttle, null);
+            ScalarOperator result = rewriter.rewrite(replaced,
+                    Collections.singletonList(new FoldConstantsRule(true)));
+            return result instanceof ConstantOperator;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Override
