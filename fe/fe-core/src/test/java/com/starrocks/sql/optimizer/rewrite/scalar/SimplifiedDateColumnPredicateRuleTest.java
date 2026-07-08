@@ -88,6 +88,14 @@ public class SimplifiedDateColumnPredicateRuleTest {
             verifyDateTime(new BinaryPredicateOperator(BinaryType.LE, call, DATE_BEGIN));
             verifyNotDateTime(new BinaryPredicateOperator(BinaryType.EQ, call, DATE_BEGIN));
 
+            // days_add past the DATETIME max folds to NULL; boundary constants stay unrewritten
+            verifyNotDateTime(new BinaryPredicateOperator(BinaryType.LE, call,
+                    ConstantOperator.createVarchar("99991231")));
+            verifyNotDateTime(new BinaryPredicateOperator(BinaryType.GT, call,
+                    ConstantOperator.createVarchar("99991231")));
+            verifyDateTime(new BinaryPredicateOperator(BinaryType.LE, call,
+                    ConstantOperator.createVarchar("99991230")));
+
             Function func = new Function(new FunctionName("date_format"),
                     new Type[] {DateType.DATETIME, VarcharType.VARCHAR}, VarcharType.VARCHAR, true);
             ScalarOperator datetimeFunCall = new CallOperator("date_format", VarcharType.VARCHAR, ImmutableList.of(

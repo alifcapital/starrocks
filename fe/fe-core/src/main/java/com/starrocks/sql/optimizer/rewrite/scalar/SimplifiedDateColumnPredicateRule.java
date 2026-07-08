@@ -32,6 +32,7 @@ import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.Type;
 
 import java.time.DateTimeException;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 import static com.starrocks.sql.ast.expression.BinaryType.GE;
@@ -87,6 +88,13 @@ public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRew
                 return new BinaryPredicateOperator(binaryType, columnRef, right);
             } else if (binaryType == GT || binaryType == LE) {
                 // date_format(t, '%Y-%m-%d') >/<= '2023-03-27' -> t >=/< days_add('2023-03-27', 1)
+                // days_add past the DATETIME max folds to NULL and the predicate would reject
+                // every row; keep the original predicate for boundary constants
+                Optional<ConstantOperator> asDatetime = ((ConstantOperator) right).castTo(DateType.DATETIME);
+                if (asDatetime.isEmpty() || asDatetime.get().isNull()
+                        || asDatetime.get().getDatetime().plusDays(1).isAfter(ConstantOperator.MAX_DATETIME)) {
+                    return predicate;
+                }
                 Function daysAddFn = ExprUtils.getBuiltinFunction(FunctionSet.DAYS_ADD,
                         new Type[] {DateType.DATETIME, IntegerType.INT}, Function.CompareMode.IS_IDENTICAL);
                 binaryType = binaryType == GT ? GE : LT;
