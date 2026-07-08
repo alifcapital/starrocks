@@ -68,17 +68,17 @@ public class MonotonicPredicateDeriveIcebergTest extends ConnectorPlanTestBase {
     }
 
     @Test
-    public void testWrappedTransformJoinKeyDerivesResidualFilter() throws Exception {
+    public void testWrappedTransformJoinKeyDerivesBareColumnRange() throws Exception {
         // t0_month is partitioned by the iceberg month(ts) transform; the derived predicate
-        // stays on date_trunc('month', ts) and reaches the scan as a row filter only
-        // (iceberg file skipping needs a predicate on the bare column)
+        // on date_trunc('month', ts) inverts into period bounds on the bare ts, and the
+        // iceberg predicate conversion pushes bare-column predicates into planFiles
         String plan = getFragmentPlan("select f.id from iceberg0.partitioned_transforms_db.t0_month f"
                 + " join ice_event_dates e"
                 + " on f.id = e.id and date_trunc('month', f.ts) = date_trunc('month', e.datadate)"
                 + " where e.datadate between '2024-03-05' and '2024-04-10'");
         assertContains(plan, "IcebergScanNode");
-        assertContains(plan, "date_trunc('month', 3: ts) >= '2024-03-01 00:00:00'");
-        assertContains(plan, "date_trunc('month', 3: ts) <= '2024-04-01 00:00:00'");
+        assertContains(plan, "3: ts >= '2024-03-01 00:00:00'");
+        assertContains(plan, "3: ts < '2024-05-01 00:00:00'");
     }
 
     @Test

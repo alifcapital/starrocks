@@ -357,10 +357,10 @@ public class PartitionPruneTest extends PlanTestBase {
                 .explainContains("partitions=6/6");
         starRocksAssert.query("select count(*) from t_gen_col where c1 = c2 ")
                 .explainContains("partitions=6/6");
+        // '2024-02-01' is not a year start, so no c1 can satisfy the equality: the monotonic
+        // inversion turns it into an empty interval on c1 and the plan collapses
         starRocksAssert.query("select count(*) from t_gen_col where date_trunc('year', c1) = '2024-02-01' ")
-                .explainContains("partitions=6/6");
-        starRocksAssert.query("select count(*) from t_gen_col where date_trunc('year', c1) = '2024-02-01' ")
-                .explainContains("partitions=6/6");
+                .explainContains("0:EMPTYSET");
 
         // compound
         starRocksAssert.query("select count(*) from t_gen_col where c1 >= '2024-02-01' and c1 <= '2024-03-01' ")

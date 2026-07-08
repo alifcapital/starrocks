@@ -1085,6 +1085,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND = "enable_monotonic_predicate_move_around";
 
+    public static final String ENABLE_MONOTONIC_PREDICATE_REWRITE = "enable_monotonic_predicate_rewrite";
+
     public static final String JIT_LEVEL = "jit_level";
 
     // ann params like: nprobe
@@ -3365,6 +3367,13 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // expressions in join equalities by mapping the column domain through the expression
     @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND)
     private boolean enableMonotonicPredicateMoveAround = true;
+
+    // rewrite f(col) cmp constant into the equivalent predicate on col when f has an exact
+    // preimage (date_trunc periods, fixed-duration shifts). Kill switch, not a tuning knob:
+    // toggling it changes predicate canonization, and FE-wide cached MV plans canonized
+    // under a different setting stop matching (rewrite misses, not wrong results).
+    @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_REWRITE)
+    private boolean enableMonotonicPredicateRewrite = true;
 
     @VarAttr(name = CONNECTOR_REMOTE_FILE_ASYNC_QUEUE_SIZE, flag = VariableMgr.INVISIBLE)
     private int connectorRemoteFileAsyncQueueSize = 1000;
@@ -6048,6 +6057,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMonotonicPredicateMoveAround(boolean enableMonotonicPredicateMoveAround) {
         this.enableMonotonicPredicateMoveAround = enableMonotonicPredicateMoveAround;
+    }
+
+    public boolean isEnableMonotonicPredicateRewrite() {
+        return enableMonotonicPredicateRewrite;
+    }
+
+    public void setEnableMonotonicPredicateRewrite(boolean enableMonotonicPredicateRewrite) {
+        this.enableMonotonicPredicateRewrite = enableMonotonicPredicateRewrite;
     }
 
     public boolean isEnableConstantExecuteInFE() {

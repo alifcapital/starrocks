@@ -141,17 +141,15 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
 
     @Test
     public void testExpressionOnBothSides() throws Exception {
-        // the derived fact-side predicate stays on date_trunc('month', ts); the expression
-        // further-prune maps partition bounds through it. 3/6 and not 2/6: the February
-        // partition has exclusive upper bound 2024-03-01, date_trunc maps it exactly onto the
-        // range edge, and the evaluator keeps such a partition. Extra partition, no wrong
-        // results.
+        // the derived fact-side predicate lands on date_trunc('month', ts), the exact
+        // inversion turns it into period bounds on the bare ts, and the native range pruner
+        // selects exactly the two covered partitions - the bounds then disappear from the
+        // scan entirely (every remaining row satisfies them)
         String plan = getFragmentPlan("select * from fact_ts f join event_dates e"
                 + " on f.id = e.id and date_trunc('month', f.ts) = date_trunc('month', e.datadate)"
                 + " where e.datadate between '2024-03-05' and '2024-04-10'");
-        assertContains(plan, "date_trunc('month', 2: ts) >= '2024-03-01 00:00:00'");
-        assertContains(plan, "date_trunc('month', 2: ts) <= '2024-04-01 00:00:00'");
-        assertContains(plan, "partitions=3/6");
+        assertContains(plan, "partitions=2/6");
+        assertNotContains(plan, "date_trunc('month', 2: ts) >=");
     }
 
     @Test

@@ -214,7 +214,10 @@ class FurtherPartitionPruneTest extends PlanTestBase {
     @Order(8)
     void testDisableExprPrunePartition(String sql) throws Exception {
         try {
+            // the monotonic inversion prunes several of these through the bare column with
+            // no expression pruning at all; both switches off isolate the baseline
             connectContext.getSessionVariable().setEnableExprPrunePartition(false);
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
             String plan = getFragmentPlan(sql);
             Pattern pattern = Pattern.compile("partitions=.*");
             Matcher matcher = pattern.matcher(plan);
@@ -227,6 +230,7 @@ class FurtherPartitionPruneTest extends PlanTestBase {
             }
         } finally {
             connectContext.getSessionVariable().setEnableExprPrunePartition(true);
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
         }
     }
 
@@ -453,7 +457,6 @@ class FurtherPartitionPruneTest extends PlanTestBase {
         sqlList.add("select * from less_than_tbl where k1 < str_to_date('20200801', '%Y%m%d')");
         sqlList.add("select * from less_than_tbl where k1 < '2020-08-01' and k1 is not null");
         sqlList.add("select * from less_than_tbl where k1 < '2020-08-01' and k1 is null");
-        sqlList.add("select * from ptest where date_trunc('year', d2) = '2020-01-01'");
         sqlList.add("select * from less_than_tbl where date_trunc('year', k1) < '2020-08-01'");
         sqlList.add("select * from less_than_tbl where datediff('2020-08-01', k1) = 1");
         sqlList.add("select * from less_than_tbl where date_format(k1, '%m月%Y年') = '06月-2020年'");
@@ -473,6 +476,9 @@ class FurtherPartitionPruneTest extends PlanTestBase {
                 "and cast(d2 as date) < '2020-04-01'");
         sqlList.add("select * from ptest where d2 < cast('20200101' as date)");
         sqlList.add("select * from ptest where d2 < str_to_date('20200401', '%Y%m%d')");
+        // the monotonic inversion turns this into year-period bounds on the bare d2, the
+        // selected partitions sit fully inside them and the predicate disappears
+        sqlList.add("select * from ptest where date_trunc('year', d2) = '2020-01-01'");
         return sqlList.stream().map(e -> Arguments.of(e));
     }
 

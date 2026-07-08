@@ -16,19 +16,34 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * Per-function facts for monotonic value reasoning, keyed by lower-case function name.
  * {@code ScalarOperatorEvaluator.isMonotonicFunction} only says "this function is monotonic
- * in some argument"; this registry says in which one, and which functions are admitted at
- * all. Functions not listed here are refused.
+ * in some argument"; this registry says in which one, which functions are admitted at all,
+ * and which have an exact preimage. Functions not listed here are refused.
  */
 public final class MonotonicFunctionRegistry {
 
     private MonotonicFunctionRegistry() {
+    }
+
+    /**
+     * Exact preimage of {@code { x : f(..., x, ...) cmp value }} as a predicate on the data
+     * argument. Empty = refuse; a refusal only loses the rewrite. Implementations never throw
+     * and never accept NULL where the original predicate would not.
+     */
+    public interface ExactInverse {
+        Optional<ScalarOperator> invert(CallOperator call, ScalarOperator dataChild,
+                                        BinaryType cmp, ConstantOperator value);
     }
 
     /**
@@ -85,6 +100,34 @@ public final class MonotonicFunctionRegistry {
             FunctionSet.FROM_UNIXTIME, FunctionSet.FROM_UNIXTIME_MS, FunctionSet.TO_DATETIME);
 
     /**
+     * Exact preimages. Only functions whose preimage boundary is computable from the
+     * constant alone are listed: calendar-period floors (date_trunc) and fixed-duration
+     * shifts (day and finer, plus weeks: 7-day fixed). Month/quarter/year shifts clamp
+     * day-of-month and are NOT invertible (months_add('2024-01-31', 1) = '2024-02-29' =
+     * months_add('2024-01-30', 1)); time_slice buckets are epoch-anchored multiples of an
+     * interval, not calendar periods, and stay image-only too.
+     */
+    private static final Map<String, ExactInverse> EXACT_INVERSES = ImmutableMap.<String, ExactInverse>builder()
+            .put(FunctionSet.DATE_TRUNC, MonotonicInverse.PERIOD_FLOOR)
+            .put(FunctionSet.DAYS_ADD, MonotonicInverse.shift(FunctionSet.DAYS_SUB))
+            .put(FunctionSet.DAYS_SUB, MonotonicInverse.shift(FunctionSet.DAYS_ADD))
+            .put(FunctionSet.WEEKS_ADD, MonotonicInverse.shift(FunctionSet.WEEKS_SUB))
+            .put(FunctionSet.WEEKS_SUB, MonotonicInverse.shift(FunctionSet.WEEKS_ADD))
+            .put(FunctionSet.HOURS_ADD, MonotonicInverse.shift(FunctionSet.HOURS_SUB))
+            .put(FunctionSet.HOURS_SUB, MonotonicInverse.shift(FunctionSet.HOURS_ADD))
+            .put(FunctionSet.MINUTES_ADD, MonotonicInverse.shift(FunctionSet.MINUTES_SUB))
+            .put(FunctionSet.MINUTES_SUB, MonotonicInverse.shift(FunctionSet.MINUTES_ADD))
+            .put(FunctionSet.SECONDS_ADD, MonotonicInverse.shift(FunctionSet.SECONDS_SUB))
+            .put(FunctionSet.SECONDS_SUB, MonotonicInverse.shift(FunctionSet.SECONDS_ADD))
+            .put(FunctionSet.MILLISECONDS_ADD, MonotonicInverse.shift(FunctionSet.MILLISECONDS_SUB))
+            .put(FunctionSet.MILLISECONDS_SUB, MonotonicInverse.shift(FunctionSet.MILLISECONDS_ADD))
+            .put(FunctionSet.ADDDATE, MonotonicInverse.shift(FunctionSet.SUBDATE))
+            .put(FunctionSet.SUBDATE, MonotonicInverse.shift(FunctionSet.ADDDATE))
+            .put(FunctionSet.DATE_ADD, MonotonicInverse.shift(FunctionSet.DATE_SUB))
+            .put(FunctionSet.DATE_SUB, MonotonicInverse.shift(FunctionSet.DATE_ADD))
+            .build();
+
+    /**
      * Argument positions the data column may occupy, or null when the function is not
      * admitted for monotonic reasoning.
      */
@@ -94,5 +137,12 @@ public final class MonotonicFunctionRegistry {
 
     public static boolean isFormatBearing(String fnName) {
         return FORMAT_BEARING_FUNCTIONS.contains(fnName.toLowerCase());
+    }
+
+    /**
+     * Exact preimage for the function, or null when only the image direction is sound.
+     */
+    public static ExactInverse exactInverse(String fnName) {
+        return EXACT_INVERSES.get(fnName.toLowerCase());
     }
 }
