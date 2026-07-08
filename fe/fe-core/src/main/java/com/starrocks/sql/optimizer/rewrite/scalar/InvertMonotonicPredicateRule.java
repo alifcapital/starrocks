@@ -42,7 +42,8 @@ import java.util.Set;
  * surrounding rewriter fixpoint unwinds the chain (casts reduce via ReduceCastRule).
  * <p>
  * The rewrite is an equivalence, NULL included (the inverse contract), so replacing the
- * predicate is valid under NOT/OR/select-list contexts. NE and null-safe-equal never match.
+ * predicate is valid under NOT/OR/select-list contexts. NE and null-safe-equal invert only
+ * where the preimage is a single point of the column domain; each inverter decides.
  */
 public class InvertMonotonicPredicateRule extends BottomUpScalarOperatorRewriteRule {
 
@@ -89,8 +90,8 @@ public class InvertMonotonicPredicateRule extends BottomUpScalarOperatorRewriteR
     /**
      * The single non-constant argument, which must sit in a registry-admitted position while
      * every other argument is a non-NULL constant; null when the call has no such shape.
-     * Exactly-one-column discipline as in the image direction: two occurrences of the column
-     * break the single-chain monotonicity argument.
+     * The column must occur exactly once, as in the image direction: with two occurrences
+     * the expression is not a single monotonic chain.
      */
     private ScalarOperator dataChildOf(CallOperator call) {
         Set<Integer> admitted = MonotonicFunctionRegistry.dataArgPositions(call.getFnName());

@@ -3369,9 +3369,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     private boolean enableMonotonicPredicateMoveAround = true;
 
     // rewrite f(col) cmp constant into the equivalent predicate on col when f has an exact
-    // preimage (date_trunc periods, fixed-duration shifts). Kill switch, not a tuning knob:
-    // toggling it changes predicate canonization, and FE-wide cached MV plans canonized
-    // under a different setting stop matching (rewrite misses, not wrong results).
+    // preimage (date_trunc periods, fixed-duration shifts). Kill switch only: toggling it
+    // changes predicate canonization, and FE-wide cached MV plans canonized under a
+    // different setting stop matching (rewrite misses, not wrong results).
     @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_REWRITE)
     private boolean enableMonotonicPredicateRewrite = true;
 

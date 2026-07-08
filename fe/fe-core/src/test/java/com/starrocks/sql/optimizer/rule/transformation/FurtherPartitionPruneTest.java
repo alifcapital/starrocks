@@ -524,7 +524,8 @@ class FurtherPartitionPruneTest extends PlanTestBase {
                 + " and cast(k1 as varchar) < '200'", "partitions=2/4"));
         arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '250'", "partitions=2/4"));
         // p3 [200,300) maps to the closed string range ['200','300'], and '300' sits on its
-        // upper edge, so p3 is kept too (the same over-keep as for every mapped expression)
+        // upper edge, so p3 is kept too, like every partition whose mapped bounds touch the
+        // range
         arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) >= '300'", "partitions=3/4"));
         // a predicate that only matches p1 keeps p1 (its range is full-scope, never pruned)
         arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '50'", "partitions=1/4"));

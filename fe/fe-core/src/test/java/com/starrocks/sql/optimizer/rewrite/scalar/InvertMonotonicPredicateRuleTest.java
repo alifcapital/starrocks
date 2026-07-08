@@ -135,7 +135,8 @@ public class InvertMonotonicPredicateRuleTest {
     @Test
     public void testDayShiftInverts() {
         // days_add overflows only at the top of the domain: LE keeps the region away from
-        // the tail and needs no guard, GE gets one, EQ maps to the total zone by construction
+        // the tail and needs no guard, GE gets one, EQ needs none (its preimage is one valid
+        // point)
         CallOperator call = new CallOperator("days_add", DateType.DATETIME,
                 ImmutableList.of(dtCol, ConstantOperator.createInt(3)));
         ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.LE, call,
@@ -155,8 +156,9 @@ public class InvertMonotonicPredicateRuleTest {
     @Test
     public void testPeriodHelperMatchesEvaluatorFold() {
         // the inverter builds bounds with SyncPartitionUtils while the image side folds via
-        // ScalarOperatorFunctions.dateTrunc - two implementations of the same floor; a drift
-        // between them manufactures wrong bounds. Pinned on the units with nontrivial floors.
+        // ScalarOperatorFunctions.dateTrunc - two implementations of the same floor; if they
+        // ever disagree the inverter produces wrong bounds. Checked on the units with
+        // nontrivial floors.
         for (String unit : new String[] {"week", "quarter", "month", "year"}) {
             for (LocalDateTime probe : new LocalDateTime[] {
                     LocalDateTime.of(2024, 3, 6, 10, 30),     // Wednesday
@@ -220,7 +222,8 @@ public class InvertMonotonicPredicateRuleTest {
 
     @Test
     public void testDatediffTwoVariableArgsRefused() {
-        // both arguments carry the column: the day-of-month sawtooth, not a monotonic chain
+        // both arguments carry the column: day of month rises and drops within each month,
+        // not a monotonic chain
         CallOperator trunc = new CallOperator("date_trunc", DateType.DATETIME,
                 ImmutableList.of(ConstantOperator.createVarchar("month"), dtCol));
         CallOperator sawtooth = new CallOperator("datediff", DateType.DATETIME,

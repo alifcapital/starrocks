@@ -84,8 +84,8 @@ public final class MonotonicInverse {
     /**
      * datediff(x, C) cmp N inverts into day-period bounds on x from the day {@code C + N};
      * the const-first form datediff(C, x) decreases in x and inverts with the comparison
-     * flipped. datediff truncates both sides to days and never overflows in x, so there is
-     * no shift-style tail.
+     * flipped. datediff truncates both sides to days and does not overflow in x, so no
+     * guard bound is needed.
      */
     public static final MonotonicFunctionRegistry.ExactInverse DATEDIFF_DAYS = MonotonicInverse::invertDatediff;
 
@@ -94,7 +94,7 @@ public final class MonotonicInverse {
      * admitted when it has the format's canonical length, parses strictly, and re-renders to
      * exactly itself; then string comparison against the rendered images coincides with date
      * comparison and the constant maps to a period of the format's granularity. On a DATE
-     * column a day format is a single point: the equality keeps its point shape (bucket
+     * column a day format is a single point: the equality inverts to col = value (bucket
      * pruning consumes point filters only) and NE / null-safe-equal invert too.
      */
     public static final MonotonicFunctionRegistry.ExactInverse RENDERED_PERIOD = MonotonicInverse::invertDateFormat;
@@ -261,7 +261,7 @@ public final class MonotonicInverse {
     }
 
     /**
-     * The comparison cells shared by every period-shaped inverse. {@code aligned} tells
+     * The comparison cells shared by every period inverse. {@code aligned} tells
      * whether the constant equals its own period start. Guards: the period must sit inside
      * the supported range and the next start must actually advance (the period helper
      * clamps at the DATETIME max instead of overflowing).
@@ -334,13 +334,15 @@ public final class MonotonicInverse {
      * {@code days_add(x, 3) >= C} becomes {@code x >= C-3d AND x <= '9999-12-28 23:59:59'}.
      * The guard bound is the opposite shift folded at the domain extreme; when that fold is
      * itself NULL, the tail lies on the other side and no guard is needed. An equality needs
-     * no guard: its preimage point always sits in the total zone. NE and null-safe-equal
-     * refuse (their regions open toward both edges and a guard would change WHERE
-     * semantics). Refuses when the shifted constant folds to NULL or throws.
+     * no guard: its only preimage point is the shifted constant, a valid value outside the
+     * tail. NE and null-safe-equal refuse: their regions open toward both edges and a guard
+     * would change WHERE semantics. Refuses when the shifted constant folds to NULL or
+     * throws.
      * <p>
      * Known residual: under NOT a tail row differs (original NOT(NULL) = NULL filters it,
-     * the guarded form gives NOT(FALSE) = TRUE). "NULL exactly on the tail" is inexpressible
-     * on the bare column; the period inverters have no such gap (total functions).
+     * the guarded form gives NOT(FALSE) = TRUE). No predicate on the bare column yields NULL
+     * only for tail rows, so this is not fixable here. Period functions do not overflow and
+     * their inverses have no such gap.
      */
     public static MonotonicFunctionRegistry.ExactInverse shift(String oppositeFnName) {
         return (call, dataChild, cmp, value) -> invertShift(oppositeFnName, call, dataChild, cmp, value);

@@ -92,7 +92,7 @@ public class MonotonicPredicateRewriteTest extends PlanTestBase {
     @Test
     public void testDateTruncRangeCmps() throws Exception {
         // month periods coincide with whole partitions here, so the inverted bounds prune
-        // and then disappear from the scan; the partition counts pin the case table
+        // and then disappear from the scan; the partition counts check the case table
         // (unaligned GE rounds up to the next period start, etc.)
         String plan = getFragmentPlan("select * from rw_month where date_trunc('month', d) >= '2024-03-15'");
         assertContains(plan, "partitions=3/6");
