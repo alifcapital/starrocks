@@ -298,6 +298,11 @@ public class ColumnFilterConverter {
             LocalDateTime rhsDateTime = ((DateLiteral) rhsLiteral).toLocalDateTime();
             LocalDateTime periodStart = getLowerDateTime(rhsDateTime, granularity);
             LocalDateTime nextPeriodStart = nextUpperDateTime(periodStart, granularity);
+            // at the DATETIME max nextUpperDateTime clamps and returns its input; the empty
+            // [start, start) interval would prune partitions that do hold last-period rows
+            if (!nextPeriodStart.isAfter(periodStart)) {
+                return false;
+            }
 
             DateLiteral startLit = new DateLiteral(periodStart, rhsLiteral.getType());
             DateLiteral nextStartLit = new DateLiteral(nextPeriodStart, rhsLiteral.getType());

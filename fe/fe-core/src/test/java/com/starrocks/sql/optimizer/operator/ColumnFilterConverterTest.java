@@ -63,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -225,7 +226,34 @@ public class ColumnFilterConverterTest {
         assertEquals(0, resultYear.size());
     }
 
+    @Test
+    public void convertColumnFilterExprDateTruncAtDatetimeMax() {
+        // nextUpperDateTime clamps at the DATETIME max, so the date_trunc fast path cannot
+        // build its half-open [start, nextStart) filter there (it degenerates to the empty
+        // [start, start)). The generic visitor takes over with inclusive bounds.
+        OlapTable olapTable = buildOlapTable("day");
+        LocalDateTime lastDay = LocalDateTime.of(9999, 12, 31, 0, 0, 0);
+
+        PartitionColumnFilter eq = ColumnFilterConverter
+                .convertColumnFilter(buildOperator("day", BinaryType.EQ, lastDay), olapTable).get("date_col");
+        assertEquals(eq.getLowerBound(), eq.getUpperBound());
+        assertTrue(eq.lowerBoundInclusive);
+        assertTrue(eq.upperBoundInclusive);
+
+        PartitionColumnFilter le = ColumnFilterConverter
+                .convertColumnFilter(buildOperator("day", BinaryType.LE, lastDay), olapTable).get("date_col");
+        assertTrue(le.upperBoundInclusive);
+
+        PartitionColumnFilter gt = ColumnFilterConverter
+                .convertColumnFilter(buildOperator("day", BinaryType.GT, lastDay), olapTable).get("date_col");
+        assertFalse(gt.lowerBoundInclusive);
+    }
+
     private List<ScalarOperator> buildOperator(String timeKey, BinaryType binaryType) {
+        return buildOperator(timeKey, binaryType, LocalDateTime.of(2022, 12, 23, 0, 0, 0));
+    }
+
+    private List<ScalarOperator> buildOperator(String timeKey, BinaryType binaryType, LocalDateTime value) {
         List<ScalarOperator> arguments = new ArrayList<>(2);
         arguments.add(ConstantOperator.createVarchar(timeKey));
         arguments.add(new ColumnRefOperator(2, IntegerType.INT, "date_col", true));
@@ -233,7 +261,7 @@ public class ColumnFilterConverterTest {
 
         ScalarOperator root1 = new BinaryPredicateOperator(binaryType,
                 callOperator,
-                ConstantOperator.createDate(LocalDateTime.of(2022, 12, 23, 0, 0, 0)));
+                ConstantOperator.createDate(value));
 
         return Lists.newArrayList(root1);
     }
