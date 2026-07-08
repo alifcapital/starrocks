@@ -1012,13 +1012,24 @@ public class ExpressionTest extends PlanTestBase {
         planFragment = getFragmentPlan(sql);
         assertContains(planFragment, "PREDICATES: 8: id_datetime = '2020-12-23 00:00:00'");
 
+        // month/year shifts clamp day-of-month (months_add('2024-01-31', 1) = '2024-02-29'),
+        // several inputs share one output and shifting the constant back loses/adds rows;
+        // such predicates stay unrewritten
         sql = "select t1a from test_all_type where years_sub(id_datetime, 2) = '2020-12-21'";
         planFragment = getFragmentPlan(sql);
-        assertContains(planFragment, "PREDICATES: 8: id_datetime = '2022-12-21 00:00:00'");
+        assertContains(planFragment, "years_sub(8: id_datetime, 2) = '2020-12-21 00:00:00'");
 
         sql = "select t1a from test_all_type where years_add(id_datetime, 2) = '2020-12-21'";
         planFragment = getFragmentPlan(sql);
-        assertContains(planFragment, "PREDICATES: 8: id_datetime = '2018-12-21 00:00:00'");
+        assertContains(planFragment, "years_add(8: id_datetime, 2) = '2020-12-21 00:00:00'");
+
+        sql = "select t1a from test_all_type where months_add(id_datetime, 1) <= '2024-02-29'";
+        planFragment = getFragmentPlan(sql);
+        assertContains(planFragment, "months_add(8: id_datetime, 1) <= '2024-02-29 00:00:00'");
+
+        sql = "select t1a from test_all_type where months_sub(id_datetime, 1) >= '2024-01-31'";
+        planFragment = getFragmentPlan(sql);
+        assertContains(planFragment, "months_sub(8: id_datetime, 1) >= '2024-01-31 00:00:00'");
     }
 
     @Test
