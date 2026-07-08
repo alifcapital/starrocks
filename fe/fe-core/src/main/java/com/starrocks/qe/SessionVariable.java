@@ -1083,6 +1083,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_PREDICATE_MOVE_AROUND = "enable_predicate_move_around";
 
+    public static final String ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND = "enable_monotonic_predicate_move_around";
+
     public static final String JIT_LEVEL = "jit_level";
 
     // ann params like: nprobe
@@ -3358,6 +3360,11 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_PREDICATE_MOVE_AROUND)
     private boolean enablePredicateMoveAround = true;
+
+    // in predicate move-around, additionally derive predicates through single-column monotonic
+    // expressions in join equalities by mapping the column domain through the expression
+    @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND)
+    private boolean enableMonotonicPredicateMoveAround = true;
 
     @VarAttr(name = CONNECTOR_REMOTE_FILE_ASYNC_QUEUE_SIZE, flag = VariableMgr.INVISIBLE)
     private int connectorRemoteFileAsyncQueueSize = 1000;
@@ -6033,6 +6040,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnablePredicateMoveAround(boolean enablePredicateMoveAround) {
         this.enablePredicateMoveAround = enablePredicateMoveAround;
+    }
+
+    public boolean isEnableMonotonicPredicateMoveAround() {
+        return enableMonotonicPredicateMoveAround;
+    }
+
+    public void setEnableMonotonicPredicateMoveAround(boolean enableMonotonicPredicateMoveAround) {
+        this.enableMonotonicPredicateMoveAround = enableMonotonicPredicateMoveAround;
     }
 
     public boolean isEnableConstantExecuteInFE() {
