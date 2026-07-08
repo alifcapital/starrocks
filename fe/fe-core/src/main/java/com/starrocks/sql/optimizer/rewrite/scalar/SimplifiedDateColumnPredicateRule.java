@@ -42,15 +42,13 @@ import static com.starrocks.sql.ast.expression.BinaryType.LT;
 
 /**
  * if t is date
- * date_format(t, '%Y%m%d') >= '20230327' -> `t` >= '20230327'
- * date_format(t, '%Y-%m-%d') >= '2023-03-27' -> `t` >= '2023-03-27'
  * substr(cast(t as varchar), 1, 10) >= '2023-03-27' -> `t` >= '2023-03-27'
  * substring(cast(t as varchar), 1, 10) >= '2023-03-27' -> `t` >= '2023-03-27'
  * replace(substring(cast(t as varchar), 1, 10), "-", "") >= '20230327' -> `t` >= '20230327'
  *
  * if it is datetime
- * date_format(t, '%Y-%m-%d') >=/< '2023-03-27' -> t >=/< '2023-03-27'
- * date_format(t, '%Y-%m-%d') >/<= '2023-03-27' -> t >=/< days_add('2023-03-27', 1)
+ * substr(cast(t as varchar), 1, 10) >=/< '2023-03-27' -> t >=/< '2023-03-27'
+ * substr(cast(t as varchar), 1, 10) >/<= '2023-03-27' -> t >=/< days_add('2023-03-27', 1)
  */
 public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRewriteRule {
     private static final String DATE_PATTERN1 = "%Y%m%d";
@@ -112,9 +110,9 @@ public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRew
     }
 
     private Extractor newExtractor(CallOperator call, ConstantOperator value) {
-        if (FunctionSet.DATE_FORMAT.equalsIgnoreCase(call.getFnName())) {
-            return new DateFormatExtractor(call, value);
-        } else if (isSubstrFn(call)) {
+        // date_format shapes invert through InvertMonotonicPredicateRule and the monotonic
+        // registry; only the substr/replace renderings stay here
+        if (isSubstrFn(call)) {
             return new SubstrExtractor(call, value, DATE_PATTERN2);
         } else if (FunctionSet.REPLACE.equalsIgnoreCase(call.getFnName())) {
             return new ReplaceAndSubstrExtractor(call, value);
@@ -145,39 +143,6 @@ public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRew
         ScalarOperator extractColumn();
 
         boolean check();
-    }
-
-    /**
-     * date_format(t, '%Y%m%d') -> t
-     */
-    private static class DateFormatExtractor implements Extractor {
-        private final CallOperator call;
-        private final ConstantOperator value;
-
-        public DateFormatExtractor(CallOperator call, ConstantOperator value) {
-            this.call = call;
-            this.value = value;
-        }
-
-        @Override
-        public boolean check() {
-            if (!call.getChild(1).isConstantRef()) {
-                return false;
-            }
-            ScalarOperator dateColumn = call.getChild(0);
-            return dateColumn.getType().getPrimitiveType() == PrimitiveType.DATE
-                    || dateColumn.getType().getPrimitiveType() == PrimitiveType.DATETIME;
-        }
-
-        @Override
-        public ScalarOperator extractColumn() {
-            ScalarOperator dateColumn = call.getChild(0);
-            String pattern = ((ConstantOperator) call.getChild(1)).getVarchar();
-            if (isDatePattern(pattern, value)) {
-                return dateColumn;
-            }
-            return null;
-        }
     }
 
     /**

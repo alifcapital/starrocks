@@ -153,6 +153,102 @@ public class InvertMonotonicPredicateRuleTest {
     }
 
     @Test
+    public void testPeriodHelperMatchesEvaluatorFold() {
+        // the inverter builds bounds with SyncPartitionUtils while the image side folds via
+        // ScalarOperatorFunctions.dateTrunc - two implementations of the same floor; a drift
+        // between them manufactures wrong bounds. Pinned on the units with nontrivial floors.
+        for (String unit : new String[] {"week", "quarter", "month", "year"}) {
+            for (LocalDateTime probe : new LocalDateTime[] {
+                    LocalDateTime.of(2024, 3, 6, 10, 30),     // Wednesday
+                    LocalDateTime.of(2024, 3, 10, 23, 59),    // Sunday
+                    LocalDateTime.of(2024, 2, 29, 0, 0)}) {   // leap day
+                LocalDateTime helper = com.starrocks.sql.common.SyncPartitionUtils.getLowerDateTime(probe, unit);
+                ConstantOperator folded = com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions.dateTrunc(
+                        ConstantOperator.createVarchar(unit), ConstantOperator.createDatetime(probe));
+                assertEquals(folded.getDatetime(), helper, unit + " at " + probe);
+            }
+        }
+    }
+
+    @Test
+    public void testYearInverts() {
+        CallOperator call = new CallOperator("year", DateType.DATETIME, ImmutableList.of(dtCol));
+        assertEquals("1: ts >= 2024-01-01 00:00:00 AND 1: ts < 2025-01-01 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, call,
+                        ConstantOperator.createInt(2024))).toString());
+        assertEquals("1: ts >= 2024-01-01 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.GE, call,
+                        ConstantOperator.createInt(2024))).toString());
+        // out of the year domain / no next period start at 9999: keep the predicate
+        ScalarOperator outOfRange = new BinaryPredicateOperator(BinaryType.EQ, call,
+                ConstantOperator.createInt(10000));
+        assertSame(outOfRange, apply(outOfRange));
+        ScalarOperator lastYear = new BinaryPredicateOperator(BinaryType.GE, call,
+                ConstantOperator.createInt(9999));
+        assertSame(lastYear, apply(lastYear));
+    }
+
+    @Test
+    public void testToDateInverts() {
+        CallOperator call = new CallOperator("to_date", DateType.DATE, ImmutableList.of(dtCol));
+        assertEquals("1: ts >= 2024-03-05 00:00:00 AND 1: ts < 2024-03-06 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, call,
+                        ConstantOperator.createDate(LocalDateTime.of(2024, 3, 5, 0, 0)))).toString());
+        assertEquals("1: ts < 2024-03-06 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.LE, call,
+                        ConstantOperator.createDate(LocalDateTime.of(2024, 3, 5, 0, 0)))).toString());
+    }
+
+    @Test
+    public void testDatediffInverts() {
+        // the column in the first position increases: same comparison, day period at C + N
+        CallOperator colFirst = new CallOperator("datediff", DateType.DATETIME, ImmutableList.of(
+                dtCol, ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0))));
+        assertEquals("1: ts >= 2024-01-11 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.GE, colFirst,
+                        ConstantOperator.createInt(10))).toString());
+        assertEquals("1: ts >= 2024-01-11 00:00:00 AND 1: ts < 2024-01-12 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, colFirst,
+                        ConstantOperator.createInt(10))).toString());
+        // the column in the second position decreases: comparison flips, period at C - N
+        CallOperator constFirst = new CallOperator("datediff", DateType.DATETIME, ImmutableList.of(
+                ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0)), dtCol));
+        assertEquals("1: ts < 2023-12-23 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.GE, constFirst,
+                        ConstantOperator.createInt(10))).toString());
+    }
+
+    @Test
+    public void testDatediffTwoVariableArgsRefused() {
+        // both arguments carry the column: the day-of-month sawtooth, not a monotonic chain
+        CallOperator trunc = new CallOperator("date_trunc", DateType.DATETIME,
+                ImmutableList.of(ConstantOperator.createVarchar("month"), dtCol));
+        CallOperator sawtooth = new CallOperator("datediff", DateType.DATETIME,
+                ImmutableList.of(dtCol, trunc));
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.GE, sawtooth,
+                ConstantOperator.createInt(10));
+        assertSame(predicate, apply(predicate));
+    }
+
+    @Test
+    public void testMonthFormatInverts() {
+        CallOperator call = new CallOperator("date_format", VarcharType.VARCHAR,
+                ImmutableList.of(dtCol, ConstantOperator.createVarchar("%Y%m")));
+        assertEquals("1: ts >= 2024-03-01 00:00:00 AND 1: ts < 2024-04-01 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, call,
+                        ConstantOperator.createVarchar("202403"))).toString());
+        assertEquals("1: ts >= 0001-01-01 00:00:00 AND 1: ts < 0001-02-01 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, call,
+                        ConstantOperator.createVarchar("000101"))).toString());
+        // month 13, month 0, non-canonical length: strict admission keeps the predicate
+        for (String bad : new String[] {"999913", "202400", "20243", "2024-03"}) {
+            ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.EQ, call,
+                    ConstantOperator.createVarchar(bad));
+            assertSame(predicate, apply(predicate), bad);
+        }
+    }
+
+    @Test
     public void testDayShiftDownwardGuard() {
         // days_sub overflows at the bottom: LE opens toward that tail and gets the guard
         CallOperator call = new CallOperator("days_sub", DateType.DATETIME,

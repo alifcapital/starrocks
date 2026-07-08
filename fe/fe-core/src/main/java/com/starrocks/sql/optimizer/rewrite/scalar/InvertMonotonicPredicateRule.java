@@ -49,9 +49,12 @@ public class InvertMonotonicPredicateRule extends BottomUpScalarOperatorRewriteR
     @Override
     public ScalarOperator visitBinaryPredicate(BinaryPredicateOperator predicate,
                                                ScalarOperatorRewriteContext context) {
+        // NE and null-safe-equal reach the inverters too: they invert only where the
+        // preimage is a single point of the column domain (each inverter decides)
         BinaryType cmp = predicate.getBinaryType();
         if (cmp != BinaryType.EQ && cmp != BinaryType.GE && cmp != BinaryType.GT
-                && cmp != BinaryType.LE && cmp != BinaryType.LT) {
+                && cmp != BinaryType.LE && cmp != BinaryType.LT
+                && cmp != BinaryType.NE && cmp != BinaryType.EQ_FOR_NULL) {
             return predicate;
         }
         ScalarOperator left = predicate.getChild(0);

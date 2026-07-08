@@ -55,6 +55,10 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.DATE_TRUNC, Set.of(1))
             .put(FunctionSet.TIME_SLICE, Set.of(0))
             .put(FunctionSet.DATE_FORMAT, Set.of(0))
+            .put(FunctionSet.YEAR, Set.of(0))
+            // increases in the first argument, decreases in the second; the caller admits
+            // only one non-constant argument, so each direction stays a single chain
+            .put(FunctionSet.DATEDIFF, Set.of(0, 1))
             .put(FunctionSet.STR_TO_DATE, Set.of(0))
             .put(FunctionSet.STR2DATE, Set.of(0))
             .put(FunctionSet.FROM_UNIXTIME, Set.of(0))
@@ -109,6 +113,10 @@ public final class MonotonicFunctionRegistry {
      */
     private static final Map<String, ExactInverse> EXACT_INVERSES = ImmutableMap.<String, ExactInverse>builder()
             .put(FunctionSet.DATE_TRUNC, MonotonicInverse.PERIOD_FLOOR)
+            .put(FunctionSet.YEAR, MonotonicInverse.YEAR_PERIOD)
+            .put(FunctionSet.TO_DATE, MonotonicInverse.DAY_FLOOR)
+            .put(FunctionSet.DATEDIFF, MonotonicInverse.DATEDIFF_DAYS)
+            .put(FunctionSet.DATE_FORMAT, MonotonicInverse.RENDERED_PERIOD)
             .put(FunctionSet.DAYS_ADD, MonotonicInverse.shift(FunctionSet.DAYS_SUB))
             .put(FunctionSet.DAYS_SUB, MonotonicInverse.shift(FunctionSet.DAYS_ADD))
             .put(FunctionSet.WEEKS_ADD, MonotonicInverse.shift(FunctionSet.WEEKS_SUB))

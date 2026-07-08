@@ -164,6 +164,40 @@ public class MonotonicPredicateRewriteTest extends PlanTestBase {
     }
 
     @Test
+    public void testMonthFormatEqPrunes() throws Exception {
+        // the string constant maps to its month period and the bounds prune; the selected
+        // partition is fully covered, so nothing of the predicate remains in the scan
+        String plan = getFragmentPlan("select * from rw_month where date_format(d, '%Y%m') = '202403'");
+        assertContains(plan, "partitions=1/6");
+        assertNotContains(plan, "date_format");
+    }
+
+    @Test
+    public void testDatediffPrunes() throws Exception {
+        // the inverted bound lands as d < '2024-02-16 00:00:00' on the cast-wrapped column
+        // and ReduceCastRule renders it back as an inclusive DATE bound
+        String plan = getFragmentPlan("select * from rw_month where datediff(d, '2024-01-01') <= 45");
+        assertContains(plan, "2: d <= '2024-02-15'");
+        assertContains(plan, "partitions=2/6");
+    }
+
+    @Test
+    public void testYearPredicateDisappears() throws Exception {
+        // the year period covers every partition: nothing is pruned and nothing remains
+        String plan = getFragmentPlan("select * from rw_month where year(d) = 2024");
+        assertContains(plan, "partitions=6/6");
+        assertNotContains(plan, "year(");
+    }
+
+    @Test
+    public void testNeKeepsPointShapeOnDateColumn() throws Exception {
+        // a day format on a DATE column is injective, so NE inverts to a point inequality
+        String plan = getFragmentPlan("select * from rw_month where date_format(d, '%Y%m%d') != '20240305'");
+        assertContains(plan, "2: d != '2024-03-05'");
+        assertNotContains(plan, "date_format");
+    }
+
+    @Test
     public void testSessionVariableOff() throws Exception {
         try {
             connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);

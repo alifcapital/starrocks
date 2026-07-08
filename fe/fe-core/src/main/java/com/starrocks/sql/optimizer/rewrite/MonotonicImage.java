@@ -161,15 +161,18 @@ public class MonotonicImage {
             if (admittedArgs == null) {
                 return false;
             }
+            // exactly one argument may be non-constant, in an admitted position, itself a
+            // monotonic chain. The one-non-constant discipline matters for functions with
+            // several admitted positions: datediff(d, date_trunc('month', d)) is the day of
+            // month, a sawtooth, even though both children are monotonic chains.
+            int nonConstant = 0;
             for (int i = 0; i < call.getChildren().size(); i++) {
                 ScalarOperator child = call.getChild(i);
                 if (child.isConstantRef()) {
                     continue;
                 }
-                // the non-constant argument must be in an allowed position and must itself be
-                // a monotonic chain; this also rejects a second non-constant argument
-                // (datediff(d1, d2) has no allowed positions at all)
-                if (!admittedArgs.contains(i) || !isMonotonicExpression(child)) {
+                nonConstant++;
+                if (nonConstant > 1 || !admittedArgs.contains(i) || !isMonotonicExpression(child)) {
                     return false;
                 }
             }
