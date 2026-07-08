@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
+import com.starrocks.qe.SessionVariableConstants;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -98,11 +99,37 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
         // fact scan. All partition bounds are 6-digit ints, so their string images have equal
         // length and further-prune can use the cast conjuncts. 3/6 and not 2/6: the February
         // partition's closed image ['202402','202403'] touches the lower bound, and a
-        // partition whose mapped bounds touch the range is kept (the usual over-keep).
+        // partition whose mapped bounds touch the range is kept.
         String plan = getFragmentPlan("select * from fact_month_int f join event_dates e"
                 + " on f.id = e.id and cast(f.datamonth as varchar) = date_format(e.datadate, '%Y%m')"
                 + " where e.datadate between '2024-03-05' and '2024-04-10'");
         assertContains(plan, "partitions=3/6");
+    }
+
+    @Test
+    public void testImplicitNumericJoinKeyDerives() throws Exception {
+        // no explicit cast on the join key: cbo_eq_base_type decides the common type of the
+        // int-vs-varchar comparison. Under DECIMAL the digit-only rendering keeps its order
+        // through the numeric cast, the derived DECIMAL bounds fold back onto the bare int
+        // column (ReduceCastRule), and the native range pruner reads exactly two partitions.
+        String sql = "select * from fact_month_int f join event_dates e"
+                + " on f.id = e.id and f.datamonth = date_format(e.datadate, '%Y%m')"
+                + " where e.datadate between '2024-03-05' and '2024-04-10'";
+        String previousEqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        try {
+            connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DECIMAL);
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "partitions=2/6");
+
+            // under VARCHAR both sides compare as strings and the derivation takes the
+            // cast(int as varchar) path: the further-prune keeps the edge partition too
+            connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.VARCHAR);
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "CAST(2: datamonth AS VARCHAR(1048576)) >= '202403'");
+            assertContains(plan, "partitions=3/6");
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(previousEqBaseType);
+        }
     }
 
     @Test

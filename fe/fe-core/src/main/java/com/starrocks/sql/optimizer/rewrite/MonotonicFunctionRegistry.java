@@ -95,11 +95,11 @@ public final class MonotonicFunctionRegistry {
             .build();
 
     /**
-     * Functions whose order behavior depends on a format argument. The evaluator's format
-     * check covers only their two-argument shapes; wider arities go through unchecked, e.g.
+     * Functions whose order behavior depends on a format argument. The evaluator checks the
+     * format only for their two-argument shapes; wider arities go through unchecked, e.g.
      * from_unixtime(ts, '%d/%m/%Y', 'UTC'), and must be refused by the caller.
      */
-    private static final Set<String> FORMAT_BEARING_FUNCTIONS = Set.of(
+    private static final Set<String> FUNCTIONS_WITH_FORMAT_ARG = Set.of(
             FunctionSet.DATE_FORMAT, FunctionSet.STR_TO_DATE, FunctionSet.STR2DATE,
             FunctionSet.FROM_UNIXTIME, FunctionSet.FROM_UNIXTIME_MS, FunctionSet.TO_DATETIME);
 
@@ -108,8 +108,8 @@ public final class MonotonicFunctionRegistry {
      * constant alone are listed: calendar-period floors (date_trunc) and fixed-duration
      * shifts (day and finer, plus weeks: 7-day fixed). Month/quarter/year shifts clamp
      * day-of-month and are NOT invertible (months_add('2024-01-31', 1) = '2024-02-29' =
-     * months_add('2024-01-30', 1)); time_slice buckets are epoch-anchored multiples of an
-     * interval, not calendar periods, and stay image-only too.
+     * months_add('2024-01-30', 1)); time_slice buckets are multiples of an interval counted
+     * from year 1, not calendar periods, and also keep the image direction only.
      */
     private static final Map<String, ExactInverse> EXACT_INVERSES = ImmutableMap.<String, ExactInverse>builder()
             .put(FunctionSet.DATE_TRUNC, MonotonicInverse.PERIOD_FLOOR)
@@ -143,8 +143,19 @@ public final class MonotonicFunctionRegistry {
         return DATA_ARG_POSITIONS.get(fnName.toLowerCase());
     }
 
-    public static boolean isFormatBearing(String fnName) {
-        return FORMAT_BEARING_FUNCTIONS.contains(fnName.toLowerCase());
+    public static boolean hasFormatArg(String fnName) {
+        return FUNCTIONS_WITH_FORMAT_ARG.contains(fnName.toLowerCase());
+    }
+
+    /**
+     * Order-preserving date_format patterns that render digits only. Their numeric value is
+     * ordered like the dates, so a numeric cast on top keeps order. Formats with separators
+     * do not cast to numbers and are not listed.
+     */
+    private static final Set<String> DIGITS_ONLY_FORMATS = Set.of("%Y", "%Y%m", "%Y%m%d");
+
+    public static boolean isDigitsOnlyFormat(String format) {
+        return DIGITS_ONLY_FORMATS.contains(format);
     }
 
     /**

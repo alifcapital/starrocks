@@ -21,6 +21,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 
 import java.util.Map;
@@ -137,7 +138,26 @@ public class MonotonicImage {
         // CastOperator extends CallOperator, so this branch must come first. Casts go through
         // the whitelist below, not through the registry: the registry accepts every cast.
         if (op instanceof CastOperator) {
-            return isOrderPreservingCast((CastOperator) op) && isMonotonicExpression(op.getChild(0));
+            CastOperator cast = (CastOperator) op;
+            if (isOrderPreservingCast(cast)) {
+                return isMonotonicExpression(cast.getChild(0));
+            }
+            // a numeric cast over a digits-only date rendering: the images of
+            // date_format(x, '%Y%m') are fixed-width digit strings, so their numeric value
+            // is ordered exactly like the dates. Comes up when an implicit comparison casts
+            // date_format against an integer column (both sides land on DECIMAL).
+            if (cast.getType().isNumericType() && cast.getChild(0) instanceof CallOperator
+                    && !(cast.getChild(0) instanceof CastOperator)) {
+                CallOperator inner = (CallOperator) cast.getChild(0);
+                if (FunctionSet.DATE_FORMAT.equals(inner.getFnName().toLowerCase())
+                        && inner.getChildren().size() == 2 && inner.getChild(1).isConstantRef()
+                        && !((ConstantOperator) inner.getChild(1)).isNull()
+                        && MonotonicFunctionRegistry.isDigitsOnlyFormat(
+                                ((ConstantOperator) inner.getChild(1)).getVarchar())) {
+                    return isMonotonicExpression(inner);
+                }
+            }
+            return false;
         }
         if (op instanceof CallOperator) {
             CallOperator call = (CallOperator) op;
@@ -154,7 +174,7 @@ public class MonotonicImage {
             // The evaluator checks the format only for the two-argument shapes.
             // from_unixtime(ts, '%d/%m/%Y', 'UTC') has three arguments and its day-first
             // format goes through unchecked. So only the two-argument forms are allowed.
-            if (MonotonicFunctionRegistry.isFormatBearing(fnName) && call.getChildren().size() != 2) {
+            if (MonotonicFunctionRegistry.hasFormatArg(fnName) && call.getChildren().size() != 2) {
                 return false;
             }
             Set<Integer> admittedArgs = MonotonicFunctionRegistry.dataArgPositions(fnName);
@@ -162,9 +182,10 @@ public class MonotonicImage {
                 return false;
             }
             // exactly one argument may be non-constant, in an admitted position, itself a
-            // monotonic chain. The one-non-constant discipline matters for functions with
-            // several admitted positions: datediff(d, date_trunc('month', d)) is the day of
-            // month, a sawtooth, even though both children are monotonic chains.
+            // monotonic chain. The one-non-constant rule matters for functions with several
+            // admitted positions: datediff(d, date_trunc('month', d)) is the day of month,
+            // it rises within a month and drops at the next, even though both children are
+            // monotonic chains.
             int nonConstant = 0;
             for (int i = 0; i < call.getChildren().size(); i++) {
                 ScalarOperator child = call.getChild(i);
@@ -197,6 +218,13 @@ public class MonotonicImage {
         // integer widening keeps numeric order; narrowing may wrap and is rejected
         if (from.isIntegerType() && to.isIntegerType()) {
             return from.getPrimitiveType().getSlotSize() <= to.getPrimitiveType().getSlotSize();
+        }
+        // integer -> decimal is exact when the integer part fits every value of the source
+        // type (BIGINT needs 19 digits; LARGEINT does not fit and stays out); implicit
+        // numeric comparisons produce these casts
+        if (from.isIntegerType() && to.isDecimalOfAnyVersion() && !from.isLargeIntType()) {
+            ScalarType decimal = (ScalarType) to;
+            return decimal.getScalarPrecision() - decimal.getScalarScale() >= 19;
         }
         // date -> datetime is exact; datetime -> date truncates, which is non-strict monotonic
         if (from.isDateType() && to.isDateType()) {

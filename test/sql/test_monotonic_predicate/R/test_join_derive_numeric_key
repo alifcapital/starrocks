@@ -1,0 +1,96 @@
+-- name: test_join_derive_digit_only_int_key
+create database db_${uuid0};
+-- result:
+-- !result
+use db_${uuid0};
+-- result:
+-- !result
+create table fact_by_month (booking_id bigint not null, datamonth int not null, v bigint null)
+duplicate key(booking_id, datamonth)
+partition by range(datamonth) (
+ partition p202601 values [('202601'), ('202602')),
+ partition p202602 values [('202602'), ('202603')),
+ partition p202605 values [('202605'), ('202606')),
+ partition p202606 values [('202606'), ('202607')),
+ partition p202607 values [('202607'), ('202608')),
+ partition p202608 values [('202608'), ('202609')))
+distributed by hash(booking_id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into fact_by_month values (10,202601,1),(11,202605,1),(12,202606,1),(13,202606,2),(14,202607,1),(15,202608,1),(12,202608,9);
+-- result:
+-- !result
+create table ev_date (booking_id bigint not null, datadate date not null)
+duplicate key(booking_id, datadate)
+distributed by hash(booking_id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into ev_date values (12,'2026-06-30'),(13,'2026-07-01'),(14,'2026-07-02'),(11,'2026-05-10'),(15,'2026-08-20');
+-- result:
+-- !result
+create table fact_by_month_v (booking_id bigint not null, datamonth varchar(6) not null, v bigint null)
+duplicate key(booking_id, datamonth)
+partition by list(datamonth) (
+ partition p202601 values in ('202601'),
+ partition p202602 values in ('202602'),
+ partition p202605 values in ('202605'),
+ partition p202606 values in ('202606'),
+ partition p202607 values in ('202607'),
+ partition p202608 values in ('202608'))
+distributed by hash(booking_id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into fact_by_month_v values (10,'202601',1),(11,'202605',1),(12,'202606',1),(13,'202606',2),(14,'202607',1),(15,'202608',1),(12,'202608',9);
+-- result:
+-- !result
+set cbo_eq_base_type = 'varchar';
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.booking_id, f.datamonth from fact_by_month f join ev_date e on f.booking_id = e.booking_id and f.datamonth = date_format(e.datadate, '%Y%m') where e.datadate between '2026-06-30' and '2026-07-02' order by f.booking_id, f.datamonth;
+-- result:
+12	202606
+14	202607
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.booking_id, f.datamonth from fact_by_month f join ev_date e on f.booking_id = e.booking_id and f.datamonth = date_format(e.datadate, '%Y%m') where e.datadate between '2026-06-30' and '2026-07-02' order by f.booking_id, f.datamonth;
+-- result:
+12	202606
+14	202607
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.booking_id, f.datamonth from fact_by_month_v f join ev_date e on f.booking_id = e.booking_id and f.datamonth = date_format(e.datadate, '%Y%m') where e.datadate between '2026-06-30' and '2026-07-02' order by f.booking_id, f.datamonth;
+-- result:
+12	202606
+14	202607
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.booking_id, f.datamonth from fact_by_month_v f join ev_date e on f.booking_id = e.booking_id and f.datamonth = date_format(e.datadate, '%Y%m') where e.datadate between '2026-06-30' and '2026-07-02' order by f.booking_id, f.datamonth;
+-- result:
+12	202606
+14	202607
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+function: assert_explain_contains("select f.booking_id from fact_by_month_v f join ev_date e on f.booking_id = e.booking_id and f.datamonth = date_format(e.datadate, '%Y%m') where e.datadate between '2026-06-30' and '2026-07-02'", 'partitions=2/6')
+-- result:
+None
+-- !result
+drop database db_${uuid0};
+-- result:
+-- !result
