@@ -586,8 +586,11 @@ public class Utils {
         }
         if (TypeManager.isAssignable2Decimal((ScalarType) childType, (ScalarType) rhsType)) {
             return Optional.of(result.get());
-        } else if (result.get().toString().equalsIgnoreCase(rhs.toString())) {
-            // check lossless
+        }
+        // lossless check: cast the result back and compare values. A string comparison
+        // misses integral decimals: '202403' vs '202403.000000000' are the same value.
+        Optional<ConstantOperator> back = result.get().castTo(rhsType);
+        if (back.isPresent() && !back.get().isNull() && back.get().compareTo(rhs) == 0) {
             return Optional.of(result.get());
         }
         return Optional.empty();
