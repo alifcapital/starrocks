@@ -93,13 +93,13 @@ public class SimplifiedDateColumnPredicateRuleTest {
                 new BinaryPredicateOperator(BinaryType.LE, datetimeCall, DATE_BEGIN),
                 ScalarOperatorRewriter.DEFAULT_REWRITE_RULES).toString());
         // a day period on a DATETIME column is a range, so the equality becomes two bounds
-        // and NE stays unrewritten
+        // and NE becomes the NULL-safe disjunction of the period complement
         Assertions.assertEquals("1: dt >= 2024-05-06 00:00:00 AND 1: dt < 2024-05-07 00:00:00",
                 rewriter.rewrite(new BinaryPredicateOperator(BinaryType.EQ, datetimeCall, DATE_BEGIN),
                         ScalarOperatorRewriter.DEFAULT_REWRITE_RULES).toString());
-        Assertions.assertTrue(rewriter.rewrite(
-                new BinaryPredicateOperator(BinaryType.NE, datetimeCall, DATE_BEGIN),
-                ScalarOperatorRewriter.DEFAULT_REWRITE_RULES).toString().contains("date_format"));
+        Assertions.assertEquals("1: dt < 2024-05-06 00:00:00 OR 1: dt >= 2024-05-07 00:00:00",
+                rewriter.rewrite(new BinaryPredicateOperator(BinaryType.NE, datetimeCall, DATE_BEGIN),
+                        ScalarOperatorRewriter.DEFAULT_REWRITE_RULES).toString());
 
         // the last day of the DATETIME domain has no next period start: no rewrite, the
         // predicate must not turn into a NULL-comparison

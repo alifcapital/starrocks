@@ -63,9 +63,14 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.STR2DATE, Set.of(0))
             .put(FunctionSet.FROM_UNIXTIME, Set.of(0))
             .put(FunctionSet.FROM_UNIXTIME_MS, Set.of(0))
+            .put(FunctionSet.UNIX_TIMESTAMP, Set.of(0))
             .put(FunctionSet.TO_DATETIME, Set.of(0))
             .put(FunctionSet.TO_DAYS, Set.of(0))
             .put(FunctionSet.TO_DATE, Set.of(0))
+            .put(FunctionSet.TO_ISO8601, Set.of(0))
+            .put(FunctionSet.LAST_DAY, Set.of(0))
+            .put(FunctionSet.NEXT_DAY, Set.of(0))
+            .put(FunctionSet.PREVIOUS_DAY, Set.of(0))
             // add/sub functions shift a date by a constant amount: monotonic in the date
             // argument. The column is not allowed in the amount argument: for subs the result
             // would decrease while the column grows.
@@ -110,6 +115,11 @@ public final class MonotonicFunctionRegistry {
      * day-of-month and are NOT invertible (months_add('2024-01-31', 1) = '2024-02-29' =
      * months_add('2024-01-30', 1)); time_slice buckets are multiples of an interval counted
      * from year 1, not calendar periods, and also keep the image direction only.
+     * timediff stays out: its FE fold floors the fractional second (Duration.getSeconds)
+     * while BE truncates toward zero (integer microsecond division), so no single preimage
+     * matches both. to_datetime stays out: epoch-grid scales plus zone-transition windows
+     * for a typed DATETIME comparison are not worth the math while its image direction is
+     * already refused by the two-argument format check.
      */
     private static final Map<String, ExactInverse> EXACT_INVERSES = ImmutableMap.<String, ExactInverse>builder()
             .put(FunctionSet.DATE_TRUNC, MonotonicInverse.PERIOD_FLOOR)
@@ -117,6 +127,14 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.TO_DATE, MonotonicInverse.DAY_FLOOR)
             .put(FunctionSet.DATEDIFF, MonotonicInverse.DATEDIFF_DAYS)
             .put(FunctionSet.DATE_FORMAT, MonotonicInverse.RENDERED_PERIOD)
+            .put(FunctionSet.TO_ISO8601, MonotonicInverse.ISO_RENDER)
+            .put(FunctionSet.UNIX_TIMESTAMP, MonotonicInverse.UNIX_EPOCH)
+            .put(FunctionSet.FROM_UNIXTIME, MonotonicInverse.EPOCH_RENDER)
+            .put(FunctionSet.FROM_UNIXTIME_MS, MonotonicInverse.EPOCH_RENDER)
+            .put(FunctionSet.TO_DAYS, MonotonicInverse.DAY_NUMBER)
+            .put(FunctionSet.LAST_DAY, MonotonicInverse.UNIT_END)
+            .put(FunctionSet.NEXT_DAY, MonotonicInverse.DOW_NEXT)
+            .put(FunctionSet.PREVIOUS_DAY, MonotonicInverse.DOW_PREVIOUS)
             .put(FunctionSet.DAYS_ADD, MonotonicInverse.shift(FunctionSet.DAYS_SUB))
             .put(FunctionSet.DAYS_SUB, MonotonicInverse.shift(FunctionSet.DAYS_ADD))
             .put(FunctionSet.WEEKS_ADD, MonotonicInverse.shift(FunctionSet.WEEKS_SUB))
@@ -145,6 +163,12 @@ public final class MonotonicFunctionRegistry {
 
     public static boolean hasFormatArg(String fnName) {
         return FUNCTIONS_WITH_FORMAT_ARG.contains(fnName.toLowerCase());
+    }
+
+    /** Epoch-to-wall-clock renderings: their order depends on the session zone's transitions. */
+    public static boolean isEpochRendering(String fnName) {
+        String lower = fnName.toLowerCase();
+        return FunctionSet.FROM_UNIXTIME.equals(lower) || FunctionSet.FROM_UNIXTIME_MS.equals(lower);
     }
 
     /**

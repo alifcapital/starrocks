@@ -16,6 +16,8 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.TimeUtils;
+import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -25,6 +27,9 @@ import com.starrocks.type.IntegerType;
 import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.zone.ZoneOffsetTransition;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -114,6 +119,21 @@ public class MonotonicImage {
         if (!a.getType().matchesType(b.getType())) {
             return Optional.empty();
         }
+        // unix_timestamp clamps out-of-range input to 0 instead of NULL: a 0 endpoint may
+        // sit on the clamp plateau, where the endpoint fold is not a bound of the image.
+        // Only whitelisted casts can sit above it in the chain, and they keep 0 recognizable.
+        if (chainContains(expr, FunctionSet.UNIX_TIMESTAMP) && (isZeroValue(a) || isZeroValue(b))) {
+            return Optional.empty();
+        }
+        // from_unixtime renders the epoch as session-zone wall clock: across a zone-rule
+        // transition the rendering is not monotonic (a fall-back repeats an hour). The
+        // domain endpoints are epoch values, so admit only transition-free windows.
+        boolean fromUnixSeconds = chainContains(expr, FunctionSet.FROM_UNIXTIME);
+        boolean fromUnixMillis = chainContains(expr, FunctionSet.FROM_UNIXTIME_MS);
+        if ((fromUnixSeconds || fromUnixMillis)
+                && !epochWindowHasNoTransition(columnDomain, fromUnixMillis ? 1000L : 1L)) {
+            return Optional.empty();
+        }
         try {
             // Sort the two results: an increasing expr gives [f(lo), f(hi)], a decreasing one
             // gives [f(hi), f(lo)]. Closed on both ends because monotonicity is non-strict.
@@ -177,16 +197,19 @@ public class MonotonicImage {
         }
         if (op instanceof CallOperator) {
             CallOperator call = (CallOperator) op;
-            // rand(), uuid() etc: the folded endpoint means nothing
-            if (FunctionSet.nonDeterministicFunctions.contains(call.getFnName().toLowerCase())) {
-                return false;
-            }
-            // registry check; for format functions (date_format, str_to_date, ...) it also
-            // checks that the format keeps date order ('%Y%m' yes, '%d%m' no)
-            if (!ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(call)) {
-                return false;
-            }
             String fnName = call.getFnName();
+            // rand(), uuid() etc: the folded endpoint means nothing
+            if (FunctionSet.nonDeterministicFunctions.contains(fnName.toLowerCase())) {
+                return false;
+            }
+            // unix_timestamp is admitted by this registry, not by the evaluator annotation:
+            // it clamps out-of-range input to 0 instead of NULL, so it is monotonic only off
+            // the clamp plateau - imageRange refuses when an endpoint folds to 0. Wall clock
+            // to epoch never runs backwards, so no timezone condition is needed here.
+            if (!FunctionSet.UNIX_TIMESTAMP.equals(fnName.toLowerCase())
+                    && !ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(call)) {
+                return false;
+            }
             // The evaluator checks the format only for the two-argument shapes.
             // from_unixtime(ts, '%d/%m/%Y', 'UTC') has three arguments and its day-first
             // format goes through unchecked. So only the two-argument forms are allowed.
@@ -218,6 +241,33 @@ public class MonotonicImage {
         }
         // everything else (case-when, lambdas, subqueries, ...) is out of scope
         return false;
+    }
+
+    private static boolean chainContains(ScalarOperator expr, String fnName) {
+        return Utils.collect(expr, CallOperator.class).stream()
+                .anyMatch(c -> fnName.equals(c.getFnName().toLowerCase()));
+    }
+
+    private static boolean epochWindowHasNoTransition(MinMax domain, long unitsPerSecond) {
+        try {
+            long min = domain.getMin().flatMap(c -> c.castTo(IntegerType.BIGINT))
+                    .map(ConstantOperator::getBigint).orElseThrow();
+            long max = domain.getMax().flatMap(c -> c.castTo(IntegerType.BIGINT))
+                    .map(ConstantOperator::getBigint).orElseThrow();
+            ZoneOffsetTransition next = TimeUtils.getTimeZone().toZoneId().getRules()
+                    .nextTransition(Instant.ofEpochSecond(min / unitsPerSecond));
+            return next == null || next.getInstant().isAfter(Instant.ofEpochSecond(max / unitsPerSecond));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isZeroValue(ConstantOperator value) {
+        try {
+            return new BigDecimal(value.toString()).signum() == 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

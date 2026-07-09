@@ -17,6 +17,8 @@ package com.starrocks.sql.optimizer.rewrite;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.catalog.Function;
+import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.TimeUtils;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.common.SyncPartitionUtils;
@@ -29,12 +31,16 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 
+import java.time.DayOfWeek;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoField;
+import java.time.zone.ZoneOffsetTransition;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -98,6 +104,61 @@ public final class MonotonicInverse {
      * pruning consumes point filters only) and NE / null-safe-equal invert too.
      */
     public static final MonotonicFunctionRegistry.ExactInverse RENDERED_PERIOD = MonotonicInverse::invertDateFormat;
+
+    /**
+     * to_iso8601(x) cmp string. The rendering is fixed-width and injective on the child's
+     * domain (a DATE renders as %Y-%m-%d, a DATETIME as %Y-%m-%dT%H:%i:%s.%f with the
+     * fraction zero-padded to six digits), so string order equals value order and every
+     * comparison carries over to the parsed constant, strict forms and NE included.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse ISO_RENDER = MonotonicInverse::invertToIso8601;
+
+    /**
+     * unix_timestamp(x) cmp N for a DATETIME x. The fold truncates x to whole seconds, so
+     * a value N covers the second [from_epoch(N), from_epoch(N+1)). Out-of-range input
+     * clamps to 0, not NULL: for N > 0 the clamped tails compare FALSE on both the original
+     * and the inverted form, so EQ/GE/GT invert exactly with a bound cutting the upper
+     * tail; the preimage of LE/LT contains both clamped tails and is not an interval, and
+     * N <= 0 lands on the clamp plateau itself - all refused. A bound falling into a
+     * fall-back overlap of the session zone refuses: that wall clock maps two epochs.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse UNIX_EPOCH = MonotonicInverse::invertUnixTimestamp;
+
+    /**
+     * from_unixtime[_ms](x[, fmt]) cmp string for an integer x. The constant is admitted by
+     * the fixed-width format machinery (canonical length, strict parse, render round-trip)
+     * and maps to an epoch period of the format's granularity. Outside [0, MAX] the
+     * rendering is NULL where the original predicate rejects the row: range comparisons get
+     * the domain-edge guard bounds, with the same NOT-context residual as the shift family.
+     * A period endpoint falling into a fall-back overlap of the session zone refuses: that
+     * wall clock maps two epochs.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse EPOCH_RENDER = MonotonicInverse::invertFromUnixTime;
+
+    /**
+     * to_days(x) cmp N. Day number N maps back to one day (the fold and BE agree on the
+     * year-0 anchor: to_days('1970-01-01') is 719528): a bijection on a DATE x where every
+     * comparison carries over, the day period on a DATETIME x.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse DAY_NUMBER = MonotonicInverse::invertToDays;
+
+    /**
+     * last_day(x[, unit]) cmp D. The images are the period ends of the unit, so the
+     * comparison maps to unit-period bounds on x with ceiling semantics: any D below its
+     * own period end already forces the next period. A D that is no period end cannot be
+     * an equality match (empty interval), and NE inverts through the aligned disjunction.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse UNIT_END = MonotonicInverse::invertLastDay;
+
+    /**
+     * next_day(x, dow) cmp D: the image grid is the given weekday and
+     * {@code next_day(x) = G} holds exactly for x in [G-7, G). previous_day(x, dow) is the
+     * strict mirror with preimage [G+1, G+8). Both invert by normalizing the constant to
+     * the grid (ceiling for GE/GT, floor for LE/LT) and emitting the seven-day window
+     * bounds; a constant off the grid refuses equality shapes.
+     */
+    public static final MonotonicFunctionRegistry.ExactInverse DOW_NEXT = MonotonicInverse::invertNextDay;
+    public static final MonotonicFunctionRegistry.ExactInverse DOW_PREVIOUS = MonotonicInverse::invertPreviousDay;
 
     private static Optional<ScalarOperator> invertPeriodFloor(CallOperator call, ScalarOperator dataChild,
                                                               BinaryType cmp, ConstantOperator value) {
@@ -260,6 +321,468 @@ public final class MonotonicInverse {
         }
     }
 
+    private static Optional<ScalarOperator> invertUnixTimestamp(CallOperator call, ScalarOperator dataChild,
+                                                                BinaryType cmp, ConstantOperator value) {
+        try {
+            if (!dataChild.getType().isDatetime() || !value.getType().isExactNumericType()) {
+                return Optional.empty();
+            }
+            ZoneId zone = TimeUtils.getTimeZone().toZoneId();
+            Optional<ConstantOperator> asLong = value.castTo(IntegerType.BIGINT);
+            if (asLong.isEmpty() || asLong.get().isNull()) {
+                return Optional.empty();
+            }
+            long n = asLong.get().getBigint();
+            if (n <= 0 || n >= TimeUtils.MAX_UNIX_TIMESTAMP) {
+                return Optional.empty();
+            }
+            LocalDateTime lower = LocalDateTime.ofInstant(Instant.ofEpochSecond(n), zone);
+            LocalDateTime upper = LocalDateTime.ofInstant(Instant.ofEpochSecond(n + 1), zone);
+            LocalDateTime maxValid = LocalDateTime.ofInstant(
+                    Instant.ofEpochSecond(TimeUtils.MAX_UNIX_TIMESTAMP), zone);
+            // a wall clock inside a fall-back overlap maps two epochs onto one rendering:
+            // the bounds are correct only when every endpoint is unambiguous
+            if (!unambiguous(zone, lower) || !unambiguous(zone, upper) || !unambiguous(zone, maxValid)) {
+                return Optional.empty();
+            }
+            switch (cmp) {
+                case EQ:
+                    return Optional.of(Utils.compoundAnd(
+                            BinaryPredicateOperator.ge(dataChild, ConstantOperator.createDatetime(lower)),
+                            BinaryPredicateOperator.lt(dataChild, ConstantOperator.createDatetime(upper))));
+                case GE:
+                    return Optional.of(Utils.compoundAnd(
+                            BinaryPredicateOperator.ge(dataChild, ConstantOperator.createDatetime(lower)),
+                            BinaryPredicateOperator.le(dataChild, ConstantOperator.createDatetime(maxValid))));
+                case GT:
+                    return Optional.of(Utils.compoundAnd(
+                            BinaryPredicateOperator.ge(dataChild, ConstantOperator.createDatetime(upper)),
+                            BinaryPredicateOperator.le(dataChild, ConstantOperator.createDatetime(maxValid))));
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<ScalarOperator> invertFromUnixTime(CallOperator call, ScalarOperator dataChild,
+                                                               BinaryType cmp, ConstantOperator value) {
+        try {
+            Type childType = dataChild.getType();
+            if (!childType.isIntegerType() || !value.getType().isStringType()) {
+                return Optional.empty();
+            }
+            ZoneId zone = TimeUtils.getTimeZone().toZoneId();
+            String fmt;
+            if (call.getChildren().size() == 1) {
+                // the one-argument form renders the SR datetime string
+                fmt = "%Y-%m-%d %H:%i:%s";
+            } else if (call.getChildren().size() == 2 && call.getChild(1).isConstantRef()
+                    && !((ConstantOperator) call.getChild(1)).isNull()) {
+                fmt = ((ConstantOperator) call.getChild(1)).getVarchar();
+            } else {
+                return Optional.empty();
+            }
+            FormatSpec spec = RENDERED_FORMATS.get(fmt);
+            if (spec == null) {
+                return Optional.empty();
+            }
+            String constant = value.getVarchar();
+            if (constant.length() != spec.length) {
+                return Optional.empty();
+            }
+            LocalDateTime parsed = LocalDateTime.from(spec.parser.parse(constant));
+            if (!spec.parser.format(parsed).equals(constant)) {
+                return Optional.empty();
+            }
+            long unitScale = FunctionSet.FROM_UNIXTIME_MS.equals(call.getFnName().toLowerCase()) ? 1000L : 1L;
+            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(parsed, spec.unit);
+            if (!nextStart.isAfter(parsed)) {
+                return Optional.empty();
+            }
+            // a wall clock inside a fall-back overlap maps two epochs onto one rendering:
+            // the period is an epoch interval only when both endpoints are unambiguous
+            // (a transition strictly inside the period just makes it longer, which the
+            // epoch interval covers by construction)
+            if (!unambiguous(zone, parsed) || !unambiguous(zone, nextStart)) {
+                return Optional.empty();
+            }
+            // a sub-day rendering repeats a wall-clock hour at a fall-back: rows just past
+            // the transition render below the constant again and a range preimage is not an
+            // interval. Only transitions near the period matter - a far fall-back rewinds
+            // the rendering by an hour but not below the constant. Day-and-coarser
+            // renderings never decrease.
+            if (TimeUnitUtils.SECOND.equals(spec.unit)
+                    && !transitionFree(zone, parsed.minusHours(26), nextStart.plusHours(26))) {
+                return Optional.empty();
+            }
+            long lower = parsed.atZone(zone).toEpochSecond() * unitScale;
+            long upper = nextStart.atZone(zone).toEpochSecond() * unitScale;
+            long minValid = 0;
+            long maxValid = TimeUtils.MAX_UNIX_TIMESTAMP * unitScale;
+            if (lower < minValid || upper > maxValid) {
+                return Optional.empty();
+            }
+            ConstantOperator lo = intBound(childType, lower);
+            ConstantOperator hi = intBound(childType, upper);
+            if (lo == null || hi == null) {
+                return Optional.empty();
+            }
+            // a domain-edge guard outside the child type's own range is dropped: the type
+            // already cannot hold values past it
+            ConstantOperator min = intBound(childType, minValid);
+            ConstantOperator max = intBound(childType, maxValid);
+            switch (cmp) {
+                case EQ:
+                    return Optional.of(Utils.compoundAnd(
+                            BinaryPredicateOperator.ge(dataChild, lo), BinaryPredicateOperator.lt(dataChild, hi)));
+                case GE:
+                    return Optional.of(withGuard(BinaryPredicateOperator.ge(dataChild, lo),
+                            max == null ? null : BinaryPredicateOperator.le(dataChild, max)));
+                case GT:
+                    return Optional.of(withGuard(BinaryPredicateOperator.ge(dataChild, hi),
+                            max == null ? null : BinaryPredicateOperator.le(dataChild, max)));
+                case LE:
+                    return Optional.of(withGuard(BinaryPredicateOperator.lt(dataChild, hi),
+                            min == null ? null : BinaryPredicateOperator.ge(dataChild, min)));
+                case LT:
+                    return Optional.of(withGuard(BinaryPredicateOperator.lt(dataChild, lo),
+                            min == null ? null : BinaryPredicateOperator.ge(dataChild, min)));
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static ScalarOperator withGuard(ScalarOperator bound, ScalarOperator guard) {
+        return guard == null ? bound : Utils.compoundAnd(bound, guard);
+    }
+
+    // to_days('1970-01-01') = 719528: the day count anchors at year 0 on both FE and BE
+    private static final long TO_DAYS_EPOCH_SHIFT = 719528L;
+
+    private static Optional<ScalarOperator> invertToDays(CallOperator call, ScalarOperator dataChild,
+                                                         BinaryType cmp, ConstantOperator value) {
+        try {
+            if (!value.getType().isExactNumericType()) {
+                return Optional.empty();
+            }
+            Optional<ConstantOperator> asLong = value.castTo(IntegerType.BIGINT);
+            if (asLong.isEmpty() || asLong.get().isNull()) {
+                return Optional.empty();
+            }
+            LocalDate day = LocalDate.ofEpochDay(asLong.get().getBigint() - TO_DAYS_EPOCH_SHIFT);
+            LocalDateTime dayStart = day.atStartOfDay();
+            if (dayStart.isBefore(ConstantOperator.MIN_DATETIME)
+                    || dayStart.isAfter(ConstantOperator.MAX_DATETIME)) {
+                return Optional.empty();
+            }
+            if (dataChild.getType().isDate()) {
+                // a bijection on the DATE domain: every comparison carries over
+                return Optional.of(new BinaryPredicateOperator(cmp, dataChild,
+                        ConstantOperator.createDate(dayStart)));
+            }
+            return periodCells(dataChild, cmp, true, dayStart, dayStart.plusDays(1), false);
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<ScalarOperator> invertLastDay(CallOperator call, ScalarOperator dataChild,
+                                                          BinaryType cmp, ConstantOperator value) {
+        try {
+            String unit = TimeUnitUtils.MONTH;
+            if (call.getChildren().size() == 2) {
+                if (!call.getChild(1).isConstantRef() || ((ConstantOperator) call.getChild(1)).isNull()) {
+                    return Optional.empty();
+                }
+                unit = ((ConstantOperator) call.getChild(1)).getVarchar().toLowerCase();
+            }
+            if (!Set.of(TimeUnitUtils.MONTH, TimeUnitUtils.QUARTER, TimeUnitUtils.YEAR).contains(unit)
+                    || !value.getType().isDateType()) {
+                return Optional.empty();
+            }
+            LocalDateTime periodStart = SyncPartitionUtils.getLowerDateTime(value.getDatetime(), unit);
+            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(periodStart, unit);
+            if (!nextStart.isAfter(periodStart) || periodStart.isBefore(ConstantOperator.MIN_DATETIME)
+                    || nextStart.isAfter(ConstantOperator.MAX_DATETIME)) {
+                return Optional.empty();
+            }
+            // the images are period-end midnights; the constant may sit below, at, or above
+            // the end of its own period (a DATETIME with a time part), and each side picks
+            // the period boundary accordingly
+            int cmpEnd = value.getDatetime().compareTo(nextStart.minusDays(1));
+            Type childType = dataChild.getType();
+            ConstantOperator lower = boundOfChildType(childType, periodStart);
+            ConstantOperator upper = boundOfChildType(childType, nextStart);
+            switch (cmp) {
+                case EQ:
+                    return Optional.of(cmpEnd == 0
+                            ? Utils.compoundAnd(BinaryPredicateOperator.ge(dataChild, lower),
+                                    BinaryPredicateOperator.lt(dataChild, upper))
+                            : Utils.compoundAnd(BinaryPredicateOperator.ge(dataChild, lower),
+                                    BinaryPredicateOperator.lt(dataChild, lower)));
+                case NE:
+                    return cmpEnd == 0 ? Optional.of(Utils.compoundOr(
+                            BinaryPredicateOperator.lt(dataChild, lower),
+                            BinaryPredicateOperator.ge(dataChild, upper))) : Optional.empty();
+                case GE:
+                    return Optional.of(BinaryPredicateOperator.ge(dataChild, cmpEnd <= 0 ? lower : upper));
+                case GT:
+                    return Optional.of(BinaryPredicateOperator.ge(dataChild, cmpEnd < 0 ? lower : upper));
+                case LE:
+                    return Optional.of(BinaryPredicateOperator.lt(dataChild, cmpEnd >= 0 ? upper : lower));
+                case LT:
+                    return Optional.of(BinaryPredicateOperator.lt(dataChild, cmpEnd > 0 ? upper : lower));
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static final Map<String, DayOfWeek> DOW_NAMES = ImmutableMap.<String, DayOfWeek>builder()
+            .put("sunday", DayOfWeek.SUNDAY).put("sun", DayOfWeek.SUNDAY)
+            .put("su", DayOfWeek.SUNDAY)
+            .put("monday", DayOfWeek.MONDAY).put("mon", DayOfWeek.MONDAY)
+            .put("mo", DayOfWeek.MONDAY)
+            .put("tuesday", DayOfWeek.TUESDAY).put("tue", DayOfWeek.TUESDAY)
+            .put("tu", DayOfWeek.TUESDAY)
+            .put("wednesday", DayOfWeek.WEDNESDAY).put("wed", DayOfWeek.WEDNESDAY)
+            .put("we", DayOfWeek.WEDNESDAY)
+            .put("thursday", DayOfWeek.THURSDAY).put("thu", DayOfWeek.THURSDAY)
+            .put("th", DayOfWeek.THURSDAY)
+            .put("friday", DayOfWeek.FRIDAY).put("fri", DayOfWeek.FRIDAY)
+            .put("fr", DayOfWeek.FRIDAY)
+            .put("saturday", DayOfWeek.SATURDAY).put("sat", DayOfWeek.SATURDAY)
+            .put("sa", DayOfWeek.SATURDAY)
+            .build();
+
+    // the fold matches the dow argument case-sensitively ("Monday"/"Mon"/"Mo"); accept
+    // exactly those spellings
+    private static DayOfWeek dowOf(CallOperator call) {
+        if (call.getChildren().size() != 2 || !call.getChild(1).isConstantRef()
+                || ((ConstantOperator) call.getChild(1)).isNull()) {
+            return null;
+        }
+        String name = ((ConstantOperator) call.getChild(1)).getVarchar();
+        if (name.isEmpty() || !Character.isUpperCase(name.charAt(0))) {
+            return null;
+        }
+        return DOW_NAMES.get(name.toLowerCase());
+    }
+
+    private static Optional<ScalarOperator> invertNextDay(CallOperator call, ScalarOperator dataChild,
+                                                          BinaryType cmp, ConstantOperator value) {
+        try {
+            DayOfWeek dow = dowOf(call);
+            if (dow == null || !value.getType().isDateType()) {
+                return Optional.empty();
+            }
+            LocalDate constant = value.getDatetime().toLocalDate();
+            if (!value.getDatetime().equals(constant.atStartOfDay())) {
+                return Optional.empty();
+            }
+            boolean aligned = constant.getDayOfWeek() == dow;
+            // the smallest grid day at or after the constant
+            LocalDate ceilGrid = constant.plusDays((dow.getValue() - constant.getDayOfWeek().getValue() + 7) % 7);
+            LocalDateTime gridStart = ceilGrid.atStartOfDay();
+            // next_day(x) = G holds exactly for x in [G-7, G)
+            switch (cmp) {
+                case EQ:
+                    return aligned
+                            ? window(dataChild, gridStart.minusDays(7), gridStart)
+                            : window(dataChild, gridStart, gridStart);
+                case NE:
+                    return aligned ? disjunction(dataChild, gridStart.minusDays(7), gridStart) : Optional.empty();
+                case GE:
+                    return lowerBound(dataChild, gridStart.minusDays(7));
+                case GT:
+                    return lowerBound(dataChild, aligned ? gridStart : gridStart.minusDays(7));
+                case LE:
+                    return upperBound(dataChild, aligned ? gridStart : gridStart.minusDays(7));
+                case LT:
+                    return upperBound(dataChild, gridStart.minusDays(7));
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<ScalarOperator> invertPreviousDay(CallOperator call, ScalarOperator dataChild,
+                                                              BinaryType cmp, ConstantOperator value) {
+        try {
+            DayOfWeek dow = dowOf(call);
+            if (dow == null || !value.getType().isDateType()) {
+                return Optional.empty();
+            }
+            LocalDate constant = value.getDatetime().toLocalDate();
+            if (!value.getDatetime().equals(constant.atStartOfDay())) {
+                return Optional.empty();
+            }
+            boolean aligned = constant.getDayOfWeek() == dow;
+            LocalDate ceilGrid = constant.plusDays((dow.getValue() - constant.getDayOfWeek().getValue() + 7) % 7);
+            LocalDate floorGrid = constant.minusDays((constant.getDayOfWeek().getValue() - dow.getValue() + 7) % 7);
+            // previous_day(x) = G holds exactly for x in [G+1, G+8)
+            switch (cmp) {
+                case EQ:
+                    return aligned
+                            ? window(dataChild, constant.plusDays(1).atStartOfDay(), constant.plusDays(8).atStartOfDay())
+                            : window(dataChild, constant.atStartOfDay(), constant.atStartOfDay());
+                case NE:
+                    return aligned
+                            ? disjunction(dataChild, constant.plusDays(1).atStartOfDay(),
+                                    constant.plusDays(8).atStartOfDay())
+                            : Optional.empty();
+                case GE:
+                    return lowerBound(dataChild, ceilGrid.plusDays(1).atStartOfDay());
+                case GT:
+                    return lowerBound(dataChild, aligned ? constant.plusDays(8).atStartOfDay()
+                            : ceilGrid.plusDays(1).atStartOfDay());
+                case LE:
+                    return upperBound(dataChild, aligned ? constant.plusDays(8).atStartOfDay()
+                            : floorGrid.plusDays(8).atStartOfDay());
+                case LT:
+                    return upperBound(dataChild, aligned ? constant.plusDays(1).atStartOfDay()
+                            : floorGrid.plusDays(8).atStartOfDay());
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<ScalarOperator> window(ScalarOperator dataChild, LocalDateTime from, LocalDateTime to) {
+        if (from.isBefore(ConstantOperator.MIN_DATETIME) || to.isAfter(ConstantOperator.MAX_DATETIME)) {
+            return Optional.empty();
+        }
+        Type childType = dataChild.getType();
+        return Optional.of(Utils.compoundAnd(
+                BinaryPredicateOperator.ge(dataChild, boundOfChildType(childType, from)),
+                BinaryPredicateOperator.lt(dataChild, boundOfChildType(childType, to))));
+    }
+
+    private static Optional<ScalarOperator> disjunction(ScalarOperator dataChild, LocalDateTime from,
+                                                        LocalDateTime to) {
+        if (from.isBefore(ConstantOperator.MIN_DATETIME) || to.isAfter(ConstantOperator.MAX_DATETIME)) {
+            return Optional.empty();
+        }
+        Type childType = dataChild.getType();
+        return Optional.of(Utils.compoundOr(
+                BinaryPredicateOperator.lt(dataChild, boundOfChildType(childType, from)),
+                BinaryPredicateOperator.ge(dataChild, boundOfChildType(childType, to))));
+    }
+
+    private static Optional<ScalarOperator> lowerBound(ScalarOperator dataChild, LocalDateTime from) {
+        if (from.isBefore(ConstantOperator.MIN_DATETIME) || from.isAfter(ConstantOperator.MAX_DATETIME)) {
+            return Optional.empty();
+        }
+        return Optional.of(BinaryPredicateOperator.ge(dataChild, boundOfChildType(dataChild.getType(), from)));
+    }
+
+    private static Optional<ScalarOperator> upperBound(ScalarOperator dataChild, LocalDateTime to) {
+        if (to.isBefore(ConstantOperator.MIN_DATETIME) || to.isAfter(ConstantOperator.MAX_DATETIME)) {
+            return Optional.empty();
+        }
+        return Optional.of(BinaryPredicateOperator.lt(dataChild, boundOfChildType(dataChild.getType(), to)));
+    }
+
+    private static boolean unambiguous(ZoneId zone, LocalDateTime wall) {
+        return zone.getRules().getValidOffsets(wall).size() == 1;
+    }
+
+    private static boolean transitionFree(ZoneId zone, LocalDateTime fromWall, LocalDateTime toWall) {
+        Instant from = fromWall.atZone(zone).toInstant();
+        Instant to = toWall.atZone(zone).toInstant();
+        ZoneOffsetTransition next = zone.getRules().nextTransition(from);
+        return next == null || next.getInstant().isAfter(to);
+    }
+
+    private static ConstantOperator intBound(Type childType, long value) {
+        Optional<ConstantOperator> typed = ConstantOperator.createBigint(value).castTo(childType);
+        return typed.filter(c -> !c.isNull()).orElse(null);
+    }
+
+    // to_iso8601 of a DATETIME: 'T' separator, microseconds zero-padded to six digits
+    // (DateUtils '%f' output renders appendFraction(MICRO_OF_SECOND, 6, 6)), 26 chars
+    private static final int ISO_DATETIME_LENGTH = 26;
+    private static final DateTimeFormatter ISO_DATETIME_RENDER = new DateTimeFormatterBuilder()
+            .appendPattern("uuuu-MM-dd'T'HH:mm:ss")
+            .appendFraction(ChronoField.MICRO_OF_SECOND, 6, 6, true)
+            .toFormatter()
+            .withResolverStyle(ResolverStyle.STRICT);
+
+    private static Optional<ScalarOperator> invertToIso8601(CallOperator call, ScalarOperator dataChild,
+                                                            BinaryType cmp, ConstantOperator value) {
+        try {
+            if (!value.getType().isStringType()) {
+                return Optional.empty();
+            }
+            String constant = value.getVarchar();
+            Type childType = dataChild.getType();
+            if (childType.isDate()) {
+                FormatSpec spec = RENDERED_FORMATS.get("%Y-%m-%d");
+                if (constant.length() != spec.length) {
+                    return Optional.empty();
+                }
+                LocalDateTime parsed = LocalDateTime.from(spec.parser.parse(constant));
+                if (!spec.parser.format(parsed).equals(constant)) {
+                    return Optional.empty();
+                }
+                return Optional.of(new BinaryPredicateOperator(cmp, dataChild,
+                        ConstantOperator.createDate(parsed)));
+            }
+            if (constant.length() != ISO_DATETIME_LENGTH) {
+                return Optional.empty();
+            }
+            LocalDateTime parsed = LocalDateTime.from(ISO_DATETIME_RENDER.parse(constant));
+            if (!ISO_DATETIME_RENDER.format(parsed).equals(constant)) {
+                return Optional.empty();
+            }
+            return Optional.of(new BinaryPredicateOperator(cmp, dataChild,
+                    ConstantOperator.createDatetime(parsed)));
+        } catch (Exception e) {
+            // strict parse rejections: wrong width, '2024-03-05T10:30:00.5', '9999-13-...'
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The half-open preimage {@code [lower, upperExclusive)} of a period comparison; a null
+     * side is unbounded. {@code aligned} tells whether the constant equals its own period
+     * start; a misaligned EQ yields the empty {@code [start, start)}. Shared by the
+     * predicate cells below and by the PartitionColumnFilter fast path in
+     * ColumnFilterConverter - one case table for both consumers.
+     */
+    public record PeriodRange(LocalDateTime lower, LocalDateTime upperExclusive) {
+    }
+
+    public static Optional<PeriodRange> periodRange(BinaryType cmp, boolean aligned,
+                                                    LocalDateTime periodStart, LocalDateTime nextStart) {
+        switch (cmp) {
+            case EQ:
+                return aligned ? Optional.of(new PeriodRange(periodStart, nextStart))
+                        : Optional.of(new PeriodRange(periodStart, periodStart));
+            case GE:
+                return Optional.of(new PeriodRange(aligned ? periodStart : nextStart, null));
+            case GT:
+                return Optional.of(new PeriodRange(nextStart, null));
+            case LE:
+                return Optional.of(new PeriodRange(null, nextStart));
+            case LT:
+                return Optional.of(new PeriodRange(null, aligned ? periodStart : nextStart));
+            default:
+                return Optional.empty();
+        }
+    }
+
     /**
      * The comparison cells shared by every period inverse. {@code aligned} tells
      * whether the constant equals its own period start. Guards: the period must sit inside
@@ -278,38 +801,49 @@ public final class MonotonicInverse {
         ConstantOperator upper = boundOfChildType(childType, nextStart);
         switch (cmp) {
             case EQ:
-                if (!aligned) {
-                    // empty interval on the child, never constant FALSE: for NULL x the
-                    // original is NULL and NOT / IS NULL contexts must see NULL here too
-                    return Optional.of(Utils.compoundAnd(
-                            BinaryPredicateOperator.ge(dataChild, lower),
-                            BinaryPredicateOperator.lt(dataChild, lower)));
-                }
-                if (pointCollapse) {
+                if (aligned && pointCollapse) {
                     return Optional.of(BinaryPredicateOperator.eq(dataChild, lower));
                 }
-                return Optional.of(Utils.compoundAnd(
-                        BinaryPredicateOperator.ge(dataChild, lower),
-                        BinaryPredicateOperator.lt(dataChild, upper)));
+                break;
             case NE:
-                // expressible only when the period is a single point of the child's domain
-                return aligned && pointCollapse
-                        ? Optional.of(BinaryPredicateOperator.ne(dataChild, lower)) : Optional.empty();
+                if (aligned && pointCollapse) {
+                    return Optional.of(BinaryPredicateOperator.ne(dataChild, lower));
+                }
+                if (aligned) {
+                    // the disjunction keeps NULL semantics: a NULL child gives
+                    // NULL OR NULL = NULL, like the original comparison
+                    return Optional.of(Utils.compoundOr(
+                            BinaryPredicateOperator.lt(dataChild, lower),
+                            BinaryPredicateOperator.ge(dataChild, upper)));
+                }
+                // a misaligned constant renders from no period: the original is TRUE for
+                // every non-NULL child, which has no bare-column comparison form
+                return Optional.empty();
             case EQ_FOR_NULL:
                 return aligned && pointCollapse
                         ? Optional.of(new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL, dataChild, lower))
                         : Optional.empty();
-            case GE:
-                return Optional.of(BinaryPredicateOperator.ge(dataChild, aligned ? lower : upper));
-            case GT:
-                return Optional.of(BinaryPredicateOperator.ge(dataChild, upper));
-            case LE:
-                return Optional.of(BinaryPredicateOperator.lt(dataChild, upper));
-            case LT:
-                return Optional.of(BinaryPredicateOperator.lt(dataChild, aligned ? lower : upper));
             default:
-                return Optional.empty();
+                break;
         }
+        Optional<PeriodRange> range = periodRange(cmp, aligned, periodStart, nextStart);
+        if (range.isEmpty()) {
+            return Optional.empty();
+        }
+        // a misaligned EQ maps to the empty [start, start): both comparisons on the child,
+        // never constant FALSE - for NULL x the original is NULL and NOT / IS NULL contexts
+        // must see NULL here too
+        ScalarOperator lowerBound = range.get().lower() == null ? null
+                : BinaryPredicateOperator.ge(dataChild, boundOfChildType(childType, range.get().lower()));
+        ScalarOperator upperBound = range.get().upperExclusive() == null ? null
+                : BinaryPredicateOperator.lt(dataChild, boundOfChildType(childType, range.get().upperExclusive()));
+        if (lowerBound == null) {
+            return Optional.ofNullable(upperBound);
+        }
+        if (upperBound == null) {
+            return Optional.of(lowerBound);
+        }
+        return Optional.of(Utils.compoundAnd(lowerBound, upperBound));
     }
 
     private static BinaryType flip(BinaryType cmp) {

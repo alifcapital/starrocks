@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.google.common.collect.ImmutableList;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -22,6 +23,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.DateType;
+import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarcharType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -118,8 +120,116 @@ public class InvertMonotonicPredicateRuleTest {
     }
 
     @Test
-    public void testNeRefused() {
-        ScalarOperator predicate = dateTrunc("month", dtCol, BinaryType.NE, LocalDateTime.of(2024, 3, 1, 0, 0));
+    public void testToIso8601Inverts() {
+        // DATE renders as %Y-%m-%d: a bijection, every comparison carries over
+        CallOperator dateCall = new CallOperator("to_iso8601", VarcharType.VARCHAR, ImmutableList.of(dateCol));
+        ScalarOperator result = apply(new BinaryPredicateOperator(BinaryType.EQ, dateCall,
+                ConstantOperator.createVarchar("2024-03-05")));
+        assertEquals("2: d = 2024-03-05", result.toString());
+        result = apply(new BinaryPredicateOperator(BinaryType.NE, dateCall,
+                ConstantOperator.createVarchar("2024-03-05")));
+        assertEquals("2: d != 2024-03-05", result.toString());
+        // non-canonical constants refuse
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.EQ, dateCall,
+                ConstantOperator.createVarchar("2024-3-05"));
+        assertSame(predicate, apply(predicate));
+
+        // DATETIME renders with 'T' and six fraction digits
+        CallOperator dtCall = new CallOperator("to_iso8601", VarcharType.VARCHAR, ImmutableList.of(dtCol));
+        result = apply(new BinaryPredicateOperator(BinaryType.GE, dtCall,
+                ConstantOperator.createVarchar("2024-03-05T10:30:00.123456")));
+        assertEquals(BinaryType.GE, ((BinaryPredicateOperator) result).getBinaryType());
+        assertEquals(LocalDateTime.of(2024, 3, 5, 10, 30, 0, 123456000),
+                ((ConstantOperator) result.getChild(1)).getDatetime());
+        // a short fraction is not the canonical rendering
+        predicate = new BinaryPredicateOperator(BinaryType.GE, dtCall,
+                ConstantOperator.createVarchar("2024-03-05T10:30:00.5"));
+        assertSame(predicate, apply(predicate));
+    }
+
+    @Test
+    public void testUnixTimestampInverts() {
+        ConnectContext ctx = new ConnectContext();
+        ctx.getSessionVariable().setTimeZone("+08:00");
+        ctx.setThreadLocalInfo();
+        try {
+            CallOperator call = new CallOperator("unix_timestamp", IntegerType.BIGINT, ImmutableList.of(dtCol));
+            // 1700000000 is 2023-11-15 06:13:20 at +08:00; the fold truncates to seconds
+            ScalarOperator result = apply(new BinaryPredicateOperator(BinaryType.EQ, call,
+                    ConstantOperator.createBigint(1700000000L)));
+            assertEquals("1: ts >= 2023-11-15 06:13:20 AND 1: ts < 2023-11-15 06:13:21", result.toString());
+            // GE cuts the upper clamp tail: unix_timestamp is 0 past the max, never >= N
+            result = apply(new BinaryPredicateOperator(BinaryType.GE, call,
+                    ConstantOperator.createBigint(1700000000L)));
+            assertEquals("1: ts >= 2023-11-15 06:13:20 AND 1: ts <= 9999-12-31 15:59:59", result.toString());
+            // the LE preimage contains both clamp tails and is not an interval
+            ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.LE, call,
+                    ConstantOperator.createBigint(1700000000L));
+            assertSame(predicate, apply(predicate));
+            // 0 is the clamp plateau itself
+            predicate = new BinaryPredicateOperator(BinaryType.EQ, call, ConstantOperator.createBigint(0L));
+            assertSame(predicate, apply(predicate));
+
+            // 1730611800 is 01:30 inside the New York fall-back overlap: two epochs render
+            // to that wall clock, the bound is ambiguous
+            ctx.getSessionVariable().setTimeZone("America/New_York");
+            predicate = new BinaryPredicateOperator(BinaryType.EQ, call,
+                    ConstantOperator.createBigint(1730611800L));
+            assertSame(predicate, apply(predicate));
+        } finally {
+            ConnectContext.remove();
+        }
+    }
+
+    @Test
+    public void testFromUnixTimeInverts() {
+        ConnectContext ctx = new ConnectContext();
+        ctx.getSessionVariable().setTimeZone("+08:00");
+        ctx.setThreadLocalInfo();
+        try {
+            ColumnRefOperator epoch = new ColumnRefOperator(3, IntegerType.BIGINT, "ep", true);
+            CallOperator dayFormat = new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                    ImmutableList.of(epoch, ConstantOperator.createVarchar("%Y-%m-%d")));
+            // the day 2024-03-05 at +08:00 is the epoch period [1709568000, 1709654400)
+            ScalarOperator result = apply(new BinaryPredicateOperator(BinaryType.EQ, dayFormat,
+                    ConstantOperator.createVarchar("2024-03-05")));
+            assertEquals("3: ep >= 1709568000 AND 3: ep < 1709654400", result.toString());
+            // LE keeps the below-zero rendering tail out
+            result = apply(new BinaryPredicateOperator(BinaryType.LE, dayFormat,
+                    ConstantOperator.createVarchar("2024-03-05")));
+            assertEquals("3: ep < 1709654400 AND 3: ep >= 0", result.toString());
+
+            // the one-argument form renders the SR datetime string: a one-second period
+            CallOperator plain = new CallOperator("from_unixtime", VarcharType.VARCHAR, ImmutableList.of(epoch));
+            result = apply(new BinaryPredicateOperator(BinaryType.EQ, plain,
+                    ConstantOperator.createVarchar("2024-03-05 10:30:00")));
+            assertEquals("3: ep >= 1709605800 AND 3: ep < 1709605801", result.toString());
+
+            // an INT column cannot hold the max-epoch guard value: the guard is dropped,
+            // the type itself ends inside the valid range
+            ColumnRefOperator intEpoch = new ColumnRefOperator(4, IntegerType.INT, "epi", true);
+            CallOperator overInt = new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                    ImmutableList.of(intEpoch, ConstantOperator.createVarchar("%Y-%m-%d")));
+            result = apply(new BinaryPredicateOperator(BinaryType.GE, overInt,
+                    ConstantOperator.createVarchar("2024-03-05")));
+            assertEquals("4: epi >= 1709568000", result.toString());
+        } finally {
+            ConnectContext.remove();
+        }
+    }
+
+    @Test
+    public void testNePeriodInvertsToDisjunction() {
+        // NULL-safe: for a NULL ts both the original and OR-of-comparisons yield NULL
+        ScalarOperator result = apply(dateTrunc("month", dtCol, BinaryType.NE, LocalDateTime.of(2024, 3, 1, 0, 0)));
+        assertEquals("1: ts < 2024-03-01 00:00:00 OR 1: ts >= 2024-04-01 00:00:00", result.toString());
+    }
+
+    @Test
+    public void testNeMisalignedRefused() {
+        // a misaligned constant renders from no period: TRUE for every non-NULL ts,
+        // which has no bare-column comparison form
+        ScalarOperator predicate = dateTrunc("month", dtCol, BinaryType.NE, LocalDateTime.of(2024, 3, 15, 0, 0));
         assertSame(predicate, apply(predicate));
     }
 

@@ -75,6 +75,15 @@ select id from rw_ts where date_trunc('day', ts) = '2024-03-31' order by id;
 select id from rw_ts where date_trunc('day', ts) = '2024-03-01' order by id;
 set enable_monotonic_predicate_rewrite = true;
 
+-- NE of an aligned period inverts into a NULL-safe disjunction
+set enable_monotonic_predicate_rewrite = true;
+select id from rw_month where date_trunc('month', d) != '2024-03-01' order by id;
+select id from rw_month where not (date_trunc('month', d) != '2024-03-01') order by id;
+set enable_monotonic_predicate_rewrite = false;
+select id from rw_month where date_trunc('month', d) != '2024-03-01' order by id;
+select id from rw_month where not (date_trunc('month', d) != '2024-03-01') order by id;
+set enable_monotonic_predicate_rewrite = true;
+
 -- the inverted predicate lands on the bare partition column and prunes
 function: assert_explain_contains("select id from rw_month where date_trunc('month', d) = '2024-03-01'", 'partitions=1/5')
 

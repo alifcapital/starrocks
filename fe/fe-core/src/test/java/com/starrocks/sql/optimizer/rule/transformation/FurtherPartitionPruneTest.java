@@ -488,16 +488,18 @@ class FurtherPartitionPruneTest extends PlanTestBase {
                 "partitions=1/4"));
         arguments.add(Arguments.of("select * from less_than_tbl where last_day(k1) is null",
                 "partitions=1/4"));
+        // the exact last_day inverse turns the equality into April bounds on the bare
+        // column: one partition instead of the two the boundary-mapping evaluator kept
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(cast(d2 as datetime)) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(cast(d2 as date)) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = cast('2020-04-30' as date)",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = cast('2020-04-30' as datetime)",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = date_trunc('day', d2)",
                 "partitions=4/4"));
         return arguments.stream();

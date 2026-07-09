@@ -57,6 +57,7 @@ import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
+import com.starrocks.sql.optimizer.rewrite.MonotonicInverse;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorEvaluator;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
 import com.starrocks.sql.spm.SPMFunctions;
@@ -304,40 +305,19 @@ public class ColumnFilterConverter {
                 return false;
             }
 
-            DateLiteral startLit = new DateLiteral(periodStart, rhsLiteral.getType());
-            DateLiteral nextStartLit = new DateLiteral(nextPeriodStart, rhsLiteral.getType());
-
-            PartitionColumnFilter filter = result.getOrDefault(columnRef.getName(), new PartitionColumnFilter());
             boolean isAligned = rhsDateTime.equals(periodStart);
-            switch (predicate.getBinaryType()) {
-                case EQ: {
-                    // If RHS constant is not aligned to the granularity, equality can never be true.
-                    // Build an empty interval: [L, L)
-                    if (!isAligned) {
-                        filter.setLowerBound(startLit, true);
-                        filter.setUpperBound(startLit, false);
-                    } else {
-                        filter.setLowerBound(startLit, true);
-                        filter.setUpperBound(nextStartLit, false);
-                    }
-                    break;
-                }
-                case GE:
-                    // If not aligned, minimal satisfying dt starts from next period start [U, +inf)
-                    filter.setLowerBound(isAligned ? startLit : nextStartLit, true);
-                    break;
-                case GT:
-                    filter.setLowerBound(nextStartLit, true);
-                    break;
-                case LE:
-                    filter.setUpperBound(nextStartLit, false);
-                    break;
-                case LT:
-                    // If not aligned, T(dt) < C allows dt < U; if aligned, dt < L
-                    filter.setUpperBound(isAligned ? startLit : nextStartLit, false);
-                    break;
-                default:
-                    return false;
+            // one case table with the predicate inverter: [lower, upperExclusive) preimage
+            Optional<MonotonicInverse.PeriodRange> range = MonotonicInverse.periodRange(
+                    predicate.getBinaryType(), isAligned, periodStart, nextPeriodStart);
+            if (range.isEmpty()) {
+                return false;
+            }
+            PartitionColumnFilter filter = result.getOrDefault(columnRef.getName(), new PartitionColumnFilter());
+            if (range.get().lower() != null) {
+                filter.setLowerBound(new DateLiteral(range.get().lower(), rhsLiteral.getType()), true);
+            }
+            if (range.get().upperExclusive() != null) {
+                filter.setUpperBound(new DateLiteral(range.get().upperExclusive(), rhsLiteral.getType()), false);
             }
             filter.setFromFunctionCall();
             result.put(columnRef.getName(), filter);
