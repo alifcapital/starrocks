@@ -70,6 +70,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.roaringbitmap.RoaringBitmap;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -582,6 +583,9 @@ public class Utils {
 
         Optional<ConstantOperator> result = rhs.castTo(childType);
         if (result.isEmpty()) {
+            result = castIntegralDecimalToInteger(rhs, childType);
+        }
+        if (result.isEmpty()) {
             return Optional.empty();
         }
         if (TypeManager.isAssignable2Decimal((ScalarType) childType, (ScalarType) rhsType)) {
@@ -594,6 +598,20 @@ public class Utils {
             return Optional.of(result.get());
         }
         return Optional.empty();
+    }
+
+    // ConstantOperator.castTo goes through the string form, so an integral decimal like
+    // 202403.000000000 does not parse as an integer. Retry with the fraction-free rendering.
+    // A real fraction refuses; an out-of-range value fails inside castTo.
+    private static Optional<ConstantOperator> castIntegralDecimalToInteger(ConstantOperator rhs, Type childType) {
+        if (!rhs.getType().isDecimalOfAnyVersion() || !childType.isIntegerType()) {
+            return Optional.empty();
+        }
+        BigDecimal plain = rhs.getDecimal().stripTrailingZeros();
+        if (plain.scale() > 0) {
+            return Optional.empty();
+        }
+        return ConstantOperator.createVarchar(plain.toPlainString()).castTo(childType);
     }
 
     public static ScalarOperator transTrue2Null(ScalarOperator predicates) {

@@ -558,4 +558,60 @@ public class ReduceCastRuleTest {
         ScalarOperator result = rule.apply(beforeOptimize, null);
         Assertions.assertTrue(result.getChild(0) instanceof CastOperator);
     }
+
+    @Test
+    public void testIntegerColumnDecimalConstantReduce() {
+        // the shape an implicit int-vs-varchar equality produces under cbo_eq_base_type=decimal:
+        // cast(int_col as decimal128(38,9)) GE 202403.000000000
+        ReduceCastRule rule = new ReduceCastRule();
+        Type decimal128 = TypeFactory.createDecimalV3NarrowestType(38, 9);
+        ColumnRefOperator intCol = new ColumnRefOperator(0, IntegerType.INT, "datamonth", false);
+
+        {
+            // integral decimal reduces to the bare column and an int constant
+            BinaryPredicateOperator pred = BinaryPredicateOperator.ge(new CastOperator(decimal128, intCol),
+                    ConstantOperator.createDecimal(new BigDecimal("202403.000000000"), decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof ColumnRefOperator);
+            Assertions.assertEquals(202403, ((ConstantOperator) result.getChild(1)).getInt());
+        }
+        {
+            // negative integral decimal reduces too
+            BinaryPredicateOperator pred = BinaryPredicateOperator.le(new CastOperator(decimal128, intCol),
+                    ConstantOperator.createDecimal(new BigDecimal("-202403.000000000"), decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof ColumnRefOperator);
+            Assertions.assertEquals(-202403, ((ConstantOperator) result.getChild(1)).getInt());
+        }
+        {
+            // a real fraction has no equal integer, no reduction
+            BinaryPredicateOperator pred = BinaryPredicateOperator.ge(new CastOperator(decimal128, intCol),
+                    ConstantOperator.createDecimal(new BigDecimal("202403.500000000"), decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof CastOperator);
+        }
+        {
+            // out of INT range, no reduction
+            BinaryPredicateOperator pred = BinaryPredicateOperator.ge(new CastOperator(decimal128, intCol),
+                    ConstantOperator.createDecimal(new BigDecimal("3000000000.000000000"), decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof CastOperator);
+        }
+        {
+            // LARGEINT does not fit decimal128(38,9): the cast itself can overflow, no reduction
+            ColumnRefOperator largeCol = new ColumnRefOperator(1, IntegerType.LARGEINT, "big", false);
+            BinaryPredicateOperator pred = BinaryPredicateOperator.ge(new CastOperator(decimal128, largeCol),
+                    ConstantOperator.createDecimal(new BigDecimal("202403.000000000"), decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof CastOperator);
+        }
+        {
+            // NULL constant keeps the reduction with a typed NULL
+            BinaryPredicateOperator pred = BinaryPredicateOperator.ge(new CastOperator(decimal128, intCol),
+                    ConstantOperator.createNull(decimal128));
+            ScalarOperator result = rule.apply(pred, null);
+            Assertions.assertTrue(result.getChild(0) instanceof ColumnRefOperator);
+            Assertions.assertTrue(((ConstantOperator) result.getChild(1)).isNull());
+        }
+    }
 }
