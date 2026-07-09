@@ -21,6 +21,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.type.IntegerType;
 import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 
@@ -89,9 +90,13 @@ public class MonotonicImage {
         if (column.getType().isStringType()) {
             return Optional.empty();
         }
+        // cast(int_col as date) is admitted only when the whole domain sits inside the
+        // positional YYYYMMDD segment (see intDateCastAdmitted); other integer
+        // expressions follow the normal rules.
+        ColumnRefOperator intDateCastColumn = intDateCastAdmitted(column, columnDomain) ? column : null;
         // No proof of monotonicity - no image. E.g. date_format(d, '%d') over
         // ['2024-03-05','2024-04-10'] produces '01'..'31', far outside ['05','10'].
-        if (!isMonotonicExpression(expr)) {
+        if (!isMonotonicExpression(expr, intDateCastColumn)) {
             return Optional.empty();
         }
         // Fold the expression at both endpoints:
@@ -132,6 +137,10 @@ public class MonotonicImage {
      * </pre>
      */
     public static boolean isMonotonicExpression(ScalarOperator op) {
+        return isMonotonicExpression(op, null);
+    }
+
+    private static boolean isMonotonicExpression(ScalarOperator op, ColumnRefOperator intDateCastColumn) {
         if (op.isColumnRef() || op.isConstantRef()) {
             return true;
         }
@@ -140,7 +149,14 @@ public class MonotonicImage {
         if (op instanceof CastOperator) {
             CastOperator cast = (CastOperator) op;
             if (isOrderPreservingCast(cast)) {
-                return isMonotonicExpression(cast.getChild(0));
+                return isMonotonicExpression(cast.getChild(0), intDateCastColumn);
+            }
+            // cast(int_col as date/datetime): only for the domain column itself, and only
+            // when the caller proved the whole domain reads as positional YYYYMMDD
+            // (see intDateCastAdmitted)
+            if (intDateCastColumn != null && cast.getType().isDateType()
+                    && intDateCastColumn.equals(cast.getChild(0))) {
+                return true;
             }
             // a numeric cast over a digits-only date rendering: the images of
             // date_format(x, '%Y%m') are fixed-width digit strings, so their numeric value
@@ -154,7 +170,7 @@ public class MonotonicImage {
                         && !((ConstantOperator) inner.getChild(1)).isNull()
                         && MonotonicFunctionRegistry.isDigitsOnlyFormat(
                                 ((ConstantOperator) inner.getChild(1)).getVarchar())) {
-                    return isMonotonicExpression(inner);
+                    return isMonotonicExpression(inner, intDateCastColumn);
                 }
             }
             return false;
@@ -193,7 +209,8 @@ public class MonotonicImage {
                     continue;
                 }
                 nonConstant++;
-                if (nonConstant > 1 || !admittedArgs.contains(i) || !isMonotonicExpression(child)) {
+                if (nonConstant > 1 || !admittedArgs.contains(i)
+                        || !isMonotonicExpression(child, intDateCastColumn)) {
                     return false;
                 }
             }
@@ -201,6 +218,35 @@ public class MonotonicImage {
         }
         // everything else (case-when, lambdas, subqueries, ...) is out of scope
         return false;
+    }
+
+    /**
+     * True when every value of the integer domain reads as positional YYYYMMDD under
+     * cast(int as date). BE (date::standardize_date) parses 8-digit numbers positionally,
+     * but smaller numbers as MySQL two-digit-year forms (690315 is 2069-03-15,
+     * 700520 is 1970-05-20: numeric order breaks on the 69/70 boundary) and 9+ digit
+     * numbers as compact datetimes. An interval with both endpoints inside
+     * [10000101, 99991231] contains 8-digit numbers only, so numeric order equals date
+     * order on the whole interval. Invalid combinations inside it (20260732) cast to
+     * NULL, and NULL never matches the equality join that consumes the image.
+     */
+    private static boolean intDateCastAdmitted(ColumnRefOperator column, MinMax domain) {
+        if (!column.getType().isIntegerType()) {
+            return false;
+        }
+        return inPositionalDateSegment(domain.getMin()) && inPositionalDateSegment(domain.getMax());
+    }
+
+    private static boolean inPositionalDateSegment(Optional<ConstantOperator> bound) {
+        if (bound.isEmpty() || bound.get().isNull()) {
+            return false;
+        }
+        Optional<ConstantOperator> asLong = bound.get().castTo(IntegerType.BIGINT);
+        if (asLong.isEmpty()) {
+            return false;
+        }
+        long v = asLong.get().getBigint();
+        return v >= 10000101L && v <= 99991231L;
     }
 
     /**

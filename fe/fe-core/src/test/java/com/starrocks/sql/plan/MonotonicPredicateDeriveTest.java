@@ -90,6 +90,16 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
                 + "DUPLICATE KEY(`id`, `datadate`)\n"
                 + "DISTRIBUTED BY HASH(`id`) BUCKETS 3\n"
                 + "PROPERTIES (\"replication_num\" = \"1\");");
+
+        // dimension keyed by an INT date like 20240305
+        starRocksAssert.withTable("CREATE TABLE `event_dates_int` (\n"
+                + "  `id` bigint NOT NULL,\n"
+                + "  `datadate` int NOT NULL,\n"
+                + "  `v` bigint NULL\n"
+                + ") ENGINE=OLAP\n"
+                + "DUPLICATE KEY(`id`, `datadate`)\n"
+                + "DISTRIBUTED BY HASH(`id`) BUCKETS 3\n"
+                + "PROPERTIES (\"replication_num\" = \"1\");");
     }
 
     @Test
@@ -130,6 +140,51 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
         } finally {
             connectContext.getSessionVariable().setCboEqBaseType(previousEqBaseType);
         }
+    }
+
+    @Test
+    public void testIntDateCastJoinKeyDerives() throws Exception {
+        // both filter endpoints are 8-digit ints, so cast(datadate as date) reads every value
+        // of the domain as positional YYYYMMDD and the chain maps [20240305, 20240410] to
+        // ['2024-03-01', '2024-04-01'] on the fact side
+        String plan = getFragmentPlan("select * from fact_month f join event_dates_int e"
+                + " on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date))"
+                + " where e.datadate between 20240305 and 20240410");
+        assertContains(plan, "partitions=2/6");
+    }
+
+    @Test
+    public void testIntDateCastWithImplicitNumericJoinKey() throws Exception {
+        // the full int-to-int shape: an INT filter column through cast + date_format against
+        // an INT fact key; under DECIMAL both sides land on decimal128 and the derived bounds
+        // fold back onto the bare int column
+        String sql = "select * from fact_month_int f join event_dates_int e"
+                + " on f.id = e.id and f.datamonth = date_format(cast(e.datadate as date), '%Y%m')"
+                + " where e.datadate between 20240305 and 20240410";
+        String previousEqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        try {
+            connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DECIMAL);
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "partitions=2/6");
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(previousEqBaseType);
+        }
+    }
+
+    @Test
+    public void testIntDateCastRefusesOutsidePositionalSegment() throws Exception {
+        // 690101 casts to 2069-01-01 and 710101 to 1971-01-01 (MySQL two-digit-year forms):
+        // numeric order does not match date order there, so nothing is derived
+        String plan = getFragmentPlan("select * from fact_month f join event_dates_int e"
+                + " on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date))"
+                + " where e.datadate between 690101 and 710101");
+        assertContains(plan, "partitions=6/6");
+
+        // one endpoint outside the 8-digit segment refuses the whole interval
+        plan = getFragmentPlan("select * from fact_month f join event_dates_int e"
+                + " on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date))"
+                + " where e.datadate between 690101 and 20240410");
+        assertContains(plan, "partitions=6/6");
     }
 
     @Test
