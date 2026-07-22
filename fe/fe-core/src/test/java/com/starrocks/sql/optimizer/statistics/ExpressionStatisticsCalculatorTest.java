@@ -629,8 +629,8 @@ public class ExpressionStatisticsCalculatorTest {
         Assertions.assertEquals(Double.NEGATIVE_INFINITY, columnStatistic.getMinValue(), 0.001);
         Assertions.assertEquals(Double.POSITIVE_INFINITY, columnStatistic.getMaxValue(), 0.001);
         Assertions.assertEquals(100, columnStatistic.getDistinctValuesCount(), 0.001);
-        // test ltrim_string function
-        callOperator = new CallOperator(FunctionSet.LTRIM_STRING, VarcharType.VARCHAR, Lists.newArrayList(left, right));
+        // test rtrim function
+        callOperator = new CallOperator(FunctionSet.RTRIM, VarcharType.VARCHAR, Lists.newArrayList(left, right));
         columnStatistic = ExpressionStatisticCalculator.calculate(callOperator, builder.build());
         Assertions.assertEquals(Double.NEGATIVE_INFINITY, columnStatistic.getMinValue(), 0.001);
         Assertions.assertEquals(Double.POSITIVE_INFINITY, columnStatistic.getMaxValue(), 0.001);
