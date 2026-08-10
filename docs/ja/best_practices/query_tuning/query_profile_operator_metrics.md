@@ -225,6 +225,16 @@ OLAP_SCAN オペレーターに似ていますが、Iceberg/Hive/Hudi/Detal な�
 | TopnReorderEligibleMorsels | ソート列の利用可能な min/max 境界で並べ替えられたスキャンタスク（morsel）の数。 |
 | TopnReorderNoBoundMorsels | 数値の優先順位を使わないスキャンタスクの数。NULLS FIRST で優先されるタスクも含みます。 |
 | TopnMinMaxFilteredScanRanges | min/max がフィルターを通過できないため、footer を読む前にスキップされたスキャン範囲の数。 |
+| ScanTime | スキャンの累積時間。スキャン操作は非同期I/Oスレッドプールで完了します。 |
+| IOTaskExecTime | I/Oタスクの実行時間。 |
+| IOTaskWaitTime | IOタスクの送信成功からスケジュール実行までの待機時間。 |
+| SubmitTaskCount | IOタスクが送信された回数。 |
+| SubmitTaskTime | タスクの送信にかかった時間。 |
+| PeakIOTasks | IOタスクのピーク数。 |
+| PeakScanTaskQueueSize | IOタスクキューのピークサイズ。 |
+| RuntimeFilterEvalTime | Parquetリーダー内でデコード済みの行に対してJoin Runtime Filterを評価するのにかかった時間。 |
+| RuntimeFilterInputRows | ParquetリーダーのJoin Runtime Filter評価に入力された行数。 |
+| RuntimeFilterOutputRows | ParquetリーダーのJoin Runtime Filter評価を通過した行数。`RuntimeFilterInputRows` との差が大きいほど、Lazy列がマテリアライズされる前に多くの行がフィルタリングされたことを意味します。 |
 
 ### Exchange Operator
 

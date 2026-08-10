@@ -33,6 +33,7 @@
 #include "storage/column_predicate.h"
 #include "storage/predicate_parser.h"
 #include "storage/predicate_tree/predicate_tree.h"
+#include "storage/runtime_filter_predicate.h"
 #include "util/runtime_profile.h"
 
 namespace starrocks {
@@ -100,6 +101,11 @@ struct HdfsScannerStats {
     int64_t parquet_lazy_read_ns = 0;
     int64_t parquet_lazy_full_trigger_count = 0;
     int64_t parquet_dict_code_predicate_eval_count = 0;
+    // Join runtime filters evaluated against decoded rows. Names mirror the OLAP
+    // storage layer's rf_cond_* stats so profiles diff directly against an OLAP run.
+    int64_t rf_cond_input_rows = 0;
+    int64_t rf_cond_output_rows = 0;
+    int64_t rf_cond_evaluate_ns = 0;
     // page statistics
     bool has_page_statistics = false;
     // page skip
@@ -324,6 +330,27 @@ struct HdfsScannerContext {
 
     // ===== shared scan fields =====
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
+    // Driver sequence of the owning pipeline driver, set by HiveDataSource from
+    // runtime_membership_filter_eval_context.  Mirrors what the lake connector
+    // already does; the hive path simply never plumbed it.
+    //
+    // RuntimeFilterProbeDescriptor::runtime_filter() indexes group_colocate_filter()
+    // with this value for group-colocate filters, so the -1 sentinel reads out of
+    // bounds.  Connector scans DO reach that path: bucket-aware execution on lake
+    // tables (enable_bucket_aware_execution_on_lake) produces colocate joins over
+    // Iceberg scans.  normalize_join_runtime_filter() already resolves filters with
+    // this value, so it must be real regardless of the runtime filter pushdown below.
+    int32_t driver_sequence = -1;
+    // Non-owning. Join runtime filters to probe against decoded rows, so rows are
+    // dropped before lazy columns are materialized. Points into predicates below.
+    // nullptr when the feature is disabled or when no runtime filter targets a
+    // pushdown-able slot.
+    //
+    // Readers must NOT call evaluate() on this instance directly: it carries mutable
+    // adaptive-sampling state, and its predicate list is not restricted to the columns
+    // any particular reader can supply. Take a per-reader copy holding only the subset
+    // you can serve -- see GroupReader::_setup_runtime_filter_predicates().
+    RuntimeFilterPredicates* runtime_filter_preds = nullptr;
     const TupleDescriptor* tuple_desc = nullptr;
     HdfsScannerConjuncts conjuncts;
     HdfsScannerOptions options;
@@ -424,6 +451,13 @@ struct HdfsScannerContext {
     //   predicate_free_pool (owns ColumnPredicates)
     //   conjuncts_manager → destroyed last
     struct PredicateState {
+        // Borrowed RuntimeFilterPredicate*, owned by the fragment-scoped
+        // runtime_state->obj_pool() like the conjuncts manager's allocations, so they
+        // outlive this struct. Holds predicate objects only -- the mutable sampling
+        // state used during evaluation lives in per-reader copies (see
+        // GroupReader::_setup_runtime_filter_predicates).
+        RuntimeFilterPredicates runtime_filter_preds;
+
         std::unique_ptr<RuntimeScanRangePruner> runtime_filter_scan_range_pruner;
         PredicateTree predicate_tree;
         std::unique_ptr<ConnectorPredicateParser> predicate_parser;
