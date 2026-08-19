@@ -20,7 +20,6 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.qe.scheduler.slot.LogicalSlot;
-import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.type.TypeFactory;
 
@@ -37,8 +36,7 @@ public class ShowRunningQueriesStmt extends ShowStmt {
             Pair.create(new Column("QueryId", TypeFactory.createVarcharType(64)),
                     slot -> DebugUtil.printId(slot.getSlotId())),
             Pair.create(new Column("WarehouseId", TypeFactory.createVarcharType(64)),
-                    slot -> slot.getWarehouseId() == WarehouseManager.DEFAULT_WAREHOUSE_ID  ? "-" :
-                            Long.toString(slot.getWarehouseId())),
+                    slot -> Long.toString(slot.getWarehouseId())),
             Pair.create(new Column("ResourceGroupId", TypeFactory.createVarcharType(64)),
                     slot -> slot.getGroupId() == LogicalSlot.ABSENT_GROUP_ID ? "-" : Long.toString(slot.getGroupId())),
             Pair.create(new Column("StartTime", TypeFactory.createVarcharType(64)),
@@ -58,7 +56,8 @@ public class ShowRunningQueriesStmt extends ShowStmt {
             Pair.create(new Column("Frontend", TypeFactory.createVarcharType(64)),
                     LogicalSlot::getRequestFeName),
             Pair.create(new Column("FeStartTime", TypeFactory.createVarcharType(64)),
-                    slot -> TimeUtils.longToTimeString(slot.getFeStartTimeMs()))
+                    slot -> TimeUtils.longToTimeString(slot.getFeStartTimeMs())),
+            Pair.create(new Column("Warehouse", TypeFactory.createVarcharType(64)), LogicalSlot::getWarehouseName)
     );
 
     private static final List<Function<LogicalSlot, String>> COLUMN_SUPPLIERS = META_DATA.stream()

@@ -34,6 +34,7 @@ SchemaScanner::ColumnDesc SchemaAnalyzeStatus::_s_tbls_columns[] = {
         {"EndTime", TypeDescriptor::create_varchar_type(1024), sizeof(Slice), false},
         {"Properties", TypeDescriptor::create_varchar_type(1024), sizeof(Slice), false},
         {"Reason", TypeDescriptor::create_varchar_type(1024), sizeof(Slice), false},
+        {"Warehouse", TypeDescriptor::create_varchar_type(256), sizeof(Slice), false},
 };
 
 SchemaAnalyzeStatus::SchemaAnalyzeStatus()
@@ -72,7 +73,8 @@ DatumArray SchemaAnalyzeStatus::_build_row() {
     auto& item = _res.items.at(_index++);
     return {Slice(item.id),         Slice(item.catalog_name), Slice(item.database_name), Slice(item.table_name),
             Slice(item.columns),    Slice(item.type),         Slice(item.schedule),      Slice(item.status),
-            Slice(item.start_time), Slice(item.end_time),     Slice(item.properties),    Slice(item.reason)};
+            Slice(item.start_time), Slice(item.end_time),     Slice(item.properties),    Slice(item.reason),
+            Slice(item.warehouse)};
 }
 
 Status SchemaAnalyzeStatus::_fill_chunk(ChunkPtr* chunk) {

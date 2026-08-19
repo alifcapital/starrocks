@@ -222,7 +222,7 @@ public class StatisticsCollectionTrigger {
                 // reset the start time after pending, so [end-start] can represent execution period
                 analyzeStatus.setStartTime(LocalDateTime.now());
                 StatisticExecutor statisticExecutor = new StatisticExecutor();
-                ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
+                ConnectContext statsConnectCtx = StatisticUtils.buildStatisticsCollectContext();
                 try (var scope = statsConnectCtx.bindScope()) {
                     // set session id for temporary table
                     if (table.isTemporaryTable()) {

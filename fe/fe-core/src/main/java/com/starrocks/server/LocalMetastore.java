@@ -2056,7 +2056,7 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
         if (RunMode.isSharedDataMode()) {
             numAliveNodes = 0;
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getWarehouseComputeNodeIds(computeResource);
             for (long nodeId : computeNodeIds) {
                 if (GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId).isAlive()) {
                     ++numAliveNodes;

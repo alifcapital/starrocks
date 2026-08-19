@@ -91,7 +91,7 @@ public class DictionaryMgrEditLogTest {
         Assertions.assertEquals(0, masterDictionaryMgr.getDictionariesMapById().size());
         
         // 3. Execute createDictionary operation (master side)
-        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         // 4. Verify master state
         Assertions.assertTrue(masterDictionaryMgr.isExist(TEST_DICTIONARY_NAME));
@@ -145,7 +145,7 @@ public class DictionaryMgrEditLogTest {
         
         // 3. Execute createDictionary operation and expect exception
         RuntimeException exception = Assertions.assertThrows(RuntimeException.class, () -> {
-            masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+            masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         });
         Assertions.assertEquals("EditLog write failed", exception.getMessage());
         
@@ -162,7 +162,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Assertions.assertTrue(masterDictionaryMgr.isExist(TEST_DICTIONARY_NAME));
         
@@ -209,7 +209,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("drop_exception_dictionary", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Assertions.assertTrue(masterDictionaryMgr.isExist("drop_exception_dictionary"));
         
@@ -242,7 +242,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Assertions.assertTrue(masterDictionaryMgr.isExist(TEST_DICTIONARY_NAME));
         
@@ -261,13 +261,13 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName(TEST_DICTIONARY_NAME);
         Assertions.assertNotNull(dictionary);
         
         // 2. Execute refreshDictionary operation (master side)
-        masterDictionaryMgr.refreshDictionary(TEST_DICTIONARY_NAME);
+        masterDictionaryMgr.refreshDictionary(TEST_DICTIONARY_NAME, 0L);
         
         // 3. Verify master state
         Set<Long> unfinishedTasks = masterDictionaryMgr.getUnfinishedRefreshTasks();
@@ -298,7 +298,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("refresh_exception_dictionary", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName("refresh_exception_dictionary");
         Assertions.assertNotNull(dictionary);
@@ -317,7 +317,7 @@ public class DictionaryMgrEditLogTest {
         
         // 3. Execute refreshDictionary operation and expect exception
         RuntimeException exception = Assertions.assertThrows(RuntimeException.class, () -> {
-            masterDictionaryMgr.refreshDictionary("refresh_exception_dictionary");
+            masterDictionaryMgr.refreshDictionary("refresh_exception_dictionary", 0L);
         });
         Assertions.assertEquals("EditLog write failed", exception.getMessage());
         
@@ -338,7 +338,7 @@ public class DictionaryMgrEditLogTest {
         
         // 3. Execute refreshDictionary operation and expect MetaNotFoundException
         MetaNotFoundException exception = Assertions.assertThrows(MetaNotFoundException.class, () -> {
-            masterDictionaryMgr.refreshDictionary(nonExistentName);
+            masterDictionaryMgr.refreshDictionary(nonExistentName, 0L);
         });
         Assertions.assertTrue(exception.getMessage().contains("refreshed dictionary not found"));
     }
@@ -404,7 +404,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt stmt = createTestDictionaryStmt("test_dict_id", properties);
-        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         // 3. Verify master state - dictionary ID should be incremented
         Assertions.assertEquals(initialDictionaryId + 1, masterDictionaryMgr.getNextDictionaryId());
@@ -449,7 +449,7 @@ public class DictionaryMgrEditLogTest {
         CreateDictionaryStmt stmt = createTestDictionaryStmt("exception_dict_id", properties);
         
         RuntimeException exception = Assertions.assertThrows(RuntimeException.class, () -> {
-            masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+            masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         });
         Assertions.assertEquals("EditLog write failed", exception.getMessage());
         
@@ -465,7 +465,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName(TEST_DICTIONARY_NAME);
         Assertions.assertNotNull(dictionary);
@@ -526,7 +526,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("commit_exception_dict", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName("commit_exception_dict");
         Assertions.assertNotNull(dictionary);
@@ -568,7 +568,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName(TEST_DICTIONARY_NAME);
         Assertions.assertNotNull(dictionary);
@@ -612,7 +612,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("finish_exception_dict", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName("finish_exception_dict");
         Assertions.assertNotNull(dictionary);
@@ -656,7 +656,7 @@ public class DictionaryMgrEditLogTest {
         properties.put("dictionary_warm_up", "false");
         properties.put("dictionary_ignore_failed_refresh", "true");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("ignore_failed_dict", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName("ignore_failed_dict");
         Assertions.assertNotNull(dictionary);
@@ -715,7 +715,7 @@ public class DictionaryMgrEditLogTest {
         Map<String, String> properties = new HashMap<>();
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt createStmt = createTestDictionaryStmt("cancelled_dict", properties);
-        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(createStmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
         
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName("cancelled_dict");
         Assertions.assertNotNull(dictionary);

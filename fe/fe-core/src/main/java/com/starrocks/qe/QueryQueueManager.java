@@ -28,6 +28,7 @@ import com.starrocks.qe.scheduler.slot.QueryQueueOptions;
 import com.starrocks.qe.scheduler.slot.SlotEstimator;
 import com.starrocks.qe.scheduler.slot.SlotEstimatorFactory;
 import com.starrocks.qe.scheduler.slot.SlotProvider;
+import com.starrocks.qe.scheduler.warehouse.WarehouseQueryQueueCounters;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.Frontend;
 import com.starrocks.thrift.TWorkGroup;
@@ -64,6 +65,9 @@ public class QueryQueueManager {
         boolean isPending = false;
         try {
             LogicalSlot slotRequirement = createSlot(context, coord);
+            if (context.getExecutor() != null) {
+                slotRequirement.setQuery(context.getExecutor().getRedactedOriginStmtInString());
+            }
             coord.setSlot(slotRequirement);
 
             // register listeners
@@ -82,6 +86,9 @@ public class QueryQueueManager {
             context.setPending(true);
             MetricRepo.COUNTER_QUERY_QUEUE_PENDING.increase(1L);
             MetricRepo.COUNTER_QUERY_QUEUE_TOTAL.increase(1L);
+            WarehouseQueryQueueCounters warehouseCounters = WarehouseQueryQueueCounters.get(
+                    slotRequirement.getWarehouseId(), context.getCurrentWarehouseName());
+            warehouseCounters.increaseTotal();
             ResourceGroupMetricMgr.increaseQueuedQuery(context, 1L);
 
             long deadlineEpochMs = slotRequirement.getExpiredPendingTimeMs();
@@ -97,6 +104,7 @@ public class QueryQueueManager {
                 long currentMs = System.currentTimeMillis();
                 if (slotRequirement.isPendingTimeout()) {
                     MetricRepo.COUNTER_QUERY_QUEUE_TIMEOUT.increase(1L);
+                    warehouseCounters.increaseTimeout();
                     slotProvider.cancelSlotRequirement(slotRequirement);
                     String timeoutVar =
                             String.format("the session variable [%s]", GlobalVariable.QUERY_QUEUE_PENDING_TIMEOUT_SECOND);

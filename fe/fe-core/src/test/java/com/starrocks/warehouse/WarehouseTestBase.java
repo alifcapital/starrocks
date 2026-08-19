@@ -14,6 +14,7 @@
 
 package com.starrocks.warehouse;
 
+import com.starrocks.common.Config;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.utframe.StarRocksTestBase;
@@ -22,13 +23,23 @@ import com.starrocks.warehouse.cngroup.ComputeResource;
 import com.starrocks.warehouse.cngroup.WarehouseComputeResourceProvider;
 import mockit.Mock;
 import mockit.MockUp;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 
 import static com.starrocks.server.WarehouseManager.DEFAULT_WAREHOUSE_ID;
 
 public abstract class WarehouseTestBase extends StarRocksTestBase {
+    private static boolean savedMultiWarehouse;
+
+    @AfterAll
+    public static void restoreWarehouses() {
+        Config.enable_multi_warehouse = savedMultiWarehouse;
+    }
+
     @BeforeAll
     public static void beforeAll() throws Exception {
+        savedMultiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         new MockUp<RunMode>() {
             @Mock
             public RunMode getCurrentRunMode() {

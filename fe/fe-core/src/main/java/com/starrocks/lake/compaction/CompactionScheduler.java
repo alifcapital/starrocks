@@ -304,7 +304,7 @@ public class CompactionScheduler extends Daemon {
             return Config.lake_compaction_max_tasks;
         }
         List<ComputeNode> aliveComputeNodes =
-                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAliveComputeNodes(computeResource);
+                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAliveWarehouseComputeNodes(computeResource);
         return aliveComputeNodes.size() * 16;
     }
 
@@ -534,7 +534,7 @@ public class CompactionScheduler extends Daemon {
         }
 
         // 2. pick aggregator node and build lake service
-        ComputeNode aggregatorNode = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+        ComputeNode aggregatorNode = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
         if (aggregatorNode == null) {
             throw new NoAliveBackendException("No alive compute node available for aggregate compaction");
         }

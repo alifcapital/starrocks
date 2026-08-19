@@ -2185,6 +2185,15 @@ public class StmtExecutor {
             return;
         }
 
+        // Capture the session settings before an asynchronous task can outlive the statement.
+        ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext(context.getCurrentWarehouseName());
+        if (table.isTemporaryTable()) {
+            statsConnectCtx.setSessionId(context.getSessionId());
+        }
+        statsConnectCtx.getSessionVariable().setStatisticCollectParallelism(
+                context.getSessionVariable().getStatisticCollectParallelism());
+        statsConnectCtx.setStatisticsConnection(true);
+
         StatsConstants.AnalyzeType analyzeType;
         AnalyzeTypeDesc analyzeTypeDesc = analyzeStmt.getAnalyzeTypeDesc();
         if (analyzeTypeDesc.isHistogram()) {
@@ -2214,6 +2223,7 @@ public class StmtExecutor {
             analyzeStatus.getProperties().put(IS_MULTI_COLUMN_STATS, "true");
         }
 
+        analyzeStatus.setWarehouseName(statsConnectCtx.getCurrentWarehouseName());
         analyzeStatus.setStatus(StatsConstants.ScheduleStatus.FAILED);
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
         analyzeStatus.setStatus(StatsConstants.ScheduleStatus.PENDING);
@@ -2222,7 +2232,7 @@ public class StmtExecutor {
         int queryTimeout = context.getSessionVariable().getQueryTimeoutS();
         int insertTimeout = context.getSessionVariable().getInsertTimeoutS();
         try {
-            Runnable originalTask = () -> executeAnalyze(analyzeStmt, analyzeStatus, db, table);
+            Runnable originalTask = () -> executeAnalyze(statsConnectCtx, analyzeStmt, analyzeStatus, db, table);
             CancelableAnalyzeTask cancelableTask = new CancelableAnalyzeTask(originalTask, analyzeStatus);
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAnalyzeTaskThreadPool().execute(cancelableTask);
 
@@ -2281,19 +2291,10 @@ public class StmtExecutor {
                 planNodeIds, context.getSessionVariable().getColorExplainOutput()));
     }
 
-    protected void executeAnalyze(AnalyzeStmt analyzeStmt, AnalyzeStatus analyzeStatus, Database db, Table table) {
-        ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
-        if (table.isTemporaryTable()) {
-            statsConnectCtx.setSessionId(context.getSessionId());
-        }
-        // from current session, may execute analyze stmt
-        statsConnectCtx.getSessionVariable().setStatisticCollectParallelism(
-                context.getSessionVariable().getStatisticCollectParallelism());
-        statsConnectCtx.setStatisticsConnection(true);
-        // honor session variable for ANALYZE
-        statsConnectCtx.setCurrentWarehouse(context.getCurrentWarehouseName());
+    protected void executeAnalyze(ConnectContext statsConnectCtx, AnalyzeStmt analyzeStmt,
+                                  AnalyzeStatus analyzeStatus, Database db, Table table) {
         try (var guard = statsConnectCtx.bindScope()) {
-            executeAnalyze(statsConnectCtx, analyzeStmt, analyzeStatus, db, table);
+            collectAnalyzeStatistics(statsConnectCtx, analyzeStmt, analyzeStatus, db, table);
         } finally {
             // copy the stats to current context
             AuditEvent event = statsConnectCtx.getAuditEventBuilder().build();
@@ -2301,8 +2302,8 @@ public class StmtExecutor {
         }
     }
 
-    private void executeAnalyze(ConnectContext statsConnectCtx, AnalyzeStmt analyzeStmt,
-                                AnalyzeStatus analyzeStatus, Database db, Table table) {
+    private void collectAnalyzeStatistics(ConnectContext statsConnectCtx, AnalyzeStmt analyzeStmt,
+                                          AnalyzeStatus analyzeStatus, Database db, Table table) {
         AnalyzeTypeDesc analyzeTypeDesc = analyzeStmt.getAnalyzeTypeDesc();
         StatisticExecutor statisticExecutor = new StatisticExecutor();
         if (analyzeStmt.isExternal()) {
@@ -3905,8 +3906,16 @@ public class StmtExecutor {
             LOG.warn("Failed to execute executeStmtWithExecPlan", e);
             coord.getExecStatus().setInternalErrorStatus(e.getMessage());
         } finally {
-            QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
-            recordExecStatsIntoContext();
+            try {
+                if (coord != null && context.isProfileEnabled() && tryProcessProfileAsync(plan, 0)) {
+                    QeProcessorImpl.INSTANCE.monitorQuery(context.getExecutionId(), System.currentTimeMillis() +
+                            context.getSessionVariable().getProfileTimeout() * 1000L);
+                } else {
+                    QeProcessorImpl.INSTANCE.unregisterQuery(context.getExecutionId());
+                }
+            } finally {
+                recordExecStatsIntoContext();
+            }
         }
         return Pair.create(sqlResult, coord.getExecStatus());
     }

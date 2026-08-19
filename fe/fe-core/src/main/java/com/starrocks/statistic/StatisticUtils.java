@@ -101,6 +101,37 @@ public class StatisticUtils {
     }
 
     public static ConnectContext buildConnectContext(TResultSinkType connectType) {
+        WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        Warehouse warehouse = manager.getBackgroundWarehouse();
+        return buildConnectContext(connectType, warehouse.getName());
+    }
+
+    public static ConnectContext buildConnectContext(String warehouseName) {
+        return buildConnectContext(TResultSinkType.MYSQL_PROTOCAL, warehouseName);
+    }
+
+    public static Warehouse getStatisticsCollectWarehouse() {
+        WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        return !Config.enable_multi_warehouse || StringUtils.isEmpty(Config.statistic_collect_warehouse)
+                ? manager.getBackgroundWarehouse() : manager.getWarehouse(Config.statistic_collect_warehouse);
+    }
+
+    public static String getStatisticsCollectWarehouseName() {
+        if (!Config.enable_multi_warehouse) {
+            return WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+        }
+        if (!StringUtils.isEmpty(Config.statistic_collect_warehouse)) {
+            return Config.statistic_collect_warehouse;
+        }
+        return Config.enable_multi_warehouse && !StringUtils.isEmpty(Config.lake_background_warehouse)
+                ? Config.lake_background_warehouse : WarehouseManager.DEFAULT_WAREHOUSE_NAME;
+    }
+
+    public static ConnectContext buildStatisticsCollectContext() {
+        return buildConnectContext(getStatisticsCollectWarehouse().getName());
+    }
+
+    private static ConnectContext buildConnectContext(TResultSinkType connectType, String warehouseName) {
         ConnectContext context;
         switch (connectType) {
             case MYSQL_PROTOCAL:
@@ -115,9 +146,7 @@ public class StatisticUtils {
         // Set warehouse FIRST: ConnectContext.setCurrentWarehouse() replaces sessionVariable
         // with a fresh clone of defaultSessionVariable, which would discard every override
         // applied below (enable_profile, queryTimeoutS, parallelism, pipeline, CTE reuse, etc.).
-        WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-        Warehouse warehouse = manager.getBackgroundWarehouse();
-        context.setCurrentWarehouse(warehouse.getName());
+        context.setCurrentWarehouse(warehouseName);
 
         // Note: statistics query does not register query id to QeProcessorImpl::coordinatorMap,
         // but QeProcessorImpl::reportExecStatus will check query id,

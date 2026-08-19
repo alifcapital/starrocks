@@ -207,7 +207,7 @@ public class SystemInfoService implements GsonPostProcessable {
             ComputeResourceProvider computeResourceProvider = warehouseManager.getComputeResourceProvider();
             ComputeResource computeResource = computeResourceProvider.ofComputeResource(warehouseId, workerGroupId);
             try {
-                computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                computeNodeIds = warehouseManager.getWarehouseComputeNodeIds(computeResource);
             } catch (Exception e) {
                 computeNodeIds = new ArrayList<>();
                 LOG.warn("fail to get compute node ids when updating historical compute nodes");
@@ -314,7 +314,7 @@ public class SystemInfoService implements GsonPostProcessable {
             ComputeResource computeResource = computeResourceProvider.ofComputeResource(warehouseId, workerGroupId);
             List<Long> computeNodeIds;
             try {
-                computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+                computeNodeIds = warehouseManager.getWarehouseComputeNodeIds(computeResource);
             } catch (Exception e) {
                 computeNodeIds = new ArrayList<>();
                 LOG.warn("fail to get compute node ids when updating historical backends");

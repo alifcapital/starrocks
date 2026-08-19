@@ -64,7 +64,7 @@ public class CRAcquireContext {
 
     public static CRAcquireContext of(String warehouseName) {
         final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-        final Warehouse warehouse = warehouseManager.getWarehouse(warehouseName);
+        final Warehouse warehouse = warehouseManager.getWarehouseForExecution(warehouseName);
         if (warehouse == null) {
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE,
                     String.format("name: %s", warehouseName));

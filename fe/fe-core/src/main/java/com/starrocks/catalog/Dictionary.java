@@ -79,6 +79,9 @@ public class Dictionary implements Writable {
     private String runtimeErrMsg;
     @SerializedName(value = "lastSuccessVersion")
     private long lastSuccessVersion = 0;
+    // Null selects the background warehouse for automatic and legacy refreshes.
+    @SerializedName("refreshWarehouseId")
+    private Long refreshWarehouseId;
     // =============== Runtime parameter ===========================
 
     public Dictionary(long dictionaryId, String dictionaryName, String queryableObject,
@@ -338,7 +341,16 @@ public class Dictionary implements Writable {
         this.setLastSuccessVersion(0);
     }
 
+    public Long getRefreshWarehouseId() {
+        return refreshWarehouseId;
+    }
+
     public synchronized void setRefreshing(long ts) {
+        setRefreshing(ts, null);
+    }
+
+    public synchronized void setRefreshing(long ts, Long warehouseId) {
+        this.refreshWarehouseId = warehouseId;
         this.stateBeforeRefresh = this.state;
         this.state = DictionaryState.REFRESHING;
         this.lastSuccessRefreshTime = ts;

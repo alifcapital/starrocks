@@ -375,7 +375,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback
 
     @Override
     public long getCurrentWarehouseId() {
-        return warehouseId;
+        return getWarehouseId();
     }
 
     @Override
@@ -765,11 +765,11 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback
     }
 
     public long getWarehouseId() {
-        return warehouseId;
+        return Config.enable_multi_warehouse ? warehouseId : WarehouseManager.DEFAULT_WAREHOUSE_ID;
     }
 
     public ComputeResource getComputeResource() {
-        return computeResource;
+        return Config.enable_multi_warehouse ? computeResource : WarehouseManager.DEFAULT_RESOURCE;
     }
 
     // RoutineLoadScheduler will run this method at fixed interval, and renew the timeout tasks

@@ -17,8 +17,11 @@ package com.starrocks.qe.scheduler.slot;
 import com.google.common.base.Preconditions;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.extension.Inject;
+import com.starrocks.metric.Metric;
+import com.starrocks.metric.MetricLabel;
 import com.starrocks.metric.MetricVisitor;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.scheduler.warehouse.WarehouseMetricEntity;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
@@ -28,6 +31,9 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -35,22 +41,26 @@ public class SlotManager extends BaseSlotManager {
     private static final Logger LOG = LogManager.getLogger(SlotManager.class);
 
     private final RequestWorker requestWorker = new RequestWorker();
-    private final SlotTracker slotTracker;
+    private final ConcurrentMap<Long, SlotTracker> slotTrackers = new ConcurrentHashMap<>();
 
     @Inject
     public SlotManager(ResourceUsageMonitor resourceUsageMonitor) {
         super(resourceUsageMonitor);
-        this.slotTracker = new SlotTracker(this, resourceUsageMonitor);
     }
 
     @Override
     public List<LogicalSlot> getSlots() {
-        return slotTracker.getSlots().stream().collect(Collectors.toList());
+        return slotTrackers.values().stream().flatMap(tracker -> tracker.getSlots().stream()).collect(Collectors.toList());
     }
 
     @Override
     public SlotTracker getSlotTracker(long warehouseId) {
-        return slotTracker;
+        return slotTrackers.computeIfAbsent(warehouseId, id -> new SlotTracker(this, resourceUsageMonitor, id));
+    }
+
+    @Override
+    public Map<Long, BaseSlotTracker> getWarehouseIdToSlotTracker() {
+        return Map.copyOf(slotTrackers);
     }
 
     @Override
@@ -60,7 +70,21 @@ public class SlotManager extends BaseSlotManager {
 
     @Override
     public void collectWarehouseMetrics(MetricVisitor visitor) {
-        // do nothing
+        if (!GlobalStateMgr.getCurrentState().isLeader()) {
+            return;
+        }
+        for (SlotTracker tracker : slotTrackers.values()) {
+            if (GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseAllowNull(tracker.getWarehouseId()) == null) {
+                continue;
+            }
+            WarehouseMetricEntity entity =
+                    new WarehouseMetricEntity(tracker);
+            for (Metric metric : entity.getMetrics()) {
+                metric.addLabel(new MetricLabel("warehouse_id", Long.toString(entity.getWarehouseId())));
+                metric.addLabel(new MetricLabel("warehouse_name", entity.getWarehouseName()));
+                visitor.visit(metric);
+            }
+        }
     }
 
     @Override
@@ -84,24 +108,27 @@ public class SlotManager extends BaseSlotManager {
         }
 
         private boolean schedule() {
-            List<LogicalSlot> expiredSlots = slotTracker.peakExpiredSlots();
-            if (!expiredSlots.isEmpty()) {
-                LOG.warn("[Slot] expired slots [{}]", expiredSlots);
+            boolean allocated = false;
+            for (SlotTracker tracker : slotTrackers.values()) {
+                List<LogicalSlot> expiredSlots = tracker.peakExpiredSlots();
+                if (!expiredSlots.isEmpty()) {
+                    LOG.warn("[Slot] expired slots [{}]", expiredSlots);
+                }
+                expiredSlots.forEach(slot -> handleReleaseSlotTask(slot));
+                allocated |= tryAllocateSlots(tracker);
             }
-            expiredSlots.forEach(slot -> handleReleaseSlotTask(slot));
-
-            return tryAllocateSlots();
+            return allocated;
         }
 
-        private boolean tryAllocateSlots() {
-            Collection<LogicalSlot> slotsToAllocate = slotTracker.peakSlotsToAllocate();
+        private boolean tryAllocateSlots(SlotTracker tracker) {
+            Collection<LogicalSlot> slotsToAllocate = tracker.peakSlotsToAllocate();
             slotsToAllocate.forEach(this::allocateSlot);
             return !slotsToAllocate.isEmpty();
         }
 
         private void allocateSlot(LogicalSlot slot) {
             slot.onAllocate();
-            slotTracker.allocateSlot(slot);
+            getSlotTracker(slot.getWarehouseId()).allocateSlot(slot);
             finishSlotRequirementToEndpoint(slot, new TStatus(TStatusCode.OK));
         }
 
@@ -112,7 +139,8 @@ public class SlotManager extends BaseSlotManager {
             for (; ; ) {
                 try {
                     newTask = null;
-                    long minExpiredTimeMs = slotTracker.getMinExpiredTimeMs();
+                    long minExpiredTimeMs = slotTrackers.values().stream()
+                            .mapToLong(SlotTracker::getMinExpiredTimeMs).filter(time -> time > 0).min().orElse(0);
                     long nowMs = System.currentTimeMillis();
                     try {
                         if (minExpiredTimeMs == 0) {

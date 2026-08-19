@@ -23,6 +23,7 @@ import com.starrocks.common.util.TimeUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.scheduler.persist.TaskSchedule;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AlterTaskStmt;
 import com.starrocks.sql.ast.SubmitTaskStmt;
 import org.apache.commons.collections.MapUtils;
@@ -75,9 +76,15 @@ public class TaskAnalyzer {
         if (MapUtils.isEmpty(properties)) {
             return;
         }
-        String value = properties.get(SessionVariable.WAREHOUSE_NAME);
-        if (value != null) {
-            ErrorReport.reportSemanticException(ErrorCode.ERR_INVALID_PARAMETER, SessionVariable.WAREHOUSE_NAME);
+        String key = properties.keySet().stream()
+                .filter(name -> SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(name)).findFirst().orElse(null);
+        if (key != null) {
+            String value = properties.get(key);
+            GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(value);
+            if (!SessionVariable.WAREHOUSE_NAME.equals(key)) {
+                properties.remove(key);
+                properties.put(SessionVariable.WAREHOUSE_NAME, value);
+            }
         }
     }
 

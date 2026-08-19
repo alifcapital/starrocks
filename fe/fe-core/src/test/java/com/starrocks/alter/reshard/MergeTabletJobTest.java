@@ -1015,7 +1015,7 @@ public class MergeTabletJobTest {
         // => budget = 5 - 4 = 1 => exactly one adjacent pair may merge, the rest must stay split.
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 // computeNodeCount only reads .size(), so the id values are irrelevant — only count 4 matters.
                 return Collections.nCopies(4, 1L);
             }
@@ -1058,7 +1058,7 @@ public class MergeTabletJobTest {
         // => budget = 3 - 5 <= 0 => nothing merges.
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 // computeNodeCount only reads .size(), so the id values are irrelevant — only count 5 matters.
                 return Collections.nCopies(5, 1L);
             }
@@ -1086,7 +1086,7 @@ public class MergeTabletJobTest {
         // throws, the manual merge still succeeds (the floor only applies to size-based auto-merge).
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 throw new RuntimeException("CN lookup must not be called for manual tablet-group merge");
             }
         };

@@ -20,6 +20,7 @@ import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.plugin.AuditEvent;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryState;
+import com.starrocks.qe.scheduler.warehouse.WarehouseQueryMetrics;
 import com.starrocks.server.WarehouseManager;
 import mockit.Expectations;
 import mockit.Mock;
@@ -29,6 +30,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LogicalSlotTest {
@@ -41,6 +43,19 @@ public class LogicalSlotTest {
         return new LogicalSlot(UUIDUtil.genTUniqueId(), "fe", WarehouseManager.DEFAULT_WAREHOUSE_ID,
                 LogicalSlot.ABSENT_GROUP_ID, numSlots, 0, 0, 0,
                 0, 0);
+    }
+
+    @Test
+    public void testActiveQueryTextWithoutHistorySurvivesThrift() {
+        LogicalSlot slot = generateSlot(1);
+        slot.setQuery("select count(*) from shared_table");
+        LogicalSlot restored = LogicalSlot.fromThrift(slot.toThrift());
+        assertTrue(restored.getExtraMessage().isEmpty());
+        assertEquals(slot.getQuery(), restored.getQuery());
+        assertEquals(slot.getQuery(), WarehouseQueryMetrics.create(restored).toThrift().getQuery());
+        var oldSlot = slot.toThrift();
+        oldSlot.unsetQuery();
+        assertEquals("", LogicalSlot.fromThrift(oldSlot).getQuery());
     }
 
     @Test

@@ -83,6 +83,10 @@ public class CompactionJob {
         return txnId;
     }
 
+    public String getWarehouse() {
+        return warehouse;
+    }
+
     public void setTasks(List<CompactionTask> tasks) {
         this.tasks = Objects.requireNonNull(tasks, "tasks is null");
     }

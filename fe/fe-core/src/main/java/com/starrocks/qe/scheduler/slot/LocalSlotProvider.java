@@ -15,17 +15,19 @@
 package com.starrocks.qe.scheduler.slot;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 
 /**
  * Manage slot locally in this FE when disabling query queue.
  */
 public class LocalSlotProvider implements SlotProvider {
-    private final PipelineDriverAllocator pipelineDriverManager = new PipelineDriverAllocator();
+    private final ConcurrentMap<Long, PipelineDriverAllocator> driverAllocators = new ConcurrentHashMap<>();
 
     @Override
     public Future<LogicalSlot> requireSlot(LogicalSlot slot) {
-        pipelineDriverManager.allocate(slot);
+        driverAllocators.computeIfAbsent(slot.getWarehouseId(), PipelineDriverAllocator::new).allocate(slot);
 
         CompletableFuture<LogicalSlot> slotFuture = new CompletableFuture<>();
         slotFuture.complete(slot);
@@ -34,11 +36,16 @@ public class LocalSlotProvider implements SlotProvider {
 
     @Override
     public void cancelSlotRequirement(LogicalSlot slot) {
-        pipelineDriverManager.release(slot);
+        releaseSlot(slot);
     }
 
     @Override
     public void releaseSlot(LogicalSlot slot) {
-        pipelineDriverManager.release(slot);
+        if (slot != null) {
+            PipelineDriverAllocator allocator = driverAllocators.get(slot.getWarehouseId());
+            if (allocator != null) {
+                allocator.release(slot);
+            }
+        }
     }
 }

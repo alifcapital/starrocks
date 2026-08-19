@@ -203,7 +203,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
                     }
                 }
             }
-            ComputeNode cn = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+            ComputeNode cn = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
             if (cn != null) {
                 shardIdsByBeMap.put(cn.getId(), Sets.newHashSet(shardIds));
             }
@@ -492,15 +492,24 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
     // get snapshot of star mgr workers and fe backend/compute node,
     // if worker not found in backend/compute node, remove it from star mgr
     public int deleteUnusedWorker() {
+        Set<Long> workerGroupIds = GlobalStateMgr.getCurrentState().getWarehouseMgr().getAllWarehouses().stream()
+                .flatMap(warehouse -> warehouse.getWorkerGroupIds().stream()).collect(Collectors.toSet());
+        int removed = 0;
+        for (long workerGroupId : workerGroupIds) {
+            removed += deleteUnusedWorkersInGroup(workerGroupId);
+        }
+        return removed;
+    }
+
+    private int deleteUnusedWorkersInGroup(long workerGroupId) {
         int cnt = 0;
         try {
-            final long workerGroupId = computeResource.getWorkerGroupId();
             List<String> workerAddresses = GlobalStateMgr.getCurrentState().getStarOSAgent().listWorkerGroupIpPort(workerGroupId);
 
             // filter backend
             List<Backend> backends = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackends();
             for (Backend backend : backends) {
-                if (backend.getStarletPort() != 0) {
+                if (backend.getWorkerGroupId() == workerGroupId && backend.getStarletPort() != 0) {
                     String workerAddr = NetUtils.getHostPortInAccessibleFormat(backend.getHost(),
                             backend.getStarletPort());
                     workerAddresses.remove(workerAddr);
@@ -510,7 +519,7 @@ public class StarMgrMetaSyncer extends FrontendDaemon {
             // filter compute node
             List<ComputeNode> computeNodes = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getComputeNodes();
             for (ComputeNode computeNode : computeNodes) {
-                if (computeNode.getStarletPort() != 0) {
+                if (computeNode.getWorkerGroupId() == workerGroupId && computeNode.getStarletPort() != 0) {
                     String workerAddr = NetUtils.getHostPortInAccessibleFormat(computeNode.getHost(),
                             computeNode.getStarletPort());
                     workerAddresses.remove(workerAddr);

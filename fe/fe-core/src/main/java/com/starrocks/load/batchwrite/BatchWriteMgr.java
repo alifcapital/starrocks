@@ -31,6 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -167,30 +168,28 @@ public class BatchWriteMgr extends FrontendDaemon {
      * @return A Pair containing the status of the operation and the MergeCommitJob instance.
      */
     private Pair<TStatus, MergeCommitJob> getOrCreateJob(TableId tableId, StreamLoadKvParams params, UserIdentity userIdentity) {
-        BatchWriteId uniqueId = new BatchWriteId(tableId, params);
+        String warehouseName = params.getWarehouse()
+                .orElseGet(() -> Utils.getUserDefaultWarehouse(userIdentity).orElse(DEFAULT_WAREHOUSE_NAME));
+        final long warehouseId;
+        try {
+            warehouseId = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseForExecution(warehouseName).getId();
+        } catch (Exception e) {
+            TStatus status = new TStatus(TStatusCode.INVALID_ARGUMENT);
+            status.setError_msgs(Collections.singletonList(e.getMessage()));
+            return new Pair<>(status, null);
+        }
+        try {
+            Utils.checkWarehouseUsage(userIdentity, warehouseName);
+        } catch (Exception e) {
+            TStatus status = new TStatus(TStatusCode.NOT_AUTHORIZED);
+            status.setError_msgs(Collections.singletonList(e.getMessage()));
+            return new Pair<>(status, null);
+        }
+        Map<String, String> warehouseParams = new HashMap<>(params.toMap());
+        // Resolved identity also distinguishes a warehouse dropped and recreated with the same name.
+        warehouseParams.remove("warehouse");
+        BatchWriteId uniqueId = new BatchWriteId(tableId, warehouseId, new StreamLoadKvParams(warehouseParams));
         MergeCommitJob load = mergeCommitJobs.get(uniqueId);
-
-        String warehouseName = params.getWarehouse().orElse(null);
-        if (warehouseName == null) {
-            // Try to use `session.warehouse` in user property if warehouse is not specified
-            Optional<String> userWarehouseName = Utils.getUserDefaultWarehouse(userIdentity);
-            if (userWarehouseName.isPresent() &&
-                    GlobalStateMgr.getCurrentState().getWarehouseMgr().warehouseExists(userWarehouseName.get())) {
-                warehouseName = userWarehouseName.get();
-                // Check job warehouse name and user default warehouse name
-                if (load != null && !warehouseName.equals(load.getWarehouseName())) {
-                    TStatus status = new TStatus();
-                    status.setStatus_code(TStatusCode.INVALID_ARGUMENT);
-                    status.setError_msgs(Collections.singletonList(String.format(
-                            "Job warehouse %s does not match the request user default warehouse %s",
-                            load.getWarehouseName(), warehouseName)));
-                    return new Pair<>(status, null);
-                }
-            }
-        }
-        if (warehouseName == null) {
-            warehouseName = DEFAULT_WAREHOUSE_NAME;
-        }
 
         if (load != null) {
             return new Pair<>(new TStatus(TStatusCode.OK), load);

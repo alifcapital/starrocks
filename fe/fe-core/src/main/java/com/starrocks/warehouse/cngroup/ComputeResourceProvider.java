@@ -63,12 +63,12 @@ public interface ComputeResourceProvider {
      * @param computeResource: the ComputeResource to get the compute node ids from
      * @return: a list of compute node ids, empty if the ComputeResource is not available
      */
-    List<Long> getAllComputeNodeIds(ComputeResource computeResource);
+    List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource);
 
     /**
      * Get all alive compute nodes in the ComputeResource
      * @param computeResource: the ComputeResource to get the alive compute nodes from
      * @return: a list of alive compute nodes, empty if the ComputeResource is not available
      */
-    List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource);
+    List<ComputeNode> getAliveWarehouseComputeNodes(ComputeResource computeResource);
 }

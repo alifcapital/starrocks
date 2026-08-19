@@ -583,8 +583,9 @@ public class StatisticExecutor {
             // fresh clone of defaultSessionVariable, which would discard the enable_profile
             // override (and any prior overrides) applied next.
             if (resetWarehouse) {
-                statsConnectCtx.setCurrentWarehouse(Config.lake_background_warehouse);
+                statsConnectCtx.setCurrentWarehouse(StatisticUtils.getStatisticsCollectWarehouse().getName());
             }
+            analyzeStatus.setWarehouseName(statsConnectCtx.getCurrentWarehouseName());
             statsConnectCtx.getSessionVariable().setEnableProfile(Config.enable_statistics_collect_profile);
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().registerConnection(analyzeStatus.getId(), statsConnectCtx);
             // Only update running status without edit log, make restart job status is failed
@@ -773,6 +774,7 @@ public class StatisticExecutor {
     }
 
     private List<TResultBatch> executeDQL(ConnectContext context, String sql) {
+        context.setStartTime();
         context.setQueryId(UUIDUtil.genUUID());
         if (Config.enable_print_sql) {
             LOG.info("Begin to execute sql, type: Statistics collect，query id:{}, sql:{}", context.getQueryId(), sql);

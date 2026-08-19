@@ -26,6 +26,7 @@ import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.LimitElement;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.AnalyzeJob;
+import com.starrocks.statistic.StatisticUtils;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -104,6 +105,7 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
             row.set(10, analyzeJob.getReason());
         }
 
+        row.add(StatisticUtils.getStatisticsCollectWarehouseName());
         return row;
     }
 

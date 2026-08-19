@@ -18,6 +18,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 import com.starrocks.qe.GlobalVariable;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.BackendResourceStat;
 import com.starrocks.thrift.TUniqueId;
 import org.apache.logging.log4j.LogManager;
@@ -44,6 +45,15 @@ public class PipelineDriverAllocator {
 
     private final Set<TUniqueId> allocatedSlotIds = Sets.newConcurrentHashSet();
     private final AtomicInteger numAllocatedDrivers = new AtomicInteger();
+    private final long warehouseId;
+
+    public PipelineDriverAllocator() {
+        this(WarehouseManager.DEFAULT_WAREHOUSE_ID);
+    }
+
+    public PipelineDriverAllocator(long warehouseId) {
+        this.warehouseId = warehouseId;
+    }
 
     private final Queue<AllocationRequest> allocationRequests = Queues.newConcurrentLinkedQueue();
 
@@ -88,7 +98,7 @@ public class PipelineDriverAllocator {
         }
 
         // If there are too many running drivers, set DOP to 1.
-        if (numAllocatedDrivers.get() + slot.getNumFragments() >= GlobalVariable.getQueryQueueDriverHighWater()) {
+        if (numAllocatedDrivers.get() + slot.getNumFragments() >= GlobalVariable.getQueryQueueDriverHighWater(warehouseId)) {
             slot.setPipelineDop(1);
             numAllocatedDrivers.getAndAdd(slot.getNumDrivers());
             return;
@@ -147,7 +157,7 @@ public class PipelineDriverAllocator {
         }
 
         // Calculate DOP by driverHighWater.
-        final int hardLimit = GlobalVariable.getQueryQueueDriverHighWater();
+        final int hardLimit = GlobalVariable.getQueryQueueDriverHighWater(warehouseId);
         int dop = calculateDopByLimit(curNumAllocatedDrivers, numFragments, hardLimit, defaultDop);
 
         if (dop <= 1) {
@@ -164,7 +174,7 @@ public class PipelineDriverAllocator {
         }
 
         // Punish DOP by driverLowWater.
-        final int softLimit = GlobalVariable.getQueryQueueDriverLowWater();
+        final int softLimit = GlobalVariable.getQueryQueueDriverLowWater(warehouseId);
         int exceedSoftLimit = curNumAllocatedDrivers + numFragments * dop - softLimit;
         if (exceedSoftLimit > 0) {
             int delta = hardLimit - softLimit;

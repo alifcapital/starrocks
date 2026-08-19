@@ -82,6 +82,7 @@ import com.starrocks.sql.ast.AlterRoutineLoadStmt;
 import com.starrocks.sql.ast.AlterStorageVolumeStmt;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.AlterTableStmt;
+import com.starrocks.sql.ast.AlterTaskStmt;
 import com.starrocks.sql.ast.AlterViewClause;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
@@ -102,6 +103,7 @@ import com.starrocks.sql.ast.CleanTemporaryTableStmt;
 import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
 import com.starrocks.sql.ast.CreateCatalogStmt;
 import com.starrocks.sql.ast.CreateDbStmt;
+import com.starrocks.sql.ast.CreateDictionaryStmt;
 import com.starrocks.sql.ast.CreateFileStmt;
 import com.starrocks.sql.ast.CreateFunctionStmt;
 import com.starrocks.sql.ast.CreateMaterializedViewStatement;
@@ -155,6 +157,7 @@ import com.starrocks.sql.ast.RecoverDbStmt;
 import com.starrocks.sql.ast.RecoverPartitionStmt;
 import com.starrocks.sql.ast.RecoverTableStmt;
 import com.starrocks.sql.ast.RefreshConnectionsStmt;
+import com.starrocks.sql.ast.RefreshDictionaryStmt;
 import com.starrocks.sql.ast.RefreshMaterializedViewStatement;
 import com.starrocks.sql.ast.RefreshTableStmt;
 import com.starrocks.sql.ast.RestoreStmt;
@@ -278,6 +281,14 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
     }
 
     public void check(StatementBase statement, ConnectContext context) {
+        if (statement instanceof QueryStatement || statement instanceof InsertStmt
+                || statement instanceof UpdateStmt || statement instanceof DeleteStmt
+                || statement instanceof CreateTableStmt || statement instanceof CreateTableAsSelectStmt
+                || statement instanceof CreateTableLikeStmt || statement instanceof AlterTableStmt
+                || statement instanceof ExportStmt || statement instanceof DataCacheSelectStatement
+                || statement instanceof CreateDictionaryStmt || statement instanceof RefreshDictionaryStmt) {
+            com.starrocks.warehouse.Utils.checkWarehouseUsage(context, context.getCurrentWarehouseName());
+        }
         visit(statement, context);
     }
 
@@ -397,12 +408,7 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
                     PrivilegeType.INSERT.name(), ObjectType.TABLE.name(), statement.getTableName());
         }
 
-        // check warehouse privilege
-        Map<String, String> properties = statement.getJobProperties();
-        if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE)) {
-            String warehouseName = properties.get(PropertyAnalyzer.PROPERTIES_WAREHOUSE);
-            checkWarehouseUsagePrivilege(warehouseName, context);
-        }
+        checkWarehouseProperties(statement.getJobProperties(), context);
         return null;
     }
 
@@ -538,12 +544,7 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
             }
         });
 
-        // check warehouse privilege
-        Map<String, String> properties = statement.getProperties();
-        if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE)) {
-            String warehouseName = properties.get(PropertyAnalyzer.PROPERTIES_WAREHOUSE);
-            checkWarehouseUsagePrivilege(warehouseName, context);
-        }
+        checkWarehouseProperties(statement.getProperties(), context);
         return null;
     }
 
@@ -1068,6 +1069,7 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
 
     @Override
     public Void visitAnalyzeStatement(AnalyzeStmt statement, ConnectContext context) {
+        checkWarehouseUsagePrivilege(context.getCurrentWarehouseName(), context);
         TableRef tableRef = statement.getTableRef();
         if (tableRef == null) {
             throw new SemanticException("Table ref is null");
@@ -2103,12 +2105,22 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
 
     @Override
     public Void visitSubmitTaskStatement(SubmitTaskStmt statement, ConnectContext context) {
+        checkWarehouseProperties(statement.getProperties(), context);
         if (statement.getCreateTableAsSelectStmt() != null) {
             visitCreateTableAsSelectStatement(statement.getCreateTableAsSelectStmt(), context);
         } else if (statement.getDataCacheSelectStmt() != null) {
             visitDataCacheSelectStatement(statement.getDataCacheSelectStmt(), context);
         } else {
             visitInsertStatement(statement.getInsertStmt(), context);
+        }
+        return null;
+    }
+
+    @Override
+    public Void visitAlterTaskStatement(AlterTaskStmt statement, ConnectContext context) {
+        if (statement.getAction() == AlterTaskStmt.AlterAction.SET && statement.getProperties() != null
+                && statement.getProperties().containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE)) {
+            checkWarehouseProperties(statement.getProperties(), context);
         }
         return null;
     }
@@ -2382,6 +2394,11 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
                     }
                 }
             } else if (setVar instanceof SystemVariable) {
+                SystemVariable variable = (SystemVariable) setVar;
+                if (SessionVariable.WAREHOUSE_NAME.equalsIgnoreCase(variable.getVariable())
+                        && variable.getResolvedExpression() != null) {
+                    checkWarehouseUsagePrivilege(variable.getResolvedExpression().getStringValue(), context);
+                }
                 SetType type = ((SystemVariable) setVar).getType();
                 if (type != null && type.equals(SetType.GLOBAL)) {
                     try {
@@ -2764,12 +2781,7 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
                     statement.getDbName(), PrivilegeType.CREATE_MATERIALIZED_VIEW);
             visitQueryStatement(statement.getQueryStatement(), context);
 
-            // check warehouse privilege
-            Map<String, String> properties = statement.getProperties();
-            if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE)) {
-                String warehouseName = properties.get(PropertyAnalyzer.PROPERTIES_WAREHOUSE);
-                checkWarehouseUsagePrivilege(warehouseName, context);
-            }
+            checkWarehouseProperties(statement.getProperties(), context);
 
         } catch (AccessDeniedException e) {
             AccessDeniedException.reportAccessDenied(
@@ -3133,13 +3145,7 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
     }
 
     public Void visitSetWarehouseStatement(SetWarehouseStmt statement, ConnectContext context) {
-        try {
-            Authorizer.checkWarehouseAction(context, statement.getWarehouseName(), PrivilegeType.USAGE);
-        } catch (AccessDeniedException e) {
-            AccessDeniedException.reportAccessDenied(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME,
-                    context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
-                    PrivilegeType.USAGE.name(), ObjectType.WAREHOUSE.name(), statement.getWarehouseName());
-        }
+        checkWarehouseUsagePrivilege(statement.getWarehouseName(), context);
         return null;
     }
 
@@ -3268,14 +3274,14 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
         });
     }
 
+    private void checkWarehouseProperties(Map<String, String> properties, ConnectContext context) {
+        String warehouseName = properties == null ? context.getCurrentWarehouseName()
+                : properties.getOrDefault(PropertyAnalyzer.PROPERTIES_WAREHOUSE, context.getCurrentWarehouseName());
+        checkWarehouseUsagePrivilege(warehouseName, context);
+    }
+
     private void checkWarehouseUsagePrivilege(String warehouseName, ConnectContext context) {
-        try {
-            Authorizer.checkWarehouseAction(context, warehouseName, PrivilegeType.USAGE);
-        } catch (AccessDeniedException e) {
-            AccessDeniedException.reportAccessDenied(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME,
-                    context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
-                    PrivilegeType.USAGE.name(), ObjectType.WAREHOUSE.name(), warehouseName);
-        }
+        com.starrocks.warehouse.Utils.checkWarehouseUsage(context, warehouseName);
     }
 
     @Override

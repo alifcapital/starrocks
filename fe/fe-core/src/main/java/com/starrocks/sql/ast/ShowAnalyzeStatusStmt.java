@@ -97,6 +97,7 @@ public class ShowAnalyzeStatusStmt extends ShowStmt {
             row.set(10, analyzeStatus.getReason());
         }
 
+        row.add(analyzeStatus.getWarehouseName());
         return row;
     }
 

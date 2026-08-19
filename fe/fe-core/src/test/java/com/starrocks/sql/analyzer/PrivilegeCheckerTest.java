@@ -127,6 +127,8 @@ import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.StarRocksTestBase;
 import com.starrocks.utframe.UtFrameUtils;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.multi.MultiWarehouse;
+import com.starrocks.warehouse.multi.MultiWarehouseManager;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -702,6 +704,79 @@ public class PrivilegeCheckerTest extends StarRocksTestBase {
                 "grant ALTER on all resource groups to test",
                 "revoke ALTER on all resource groups from test",
                 "Access denied; you need (at least one of) the ALTER privilege(s)");
+    }
+
+    @Test
+    public void testManualAnalyzeRequiresWarehouseUsage() throws Exception {
+        WarehouseManager warehouses = new MultiWarehouseManager();
+        warehouses.initDefaultWarehouse();
+        warehouses.addWarehouse(new MultiWarehouse(101, "analyze_etl", "", 201, Map.of(), 0));
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public WarehouseManager getWarehouseMgr() {
+                return warehouses;
+            }
+        };
+        ConnectContext ctx = starRocksAssert.getCtx();
+        String warehouse = ctx.getCurrentWarehouseName();
+        ctxToRoot();
+        DDLStmtExecutor.execute(UtFrameUtils.parseStmtWithNewParser(
+                "grant SELECT,INSERT on db1.tbl1 to test", ctx), ctx);
+        boolean enabled = Config.enable_multi_warehouse;
+        try {
+            Config.enable_multi_warehouse = true;
+            ctx.setCurrentWarehouse("analyze_etl");
+            for (String mode : List.of("sync", "async")) {
+                verifyGrantRevoke("analyze table db1.tbl1 with " + mode + " mode",
+                        "grant USAGE on warehouse analyze_etl to test",
+                        "revoke USAGE on warehouse analyze_etl from test",
+                        "USAGE");
+            }
+        } finally {
+            Config.enable_multi_warehouse = enabled;
+            ctxToRoot();
+            ctx.setCurrentWarehouse(warehouse);
+            DDLStmtExecutor.execute(UtFrameUtils.parseStmtWithNewParser(
+                    "revoke SELECT,INSERT on db1.tbl1 from test", ctx), ctx);
+        }
+    }
+
+    @Test
+    public void testDictionaryCommandsRequireWarehouseUsage() throws Exception {
+        WarehouseManager warehouses = new MultiWarehouseManager();
+        warehouses.initDefaultWarehouse();
+        warehouses.addWarehouse(new MultiWarehouse(201, "dict_etl", "", 301, Map.of(), 0));
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public WarehouseManager getWarehouseMgr() {
+                return warehouses;
+            }
+        };
+        ConnectContext ctx = starRocksAssert.getCtx();
+        String warehouse = ctx.getCurrentWarehouseName();
+        String database = ctx.getDatabase();
+        boolean enabled = Config.enable_multi_warehouse;
+        ctxToRoot();
+        try {
+            Config.enable_multi_warehouse = true;
+            ctx.setDatabase("db1");
+            ctx.setCurrentWarehouse("dict_etl");
+            String create = "create dictionary warehouse_dict_existing using tbl1 (k1 KEY, k2 VALUE) " +
+                    "properties ('dictionary_warm_up'='false')";
+            DDLStmtExecutor.execute(UtFrameUtils.parseStmtWithNewParser(create, ctx), ctx);
+            for (String sql : List.of(create.replace("warehouse_dict_existing", "warehouse_dict_candidate"),
+                    "refresh dictionary warehouse_dict_existing")) {
+                verifyGrantRevoke(sql,
+                        "grant USAGE on warehouse dict_etl to test",
+                        "revoke USAGE on warehouse dict_etl from test", "USAGE");
+            }
+        } finally {
+            Config.enable_multi_warehouse = enabled;
+            ctxToRoot();
+            ctx.setCurrentWarehouse(warehouse);
+            ctx.setDatabase(database);
+            ctx.getGlobalStateMgr().getDictionaryMgr().replayDropDictionary("warehouse_dict_existing");
+        }
     }
 
     @Test

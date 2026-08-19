@@ -52,9 +52,10 @@ import com.starrocks.rpc.LakeService;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
-import com.starrocks.system.Backend;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.THdfsProperties;
 import com.starrocks.thrift.TStorageMedium;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -124,10 +125,11 @@ public class LakeRestoreJob extends RestoreJob {
                 Partition part = tbl.getPartition(idChain.getPartId());
                 MaterializedIndex index = part.getDefaultPhysicalPartition().getIndex(idChain.getIdxId());
                 tablet = (LakeTablet) index.getTablet(idChain.getTabletId());
-                Long computeNodeId = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                        .getAliveComputeNodeId(WarehouseManager.DEFAULT_RESOURCE, tablet.getId());
+                WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+                ComputeResource restoreResource = warehouseManager.getBackgroundComputeResource(tbl.getId());
+                Long computeNodeId = warehouseManager.getAliveComputeNodeId(restoreResource, tablet.getId());
                 Preconditions.checkArgument(computeNodeId != null,
-                        "No alive backend or compute node in %s warehouse", WarehouseManager.DEFAULT_RESOURCE);
+                        "No alive backend or compute node in %s warehouse", restoreResource);
                 LakeTableSnapshotInfo info = new LakeTableSnapshotInfo(db.getId(), idChain.getTblId(),
                         idChain.getPartId(), idChain.getIdxId(), idChain.getTabletId(),
                         computeNodeId, tbl.getSchemaHashByIndexMetaId(index.getMetaId()), -1);
@@ -135,7 +137,7 @@ public class LakeRestoreJob extends RestoreJob {
             } catch (Exception e) {
                 LOG.error(e.getMessage(), e);
                 status = new Status(Status.ErrCode.COMMON_ERROR,
-                        "failed to choose replica to make snapshot for tablet " + tablet.getId());
+                        "failed to choose replica to make snapshot for tablet " + idChain.getTabletId());
             }
         }
     }
@@ -207,7 +209,8 @@ public class LakeRestoreJob extends RestoreJob {
     @Override
     protected void sendDownloadTasks() {
         for (Map.Entry<Long, RestoreSnapshotsRequest> entry : requests.entrySet()) {
-            Backend backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackend(entry.getKey());
+            ComputeNode backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
+                    .getBackendOrComputeNode(entry.getKey());
             LakeService lakeService = null;
             try {
                 lakeService = BrpcProxy.getLakeService(backend.getHost(), backend.getBrpcPort());

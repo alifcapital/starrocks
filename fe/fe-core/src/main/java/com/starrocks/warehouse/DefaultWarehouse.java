@@ -20,7 +20,6 @@ import com.google.common.collect.Lists;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
-import com.starrocks.common.proc.BaseProcResult;
 import com.starrocks.common.proc.ProcResult;
 import com.starrocks.lake.StarOSAgent;
 import com.starrocks.sql.ast.warehouse.cngroup.AlterCnGroupStmt;
@@ -29,7 +28,6 @@ import com.starrocks.sql.ast.warehouse.cngroup.DropCnGroupStmt;
 import com.starrocks.sql.ast.warehouse.cngroup.EnableDisableCnGroupStmt;
 import com.starrocks.system.ComputeNode;
 
-import java.util.ArrayList;
 import java.util.List;
 
 public class DefaultWarehouse extends Warehouse {
@@ -74,16 +72,17 @@ public class DefaultWarehouse extends Warehouse {
 
     @Override
     public List<String> getWarehouseInfo() {
+        List<ComputeNode> nodes = WarehouseProcDir.getNodes(this);
         return Lists.newArrayList(
                 String.valueOf(getId()),
                 getName(),
-                "AVAILABLE",
-                String.valueOf(0L),
+                nodes.stream().anyMatch(ComputeNode::isAlive) ? "AVAILABLE" : "UNAVAILABLE",
+                String.valueOf(nodes.size()),
                 String.valueOf(1L),
                 String.valueOf(1L),
                 String.valueOf(1L),
-                String.valueOf(0L),   //TODO: need to be filled after
-                String.valueOf(0L),   //TODO: need to be filled after
+                String.valueOf(0L),   // Filled from the query snapshot.
+                String.valueOf(0L),   // Filled from the query snapshot.
                 "",
                 "",
                 "",
@@ -93,12 +92,12 @@ public class DefaultWarehouse extends Warehouse {
 
     @Override
     public List<List<String>> getWarehouseNodesInfo() {
-        return new ArrayList<>();
+        return WarehouseProcDir.getNodesInfo(this);
     }
 
     @Override
     public ProcResult fetchResult() {
-        return new BaseProcResult();
+        return WarehouseProcDir.buildResult(List.of(this));
     }
 
     @Override

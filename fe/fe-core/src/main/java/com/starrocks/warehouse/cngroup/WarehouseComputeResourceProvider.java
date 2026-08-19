@@ -29,6 +29,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -81,7 +82,7 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
         }
         try {
             final long availableWorkerGroupIdSize =
-                    Optional.ofNullable(getAliveComputeNodes(computeResource)).map(List::size).orElse(0);
+                    Optional.ofNullable(getAliveWarehouseComputeNodes(computeResource)).map(List::size).orElse(0);
             return availableWorkerGroupIdSize > 0;
         } catch (Exception e) {
             LOG.warn("Failed to get alive compute nodes from starMgr : {}", e.getMessage());
@@ -90,7 +91,7 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
     }
 
     @Override
-    public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+    public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
         try {
             return GlobalStateMgr.getCurrentState().getStarOSAgent().getWorkersByWorkerGroup(computeResource.getWorkerGroupId());
         } catch (StarRocksException e) {
@@ -100,14 +101,15 @@ public final class WarehouseComputeResourceProvider implements ComputeResourcePr
     }
 
     @Override
-    public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
-        List<Long> computeNodeIds = getAllComputeNodeIds(computeResource);
+    public List<ComputeNode> getAliveWarehouseComputeNodes(ComputeResource computeResource) {
+        List<Long> computeNodeIds = getWarehouseComputeNodeIds(computeResource);
         if (CollectionUtils.isEmpty(computeNodeIds)) {
             return Lists.newArrayList();
         }
         SystemInfoService systemInfoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
         List<ComputeNode> nodes = computeNodeIds.stream()
                 .map(id -> systemInfoService.getBackendOrComputeNode(id))
+                .filter(Objects::nonNull)
                 .filter(ComputeNode::isAlive).collect(Collectors.toList());
         return nodes;
     }

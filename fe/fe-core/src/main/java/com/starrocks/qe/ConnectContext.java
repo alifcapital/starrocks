@@ -1731,7 +1731,15 @@ public class ConnectContext {
             final VariableMgr variableMgr = globalStateMgr.getVariableMgr();
             final Map<String, String> userPropertySvs = userProperty.getSessionVariables();
             if (userPropertySvs.containsKey(SessionVariable.WAREHOUSE_NAME)) {
-                setCurrentWarehouse(userPropertySvs.get(SessionVariable.WAREHOUSE_NAME));
+                String warehouse = userPropertySvs.get(SessionVariable.WAREHOUSE_NAME);
+                try {
+                    setCurrentWarehouse(warehouse);
+                } catch (Exception e) {
+                    // Keep login available, but an invalid user default must not redirect queries to another pool.
+                    sessionVariable.setWarehouseName(warehouse);
+                    resetComputeResource();
+                    throw e;
+                }
             } else {
                 variableMgr.applySessionVariable(userPropertySvs, sessionVariable);
             }

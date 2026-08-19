@@ -29,6 +29,7 @@ import com.starrocks.utframe.UtFrameUtils;
 import com.starrocks.warehouse.DefaultWarehouse;
 import mockit.Expectations;
 import org.assertj.core.util.Sets;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,9 +45,17 @@ public class TaskRunSchedulerTest {
     private static ConnectContext connectContext;
 
     private WarehouseManager warehouseManager;
+    private boolean savedMultiWarehouse;
+
+    @AfterEach
+    public void restoreWarehouses() {
+        Config.enable_multi_warehouse = savedMultiWarehouse;
+    }
 
     @BeforeEach
     public void setUp() {
+        savedMultiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         GlobalStateMgr globalStateMgr = connectContext.getGlobalStateMgr();
         new Expectations() {
             {

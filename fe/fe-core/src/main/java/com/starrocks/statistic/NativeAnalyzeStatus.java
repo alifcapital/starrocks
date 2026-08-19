@@ -63,6 +63,9 @@ public class NativeAnalyzeStatus implements AnalyzeStatus, Writable {
     @SerializedName("endTime")
     private LocalDateTime endTime;
 
+    @SerializedName("warehouseName")
+    private String warehouseName = "";
+
     @SerializedName("reason")
     private String reason;
 
@@ -188,6 +191,16 @@ public class NativeAnalyzeStatus implements AnalyzeStatus, Writable {
     @Override
     public StatsConstants.ScheduleStatus getStatus() {
         return status;
+    }
+
+    @Override
+    public String getWarehouseName() {
+        return warehouseName == null ? "" : warehouseName;
+    }
+
+    @Override
+    public void setWarehouseName(String warehouseName) {
+        this.warehouseName = warehouseName;
     }
 
     @Override

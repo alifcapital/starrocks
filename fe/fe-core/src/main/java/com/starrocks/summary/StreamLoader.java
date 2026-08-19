@@ -111,8 +111,9 @@ class StreamLoader {
         // Choose a backend sequentially, or choose a cn in shared_data mode
         List<Long> nodeIds = new ArrayList<>();
         if (RunMode.isSharedDataMode()) {
-            List<Long> computeIds = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                    .getAllComputeNodeIds(WarehouseManager.DEFAULT_RESOURCE);
+            WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+            List<Long> computeIds = warehouseManager.getWarehouseComputeNodeIds(
+                    warehouseManager.getBackgroundComputeResource());
             for (long nodeId : computeIds) {
                 ComputeNode node =
                         GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);

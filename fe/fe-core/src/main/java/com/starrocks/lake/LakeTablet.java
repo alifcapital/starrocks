@@ -23,6 +23,7 @@ import com.starrocks.catalog.TabletRange;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -194,7 +195,8 @@ public class LakeTablet extends Tablet {
     public List<Replica> getAllReplicas() {
         List<Replica> replicas = Lists.newArrayList();
         getQueryableReplicas(replicas, null, 0, -1, 0,
-                WarehouseManager.DEFAULT_RESOURCE, null);
+                WarehouseComputeResource.of(GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                        .getBackgroundWarehouse().getId()), null);
         return replicas;
     }
 

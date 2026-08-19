@@ -119,7 +119,7 @@ public class DefaultSharedDataWorkerProviderTest {
         WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
         new Expectations(warehouseManager) {
             {
-                warehouseManager.getAllComputeNodeIds((ComputeResource) any);
+                warehouseManager.getWarehouseComputeNodeIds((ComputeResource) any);
                 result = Lists.newArrayList(id2AllNodes.keySet());
                 minTimes = 0;
             }

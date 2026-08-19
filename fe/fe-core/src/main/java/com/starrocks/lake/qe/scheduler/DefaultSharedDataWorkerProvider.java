@@ -93,7 +93,7 @@ public class DefaultSharedDataWorkerProvider implements WorkerProvider {
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
             final ImmutableMap.Builder<Long, ComputeNode> builder = ImmutableMap.builder();
-            final List<Long> computeNodeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeNodeIds = warehouseManager.getWarehouseComputeNodeIds(computeResource);
             computeNodeIds.forEach(nodeId -> builder.put(nodeId,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId)));
             ImmutableMap<Long, ComputeNode> idToComputeNode = builder.build();

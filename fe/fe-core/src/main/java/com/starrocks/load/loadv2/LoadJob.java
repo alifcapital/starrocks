@@ -568,6 +568,9 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
             DuplicatedRequestException, LoadException {
         writeLock();
         try {
+            if (!Config.enable_multi_warehouse) {
+                computeResource = WarehouseManager.DEFAULT_RESOURCE;
+            }
             unprotectedExecute();
         } finally {
             writeUnlock();

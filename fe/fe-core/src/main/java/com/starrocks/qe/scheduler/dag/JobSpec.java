@@ -256,6 +256,7 @@ public class JobSpec {
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
                     .commonProperties(context)
+                    .computeResource(context.getCurrentComputeResource())
                     .build();
         }
 

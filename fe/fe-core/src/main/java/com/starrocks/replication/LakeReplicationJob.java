@@ -27,6 +27,7 @@ import com.starrocks.storagevolume.StorageVolume;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.task.ReplicateSnapshotTask;
 import com.starrocks.thrift.TTableReplicationRequest;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.util.VisibleForTesting;
 import org.apache.logging.log4j.LogManager;
@@ -136,6 +137,7 @@ public class LakeReplicationJob extends ReplicationJob implements GsonPreProcess
     private void sendReplicateLakeRemoteStorageTasks() throws Exception {
         runningTasks.clear();
         WarehouseManager warehouseMgr = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        ComputeResource computeResource = warehouseMgr.getBackgroundComputeResource(super.getTableId());
         byte[] encryptionMeta = GlobalStateMgr.getCurrentState().getKeyMgr().getCurrentKEKAsEncryptionMeta();
         for (PartitionInfo partitionInfo : super.getPartitionInfos().values()) {
             // Get S3 full path if applicable (only for S3 storage type)
@@ -145,7 +147,7 @@ public class LakeReplicationJob extends ReplicationJob implements GsonPreProcess
             for (IndexInfo indexInfo : partitionInfo.getIndexInfos().values()) {
                 for (TabletInfo tabletInfo : indexInfo.getTabletInfos().values()) {
                     Long computeNodeId = warehouseMgr
-                            .getComputeNodeId(WarehouseManager.DEFAULT_RESOURCE, tabletInfo.getTabletId());
+                            .getComputeNodeId(computeResource, tabletInfo.getTabletId());
                     if (computeNodeId == null) {
                         throw new RuntimeException("Send lake replicate task failed, no compute node found for tablet: "
                                 + tabletInfo.getTabletId());

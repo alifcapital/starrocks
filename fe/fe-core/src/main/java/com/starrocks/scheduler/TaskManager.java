@@ -28,6 +28,7 @@ import com.starrocks.catalog.ResourceGroupClassifier;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.util.LogUtil;
+import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.common.util.concurrent.QueryableReentrantLock;
@@ -51,6 +52,7 @@ import com.starrocks.scheduler.persist.TaskRunStatus;
 import com.starrocks.scheduler.persist.TaskRunStatusChange;
 import com.starrocks.scheduler.persist.TaskSchedule;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.SubmitTaskStmt;
 import com.starrocks.sql.common.DmlException;
@@ -561,6 +563,9 @@ public class TaskManager implements MemoryTrackable {
     public void updateTaskProperties(Task task, Map<String, String> properties) {
         if (task == null || properties == null || properties.isEmpty()) {
             return;
+        }
+        if (task.getSource() == Constants.TaskSource.MV && properties.containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE)) {
+            throw new SemanticException("Use ALTER MATERIALIZED VIEW to change the warehouse of an MV refresh task");
         }
         GlobalStateMgr.getCurrentState().getEditLog().logAlterTask(
                 new AlterTaskInfo(task.getName(), properties),

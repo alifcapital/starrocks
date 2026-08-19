@@ -1756,6 +1756,7 @@ struct TUpdateResourceUsageResponse {
 }
 
 struct TGetQueryStatisticsRequest {
+    1: optional bool collect_metrics = true
 }
 
 struct TQueryStatisticsInfo {
@@ -1793,6 +1794,7 @@ struct TResourceLogicalSlot {
     6: optional i64 expired_allocated_time_ms
     7: optional i64 fe_start_time_ms
     8: optional i64 warehouse_id
+    9: optional string query
 
     100: optional i32 num_fragments
     101: optional i32 pipeline_dop
@@ -1984,6 +1986,7 @@ struct TAnalyzeStatusItem {
     10: optional string end_time
     11: optional string properties
     12: optional string reason
+    13: optional string warehouse
 }
 
 struct TAnalyzeStatusRes {

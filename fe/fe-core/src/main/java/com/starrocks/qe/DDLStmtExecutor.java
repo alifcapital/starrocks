@@ -1032,7 +1032,7 @@ public class DDLStmtExecutor {
                 }
 
                 if (Config.enable_trigger_analyze_job_immediate) {
-                    ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
+                    ConnectContext statsConnectCtx = StatisticUtils.buildStatisticsCollectContext();
                     // from current session, may execute analyze stmt
                     statsConnectCtx.getSessionVariable().setStatisticCollectParallelism(
                             context.getSessionVariable().getStatisticCollectParallelism());
@@ -1316,7 +1316,7 @@ public class DDLStmtExecutor {
         public ShowResultSet visitCreateDictionaryStatement(CreateDictionaryStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
                 context.getGlobalStateMgr().getDictionaryMgr().createDictionary(stmt,
-                        context.getCurrentCatalog(), context.getDatabase());
+                        context.getCurrentCatalog(), context.getDatabase(), context.getCurrentWarehouseId());
             });
             return null;
         }
@@ -1333,7 +1333,8 @@ public class DDLStmtExecutor {
         @Override
         public ShowResultSet visitRefreshDictionaryStatement(RefreshDictionaryStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
-                context.getGlobalStateMgr().getDictionaryMgr().refreshDictionary(stmt.getDictionaryName());
+                context.getGlobalStateMgr().getDictionaryMgr()
+                        .refreshDictionary(stmt.getDictionaryName(), context.getCurrentWarehouseId());
             });
             return null;
         }

@@ -347,6 +347,11 @@ public final class GlobalVariable {
         return queryQueueDriverHighWater;
     }
 
+    public static int getQueryQueueDriverHighWater(long warehouseId) {
+        return queryQueueDriverHighWater == 0
+                ? BackendResourceStat.getInstance().getAvgNumCoresOfBe(warehouseId) * 16 : queryQueueDriverHighWater;
+    }
+
     public static void setQueryQueueDriverHighWater(int queryQueueDriverHighWater) {
         GlobalVariable.queryQueueDriverHighWater = queryQueueDriverHighWater;
     }
@@ -360,6 +365,11 @@ public final class GlobalVariable {
             return BackendResourceStat.getInstance().getAvgNumCoresOfBe() * 8;
         }
         return queryQueueDriverLowWater;
+    }
+
+    public static int getQueryQueueDriverLowWater(long warehouseId) {
+        return queryQueueDriverLowWater == 0
+                ? BackendResourceStat.getInstance().getAvgNumCoresOfBe(warehouseId) * 8 : queryQueueDriverLowWater;
     }
 
     public static void setQueryQueueDriverLowWater(int queryQueueDriverLowWater) {

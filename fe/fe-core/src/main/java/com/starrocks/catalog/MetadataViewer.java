@@ -44,6 +44,7 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
+import com.starrocks.lake.LakeTablet;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
@@ -58,11 +59,13 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 
 import java.text.DecimalFormat;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class MetadataViewer {
 
@@ -260,7 +263,7 @@ public class MetadataViewer {
             // backend id -> replica count
             Map<Long, Integer> countMap = Maps.newHashMap();
             // init map
-            List<Long> beIds = getAllComputeNodeIds();
+            List<Long> beIds = getWarehouseComputeNodeIds();
             for (long beId : beIds) {
                 countMap.put(beId, 0);
             }
@@ -271,7 +274,11 @@ public class MetadataViewer {
                 for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
                     for (MaterializedIndex index : physicalPartition.getLatestMaterializedIndices(IndexExtState.VISIBLE)) {
                         for (Tablet tablet : index.getTablets()) {
-                            for (long beId : tablet.getBackendIds()) {
+                            Set<Long> tabletNodes = tablet instanceof LakeTablet
+                                    ? ((LakeTablet) tablet).getBackendIds(WarehouseComputeResource.of(
+                                            ConnectContext.get().getCurrentWarehouseId()))
+                                    : tablet.getBackendIds();
+                            for (long beId : tabletNodes) {
                                 if (!countMap.containsKey(beId)) {
                                     continue;
                                 }
@@ -301,14 +308,14 @@ public class MetadataViewer {
         return result;
     }
 
-    private static List<Long> getAllComputeNodeIds() throws DdlException {
+    private static List<Long> getWarehouseComputeNodeIds() throws DdlException {
         SystemInfoService infoService = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
         List<Long> allComputeNodeIds = Lists.newArrayList();
         if (RunMode.isSharedDataMode()) {
             // check warehouse
             long warehouseId = ConnectContext.get().getCurrentWarehouseId();
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<Long> computeNodeIs = warehouseManager.getAllComputeNodeIds(warehouseId);
+            List<Long> computeNodeIs = warehouseManager.getWarehouseComputeNodeIds(warehouseId);
             if (computeNodeIs.isEmpty()) {
                 final Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(warehouseId);
                 throw new DdlException("no available compute nodes in warehouse " + warehouse.getName());

@@ -445,7 +445,7 @@ public class OlapTableSink extends DataSink {
                     enableAutomaticPartition, automaticBucketSize, getOpenPartitions(), txnState, targetWriteIndexId);
             tSink.setPartition(partitionParam);
             tSink.setLocation(createLocation(dstTable, partitionParam, enableReplicatedStorage, computeResource, txnState));
-            tSink.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(computeResource, getSystemInfoService(dstTable)));
+            tSink.setNodes_info(GlobalStateMgr.getCurrentState().createWarehouseNodesInfo(computeResource, getSystemInfoService(dstTable)));
             tSink.setPartial_update_mode(this.partialUpdateMode);
             tSink.setAutomatic_bucket_size(automaticBucketSize);
             if (canUseColocateMVIndex(dstTable)) {

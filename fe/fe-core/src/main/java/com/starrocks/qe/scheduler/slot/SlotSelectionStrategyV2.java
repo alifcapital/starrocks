@@ -135,7 +135,8 @@ public class SlotSelectionStrategyV2 implements SlotSelectionStrategy {
         int curNumAllocatedSmallSlots = numAllocatedSmallSlots;
         for (SlotContext slotContext : requiringSmallSlots.values()) {
             LogicalSlot slot = slotContext.getSlot();
-            if (!isSmallSlotAvailable(slotTracker, slot, curNumAllocatedSmallSlots)) {
+            if (!isSmallSlotAvailable(slotTracker, slot, curNumAllocatedSmallSlots)
+                    || !isQueryConcurrencyLimitAvailable(slotTracker, slotsToAllocate.size())) {
                 break;
             }
 
@@ -150,7 +151,8 @@ public class SlotSelectionStrategyV2 implements SlotSelectionStrategy {
         int numAllocatedSlots = slotTracker.getNumAllocatedSlots() - numAllocatedSmallSlots;
         while (!requiringQueue.isEmpty()) {
             SlotContext slotContext = requiringQueue.peak();
-            if (!isGlobalSlotAvailable(slotTracker, numAllocatedSlots, slotContext.getSlot())) {
+            if (!isGlobalSlotAvailable(slotTracker, numAllocatedSlots, slotContext.getSlot())
+                    || !isQueryConcurrencyLimitAvailable(slotTracker, slotsToAllocate.size())) {
                 break;
             }
 
@@ -231,12 +233,16 @@ public class SlotSelectionStrategyV2 implements SlotSelectionStrategy {
     }
 
     private boolean isQueryConcurrencyLimitAvailable(BaseSlotTracker slotTracker) {
+        return isQueryConcurrencyLimitAvailable(slotTracker, 0);
+    }
+
+    private boolean isQueryConcurrencyLimitAvailable(BaseSlotTracker slotTracker, int selectedQueries) {
         // if the query queue limit is not set(by default), return true
         int queryQueueConcurrencyLimit = slotManager.getQueryQueueConcurrencyLimit(warehouseId);
         if (queryQueueConcurrencyLimit <= 0) {
             return true;
         }
-        return slotTracker.getCurrentCurrency() < queryQueueConcurrencyLimit;
+        return slotTracker.getCurrentCurrency() + selectedQueries < queryQueueConcurrencyLimit;
     }
 
     private static boolean isSmallSlot(LogicalSlot slot) {

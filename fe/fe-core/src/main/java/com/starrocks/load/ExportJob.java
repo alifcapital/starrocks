@@ -414,7 +414,8 @@ public class ExportJob implements Writable, GsonPostProcessable {
         switch (exportTable.getType()) {
             case OLAP:
             case CLOUD_NATIVE:
-                scanNode = new OlapScanNode(new PlanNodeId(0), exportTupleDesc, "OlapScanNodeForExport", -1, computeResource);
+                scanNode = new OlapScanNode(new PlanNodeId(0), exportTupleDesc, "OlapScanNodeForExport", -1,
+                        getComputeResource());
                 scanNode.setColumnFilters(Maps.newHashMap());
                 ((OlapScanNode) scanNode).setIsPreAggregation(false, "This an export operation");
                 ((OlapScanNode) scanNode).setCanTurnOnPreAggr(false);
@@ -428,7 +429,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
         }
 
         scanNode.finalizeStats();
-        scanNode.setComputeResource(computeResource);
+        scanNode.setComputeResource(getComputeResource());
         return scanNode;
     }
 
@@ -438,7 +439,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
                 exportTupleDesc,
                 "OlapScanNodeForExport",
                 locations,
-                computeResource);
+                getComputeResource());
     }
 
     private PlanFragment genPlanFragment(Table.TableType type, ScanNode scanNode, int taskIdx) throws
@@ -514,7 +515,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
             Coordinator coord = getCoordinatorFactory().createBrokerExportScheduler(
                     id, queryId, desc, Lists.newArrayList(fragment), Lists.newArrayList(scanNode),
                     TimeUtils.DEFAULT_TIME_ZONE, stmt.getExportStartTime(),
-                    Maps.newHashMap(), getMemLimit(), computeResource);
+                    Maps.newHashMap(), getMemLimit(), getComputeResource());
             this.coordList.add(coord);
             LOG.info("split export job to tasks. job id: {}, job query id: {}, task idx: {}, task query id: {}",
                     id, DebugUtil.printId(this.queryId), i, DebugUtil.printId(queryId));
@@ -542,7 +543,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
         newOlapScanNode.setIsPreAggregation(false, "This an export operation");
         newOlapScanNode.setCanTurnOnPreAggr(false);
         newOlapScanNode.computePartitionInfo();
-        List<TScanRangeLocations> newLocations = newOlapScanNode.updateScanRangeLocations(locations, computeResource);
+        List<TScanRangeLocations> newLocations = newOlapScanNode.updateScanRangeLocations(locations, getComputeResource());
 
         // random select a new location for each TScanRangeLocations
         for (TScanRangeLocations tablet : newLocations) {
@@ -556,7 +557,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
 
         Coordinator newCoord = getCoordinatorFactory().createBrokerExportScheduler(
                 id, newQueryId, desc, Lists.newArrayList(newFragment), Lists.newArrayList(newTaskScanNode),
-                TimeUtils.DEFAULT_TIME_ZONE, coord.getStartTimeMs(), Maps.newHashMap(), getMemLimit(), computeResource);
+                TimeUtils.DEFAULT_TIME_ZONE, coord.getStartTimeMs(), Maps.newHashMap(), getMemLimit(), getComputeResource());
         this.coordList.set(taskIndex, newCoord);
         LOG.info("reset coordinator for export job: {}, taskIdx: {}", id, taskIndex);
         return newCoord;
@@ -744,7 +745,7 @@ public class ExportJob implements Writable, GsonPostProcessable {
     }
 
     public ComputeResource getComputeResource() {
-        return computeResource;
+        return Config.enable_multi_warehouse ? computeResource : WarehouseManager.DEFAULT_RESOURCE;
     }
 
     public synchronized boolean updateState(JobState newState, long stateChangeTime) {

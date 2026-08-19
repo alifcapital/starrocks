@@ -35,8 +35,10 @@
 package com.starrocks.qe;
 
 import com.google.common.collect.Lists;
+import com.starrocks.authentication.UserProperty;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.catalog.Database;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.Status;
@@ -50,6 +52,7 @@ import com.starrocks.server.MetadataMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.analyzer.Authorizer;
+import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.QualifiedName;
 import com.starrocks.sql.ast.QueryStatement;
@@ -68,6 +71,7 @@ import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
 import mockit.Mocked;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -78,6 +82,19 @@ import java.util.List;
 import java.util.Map;
 
 public class ConnectContextTest {
+    private boolean savedMultiWarehouse;
+
+    @BeforeEach
+    public void enableWarehouses() {
+        savedMultiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
+    }
+
+    @AfterEach
+    public void restoreWarehouses() {
+        Config.enable_multi_warehouse = savedMultiWarehouse;
+    }
+
     @Mocked
     private MysqlChannel channel;
     @Mocked
@@ -109,6 +126,31 @@ public class ConnectContextTest {
                 result = variableMgr;
             }
         };
+    }
+
+    @Test
+    public void testMissingUserWarehouseDoesNotFallBack(@Mocked WarehouseManager warehouseManager) {
+        new Expectations() {
+            {
+                globalStateMgr.getWarehouseMgr();
+                result = warehouseManager;
+                warehouseManager.getWarehouse("removed_warehouse");
+                result = new SemanticException("Warehouse removed_warehouse not exist");
+                warehouseManager.getWarehouseAllowNull("removed_warehouse");
+                result = null;
+            }
+        };
+        ConnectContext context = new ConnectContext(connection);
+        context.setGlobalStateMgr(globalStateMgr);
+        context.setCurrentComputeResource(WarehouseComputeResource.of(0));
+        UserProperty property = new UserProperty();
+        property.setSessionVariables(Map.of(SessionVariable.WAREHOUSE_NAME, "removed_warehouse"));
+
+        Assertions.assertDoesNotThrow(() -> context.updateByUserProperty(property));
+        Assertions.assertEquals("removed_warehouse", context.getCurrentWarehouseName());
+        Assertions.assertThrows(SemanticException.class, context::getCurrentWarehouseId);
+        Assertions.assertNull(Deencapsulation.getField(context, "computeResource"));
+        Assertions.assertFalse(context.getState().isError());
     }
 
     @Test

@@ -309,6 +309,15 @@ This topic introduces the following types of FE configurations:
 - Description: Whether to allow StarRocks to create the built-in storage volume by using the object storage-related properties specified in the FE configuration file. The default value is changed from `true` to `false` from v3.4.1 onwards.
 - Introduced in: v3.1.0
 
+### `enable_multi_warehouse`
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: No
+- Description: Enables `CREATE WAREHOUSE`, `DROP WAREHOUSE`, `ALTER WAREHOUSE`, and `ALTER SYSTEM ADD COMPUTE NODE ... INTO WAREHOUSE` in shared-data clusters. Each warehouse owns a worker group and its compute nodes; tables and data remain shared. `SET warehouse = '<name>'` selects the pool for queries and loads. Configure the same value on every FE and restart. Warehouse metadata is replayed and persisted independently of this flag to protect existing catalogs, but disabling the flag is not a supported rollback of a multi-warehouse deployment. Background and compaction routing use `lake_background_warehouse` and `lake_compaction_warehouse`.
+- Introduced in: v4.1 (custom backport of PR #78027)
+
 ### `gcp_gcs_impersonation_service_account`
 
 - Default: Empty string

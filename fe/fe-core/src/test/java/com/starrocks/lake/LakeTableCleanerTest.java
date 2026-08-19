@@ -28,6 +28,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.utframe.UtFrameUtils;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -78,7 +79,7 @@ public class LakeTableCleanerTest {
 
         new MockUp<Utils>() {
             @Mock
-            public ComputeNode chooseNode(ShardInfo info) {
+            public ComputeNode chooseMaintenanceNode(ShardInfo info, ComputeResource computeResource) {
                 return new ComputeNode();
             }
         };
@@ -157,7 +158,7 @@ public class LakeTableCleanerTest {
 
         new MockUp<Utils>() {
             @Mock
-            public ComputeNode chooseNode(ShardInfo info) {
+            public ComputeNode chooseMaintenanceNode(ShardInfo info, ComputeResource computeResource) {
                 return null;
             }
         };
@@ -224,7 +225,7 @@ public class LakeTableCleanerTest {
 
         new MockUp<Utils>() {
             @Mock
-            public ComputeNode chooseNode(ShardInfo info) {
+            public ComputeNode chooseMaintenanceNode(ShardInfo info, ComputeResource computeResource) {
                 return new ComputeNode();
             }
         };

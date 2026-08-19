@@ -4005,7 +4005,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     }
 
     public String getWarehouseName() {
-        return warehouseName;
+        return Config.enable_multi_warehouse ? warehouseName : WarehouseManager.DEFAULT_WAREHOUSE_NAME;
     }
 
     // NOTE: It's not recommended to set warehouse name in session variable, use ConnectContext#setCurrentWarehouse to change.

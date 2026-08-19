@@ -51,6 +51,7 @@ public class CompactionJobTest {
         CompactionJob job = new CompactionJob(db, table, partition, 10010, true, computeResource, "wh1", scoreBefore);
 
         Assertions.assertEquals(10010, job.getTxnId());
+        Assertions.assertEquals("wh1", CompactionRecord.build(job).getWarehouse());
         Assertions.assertTrue(job.getAllowPartialSuccess());
         Assertions.assertEquals(scoreBefore, job.getScoreBefore());
         Assertions.assertNull(job.getScoreAfter());

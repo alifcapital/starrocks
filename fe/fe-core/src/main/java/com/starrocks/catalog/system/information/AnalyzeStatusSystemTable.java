@@ -67,6 +67,7 @@ public class AnalyzeStatusSystemTable extends SystemTable {
                     .addColumn(new Column("EndTime", TypeFactory.createVarcharType(60)))
                     .addColumn(new Column("Properties", TypeFactory.createVarcharType(200)))
                     .addColumn(new Column("Reason", TypeFactory.createVarcharType(100)))
+                    .addColumn(new Column("Warehouse", TypeFactory.createVarcharType(256)))
                     .build();
     static {
         COLUMNS = Lists.newArrayList(META_DATA.getColumns());
@@ -148,6 +149,7 @@ public class AnalyzeStatusSystemTable extends SystemTable {
             item.setEnd_time(DateUtils.formatDateTimeUnix(analyze.getEndTime()));
             item.setProperties(analyze.getProperties() == null ? "{}" : analyze.getProperties().toString());
             item.setReason(analyze.getReason());
+            item.setWarehouse(analyze.getWarehouseName());
             itemList.add(item);
         }
 

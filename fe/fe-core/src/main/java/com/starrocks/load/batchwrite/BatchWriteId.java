@@ -25,13 +25,15 @@ public class BatchWriteId {
 
     /** The ID of the table associated with the batch write. */
     private final TableId tableId;
+    private final long warehouseId;
 
     /** The parameters for the stream load associated with the batch write. */
     private final StreamLoadKvParams params;
 
 
-    public BatchWriteId(TableId tableId, StreamLoadKvParams params) {
+    public BatchWriteId(TableId tableId, long warehouseId, StreamLoadKvParams params) {
         this.tableId = tableId;
+        this.warehouseId = warehouseId;
         this.params = params;
     }
 
@@ -44,11 +46,11 @@ public class BatchWriteId {
             return false;
         }
         BatchWriteId that = (BatchWriteId) o;
-        return Objects.equals(tableId, that.tableId) && Objects.equals(params, that.params);
+        return warehouseId == that.warehouseId && Objects.equals(tableId, that.tableId) && Objects.equals(params, that.params);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(tableId, params);
+        return Objects.hash(tableId, warehouseId, params);
     }
 }

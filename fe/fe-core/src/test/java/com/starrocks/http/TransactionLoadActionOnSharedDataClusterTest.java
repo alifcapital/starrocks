@@ -68,7 +68,7 @@ public class TransactionLoadActionOnSharedDataClusterTest extends TransactionLoa
 
         new MockUp<WarehouseComputeResourceProvider>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 return Arrays.asList(1234L);
             }
         };

@@ -715,7 +715,7 @@ public class TransactionState implements Writable, GsonPreProcessable {
     }
 
     public long getWarehouseId() {
-        return warehouseId;
+        return Config.enable_multi_warehouse ? warehouseId : WarehouseManager.DEFAULT_WAREHOUSE_ID;
     }
 
     public void setComputeResource(ComputeResource computeResource) {
@@ -724,7 +724,7 @@ public class TransactionState implements Writable, GsonPreProcessable {
     }
 
     public ComputeResource getComputeResource() {
-        return computeResource;
+        return Config.enable_multi_warehouse ? computeResource : WarehouseManager.DEFAULT_RESOURCE;
     }
 
     public void setTransactionStatus(TransactionStatus transactionStatus) {

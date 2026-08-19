@@ -1136,12 +1136,16 @@ public class NodeMgr {
     }
 
     public List<QueryStatisticsInfo> getQueryStatisticsInfoFromOtherFEs() {
+        return getQueryStatisticsInfoFromOtherFEs(true);
+    }
+
+    public List<QueryStatisticsInfo> getQueryStatisticsInfoFromOtherFEs(boolean collectMetrics) {
         List<QueryStatisticsInfo> statisticsItems = Lists.newArrayList();
-        TGetQueryStatisticsRequest request = new TGetQueryStatisticsRequest();
+        TGetQueryStatisticsRequest request = new TGetQueryStatisticsRequest().setCollect_metrics(collectMetrics);
 
         List<Frontend> allFrontends = getAllFrontends();
         for (Frontend fe : allFrontends) {
-            if (fe.getHost().equals(getSelfNode().first)) {
+            if (!fe.isAlive() || fe.getHost().equals(getSelfNode().first)) {
                 continue;
             }
 

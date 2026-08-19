@@ -60,7 +60,7 @@ class LakeTableCleaner {
                     continue;
                 }
                 removedPaths.add(shardInfo.getFilePath().getFullPath());
-                if (!LakeTableHelper.removeShardRootDirectory(shardInfo)) {
+                if (!LakeTableHelper.removeShardRootDirectory(shardInfo, computeResource)) {
                     allRemoved = false;
                 }
             } catch (StarClientException e) {

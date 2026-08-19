@@ -72,8 +72,9 @@ public class LogicalSlot {
     private Optional<Integer> allocatedNumPhysicalSlots = Optional.empty();
     private Optional<Double> queuedWaitSeconds = Optional.empty();
     private Optional<ExtraMessage> extraMessage = Optional.empty();
+    private String query = "";
 
-    private State state = State.CREATED;
+    private volatile State state = State.CREATED;
 
     public LogicalSlot(TUniqueId slotId, String requestFeName,
                        long warehouseId, long groupId, int numPhysicalSlots,
@@ -133,16 +134,27 @@ public class LogicalSlot {
                 .setExpired_allocated_time_ms(expiredAllocatedTimeMs)
                 .setFe_start_time_ms(feStartTimeMs)
                 .setNum_fragments(numFragments)
-                .setPipeline_dop(pipelineDop);
+                .setPipeline_dop(pipelineDop)
+                .setQuery(query);
 
         return tslot;
     }
 
     public static LogicalSlot fromThrift(TResourceLogicalSlot tslot) {
-        return new LogicalSlot(tslot.getSlot_id(), tslot.getRequest_fe_name(), tslot.getWarehouse_id(),
+        LogicalSlot slot = new LogicalSlot(tslot.getSlot_id(), tslot.getRequest_fe_name(), tslot.getWarehouse_id(),
                 tslot.getGroup_id(), tslot.getNum_slots(),
                 tslot.getExpired_pending_time_ms(), tslot.getExpired_allocated_time_ms(), tslot.getFe_start_time_ms(),
                 tslot.getNum_fragments(), tslot.getPipeline_dop());
+        slot.setQuery(tslot.isSetQuery() ? tslot.getQuery() : "");
+        return slot;
+    }
+
+    public void setQuery(String query) {
+        this.query = query == null ? "" : query;
+    }
+
+    public String getQuery() {
+        return query;
     }
 
     public TUniqueId getSlotId() {
@@ -220,8 +232,10 @@ public class LogicalSlot {
     public String getWarehouseName() {
         if (warehouseName.isEmpty()) {
             WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            Warehouse warehouse = warehouseManager.getWarehouse(warehouseId);
-            this.warehouseName = Optional.of(warehouse.getName());
+            Warehouse warehouse = warehouseManager.getWarehouseAllowNull(warehouseId);
+            if (warehouse != null) {
+                this.warehouseName = Optional.of(warehouse.getName());
+            }
         }
         return warehouseName.orElse("");
     }

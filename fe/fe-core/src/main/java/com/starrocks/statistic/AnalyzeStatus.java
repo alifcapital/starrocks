@@ -74,6 +74,10 @@ public interface AnalyzeStatus {
 
     StatsConstants.ScheduleStatus getStatus();
 
+    String getWarehouseName();
+
+    void setWarehouseName(String warehouseName);
+
     String getReason();
 
     void setReason(String reason);

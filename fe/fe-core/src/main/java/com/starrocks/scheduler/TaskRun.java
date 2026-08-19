@@ -46,6 +46,7 @@ import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.scheduler.persist.TaskRunStatus;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
@@ -271,7 +272,7 @@ public class TaskRun implements Comparable<TaskRun> {
             // 2. It may pollute the properties of task run.
             newProperties.putAll(materializedView.getSessionProperties());
 
-            Warehouse w = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(
+            Warehouse w = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseForExecution(
                     materializedView.getWarehouseId());
             newProperties.put(PROPERTIES_WAREHOUSE, w.getName());
 
@@ -372,6 +373,9 @@ public class TaskRun implements Comparable<TaskRun> {
 
         Map<String, String> newProperties = refreshTaskProperties(runCtx);
         properties.putAll(newProperties);
+        if (!Config.enable_multi_warehouse) {
+            properties.put(PROPERTIES_WAREHOUSE, WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+        }
         // Update status properties with the refreshed values (especially warehouse)
         // so system tables show the correct information
         if (status != null) {

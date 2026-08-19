@@ -128,6 +128,9 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
                         (dictionary.isRefreshing() && !runningRefreshTasks.contains(id))) {
                     UpdateDictionaryLog updateDictionaryLog = new UpdateDictionaryLog(id, ts);
                     updateDictionaryLog.setState(Dictionary.DictionaryState.REFRESHING);
+                    if (dictionary.isRefreshing()) {
+                        updateDictionaryLog.setRefreshWarehouseId(dictionary.getRefreshWarehouseId());
+                    }
                     updateDictionaryLogList.add(updateDictionaryLog);
                 }
             }
@@ -138,7 +141,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
                         wal -> {
                             for (UpdateDictionaryLog log : updateDictionaryLogList) {
                                 Dictionary dict = dictionariesMapById.get(log.getDictionaryId());
-                                dict.setRefreshing(log.getTs());
+                                dict.setRefreshing(log.getTs(), log.getRefreshWarehouseId());
                                 unfinishedRefreshTasks.add(dict.getDictionaryId());
                             }
                         });
@@ -207,7 +210,8 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
         return new Pair<>(false, "");
     }
 
-    public void createDictionary(CreateDictionaryStmt stmt, String catalogName, String dbName) throws DdlException {
+    public void createDictionary(CreateDictionaryStmt stmt, String catalogName, String dbName, long warehouseId)
+            throws DdlException {
         Dictionary dictionary = new Dictionary(getAndIncrementDictionaryId(), stmt.getDictionaryName(),
                 stmt.getQueryableObject(), catalogName, dbName, stmt.getDictionaryKeys(),
                 stmt.getDictionaryValues(), stmt.getProperties());
@@ -217,7 +221,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
 
         if (dictionary.needWarmUp()) {
             try {
-                refreshDictionary(stmt.getDictionaryName());
+                refreshDictionary(stmt.getDictionaryName(), warehouseId);
             } catch (MetaNotFoundException e) {
                 throw new DdlException("create dictionary failed: " + e.getMessage());
             }
@@ -275,7 +279,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
         }
     }
 
-    public void refreshDictionary(String dictionaryName) throws MetaNotFoundException {
+    public void refreshDictionary(String dictionaryName, long warehouseId) throws MetaNotFoundException {
         lock.lock();
         try {
             Dictionary dictionary = getDictionaryByName(dictionaryName);
@@ -286,9 +290,10 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
             long ts = System.currentTimeMillis();
             UpdateDictionaryLog updateDictionaryLog = new UpdateDictionaryLog(dictionary.getDictionaryId(), ts);
             updateDictionaryLog.setState(Dictionary.DictionaryState.REFRESHING);
+            updateDictionaryLog.setRefreshWarehouseId(warehouseId);
             GlobalStateMgr.getCurrentState().getEditLog().logModifyDictionaryMgr(
                     new UpdateDictionaryMgrLog(Lists.newArrayList(updateDictionaryLog)),
-                    wal -> dictionary.setRefreshing(ts));
+                    wal -> dictionary.setRefreshing(ts, warehouseId));
             unfinishedRefreshTasks.add(dictionary.getDictionaryId());
         } finally {
             lock.unlock();
@@ -416,7 +421,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
         return new DefaultCoordinator.Factory();
     }
 
-    private void submit(RefreshDictionaryCacheWorker task) throws RejectedExecutionException {
+    protected void submit(RefreshDictionaryCacheWorker task) throws RejectedExecutionException {
         if (task == null) {
             return;
         }
@@ -552,7 +557,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
                                     dictionary.setCancelled();
                                     break;
                                 case REFRESHING:
-                                    dictionary.setRefreshing(dictionaryLog.getTs());
+                                    dictionary.setRefreshing(dictionaryLog.getTs(), dictionaryLog.getRefreshWarehouseId());
                                     break;
                                 default:
                                     break;
@@ -607,6 +612,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
 
     public class RefreshDictionaryCacheWorker implements Runnable {
         private Dictionary dictionary;
+        private final Long refreshWarehouseId;
         private long txnId;
         private List<TNetworkAddress> beNodes = Lists.newArrayList();
         private boolean error;
@@ -614,6 +620,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
 
         public RefreshDictionaryCacheWorker(Dictionary dictionary, long txnId) {
             this.dictionary = dictionary;
+            this.refreshWarehouseId = dictionary.getRefreshWarehouseId();
             this.txnId = txnId;
             this.error = false;
             this.errMsg = "";
@@ -629,7 +636,7 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
             this.errMsg = errMsg;
         }
 
-        private ConnectContext buildConnectContext() {
+        protected ConnectContext buildConnectContext() {
             ConnectContext context = ConnectContext.buildInner();
             context.setCurrentCatalog(dictionary.getCatalogName());
             context.setDatabase(dictionary.getDbName());
@@ -641,7 +648,8 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
             // with a fresh clone of defaultSessionVariable, which would discard every override
             // applied below.
             WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            Warehouse warehouse = manager.getBackgroundWarehouse();
+            Warehouse warehouse = refreshWarehouseId == null ? manager.getBackgroundWarehouse()
+                    : manager.getWarehouseForExecution(refreshWarehouseId);
             context.setCurrentWarehouse(warehouse.getName());
             context.getSessionVariable().setTimeZone(TimeUtils.DEFAULT_TIME_ZONE);
             context.getSessionVariable().setEnablePipelineEngine(true);
@@ -690,7 +698,8 @@ public class DictionaryMgr implements Writable, GsonPostProcessable {
             Coordinator coord = getCoordinatorFactory().createRefreshDictionaryCacheScheduler(
                     context, queryId, descTable, fragments, scanNodes, execPlan);
 
-            QeProcessorImpl.INSTANCE.registerQuery(queryId, coord);
+            QeProcessorImpl.INSTANCE.registerQuery(queryId,
+                    new QeProcessorImpl.QueryInfo(context, dictionary.buildQuery(), coord));
             int leftTimeSecond = context.getExecTimeout();
             coord.setTimeoutSecond(leftTimeSecond);
             coord.exec();
