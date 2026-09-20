@@ -2816,7 +2816,10 @@ public class ExpressionStatisticsCalculatorTest {
                         .setNullsFraction(0.0)
                         .setAverageRowSize(8)
                         .setDistinctValuesCount(62)
-                        .setHistogram(new Histogram(Collections.emptyList(), Map.of("mcv1", 236L)))
+                        // 236 of the 1000 rows hold mcv1; the tail bucket carries the other 764.
+                        .setHistogram(new Histogram(
+                                List.of(new Bucket(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, 764L, 0L)),
+                                Map.of("mcv1", 236L)))
                         .build())
                 .build();
 
@@ -2933,7 +2936,10 @@ public class ExpressionStatisticsCalculatorTest {
                         .setNullsFraction(0.2)
                         .setAverageRowSize(8)
                         .setDistinctValuesCount(62)
-                        .setHistogram(new Histogram(Collections.emptyList(), Map.of("mcv1", 236L)))
+                        // 236 of the 800 non-NULL rows hold mcv1; the tail bucket carries the other 564.
+                        .setHistogram(new Histogram(
+                                List.of(new Bucket(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, 564L, 0L)),
+                                Map.of("mcv1", 236L)))
                         .build())
                 .build();
 

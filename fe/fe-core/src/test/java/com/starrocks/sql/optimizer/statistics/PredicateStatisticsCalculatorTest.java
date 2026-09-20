@@ -272,6 +272,37 @@ public class PredicateStatisticsCalculatorTest {
     }
 
     @Test
+    public void testStringValueOutsideMcvEstimatesTheSameForEqualityAndIn() {
+        ColumnRefOperator columnRef = new ColumnRefOperator(2, VarcharType.VARCHAR, "c2", true);
+        // 800 rows in the two most common values, 200 rows of 20 other values in the tail bucket.
+        Histogram histogram = new Histogram(
+                List.of(new Bucket(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, 200L, 0L)),
+                Map.of("approved", 500L, "declined", 300L));
+        ColumnStatistic columnStatistic = ColumnStatistic.builder()
+                .setDistinctValuesCount(22)
+                .setNullsFraction(0)
+                .setAverageRowSize(8)
+                .setHistogram(histogram)
+                .build();
+        Statistics statistics = Statistics.builder()
+                .setOutputRowCount(1000)
+                .addColumnStatistic(columnRef, columnStatistic)
+                .build();
+
+        ConstantOperator pending = ConstantOperator.createVarchar("pending");
+        Statistics equality = PredicateStatisticsCalculator.statisticsCalculate(
+                new BinaryPredicateOperator(BinaryType.EQ, columnRef, pending), statistics);
+        Statistics in = HistogramStatisticsUtils.estimateInPredicateWithHistogram(
+                columnRef, columnStatistic, List.of(pending), false, statistics);
+        Assertions.assertEquals(10, equality.getOutputRowCount(), 0.001);
+        Assertions.assertEquals(equality.getOutputRowCount(), in.getOutputRowCount(), 0.001);
+
+        Statistics inTwo = HistogramStatisticsUtils.estimateInPredicateWithHistogram(
+                columnRef, columnStatistic, List.of(pending, ConstantOperator.createVarchar("failed")), false, statistics);
+        Assertions.assertEquals(20, inTwo.getOutputRowCount(), 0.001);
+    }
+
+    @Test
     public void testEstimateInPredicateWithBooleanType() {
         ColumnRefOperator columnRef = new ColumnRefOperator(6, BooleanType.BOOLEAN, "c6", true);
 

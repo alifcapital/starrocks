@@ -128,9 +128,9 @@ public class BinaryPredicateStatisticCalculator {
                         ? 1.0 / Math.max(1.0, columnStatistic.getDistinctValuesCount())
                         : rowCountInHistogram / (double) columnHist.getTotalRows();
 
-                rows = rowCountInHistogram <= 1
-                        ? Math.max(1.0, outputRows * nonNullFraction * factor)
-                        : Math.min(rowCountInHistogram, outputRows * nonNullFraction * factor);
+                // The histogram counts rows at collection time. Its share of the rows is what carries
+                // over to the rows at hand, whether they were filtered or the table has grown since.
+                rows = Math.max(1.0, outputRows * nonNullFraction * factor);
             } else {
                 // The constant was not found in the column histogram.
                 Long mostCommonValuesCount = columnHist.getMCV().values().stream().reduce(Long::sum).orElse(0L);

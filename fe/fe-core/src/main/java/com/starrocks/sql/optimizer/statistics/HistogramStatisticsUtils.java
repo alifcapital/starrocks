@@ -382,8 +382,11 @@ public class HistogramStatisticsUtils {
         double mcvCount = histogram.getMCV().size();
 
         if (columnRefOperator.getType().getPrimitiveType().isCharFamily()) {
-            double avgRowsPerValue = totalRows / ndv;
-            return Math.max(1, Math.round(avgRowsPerValue * HISTOGRAM_UNREPRESENTED_VALUE_COEFFICIENT));
+            // A string histogram has no buckets, so a value outside the MCV list is an ordinary value of
+            // the tail: the tail rows spread over the tail distinct values, as for column = constant.
+            long nonMcvRows = totalRows - mcvRowCount;
+            double nonMcvNdv = Math.max(1.0, ndv - mcvCount);
+            return Math.max(1, Math.round(nonMcvRows / nonMcvNdv));
         } else {
             Optional<Double> constantValueOpt = StatisticUtils.convertStatisticsToDouble(
                     constant.getType(), constant.toString());

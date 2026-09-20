@@ -471,20 +471,20 @@ public class HistogramStatisticsTest {
         builder.addColumnStatistic(columnRefOperator, columnStatistic);
         Statistics statistics = builder.build();
 
-        // hit upper bound
+        // hit upper bound: 20 of the 800 histogram rows, scaled to the 100000 rows at hand
         Statistics estimated = BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(
                 Optional.of(columnRefOperator),
                 columnStatistic, eq10, Optional.of(ConstantOperator.createBigint(10)), statistics);
-        Assertions.assertEquals(20, estimated.getOutputRowCount(), 0.001);
+        Assertions.assertEquals(2500, estimated.getOutputRowCount(), 0.001);
 
-        // in second bucket
+        // in second bucket: 16 of 800
         BinaryPredicateOperator eq15 = new BinaryPredicateOperator(
                 BinaryType.EQ,
                 columnRefOperator,
                 ConstantOperator.createBigint(15));
         estimated = BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(Optional.of(columnRefOperator),
                 columnStatistic, eq10, Optional.of(ConstantOperator.createBigint(15)), statistics);
-        Assertions.assertEquals(16, estimated.getOutputRowCount(), 0.001);
+        Assertions.assertEquals(2000, estimated.getOutputRowCount(), 0.001);
 
         // not in bucket
         BinaryPredicateOperator eq35 = new BinaryPredicateOperator(
@@ -512,11 +512,11 @@ public class HistogramStatisticsTest {
         builder.addColumnStatistic(columnRefOperator, columnStatistic);
         Statistics statistics = builder.build();
 
-        // hit upper bound
+        // the only MCV holds every histogram row, so every row at hand
         Statistics estimated = BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(
                 Optional.of(columnRefOperator),
                 columnStatistic, eq10, Optional.of(ConstantOperator.createBoolean(false)), statistics);
-        Assertions.assertEquals(500L, estimated.getOutputRowCount(), 0.001);
+        Assertions.assertEquals(100000L, estimated.getOutputRowCount(), 0.001);
 
 
         mcv = Maps.newHashMap();
@@ -531,7 +531,7 @@ public class HistogramStatisticsTest {
         statistics = builder.build();
 
         estimated = PredicateStatisticsCalculator.statisticsCalculate(columnRefOperator, statistics);
-        Assertions.assertEquals(500L, estimated.getOutputRowCount(), 0.001);
+        Assertions.assertEquals(50000L, estimated.getOutputRowCount(), 0.001);
     }
 
     @Test
@@ -566,8 +566,10 @@ public class HistogramStatisticsTest {
 
     @Test
     public void testColumnNotEqualToConstantExcludesNullRows() {
+        // 236 of the 1000 histogram rows hold 10; 20% of the rows at hand are NULL.
         Map<String, Long> mcv = Maps.newHashMap();
         mcv.put("10", 236L);
+        mcv.put("11", 764L);
         Histogram histogram = new Histogram(new ArrayList<>(), mcv);
         ColumnRefOperator columnRefOperator = new ColumnRefOperator(0, IntegerType.BIGINT, "v1", true);
         ColumnStatistic columnStatistic = new ColumnStatistic(1, 1000, 0.2, 8, 62,
@@ -584,7 +586,8 @@ public class HistogramStatisticsTest {
                 Optional.of(columnRefOperator), columnStatistic, ne,
                 Optional.of(ConstantOperator.createBigint(10)), statistics);
 
-        Assertions.assertEquals(564L, estimated.getOutputRowCount(), 0.001);
+        // 800 non-NULL rows less the 23.6% share of 10.
+        Assertions.assertEquals(611.2, estimated.getOutputRowCount(), 0.001);
         Assertions.assertEquals(0.0, estimated.getColumnStatistic(columnRefOperator).getNullsFraction(), 0.001);
     }
 
