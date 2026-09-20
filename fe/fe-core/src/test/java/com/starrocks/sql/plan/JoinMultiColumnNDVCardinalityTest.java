@@ -97,6 +97,16 @@ public class JoinMultiColumnNDVCardinalityTest extends PlanWithCostTestBase {
     }
 
     @Test
+    public void testFilteredInputsBoundTheCombinedNDV() throws Exception {
+        mockCombinedStatsOnBothSides();
+        // Each input keeps 10 of its 1000 rows, so each side has at most 10 key tuples:
+        // 10 * 10 / max(min(200, 10), min(100, 10)) = 10, not 100 / 200.
+        String plan = getCostExplain("select * from t0 join t1 on t0.v1 = t1.v4 and t0.v2 = t1.v5"
+                + " where t0.v3 = 1 and t1.v6 = 1");
+        assertContains(plan, "cardinality: 10");
+    }
+
+    @Test
     public void testFallsBackWhenOneSideUncovered() throws Exception {
         StatisticStorage ss = GlobalStateMgr.getCurrentState().getStatisticStorage();
         new Expectations(ss) {

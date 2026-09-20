@@ -1377,7 +1377,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
         Statistics innerJoinStats;
         if (innerRowCount == -1) {
-            innerJoinStats = estimateInnerJoinStatistics(crossJoinStats, eqOnPredicates);
+            innerJoinStats = estimateInnerJoinStatistics(crossJoinStats, eqOnPredicates, leftStatistics, rightStatistics);
 
             OptExpression optExpression = context.getOptExpression();
             SessionVariable sessionVariable = ConnectContext.get().getSessionVariable();
@@ -1886,6 +1886,13 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     }
 
     public Statistics estimateInnerJoinStatistics(Statistics statistics, List<BinaryPredicateOperator> eqOnPredicates) {
+        return estimateInnerJoinStatistics(statistics, eqOnPredicates, null, null);
+    }
+
+    // leftStatistics and rightStatistics are the join inputs, when known: the multi-column statistics of
+    // a filtered input still describe the whole table, so they are bounded by the input's rows.
+    public Statistics estimateInnerJoinStatistics(Statistics statistics, List<BinaryPredicateOperator> eqOnPredicates,
+                                                  Statistics leftStatistics, Statistics rightStatistics) {
         if (eqOnPredicates.isEmpty()) {
             return statistics;
         }
@@ -1895,7 +1902,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         } else {
             estimated = statistics.withOutputRowCount(estimateInnerRowCountMiddleGround(statistics, eqOnPredicates));
         }
-        double mcRowCount = estimateInnerRowCountByMultiColumnNDV(statistics, eqOnPredicates);
+        double mcRowCount = estimateInnerRowCountByMultiColumnNDV(statistics, eqOnPredicates, leftStatistics,
+                rightStatistics);
         if (mcRowCount >= 0) {
             // The per-predicate estimate keeps the effect of the equalities on the key columns' statistics;
             // only the row count comes from the multi-column statistics.
@@ -1915,7 +1923,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     // relations, and each relation's full key is covered by a combined-NDV statistic, so max() needs no independence
     // guess.
     private double estimateInnerRowCountByMultiColumnNDV(Statistics statistics,
-                                                         List<BinaryPredicateOperator> eqOnPredicates) {
+                                                         List<BinaryPredicateOperator> eqOnPredicates,
+                                                         Statistics leftStatistics, Statistics rightStatistics) {
         if (eqOnPredicates.size() < 2 || columnRefFactory == null) {
             return -1;
         }
@@ -1946,18 +1955,64 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
         double ndv = 1.0;
         double nonNullFactor = 1.0;
-        for (Set<ColumnRefOperator> keyColumns : relationToKeyColumns.values()) {
+        boolean unfiltered = true;
+        List<MultiColumnCombinedStats> sides = new ArrayList<>(2);
+        List<Integer> relations = new ArrayList<>(relationToKeyColumns.keySet());
+        for (Integer relation : relations) {
+            Set<ColumnRefOperator> keyColumns = relationToKeyColumns.get(relation);
             Pair<Set<ColumnRefOperator>, MultiColumnCombinedStats> mc = statistics.getLargestSubsetMCStats(keyColumns);
             if (mc == null || mc.first.size() != keyColumns.size()) {
                 // this relation's full key is not covered by a combined-NDV statistic
                 return -1;
             }
-            ndv = Math.max(ndv, mc.second.getNdv());
+            sides.add(mc.second);
+            // The combined NDV counts the tuples of the whole table; a filtered input has at most its rows.
+            double sideNdv = mc.second.getNdv();
+            Statistics side = sideOf(keyColumns, leftStatistics, rightStatistics);
+            if (side != null) {
+                sideNdv = Math.min(sideNdv, Math.max(1.0, side.getOutputRowCount()));
+                unfiltered &= mc.second.getRowCount() <= 0 || side.getOutputRowCount() >= mc.second.getRowCount() * 0.99;
+            }
+            ndv = Math.max(ndv, sideNdv);
             // NULLs never satisfy an equi-join, so discount the most NULL-heavy key column on this side,
             // mirroring estimateColumnEqualToColumn's single-column (1 - nullsFraction) factor.
             nonNullFactor *= (1.0 - maxNullsFraction(statistics, keyColumns));
         }
+        if (!unfiltered) {
+            // The MCV lists describe the whole tables; a filtered input has lost part of them.
+            return statistics.getOutputRowCount() / ndv * nonNullFactor;
+        }
+
+        // With an MCV list on both sides the head tuples join exactly and the tails follow the NDV.
+        List<ColumnRefOperator> leftKey = new ArrayList<>(eqOnPredicates.size());
+        List<ColumnRefOperator> rightKey = new ArrayList<>(eqOnPredicates.size());
+        for (BinaryPredicateOperator predicate : eqOnPredicates) {
+            ColumnRefOperator first = (ColumnRefOperator) predicate.getChild(0);
+            ColumnRefOperator second = (ColumnRefOperator) predicate.getChild(1);
+            boolean firstIsLeft = columnRefFactory.getRelationId(first.getId()) == relations.get(0);
+            leftKey.add(firstIsLeft ? first : second);
+            rightKey.add(firstIsLeft ? second : first);
+        }
+        OptionalDouble mcvSelectivity = MultiColumnJoinMcvEstimator.estimateSelectivity(
+                sides.get(0), leftKey, maxNullsFraction(statistics, relationToKeyColumns.get(relations.get(0))),
+                sides.get(1), rightKey, maxNullsFraction(statistics, relationToKeyColumns.get(relations.get(1))));
+        if (mcvSelectivity.isPresent()) {
+            return statistics.getOutputRowCount() * mcvSelectivity.getAsDouble();
+        }
         return statistics.getOutputRowCount() / ndv * nonNullFactor;
+    }
+
+    // The join input holding the key columns, when known.
+    private static Statistics sideOf(Set<ColumnRefOperator> keyColumns, Statistics leftStatistics,
+                                     Statistics rightStatistics) {
+        ColumnRefOperator column = keyColumns.iterator().next();
+        if (leftStatistics != null && leftStatistics.getColumnStatistics().containsKey(column)) {
+            return leftStatistics;
+        }
+        if (rightStatistics != null && rightStatistics.getColumnStatistics().containsKey(column)) {
+            return rightStatistics;
+        }
+        return null;
     }
 
     private static double maxNullsFraction(Statistics statistics, Set<ColumnRefOperator> columns) {
