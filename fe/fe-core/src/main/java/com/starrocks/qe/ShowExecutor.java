@@ -264,6 +264,7 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
+import com.starrocks.statistic.ExternalMultiColumnStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
@@ -2864,6 +2865,15 @@ public class ShowExecutor {
                 }
             }
 
+            List<ExternalMultiColumnStatsMeta> externalMetas = new ArrayList<>(
+                    context.getGlobalStateMgr().getAnalyzeMgr().getExternalMultiColumnStatsMetaMap().values());
+            for (ExternalMultiColumnStatsMeta meta : externalMetas) {
+                List<String> result = ShowExecutor.showExternalMultiColumnStatsMeta(context, meta);
+                if (result != null) {
+                    rows.add(result);
+                }
+            }
+
             ShowResultSetMetaData showResultSetMetaData = new ShowResultMetaFactory().getMetadata(stmt);
             rows = doPredicate(stmt, showResultSetMetaData, rows);
             rows = doOrderBy(rows, stmt.getOrderByPairs());
@@ -3616,6 +3626,38 @@ public class ShowExecutor {
         row.set(5, meta.getUpdateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
         row.set(6, meta.getProperties() == null ? "{}" : meta.getProperties().toString());
 
+        return row;
+    }
+
+    public static List<String> showExternalMultiColumnStatsMeta(ConnectContext context, ExternalMultiColumnStatsMeta meta) {
+        Database db;
+        Table table;
+        try {
+            db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, meta.getCatalogName(), meta.getDbName());
+            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, meta.getCatalogName(),
+                    meta.getDbName(), meta.getTableName());
+        } catch (Exception e) {
+            // The catalog may be unreachable; the row is skipped like for the other external statistics.
+            return null;
+        }
+        if (db == null || table == null) {
+            return null;
+        }
+        try {
+            Authorizer.checkAnyActionOnTableLikeObject(context, db.getFullName(), table);
+        } catch (AccessDeniedException e) {
+            return null;
+        }
+
+        List<String> row = Lists.newArrayList("", "", "", "", "", "", "");
+        row.set(0, meta.getCatalogName() + "." + meta.getDbName());
+        row.set(1, meta.getTableName());
+        row.set(2, meta.getColumnNames().toString());
+        row.set(3, meta.getAnalyzeType().name());
+        row.set(4, meta.getStatisticsTypes() == null ? "" :
+                meta.getStatisticsTypes().stream().map(Enum::name).collect(Collectors.joining(", ")));
+        row.set(5, meta.getUpdateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        row.set(6, meta.getProperties() == null ? "{}" : meta.getProperties().toString());
         return row;
     }
 }

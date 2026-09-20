@@ -884,7 +884,7 @@ public class AnalyzeStmtTest {
         analyzeFail("analyze table db.tbl multiple columns (k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11)",
                 "column size 11 exceeded max size of 10 on multi-column combined analyze statement");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE)",
-                "Don't support analyze multi-columns combined statistics on external table");
+                "Multi-column combined statistics on external table only support FULL collection");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE) with async mode",
                 "not support async analyze on multi-column analyze statement");
 

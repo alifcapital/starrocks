@@ -253,8 +253,11 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException(
                             "Analyze external table only support hive, iceberg, deltalake, paimon and odps table",
                             tableName.toString());
-                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc) {
-                    throw new SemanticException("Don't support analyze multi-columns combined statistics on external table");
+                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc && statement.isSample()) {
+                    // Multi-column statistics of an external table are collected by a full scan of the column
+                    // group; there is no sampled collection for them.
+                    throw new SemanticException("Multi-column combined statistics on external table only support "
+                            + "FULL collection, use ANALYZE FULL TABLE ... MULTIPLE COLUMNS");
                 }
 
                 statement.setExternal(true);

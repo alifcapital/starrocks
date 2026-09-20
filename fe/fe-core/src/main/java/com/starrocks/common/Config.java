@@ -2758,6 +2758,14 @@ public class Config extends ConfigBase {
     public static long histogram_mcv_size = 100;
 
     /**
+     * log2 of the hash map size of the frequent-items sketch (ds_frequent_items) that finds the most
+     * common values during statistics collection. The sketch keeps at most 2^N entries per fragment and
+     * guarantees every value with a share above 3.5 / 2^N of the rows; 14 gives 16384 entries.
+     */
+    @ConfField(mutable = true)
+    public static int statistic_mcv_sketch_lg_map_size = 14;
+
+    /**
      * default sample ratio of histogram statistics
      */
     @ConfField(mutable = true)

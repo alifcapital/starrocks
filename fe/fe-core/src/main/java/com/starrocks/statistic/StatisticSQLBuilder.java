@@ -451,6 +451,28 @@ public class StatisticSQLBuilder {
                         .map(c -> "'" + SqlUtils.escapeSqlString(c) + "'").collect(Collectors.toList())) + ")";
     }
 
+    // Rows come back as [column_names, row_count, ndv, mcv]; see ExternalMultiColumnStatsCacheLoader.
+    public static String buildQueryExternalMultiColumnStatisticsSQL(String tableUUID) {
+        return "SELECT column_names, row_count, ndv, mcv FROM " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID);
+    }
+
+    public static String buildDropExternalMultiColumnStatisticsSQL(String tableUUID) {
+        return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + " where " + buildTableUUIDInPredicateQuoted(tableUUID);
+    }
+
+    public static String buildDropExternalMultiColumnStatisticsSQL(String catalogName, String dbName,
+                                                                   String tableName) {
+        return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + " where catalog_name = '" + SqlUtils.escapeSqlString(catalogName) + "'"
+                + " and db_name = '" + SqlUtils.escapeSqlString(dbName) + "'"
+                + " and table_name = '" + SqlUtils.escapeSqlString(tableName) + "'";
+    }
+
     private static String build(VelocityContext context, String template) {
         StringWriter sw = new StringWriter();
         DEFAULT_VELOCITY_ENGINE.evaluate(context, sw, "", template);

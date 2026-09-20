@@ -19,6 +19,9 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.Database;
@@ -61,6 +64,7 @@ import com.starrocks.thrift.TStatisticData;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.type.JsonType;
 import com.starrocks.type.Type;
+import io.netty.buffer.Unpooled;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.logging.log4j.LogManager;
@@ -71,6 +75,7 @@ import org.apache.thrift.protocol.TCompactProtocol;
 import org.jetbrains.annotations.NotNull;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
@@ -684,6 +689,22 @@ public class StatisticExecutor {
                             basicStatsMeta.getDbId(), basicStatsMeta.getTableId(), basicStatsMeta.getColumns(),
                             refreshAsync);
                 }
+            } else if (statsJob.isMultiColumnStatsJob()) {
+                // for external table
+                for (List<String> columnGroup : statsJob.getColumnGroups()) {
+                    ExternalMultiColumnStatsMeta meta = new ExternalMultiColumnStatsMeta(statsJob.getCatalogName(),
+                            db.getFullName(), table.getName(), Lists.newArrayList(columnGroup),
+                            statsJob.getAnalyzeType(), statsJob.getStatisticsTypes(), analyzeStatus.getEndTime(),
+                            statsJob.getProperties());
+                    try {
+                        meta.setTableUUID(table.getUUID());
+                    } catch (Exception e) {
+                        LOG.warn("Failed to resolve table UUID for external multi-column stats meta, table: {}.{}.{}",
+                                statsJob.getCatalogName(), db.getFullName(), table.getName(), e);
+                    }
+                    analyzeMgr.addExternalMultiColumnStatsMeta(meta);
+                }
+                analyzeMgr.refreshExternalMultiColumnStatisticsCache(table.getUUID(), !refreshAsync);
             } else {
                 // for external table
                 ExternalBasicStatsMeta externalBasicStatsMeta = analyzeMgr.getExternalTableBasicStatsMeta(
@@ -743,6 +764,74 @@ public class StatisticExecutor {
             return deserializerStatisticData(sqlResult);
         } catch (TException e) {
             throw new SemanticException(e.getMessage());
+        }
+    }
+
+    /**
+     * Runs a statistics query whose result does not fit a TStatisticData layout and returns its rows as
+     * text cells, null for a NULL cell.
+     */
+    public List<List<String>> executeStatisticJsonDQL(ConnectContext context, String sql) {
+        context.setQueryId(UUIDUtil.genUUID());
+        if (Config.enable_print_sql) {
+            LOG.info("Begin to execute sql, type: Statistics collect，query id:{}, sql:{}", context.getQueryId(), sql);
+        }
+        if (FeConstants.enableUnitStatistics) {
+            return Collections.emptyList();
+        }
+        Stopwatch watch = Stopwatch.createStarted();
+        StatementBase parsedStmt = SqlParser.parseOneWithStarRocksDialect(sql, context.getSessionVariable());
+        ExecPlan execPlan = StatementPlanner.plan(parsedStmt, context, TResultSinkType.HTTP_PROTOCAL);
+        StmtExecutor executor = StmtExecutor.newInternalExecutor(context, parsedStmt);
+        context.setExecutor(executor);
+        context.getSessionVariable().setEnableMaterializedViewRewrite(false);
+        Pair<List<TResultBatch>, Status> sqlResult = executor.executeStmtWithExecPlan(context, execPlan);
+        if (!sqlResult.second.ok()) {
+            String errorMsg = context.getState().getErrorMessage();
+            if (Strings.isNullOrEmpty(errorMsg) && executor.getCoordinator() != null) {
+                errorMsg = executor.getCoordinator().getExecStatus().getErrorMsg();
+            }
+            throw new SemanticException("Statistics query fail | Error Message [%s] | QueryId [%s] | SQL [%s]",
+                    errorMsg, DebugUtil.printId(context.getQueryId()), sql);
+        }
+        AuditInternalLog.handleInternalLog(AuditInternalLog.InternalType.QUERY, DebugUtil.printId(context.getQueryId()),
+                sql, watch);
+
+        List<List<String>> rows = Lists.newArrayList();
+        for (TResultBatch batch : ListUtils.emptyIfNull(sqlResult.first)) {
+            for (ByteBuffer buffer : batch.getRows()) {
+                String json = Unpooled.copiedBuffer(buffer).toString(StandardCharsets.UTF_8);
+                JsonArray data = JsonParser.parseString(json).getAsJsonObject().getAsJsonArray("data");
+                List<String> row = Lists.newArrayList();
+                for (JsonElement cell : data) {
+                    row.add(cell.isJsonNull() ? null : cell.getAsString());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    public List<List<String>> queryExternalMultiColumnStatistics(ConnectContext context, String tableUUID) {
+        if (!StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME))) {
+            return Collections.emptyList();
+        }
+        return executeStatisticJsonDQL(context,
+                StatisticSQLBuilder.buildQueryExternalMultiColumnStatisticsSQL(tableUUID));
+    }
+
+    public void dropExternalMultiColumnStatistics(ConnectContext statsConnectCtx, String tableUUID) {
+        String sql = StatisticSQLBuilder.buildDropExternalMultiColumnStatisticsSQL(tableUUID);
+        if (!executeDML(statsConnectCtx, sql)) {
+            LOG.warn("Execute external multi-column statistic table expire fail.");
+        }
+    }
+
+    public void dropExternalMultiColumnStatistics(ConnectContext statsConnectCtx, String catalogName, String dbName,
+                                                  String tableName) {
+        String sql = StatisticSQLBuilder.buildDropExternalMultiColumnStatisticsSQL(catalogName, dbName, tableName);
+        if (!executeDML(statsConnectCtx, sql)) {
+            LOG.warn("Execute external multi-column statistic table expire fail.");
         }
     }
 

@@ -36,6 +36,8 @@ import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.LocalDateTime;
@@ -48,10 +50,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class StatisticsCalcUtils {
+    private static final Logger LOG = LogManager.getLogger(StatisticsCalcUtils.class);
 
     private StatisticsCalcUtils() {
 
@@ -92,6 +96,86 @@ public class StatisticsCalcUtils {
             }
         }
         return builder;
+    }
+
+    /**
+     * Attaches the multi-column statistics collected for an external table (see
+     * ExternalMultiColumnStatisticsCollectJob) to the scan statistics. Column groups are matched to the
+     * scan's columns by name; a group with a column the scan does not read is left out.
+     */
+    public static Statistics withExternalMultiColumnStats(Table table, Statistics statistics,
+                                                          Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        if (statistics == null || table == null || !table.isAnalyzableExternalTable()) {
+            return statistics;
+        }
+        ExternalMultiColumnCombinedStatistics cached;
+        try {
+            cached = GlobalStateMgr.getCurrentState().getStatisticStorage().getExternalMultiColumnCombinedStatistics(table);
+        } catch (Exception e) {
+            LOG.warn("Failed to get external multi-column statistics of table {}", table.getName(), e);
+            return statistics;
+        }
+        if (cached == null || cached.isEmpty()) {
+            return statistics;
+        }
+        return attachExternalMultiColumnStats(statistics, cached, colRefToColumnMetaMap);
+    }
+
+    /**
+     * Attaches every column group the scan reads at least two columns of, keyed by the columns it reads.
+     * A group with unread columns keeps them as null placeholders in the component order: its MCV list
+     * still answers predicates on the read columns, while its combined NDV describes the whole group
+     * only (see MultiColumnCombinedStats#isComplete()), so such a group needs an MCV list to be of use.
+     * When two groups read the same columns, the complete one wins, then the one whose MCV list covers
+     * more rows.
+     */
+    static Statistics attachExternalMultiColumnStats(Statistics statistics, ExternalMultiColumnCombinedStatistics cached,
+                                                     Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        Map<String, ColumnRefOperator> columnNameToRefMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        colRefToColumnMetaMap.keySet().forEach(ref -> columnNameToRefMap.putIfAbsent(ref.getName(), ref));
+
+        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> attached = new HashMap<>();
+        for (ExternalMultiColumnCombinedStatistics.Group group : cached.getGroups()) {
+            List<ColumnRefOperator> refs = new ArrayList<>(group.getColumnNames().size());
+            Set<ColumnRefOperator> read = new HashSet<>();
+            boolean duplicate = false;
+            for (String columnName : group.getColumnNames()) {
+                ColumnRefOperator ref = columnNameToRefMap.get(columnName);
+                refs.add(ref);
+                if (ref != null && !read.add(ref)) {
+                    duplicate = true;
+                }
+            }
+            if (duplicate || read.size() < 2 || (read.size() < refs.size() && group.getMcv().isEmpty())) {
+                continue;
+            }
+            MultiColumnCombinedStats stats =
+                    new MultiColumnCombinedStats(group.getNdv(), group.getRowCount(), refs, group.getMcv());
+            attached.merge(read, stats, StatisticsCalcUtils::preferMultiColumnStats);
+        }
+        if (attached.isEmpty()) {
+            return statistics;
+        }
+        return Statistics.buildFrom(statistics).addMultiColumnStatistics(attached).build();
+    }
+
+    private static MultiColumnCombinedStats preferMultiColumnStats(MultiColumnCombinedStats current,
+                                                                   MultiColumnCombinedStats candidate) {
+        if (current.isComplete() != candidate.isComplete()) {
+            return current.isComplete() ? current : candidate;
+        }
+        return mcvCoverage(candidate) > mcvCoverage(current) ? candidate : current;
+    }
+
+    private static double mcvCoverage(MultiColumnCombinedStats stats) {
+        if (stats.getRowCount() <= 0) {
+            return 0;
+        }
+        double rows = 0;
+        for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
+            rows += entry.getCount();
+        }
+        return rows / stats.getRowCount();
     }
 
     public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,

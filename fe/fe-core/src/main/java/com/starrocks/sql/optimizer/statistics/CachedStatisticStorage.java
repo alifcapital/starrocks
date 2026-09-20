@@ -83,6 +83,10 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     AsyncLoadingCache<Long, Optional<MultiColumnCombinedStatistics>> multiColumnStats =
             createAsyncLoadingCache(new MultiColumnCombinedStatsCacheLoader());
 
+    // Keyed by table UUID.
+    AsyncLoadingCache<String, Optional<ExternalMultiColumnCombinedStatistics>> externalMultiColumnStats =
+            createAsyncLoadingCache(new ExternalMultiColumnStatsCacheLoader());
+
     @Override
     public Map<Long, Optional<Long>> getTableStatistics(Long tableId, Collection<Partition> partitions) {
         // get Statistics Table column info, just return default column statistics
@@ -749,6 +753,63 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
+    public ExternalMultiColumnCombinedStatistics getExternalMultiColumnCombinedStatistics(Table table) {
+        if (table == null || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return ExternalMultiColumnCombinedStatistics.EMPTY;
+        }
+        try {
+            CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> result =
+                    externalMultiColumnStats.get(table.getUUID());
+            if (Config.enable_sync_statistics_load) {
+                result.get();
+            }
+            if (result.isDone()) {
+                return result.get().orElse(ExternalMultiColumnCombinedStatistics.EMPTY);
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("Failed to load external multi-column statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Failed to load external multi-column statistics", e);
+        }
+        return ExternalMultiColumnCombinedStatistics.EMPTY;
+    }
+
+    @Override
+    public void expireExternalMultiColumnStatistics(String tableUUID) {
+        if (tableUUID == null || tableUUID.isEmpty()) {
+            return;
+        }
+        externalMultiColumnStats.synchronous().invalidate(tableUUID);
+    }
+
+    @Override
+    public void refreshExternalMultiColumnStatistics(String tableUUID, boolean isSync) {
+        if (tableUUID == null || tableUUID.isEmpty() || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return;
+        }
+        try {
+            ExternalMultiColumnStatsCacheLoader loader = new ExternalMultiColumnStatsCacheLoader();
+            CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> future =
+                    loader.asyncLoad(tableUUID, statsCacheRefresherExecutor);
+            if (isSync) {
+                externalMultiColumnStats.synchronous().put(tableUUID, future.get());
+            } else {
+                future.whenComplete((res, e) -> {
+                    if (e == null) {
+                        externalMultiColumnStats.synchronous().put(tableUUID, res);
+                    }
+                });
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("Failed to refresh external multi-column statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Failed to refresh external multi-column statistics", e);
+        }
+    }
+
+    @Override
     public long estimateSize() {
         return Estimator.estimate(tableStatsCache.synchronous().asMap(), 20) +
                 Estimator.estimate(columnStatistics.synchronous().asMap(), 20) +
@@ -756,7 +817,8 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Estimator.estimate(histogramCache.synchronous().asMap(), 20) +
                 Estimator.estimate(connectorTableCachedStatistics.synchronous().asMap(), 20) +
                 Estimator.estimate(connectorHistogramCache.synchronous().asMap(), 20) +
-                Estimator.estimate(multiColumnStats.synchronous().asMap(), 20);
+                Estimator.estimate(multiColumnStats.synchronous().asMap(), 20) +
+                Estimator.estimate(externalMultiColumnStats.synchronous().asMap(), 20);
     }
 
     @Override

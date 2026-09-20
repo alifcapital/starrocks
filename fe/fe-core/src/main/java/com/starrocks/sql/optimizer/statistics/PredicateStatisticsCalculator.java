@@ -370,9 +370,11 @@ public class PredicateStatisticsCalculator {
             if (predicate.isAnd()) {
                 Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> extracted =
                         Utils.separateEqualityPredicates(predicate);
+                Optional<MultiColumnMcvEstimator.Result> mcvEstimate =
+                        MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics);
 
-                if (extracted.first.size() > 1) {
-                    return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics);
+                if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
+                    return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate);
                 }
 
                 Statistics leftStatistics = predicate.getChild(0).accept(this, null);
@@ -518,9 +520,11 @@ public class PredicateStatisticsCalculator {
             if (predicate.isAnd()) {
                 Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> extracted =
                         Utils.separateEqualityPredicates(predicate);
+                Optional<MultiColumnMcvEstimator.Result> mcvEstimate =
+                        MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics);
 
-                if (extracted.first.size() > 1) {
-                    return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics);
+                if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
+                    return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate);
                 }
 
                 Statistics leftStatistics = predicate.getChild(0).accept(this, null);

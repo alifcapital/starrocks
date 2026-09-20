@@ -596,6 +596,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             } else {
                 statistics = StatisticsUtils.buildDefaultStatistics(colRefToColumnMetaMap.keySet());
             }
+            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap);
 
             context.setStatistics(statistics);
             if (node.isLogical()) {
@@ -625,6 +626,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null,
                     node.getPredicate(), node.getLimit(), TvrTableSnapshot.empty());
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
             context.setStatistics(stats);
 
             if (node.isLogical()) {
@@ -757,6 +759,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null,
                     node.getPredicate(), node.getLimit(), tvrVersionRange);
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
             context.setStatistics(stats);
             if (node.isLogical()) {
                 boolean hasUnknownColumns = stats.getColumnStatistics().values().stream()
@@ -784,6 +787,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             String catalogName = table.getCatalogName();
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null, node.getPredicate());
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
             context.setStatistics(stats);
         }
         return visitOperator(node, context);
@@ -855,6 +859,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             String catalogName = (table).getCatalogName();
             Statistics statistics = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, colRefToColumnMetaMap, partitionKeys, null);
+            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap);
             context.setStatistics(statistics);
 
             if (node.isLogical()) {
@@ -888,7 +893,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         builder.setOutputRowCount(outputRowCount);
         builder.setStatsSource(statsSource);
 
-        context.setStatistics(builder.build());
+        context.setStatistics(
+                StatisticsCalcUtils.withExternalMultiColumnStats(table, builder.build(), colRefToColumnMetaMap));
         return visitOperator(node, context);
     }
 

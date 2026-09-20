@@ -489,6 +489,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_ENABLE_REPLICATED_JOIN = "cbo_enable_replicated_join";
     public static final String CBO_USE_CORRELATED_JOIN_ESTIMATE = "cbo_use_correlated_join_estimate";
     public static final String CBO_USE_CORRELATED_PREDICATE_ESTIMATE = "cbo_use_correlated_predicate_estimate";
+    public static final String CBO_ENABLE_MULTI_COLUMN_MCV_ESTIMATE = "cbo_enable_multi_column_mcv_estimate";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT = "always_collect_low_card_dict";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT_ON_LAKE = "always_collect_low_card_dict_on_lake";
     public static final String CBO_ENABLE_LOW_CARDINALITY_OPTIMIZE = "cbo_enable_low_cardinality_optimize";
@@ -1519,6 +1520,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VariableMgr.VarAttr(name = CBO_USE_CORRELATED_PREDICATE_ESTIMATE)
     private boolean useCorrelatedPredicateEstimate = true;
+
+    // Estimate conjunctions with the most common value list of multi-column statistics when one exists.
+    @VariableMgr.VarAttr(name = CBO_ENABLE_MULTI_COLUMN_MCV_ESTIMATE)
+    private boolean cboEnableMultiColumnMcvEstimate = true;
 
     @VariableMgr.VarAttr(name = CBO_USE_NTH_EXEC_PLAN, flag = VariableMgr.INVISIBLE)
     private int useNthExecPlan = 0;
@@ -4805,6 +4810,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setUseCorrelatedPredicateEstimate(boolean useCorrelatedPredicateEstimate) {
         this.useCorrelatedPredicateEstimate = useCorrelatedPredicateEstimate;
+    }
+
+    public boolean isCboEnableMultiColumnMcvEstimate() {
+        return cboEnableMultiColumnMcvEstimate;
+    }
+
+    public void setCboEnableMultiColumnMcvEstimate(boolean cboEnableMultiColumnMcvEstimate) {
+        this.cboEnableMultiColumnMcvEstimate = cboEnableMultiColumnMcvEstimate;
     }
 
     public boolean isAlwaysCollectDict() {

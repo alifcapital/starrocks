@@ -198,7 +198,8 @@ public class Statistics {
             Set<ColumnRefOperator> keySet = entry.getKey();
             int keySize = keySet.size();
 
-            if (keySize <= maxSize) {
+            // The NDV of a group with unread columns is not the NDV of the columns that are read.
+            if (keySize <= maxSize || !entry.getValue().isComplete()) {
                 continue;
             }
 

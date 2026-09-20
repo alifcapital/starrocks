@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static java.lang.Double.NEGATIVE_INFINITY;
@@ -289,18 +290,74 @@ public class StatisticsEstimateUtils {
         return Math.min(1.0, Math.max(0.0, estimatedSelectivity));
     }
 
+    // S_final = S_mcv * ∏(S_i^(0.5^(i+1))) over the equality predicates on columns the MCV estimate did not
+    // cover, S_i sorted ascending, at most three of them; the same decay as for columns outside a group.
+    private static double applyRemainingEqualityPredicates(MultiColumnMcvEstimator.Result mcvEstimate,
+                                                           Map<ColumnRefOperator, ConstantOperator> equalityPredicates,
+                                                           Statistics statistics) {
+        double selectivity = mcvEstimate.getSelectivity();
+        List<Double> remaining = new ArrayList<>();
+        for (Map.Entry<ColumnRefOperator, ConstantOperator> entry : equalityPredicates.entrySet()) {
+            if (mcvEstimate.getConsumedColumns().contains(entry.getKey())) {
+                continue;
+            }
+            BinaryPredicateOperator equality =
+                    new BinaryPredicateOperator(BinaryType.EQ, entry.getKey(), entry.getValue());
+            remaining.add(getPredicateSelectivity(equality, statistics));
+        }
+        remaining.sort(Double::compare);
+        boolean decay = ConnectContext.get() == null ||
+                ConnectContext.get().getSessionVariable().isUseCorrelatedPredicateEstimate();
+        for (int i = 0; i < Math.min(3, remaining.size()); i++) {
+            double decayFactor = decay ? Math.pow(0.5, i + 1) : 1;
+            selectivity *= Math.pow(remaining.get(i), decayFactor);
+        }
+        return Math.min(1.0, Math.max(0.0, selectivity));
+    }
+
     public static Statistics computeCompoundStatsWithMultiColumnOptimize(ScalarOperator predicate, Statistics inputStats) {
+        return computeCompoundStatsWithMultiColumnOptimize(predicate, inputStats, Optional.empty());
+    }
+
+    /**
+     * Estimates a conjunction with multi-column statistics. When an MCV estimate is given, it covers the
+     * conjuncts it consumed (see MultiColumnMcvEstimator); the equality predicates left over are applied
+     * with the same decay as the columns outside a combined-NDV group, and the other predicates are applied
+     * one after another. Without an MCV estimate, the conjunction must hold at least two equality
+     * predicates, which are estimated with the combined NDV.
+     */
+    public static Statistics computeCompoundStatsWithMultiColumnOptimize(ScalarOperator predicate, Statistics inputStats,
+                                                                          Optional<MultiColumnMcvEstimator.Result> mcvEstimate) {
         Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> decomposedPredicates =
                 Utils.separateEqualityPredicates(predicate);
 
         Map<ColumnRefOperator, ConstantOperator> equalityPredicates = decomposedPredicates.first;
         List<ScalarOperator> nonEqualityPredicates = decomposedPredicates.second;
 
-        double conjunctiveSelectivity = estimateConjunctiveEqualitySelectivity(equalityPredicates, inputStats);
+        double conjunctiveSelectivity;
+        List<ScalarOperator> consumedNonEqualityPredicates = List.of();
+        if (mcvEstimate.isPresent()) {
+            MultiColumnMcvEstimator.Result mcv = mcvEstimate.get();
+            conjunctiveSelectivity = applyRemainingEqualityPredicates(mcv, equalityPredicates, inputStats);
+            consumedNonEqualityPredicates = nonEqualityPredicates.stream()
+                    .filter(p -> mcv.getConsumed().contains(p)).toList();
+            nonEqualityPredicates = nonEqualityPredicates.stream()
+                    .filter(p -> !mcv.getConsumed().contains(p)).toList();
+        } else {
+            conjunctiveSelectivity = estimateConjunctiveEqualitySelectivity(equalityPredicates, inputStats);
+        }
         double filteredRowCount = inputStats.getOutputRowCount() * conjunctiveSelectivity;
 
         Statistics.Builder filteredStatsBuilder = Statistics.buildFrom(inputStats)
                 .setOutputRowCount(filteredRowCount);
+
+        // The row count already reflects these predicates; take only their effect on the column statistics.
+        for (ScalarOperator consumed : consumedNonEqualityPredicates) {
+            Statistics consumedStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, inputStats);
+            for (ColumnRefOperator column : Utils.extractColumnRef(consumed)) {
+                filteredStatsBuilder.addColumnStatistic(column, consumedStats.getColumnStatistic(column));
+            }
+        }
 
         for (Map.Entry<ColumnRefOperator, ConstantOperator> entry : equalityPredicates.entrySet()) {
             ColumnRefOperator columnRef = entry.getKey();
