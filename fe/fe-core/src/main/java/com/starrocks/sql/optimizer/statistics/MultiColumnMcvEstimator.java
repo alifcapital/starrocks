@@ -29,6 +29,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -130,6 +131,49 @@ public class MultiColumnMcvEstimator {
         }
         double floor = 1.0 / Math.max(1.0, statistics.getOutputRowCount());
         return Optional.of(new Result(Math.min(1.0, Math.max(floor, selectivity)), consumed, consumedColumns));
+    }
+
+    /**
+     * The distinct value tuples of some columns of a group, from its head: the distinct projections
+     * of the head tuples, plus the tail tuples projected at the same rate as the head. When several
+     * groups hold every column, the narrowest one projects; ties go to the one whose head covers
+     * more rows. Empty when no group with an MCV list holds every column.
+     */
+    public static OptionalDouble projectedNdv(Collection<ColumnRefOperator> columns, Statistics statistics) {
+        if (!isEnabled() || columns.isEmpty()) {
+            return OptionalDouble.empty();
+        }
+        MultiColumnCombinedStats best = null;
+        double bestCoverage = -1;
+        for (MultiColumnCombinedStats stats : statistics.getMultiColumnCombinedStats().values()) {
+            if (!stats.hasMcv() || stats.getNdv() <= 0 || !stats.getColumns().containsAll(columns)) {
+                continue;
+            }
+            double coverage = mcvTotalRows(stats) / (double) stats.getRowCount();
+            if (best == null || stats.getColumns().size() < best.getColumns().size()
+                    || (stats.getColumns().size() == best.getColumns().size() && coverage > bestCoverage)) {
+                best = stats;
+                bestCoverage = coverage;
+            }
+        }
+        if (best == null) {
+            return OptionalDouble.empty();
+        }
+        List<Integer> positions = new ArrayList<>();
+        for (ColumnRefOperator column : columns) {
+            positions.add(best.getColumns().indexOf(column));
+        }
+        Set<List<String>> projections = new HashSet<>();
+        for (MultiColumnCombinedStats.McvEntry entry : best.getMcv()) {
+            List<String> projection = new ArrayList<>(positions.size());
+            for (int position : positions) {
+                projection.add(entry.getValues().get(position));
+            }
+            projections.add(projection);
+        }
+        double headTuples = best.getMcv().size();
+        double tailTuples = Math.max(0, best.getNdv() - headTuples);
+        return OptionalDouble.of(projections.size() + tailTuples * projections.size() / headTuples);
     }
 
     private static boolean isEnabled() {

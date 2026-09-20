@@ -178,6 +178,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -1220,6 +1221,23 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             if (columnsWithMultiColStats.size() == groupBys.size()) {
                 return Math.min(Math.max(1, rowCount), inputStatistics.getOutputRowCount());
             }
+        }
+
+        // A group with an MCV list that holds every group-by column projects its head onto them. The
+        // projection is bounded by the product of the single-column distinct counts.
+        OptionalDouble projectedNdv = MultiColumnMcvEstimator.projectedNdv(groupBys, inputStatistics);
+        if (projectedNdv.isPresent()) {
+            double product = 1;
+            for (ColumnRefOperator column : groupBys) {
+                ColumnStatistic columnStats = inputStatistics.getColumnStatistic(column);
+                if (columnStats.isUnknown()) {
+                    product = Double.POSITIVE_INFINITY;
+                    break;
+                }
+                product *= columnStats.getDistinctValuesCount() + (columnStats.getNullsFraction() == 0.0 ? 0 : 1);
+            }
+            return Math.min(Math.max(1, Math.min(projectedNdv.getAsDouble(), product)),
+                    inputStatistics.getOutputRowCount());
         }
 
         // Process columns not covered by multi-column statistics

@@ -37,7 +37,9 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -299,6 +301,29 @@ public class MultiColumnMcvEstimatorTest {
         ScalarOperator predicate = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
                 eq(GATE, ConstantOperator.createInt(0)));
         Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics).isEmpty());
+    }
+
+    @Test
+    public void testGroupByProjectsTheHeadOntoItsColumns() {
+        Statistics statistics = statisticsWithMcv();
+        // Three distinct (status, gate) projections among the four head tuples; the eight tail tuples
+        // project at the same rate.
+        Assertions.assertEquals(9, MultiColumnMcvEstimator.projectedNdv(List.of(STATUS, GATE), statistics).orElseThrow(),
+                1e-9);
+        Assertions.assertEquals(9, MultiColumnMcvEstimator.projectedNdv(List.of(TYPE), statistics).orElseThrow(), 1e-9);
+        Assertions.assertTrue(MultiColumnMcvEstimator.projectedNdv(List.of(STATUS, EXTRA), statistics).isEmpty());
+
+        // Every head tuple projects to a distinct (status, type): 4 + 8, within the product 3 * 4 of the
+        // single-column counts with the NULL of status.
+        Map<ColumnRefOperator, ColumnStatistic> groupStatistics = new HashMap<>();
+        Assertions.assertEquals(12, StatisticsCalculator.computeGroupByStatistics(List.of(STATUS, TYPE), statistics,
+                groupStatistics), 1e-9);
+        // The product of the single-column counts caps the projection.
+        Assertions.assertEquals(3, StatisticsCalculator.computeGroupByStatistics(List.of(STATUS), statistics,
+                groupStatistics), 1e-9);
+        // The whole group has its exact count.
+        Assertions.assertEquals(12, StatisticsCalculator.computeGroupByStatistics(List.of(STATUS, GATE, TYPE),
+                statistics, groupStatistics), 1e-9);
     }
 
     @Test
