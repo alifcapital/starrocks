@@ -680,7 +680,8 @@ public class MockIcebergMetadata implements ConnectorMetadata {
         readLock();
         try {
             IcebergTableInfo info = MOCK_TABLE_MAP.get(hiveDb).get(tblName);
-            Statistics.Builder builder = Statistics.builder();
+            // As the iceberg connector reports its statistics: counted from the table metadata.
+            Statistics.Builder builder = Statistics.builder().setStatsSource(Statistics.StatsSource.TABLE_METADATA);
             builder.setOutputRowCount(info.rowCount);
             for (ColumnRefOperator columnRefOperator : columns.keySet()) {
                 ColumnStatistic columnStatistic = info.columnStatsMap.get(columnRefOperator.getName());

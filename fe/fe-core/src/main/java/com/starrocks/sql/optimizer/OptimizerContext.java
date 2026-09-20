@@ -78,6 +78,9 @@ public class OptimizerContext {
     // lifecycle instead of per materialized view.
 
     private boolean isObtainedFromInternalStatistics = false;
+    // The scan statistics already cover only the partitions the scan reads, so a predicate on the
+    // partition columns must not be applied to them again.
+    private boolean partitionPrunedStatistics = false;
     private boolean inMemoPhase = false;
 
     // Is not null predicate can be derived from inner join or semi join,
@@ -241,6 +244,14 @@ public class OptimizerContext {
 
     public void setObtainedFromInternalStatistics(boolean obtainedFromInternalStatistics) {
         isObtainedFromInternalStatistics = obtainedFromInternalStatistics;
+    }
+
+    public boolean isPartitionPrunedStatistics() {
+        return partitionPrunedStatistics;
+    }
+
+    public void setPartitionPrunedStatistics(boolean partitionPrunedStatistics) {
+        this.partitionPrunedStatistics = partitionPrunedStatistics;
     }
 
     public void setInMemoPhase(boolean inMemoPhase) {

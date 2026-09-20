@@ -87,6 +87,9 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     AsyncLoadingCache<String, Optional<ExternalMultiColumnCombinedStatistics>> externalMultiColumnStats =
             createAsyncLoadingCache(new ExternalMultiColumnStatsCacheLoader());
 
+    AsyncLoadingCache<ExternalPartitionStatsKey, Optional<Map<String, ExternalPartitionStatistics.ColumnStats>>>
+            externalPartitionStats = createAsyncLoadingCache(new ExternalPartitionStatsCacheLoader());
+
     @Override
     public Map<Long, Optional<Long>> getTableStatistics(Long tableId, Collection<Partition> partitions) {
         // get Statistics Table column info, just return default column statistics
@@ -309,6 +312,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             allKeys.add(key);
         }
         connectorTableCachedStatistics.synchronous().invalidateAll(allKeys);
+        expireExternalPartitionStatistics(table.getUUID());
     }
 
     @Override
@@ -320,6 +324,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 .map(column -> new ConnectorTableColumnKey(tableUUID, column))
                 .collect(Collectors.toList());
         connectorTableCachedStatistics.synchronous().invalidateAll(allKeys);
+        expireExternalPartitionStatistics(tableUUID);
     }
 
     @Override
@@ -333,6 +338,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
         for (String column : columns) {
             cacheKeys.add(new ConnectorTableColumnKey(table.getUUID(), column));
         }
+        expireExternalPartitionStatistics(table.getUUID());
 
         try {
             ConnectorColumnStatsCacheLoader loader = new ConnectorColumnStatsCacheLoader();
@@ -773,6 +779,43 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             LOG.warn("Failed to load external multi-column statistics", e);
         }
         return ExternalMultiColumnCombinedStatistics.EMPTY;
+    }
+
+    @Override
+    public ExternalPartitionStatistics getExternalPartitionStatistics(Table table, Collection<String> partitionNames) {
+        if (table == null || partitionNames.isEmpty() || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return ExternalPartitionStatistics.EMPTY;
+        }
+        List<ExternalPartitionStatsKey> keys = new ArrayList<>(partitionNames.size());
+        for (String partitionName : partitionNames) {
+            keys.add(new ExternalPartitionStatsKey(table.getUUID(), partitionName));
+        }
+        try {
+            CompletableFuture<Map<ExternalPartitionStatsKey, Optional<Map<String, ExternalPartitionStatistics.ColumnStats>>>>
+                    result = externalPartitionStats.getAll(keys);
+            if (Config.enable_sync_statistics_load) {
+                result.get();
+            }
+            if (result.isDone()) {
+                Map<String, Map<String, ExternalPartitionStatistics.ColumnStats>> partitions = new HashMap<>();
+                result.get().forEach((key, stats) -> stats.ifPresent(value -> partitions.put(key.partitionName, value)));
+                return partitions.isEmpty() ? ExternalPartitionStatistics.EMPTY : new ExternalPartitionStatistics(partitions);
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("Failed to load external partition statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Failed to load external partition statistics", e);
+        }
+        return ExternalPartitionStatistics.EMPTY;
+    }
+
+    @Override
+    public void expireExternalPartitionStatistics(String tableUUID) {
+        if (tableUUID == null || tableUUID.isEmpty()) {
+            return;
+        }
+        externalPartitionStats.synchronous().asMap().keySet().removeIf(key -> key.tableUUID.equals(tableUUID));
     }
 
     @Override

@@ -58,12 +58,14 @@ import com.starrocks.connector.DatabaseTableName;
 import com.starrocks.connector.GetRemoteFilesParams;
 import com.starrocks.connector.MetaPreparationItem;
 import com.starrocks.connector.PartitionInfo;
+import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.Procedure;
 import com.starrocks.connector.RemoteFileInfo;
 import com.starrocks.connector.RemoteFileInfoDefaultSource;
 import com.starrocks.connector.RemoteFileInfoSource;
 import com.starrocks.connector.SerializedMetaSpec;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.connector.hive.HiveMetaClient;
 import com.starrocks.connector.iceberg.Partition;
 import com.starrocks.connector.metadata.MetadataTable;
 import com.starrocks.connector.metadata.MetadataTableType;
@@ -85,10 +87,13 @@ import com.starrocks.sql.ast.DropTemporaryTableStmt;
 import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.ast.TruncateTableStmt;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalPartitionStatistics;
 import com.starrocks.sql.optimizer.statistics.Histogram;
+import com.starrocks.sql.optimizer.statistics.PredicateStatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.thrift.TSinkCommitInfo;
@@ -99,6 +104,7 @@ import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -823,6 +829,7 @@ public class MetadataMgr {
                                          ScalarOperator predicate,
                                          long limit,
                                          TvrVersionRange versionRange) {
+        session.setPartitionPrunedStatistics(false);
         // FIXME: In testing env, `_statistics_.external_column_statistics` is not created, ignore query columns stats from it.
         // Get basic/histogram stats from internal statistics.
         Statistics internalStatistics = FeConstants.runningUnitTest ? null :
@@ -865,7 +872,148 @@ public class MetadataMgr {
             }
         } else {
             session.setObtainedFromInternalStatistics(true);
+            return withSelectedPartitions(session, catalogName, table, columns, partitionKeys, predicate, limit,
+                    versionRange, internalStatistics);
+        }
+    }
+
+    // The internal statistics describe the whole table. When the scan reads some of its partitions,
+    // restrict them to those: the per-partition rows of external_column_statistics are summed over the
+    // partitions the scan reads, which an HMS table names from its selected partition keys and an
+    // Iceberg table from the data files the connector planned for the predicate. An Iceberg table
+    // without partition statistics takes the rows the connector counts from the manifests. In both
+    // cases the partition predicates are already in the row count (see
+    // StatisticsCalculator#removePartitionPredicate).
+    private Statistics withSelectedPartitions(OptimizerContext session, String catalogName, Table table,
+                                              Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
+                                              ScalarOperator predicate, long limit, TvrVersionRange versionRange,
+                                              Statistics internalStatistics) {
+        if (!session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics() || table.isUnPartitioned()
+                || partitionConjuncts(table, columns, predicate).isEmpty()) {
+            // Without a predicate on a partition column the scan reads the whole table, which the
+            // table-level statistics describe; naming the partitions would only plan the files early.
             return internalStatistics;
+        }
+        List<String> partitionNames = selectedPartitionNames(catalogName, table, partitionKeys, predicate, limit,
+                versionRange);
+        if (partitionNames != null && !partitionNames.isEmpty()) {
+            ExternalPartitionStatistics partitionStatistics = GlobalStateMgr.getCurrentState().getStatisticStorage()
+                    .getExternalPartitionStatistics(table, partitionNames);
+            Optional<Statistics> selected = partitionStatistics.aggregate(internalStatistics, columns, partitionNames);
+            if (selected.isPresent()) {
+                session.setPartitionPrunedStatistics(true);
+                return selected.get();
+            }
+        }
+        if (table.isIcebergTable()) {
+            // No partition statistics: the connector's count for the predicate, over whole manifests,
+            // with the table-level column shape.
+            Statistics counted = icebergRowCount(session, catalogName, table, columns, partitionKeys, predicate, limit,
+                    versionRange);
+            if (counted == null) {
+                return internalStatistics;
+            }
+            Statistics.Builder builder = Statistics.buildFrom(internalStatistics).setOutputRowCount(counted.getOutputRowCount());
+            narrowPartitionColumns(builder, internalStatistics, table, columns, predicate);
+            session.setPartitionPrunedStatistics(true);
+            return builder.build();
+        }
+        return internalStatistics;
+    }
+
+    // The conjuncts of the predicate on the partition columns alone.
+    private static List<ScalarOperator> partitionConjuncts(Table table, Map<ColumnRefOperator, Column> columns,
+                                                           ScalarOperator predicate) {
+        if (predicate == null) {
+            return Collections.emptyList();
+        }
+        Set<String> partitionColumnNames = new HashSet<>(table.getPartitionColumnNames());
+        Set<ColumnRefOperator> partitionRefs = new HashSet<>();
+        for (Map.Entry<ColumnRefOperator, Column> entry : columns.entrySet()) {
+            if (partitionColumnNames.contains(entry.getValue().getName())) {
+                partitionRefs.add(entry.getKey());
+            }
+        }
+        List<ScalarOperator> conjuncts = new ArrayList<>();
+        for (ScalarOperator conjunct : Utils.extractConjuncts(predicate)) {
+            List<ColumnRefOperator> refs = Utils.extractColumnRef(conjunct);
+            if (!refs.isEmpty() && partitionRefs.containsAll(refs)) {
+                conjuncts.add(conjunct);
+            }
+        }
+        return conjuncts;
+    }
+
+    // The partitions the scan reads, named as the collection wrote them; null when unknown.
+    private List<String> selectedPartitionNames(String catalogName, Table table, List<PartitionKey> partitionKeys,
+                                                ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
+        if (table.isHiveTable() || table.isHudiTable()) {
+            if (partitionKeys == null) {
+                return null;
+            }
+            List<String> partitionColumnNames = table.getPartitionColumnNames();
+            List<String> partitionNames = new ArrayList<>(partitionKeys.size());
+            for (PartitionKey partitionKey : partitionKeys) {
+                // The names the collection wrote, see ExternalFullStatisticsCollectJob.
+                partitionNames.add(PartitionUtil.normalizePartitionName(
+                        PartitionUtil.toHivePartitionName(partitionColumnNames, partitionKey), partitionColumnNames,
+                        Collections.singleton(HiveMetaClient.PARTITION_NULL_VALUE)));
+            }
+            return partitionNames;
+        }
+        if (table.isIcebergTable()) {
+            try {
+                return getOptionalMetadata(catalogName)
+                        .map(metadata -> metadata.getScannedPartitionNames(table, predicate, limit, versionRange))
+                        .orElse(null);
+            } catch (Exception e) {
+                LOG.warn("Failed to name the partitions iceberg table {} reads for the scan predicate", table.getName(), e);
+            }
+        }
+        return null;
+    }
+
+    // The rows the connector counts for the scan predicate; null when it has no real count.
+    private Statistics icebergRowCount(OptimizerContext session, String catalogName, Table table,
+                                       Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
+                                       ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
+        Statistics connectorStatistics;
+        try {
+            connectorStatistics = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
+                    session, table, columns, partitionKeys, predicate, limit, versionRange)).orElse(null);
+        } catch (Exception e) {
+            LOG.warn("Failed to count the rows of iceberg table {} for the scan predicate", table.getName(), e);
+            return null;
+        }
+        // Without table metadata the connector answers with a default row count, not a count.
+        if (connectorStatistics == null || connectorStatistics.getStatsSource() != Statistics.StatsSource.TABLE_METADATA
+                || !Double.isFinite(connectorStatistics.getOutputRowCount())
+                || connectorStatistics.getOutputRowCount() < 0) {
+            return null;
+        }
+        return connectorStatistics;
+    }
+
+    // The predicates on the partition columns are dropped from the scan afterwards, since the row count
+    // already reflects them; keep their effect on the bounds of those columns.
+    private static void narrowPartitionColumns(Statistics.Builder builder, Statistics statistics, Table table,
+                                               Map<ColumnRefOperator, Column> columns, ScalarOperator predicate) {
+        List<ScalarOperator> conjuncts = partitionConjuncts(table, columns, predicate);
+        if (conjuncts.isEmpty()) {
+            return;
+        }
+        try {
+            Statistics narrowed = PredicateStatisticsCalculator.statisticsCalculate(Utils.compoundAnd(conjuncts), statistics);
+            for (ScalarOperator conjunct : conjuncts) {
+                for (ColumnRefOperator ref : Utils.extractColumnRef(conjunct)) {
+                    ColumnStatistic columnStatistic = narrowed.getColumnStatistics().get(ref);
+                    if (columnStatistic != null) {
+                        builder.addColumnStatistic(ref, columnStatistic);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to narrow the partition columns of table {} by the scan predicate", table.getName(), e);
         }
     }
 

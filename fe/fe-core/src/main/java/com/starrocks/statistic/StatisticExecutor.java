@@ -812,6 +812,16 @@ public class StatisticExecutor {
         return rows;
     }
 
+    public List<List<String>> queryExternalPartitionStatistics(ConnectContext context, String tableUUID,
+                                                               Collection<String> partitionNames) {
+        if (partitionNames.isEmpty()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME))) {
+            return Collections.emptyList();
+        }
+        return executeStatisticJsonDQL(context,
+                StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(tableUUID, partitionNames));
+    }
+
     public List<List<String>> queryExternalMultiColumnStatistics(ConnectContext context, String tableUUID) {
         if (!StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME))) {
             return Collections.emptyList();

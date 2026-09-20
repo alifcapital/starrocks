@@ -240,6 +240,15 @@ public interface ConnectorMetadata {
     }
 
     /**
+     * The names of the partitions the files a scan with this predicate reads belong to, as
+     * listPartitionNames names them; null when the connector cannot tell.
+     */
+    default List<String> getScannedPartitionNames(Table table, ScalarOperator predicate, long limit,
+                                                  TvrVersionRange version) {
+        return null;
+    }
+
+    /**
      * Get statistics for the table.
      *
      * @param session           optimizer context

@@ -93,6 +93,14 @@ public interface StatisticStorage {
     default void expireMultiColumnStatistics(Long tableId) {
     }
 
+    // The statistics of the given partitions of an external table; the ones without statistics are left out.
+    default ExternalPartitionStatistics getExternalPartitionStatistics(Table table, Collection<String> partitionNames) {
+        return ExternalPartitionStatistics.EMPTY;
+    }
+
+    default void expireExternalPartitionStatistics(String tableUUID) {
+    }
+
     // Multi-column statistics of an external table, looked up by its UUID.
     default ExternalMultiColumnCombinedStatistics getExternalMultiColumnCombinedStatistics(Table table) {
         return ExternalMultiColumnCombinedStatistics.EMPTY;

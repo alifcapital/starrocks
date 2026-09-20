@@ -124,6 +124,7 @@ import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.PartitionSpecParser;
+import org.apache.iceberg.Partitioning;
 import org.apache.iceberg.ReplacePartitions;
 import org.apache.iceberg.RewriteFiles;
 import org.apache.iceberg.RowDelta;
@@ -136,6 +137,7 @@ import org.apache.iceberg.SnapshotSummary;
 import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.StarRocksIcebergTableScan;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.Transaction;
@@ -177,6 +179,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1260,6 +1263,39 @@ public class IcebergMetadata implements ConnectorMetadata {
                 collectTableStatisticsAndCacheIcebergSplit(key, table, tracers, connectContext);
             }
         }
+    }
+
+    // The partitions of the data files the scan reads, named as listPartitionNames names them, so
+    // they match the rows ANALYZE wrote for the table. Files of an older partition spec are coerced
+    // to the table's partition type first.
+    @Override
+    public List<String> getScannedPartitionNames(Table table, ScalarOperator predicate, long limit,
+                                                 TvrVersionRange version) {
+        IcebergTable icebergTable = (IcebergTable) table;
+        if (icebergTable.isUnPartitioned() || version == null || version.isEmpty()) {
+            return null;
+        }
+        GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder()
+                .setPredicate(predicate)
+                .setLimit(limit)
+                .setTableVersionRange(version)
+                .build();
+        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(),
+                params);
+        triggerIcebergPlanFilesIfNeeded(key, icebergTable);
+        List<FileScanTask> icebergSplitTasks = splitTasks.get(key);
+        if (icebergSplitTasks == null) {
+            return null;
+        }
+        org.apache.iceberg.Table nativeTable = icebergTable.getNativeTable();
+        Types.StructType partitionType = Partitioning.partitionType(nativeTable);
+        Set<String> names = new LinkedHashSet<>();
+        for (FileScanTask task : icebergSplitTasks) {
+            StructLike partition = org.apache.iceberg.util.PartitionUtil.coercePartition(partitionType, task.spec(),
+                    task.file().partition());
+            names.add(PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, task.spec(), partition));
+        }
+        return new ArrayList<>(names);
     }
 
     public List<PartitionKey> getPrunedPartitions(Table table, ScalarOperator predicate, long limit, TvrVersionRange version) {

@@ -27,6 +27,7 @@ import org.apache.velocity.app.VelocityEngine;
 
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -456,6 +457,20 @@ public class StatisticSQLBuilder {
         return "SELECT column_names, row_count, ndv, mcv FROM " + StatsConstants.STATISTICS_DB_NAME + "."
                 + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
                 + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID);
+    }
+
+    // One row per (partition, column) of the given partitions with its latest collection; the dedup
+    // is the one of QUERY_EXTERNAL_FULL_STATISTIC_V2_TEMPLATE. Bounds come as the stored text.
+    public static String buildQueryExternalPartitionStatisticsSQL(String tableUUID, Collection<String> partitionNames) {
+        String names = partitionNames.stream()
+                .map(name -> "'" + SqlUtils.escapeSqlString(name) + "'")
+                .collect(Collectors.joining(", "));
+        return "SELECT partition_name, column_name, row_count, hll_cardinality(ndv), null_count, min, max"
+                + " FROM (SELECT *, row_number() over ("
+                + " partition by partition_name, column_name order by update_time desc) as rn"
+                + " FROM " + StatsConstants.STATISTICS_DB_NAME + "." + EXTERNAL_FULL_STATISTICS_TABLE_NAME
+                + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID) + " AND partition_name IN (" + names + ")) dedup_t"
+                + " WHERE rn = 1";
     }
 
     public static String buildDropExternalMultiColumnStatisticsSQL(String tableUUID) {

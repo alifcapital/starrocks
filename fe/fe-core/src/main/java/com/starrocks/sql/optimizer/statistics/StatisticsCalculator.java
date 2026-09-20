@@ -858,7 +858,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
             String catalogName = (table).getCatalogName();
             Statistics statistics = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
-                    optimizerContext, catalogName, table, colRefToColumnMetaMap, partitionKeys, null);
+                    optimizerContext, catalogName, table, colRefToColumnMetaMap, partitionKeys, node.getPredicate());
             statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap);
             context.setStatistics(statistics);
 
@@ -2346,10 +2346,16 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     public ScalarOperator removePartitionPredicate(ScalarOperator predicate, Operator operator,
                                                    OptimizerContext optimizerContext) {
         boolean isTableTypeSupported = operator instanceof LogicalIcebergScanOperator ||
+                operator instanceof LogicalHiveScanOperator || operator instanceof LogicalHudiScanOperator ||
                 isOlapScanListPartitionTable(operator);
-        if (isTableTypeSupported && !optimizerContext.isObtainedFromInternalStatistics()) {
+        // Connector statistics count the selected partitions only, as do internal statistics restricted
+        // to them (see MetadataMgr#withSelectedPartitions).
+        boolean partitionPruned = !optimizerContext.isObtainedFromInternalStatistics() ||
+                optimizerContext.isPartitionPrunedStatistics();
+        if (isTableTypeSupported && partitionPruned) {
             LogicalScanOperator scanOperator = operator.cast();
-            List<String> partitionColNames = scanOperator.getTable().getPartitionColumnNames();
+            // A copy: a Hive table hands out its own list of partition columns.
+            Set<String> partitionColNames = new HashSet<>(scanOperator.getTable().getPartitionColumnNames());
             partitionColNames.addAll(ListPartitionPruner.deduceGenerateColumns(scanOperator));
 
             List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
