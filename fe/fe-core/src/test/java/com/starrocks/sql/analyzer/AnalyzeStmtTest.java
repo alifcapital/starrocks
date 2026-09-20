@@ -658,6 +658,23 @@ public class AnalyzeStmtTest {
     }
 
     @Test
+    public void testExternalHistogramIsNeverSampled() {
+        AnalyzeStmt analyzeStmt = (AnalyzeStmt) analyzeSuccess(
+                "analyze table hive0.tpch.customer update histogram on c_name with 64 buckets");
+        Assertions.assertTrue(analyzeStmt.isExternal());
+        Assertions.assertEquals("1", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+        Assertions.assertEquals("64", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_BUCKET_NUM));
+
+        analyzeStmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer update histogram on c_name "
+                + "with 64 buckets properties(\"histogram_sample_ratio\"=\"1\")");
+        Assertions.assertEquals("1", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+
+        analyzeFail("analyze table hive0.tpch.customer update histogram on c_name with 64 buckets "
+                        + "properties(\"histogram_sample_ratio\"=\"0.5\")",
+                "Sampled histogram collection is not supported on external table");
+    }
+
+    @Test
     public void testDropStats() {
         String sql = "drop stats t0";
         DropStatsStmt dropStatsStmt = (DropStatsStmt) analyzeSuccess(sql);

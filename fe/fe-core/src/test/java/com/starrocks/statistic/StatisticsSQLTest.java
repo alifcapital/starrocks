@@ -257,27 +257,29 @@ public class StatisticsSQLTest extends PlanTestBase {
                 StatsConstants.AnalyzeType.HISTOGRAM, StatsConstants.ScheduleType.ONCE,
                 Maps.newHashMap());
         for (String col : columnNames) {
-            String sql = Deencapsulation.invoke(hiveHistogramStatisticsCollectJob, "buildCollectMCV",
-                    db, t0, 3L, col);
+            String sql = Deencapsulation.invoke(hiveHistogramStatisticsCollectJob, "buildSketchSQL", col, true, true);
             starRocksAssert.useDatabase("_statistics_");
             String plan = getFragmentPlan(sql);
             assertCContains(plan, " 0:HdfsScanNode\n" +
                     "     TABLE: subfield");
+            assertCContains(plan, "ds_frequent_items");
+            assertCContains(plan, "ds_kll_quantiles");
         }
 
         for (String col : columnNames) {
-            String sql = Deencapsulation.invoke(hiveHistogramStatisticsCollectJob, "buildCollectHistogram",
-                    db, t0, 0.1, 10L, ImmutableMap.of("col_struct.c1.c11", "100"), col, IntegerType.INT);
-            sql = sql.substring(sql.indexOf("SELECT"));
+            String sql = Deencapsulation.invoke(hiveHistogramStatisticsCollectJob, "buildExactSQL",
+                    col, List.of("100"), List.of("0", "50", "100"));
+            Assertions.assertTrue(sql.contains("), count(*) FROM `hive0`.`subfield_db`.`subfield`"), sql);
             starRocksAssert.useDatabase("_statistics_");
             String plan = getFragmentPlan(sql);
-            assertCContains(plan, "4:AGGREGATE (update finalize)\n" +
-                    "  |  output: histogram");
+            assertCContains(plan, " 0:HdfsScanNode\n" +
+                    "     TABLE: subfield");
+            assertCContains(plan, "histogram_by_bounds");
         }
     }
 
     @Test
-    public void testExternalHistogramSkipsBucketQueryForStringColumns() throws Exception {
+    public void testExternalHistogramSkipsBucketsForStringColumns() throws Exception {
         Table region = GlobalStateMgr.getCurrentState().getMetadataMgr()
                 .getTable(connectContext, "hive0", "tpch", "region");
         Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(connectContext, "hive0", "tpch");
@@ -286,16 +288,25 @@ public class StatisticsSQLTest extends PlanTestBase {
                 "hive0", db, region, Lists.newArrayList("r_name"), Lists.<Type>newArrayList(VarcharType.VARCHAR),
                 StatsConstants.AnalyzeType.HISTOGRAM, StatsConstants.ScheduleType.ONCE, Maps.newHashMap());
 
-        String sql = Deencapsulation.invoke(job, "buildCollectHistogram",
-                db, region, 0.1, 10L, ImmutableMap.of("a", "10"), "r_name", VarcharType.VARCHAR);
+        String sketchSql = Deencapsulation.invoke(job, "buildSketchSQL", "r_name", true, false);
+        Assertions.assertTrue(sketchSql.contains("ds_frequent_items(`r_name`"), sketchSql);
+        Assertions.assertFalse(sketchSql.contains("ds_kll_quantiles"), sketchSql);
+        Assertions.assertTrue(sketchSql.contains("FROM `hive0`.`tpch`.`region` WHERE `r_name` IS NOT NULL"), sketchSql);
+        Assertions.assertFalse(sketchSql.toLowerCase().contains("order by"), sketchSql);
+        Assertions.assertFalse(sketchSql.toLowerCase().contains("sample("), sketchSql);
+        String bucketsOnly = Deencapsulation.invoke(job, "buildSketchSQL", "r_name", false, true);
+        Assertions.assertTrue(bucketsOnly.startsWith("SELECT ds_kll_quantiles(`r_name`"), bucketsOnly);
 
-        Assertions.assertTrue(sql.contains("concat('[[\"Infinity\",\"Infinity\",', " +
-                "cast(greatest(0, count(`r_name`) - 10) as varchar), ',0]]')"), sql);
-        Assertions.assertTrue(sql.contains("FROM `hive0`.`tpch`.`region`"), sql);
-        Assertions.assertFalse(sql.contains("histogram("), sql);
-        Assertions.assertFalse(sql.toLowerCase().contains("order by"), sql);
-        Assertions.assertFalse(sql.toLowerCase().contains("is not null"), sql);
-        Assertions.assertFalse(sql.toLowerCase().contains("sample("), sql);
+        String exactSql = Deencapsulation.invoke(job, "buildExactSQL", "r_name", List.of("AFRICA", "O'HARA"), List.of());
+        Assertions.assertTrue(exactSql.contains(
+                "histogram_by_bounds(`r_name`, '[\"AFRICA\",\"O''HARA\"]', '[]'), count(*)"), exactSql);
+
+        starRocksAssert.useDatabase("_statistics_");
+        for (String sql : List.of(sketchSql, exactSql)) {
+            String plan = getFragmentPlan(sql);
+            assertCContains(plan, " 0:HdfsScanNode\n" +
+                    "     TABLE: region");
+        }
     }
 
     @Test

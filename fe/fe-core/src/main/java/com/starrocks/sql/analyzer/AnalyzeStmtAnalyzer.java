@@ -476,6 +476,32 @@ public class AnalyzeStmtAnalyzer {
                 }
                 properties.put(StatsConstants.HISTOGRAM_BUCKET_NUM, String.valueOf(bucket));
 
+                if (analyzeTable.isAnalyzableExternalTable()) {
+                    // External histograms are built by sketches over a full scan of the column (see
+                    // ExternalHistogramStatisticsCollectJob); there is no sampled collection for them.
+                    // Every UPDATE HISTOGRAM statement is parsed as a sampled one, so only an explicit
+                    // histogram_sample_ratio below 1 asks for a sample.
+                    String ratio = properties.get(StatsConstants.HISTOGRAM_SAMPLE_RATIO);
+                    boolean sampleRequested = false;
+                    if (ratio != null) {
+                        try {
+                            sampleRequested = Double.parseDouble(ratio) < 1;
+                        } catch (NumberFormatException e) {
+                            throw new SemanticException("Invalid histogram_sample_ratio: %s", ratio);
+                        }
+                    }
+                    if (sampleRequested) {
+                        throw new SemanticException("Sampled histogram collection is not supported on external "
+                                + "table; ANALYZE TABLE ... UPDATE HISTOGRAM scans the whole column");
+                    }
+                    properties.put(StatsConstants.HISTOGRAM_SAMPLE_RATIO, "1");
+                    properties.computeIfAbsent(StatsConstants.HISTOGRAM_MCV_SIZE,
+                            p -> String.valueOf(Config.histogram_mcv_size));
+                    properties.computeIfAbsent(StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
+                            p -> String.valueOf(Config.histogram_collect_bucket_ndv_mode));
+                    return;
+                }
+
                 properties.computeIfAbsent(StatsConstants.HISTOGRAM_MCV_SIZE,
                         p -> String.valueOf(Config.histogram_mcv_size));
                 properties.computeIfAbsent(StatsConstants.HISTOGRAM_SAMPLE_RATIO,
