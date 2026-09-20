@@ -14,14 +14,18 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.catalog.FunctionSet;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.type.Type;
 
@@ -45,7 +49,8 @@ import java.util.Set;
  *
  * The MCV list is a point sample of the joint distribution of a column group, so it answers any
  * predicate that can be evaluated on a value tuple: equality on all or some of the group's columns,
- * IN, ranges, IS NULL. The head of the distribution is counted exactly by summing the rows of the
+ * IN, ranges, IS NULL, on the column itself or on a cast or a function of it, evaluated on the
+ * tuple component. The head of the distribution is counted exactly by summing the rows of the
  * tuples that satisfy the predicates. The rest is the independence estimate of the predicates minus
  * what independence attributes to the matching tuples, the formula PostgreSQL uses for
  * pg_mcv_list: sel = mcv_sel + clamp(simple_sel - mcv_basesel, 0, 1 - mcv_totalsel).
@@ -261,7 +266,10 @@ public class MultiColumnMcvEstimator {
         boolean hasExactSel = false;
         for (ScalarOperator conjunct : conjuncts) {
             ColumnRefOperator column = predicateColumn(conjunct);
-            OptionalDouble exact = shares.selectivity(conjunct, columns.indexOf(column), column.getType());
+            // An expression of the column may map several values to one; only the column itself has
+            // an exact share.
+            OptionalDouble exact = conjunct.getChild(0).isColumnRef()
+                    ? shares.selectivity(conjunct, columns.indexOf(column), column.getType()) : OptionalDouble.empty();
             double sel = exact.isPresent() ? exact.getAsDouble()
                     : StatisticsEstimateUtils.getPredicateSelectivity(conjunct, statistics);
             simpleSel *= sel;
@@ -297,7 +305,7 @@ public class MultiColumnMcvEstimator {
             if (index < 0 || index >= entry.getValues().size()) {
                 return Optional.empty();
             }
-            Optional<Boolean> match = matches(conjunct, column.getType(), entry.getValues().get(index));
+            Optional<Boolean> match = matchesComponent(conjunct, column, entry.getValues().get(index));
             if (match.isEmpty()) {
                 return Optional.empty();
             }
@@ -332,10 +340,12 @@ public class MultiColumnMcvEstimator {
         return OptionalDouble.of(base);
     }
 
+    // Equality on the columns themselves: one value tuple satisfies the conjunction.
     private static boolean allEquality(List<ScalarOperator> conjuncts) {
         for (ScalarOperator conjunct : conjuncts) {
             if (!(conjunct instanceof BinaryPredicateOperator) ||
-                    ((BinaryPredicateOperator) conjunct).getBinaryType() != BinaryType.EQ) {
+                    ((BinaryPredicateOperator) conjunct).getBinaryType() != BinaryType.EQ ||
+                    !conjunct.getChild(0).isColumnRef()) {
                 return false;
             }
         }
@@ -450,8 +460,9 @@ public class MultiColumnMcvEstimator {
     }
 
     /**
-     * Conjuncts of the forms column op constant, column [NOT] IN (constants) and column IS [NOT] NULL,
-     * keyed by their column. Other conjuncts are left to the regular estimation.
+     * Conjuncts of the forms expr op constant, expr [NOT] IN (constants) and expr IS [NOT] NULL, where
+     * expr is a column or a cast or a function of one column, keyed by that column. Other conjuncts
+     * are left to the regular estimation.
      */
     private static Map<ColumnRefOperator, List<ScalarOperator>> groupSupportedConjuncts(List<ScalarOperator> conjuncts) {
         Map<ColumnRefOperator, List<ScalarOperator>> byColumn = new LinkedHashMap<>();
@@ -470,14 +481,14 @@ public class MultiColumnMcvEstimator {
             if (predicate.getBinaryType() == BinaryType.EQ_FOR_NULL) {
                 return null;
             }
-            if (predicate.getChild(0).isColumnRef() && isNonNullConstant(predicate.getChild(1))) {
-                return (ColumnRefOperator) predicate.getChild(0);
+            if (isNonNullConstant(predicate.getChild(1))) {
+                return columnOf(predicate.getChild(0));
             }
             return null;
         }
         if (conjunct instanceof InPredicateOperator) {
             InPredicateOperator predicate = (InPredicateOperator) conjunct;
-            if (predicate.isSubquery() || !predicate.getChild(0).isColumnRef()) {
+            if (predicate.isSubquery()) {
                 return null;
             }
             for (int i = 1; i < predicate.getChildren().size(); i++) {
@@ -485,15 +496,127 @@ public class MultiColumnMcvEstimator {
                     return null;
                 }
             }
-            return (ColumnRefOperator) predicate.getChild(0);
+            return columnOf(predicate.getChild(0));
         }
         if (conjunct instanceof IsNullPredicateOperator) {
-            IsNullPredicateOperator predicate = (IsNullPredicateOperator) conjunct;
-            if (predicate.getChild(0).isColumnRef()) {
-                return (ColumnRefOperator) predicate.getChild(0);
-            }
+            return columnOf(conjunct.getChild(0));
         }
         return null;
+    }
+
+    // The one column an expression of casts and function calls with constant arguments is built on.
+    static ColumnRefOperator columnOf(ScalarOperator expr) {
+        if (expr.isColumnRef()) {
+            return (ColumnRefOperator) expr;
+        }
+        if (!(expr instanceof CastOperator) && !(expr instanceof CallOperator)) {
+            return null;
+        }
+        ColumnRefOperator column = null;
+        for (ScalarOperator child : expr.getChildren()) {
+            if (child.isConstantRef()) {
+                continue;
+            }
+            ColumnRefOperator childColumn = columnOf(child);
+            if (childColumn == null || (column != null && !column.equals(childColumn))) {
+                return null;
+            }
+            column = childColumn;
+        }
+        return column;
+    }
+
+    // The functions that pick one of their arguments, folded here because the optimizer's rules leave
+    // a NULL first argument alone. Empty for any other function.
+    private static Optional<ConstantOperator> chooseAmongConstants(String function, List<ScalarOperator> arguments) {
+        List<ConstantOperator> constants = new ArrayList<>(arguments.size());
+        for (ScalarOperator argument : arguments) {
+            constants.add((ConstantOperator) argument);
+        }
+        if (FunctionSet.COALESCE.equalsIgnoreCase(function)) {
+            for (ConstantOperator constant : constants) {
+                if (!constant.isNull()) {
+                    return Optional.of(constant);
+                }
+            }
+            return Optional.of(constants.get(constants.size() - 1));
+        }
+        if (FunctionSet.IFNULL.equalsIgnoreCase(function) && constants.size() == 2) {
+            return Optional.of(constants.get(0).isNull() ? constants.get(1) : constants.get(0));
+        }
+        if (FunctionSet.IF.equalsIgnoreCase(function) && constants.size() == 3) {
+            ConstantOperator condition = constants.get(0);
+            boolean holds = !condition.isNull() && condition.getType().isBoolean() && condition.getBoolean();
+            return Optional.of(holds ? constants.get(1) : constants.get(2));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a tuple component satisfies the conjunct, whose left side is the column or an
+     * expression of it evaluated on the component. Empty when the expression cannot be evaluated
+     * or the result cannot be compared with the constant.
+     */
+    static Optional<Boolean> matchesComponent(ScalarOperator conjunct, ColumnRefOperator column, String value) {
+        ScalarOperator expr = conjunct.getChild(0);
+        if (expr.isColumnRef()) {
+            return matches(conjunct, column.getType(), value);
+        }
+        Optional<ConstantOperator> result = evaluate(expr, column, value);
+        if (result.isEmpty()) {
+            return Optional.empty();
+        }
+        return matches(conjunct, expr.getType(), result.get().isNull() ? null : constantText(result.get()));
+    }
+
+    // The expression with the column replaced by the component value, folded to a constant.
+    static Optional<ConstantOperator> evaluate(ScalarOperator expr, ColumnRefOperator column, String value) {
+        try {
+            if (expr.isColumnRef()) {
+                if (value == null) {
+                    return Optional.of(ConstantOperator.createNull(column.getType()));
+                }
+                return ConstantOperator.createVarchar(value).castTo(column.getType());
+            }
+            List<ScalarOperator> children = new ArrayList<>(expr.getChildren().size());
+            for (ScalarOperator child : expr.getChildren()) {
+                if (child.isConstantRef()) {
+                    children.add(child);
+                    continue;
+                }
+                Optional<ConstantOperator> folded = evaluate(child, column, value);
+                if (folded.isEmpty()) {
+                    return Optional.empty();
+                }
+                children.add(folded.get());
+            }
+            if (expr instanceof CastOperator) {
+                ConstantOperator child = (ConstantOperator) children.get(0);
+                if (child.isNull()) {
+                    return Optional.of(ConstantOperator.createNull(expr.getType()));
+                }
+                // A value the target type cannot hold casts to NULL, as on the BE.
+                return Optional.of(child.castTo(expr.getType()).orElse(ConstantOperator.createNull(expr.getType())));
+            }
+            if (expr instanceof CallOperator) {
+                CallOperator call = (CallOperator) expr;
+                Optional<ConstantOperator> chosen = chooseAmongConstants(call.getFnName(), children);
+                if (chosen.isPresent()) {
+                    return chosen.get().isNull() || chosen.get().getType().equals(expr.getType())
+                            ? chosen : chosen.get().castTo(expr.getType());
+                }
+                // The optimizer's own folding of a call over constants.
+                ScalarOperator result = new ScalarOperatorRewriter().rewrite(
+                        new CallOperator(call.getFnName(), call.getType(), children, call.getFunction()),
+                        ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+                if (result instanceof ConstantOperator) {
+                    return Optional.of((ConstantOperator) result);
+                }
+            }
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            return Optional.empty();
+        }
     }
 
     private static boolean isNonNullConstant(ScalarOperator operator) {
@@ -591,7 +714,7 @@ public class MultiColumnMcvEstimator {
         return "1".equals(text) || "true".equalsIgnoreCase(text) ? 1.0 : 0.0;
     }
 
-    private static String constantText(ConstantOperator constant) {
+    static String constantText(ConstantOperator constant) {
         if (constant.getType().isBoolean()) {
             return constant.getBoolean() ? "1" : "0";
         }

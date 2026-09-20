@@ -14,10 +14,14 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.catalog.Function;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
@@ -29,6 +33,7 @@ import com.starrocks.type.DecimalType;
 import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.PrimitiveType;
+import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.Assertions;
@@ -324,6 +329,42 @@ public class MultiColumnMcvEstimatorTest {
         // The whole group has its exact count.
         Assertions.assertEquals(12, StatisticsCalculator.computeGroupByStatistics(List.of(STATUS, GATE, TYPE),
                 statistics, groupStatistics), 1e-9);
+    }
+
+    @Test
+    public void testCastAndFunctionOfGroupColumnsEvaluateOnTheHead() {
+        Statistics statistics = statisticsWithComponentCounts();
+        ScalarOperator castPredicate = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
+                new BinaryPredicateOperator(BinaryType.EQ, new CastOperator(VarcharType.VARCHAR, GATE),
+                        ConstantOperator.createVarchar("0")));
+        // Head 0.55. The cast equality has no exact share, so its single-column estimate stands in;
+        // the exact 0.6 of status caps the tail at 0.05.
+        double castRows = estimateRows(castPredicate, statistics);
+        Assertions.assertTrue(castRows >= 550 - 1e-6 && castRows <= 600 + 1e-6, String.valueOf(castRows));
+
+        Function upper = ExprUtils.getBuiltinFunction("upper", new Type[] {VarcharType.VARCHAR},
+                Function.CompareMode.IS_IDENTICAL);
+        ScalarOperator callPredicate = and(
+                new BinaryPredicateOperator(BinaryType.EQ, new CallOperator("upper", VarcharType.VARCHAR, List.of(STATUS), upper),
+                        ConstantOperator.createVarchar("APPROVED")),
+                eq(GATE, ConstantOperator.createInt(0)));
+        Optional<MultiColumnMcvEstimator.Result> result =
+                MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(callPredicate), statistics);
+        Assertions.assertTrue(result.isPresent());
+        Assertions.assertEquals(2, result.get().getConsumed().size());
+        // The head gives 0.55; the exact 0.62 of gate = 0 caps the tail at 0.07.
+        double rows = estimateRows(callPredicate, statistics);
+        Assertions.assertTrue(rows >= 550 - 1e-6 && rows <= 620 + 1e-6, String.valueOf(rows));
+        Assertions.assertEquals(Optional.of(true), MultiColumnMcvEstimator.matchesComponent(
+                Utils.extractConjuncts(callPredicate).get(0), STATUS, "approved"));
+        Assertions.assertEquals(Optional.of(false), MultiColumnMcvEstimator.matchesComponent(
+                Utils.extractConjuncts(callPredicate).get(0), STATUS, null));
+
+        // An expression of two group columns is left to the regular estimation.
+        ScalarOperator twoColumns = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
+                new BinaryPredicateOperator(BinaryType.EQ, new CallOperator("add", IntegerType.INT, List.of(GATE, TYPE)),
+                        ConstantOperator.createInt(0)));
+        Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(twoColumns), statistics).isEmpty());
     }
 
     @Test
