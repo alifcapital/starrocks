@@ -143,7 +143,9 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
 import com.starrocks.sql.optimizer.statistics.Histogram;
+import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStatistics;
 import com.starrocks.sql.optimizer.transformer.LogicalPlan;
 import com.starrocks.sql.optimizer.transformer.RelationTransformer;
 import com.starrocks.sql.parser.ParsingException;
@@ -181,6 +183,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1253,6 +1256,46 @@ public class UtFrameUtils {
                             0, replayTable.getId(), columnName, StatsConstants.AnalyzeType.HISTOGRAM,
                             LocalDateTime.MIN, Maps.newHashMap()));
                 }
+            }
+        }
+        // mock multi-column statistics: an internal table takes the combined NDVs keyed by its recreated column
+        // ids; an external-catalog table takes the groups with their MCV lists under its mock table's UUID.
+        for (Map.Entry<String, List<ExternalMultiColumnCombinedStatistics.Group>> entry :
+                replayDumpInfo.getMultiColumnStatisticsMap().entrySet()) {
+            String dbName = entry.getKey().split("\\.")[0];
+            String tableName = entry.getKey().split("\\.")[1];
+            Database replayDb = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(dbName);
+            Table replayTable = replayDb == null ? null : replayDb.getTable(tableName);
+            if (replayTable != null) {
+                MultiColumnCombinedStatistics statistics = null;
+                for (ExternalMultiColumnCombinedStatistics.Group group : entry.getValue()) {
+                    Set<Integer> columnIds = new HashSet<>();
+                    for (String columnName : group.getColumnNames()) {
+                        Column column = replayTable.getColumn(columnName);
+                        if (column != null) {
+                            columnIds.add(column.getUniqueId());
+                        }
+                    }
+                    if (columnIds.size() != group.getColumnNames().size()) {
+                        continue;
+                    }
+                    if (statistics == null) {
+                        statistics = new MultiColumnCombinedStatistics(columnIds, group.getNdv());
+                    } else {
+                        statistics.update(columnIds, group.getNdv());
+                    }
+                }
+                if (statistics != null) {
+                    GlobalStateMgr.getCurrentState().getStatisticStorage().addMultiColumnStatistics(replayTable, statistics);
+                }
+                continue;
+            }
+            String catalog = replayDumpInfo.getExternalTableCatalogMap().get(entry.getKey());
+            Table externalTable = catalog == null ? null
+                    : GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(connectContext, catalog, dbName, tableName);
+            if (externalTable != null) {
+                GlobalStateMgr.getCurrentState().getStatisticStorage().addExternalMultiColumnStatistics(externalTable,
+                        new ExternalMultiColumnCombinedStatistics(entry.getValue()));
             }
         }
         return replaySql;

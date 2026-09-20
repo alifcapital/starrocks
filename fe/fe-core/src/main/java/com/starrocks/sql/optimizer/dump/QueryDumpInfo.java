@@ -29,6 +29,7 @@ import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.MaterializedViewOptimizer;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -53,6 +54,10 @@ public class QueryDumpInfo implements DumpInfo {
     private final Map<String, Map<String, Long>> partitionRowCountMap = new HashMap<>();
     // tableName->columnName->column statistics
     private final Map<String, Map<String, ColumnStatistic>> tableStatisticsMap = new HashMap<>();
+    // tableName->the multi-column statistics of the table: one group per collected column set, with
+    // its combined NDV and, for an external table, its MCV list.
+    private final Map<String, List<ExternalMultiColumnCombinedStatistics.Group>> multiColumnStatisticsMap =
+            new LinkedHashMap<>();
     // tableName->representative partition values (one tuple per concrete partition). Only populated for tables
     // whose CREATE TABLE omits partition definitions (automatic/expression partitioning), so replay can
     // recreate those partitions and match the per-partition row counts. Each inner list is one partition's
@@ -222,6 +227,7 @@ public class QueryDumpInfo implements DumpInfo {
         this.tableMap.clear();
         this.partitionRowCountMap.clear();
         this.tableStatisticsMap.clear();
+        this.multiColumnStatisticsMap.clear();
         this.createTableStmtMap.clear();
         this.numCoresPerBe.clear();
         this.numCoresPerWarehouse.clear();
@@ -281,6 +287,22 @@ public class QueryDumpInfo implements DumpInfo {
 
     public Map<String, Map<String, ColumnStatistic>> getTableStatisticsMap() {
         return tableStatisticsMap;
+    }
+
+    @Override
+    public void addMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics.Group group) {
+        addMultiColumnStatistics(getTableName(table.getId()), group);
+    }
+
+    public void addMultiColumnStatistics(String tableName, ExternalMultiColumnCombinedStatistics.Group group) {
+        List<ExternalMultiColumnCombinedStatistics.Group> groups =
+                multiColumnStatisticsMap.computeIfAbsent(tableName, k -> new ArrayList<>());
+        groups.removeIf(existing -> existing.getColumnNames().equals(group.getColumnNames()));
+        groups.add(group);
+    }
+
+    public Map<String, List<ExternalMultiColumnCombinedStatistics.Group>> getMultiColumnStatisticsMap() {
+        return multiColumnStatisticsMap;
     }
 
     public void addAutomaticPartitionValues(String tableName, List<List<String>> partitionValues) {

@@ -20,6 +20,7 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.View;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
 
 import java.util.List;
 import java.util.Map;
@@ -42,6 +43,9 @@ public interface DumpInfo {
     }
 
     default void addTableStatistics(Table table, String column, ColumnStatistic columnStatistic) {
+    }
+
+    default void addMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics.Group group) {
     }
 
     default void addExternalTableRowCount(Table table, long rowCount) {

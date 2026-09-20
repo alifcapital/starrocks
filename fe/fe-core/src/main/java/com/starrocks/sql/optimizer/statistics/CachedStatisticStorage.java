@@ -558,6 +558,16 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
+    public void addMultiColumnStatistics(Table table, MultiColumnCombinedStatistics statistics) {
+        this.multiColumnStats.synchronous().put(table.getId(), Optional.of(statistics));
+    }
+
+    @Override
+    public void addExternalMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics statistics) {
+        this.externalMultiColumnStats.synchronous().put(table.getUUID(), Optional.of(statistics));
+    }
+
+    @Override
     public Map<String, Histogram> getHistogramStatistics(Table table, List<String> columns) {
         Preconditions.checkState(table != null);
 

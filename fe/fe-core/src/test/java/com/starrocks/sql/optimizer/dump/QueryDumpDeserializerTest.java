@@ -18,16 +18,21 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnStatsCacheLoader;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.HistogramUtils;
+import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -282,6 +287,67 @@ public class QueryDumpDeserializerTest {
         assertThat(b1.getUpperRepeats()).isEqualTo(8L);
         assertThat(b1.getDistinctCount()).hasValue(7L);
         assertThat(roundTrip.getMCV()).hasSize(2).containsEntry("apple", 30L).containsEntry("banana", 20L);
+    }
+
+    @Test
+    public void testDeserializeQueryDumpWithMultiColumnStatistics() {
+        List<MultiColumnCombinedStats.McvEntry> mcv = Lists.newArrayList(
+                new MultiColumnCombinedStats.McvEntry(Lists.newArrayList("approved", "0"), 500, Lists.newArrayList(600L, 620L)),
+                new MultiColumnCombinedStats.McvEntry(Arrays.asList(null, "2"), 50));
+        String mcvText = ExternalMultiColumnStatsCacheLoader.formatMcv(mcv);
+        assertThat(mcvText).isEqualTo("[[[\"approved\",\"0\"],\"500\",[\"600\",\"620\"]],[[null,\"2\"],\"50\"]]");
+
+        JsonObject dump = new JsonObject();
+        dump.addProperty("statement", "select * from t1");
+        JsonObject tableMeta = new JsonObject();
+        tableMeta.addProperty("test.t1", "CREATE TABLE t1 (status VARCHAR(10), gate INT)");
+        dump.add("table_meta", tableMeta);
+        JsonObject rowCount = new JsonObject();
+        JsonObject partitionRowCount = new JsonObject();
+        partitionRowCount.addProperty("t1", 1000L);
+        rowCount.add("test.t1", partitionRowCount);
+        dump.add("table_row_count", rowCount);
+        dump.add("column_statistics", new JsonObject());
+        JsonObject multiColumn = new JsonObject();
+        JsonArray groups = new JsonArray();
+        JsonObject group = new JsonObject();
+        JsonArray columns = new JsonArray();
+        columns.add("status");
+        columns.add("gate");
+        group.add("columns", columns);
+        group.addProperty("ndv", 12L);
+        group.addProperty("row_count", 1000L);
+        group.addProperty("mcv", mcvText);
+        groups.add(group);
+        JsonObject ndvOnly = new JsonObject();
+        JsonArray ndvOnlyColumns = new JsonArray();
+        ndvOnlyColumns.add("gate");
+        ndvOnlyColumns.add("type");
+        ndvOnly.add("columns", ndvOnlyColumns);
+        ndvOnly.addProperty("ndv", 7L);
+        groups.add(ndvOnly);
+        multiColumn.add("test.t1", groups);
+        dump.add("multi_column_statistics", multiColumn);
+        dump.addProperty("be_number", 3);
+
+        Gson gson = new GsonBuilder()
+                .registerTypeAdapter(QueryDumpInfo.class, new QueryDumpDeserializer())
+                .create();
+        QueryDumpInfo dumpInfo = gson.fromJson(dump, QueryDumpInfo.class);
+
+        List<ExternalMultiColumnCombinedStatistics.Group> parsed = dumpInfo.getMultiColumnStatisticsMap().get("test.t1");
+        assertThat(parsed).hasSize(2);
+        assertThat(parsed.get(0).getColumnNames()).containsExactly("status", "gate");
+        assertThat(parsed.get(0).getNdv()).isEqualTo(12L);
+        assertThat(parsed.get(0).getRowCount()).isEqualTo(1000L);
+        assertThat(parsed.get(0).getMcv()).hasSize(2);
+        assertThat(parsed.get(0).getMcv().get(0).getValues()).containsExactly("approved", "0");
+        assertThat(parsed.get(0).getMcv().get(0).getCount()).isEqualTo(500L);
+        assertThat(parsed.get(0).getMcv().get(0).getComponentCounts()).containsExactly(600L, 620L);
+        assertThat(parsed.get(0).getMcv().get(1).getValues()).containsExactly(null, "2");
+        assertThat(parsed.get(1).getColumnNames()).containsExactly("gate", "type");
+        assertThat(parsed.get(1).getNdv()).isEqualTo(7L);
+        assertThat(parsed.get(1).getMcv()).isEmpty();
     }
 
     @Test

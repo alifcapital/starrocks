@@ -409,7 +409,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             builder.setTableRowCountMayInaccurate(true);
         }
         // 3. get multi-column combined statistics according to required columns
-        builder = StatisticsCalcUtils.estimateMultiColumnCombinedStats(table, builder, colRefToColumnMetaMap);
+        builder = StatisticsCalcUtils.estimateMultiColumnCombinedStats(table, builder, colRefToColumnMetaMap,
+                optimizerContext);
 
         // 4. deal with column statistics for partition prune
         OlapTable olapTable = (OlapTable) table;
@@ -597,7 +598,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             } else {
                 statistics = StatisticsUtils.buildDefaultStatistics(colRefToColumnMetaMap.keySet());
             }
-            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap);
+            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap,
+                    optimizerContext);
 
             context.setStatistics(statistics);
             if (node.isLogical()) {
@@ -627,7 +629,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null,
                     node.getPredicate(), node.getLimit(), TvrTableSnapshot.empty());
-            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap,
+                    optimizerContext);
             context.setStatistics(stats);
 
             if (node.isLogical()) {
@@ -760,7 +763,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null,
                     node.getPredicate(), node.getLimit(), tvrVersionRange);
-            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap,
+                    optimizerContext);
             context.setStatistics(stats);
             if (node.isLogical()) {
                 boolean hasUnknownColumns = stats.getColumnStatistics().values().stream()
@@ -788,7 +792,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             String catalogName = table.getCatalogName();
             Statistics stats = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, columnRefOperatorColumnMap, null, node.getPredicate());
-            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap);
+            stats = StatisticsCalcUtils.withExternalMultiColumnStats(table, stats, columnRefOperatorColumnMap,
+                    optimizerContext);
             context.setStatistics(stats);
         }
         return visitOperator(node, context);
@@ -860,7 +865,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             String catalogName = (table).getCatalogName();
             Statistics statistics = GlobalStateMgr.getCurrentState().getMetadataMgr().getTableStatistics(
                     optimizerContext, catalogName, table, colRefToColumnMetaMap, partitionKeys, node.getPredicate());
-            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap);
+            statistics = StatisticsCalcUtils.withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap,
+                    optimizerContext);
             context.setStatistics(statistics);
 
             if (node.isLogical()) {
@@ -895,7 +901,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         builder.setStatsSource(statsSource);
 
         context.setStatistics(
-                StatisticsCalcUtils.withExternalMultiColumnStats(table, builder.build(), colRefToColumnMetaMap));
+                StatisticsCalcUtils.withExternalMultiColumnStats(table, builder.build(), colRefToColumnMetaMap,
+                    optimizerContext));
         return visitOperator(node, context);
     }
 

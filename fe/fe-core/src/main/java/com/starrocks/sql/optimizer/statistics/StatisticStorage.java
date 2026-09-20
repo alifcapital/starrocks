@@ -146,4 +146,11 @@ public interface StatisticStorage {
     // Inject a histogram into the cache for query-dump replay; no-op if histograms aren't cached.
     default void addHistogramStatistics(Table table, String column, Histogram histogram) {
     }
+
+    // Inject multi-column statistics for query-dump replay; no-op unless they are cached.
+    default void addMultiColumnStatistics(Table table, MultiColumnCombinedStatistics statistics) {
+    }
+
+    default void addExternalMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics statistics) {
+    }
 }

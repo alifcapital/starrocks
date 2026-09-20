@@ -15,9 +15,13 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.starrocks.common.FeConstants;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.statistic.StatisticExecutor;
@@ -40,6 +44,7 @@ import java.util.concurrent.Executor;
 public class ExternalMultiColumnStatsCacheLoader
         implements AsyncCacheLoader<String, Optional<ExternalMultiColumnCombinedStatistics>> {
     private static final Logger LOG = LogManager.getLogger(ExternalMultiColumnStatsCacheLoader.class);
+    private static final Gson JSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private final StatisticExecutor statisticExecutor = new StatisticExecutor();
 
@@ -140,6 +145,29 @@ public class ExternalMultiColumnStatsCacheLoader
             result.add(new MultiColumnCombinedStats.McvEntry(values, count, componentCounts));
         }
         return result;
+    }
+
+    /** The inverse of parseMcv: the MCV text as the statistics table stores it. */
+    public static String formatMcv(List<MultiColumnCombinedStats.McvEntry> mcv) {
+        JsonArray array = new JsonArray();
+        for (MultiColumnCombinedStats.McvEntry entry : mcv) {
+            JsonArray values = new JsonArray();
+            for (String value : entry.getValues()) {
+                values.add(value == null ? JsonNull.INSTANCE : new JsonPrimitive(value));
+            }
+            JsonArray pair = new JsonArray();
+            pair.add(values);
+            pair.add(String.valueOf(entry.getCount()));
+            if (entry.hasComponentCounts()) {
+                JsonArray counts = new JsonArray();
+                for (Long count : entry.getComponentCounts()) {
+                    counts.add(String.valueOf(count));
+                }
+                pair.add(counts);
+            }
+            array.add(pair);
+        }
+        return JSON.toJson(array);
     }
 
     private static List<String> parseStringArray(JsonArray array) {

@@ -105,6 +105,12 @@ public class StatisticsCalcUtils {
      */
     public static Statistics withExternalMultiColumnStats(Table table, Statistics statistics,
                                                           Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        return withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap, null);
+    }
+
+    public static Statistics withExternalMultiColumnStats(Table table, Statistics statistics,
+                                                          Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                                          OptimizerContext optimizerContext) {
         if (statistics == null || table == null || !table.isAnalyzableExternalTable()) {
             return statistics;
         }
@@ -117,6 +123,11 @@ public class StatisticsCalcUtils {
         }
         if (cached == null || cached.isEmpty()) {
             return statistics;
+        }
+        if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
+            for (ExternalMultiColumnCombinedStatistics.Group group : cached.getGroups()) {
+                optimizerContext.getDumpInfo().addMultiColumnStatistics(table, group);
+            }
         }
         return attachExternalMultiColumnStats(statistics, cached, colRefToColumnMetaMap);
     }
@@ -181,6 +192,13 @@ public class StatisticsCalcUtils {
     public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,
                                                                       Statistics.Builder builder,
                                                                       Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        return estimateMultiColumnCombinedStats(table, builder, colRefToColumnMetaMap, null);
+    }
+
+    public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,
+                                                                      Statistics.Builder builder,
+                                                                      Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                                                      OptimizerContext optimizerContext) {
         if (!table.isNativeTableOrMaterializedView()) {
             return builder;
         }
@@ -203,6 +221,14 @@ public class StatisticsCalcUtils {
         for (Map.Entry<Set<Integer>, Long> entry : distinctCounts.entrySet()) {
             Set<Integer> uniqueColumnIds = entry.getKey();
             Long ndv = entry.getValue();
+            if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
+                List<String> names = new ArrayList<>();
+                uniqueColumnIds.forEach(id -> names.add(uniqueIdToColumnNameMap.get(id)));
+                if (!names.contains(null)) {
+                    optimizerContext.getDumpInfo().addMultiColumnStatistics(table,
+                            new ExternalMultiColumnCombinedStatistics.Group(names, 0, ndv, List.of()));
+                }
+            }
 
             Set<ColumnRefOperator> mcRefOperators = new HashSet<>(uniqueColumnIds.size());
             boolean allColumnsFound = true;
