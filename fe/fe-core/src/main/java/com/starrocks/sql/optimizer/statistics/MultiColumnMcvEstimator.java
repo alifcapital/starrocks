@@ -24,6 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.statistic.StatisticUtils;
@@ -460,7 +461,7 @@ public class MultiColumnMcvEstimator {
     }
 
     /**
-     * Conjuncts of the forms expr op constant, expr [NOT] IN (constants) and expr IS [NOT] NULL, where
+     * Conjuncts of the forms expr op constant, expr [NOT] IN (constants), expr LIKE 'pattern' and expr IS [NOT] NULL, where
      * expr is a column or a cast or a function of one column, keyed by that column. Other conjuncts
      * are left to the regular estimation.
      */
@@ -499,6 +500,10 @@ public class MultiColumnMcvEstimator {
             return columnOf(predicate.getChild(0));
         }
         if (conjunct instanceof IsNullPredicateOperator) {
+            return columnOf(conjunct.getChild(0));
+        }
+        if (conjunct instanceof LikePredicateOperator
+                && LikePatternEstimator.pattern((LikePredicateOperator) conjunct).isPresent()) {
             return columnOf(conjunct.getChild(0));
         }
         return null;
@@ -634,6 +639,9 @@ public class MultiColumnMcvEstimator {
         }
         if (value == null) {
             return Optional.of(false);
+        }
+        if (conjunct instanceof LikePredicateOperator) {
+            return LikePatternEstimator.pattern((LikePredicateOperator) conjunct).map(pattern -> pattern.matches(value));
         }
         if (conjunct instanceof BinaryPredicateOperator) {
             BinaryPredicateOperator predicate = (BinaryPredicateOperator) conjunct;

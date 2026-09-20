@@ -26,6 +26,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.DateType;
@@ -365,6 +366,19 @@ public class MultiColumnMcvEstimatorTest {
                 new BinaryPredicateOperator(BinaryType.EQ, new CallOperator("add", IntegerType.INT, List.of(GATE, TYPE)),
                         ConstantOperator.createInt(0)));
         Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(twoColumns), statistics).isEmpty());
+    }
+
+    @Test
+    public void testLikeFiltersTheHead() {
+        Statistics statistics = statisticsWithComponentCounts();
+        LikePredicateOperator like = new LikePredicateOperator(STATUS, ConstantOperator.createVarchar("app%"));
+        ScalarOperator predicate = and(like, eq(GATE, ConstantOperator.createInt(0)));
+        // (approved, 0, *) holds 0.55; gate = 0 has the exact share 0.62, so the tail is at most 0.07.
+        double rows = estimateRows(predicate, statistics);
+        Assertions.assertTrue(rows >= 550 - 1e-6 && rows <= 620 + 1e-6, String.valueOf(rows));
+        Assertions.assertEquals(Optional.of(true), MultiColumnMcvEstimator.matches(like, VarcharType.VARCHAR, "approved"));
+        Assertions.assertEquals(Optional.of(false), MultiColumnMcvEstimator.matches(like, VarcharType.VARCHAR, "declined"));
+        Assertions.assertEquals(Optional.of(false), MultiColumnMcvEstimator.matches(like, VarcharType.VARCHAR, null));
     }
 
     @Test

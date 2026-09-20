@@ -29,6 +29,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.sql.spm.SPMFunctions;
@@ -38,6 +39,7 @@ import org.apache.commons.math3.util.Precision;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.statistics.HistogramStatisticsUtils.estimateInPredicateWithHistogram;
@@ -287,6 +289,26 @@ public class PredicateStatisticsCalculator {
             builder.addColumnStatistic(children.get(0), ColumnStatistic.buildFrom(isNullColumnStatistic)
                     .setNullsFraction(predicate.isNotNull() ? 0.0 : 1.0)
                     .build());
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount);
+        }
+
+        @Override
+        public Statistics visitLikePredicateOperator(LikePredicateOperator predicate, Void context) {
+            if (!checkNeedEvalEstimate(predicate)) {
+                return statistics;
+            }
+            OptionalDouble selectivity = LikePatternEstimator.selectivity(predicate, statistics);
+            if (selectivity.isEmpty()) {
+                return visit(predicate, context);
+            }
+            ColumnRefOperator column = LikePatternEstimator.column(predicate).orElseThrow();
+            double rowCount = statistics.getOutputRowCount() * selectivity.getAsDouble();
+            Statistics.Builder builder = Statistics.buildFrom(statistics).setOutputRowCount(rowCount);
+            // The NULL rows are out unless the expression turns NULL into a matching value.
+            if (!LikePatternEstimator.nullRowsMatch(predicate, column).orElse(true)) {
+                builder.addColumnStatistic(column,
+                        ColumnStatistic.buildFrom(statistics.getColumnStatistic(column)).setNullsFraction(0).build());
+            }
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount);
         }
 
