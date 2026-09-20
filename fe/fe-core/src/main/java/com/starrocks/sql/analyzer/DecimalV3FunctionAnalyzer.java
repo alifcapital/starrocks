@@ -82,6 +82,9 @@ public class DecimalV3FunctionAnalyzer {
                     .add(FunctionSet.APPROX_TOP_K)
                     .add(FunctionSet.HISTOGRAM)
                     .add(FunctionSet.HISTOGRAM_HLL_NDV)
+                    .add(FunctionSet.DS_FREQUENT_ITEMS)
+                    .add(FunctionSet.DS_KLL_QUANTILES)
+                    .add(FunctionSet.HISTOGRAM_BY_BOUNDS)
                     .add(FunctionSet.ARRAY_UNIQUE_AGG) // array_unique_agg(array<decimal>) -> array<decimal>
                     .addAll(DECIMAL_ARRAY_AGG_FUNCTION_SAME_TYPE)
                     .build();
@@ -470,7 +473,10 @@ public class DecimalV3FunctionAnalyzer {
         boolean widerTypeAgg = DECIMAL_AGG_FUNCTION_WIDER_TYPE.contains(fnName) && argumentTypes[0].isDecimalV3();
         if (sameTypeAgg || widerTypeAgg) {
             Type commonType = InvalidType.INVALID;
-            if (FunctionSet.HISTOGRAM.equals(fnName) || FunctionSet.HISTOGRAM_HLL_NDV.equals(fnName)) {
+            if (FunctionSet.HISTOGRAM.equals(fnName) || FunctionSet.HISTOGRAM_HLL_NDV.equals(fnName)
+                    || FunctionSet.DS_FREQUENT_ITEMS.equals(fnName) || FunctionSet.DS_KLL_QUANTILES.equals(fnName)
+                    || FunctionSet.HISTOGRAM_BY_BOUNDS.equals(fnName)) {
+                // The result is text; the decimal argument keeps its precision and scale for the BE.
                 commonType = VarcharType.VARCHAR;
             } else if (sameTypeAgg) {
                 commonType = argumentTypes[0];

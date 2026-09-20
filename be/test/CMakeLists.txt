@@ -157,6 +157,7 @@ set(EXEC_FILES
         ./exec/hdfs_scanner/hdfs_scanner_test.cpp
         ./exec/hdfs_scanner/jni_scanner_test.cpp
         ./exprs/agg/data_sketch/ds_theta_test.cpp
+        ./exprs/agg/stats_sketch_agg_test.cpp
         ./exprs/agg/json_each_test.cpp
         ./exprs/agg/aggregate_test.cpp
         ./exprs/agg/window_test.cpp
@@ -190,6 +191,7 @@ set(EXEC_FILES
         ./exprs/geography_functions_test.cpp
         ./exprs/gin_functions_test.cpp
         ./exprs/hash_functions_test.cpp
+        ./exprs/stats_functions_test.cpp
         ./exprs/hyperloglog_functions_test.cpp
         ./exprs/if_expr_test.cpp
         ./exprs/function_helper_test.cpp

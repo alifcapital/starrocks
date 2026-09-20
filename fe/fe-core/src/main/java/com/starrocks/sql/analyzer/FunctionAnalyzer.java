@@ -611,6 +611,32 @@ public class FunctionAnalyzer {
             }
         }
 
+        // ds_frequent_items(expr, k[, lg_max_map_size]) and ds_kll_quantiles(expr, num_buckets[, k]): the
+        // BE reads the trailing arguments as constants when it creates the sketch and when it finalizes.
+        if (fnName.equals(FunctionSet.DS_FREQUENT_ITEMS) || fnName.equals(FunctionSet.DS_KLL_QUANTILES)) {
+            for (int i = 1; i < functionCallExpr.getChildren().size(); i++) {
+                Expr parameter = functionCallExpr.getChild(i);
+                Optional<Long> value = extractIntegerValue(parameter);
+                if (!value.isPresent() || value.get() <= 0) {
+                    throw new SemanticException(
+                            "Parameter " + (i + 1) + " of " + fnName + " must be a constant positive integer: " +
+                                    ExprToSql.toSql(functionCallExpr), parameter.getPos());
+                }
+            }
+        }
+
+        // histogram_by_bounds(expr, mcv_json, bounds_json): the BE parses both specifications once per state.
+        if (fnName.equals(FunctionSet.HISTOGRAM_BY_BOUNDS)) {
+            for (int i = 1; i < functionCallExpr.getChildren().size(); i++) {
+                Expr parameter = functionCallExpr.getChild(i);
+                if (!(unwrapConstantString(parameter) instanceof StringLiteral)) {
+                    throw new SemanticException(
+                            "Parameter " + (i + 1) + " of " + fnName + " must be a constant string: " +
+                                    ExprToSql.toSql(functionCallExpr), parameter.getPos());
+                }
+            }
+        }
+
         if (fnName.equals(FunctionSet.APPROX_TOP_K)) {
             Optional<Long> k = Optional.empty();
             Optional<Long> counterNum = Optional.empty();

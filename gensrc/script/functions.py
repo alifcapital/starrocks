@@ -852,6 +852,7 @@ vectorized_functions = [
     [100025, 'uuid_v7', True, False, 'VARCHAR', [], "UtilityFunctions::uuid_v7"],
     [100026, 'uuid_v7_numeric', True, False, 'LARGEINT', [], "UtilityFunctions::uuid_v7_numeric"],
     [100027, 'query_id', True, False, 'VARCHAR', [], "UtilityFunctions::query_id"],
+    [100028, 'stats_tuple_key', True, False, 'VARCHAR', ['VARCHAR', '...'], 'StatsFunctions::tuple_key'],
 
     # json string function
     [110022, "get_json_int", False, False, "BIGINT", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bigint",

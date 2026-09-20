@@ -112,6 +112,7 @@ set(EXPR_FILES
   match_expr.cpp
   bit_functions.cpp
   hash_functions.cpp
+  stats_functions.cpp
   gin_functions.cpp
   ai_functions.cpp
 )

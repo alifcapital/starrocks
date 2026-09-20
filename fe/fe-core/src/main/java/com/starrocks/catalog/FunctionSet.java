@@ -364,6 +364,10 @@ public class FunctionSet {
     public static final String DISTINCT_PCSA = "distinct_pcsa";
     public static final String HISTOGRAM = "histogram";
     public static final String HISTOGRAM_HLL_NDV = "histogram_hll_ndv";
+    public static final String HISTOGRAM_BY_BOUNDS = "histogram_by_bounds";
+    public static final String DS_FREQUENT_ITEMS = "ds_frequent_items";
+    public static final String DS_KLL_QUANTILES = "ds_kll_quantiles";
+    public static final String STATS_TUPLE_KEY = "stats_tuple_key";
     public static final String FLAT_JSON_META = "flat_json_meta";
     public static final String COLUMN_SIZE = "column_size";
     public static final String COLUMN_COMPRESSED_SIZE = "column_compressed_size";
@@ -731,7 +735,7 @@ public class FunctionSet {
     private final ImmutableSet<String> notAlwaysNullResultWithNullParamFunctions =
             ImmutableSet.of(IF, CONCAT_WS, IFNULL, NULLIF, NULL_OR_EMPTY, COALESCE, BITMAP_HASH, BITMAP_HASH64,
                     PERCENTILE_HASH, HLL_HASH, JSON_ARRAY, JSON_OBJECT, ROW, STRUCT, NAMED_STRUCT, AES_ENCRYPT, AES_DECRYPT,
-                    ENCODE_FINGERPRINT_SHA256, ENCODE_SORT_KEY);
+                    ENCODE_FINGERPRINT_SHA256, ENCODE_SORT_KEY, STATS_TUPLE_KEY);
 
     // If low cardinality string column with global dict, for some string functions,
     // we could evaluate the function only with the dict content, not all string column data.
@@ -931,6 +935,9 @@ public class FunctionSet {
                     .add(FIRST_VALUE_REWRITE)
                     .add(HISTOGRAM)
                     .add(HISTOGRAM_HLL_NDV)
+                    .add(HISTOGRAM_BY_BOUNDS)
+                    .add(DS_FREQUENT_ITEMS)
+                    .add(DS_KLL_QUANTILES)
                     .add(DICT_MERGE)
                     // no need to support agg_state
                     .add(DS_HLL_ACCUMULATE)
@@ -964,16 +971,15 @@ public class FunctionSet {
         final String functionName = desc.getFunctionName().getFunction();
         final Type[] descArgTypes = desc.getArgs();
         final Type[] candidateArgTypes = candicate.getArgs();
-        if (functionName.equalsIgnoreCase(HEX)
-                || functionName.equalsIgnoreCase(LEAD)
-                || functionName.equalsIgnoreCase(LAG)
-                || functionName.equalsIgnoreCase(APPROX_TOP_K)) {
+        boolean keepsFirstArgType = functionName.equalsIgnoreCase(LEAD) || functionName.equalsIgnoreCase(LAG)
+                || functionName.equalsIgnoreCase(APPROX_TOP_K) || functionName.equalsIgnoreCase(DS_FREQUENT_ITEMS)
+                || functionName.equalsIgnoreCase(DS_KLL_QUANTILES) || functionName.equalsIgnoreCase(HISTOGRAM_BY_BOUNDS);
+        if (functionName.equalsIgnoreCase(HEX) || keepsFirstArgType) {
             final Type descArgType = descArgTypes[0];
             final Type candidateArgType = candidateArgTypes[0];
-            if (functionName.equalsIgnoreCase(LEAD) ||
-                    functionName.equalsIgnoreCase(LAG) ||
-                    functionName.equalsIgnoreCase(APPROX_TOP_K)) {
-                // lead and lag function respect first arg type
+            if (keepsFirstArgType) {
+                // lead and lag function respect first arg type; the statistics sketches keep the column's
+                // type as well, so a decimal is not cast to double and loses no digits
                 return descArgType.isNull() || descArgType.matchesType(candidateArgType);
             } else if (descArgType.isOnlyMetricType()) {
                 // Bitmap, HLL, PERCENTILE type don't allow cast
@@ -1621,6 +1627,32 @@ public class FunctionSet {
             addBuiltin(AggregateFunction.createBuiltin(HISTOGRAM_HLL_NDV,
                     Lists.newArrayList(t, VarcharType.VARCHAR), VarcharType.VARCHAR, VarcharType.VARCHAR,
                     false, false, false));
+
+            // Sketch-based statistics collection. Booleans never need a histogram and the BE has no
+            // sketch serde for DECIMAL256.
+            if (t.isBoolean() || t.isDecimal256()) {
+                continue;
+            }
+            // ds_frequent_items(col, k[, lg_max_map_size])
+            addBuiltin(AggregateFunction.createBuiltin(DS_FREQUENT_ITEMS,
+                    Lists.newArrayList(t, IntegerType.INT), VarcharType.VARCHAR, VarbinaryType.VARBINARY,
+                    false, false, false));
+            addBuiltin(AggregateFunction.createBuiltin(DS_FREQUENT_ITEMS,
+                    Lists.newArrayList(t, IntegerType.INT, IntegerType.INT), VarcharType.VARCHAR,
+                    VarbinaryType.VARBINARY, false, false, false));
+            // histogram_by_bounds(col, mcv_json, bounds_json)
+            addBuiltin(AggregateFunction.createBuiltin(HISTOGRAM_BY_BOUNDS,
+                    Lists.newArrayList(t, VarcharType.VARCHAR, VarcharType.VARCHAR), VarcharType.VARCHAR,
+                    VarbinaryType.VARBINARY, false, false, false));
+            // ds_kll_quantiles(col, num_buckets[, k]): strings have no bucket boundaries.
+            if (!t.isStringType()) {
+                addBuiltin(AggregateFunction.createBuiltin(DS_KLL_QUANTILES,
+                        Lists.newArrayList(t, IntegerType.INT), VarcharType.VARCHAR, VarbinaryType.VARBINARY,
+                        false, false, false));
+                addBuiltin(AggregateFunction.createBuiltin(DS_KLL_QUANTILES,
+                        Lists.newArrayList(t, IntegerType.INT, IntegerType.INT), VarcharType.VARCHAR,
+                        VarbinaryType.VARBINARY, false, false, false));
+            }
         }
 
         // causal inference functions.

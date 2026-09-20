@@ -51,6 +51,27 @@ struct HLLUnionBuilder {
     }
 };
 
+// Sketch-based statistics collection: bounded-memory most-common-value candidates, quantile
+// boundaries, and exact MCV and bucket counts for given boundaries. Booleans never need a
+// histogram and DECIMAL256 has no sketch item serde, so both stay out.
+struct StatsSketchBuilder {
+    template <LogicalType lt>
+    void operator()(AggregateFuncResolver* resolver) {
+        constexpr bool ordered =
+                lt_is_fixedlength<lt> && !lt_is_boolean<lt> && !lt_is_decimal256<lt> && !lt_is_time<lt>;
+        if constexpr (ordered || lt_is_string<lt>) {
+            resolver->add_aggregate_mapping_variadic<lt, TYPE_VARCHAR, FrequentItemsState<lt>>(
+                    "ds_frequent_items", false, AggregateFactory::MakeFrequentItemsAggregateFunction<lt>());
+            resolver->add_aggregate_mapping<lt, TYPE_VARCHAR, HistogramByBoundsState<lt>>(
+                    "histogram_by_bounds", false, AggregateFactory::MakeHistogramByBoundsAggregateFunction<lt>());
+        }
+        if constexpr (ordered) {
+            resolver->add_aggregate_mapping_variadic<lt, TYPE_VARCHAR, KllQuantilesState<lt>>(
+                    "ds_kll_quantiles", false, AggregateFactory::MakeKllQuantilesAggregateFunction<lt>());
+        }
+    }
+};
+
 struct ApproxTopKBuilder {
     template <LogicalType lt>
     void operator()(AggregateFuncResolver* resolver) {
@@ -72,6 +93,7 @@ void AggregateFuncResolver::register_approx() {
 
     for (auto type : aggregate_types()) {
         type_dispatch_all(type, ApproxTopKBuilder(), this);
+        type_dispatch_all(type, StatsSketchBuilder(), this);
     }
     add_aggregate_mapping<TYPE_HLL, TYPE_HLL, HyperLogLog>("hll_union", false,
                                                            AggregateFactory::MakeHllUnionAggregateFunction());
