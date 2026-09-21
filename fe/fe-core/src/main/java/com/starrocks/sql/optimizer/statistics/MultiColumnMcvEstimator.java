@@ -94,15 +94,15 @@ public class MultiColumnMcvEstimator {
 
     /**
      * Estimates the conjuncts that fall on column groups with an MCV list. Empty when no group has an
-     * MCV list, when fewer than two columns of any group carry supported predicates, or when a value
-     * cannot be interpreted.
+     * MCV list, when no column of a group carries a supported predicate, or when a value cannot be
+     * interpreted.
      */
     public static Optional<Result> estimate(List<ScalarOperator> conjuncts, Statistics statistics) {
         if (!isEnabled() || !hasMcvStats(statistics)) {
             return Optional.empty();
         }
         Map<ColumnRefOperator, List<ScalarOperator>> byColumn = groupSupportedConjuncts(conjuncts);
-        if (byColumn.size() < 2) {
+        if (byColumn.isEmpty()) {
             return Optional.empty();
         }
 
@@ -197,13 +197,15 @@ public class MultiColumnMcvEstimator {
     }
 
     /**
-     * The group covering the most predicate columns; ties go to the group whose MCV list covers more rows.
+     * The group covering the most predicate columns; ties go to the narrowest group, whose head is the
+     * most detailed on those columns, then to the group whose MCV list covers more rows.
      */
     private static Map.Entry<Set<ColumnRefOperator>, MultiColumnCombinedStats> findBestGroup(
             Map<ColumnRefOperator, List<ScalarOperator>> byColumn,
             Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups) {
         Map.Entry<Set<ColumnRefOperator>, MultiColumnCombinedStats> best = null;
-        int bestCovered = 1;
+        int bestCovered = 0;
+        int bestWidth = Integer.MAX_VALUE;
         double bestCoverage = -1;
         for (Map.Entry<Set<ColumnRefOperator>, MultiColumnCombinedStats> entry : groups.entrySet()) {
             if (!entry.getValue().hasMcv()) {
@@ -215,10 +217,16 @@ public class MultiColumnMcvEstimator {
                     covered++;
                 }
             }
+            if (covered == 0) {
+                continue;
+            }
+            int width = entry.getValue().getColumns().size();
             double coverage = mcvTotalRows(entry.getValue()) / (double) entry.getValue().getRowCount();
-            if (covered > bestCovered || (covered == bestCovered && best != null && coverage > bestCoverage)) {
+            if (covered > bestCovered || (covered == bestCovered
+                    && (width < bestWidth || (width == bestWidth && coverage > bestCoverage)))) {
                 best = entry;
                 bestCovered = covered;
+                bestWidth = width;
                 bestCoverage = coverage;
             }
         }
@@ -270,7 +278,9 @@ public class MultiColumnMcvEstimator {
             // An expression of the column may map several values to one; only the column itself has
             // an exact share.
             OptionalDouble exact = conjunct.getChild(0).isColumnRef()
-                    ? shares.selectivity(conjunct, columns.indexOf(column), column.getType()) : OptionalDouble.empty();
+                    ? shares.selectivity(conjunct, columns.indexOf(column), column.getType(),
+                            statistics.getColumnStatistic(column).getNullsFraction())
+                    : OptionalDouble.empty();
             double sel = exact.isPresent() ? exact.getAsDouble()
                     : StatisticsEstimateUtils.getPredicateSelectivity(conjunct, statistics);
             simpleSel *= sel;
@@ -280,7 +290,11 @@ public class MultiColumnMcvEstimator {
             }
         }
         double otherSel = Math.min(Math.max(0.0, 1.0 - mcvTotalSel), Math.max(0.0, simpleSel - mcvBaseSel));
-        if (hasExactSel) {
+        if (hasExactSel && conjuncts.size() == 1) {
+            // One exactly known conjunct: the rows outside the head that satisfy it are its rows less
+            // the matching head tuples.
+            otherSel = Math.min(Math.max(0.0, 1.0 - mcvTotalSel), Math.max(0.0, exactSel - mcvSel));
+        } else if (hasExactSel) {
             // The matching head tuples all satisfy an exactly known conjunct, so the rows outside the
             // head that satisfy the conjunction are at most its rows less the matching head tuples.
             otherSel = Math.min(otherSel, Math.max(0.0, exactSel - mcvSel));
@@ -405,10 +419,12 @@ public class MultiColumnMcvEstimator {
         }
 
         /**
-         * The exact selectivity of column = constant, column IN (constants), column IS NULL or column IS
-         * NOT NULL at the tuple position; empty when a value is not a head component there.
+         * The exact selectivity of column = constant, column != constant, column [NOT] IN (constants),
+         * column IS NULL or column IS NOT NULL at the tuple position; empty when a value is not a head
+         * component there. The negated forms leave the NULL rows out, counted from the head when a
+         * tuple has a NULL there and from the column's nulls fraction otherwise.
          */
-        OptionalDouble selectivity(ScalarOperator conjunct, int position, Type type) {
+        OptionalDouble selectivity(ScalarOperator conjunct, int position, Type type, double nullsFraction) {
             if (position < 0 || position >= counts.size() || counts.get(position).isEmpty()) {
                 return OptionalDouble.empty();
             }
@@ -422,10 +438,16 @@ public class MultiColumnMcvEstimator {
                 return OptionalDouble.of(((IsNullPredicateOperator) conjunct).isNotNull() ? 1.0 - share : share);
             }
             List<ConstantOperator> constants = new ArrayList<>();
-            if (conjunct instanceof BinaryPredicateOperator
-                    && ((BinaryPredicateOperator) conjunct).getBinaryType() == BinaryType.EQ) {
+            boolean negated;
+            if (conjunct instanceof BinaryPredicateOperator) {
+                BinaryType binaryType = ((BinaryPredicateOperator) conjunct).getBinaryType();
+                if (binaryType != BinaryType.EQ && binaryType != BinaryType.NE) {
+                    return OptionalDouble.empty();
+                }
+                negated = binaryType == BinaryType.NE;
                 constants.add((ConstantOperator) conjunct.getChild(1));
-            } else if (conjunct instanceof InPredicateOperator && !((InPredicateOperator) conjunct).isNotIn()) {
+            } else if (conjunct instanceof InPredicateOperator) {
+                negated = ((InPredicateOperator) conjunct).isNotIn();
                 for (int i = 1; i < conjunct.getChildren().size(); i++) {
                     constants.add((ConstantOperator) conjunct.getChild(i));
                 }
@@ -443,7 +465,15 @@ public class MultiColumnMcvEstimator {
                     share += known.get(value.get()) / rowCount;
                 }
             }
-            return OptionalDouble.of(Math.min(1.0, share));
+            if (!negated) {
+                return OptionalDouble.of(Math.min(1.0, share));
+            }
+            Long nulls = known.get(null);
+            double nullShare = nulls != null ? nulls / rowCount : nullsFraction;
+            if (Double.isNaN(nullShare)) {
+                return OptionalDouble.empty();
+            }
+            return OptionalDouble.of(Math.max(0.0, 1.0 - share - nullShare));
         }
 
         private static Optional<String> findComponent(Map<String, Long> known, Type type, ConstantOperator constant) {

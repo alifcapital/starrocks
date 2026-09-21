@@ -272,11 +272,97 @@ public class MultiColumnMcvEstimatorTest {
     }
 
     @Test
-    public void testSingleGroupColumnLeavesRegularEstimation() {
+    public void testOneGroupColumnAmongOthersIsEstimatedFromTheHead() {
         Statistics statistics = statisticsWithMcv();
         ScalarOperator predicate = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
                 eq(EXTRA, ConstantOperator.createInt(5)));
-        Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics).isEmpty());
+        Optional<MultiColumnMcvEstimator.Result> result =
+                MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics);
+        Assertions.assertTrue(result.isPresent());
+        Assertions.assertEquals(Set.of(Utils.extractConjuncts(predicate).get(0)), result.get().getConsumed());
+        Assertions.assertTrue(estimateRows(predicate, statistics) > 0);
+    }
+
+    @Test
+    public void testLonePredicateOnGroupColumnUsesTheHeadAndTheExactShare() {
+        Statistics statistics = statisticsWithComponentCounts();
+        // The approved head tuples hold 0.55; the column holds approved in 0.6 of the rows.
+        Assertions.assertEquals(600, estimateRows(eq(STATUS, ConstantOperator.createVarchar("approved")), statistics),
+                1e-6);
+        // Not approved and not NULL: 1 - 0.6 - 0.05; the declined tuple holds 0.2 of it.
+        Assertions.assertEquals(350, estimateRows(new BinaryPredicateOperator(BinaryType.NE, STATUS,
+                ConstantOperator.createVarchar("approved")), statistics), 1e-6);
+        Assertions.assertEquals(900, estimateRows(new InPredicateOperator(false, STATUS,
+                ConstantOperator.createVarchar("approved"), ConstantOperator.createVarchar("declined")), statistics), 1e-6);
+        Assertions.assertEquals(50, estimateRows(new InPredicateOperator(true, STATUS,
+                ConstantOperator.createVarchar("approved"), ConstantOperator.createVarchar("declined")), statistics), 1e-6);
+        Assertions.assertEquals(50, estimateRows(new IsNullPredicateOperator(false, STATUS), statistics), 1e-6);
+        // The column statistics come from the plain estimate of the predicate.
+        Statistics estimated = PredicateStatisticsCalculator.statisticsCalculate(
+                eq(STATUS, ConstantOperator.createVarchar("approved")), statistics);
+        Assertions.assertEquals(0, estimated.getColumnStatistic(STATUS).getNullsFraction(), 1e-9);
+
+        // LIKE alone: the matching head tuples; the plain LIKE estimate leaves nothing for the tail.
+        LikePredicateOperator like = new LikePredicateOperator(STATUS, ConstantOperator.createVarchar("app%"));
+        double rows = estimateRows(like, statistics);
+        Assertions.assertTrue(rows >= 550 - 1e-6 && rows <= 750 + 1e-6, String.valueOf(rows));
+
+        // The plain estimates the MCV estimate is built from do not use the MCV lists themselves.
+        double plain = PredicateStatisticsCalculator.statisticsCalculate(
+                eq(STATUS, ConstantOperator.createVarchar("approved")), statistics, false).getOutputRowCount();
+        Assertions.assertEquals(ROWS * sel(eq(STATUS, ConstantOperator.createVarchar("approved")), statistics), plain,
+                1e-6);
+        Assertions.assertNotEquals(600, plain, 1e-6);
+    }
+
+    @Test
+    public void testLonePredicateOnTheOnlyReadColumnOfAGroup() {
+        // The query reads gate only; status and type are placeholders.
+        Statistics statistics = Statistics.builder()
+                .setOutputRowCount(ROWS)
+                .addColumnStatistic(GATE, ColumnStatistic.builder()
+                        .setMinValue(0).setMaxValue(3).setDistinctValuesCount(4).setNullsFraction(0).setAverageRowSize(4)
+                        .build())
+                .addMultiColumnStatistics(Set.of(GATE),
+                        new MultiColumnCombinedStats(12, 1000, Arrays.asList(null, GATE, null), mcvWithComponentCounts()))
+                .build();
+        // gate = 0 holds 0.62 of the rows; the head tuples with it hold 0.55.
+        Assertions.assertEquals(620, estimateRows(eq(GATE, ConstantOperator.createInt(0)), statistics), 1e-6);
+        Assertions.assertEquals(620, estimateRows(new InPredicateOperator(false, GATE, ConstantOperator.createInt(0)),
+                statistics), 1e-6);
+        Assertions.assertEquals(380, estimateRows(new BinaryPredicateOperator(BinaryType.NE, GATE,
+                ConstantOperator.createInt(0)), statistics), 1e-6);
+    }
+
+    // A group of one column: its own MCV list with the exact counts of the values.
+    private static Statistics statisticsWithSingleColumnGroup(Statistics base, long approvedRows) {
+        List<MultiColumnCombinedStats.McvEntry> mcv = List.of(
+                new MultiColumnCombinedStats.McvEntry(List.of("approved"), approvedRows, List.of(approvedRows)),
+                new MultiColumnCombinedStats.McvEntry(List.of("declined"), 300, List.of(300L)));
+        return Statistics.buildFrom(base)
+                .addMultiColumnStatistics(Set.of(STATUS), new MultiColumnCombinedStats(3, 1000, List.of(STATUS), mcv))
+                .build();
+    }
+
+    @Test
+    public void testSingleColumnGroup() {
+        Statistics statistics = statisticsWithSingleColumnGroup(Statistics.buildFrom(statisticsWithMcv())
+                .addColumnStatistic(STATUS, ColumnStatistic.builder()
+                        .setDistinctValuesCount(3).setNullsFraction(0.05).setAverageRowSize(8).build())
+                .build(), 600);
+        Assertions.assertEquals(600, estimateRows(eq(STATUS, ConstantOperator.createVarchar("approved")), statistics),
+                1e-6);
+        // A value outside the head: the tail mass 0.1 over the one tail value, within the smallest head share.
+        Assertions.assertEquals(100, estimateRows(eq(STATUS, ConstantOperator.createVarchar("other")), statistics),
+                1e-6);
+        // The narrowest group projects: two head values plus the one tail value.
+        Assertions.assertEquals(3, MultiColumnMcvEstimator.projectedNdv(List.of(STATUS), statistics).orElseThrow(), 1e-9);
+
+        // Among groups covering the same predicate columns, the narrowest answers.
+        Statistics both = statisticsWithSingleColumnGroup(statisticsWithComponentCounts(), 700);
+        Assertions.assertEquals(700, estimateRows(eq(STATUS, ConstantOperator.createVarchar("approved")), both), 1e-6);
+        Assertions.assertEquals(600, estimateRows(and(eq(STATUS, ConstantOperator.createVarchar("approved")),
+                eq(GATE, ConstantOperator.createInt(0))), both), 1e-6);
     }
 
     @Test
@@ -361,11 +447,14 @@ public class MultiColumnMcvEstimatorTest {
         Assertions.assertEquals(Optional.of(false), MultiColumnMcvEstimator.matchesComponent(
                 Utils.extractConjuncts(callPredicate).get(0), STATUS, null));
 
-        // An expression of two group columns is left to the regular estimation.
+        // An expression of two group columns is left to the regular estimation; the status equality
+        // beside it is still answered from the head.
         ScalarOperator twoColumns = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
                 new BinaryPredicateOperator(BinaryType.EQ, new CallOperator("add", IntegerType.INT, List.of(GATE, TYPE)),
                         ConstantOperator.createInt(0)));
-        Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(twoColumns), statistics).isEmpty());
+        result = MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(twoColumns), statistics);
+        Assertions.assertTrue(result.isPresent());
+        Assertions.assertEquals(Set.of(Utils.extractConjuncts(twoColumns).get(0)), result.get().getConsumed());
     }
 
     @Test

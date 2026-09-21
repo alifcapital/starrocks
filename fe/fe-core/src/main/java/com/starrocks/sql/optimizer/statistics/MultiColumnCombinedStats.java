@@ -116,8 +116,9 @@ public class MultiColumnCombinedStats {
         return readColumns == columns.size();
     }
 
+    /** Whether the MCV list can answer predicates: it exists and the query reads a column of the group. */
     public boolean hasMcv() {
-        return rowCount > 0 && !mcv.isEmpty() && readColumns > 1;
+        return rowCount > 0 && !mcv.isEmpty() && readColumns > 0;
     }
 
     @Override

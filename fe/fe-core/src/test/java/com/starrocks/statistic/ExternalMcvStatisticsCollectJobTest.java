@@ -113,6 +113,24 @@ public class ExternalMcvStatisticsCollectJobTest {
     }
 
     @Test
+    public void testOneColumnGroup() {
+        Assertions.assertEquals("stats_tuple_key(cast(`status` as varchar)) AS k, cast(`status` as varchar) AS v0",
+                ExternalMcvStatisticsCollectJob.buildProjection(null, List.of("status")));
+        ExternalMcvStatisticsCollectJob job = newJob(Map.of());
+        Assertions.assertEquals("SELECT histogram_by_bounds(k, '[\"approved\",\"\\\\\\\\N\"]', '[]'), count(*),"
+                        + " histogram_by_bounds(v0, '[\"approved\"]', '[]'), count(v0) FROM t",
+                job.buildExactCountSQL(" FROM t", List.of("approved", "\\N"), 1));
+        ExternalMcvStatisticsCollectJob.GroupStatistics statistics = ExternalMcvStatisticsCollectJob.parseExactCounts(
+                List.of("{\"mcv\":[[\"approved\",\"600\"],[\"\\\\N\",\"50\"]],\"buckets\":[]}", "1000",
+                        "{\"mcv\":[[\"approved\",\"600\"]],\"buckets\":[]}", "950"), 1, 3);
+        Assertions.assertEquals(2, statistics.mcv.size());
+        Assertions.assertEquals(List.of("approved"), statistics.mcv.get(0).values);
+        Assertions.assertEquals(List.of(600L), statistics.mcv.get(0).componentCounts);
+        Assertions.assertEquals(Arrays.asList((String) null), statistics.mcv.get(1).values);
+        Assertions.assertEquals(List.of(50L), statistics.mcv.get(1).componentCounts);
+    }
+
+    @Test
     public void testMcvJsonRoundTrip() {
         List<ExternalMcvStatisticsCollectJob.McvTuple> mcv = List.of(
                 new ExternalMcvStatisticsCollectJob.McvTuple(List.of("approved", "0"), 540, List.of(700L, 900L)),

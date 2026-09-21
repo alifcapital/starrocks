@@ -133,7 +133,7 @@ public class StatisticsCalcUtils {
     }
 
     /**
-     * Attaches every column group the scan reads at least two columns of, keyed by the columns it reads.
+     * Attaches every column group the scan reads at least one column of, keyed by the columns it reads.
      * A group with unread columns keeps them as null placeholders in the component order: its MCV list
      * still answers predicates on the read columns, while its combined NDV describes the whole group
      * only (see MultiColumnCombinedStats#isComplete()), so such a group needs an MCV list to be of use.
@@ -157,7 +157,7 @@ public class StatisticsCalcUtils {
                     duplicate = true;
                 }
             }
-            if (duplicate || read.size() < 2 || (read.size() < refs.size() && group.getMcv().isEmpty())) {
+            if (duplicate || read.isEmpty() || (read.size() < refs.size() && group.getMcv().isEmpty())) {
                 continue;
             }
             MultiColumnCombinedStats stats =

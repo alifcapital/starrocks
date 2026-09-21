@@ -146,8 +146,9 @@ public class StatisticsEstimateUtils {
         return builder.build();
     }
 
+    // The plain selectivity of a predicate, without the MCV lists: what the MCV estimation is built from.
     public static double getPredicateSelectivity(ScalarOperator predicate, Statistics statistics) {
-        Statistics estimatedStatistics = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics);
+        Statistics estimatedStatistics = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, false);
 
         // avoid sample statistics filter all data, save one rows least
         if (statistics.getOutputRowCount() > 0 && estimatedStatistics.getOutputRowCount() == 0) {
@@ -352,7 +353,7 @@ public class StatisticsEstimateUtils {
 
         // The row count already reflects these predicates; take only their effect on the column statistics.
         for (ScalarOperator consumed : consumedNonEqualityPredicates) {
-            Statistics consumedStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, inputStats);
+            Statistics consumedStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, inputStats, false);
             for (ColumnRefOperator column : Utils.extractColumnRef(consumed)) {
                 filteredStatsBuilder.addColumnStatistic(column, consumedStats.getColumnStatistic(column));
             }

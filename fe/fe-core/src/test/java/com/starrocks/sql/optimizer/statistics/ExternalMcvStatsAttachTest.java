@@ -58,7 +58,13 @@ public class ExternalMcvStatsAttachTest {
                 new ExternalMcvStatistics.Group(List.of("status", "type"), 1000, 4, MCV)),
                 read(STATUS, GATE, EXTRA));
         Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = statistics.getMultiColumnCombinedStats();
-        Assertions.assertEquals(2, groups.size());
+        Assertions.assertEquals(3, groups.size());
+
+        // (status, type) read by status only: kept for its MCV list under the one read column.
+        MultiColumnCombinedStats single = groups.get(Set.of(STATUS));
+        Assertions.assertEquals(Arrays.asList(STATUS, null), single.getColumns());
+        Assertions.assertFalse(single.isComplete());
+        Assertions.assertEquals(MCV, single.getMcv());
 
         MultiColumnCombinedStats partial = groups.get(Set.of(STATUS, GATE));
         Assertions.assertEquals(Arrays.asList(STATUS, GATE, null), partial.getColumns());
@@ -94,11 +100,42 @@ public class ExternalMcvStatsAttachTest {
     }
 
     @Test
+    public void testGroupsReadByOneColumnAttach() {
+        List<MultiColumnCombinedStats.McvEntry> single = List.of(
+                new MultiColumnCombinedStats.McvEntry(List.of("approved"), 600, List.of(600L)));
+        Statistics statistics = attach(List.of(
+                new ExternalMcvStatistics.Group(List.of("status"), 1000, 3, single),
+                new ExternalMcvStatistics.Group(List.of("gate", "extra", "type"), 1000, 12, MCV),
+                new ExternalMcvStatistics.Group(List.of("type"), 1000, 4, List.of())),
+                read(STATUS, GATE));
+        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = statistics.getMultiColumnCombinedStats();
+        Assertions.assertEquals(2, groups.size());
+
+        MultiColumnCombinedStats own = groups.get(Set.of(STATUS));
+        Assertions.assertEquals(List.of(STATUS), own.getColumns());
+        Assertions.assertTrue(own.isComplete());
+        Assertions.assertEquals(3, own.getNdv());
+        Assertions.assertEquals(single, own.getMcv());
+
+        MultiColumnCombinedStats partial = groups.get(Set.of(GATE));
+        Assertions.assertEquals(Arrays.asList(GATE, null, null), partial.getColumns());
+        Assertions.assertFalse(partial.isComplete());
+        Assertions.assertEquals(MCV, partial.getMcv());
+    }
+
+    @Test
     public void testNothingToAttachLeavesTheStatisticsAlone() {
         Statistics input = Statistics.builder().setOutputRowCount(1000).build();
         Statistics statistics = StatisticsCalcUtils.attachExternalMcvStats(input,
                 new ExternalMcvStatistics(List.of(
-                        new ExternalMcvStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV))),
+                        new ExternalMcvStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV),
+                        new ExternalMcvStatistics.Group(List.of("gate", "type"), 1000, 12, List.of()))),
+                read(EXTRA));
+        Assertions.assertSame(input, statistics);
+        // A group with no MCV list serves the whole group only.
+        statistics = StatisticsCalcUtils.attachExternalMcvStats(input,
+                new ExternalMcvStatistics(List.of(
+                        new ExternalMcvStatistics.Group(List.of("status", "gate"), 1000, 12, List.of()))),
                 read(STATUS, EXTRA));
         Assertions.assertSame(input, statistics);
     }

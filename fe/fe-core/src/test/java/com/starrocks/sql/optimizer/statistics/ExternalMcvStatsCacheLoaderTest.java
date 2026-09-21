@@ -58,8 +58,15 @@ public class ExternalMcvStatsCacheLoaderTest {
         Assertions.assertTrue(group.getMcv().isEmpty());
 
         Assertions.assertNull(ExternalMcvStatsCacheLoader.parseGroup(Arrays.asList(null, "10", "3", "[]")));
-        Assertions.assertNull(ExternalMcvStatsCacheLoader.parseGroup(List.of("[\"a\"]", "10", "3", "[]")));
+        Assertions.assertNull(ExternalMcvStatsCacheLoader.parseGroup(List.of("[]", "10", "3", "[]")));
         Assertions.assertNull(ExternalMcvStatsCacheLoader.parseGroup(List.of("not json", "10", "3", "[]")));
+
+        ExternalMcvStatistics.Group single = ExternalMcvStatsCacheLoader.parseGroup(
+                List.of("[\"a\"]", "10", "3", "[[[\"x\"],\"6\",[\"6\"]]]"));
+        Assertions.assertNotNull(single);
+        Assertions.assertEquals(List.of("a"), single.getColumnNames());
+        Assertions.assertEquals(List.of("x"), single.getMcv().get(0).getValues());
+        Assertions.assertEquals(List.of(6L), single.getMcv().get(0).getComponentCounts());
     }
 
     @Test

@@ -47,15 +47,23 @@ import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateUtils.com
 
 public class PredicateStatisticsCalculator {
     public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics) {
+        return statisticsCalculate(predicate, statistics, true);
+    }
+
+    /**
+     * @param useMcv whether predicates on the columns of an MCV list are estimated from the list; off for
+     *               the plain estimates the MCV estimation itself is built from
+     */
+    public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
         if (predicate == null) {
             return statistics;
         }
 
         // The time-complexity of PredicateStatisticsCalculatingVisitor OR row-count is O(2^n), n is OR number
         if (countDisConsecutiveOr(predicate, 0, false) > StatisticsEstimateCoefficient.DEFAULT_OR_OPERATOR_LIMIT) {
-            return predicate.accept(new LargeOrCalculatingVisitor(statistics), null);
+            return predicate.accept(new LargeOrCalculatingVisitor(statistics, useMcv), null);
         } else {
-            return predicate.accept(new BaseCalculatingVisitor(statistics), null);
+            return predicate.accept(new BaseCalculatingVisitor(statistics, useMcv), null);
         }
     }
 
@@ -74,9 +82,31 @@ public class PredicateStatisticsCalculator {
 
     private static class BaseCalculatingVisitor extends ScalarOperatorVisitor<Statistics, Void> {
         protected final Statistics statistics;
+        protected final boolean useMcv;
 
-        public BaseCalculatingVisitor(Statistics statistics) {
+        public BaseCalculatingVisitor(Statistics statistics, boolean useMcv) {
             this.statistics = statistics;
+            this.useMcv = useMcv;
+        }
+
+        /**
+         * A predicate on a column of an MCV list, estimated from the list: the row count comes from the
+         * MCV estimate, the column statistics from the plain estimate of the predicate. Empty when no
+         * MCV list answers the predicate.
+         */
+        protected Optional<Statistics> estimateWithMcv(ScalarOperator predicate) {
+            if (!useMcv) {
+                return Optional.empty();
+            }
+            Optional<MultiColumnMcvEstimator.Result> mcv =
+                    MultiColumnMcvEstimator.estimate(List.of(predicate), statistics);
+            if (mcv.isEmpty()) {
+                return Optional.empty();
+            }
+            double rowCount = statistics.getOutputRowCount() * mcv.get().getSelectivity();
+            Statistics plain = predicate.accept(new BaseCalculatingVisitor(statistics, false), null);
+            Statistics estimated = Statistics.buildFrom(plain).setOutputRowCount(rowCount).build();
+            return Optional.of(StatisticsEstimateUtils.adjustStatisticsByRowCount(estimated, rowCount));
         }
 
         protected boolean checkNeedEvalEstimate(ScalarOperator predicate) {
@@ -138,6 +168,10 @@ public class PredicateStatisticsCalculator {
         public Statistics visitInPredicate(InPredicateOperator predicate, Void context) {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
+            }
+            Optional<Statistics> mcv = estimateWithMcv(predicate);
+            if (mcv.isPresent()) {
+                return mcv.get();
             }
             if (SPMFunctions.isSPMFunctions(predicate)) {
                 if (SPMFunctions.canRevert2ScalarOperator(predicate)) {
@@ -263,6 +297,10 @@ public class PredicateStatisticsCalculator {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
             }
+            Optional<Statistics> mcv = estimateWithMcv(predicate);
+            if (mcv.isPresent()) {
+                return mcv.get();
+            }
             double selectivity = 1;
             List<ColumnRefOperator> children = Utils.extractColumnRef(predicate);
             if (children.size() != 1) {
@@ -297,6 +335,10 @@ public class PredicateStatisticsCalculator {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
             }
+            Optional<Statistics> mcv = estimateWithMcv(predicate);
+            if (mcv.isPresent()) {
+                return mcv.get();
+            }
             OptionalDouble selectivity = LikePatternEstimator.selectivity(predicate, statistics);
             if (selectivity.isEmpty()) {
                 return visit(predicate, context);
@@ -316,6 +358,10 @@ public class PredicateStatisticsCalculator {
         public Statistics visitBinaryPredicate(BinaryPredicateOperator predicate, Void context) {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
+            }
+            Optional<Statistics> mcv = estimateWithMcv(predicate);
+            if (mcv.isPresent()) {
+                return mcv.get();
             }
             ScalarOperator leftChild = predicate.getChild(0);
             ScalarOperator rightChild = predicate.getChild(1);
@@ -393,7 +439,8 @@ public class PredicateStatisticsCalculator {
                 Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> extracted =
                         Utils.separateEqualityPredicates(predicate);
                 Optional<MultiColumnMcvEstimator.Result> mcvEstimate =
-                        MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics);
+                        useMcv ? MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics)
+                                : Optional.empty();
 
                 if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
                     return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate);
@@ -401,7 +448,7 @@ public class PredicateStatisticsCalculator {
 
                 Statistics leftStatistics = predicate.getChild(0).accept(this, null);
                 Statistics andStatistics =
-                        predicate.getChild(1).accept(new BaseCalculatingVisitor(leftStatistics), null);
+                        predicate.getChild(1).accept(new BaseCalculatingVisitor(leftStatistics, useMcv), null);
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(andStatistics,
                         andStatistics.getOutputRowCount());
             } else if (predicate.isOr()) {
@@ -412,7 +459,7 @@ public class PredicateStatisticsCalculator {
                 for (int i = 1; i < disjunctive.size(); ++i) {
                     Statistics orItemStatistics = disjunctive.get(i).accept(this, null);
                     Statistics andStatistics =
-                            disjunctive.get(i).accept(new BaseCalculatingVisitor(cumulativeStatistics), null);
+                            disjunctive.get(i).accept(new BaseCalculatingVisitor(cumulativeStatistics, useMcv), null);
                     rowCount = cumulativeStatistics.getOutputRowCount() + orItemStatistics.getOutputRowCount() -
                             andStatistics.getOutputRowCount();
                     rowCount = Math.min(rowCount, statistics.getOutputRowCount());
@@ -529,8 +576,8 @@ public class PredicateStatisticsCalculator {
     }
 
     private static class LargeOrCalculatingVisitor extends BaseCalculatingVisitor {
-        public LargeOrCalculatingVisitor(Statistics statistics) {
-            super(statistics);
+        public LargeOrCalculatingVisitor(Statistics statistics, boolean useMcv) {
+            super(statistics, useMcv);
         }
 
         @Override
@@ -543,7 +590,8 @@ public class PredicateStatisticsCalculator {
                 Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> extracted =
                         Utils.separateEqualityPredicates(predicate);
                 Optional<MultiColumnMcvEstimator.Result> mcvEstimate =
-                        MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics);
+                        useMcv ? MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics)
+                                : Optional.empty();
 
                 if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
                     return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate);
@@ -551,7 +599,7 @@ public class PredicateStatisticsCalculator {
 
                 Statistics leftStatistics = predicate.getChild(0).accept(this, null);
                 Statistics andStatistics = predicate.getChild(1)
-                        .accept(new LargeOrCalculatingVisitor(leftStatistics), null);
+                        .accept(new LargeOrCalculatingVisitor(leftStatistics, useMcv), null);
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(andStatistics,
                         andStatistics.getOutputRowCount());
             } else if (predicate.isOr()) {

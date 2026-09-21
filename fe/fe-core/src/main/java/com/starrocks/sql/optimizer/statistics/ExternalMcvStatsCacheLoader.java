@@ -95,7 +95,7 @@ public class ExternalMcvStatsCacheLoader
         }
         try {
             List<String> columnNames = parseStringArray(JsonParser.parseString(row.get(0)).getAsJsonArray());
-            if (columnNames.size() < 2) {
+            if (columnNames.isEmpty()) {
                 return null;
             }
             long rowCount = row.get(1) == null ? 0 : Long.parseLong(row.get(1));
