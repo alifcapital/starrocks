@@ -358,10 +358,7 @@ public:
     // must keep the driver alive until its tasks drain. Operator::pending_finish() defaults to false, so
     // for chains whose only pending_finish overrides are on the edges this checks exactly those edges; it
     // only adds coverage for interior operators.
-    bool is_still_pending_finish() {
-        return std::any_of(_operators.begin(), _operators.end(),
-                           [](const OperatorPtr& op) { return op->pending_finish(); });
-    }
+    bool is_still_pending_finish();
     // return false if all the dependencies are ready, otherwise return true.
     bool dependencies_block();
 
@@ -438,119 +435,14 @@ public:
         }
     }
 
-    StatusOr<bool> is_not_blocked() {
-        // If the sink operator is finished, the rest operators of this driver needn't be executed anymore.
-        if (sink_operator()->is_finished()) {
-            return true;
-        }
-        if (source_operator()->is_epoch_finished() || sink_operator()->is_epoch_finished()) {
-            return true;
-        }
-
-        // PRECONDITION_BLOCK
-        if (_state == DriverState::PRECONDITION_BLOCK) {
-            if (is_precondition_block()) {
-                return false;
-            }
-
-            mark_precondition_ready();
-
-            RETURN_IF_ERROR(check_short_circuit());
-            if (_state == DriverState::PENDING_FINISH) {
-                return false;
-            }
-            // Driver state must be set to a state different from PRECONDITION_BLOCK bellow,
-            // to avoid call mark_precondition_ready() and check_short_circuit() multiple times.
-        }
-
-        // OUTPUT_FULL
-        if (!sink_operator()->need_input() && !sink_operator()->is_finished()) {
-            set_driver_state(DriverState::OUTPUT_FULL);
-            return false;
-        }
-
-        // A notified interior operator may have output even while the source is
-        // empty (e.g. a completed probe restore). Do not discard that wakeup:
-        // another source notification is not guaranteed. Keep sink backpressure
-        // and preconditions above this check, and preserve the edges-only path
-        // for chains without wakeable interiors.
-        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
-            return true;
-        }
-
-        // INPUT_EMPTY
-        if (!source_operator()->has_output() && !source_operator()->is_finished()) {
-            set_driver_state(DriverState::INPUT_EMPTY);
-            return false;
-        }
-
-        // INTERMEDIATE_BLOCK: both edges are open but an interior pair may still be blocked. Only walk
-        // the interior pairs (O(pairs)) for a driver that was parked in INTERMEDIATE_BLOCK; for all other
-        // states the edges-only checks above are sufficient and this O(pairs) cost is not paid.
-        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
-            return false;
-        }
-
-        return true;
-    }
+    StatusOr<bool> is_not_blocked();
 
     // used in event scheduler
     // check driver is ready for schedule
     // similar to is_not_blocked but without check short_circuit.
     bool has_wakeable_intermediates() const { return _has_wakeable_intermediates; }
 
-    bool check_is_ready() {
-        // If the sink operator is finished, the rest operators of this driver needn't be executed anymore.
-        if (sink_operator()->is_finished()) {
-            return true;
-        }
-        if (source_operator()->is_epoch_finished() || sink_operator()->is_epoch_finished()) {
-            return true;
-        }
-
-        if (_state == DriverState::PRECONDITION_BLOCK) {
-            if (is_precondition_block()) {
-                return false;
-            }
-            mark_precondition_ready();
-            // In the event scheduler, we avoid calling check_short_circuit inside check_is_ready.
-            // Because check_short_circuit may trigger cascading recursive calls such as set_finished.
-            // It will increase scheduler complexity (like call set finished in unknown thread).
-            // Instead, we directly return true after the precondition block state changes.
-            // The check is performed in driver::process.
-            return true;
-        }
-
-        // OUTPUT_FULL
-        if (!sink_operator()->need_input() && !sink_operator()->is_finished()) {
-            set_driver_state(DriverState::OUTPUT_FULL);
-            return false;
-        }
-
-        // A notified interior operator may have output even while the source is
-        // empty (e.g. a completed probe restore). Do not discard that wakeup:
-        // another source notification is not guaranteed. Keep sink backpressure
-        // and preconditions above this check, and preserve the edges-only path
-        // for chains without wakeable interiors.
-        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
-            return true;
-        }
-
-        // INPUT_EMPTY
-        if (!source_operator()->has_output() && !source_operator()->is_finished()) {
-            set_driver_state(DriverState::INPUT_EMPTY);
-            return false;
-        }
-
-        // INTERMEDIATE_BLOCK: edges are open but an interior pair may still be blocked. Without this an
-        // INTERMEDIATE_BLOCK driver would pass the edges-only gate on every notify, be scheduled, re-block
-        // in process(), and spin through try_schedule. Walk interior pairs (O(pairs)) only for such a driver.
-        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
-            return false;
-        }
-
-        return true;
-    }
+    bool check_is_ready();
 
     // Check whether an operator can be short-circuited, when is_precondition_block() becomes false from true.
     Status check_short_circuit();

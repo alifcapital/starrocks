@@ -722,7 +722,125 @@ void PipelineDriver::finish_operators(RuntimeState* runtime_state) {
     }
 }
 
+bool PipelineDriver::is_still_pending_finish() {
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_runtime_state->instance_mem_tracker());
+        return std::any_of(_operators.begin(), _operators.end(),
+                           [](const OperatorPtr& op) { return op->pending_finish(); });
+    }
+
+StatusOr<bool> PipelineDriver::is_not_blocked() {
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_runtime_state->instance_mem_tracker());
+        // If the sink operator is finished, the rest operators of this driver needn't be executed anymore.
+        if (sink_operator()->is_finished()) {
+            return true;
+        }
+        if (source_operator()->is_epoch_finished() || sink_operator()->is_epoch_finished()) {
+            return true;
+        }
+
+        // PRECONDITION_BLOCK
+        if (_state == DriverState::PRECONDITION_BLOCK) {
+            if (is_precondition_block()) {
+                return false;
+            }
+
+            mark_precondition_ready();
+
+            RETURN_IF_ERROR(check_short_circuit());
+            if (_state == DriverState::PENDING_FINISH) {
+                return false;
+            }
+            // Driver state must be set to a state different from PRECONDITION_BLOCK bellow,
+            // to avoid call mark_precondition_ready() and check_short_circuit() multiple times.
+        }
+
+        // OUTPUT_FULL
+        if (!sink_operator()->need_input() && !sink_operator()->is_finished()) {
+            set_driver_state(DriverState::OUTPUT_FULL);
+            return false;
+        }
+
+        // A notified interior operator may have output even while the source is
+        // empty (e.g. a completed probe restore). Do not discard that wakeup:
+        // another source notification is not guaranteed. Keep sink backpressure
+        // and preconditions above this check, and preserve the edges-only path
+        // for chains without wakeable interiors.
+        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
+            return true;
+        }
+
+        // INPUT_EMPTY
+        if (!source_operator()->has_output() && !source_operator()->is_finished()) {
+            set_driver_state(DriverState::INPUT_EMPTY);
+            return false;
+        }
+
+        // INTERMEDIATE_BLOCK: both edges are open but an interior pair may still be blocked. Only walk
+        // the interior pairs (O(pairs)) for a driver that was parked in INTERMEDIATE_BLOCK; for all other
+        // states the edges-only checks above are sufficient and this O(pairs) cost is not paid.
+        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
+            return false;
+        }
+
+        return true;
+    }
+
+bool PipelineDriver::check_is_ready() {
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_runtime_state->instance_mem_tracker());
+        // If the sink operator is finished, the rest operators of this driver needn't be executed anymore.
+        if (sink_operator()->is_finished()) {
+            return true;
+        }
+        if (source_operator()->is_epoch_finished() || sink_operator()->is_epoch_finished()) {
+            return true;
+        }
+
+        if (_state == DriverState::PRECONDITION_BLOCK) {
+            if (is_precondition_block()) {
+                return false;
+            }
+            mark_precondition_ready();
+            // In the event scheduler, we avoid calling check_short_circuit inside check_is_ready.
+            // Because check_short_circuit may trigger cascading recursive calls such as set_finished.
+            // It will increase scheduler complexity (like call set finished in unknown thread).
+            // Instead, we directly return true after the precondition block state changes.
+            // The check is performed in driver::process.
+            return true;
+        }
+
+        // OUTPUT_FULL
+        if (!sink_operator()->need_input() && !sink_operator()->is_finished()) {
+            set_driver_state(DriverState::OUTPUT_FULL);
+            return false;
+        }
+
+        // A notified interior operator may have output even while the source is
+        // empty (e.g. a completed probe restore). Do not discard that wakeup:
+        // another source notification is not guaranteed. Keep sink backpressure
+        // and preconditions above this check, and preserve the edges-only path
+        // for chains without wakeable interiors.
+        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
+            return true;
+        }
+
+        // INPUT_EMPTY
+        if (!source_operator()->has_output() && !source_operator()->is_finished()) {
+            set_driver_state(DriverState::INPUT_EMPTY);
+            return false;
+        }
+
+        // INTERMEDIATE_BLOCK: edges are open but an interior pair may still be blocked. Without this an
+        // INTERMEDIATE_BLOCK driver would pass the edges-only gate on every notify, be scheduled, re-block
+        // in process(), and spin through try_schedule. Walk interior pairs (O(pairs)) only for such a driver.
+        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
+            return false;
+        }
+
+        return true;
+    }
+
 void PipelineDriver::cancel_operators(RuntimeState* runtime_state) {
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(runtime_state->instance_mem_tracker());
     if (this->query_ctx()->is_query_expired()) {
         if (_has_log_cancelled.exchange(true) == false) {
             VLOG_ROW << "begin to cancel operators for " << to_readable_string();
