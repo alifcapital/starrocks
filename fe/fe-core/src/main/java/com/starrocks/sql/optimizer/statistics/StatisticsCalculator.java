@@ -268,8 +268,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         PredicateColumnsMgr.getInstance().recordPredicateColumns(predicate, optimizerContext.getColumnRefFactory(),
                 context.getOptExpression());
 
+        ScalarOperator scanPredicate = predicate;
         predicate = removePartitionPredicate(predicate, node, optimizerContext);
-        Statistics statistics = context.getStatistics();
+        Statistics statistics = narrowDroppedPartitionColumns(scanPredicate, predicate, context.getStatistics());
         if (null != predicate && !predicate.isNotEvalEstimate()) {
             statistics = estimateStatistics(ImmutableList.of(predicate), statistics);
         }
@@ -2419,6 +2420,40 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     public Void visitPhysicalNoCTE(PhysicalNoCTEOperator node, ExpressionContext context) {
         context.setStatistics(context.getChildStatistics(0));
         return visitOperator(node, context);
+    }
+
+    /**
+     * The statistics with the partition columns bounded by the predicates removePartitionPredicate dropped:
+     * the rows of those predicates are in the row count already, but the columns still range over the
+     * selected partitions only.
+     */
+    private static Statistics narrowDroppedPartitionColumns(ScalarOperator predicate, ScalarOperator remaining,
+                                                             Statistics statistics) {
+        if (predicate == null || statistics == null) {
+            return statistics;
+        }
+        List<ScalarOperator> dropped = new ArrayList<>(Utils.extractConjuncts(predicate));
+        dropped.removeAll(Utils.extractConjuncts(remaining));
+        if (dropped.isEmpty()) {
+            return statistics;
+        }
+        try {
+            Statistics narrowed =
+                    PredicateStatisticsCalculator.statisticsCalculate(Utils.compoundAnd(dropped), statistics, false);
+            Statistics.Builder builder = Statistics.buildFrom(statistics);
+            for (ScalarOperator conjunct : dropped) {
+                for (ColumnRefOperator ref : Utils.extractColumnRef(conjunct)) {
+                    ColumnStatistic columnStatistic = narrowed.getColumnStatistics().get(ref);
+                    if (columnStatistic != null) {
+                        builder.addColumnStatistic(ref, columnStatistic);
+                    }
+                }
+            }
+            return builder.build();
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to narrow the partition columns by the dropped predicates {}", dropped, e);
+            return statistics;
+        }
     }
 
     // avoid use partition cols filter rows twice

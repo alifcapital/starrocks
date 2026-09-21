@@ -174,9 +174,9 @@ public class QueryDumpExternalCatalogReplayTest extends ReplayFromDumpTestBase {
         Assertions.assertTrue(plan.contains("partitions=2/3"),
                 "expected partition pruning 2/3, plan:\n" + plan);
         // (4) The ANALYZEd column statistics round-trip to the planner UNCLAMPED -- the heart of the fix. Both
-        // columns show their real captured statistic (NDV 3, full ranges), not the [-inf,inf]/UNKNOWN the dump
-        // fed before the row count + stats were captured.
-        Assertions.assertTrue(plan.contains("dt-->[2.0240101E7, 2.0240103E7, 0.0, 4.0, 3.0]"),
+        // columns show their real captured statistic (NDV 3), not the [-inf,inf]/UNKNOWN the dump fed before
+        // the row count + stats were captured; dt ranges over the partitions the scan reads.
+        Assertions.assertTrue(plan.contains("dt-->[2.0240102E7, 2.0240103E7, 0.0, 4.0, 3.0]"),
                 "expected the captured dt statistic on the scan, plan:\n" + plan);
         Assertions.assertTrue(plan.contains("k-->[1.0, 3.0, 0.0, 4.0, 3.0]"),
                 "expected the captured k statistic on the scan, plan:\n" + plan);
@@ -220,7 +220,7 @@ public class QueryDumpExternalCatalogReplayTest extends ReplayFromDumpTestBase {
         // 3 of 5 partitions survive dt >= 20240102: (20240102,bj),(20240102,sh),(20240103,bj).
         Assertions.assertTrue(plan.contains("partitions=3/5"),
                 "expected multi-column partition pruning 3/5, plan:\n" + plan);
-        Assertions.assertTrue(plan.contains("dt-->[2.0240101E7, 2.0240103E7, 0.0, 4.0, 3.0]"),
+        Assertions.assertTrue(plan.contains("dt-->[2.0240102E7, 2.0240103E7, 0.0, 4.0, 3.0]"),
                 "expected the captured dt statistic on the scan, plan:\n" + plan);
         // Cardinality is the full captured total (see the single-column test for why the partition-column
         // predicate is not selectivized in the replay env).
