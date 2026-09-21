@@ -284,7 +284,7 @@ public class MultiColumnMcvEstimatorTest {
         Statistics statistics = statisticsWithMcv();
         ScalarOperator predicate = and(eq(STATUS, ConstantOperator.createVarchar("approved")),
                 eq(GATE, ConstantOperator.createInt(0)), eq(TYPE, ConstantOperator.createInt(0)));
-        ConnectContext.get().getSessionVariable().setCboEnableMultiColumnMcvEstimate(false);
+        ConnectContext.get().getSessionVariable().setCboEnableMcvEstimate(false);
         try {
             Assertions.assertTrue(
                     MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), statistics).isEmpty());
@@ -295,7 +295,7 @@ public class MultiColumnMcvEstimatorTest {
                     pStatus * pGate * pType);
             Assertions.assertEquals(ROWS * expected, estimateRows(predicate, statistics), 1e-6);
         } finally {
-            ConnectContext.get().getSessionVariable().setCboEnableMultiColumnMcvEstimate(true);
+            ConnectContext.get().getSessionVariable().setCboEnableMcvEstimate(true);
         }
     }
 

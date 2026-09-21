@@ -184,7 +184,7 @@ public class MultiColumnMcvEstimator {
 
     private static boolean isEnabled() {
         ConnectContext context = ConnectContext.get();
-        return context == null || context.getSessionVariable().isCboEnableMultiColumnMcvEstimate();
+        return context == null || context.getSessionVariable().isCboEnableMcvEstimate();
     }
 
     private static boolean hasMcvStats(Statistics statistics) {

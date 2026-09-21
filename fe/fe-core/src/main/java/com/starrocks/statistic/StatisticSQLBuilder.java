@@ -452,10 +452,10 @@ public class StatisticSQLBuilder {
                         .map(c -> "'" + SqlUtils.escapeSqlString(c) + "'").collect(Collectors.toList())) + ")";
     }
 
-    // Rows come back as [column_names, row_count, ndv, mcv]; see ExternalMultiColumnStatsCacheLoader.
-    public static String buildQueryExternalMultiColumnStatisticsSQL(String tableUUID) {
+    // Rows come back as [column_names, row_count, ndv, mcv]; see ExternalMcvStatsCacheLoader.
+    public static String buildQueryExternalMcvStatisticsSQL(String tableUUID) {
         return "SELECT column_names, row_count, ndv, mcv FROM " + StatsConstants.STATISTICS_DB_NAME + "."
-                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
                 + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID);
     }
 
@@ -473,16 +473,16 @@ public class StatisticSQLBuilder {
                 + " WHERE rn = 1";
     }
 
-    public static String buildDropExternalMultiColumnStatisticsSQL(String tableUUID) {
+    public static String buildDropExternalMcvStatisticsSQL(String tableUUID) {
         return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
-                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
                 + " where " + buildTableUUIDInPredicateQuoted(tableUUID);
     }
 
-    public static String buildDropExternalMultiColumnStatisticsSQL(String catalogName, String dbName,
+    public static String buildDropExternalMcvStatisticsSQL(String catalogName, String dbName,
                                                                    String tableName) {
         return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
-                + StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
                 + " where catalog_name = '" + SqlUtils.escapeSqlString(catalogName) + "'"
                 + " and db_name = '" + SqlUtils.escapeSqlString(dbName) + "'"
                 + " and table_name = '" + SqlUtils.escapeSqlString(tableName) + "'";

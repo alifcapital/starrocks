@@ -41,8 +41,8 @@ import com.starrocks.server.CatalogMgr;
 import com.starrocks.sql.analyzer.AstToStringBuilder;
 import com.starrocks.sql.ast.expression.LiteralExpr;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnStatsCacheLoader;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatsCacheLoader;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.HistogramUtils;
 import com.starrocks.system.BackendResourceStat;
@@ -249,26 +249,26 @@ public class QueryDumpSerializer implements JsonSerializer<QueryDumpInfo> {
         // multi-column statistics: per table, one object per column group with its columns in tuple order,
         // the combined NDV, the rows at collection time and the MCV list as the statistics table stores it.
         // Like column_histogram, not emitted on the desensitized path: the MCV tuples are raw values.
-        JsonObject multiColumnStatistics = new JsonObject();
-        for (Map.Entry<String, List<ExternalMultiColumnCombinedStatistics.Group>> entry :
-                dumpInfo.getMultiColumnStatisticsMap().entrySet()) {
+        JsonObject externalMcvStatistics = new JsonObject();
+        for (Map.Entry<String, List<ExternalMcvStatistics.Group>> entry :
+                dumpInfo.getExternalMcvStatisticsMap().entrySet()) {
             JsonArray groups = new JsonArray();
-            for (ExternalMultiColumnCombinedStatistics.Group group : entry.getValue()) {
+            for (ExternalMcvStatistics.Group group : entry.getValue()) {
                 JsonObject groupJson = new JsonObject();
                 JsonArray columns = new JsonArray();
                 group.getColumnNames().forEach(columns::add);
                 groupJson.add("columns", columns);
                 groupJson.addProperty("ndv", group.getNdv());
                 groupJson.addProperty("row_count", group.getRowCount());
-                groupJson.addProperty("mcv", ExternalMultiColumnStatsCacheLoader.formatMcv(group.getMcv()));
+                groupJson.addProperty("mcv", ExternalMcvStatsCacheLoader.formatMcv(group.getMcv()));
                 groups.add(groupJson);
             }
             if (groups.size() > 0) {
-                multiColumnStatistics.add(entry.getKey(), groups);
+                externalMcvStatistics.add(entry.getKey(), groups);
             }
         }
-        if (multiColumnStatistics.size() > 0) {
-            dumpJson.add("multi_column_statistics", multiColumnStatistics);
+        if (externalMcvStatistics.size() > 0) {
+            dumpJson.add("external_mcv_statistics", externalMcvStatistics);
         }
         if (StringUtils.isNotEmpty(dumpInfo.getExplainInfo())) {
             dumpJson.addProperty("explain_info", dumpInfo.getExplainInfo());

@@ -1467,10 +1467,11 @@ analyzeColumnClause
     | ALL COLUMNS                                               #allColumns
     | PREDICATE COLUMNS                                         #predicateColumns
     | MULTIPLE COLUMNS '(' qualifiedName  (',' qualifiedName)* ')' #multiColumnSet
+    | MCV '(' qualifiedName  (',' qualifiedName)* ')'              #mcvColumnSet
     ;
 
 dropStatsStatement
-    : DROP (MULTIPLE COLUMNS)? STATS qualifiedName
+    : DROP (MULTIPLE COLUMNS | MCV)? STATS qualifiedName
     ;
 
 histogramStatement:
@@ -1505,7 +1506,7 @@ showAnalyzeStatement
     ;
 
 showStatsMetaStatement
-    : SHOW (MULTIPLE COLUMNS)? STATS META showPredicateClauses
+    : SHOW (MULTIPLE COLUMNS | MCV)? STATS META showPredicateClauses
     ;
 
 showHistogramMetaStatement
@@ -3309,7 +3310,7 @@ nonReserved
     | INTERVAL | ISOLATION
     | JOB
     | LABEL | LAST | LESS | LEVEL | LIST | LOCAL | LOCATION | LOGS | LOGICAL | LOW_PRIORITY | LOCK | LOCATIONS
-    | MANUAL | MAP | MAPPING | MAPPINGS | MASKING | MATCH | MATCH_ANY | MATCH_ALL | MAPPINGS | MATERIALIZED | MAX | META | METADATA | MIN | MINUTE | MINUTES | MODE | MODIFY | MONTH | MERGE | MINUS | MULTIPLE
+    | MANUAL | MAP | MAPPING | MAPPINGS | MASKING | MATCH | MATCH_ANY | MATCH_ALL | MAPPINGS | MATERIALIZED | MAX | MCV | META | METADATA | MIN | MINUTE | MINUTES | MODE | MODIFY | MONTH | MERGE | MINUS | MULTIPLE
     | NAME | NAMES | NEGATIVE | NO | NODE | NODES | NONE | NULLS | NUMBER | NUMERIC
     | OBSERVER | OF | OFFSET | ONLY | OPTIMIZER | OPEN | OPERATE | OPTION | OVERWRITE | OFF
     | PARTITIONS | PASSWORD | PATH | PAUSE | PENDING | PERCENTILE_UNION | PIVOT | PLAN | PLUGIN | PLUGINS | POLICY | POLICIES

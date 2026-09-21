@@ -63,7 +63,7 @@ import java.util.Map;
 import static com.starrocks.catalog.InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME;
-import static com.starrocks.statistic.StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.HISTOGRAM_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.MULTI_COLUMN_STATISTICS_TABLE_NAME;
@@ -150,7 +150,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
             "table_id", "column_ids"
     );
 
-    private static final List<String> EXTERNAL_MULTI_COLUMN_STATISTICS_KEY_COLUMNS = ImmutableList.of(
+    private static final List<String> EXTERNAL_MCV_STATISTICS_KEY_COLUMNS = ImmutableList.of(
             "table_uuid", "column_ids"
     );
 
@@ -370,8 +370,8 @@ public class StatisticsMetaManager extends FrontendDaemon {
         return checkTableExist(MULTI_COLUMN_STATISTICS_TABLE_NAME);
     }
 
-    private boolean createExternalMultiColumnStatisticsTable(ConnectContext context) {
-        LOG.info("create external multi column statistics table start");
+    private boolean createExternalMcvStatisticsTable(ConnectContext context) {
+        LOG.info("create external MCV statistics table start");
         KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
         Map<String, String> properties = Maps.newHashMap();
 
@@ -379,15 +379,15 @@ public class StatisticsMetaManager extends FrontendDaemon {
             int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
             properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
             QualifiedName qualifiedName =
-                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME));
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_MCV_STATISTICS_TABLE_NAME));
             TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
             CreateTableStmt stmt = new CreateTableStmt(false, false,
                     tableRef,
-                    StatisticUtils.buildStatsColumnDef(EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME),
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_MCV_STATISTICS_TABLE_NAME),
                     EngineType.defaultEngine().name(),
-                    new KeysDesc(keysType, EXTERNAL_MULTI_COLUMN_STATISTICS_KEY_COLUMNS),
+                    new KeysDesc(keysType, EXTERNAL_MCV_STATISTICS_KEY_COLUMNS),
                     null,
-                    new HashDistributionDesc(10, EXTERNAL_MULTI_COLUMN_STATISTICS_KEY_COLUMNS),
+                    new HashDistributionDesc(10, EXTERNAL_MCV_STATISTICS_KEY_COLUMNS),
                     properties,
                     null,
                     "");
@@ -395,19 +395,19 @@ public class StatisticsMetaManager extends FrontendDaemon {
             Analyzer.analyze(stmt, context);
             GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
         } catch (StarRocksException e) {
-            LOG.warn("Failed to create external multi column statistics table", e);
+            LOG.warn("Failed to create external MCV statistics table", e);
             return false;
         }
-        LOG.info("create external multi column statistics table done");
-        for (ExternalMultiColumnStatsMeta meta : GlobalStateMgr.getCurrentState().getAnalyzeMgr()
-                .getExternalMultiColumnStatsMetaMap().values()) {
-            ExternalMultiColumnStatsMeta reInitMeta = new ExternalMultiColumnStatsMeta(meta.getCatalogName(),
+        LOG.info("create external MCV statistics table done");
+        for (ExternalMcvStatsMeta meta : GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                .getExternalMcvStatsMetaMap().values()) {
+            ExternalMcvStatsMeta reInitMeta = new ExternalMcvStatsMeta(meta.getCatalogName(),
                     meta.getDbName(), meta.getTableName(), meta.getColumnNames(), meta.getAnalyzeType(),
                     meta.getStatisticsTypes(), LocalDateTime.MIN, meta.getProperties());
             reInitMeta.setTableUUID(meta.getTableUUID());
-            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addExternalMultiColumnStatsMeta(reInitMeta);
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addExternalMcvStatsMeta(reInitMeta);
         }
-        return checkTableExist(EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME);
+        return checkTableExist(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
     }
 
     private boolean createSPMBaselinesTable(ConnectContext context) {
@@ -524,8 +524,8 @@ public class StatisticsMetaManager extends FrontendDaemon {
                 return createExternalHistogramStatisticsTable(context);
             } else if (tableName.equals(MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
                 return createMultiColumnStatisticsTable(context);
-            } else if (tableName.equals(EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
-                return createExternalMultiColumnStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
+                return createExternalMcvStatisticsTable(context);
             } else if (SPM_BASELINE_TABLE_NAME.equals(tableName)) {
                 return createSPMBaselinesTable(context);
             } else if (QUERY_HISTORY_TABLE_NAME.equals(tableName)) {
@@ -640,7 +640,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(EXTERNAL_FULL_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(MULTI_COLUMN_STATISTICS_TABLE_NAME);
-        refreshStatisticsTable(EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(SPM_BASELINE_TABLE_NAME);
         refreshStatisticsTable(QUERY_HISTORY_TABLE_NAME);
 

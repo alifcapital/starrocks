@@ -70,7 +70,7 @@ public class StatsConstants {
     public static final String HISTOGRAM_STATISTICS_TABLE_NAME = "histogram_statistics";
     public static final String EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME = "external_histogram_statistics";
     public static final String MULTI_COLUMN_STATISTICS_TABLE_NAME = "multi_column_statistics";
-    public static final String EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME = "external_multi_column_statistics";
+    public static final String EXTERNAL_MCV_STATISTICS_TABLE_NAME = "external_mcv_statistics";
 
 
     public static final String INFORMATION_SCHEMA = "information_schema";
@@ -140,7 +140,7 @@ public class StatsConstants {
             MULTI_COLUMN_STATISTICS_TABLE_NAME,
             HISTOGRAM_STATISTICS_TABLE_NAME,
             EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME,
-            EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME
+            EXTERNAL_MCV_STATISTICS_TABLE_NAME
     );
 
     public enum AnalyzeType {

@@ -27,7 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-public class ExternalMultiColumnStatsAttachTest {
+public class ExternalMcvStatsAttachTest {
     private static final ColumnRefOperator STATUS = new ColumnRefOperator(1, VarcharType.VARCHAR, "status", true);
     private static final ColumnRefOperator GATE = new ColumnRefOperator(2, IntegerType.INT, "gate", true);
     private static final ColumnRefOperator EXTRA = new ColumnRefOperator(4, IntegerType.INT, "extra", true);
@@ -43,19 +43,19 @@ public class ExternalMultiColumnStatsAttachTest {
         return map;
     }
 
-    private static Statistics attach(List<ExternalMultiColumnCombinedStatistics.Group> groups,
+    private static Statistics attach(List<ExternalMcvStatistics.Group> groups,
                                      Map<ColumnRefOperator, Column> read) {
-        return StatisticsCalcUtils.attachExternalMultiColumnStats(Statistics.builder().setOutputRowCount(1000).build(),
-                new ExternalMultiColumnCombinedStatistics(groups), read);
+        return StatisticsCalcUtils.attachExternalMcvStats(Statistics.builder().setOutputRowCount(1000).build(),
+                new ExternalMcvStatistics(groups), read);
     }
 
     @Test
     public void testGroupsWithUnreadColumnsAreKeptForTheirMcv() {
         Statistics statistics = attach(List.of(
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV),
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "extra", "type"), 1000, 30, List.of()),
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("gate", "extra"), 1000, 20, List.of()),
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "type"), 1000, 4, MCV)),
+                new ExternalMcvStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV),
+                new ExternalMcvStatistics.Group(List.of("status", "extra", "type"), 1000, 30, List.of()),
+                new ExternalMcvStatistics.Group(List.of("gate", "extra"), 1000, 20, List.of()),
+                new ExternalMcvStatistics.Group(List.of("status", "type"), 1000, 4, MCV)),
                 read(STATUS, GATE, EXTRA));
         Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = statistics.getMultiColumnCombinedStats();
         Assertions.assertEquals(2, groups.size());
@@ -81,8 +81,8 @@ public class ExternalMultiColumnStatsAttachTest {
         List<MultiColumnCombinedStats.McvEntry> pairMcv = List.of(
                 new MultiColumnCombinedStats.McvEntry(List.of("approved", "0"), 550, List.of(600L, 620L)));
         Statistics statistics = attach(List.of(
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV),
-                new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "gate"), 1000, 5, pairMcv)),
+                new ExternalMcvStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV),
+                new ExternalMcvStatistics.Group(List.of("status", "gate"), 1000, 5, pairMcv)),
                 read(STATUS, GATE));
         Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = statistics.getMultiColumnCombinedStats();
         Assertions.assertEquals(1, groups.size());
@@ -96,9 +96,9 @@ public class ExternalMultiColumnStatsAttachTest {
     @Test
     public void testNothingToAttachLeavesTheStatisticsAlone() {
         Statistics input = Statistics.builder().setOutputRowCount(1000).build();
-        Statistics statistics = StatisticsCalcUtils.attachExternalMultiColumnStats(input,
-                new ExternalMultiColumnCombinedStatistics(List.of(
-                        new ExternalMultiColumnCombinedStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV))),
+        Statistics statistics = StatisticsCalcUtils.attachExternalMcvStats(input,
+                new ExternalMcvStatistics(List.of(
+                        new ExternalMcvStatistics.Group(List.of("status", "gate", "type"), 1000, 12, MCV))),
                 read(STATUS, EXTRA));
         Assertions.assertSame(input, statistics);
     }

@@ -110,6 +110,7 @@ import com.starrocks.sql.ast.AlterViewClause;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AnalyzeBasicDesc;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
 import com.starrocks.sql.ast.AnalyzeStmt;
@@ -364,6 +365,7 @@ import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowLoadWarningsStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowOpenTableStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
@@ -3155,6 +3157,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             List<QualifiedName> names = multiColumnSetContext.qualifiedName().stream()
                     .map(this::getQualifiedName).collect(toList());
             columns = getAnalyzeColumns(names);
+        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) {
+            com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext mcvColumnSetContext =
+                    (com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) context;
+            List<QualifiedName> names = mcvColumnSetContext.qualifiedName().stream()
+                    .map(this::getQualifiedName).collect(toList());
+            columns = getAnalyzeColumns(names);
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext) {
             usePredicateColumns = true;
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.RegularColumnsContext) {
@@ -3190,6 +3198,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             // we use sample strategy to collect multi-column combined statistics as default.
             isSample = context.FULL() == null;
             analyzeTypeDesc = new AnalyzeMultiColumnDesc(statisticsTypes);
+        } else if (context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) {
+            analyzeTypeDesc = new AnalyzeMcvDesc();
         }
 
         return new AnalyzeStmt(tableRef, analyzeColumn.second, partitionNames, properties,
@@ -3204,7 +3214,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         QualifiedName qualifiedName = getQualifiedName(context.qualifiedName());
         NodePosition tablePos = createPos(context.qualifiedName().start, context.qualifiedName().stop);
         TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, tablePos);
-        return new DropStatsStmt(tableRef, context.MULTIPLE() != null, createPos(context));
+        return new DropStatsStmt(tableRef, context.MULTIPLE() != null, context.MCV() != null, createPos(context));
     }
 
     @Override
@@ -3282,7 +3292,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         List<OrderByElement> orderByElements = getOrderByFrom(showPredicateClauses);
         LimitElement limitElement = getLimitFrom(showPredicateClauses);
 
-        if (context.MULTIPLE() != null) {
+        if (context.MCV() != null) {
+            ShowMcvStatsMetaStmt showMcvStatsMetaStmt =
+                    new ShowMcvStatsMetaStmt(predicate, orderByElements, limitElement, createPos(context));
+            showMcvStatsMetaStmt.markSelfPredicateOrderLimit(true, true, true);
+            return showMcvStatsMetaStmt;
+        } else if (context.MULTIPLE() != null) {
             ShowMultiColumnStatsMetaStmt showMultiColumnStatsMetaStmt =
                     new ShowMultiColumnStatsMetaStmt(predicate, orderByElements, limitElement, createPos(context));
             showMultiColumnStatsMetaStmt.markSelfPredicateOrderLimit(true, true, true);

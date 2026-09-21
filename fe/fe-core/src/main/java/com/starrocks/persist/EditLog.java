@@ -102,7 +102,7 @@ import com.starrocks.statistic.ExternalAnalyzeJob;
 import com.starrocks.statistic.ExternalAnalyzeStatus;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
-import com.starrocks.statistic.ExternalMultiColumnStatsMeta;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.NativeAnalyzeJob;
@@ -1026,21 +1026,21 @@ public class EditLog {
                     }
                     break;
                 }
-                case OperationType.OP_ADD_EXTERNAL_MULTI_COLUMN_STATS_META: {
-                    ExternalMultiColumnStatsMeta meta = (ExternalMultiColumnStatsMeta) journal.data();
-                    globalStateMgr.getAnalyzeMgr().replayAddExternalMultiColumnStatsMeta(meta);
+                case OperationType.OP_ADD_EXTERNAL_MCV_STATS_META: {
+                    ExternalMcvStatsMeta meta = (ExternalMcvStatsMeta) journal.data();
+                    globalStateMgr.getAnalyzeMgr().replayAddExternalMcvStatsMeta(meta);
                     // The leader has re-collected the statistics; drop the follower's cached copy so the next
                     // query reloads it.
                     if (!GlobalStateMgr.isCheckpointThread()) {
-                        globalStateMgr.getAnalyzeMgr().replayExpireExternalMultiColumnStatsCache(meta);
+                        globalStateMgr.getAnalyzeMgr().replayExpireExternalMcvStatsCache(meta);
                     }
                     break;
                 }
-                case OperationType.OP_REMOVE_EXTERNAL_MULTI_COLUMN_STATS_META: {
-                    ExternalMultiColumnStatsMeta meta = (ExternalMultiColumnStatsMeta) journal.data();
-                    globalStateMgr.getAnalyzeMgr().replayRemoveExternalMultiColumnStatsMeta(meta);
+                case OperationType.OP_REMOVE_EXTERNAL_MCV_STATS_META: {
+                    ExternalMcvStatsMeta meta = (ExternalMcvStatsMeta) journal.data();
+                    globalStateMgr.getAnalyzeMgr().replayRemoveExternalMcvStatsMeta(meta);
                     if (!GlobalStateMgr.isCheckpointThread()) {
-                        globalStateMgr.getAnalyzeMgr().replayExpireExternalMultiColumnStatsCache(meta);
+                        globalStateMgr.getAnalyzeMgr().replayExpireExternalMcvStatsCache(meta);
                     }
                     break;
                 }
@@ -2072,12 +2072,12 @@ public class EditLog {
         logJsonObject(OperationType.OP_REMOVE_EXTERNAL_HISTOGRAM_STATS_META, meta, walApplier);
     }
 
-    public void logAddExternalMultiColumnStatsMeta(ExternalMultiColumnStatsMeta meta, WALApplier walApplier) {
-        logJsonObject(OperationType.OP_ADD_EXTERNAL_MULTI_COLUMN_STATS_META, meta, walApplier);
+    public void logAddExternalMcvStatsMeta(ExternalMcvStatsMeta meta, WALApplier walApplier) {
+        logJsonObject(OperationType.OP_ADD_EXTERNAL_MCV_STATS_META, meta, walApplier);
     }
 
-    public void logRemoveExternalMultiColumnStatsMeta(ExternalMultiColumnStatsMeta meta, WALApplier walApplier) {
-        logJsonObject(OperationType.OP_REMOVE_EXTERNAL_MULTI_COLUMN_STATS_META, meta, walApplier);
+    public void logRemoveExternalMcvStatsMeta(ExternalMcvStatsMeta meta, WALApplier walApplier) {
+        logJsonObject(OperationType.OP_REMOVE_EXTERNAL_MCV_STATS_META, meta, walApplier);
     }
 
     public void logModifyTableColumn(ModifyTableColumnOperationLog log, WALApplier walApplier) {

@@ -84,6 +84,7 @@ import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowLoadWarningsStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowOpenTableStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
@@ -1248,6 +1249,19 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
             builder.addColumn(new Column(title, TypeFactory.createVarcharType(30)));
         }
         return builder.build();
+    }
+
+    @Override
+    public ShowResultSetMetaData visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt statement, Void context) {
+        return ShowResultSetMetaData.builder()
+                .addColumn(new Column("Database", TypeFactory.createVarcharType(60)))
+                .addColumn(new Column("Table", TypeFactory.createVarcharType(60)))
+                .addColumn(new Column("Columns", TypeFactory.createVarcharType(200)))
+                .addColumn(new Column("Type", TypeFactory.createVarcharType(20)))
+                .addColumn(new Column("StatisticsTypes", TypeFactory.createVarcharType(200)))
+                .addColumn(new Column("UpdateTime", TypeFactory.createVarcharType(60)))
+                .addColumn(new Column("Properties", TypeFactory.createVarcharType(200)))
+                .build();
     }
 
     @Override

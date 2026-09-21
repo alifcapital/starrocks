@@ -63,11 +63,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static com.starrocks.statistic.StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.STATISTICS_DB_NAME;
 
 /**
- * Collects the joint statistics of a column group of an external table: the number of distinct value
+ * Collects the MCV statistics of a column set of an external table: the number of distinct value
  * tuples and the most common tuples with exact row counts. Every column group takes two scans of its
  * columns and O(mcv size) memory per fragment, whatever the number of distinct tuples:
  *
@@ -78,10 +78,10 @@ import static com.starrocks.statistic.StatsConstants.STATISTICS_DB_NAME;
  *    rows holding each component value on its own, whatever the other columns hold.
  *
  * The tuple key is stats_tuple_key over the columns (see StatsTupleKeyCodec). Results go to
- * _statistics_.external_multi_column_statistics, one row per column group.
+ * _statistics_.external_mcv_statistics, one row per column group.
  */
-public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJob {
-    private static final Logger LOG = LogManager.getLogger(ExternalMultiColumnStatisticsCollectJob.class);
+public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
+    private static final Logger LOG = LogManager.getLogger(ExternalMcvStatisticsCollectJob.class);
 
     // 2^17 HLL registers: about 0.3% relative error on the combined NDV.
     private static final int NDV_SKETCH_LG_K = 17;
@@ -92,7 +92,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
     private final List<String> sqlBuffer = Lists.newArrayList();
     private final List<List<Expr>> rowsBuffer = Lists.newArrayList();
 
-    public ExternalMultiColumnStatisticsCollectJob(String catalogName, Database db, Table table,
+    public ExternalMcvStatisticsCollectJob(String catalogName, Database db, Table table,
                                                    List<String> columnNames, List<Type> columnTypes,
                                                    StatsConstants.AnalyzeType type,
                                                    StatsConstants.ScheduleType scheduleType,
@@ -110,7 +110,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
 
     @Override
     public String getName() {
-        return "ExternalMultiColumn";
+        return "ExternalMcv";
     }
 
     @Override
@@ -164,7 +164,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
         String from = buildFromClause(columnGroup);
         List<List<String>> rows = execute(context, analyzeStatus, buildSketchSQL(from));
         if (rows.isEmpty() || rows.get(0).size() < 3) {
-            throw new DdlException("Multi-column statistics query returned no row for " + columnGroup);
+            throw new DdlException("MCV statistics query returned no row for " + columnGroup);
         }
         List<String> row = rows.get(0);
         long rowCount = parseLong(row.get(0));
@@ -177,7 +177,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
         int width = columnGroup.size();
         rows = execute(context, analyzeStatus, buildExactCountSQL(from, candidates, width));
         if (rows.isEmpty() || rows.get(0).size() < 2 + 2 * width) {
-            throw new DdlException("Multi-column MCV count query returned no row for " + columnGroup);
+            throw new DdlException("MCV count query returned no row for " + columnGroup);
         }
         if (rows.get(0).get(0) == null) {
             // The aggregate saw no row: the table lost its rows between the two scans.
@@ -260,7 +260,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
             throws DdlException {
         checkCancelled(analyzeStatus);
         calculateAndSetRemainingTimeout(context, analyzeStatus);
-        LOG.debug("external multi-column statistics collect sql : {}", sql);
+        LOG.debug("external MCV statistics collect sql : {}", sql);
         return new StatisticExecutor().executeStatisticJsonDQL(context, sql);
     }
 
@@ -405,7 +405,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
         int maxRetryTimes = 5;
         StatementBase insertStmt = createInsertStmt();
         do {
-            LOG.debug("external multi-column statistics insert rows: {}", rowsBuffer.size());
+            LOG.debug("external MCV statistics insert rows: {}", rowsBuffer.size());
             StmtExecutor executor = StmtExecutor.newInternalExecutor(context, insertStmt);
             context.setExecutor(executor);
             context.setQueryId(UUIDUtil.genUUID());
@@ -413,7 +413,7 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
             executor.execute();
 
             if (context.getState().getStateType() == QueryState.MysqlStateType.ERR) {
-                LOG.warn("external multi-column statistics collect fail | {} | Error Message [{}]",
+                LOG.warn("external MCV statistics collect fail | {} | Error Message [{}]",
                         DebugUtil.printId(context.getQueryId()), context.getState().getErrorMessage());
                 if (StringUtils.contains(context.getState().getErrorMessage(), "Too many versions")) {
                     Thread.sleep(Config.statistic_collect_too_many_version_sleep);
@@ -432,14 +432,14 @@ public class ExternalMultiColumnStatisticsCollectJob extends StatisticsCollectJo
     }
 
     private StatementBase createInsertStmt() {
-        List<String> targetColumnNames = StatisticUtils.buildStatsColumnDef(EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME)
+        List<String> targetColumnNames = StatisticUtils.buildStatsColumnDef(EXTERNAL_MCV_STATISTICS_TABLE_NAME)
                 .stream().map(ColumnDef::getName).collect(Collectors.toList());
 
-        String sql = "INSERT INTO " + STATISTICS_DB_NAME + "." + EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME + "("
+        String sql = "INSERT INTO " + STATISTICS_DB_NAME + "." + EXTERNAL_MCV_STATISTICS_TABLE_NAME + "("
                 + String.join(", ", targetColumnNames) + ") values " + String.join(", ", sqlBuffer) + ";";
         QueryStatement qs = new QueryStatement(new ValuesRelation(rowsBuffer, targetColumnNames));
         TableRef tableRef = new TableRef(
-                QualifiedName.of(Lists.newArrayList(STATISTICS_DB_NAME, EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME)),
+                QualifiedName.of(Lists.newArrayList(STATISTICS_DB_NAME, EXTERNAL_MCV_STATISTICS_TABLE_NAME)),
                 null, NodePosition.ZERO);
         InsertStmt insert = new InsertStmt(tableRef, qs);
         insert.setTargetColumnNames(targetColumnNames);

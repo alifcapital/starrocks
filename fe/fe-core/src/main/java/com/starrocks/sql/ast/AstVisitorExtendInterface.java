@@ -289,6 +289,10 @@ public interface AstVisitorExtendInterface<R, C> extends AstVisitor<R, C> {
         return visitShowStatement(statement, context);
     }
 
+    default R visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt statement, C context) {
+        return visitShowStatement(statement, context);
+    }
+
     // ---------------------------------------- Resource Group Statement -----------------------------------------------
 
 

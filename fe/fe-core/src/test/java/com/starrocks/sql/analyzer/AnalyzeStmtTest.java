@@ -34,6 +34,7 @@ import com.starrocks.scheduler.history.TableKeeper;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.DropHistogramStmt;
@@ -47,6 +48,7 @@ import com.starrocks.sql.ast.ShowAnalyzeJobStmt;
 import com.starrocks.sql.ast.ShowAnalyzeStatusStmt;
 import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowHistogramStatsMetaStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowUserPropertyStmt;
 import com.starrocks.sql.ast.StatementBase;
@@ -57,6 +59,7 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalAnalyzeJob;
 import com.starrocks.statistic.ExternalAnalyzeStatus;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.FullStatisticsCollectJob;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
@@ -93,6 +96,7 @@ import static com.starrocks.sql.analyzer.AnalyzeTestUtil.connectContext;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.getConnectContext;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.getStarRocksAssert;
 import static com.starrocks.sql.ast.StatisticsType.MCDISTINCT;
+import static com.starrocks.sql.ast.StatisticsType.MCV;
 import static com.starrocks.statistic.AnalyzeMgr.IS_MULTI_COLUMN_STATS;
 
 public class AnalyzeStmtTest {
@@ -901,7 +905,7 @@ public class AnalyzeStmtTest {
         analyzeFail("analyze table db.tbl multiple columns (k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11)",
                 "column size 11 exceeded max size of 10 on multi-column combined analyze statement");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE)",
-                "Multi-column combined statistics on external table only support FULL collection");
+                "Multi-column combined statistics are not supported on external tables");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE) with async mode",
                 "not support async analyze on multi-column analyze statement");
 
@@ -934,6 +938,63 @@ public class AnalyzeStmtTest {
         Assertions.assertEquals(
                 "[[db, tbl, [kk1, kk2, kk3], FULL, MCDISTINCT, 2020-01-01 01:01:00, {is_multi_column_stats=true}]]",
                 res.toString());
+    }
+
+    @Test
+    public void testAnalyzeMcvStats() {
+        analyzeFail("analyze table hive0.tpch.customer mcv ()");
+        analyzeFail("analyze table db.tbl mcv (kk1)", "MCV statistics are collected on external tables only");
+        analyzeFail("analyze sample table hive0.tpch.customer mcv (C_NAME)",
+                "MCV statistics are collected by a full scan");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME) with async mode",
+                "not support async analyze on MCV analyze statement");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME, C_PHONE, C_ADDRESS, C_CUSTKEY, C_NATIONKEY, "
+                        + "C_ACCTBAL, C_MKTSEGMENT, C_COMMENT, C_NAME, C_PHONE, C_ADDRESS)",
+                "column size 11 exceeded max size of 10 on MCV analyze statement");
+
+        AnalyzeStmt stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (C_NAME)");
+        Assertions.assertTrue(stmt.isExternal());
+        Assertions.assertFalse(stmt.isSample());
+        Assertions.assertFalse(stmt.isAsync());
+        Assertions.assertTrue(stmt.getAnalyzeTypeDesc() instanceof AnalyzeMcvDesc);
+        Assertions.assertEquals(List.of(MCV), stmt.getAnalyzeTypeDesc().getStatsTypes());
+        Assertions.assertEquals(1, stmt.getColumnNames().size());
+
+        stmt = (AnalyzeStmt) analyzeSuccess("analyze full table hive0.tpch.customer mcv (C_NAME, C_PHONE)");
+        Assertions.assertFalse(stmt.isSample());
+        Assertions.assertEquals(2, stmt.getColumnNames().size());
+    }
+
+    @Test
+    public void testDropMcvStats() {
+        DropStatsStmt stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer");
+        Assertions.assertTrue(stmt.isMcv());
+        Assertions.assertFalse(stmt.isMultiColumn());
+        Assertions.assertTrue(stmt.isExternal());
+        analyzeFail("drop mcv stats t0", "MCV statistics exist on external tables only");
+        analyzeFail("drop multiple columns stats hive0.tpch.customer",
+                "Multi-column combined statistics exist on native tables only");
+    }
+
+    @Test
+    public void testShowMcvStatsMeta() {
+        ShowMcvStatsMetaStmt stmt = (ShowMcvStatsMetaStmt) analyzeSuccess("show mcv stats meta");
+        List<List<String>> res = ShowExecutor.execute(stmt, getConnectContext()).getResultRows();
+        Assertions.assertTrue(res.isEmpty());
+        ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta("hive0", "tpch", "customer", List.of("c_name"),
+                StatsConstants.AnalyzeType.FULL, List.of(MCV), LocalDateTime.of(2020, 1, 1, 1, 1),
+                Map.of(IS_MULTI_COLUMN_STATS, "true"));
+        getConnectContext().getGlobalStateMgr().getAnalyzeMgr().addExternalMcvStatsMeta(meta);
+        res = ShowExecutor.execute(stmt, getConnectContext()).getResultRows();
+        Assertions.assertEquals(
+                "[[hive0.tpch, customer, [c_name], FULL, MCV, 2020-01-01 01:01:00, {is_multi_column_stats=true}]]",
+                res.toString());
+        // The native listing leaves the external statistics out.
+        ShowMultiColumnStatsMetaStmt nativeStmt =
+                (ShowMultiColumnStatsMetaStmt) analyzeSuccess("show multiple columns stats meta");
+        for (List<String> row : ShowExecutor.execute(nativeStmt, getConnectContext()).getResultRows()) {
+            Assertions.assertNotEquals("hive0.tpch", row.get(0));
+        }
     }
 
     @Test

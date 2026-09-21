@@ -22,8 +22,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnStatsCacheLoader;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatsCacheLoader;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.HistogramUtils;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
@@ -294,7 +294,7 @@ public class QueryDumpDeserializerTest {
         List<MultiColumnCombinedStats.McvEntry> mcv = Lists.newArrayList(
                 new MultiColumnCombinedStats.McvEntry(Lists.newArrayList("approved", "0"), 500, Lists.newArrayList(600L, 620L)),
                 new MultiColumnCombinedStats.McvEntry(Arrays.asList(null, "2"), 50));
-        String mcvText = ExternalMultiColumnStatsCacheLoader.formatMcv(mcv);
+        String mcvText = ExternalMcvStatsCacheLoader.formatMcv(mcv);
         assertThat(mcvText).isEqualTo("[[[\"approved\",\"0\"],\"500\",[\"600\",\"620\"]],[[null,\"2\"],\"50\"]]");
 
         JsonObject dump = new JsonObject();
@@ -327,7 +327,7 @@ public class QueryDumpDeserializerTest {
         ndvOnly.addProperty("ndv", 7L);
         groups.add(ndvOnly);
         multiColumn.add("test.t1", groups);
-        dump.add("multi_column_statistics", multiColumn);
+        dump.add("external_mcv_statistics", multiColumn);
         dump.addProperty("be_number", 3);
 
         Gson gson = new GsonBuilder()
@@ -335,7 +335,7 @@ public class QueryDumpDeserializerTest {
                 .create();
         QueryDumpInfo dumpInfo = gson.fromJson(dump, QueryDumpInfo.class);
 
-        List<ExternalMultiColumnCombinedStatistics.Group> parsed = dumpInfo.getMultiColumnStatisticsMap().get("test.t1");
+        List<ExternalMcvStatistics.Group> parsed = dumpInfo.getExternalMcvStatisticsMap().get("test.t1");
         assertThat(parsed).hasSize(2);
         assertThat(parsed.get(0).getColumnNames()).containsExactly("status", "gate");
         assertThat(parsed.get(0).getNdv()).isEqualTo(12L);

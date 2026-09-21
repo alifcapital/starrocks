@@ -489,7 +489,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_ENABLE_REPLICATED_JOIN = "cbo_enable_replicated_join";
     public static final String CBO_USE_CORRELATED_JOIN_ESTIMATE = "cbo_use_correlated_join_estimate";
     public static final String CBO_USE_CORRELATED_PREDICATE_ESTIMATE = "cbo_use_correlated_predicate_estimate";
-    public static final String CBO_ENABLE_MULTI_COLUMN_MCV_ESTIMATE = "cbo_enable_multi_column_mcv_estimate";
+    public static final String CBO_ENABLE_MCV_ESTIMATE = "cbo_enable_mcv_estimate";
     public static final String CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS =
             "cbo_enable_partition_aware_external_statistics";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT = "always_collect_low_card_dict";
@@ -1523,9 +1523,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = CBO_USE_CORRELATED_PREDICATE_ESTIMATE)
     private boolean useCorrelatedPredicateEstimate = true;
 
-    // Estimate conjunctions with the most common value list of multi-column statistics when one exists.
-    @VariableMgr.VarAttr(name = CBO_ENABLE_MULTI_COLUMN_MCV_ESTIMATE)
-    private boolean cboEnableMultiColumnMcvEstimate = true;
+    // Estimate predicates with the most common value lists of the MCV statistics when they exist.
+    @VariableMgr.VarAttr(name = CBO_ENABLE_MCV_ESTIMATE)
+    private boolean cboEnableMcvEstimate = true;
 
     // Restrict the internal statistics of an external table to the partitions a scan reads.
     @VariableMgr.VarAttr(name = CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS)
@@ -4818,12 +4818,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         this.useCorrelatedPredicateEstimate = useCorrelatedPredicateEstimate;
     }
 
-    public boolean isCboEnableMultiColumnMcvEstimate() {
-        return cboEnableMultiColumnMcvEstimate;
+    public boolean isCboEnableMcvEstimate() {
+        return cboEnableMcvEstimate;
     }
 
-    public void setCboEnableMultiColumnMcvEstimate(boolean cboEnableMultiColumnMcvEstimate) {
-        this.cboEnableMultiColumnMcvEstimate = cboEnableMultiColumnMcvEstimate;
+    public void setCboEnableMcvEstimate(boolean cboEnableMcvEstimate) {
+        this.cboEnableMcvEstimate = cboEnableMcvEstimate;
     }
 
     public boolean isCboEnablePartitionAwareExternalStatistics() {

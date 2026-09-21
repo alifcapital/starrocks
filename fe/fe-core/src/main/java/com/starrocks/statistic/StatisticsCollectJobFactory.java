@@ -279,7 +279,7 @@ public class StatisticsCollectJobFactory {
                 StatsConstants.AnalyzeType.FULL, scheduleType, properties);
     }
 
-    public static StatisticsCollectJob buildExternalMultiColumnStatisticsCollectJob(
+    public static StatisticsCollectJob buildExternalMcvStatisticsCollectJob(
             String catalogName, Database db, Table table,
             List<String> columnNames, List<Type> columnTypes,
             StatsConstants.AnalyzeType analyzeType, StatsConstants.ScheduleType scheduleType,
@@ -288,7 +288,7 @@ public class StatisticsCollectJobFactory {
         if (columnTypes == null || columnTypes.isEmpty()) {
             columnTypes = columnNames.stream().map(col -> table.getColumn(col).getType()).collect(Collectors.toList());
         }
-        return new ExternalMultiColumnStatisticsCollectJob(catalogName, db, table, columnNames, columnTypes,
+        return new ExternalMcvStatisticsCollectJob(catalogName, db, table, columnNames, columnTypes,
                 analyzeType, scheduleType, properties, statisticsTypes, columnGroups);
     }
 

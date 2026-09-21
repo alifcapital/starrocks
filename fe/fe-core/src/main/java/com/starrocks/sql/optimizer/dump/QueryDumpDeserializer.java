@@ -27,8 +27,8 @@ import com.starrocks.catalog.Resource;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnStatsCacheLoader;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatsCacheLoader;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.HistogramUtils;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
@@ -179,20 +179,20 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
             }
         }
         // multi-column statistics: optional section (older dumps don't have it), guarded by has().
-        if (dumpJsonObject.has("multi_column_statistics")) {
-            JsonObject multiColumnStatistics = dumpJsonObject.getAsJsonObject("multi_column_statistics");
-            for (String tableKey : multiColumnStatistics.keySet()) {
-                for (JsonElement groupElement : multiColumnStatistics.get(tableKey).getAsJsonArray()) {
+        if (dumpJsonObject.has("external_mcv_statistics")) {
+            JsonObject externalMcvStatistics = dumpJsonObject.getAsJsonObject("external_mcv_statistics");
+            for (String tableKey : externalMcvStatistics.keySet()) {
+                for (JsonElement groupElement : externalMcvStatistics.get(tableKey).getAsJsonArray()) {
                     JsonObject groupJson = groupElement.getAsJsonObject();
                     List<String> columns = new ArrayList<>();
                     groupJson.get("columns").getAsJsonArray().forEach(e -> columns.add(e.getAsString()));
                     long ndv = groupJson.get("ndv").getAsLong();
                     long rowCount = groupJson.has("row_count") ? groupJson.get("row_count").getAsLong() : 0;
                     List<MultiColumnCombinedStats.McvEntry> mcv = groupJson.has("mcv")
-                            ? ExternalMultiColumnStatsCacheLoader.parseMcv(groupJson.get("mcv").getAsString(), columns.size())
+                            ? ExternalMcvStatsCacheLoader.parseMcv(groupJson.get("mcv").getAsString(), columns.size())
                             : Collections.emptyList();
-                    dumpInfo.addMultiColumnStatistics(tableKey,
-                            new ExternalMultiColumnCombinedStatistics.Group(columns, rowCount, ndv, mcv));
+                    dumpInfo.addExternalMcvStatistics(tableKey,
+                            new ExternalMcvStatistics.Group(columns, rowCount, ndv, mcv));
                 }
             }
         }

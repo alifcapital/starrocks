@@ -78,7 +78,7 @@ public class AnalyzeMgr implements Writable {
     private final Map<Pair<Long, String>, HistogramStatsMeta> histogramStatsMetaMap;
     private final Map<StatsMetaColumnKey, ExternalHistogramStatsMeta> externalHistogramStatsMetaMap;
     private final Map<MultiColumnStatsKey, MultiColumnStatsMeta> multiColumnStatsMetaMap;
-    private final Map<ExternalMultiColumnStatsKey, ExternalMultiColumnStatsMeta> externalMultiColumnStatsMetaMap;
+    private final Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> externalMcvStatsMetaMap;
 
     // ConnectContext of all currently running analyze tasks
     private final Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
@@ -102,7 +102,7 @@ public class AnalyzeMgr implements Writable {
         histogramStatsMetaMap = Maps.newConcurrentMap();
         externalHistogramStatsMetaMap = Maps.newConcurrentMap();
         multiColumnStatsMetaMap = Maps.newConcurrentMap();
-        externalMultiColumnStatsMetaMap = Maps.newConcurrentMap();
+        externalMcvStatsMetaMap = Maps.newConcurrentMap();
     }
 
     public AnalyzeJob getAnalyzeJob(long id) {
@@ -336,36 +336,36 @@ public class AnalyzeMgr implements Writable {
         return multiColumnStatsMetaMap;
     }
 
-    public Map<ExternalMultiColumnStatsKey, ExternalMultiColumnStatsMeta> getExternalMultiColumnStatsMetaMap() {
-        return externalMultiColumnStatsMetaMap;
+    public Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> getExternalMcvStatsMetaMap() {
+        return externalMcvStatsMetaMap;
     }
 
-    public void addExternalMultiColumnStatsMeta(ExternalMultiColumnStatsMeta meta) {
-        GlobalStateMgr.getCurrentState().getEditLog().logAddExternalMultiColumnStatsMeta(meta,
-                wal -> externalMultiColumnStatsMetaMap.put(ExternalMultiColumnStatsKey.of(meta), meta));
+    public void addExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        GlobalStateMgr.getCurrentState().getEditLog().logAddExternalMcvStatsMeta(meta,
+                wal -> externalMcvStatsMetaMap.put(ExternalMcvStatsKey.of(meta), meta));
     }
 
-    public void replayAddExternalMultiColumnStatsMeta(ExternalMultiColumnStatsMeta meta) {
-        externalMultiColumnStatsMetaMap.put(ExternalMultiColumnStatsKey.of(meta), meta);
+    public void replayAddExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        externalMcvStatsMetaMap.put(ExternalMcvStatsKey.of(meta), meta);
     }
 
-    public void replayRemoveExternalMultiColumnStatsMeta(ExternalMultiColumnStatsMeta meta) {
-        externalMultiColumnStatsMetaMap.remove(ExternalMultiColumnStatsKey.of(meta));
+    public void replayRemoveExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        externalMcvStatsMetaMap.remove(ExternalMcvStatsKey.of(meta));
     }
 
-    public void removeExternalMultiColumnStatsMeta(String catalogName, String dbName, String tableName) {
+    public void removeExternalMcvStatsMeta(String catalogName, String dbName, String tableName) {
         StatsMetaKey tableKey = new StatsMetaKey(catalogName, dbName, tableName);
-        for (Map.Entry<ExternalMultiColumnStatsKey, ExternalMultiColumnStatsMeta> entry :
-                Lists.newArrayList(externalMultiColumnStatsMetaMap.entrySet())) {
+        for (Map.Entry<ExternalMcvStatsKey, ExternalMcvStatsMeta> entry :
+                Lists.newArrayList(externalMcvStatsMetaMap.entrySet())) {
             if (entry.getKey().getTableKey().equals(tableKey)) {
-                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMultiColumnStatsMeta(entry.getValue(),
-                        wal -> externalMultiColumnStatsMetaMap.remove(entry.getKey()));
+                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(entry.getValue(),
+                        wal -> externalMcvStatsMetaMap.remove(entry.getKey()));
             }
         }
     }
 
-    public void refreshExternalMultiColumnStatisticsCache(String tableUUID, boolean isSync) {
-        GlobalStateMgr.getCurrentState().getStatisticStorage().refreshExternalMultiColumnStatistics(tableUUID, isSync);
+    public void refreshExternalMcvStatisticsCache(String tableUUID, boolean isSync) {
+        GlobalStateMgr.getCurrentState().getStatisticStorage().refreshExternalMcvStatistics(tableUUID, isSync);
     }
 
     /**
@@ -373,7 +373,7 @@ public class AnalyzeMgr implements Writable {
      * stale either way, so it is dropped and reloaded lazily. Journals written without a table UUID fall
      * back to resolving the table.
      */
-    public void replayExpireExternalMultiColumnStatsCache(ExternalMultiColumnStatsMeta meta) {
+    public void replayExpireExternalMcvStatsCache(ExternalMcvStatsMeta meta) {
         String tableUUID = meta.getTableUUID();
         if (tableUUID == null || tableUUID.isEmpty()) {
             try {
@@ -389,19 +389,19 @@ public class AnalyzeMgr implements Writable {
                 return;
             }
         }
-        GlobalStateMgr.getCurrentState().getStatisticStorage().expireExternalMultiColumnStatistics(tableUUID);
+        GlobalStateMgr.getCurrentState().getStatisticStorage().expireExternalMcvStatistics(tableUUID);
     }
 
-    public void dropExternalMultiColumnStatsMetaAndData(String catalogName, String dbName, String tableName) {
-        new StatisticExecutor().dropExternalMultiColumnStatistics(StatisticUtils.buildConnectContext(), catalogName,
+    public void dropExternalMcvStatsMetaAndData(String catalogName, String dbName, String tableName) {
+        new StatisticExecutor().dropExternalMcvStatistics(StatisticUtils.buildConnectContext(), catalogName,
                 dbName, tableName);
-        removeExternalMultiColumnStatsMeta(catalogName, dbName, tableName);
+        removeExternalMcvStatsMeta(catalogName, dbName, tableName);
     }
 
-    public void dropExternalMultiColumnStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
+    public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
                                                         Table table) {
-        new StatisticExecutor().dropExternalMultiColumnStatistics(statsConnectCtx, table.getUUID());
-        removeExternalMultiColumnStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+        new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID());
+        removeExternalMcvStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
     }
 
     public void refreshBasicStatisticsCache(Long dbId, Long tableId, List<String> columns, boolean async) {
@@ -717,7 +717,7 @@ public class AnalyzeMgr implements Writable {
                     droppedTable.getTableName());
             dropExternalHistogramStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
                     droppedTable.getTableName());
-            dropExternalMultiColumnStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
+            dropExternalMcvStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
                     droppedTable.getTableName());
         }
     }
@@ -1120,7 +1120,7 @@ public class AnalyzeMgr implements Writable {
                 + 1 + externalBasicStatsMetaMap.size()
                 + 1 + externalHistogramStatsMetaMap.size()
                 + 1 + multiColumnStatsMetaMap.size()
-                + 1 + externalMultiColumnStatsMetaMap.size();
+                + 1 + externalMcvStatsMetaMap.size();
 
         SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.ANALYZE_MGR, numJson);
 
@@ -1160,8 +1160,8 @@ public class AnalyzeMgr implements Writable {
             writer.writeJson(multiColumnStatsMeta);
         }
 
-        writer.writeInt(externalMultiColumnStatsMetaMap.size());
-        for (ExternalMultiColumnStatsMeta meta : externalMultiColumnStatsMetaMap.values()) {
+        writer.writeInt(externalMcvStatsMetaMap.size());
+        for (ExternalMcvStatsMeta meta : externalMcvStatsMetaMap.values()) {
             writer.writeJson(meta);
         }
 
@@ -1183,7 +1183,7 @@ public class AnalyzeMgr implements Writable {
 
         reader.readCollection(MultiColumnStatsMeta.class, this::replayAddMultiColumnStatsMeta);
 
-        reader.readCollection(ExternalMultiColumnStatsMeta.class, this::replayAddExternalMultiColumnStatsMeta);
+        reader.readCollection(ExternalMcvStatsMeta.class, this::replayAddExternalMcvStatsMeta);
     }
 
     private void updateBasicStatsMeta(long dbId, long tableId, long loadedRows) {
@@ -1295,12 +1295,12 @@ public class AnalyzeMgr implements Writable {
         }
     }
 
-    public static class ExternalMultiColumnStatsKey {
+    public static class ExternalMcvStatsKey {
         private final StatsMetaKey tableKey;
         // Case-insensitive like column names; the order of the group does not matter.
         private final Set<String> columnNames;
 
-        public ExternalMultiColumnStatsKey(String catalogName, String dbName, String tableName,
+        public ExternalMcvStatsKey(String catalogName, String dbName, String tableName,
                                            Collection<String> columnNames) {
             this.tableKey = new StatsMetaKey(catalogName, dbName, tableName);
             this.columnNames = new HashSet<>();
@@ -1309,8 +1309,8 @@ public class AnalyzeMgr implements Writable {
             }
         }
 
-        public static ExternalMultiColumnStatsKey of(ExternalMultiColumnStatsMeta meta) {
-            return new ExternalMultiColumnStatsKey(meta.getCatalogName(), meta.getDbName(), meta.getTableName(),
+        public static ExternalMcvStatsKey of(ExternalMcvStatsMeta meta) {
+            return new ExternalMcvStatsKey(meta.getCatalogName(), meta.getDbName(), meta.getTableName(),
                     meta.getColumnNames());
         }
 
@@ -1327,10 +1327,10 @@ public class AnalyzeMgr implements Writable {
             if (this == o) {
                 return true;
             }
-            if (!(o instanceof ExternalMultiColumnStatsKey)) {
+            if (!(o instanceof ExternalMcvStatsKey)) {
                 return false;
             }
-            ExternalMultiColumnStatsKey that = (ExternalMultiColumnStatsKey) o;
+            ExternalMcvStatsKey that = (ExternalMcvStatsKey) o;
             return Objects.equal(tableKey, that.tableKey) && Objects.equal(columnNames, that.columnNames);
         }
 

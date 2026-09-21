@@ -25,9 +25,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
-public class ExternalMultiColumnStatisticsCollectJobTest {
-    private static ExternalMultiColumnStatisticsCollectJob newJob(Map<String, String> properties) {
-        return new ExternalMultiColumnStatisticsCollectJob("hive0", null, null,
+public class ExternalMcvStatisticsCollectJobTest {
+    private static ExternalMcvStatisticsCollectJob newJob(Map<String, String> properties) {
+        return new ExternalMcvStatisticsCollectJob("hive0", null, null,
                 List.of("status", "gate"), List.of(VarcharType.VARCHAR, IntegerType.INT),
                 StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.ONCE, properties,
                 List.of(StatisticsType.MCDISTINCT, StatisticsType.MCV), List.of(List.of("status", "gate")));
@@ -37,7 +37,7 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
     public void testSketchSQLUsesMcvSizeAndSketchParameters() {
         String from = " FROM (SELECT stats_tuple_key(cast(`status` as varchar), cast(`gate` as varchar)) AS k"
                 + " FROM `hive0`.`db`.`t`) t";
-        ExternalMultiColumnStatisticsCollectJob job = newJob(Map.of());
+        ExternalMcvStatisticsCollectJob job = newJob(Map.of());
         Assertions.assertEquals("SELECT count(*), ds_frequent_items(k, " + Config.histogram_mcv_size + ", "
                         + Config.statistic_mcv_sketch_lg_map_size + "), ds_hll_count_distinct(k, 17)" + from,
                 job.buildSketchSQL(from));
@@ -48,7 +48,7 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
 
     @Test
     public void testExactCountSQLCountsTuplesAndComponents() {
-        ExternalMultiColumnStatisticsCollectJob job = newJob(Map.of());
+        ExternalMcvStatisticsCollectJob job = newJob(Map.of());
         String sql = job.buildExactCountSQL(" FROM t", List.of("approved#0", "it's#\\N", "declined#0"), 2);
         Assertions.assertEquals("SELECT histogram_by_bounds(k, '[\"approved#0\",\"it''s#\\\\\\\\N\",\"declined#0\"]', '[]'),"
                 + " count(*), histogram_by_bounds(v0, '[\"approved\",\"it''s\",\"declined\"]', '[]'), count(v0),"
@@ -62,16 +62,16 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
     public void testProjectionExposesKeyAndComponents() {
         Assertions.assertEquals("stats_tuple_key(cast(`status` as varchar), cast(`gate` as varchar)) AS k,"
                         + " cast(`status` as varchar) AS v0, cast(`gate` as varchar) AS v1",
-                ExternalMultiColumnStatisticsCollectJob.buildProjection(null, List.of("status", "gate")));
+                ExternalMcvStatisticsCollectJob.buildProjection(null, List.of("status", "gate")));
     }
 
     @Test
     public void testParseFrequentItemsKeepsOrder() {
         Assertions.assertEquals(List.of("approved#0#0", "declined#1#0", "\\N#0#0"),
-                ExternalMultiColumnStatisticsCollectJob.parseFrequentItems(
+                ExternalMcvStatisticsCollectJob.parseFrequentItems(
                         "[[\"approved#0#0\",\"540\"],[\"declined#1#0\",\"100\"],[\"\\\\N#0#0\",\"7\"]]"));
-        Assertions.assertTrue(ExternalMultiColumnStatisticsCollectJob.parseFrequentItems("[]").isEmpty());
-        Assertions.assertTrue(ExternalMultiColumnStatisticsCollectJob.parseFrequentItems(null).isEmpty());
+        Assertions.assertTrue(ExternalMcvStatisticsCollectJob.parseFrequentItems("[]").isEmpty());
+        Assertions.assertTrue(ExternalMcvStatisticsCollectJob.parseFrequentItems(null).isEmpty());
     }
 
     @Test
@@ -83,11 +83,11 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
                 "{\"mcv\":[[\"approved\",\"700\"],[\"declined\",\"900\"],[\"gone\",\"0\"]],\"buckets\":[]}", "1990",
                 "{\"mcv\":[[\"0\",\"1000\"],[\"1\",\"950\"],[\"9\",\"0\"]],\"buckets\":[]}", "2000",
                 "{\"mcv\":[[\"0\",\"1800\"],[\"9\",\"0\"]],\"buckets\":[]}", "2000");
-        ExternalMultiColumnStatisticsCollectJob.GroupStatistics statistics =
-                ExternalMultiColumnStatisticsCollectJob.parseExactCounts(row, 3, 12);
+        ExternalMcvStatisticsCollectJob.GroupStatistics statistics =
+                ExternalMcvStatisticsCollectJob.parseExactCounts(row, 3, 12);
         Assertions.assertEquals(2000, statistics.rowCount);
         Assertions.assertEquals(12, statistics.ndv);
-        List<ExternalMultiColumnStatisticsCollectJob.McvTuple> mcv = statistics.mcv;
+        List<ExternalMcvStatisticsCollectJob.McvTuple> mcv = statistics.mcv;
         Assertions.assertEquals(3, mcv.size());
         Assertions.assertEquals(List.of("declined", "1", "0"), mcv.get(0).values);
         Assertions.assertEquals(600, mcv.get(0).count);
@@ -102,11 +102,11 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
         // A component count below its tuple count is raised to the tuple count.
         row = List.of("{\"mcv\":[[\"a#1\",\"50\"]],\"buckets\":[]}", "100",
                 "{\"mcv\":[[\"a\",\"20\"]],\"buckets\":[]}", "100", "{\"mcv\":[],\"buckets\":[]}", "100");
-        statistics = ExternalMultiColumnStatisticsCollectJob.parseExactCounts(row, 2, 3);
+        statistics = ExternalMcvStatisticsCollectJob.parseExactCounts(row, 2, 3);
         Assertions.assertEquals(List.of(50L, 50L), statistics.mcv.get(0).componentCounts);
 
         Assertions.assertThrows(IllegalStateException.class, () ->
-                ExternalMultiColumnStatisticsCollectJob.parseExactCounts(
+                ExternalMcvStatisticsCollectJob.parseExactCounts(
                         List.of("{\"mcv\":[[\"approved#0\",\"1\"]],\"buckets\":[]}", "1",
                                 "{\"mcv\":[],\"buckets\":[]}", "1", "{\"mcv\":[],\"buckets\":[]}", "1",
                                 "{\"mcv\":[],\"buckets\":[]}", "1"), 3, 1));
@@ -114,19 +114,19 @@ public class ExternalMultiColumnStatisticsCollectJobTest {
 
     @Test
     public void testMcvJsonRoundTrip() {
-        List<ExternalMultiColumnStatisticsCollectJob.McvTuple> mcv = List.of(
-                new ExternalMultiColumnStatisticsCollectJob.McvTuple(List.of("approved", "0"), 540, List.of(700L, 900L)),
-                new ExternalMultiColumnStatisticsCollectJob.McvTuple(Arrays.asList(null, "it's \"quoted\""), 7));
-        String json = ExternalMultiColumnStatisticsCollectJob.buildMcvJson(mcv);
+        List<ExternalMcvStatisticsCollectJob.McvTuple> mcv = List.of(
+                new ExternalMcvStatisticsCollectJob.McvTuple(List.of("approved", "0"), 540, List.of(700L, 900L)),
+                new ExternalMcvStatisticsCollectJob.McvTuple(Arrays.asList(null, "it's \"quoted\""), 7));
+        String json = ExternalMcvStatisticsCollectJob.buildMcvJson(mcv);
         Assertions.assertEquals("[[[\"approved\",\"0\"],\"540\",[\"700\",\"900\"]],"
                 + "[[null,\"it's \\\"quoted\\\"\"],\"7\"]]", json);
         Assertions.assertEquals("[\"status\",\"gate\"]",
-                ExternalMultiColumnStatisticsCollectJob.buildColumnNamesJson(List.of("status", "gate")));
+                ExternalMcvStatisticsCollectJob.buildColumnNamesJson(List.of("status", "gate")));
         // The storage key is a fixed-length digest that does not depend on the order the group was given in.
-        String columnIds = ExternalMultiColumnStatisticsCollectJob.buildColumnIds(List.of("status", "gate"));
+        String columnIds = ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("status", "gate"));
         Assertions.assertEquals(32, columnIds.length());
-        Assertions.assertEquals(columnIds, ExternalMultiColumnStatisticsCollectJob.buildColumnIds(List.of("gate", "status")));
-        Assertions.assertNotEquals(columnIds, ExternalMultiColumnStatisticsCollectJob.buildColumnIds(List.of("sta", "tus#gate")));
-        Assertions.assertEquals("[]", ExternalMultiColumnStatisticsCollectJob.buildMcvJson(List.of()));
+        Assertions.assertEquals(columnIds, ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("gate", "status")));
+        Assertions.assertNotEquals(columnIds, ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("sta", "tus#gate")));
+        Assertions.assertEquals("[]", ExternalMcvStatisticsCollectJob.buildMcvJson(List.of()));
     }
 }

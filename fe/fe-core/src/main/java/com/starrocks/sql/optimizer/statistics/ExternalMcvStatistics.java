@@ -19,12 +19,12 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Multi-column statistics of one external table as kept by the statistics cache: one entry per
- * collected column group. Column groups are identified by column names because external columns
+ * MCV statistics of one external table as kept by the statistics cache: one entry per
+ * collected column set. Column sets are identified by column names because external columns
  * have no stable numeric id.
  */
-public class ExternalMultiColumnCombinedStatistics {
-    public static final ExternalMultiColumnCombinedStatistics EMPTY = new ExternalMultiColumnCombinedStatistics();
+public class ExternalMcvStatistics {
+    public static final ExternalMcvStatistics EMPTY = new ExternalMcvStatistics();
 
     public static class Group {
         // Order of the tuple components in the most common values.
@@ -60,11 +60,11 @@ public class ExternalMultiColumnCombinedStatistics {
 
     private final List<Group> groups;
 
-    private ExternalMultiColumnCombinedStatistics() {
+    private ExternalMcvStatistics() {
         this.groups = Collections.emptyList();
     }
 
-    public ExternalMultiColumnCombinedStatistics(List<Group> groups) {
+    public ExternalMcvStatistics(List<Group> groups) {
         this.groups = new ArrayList<>(groups);
     }
 

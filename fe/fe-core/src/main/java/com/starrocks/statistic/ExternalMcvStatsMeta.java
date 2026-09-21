@@ -23,11 +23,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Journaled record of one multi-column statistics collection on an external table: which column
+ * Journaled record of one MCV statistics collection on an external table: which column
  * group was collected, when and with what parameters. The statistics themselves live in
- * _statistics_.external_multi_column_statistics.
+ * _statistics_.external_mcv_statistics.
  */
-public class ExternalMultiColumnStatsMeta implements Writable {
+public class ExternalMcvStatsMeta implements Writable {
     @SerializedName("catalogName")
     private String catalogName;
 
@@ -57,7 +57,7 @@ public class ExternalMultiColumnStatsMeta implements Writable {
     @SerializedName("tableUUID")
     private String tableUUID;
 
-    public ExternalMultiColumnStatsMeta(String catalogName, String dbName, String tableName,
+    public ExternalMcvStatsMeta(String catalogName, String dbName, String tableName,
                                         List<String> columnNames, StatsConstants.AnalyzeType analyzeType,
                                         List<StatisticsType> statisticsTypes, LocalDateTime updateTime,
                                         Map<String, String> properties) {

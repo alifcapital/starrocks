@@ -385,10 +385,10 @@ public class OperationType {
     public static final short OP_REMOVE_EXTERNAL_HISTOGRAM_STATS_META = 11207;
 
     @IgnorableOnReplayFailed
-    public static final short OP_ADD_EXTERNAL_MULTI_COLUMN_STATS_META = 11208;
+    public static final short OP_ADD_EXTERNAL_MCV_STATS_META = 11208;
 
     @IgnorableOnReplayFailed
-    public static final short OP_REMOVE_EXTERNAL_MULTI_COLUMN_STATS_META = 11209;
+    public static final short OP_REMOVE_EXTERNAL_MCV_STATS_META = 11209;
 
     //Database json format log
     public static final short OP_CREATE_DB_V2 = 12001;

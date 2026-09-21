@@ -99,37 +99,37 @@ public class StatisticsCalcUtils {
     }
 
     /**
-     * Attaches the multi-column statistics collected for an external table (see
-     * ExternalMultiColumnStatisticsCollectJob) to the scan statistics. Column groups are matched to the
+     * Attaches the MCV statistics collected for an external table (see
+     * ExternalMcvStatisticsCollectJob) to the scan statistics. Column groups are matched to the
      * scan's columns by name; a group with a column the scan does not read is left out.
      */
-    public static Statistics withExternalMultiColumnStats(Table table, Statistics statistics,
+    public static Statistics withExternalMcvStats(Table table, Statistics statistics,
                                                           Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
-        return withExternalMultiColumnStats(table, statistics, colRefToColumnMetaMap, null);
+        return withExternalMcvStats(table, statistics, colRefToColumnMetaMap, null);
     }
 
-    public static Statistics withExternalMultiColumnStats(Table table, Statistics statistics,
+    public static Statistics withExternalMcvStats(Table table, Statistics statistics,
                                                           Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
                                                           OptimizerContext optimizerContext) {
         if (statistics == null || table == null || !table.isAnalyzableExternalTable()) {
             return statistics;
         }
-        ExternalMultiColumnCombinedStatistics cached;
+        ExternalMcvStatistics cached;
         try {
-            cached = GlobalStateMgr.getCurrentState().getStatisticStorage().getExternalMultiColumnCombinedStatistics(table);
+            cached = GlobalStateMgr.getCurrentState().getStatisticStorage().getExternalMcvStatistics(table);
         } catch (Exception e) {
-            LOG.warn("Failed to get external multi-column statistics of table {}", table.getName(), e);
+            LOG.warn("Failed to get external MCV statistics of table {}", table.getName(), e);
             return statistics;
         }
         if (cached == null || cached.isEmpty()) {
             return statistics;
         }
         if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
-            for (ExternalMultiColumnCombinedStatistics.Group group : cached.getGroups()) {
-                optimizerContext.getDumpInfo().addMultiColumnStatistics(table, group);
+            for (ExternalMcvStatistics.Group group : cached.getGroups()) {
+                optimizerContext.getDumpInfo().addExternalMcvStatistics(table, group);
             }
         }
-        return attachExternalMultiColumnStats(statistics, cached, colRefToColumnMetaMap);
+        return attachExternalMcvStats(statistics, cached, colRefToColumnMetaMap);
     }
 
     /**
@@ -140,13 +140,13 @@ public class StatisticsCalcUtils {
      * When two groups read the same columns, the complete one wins, then the one whose MCV list covers
      * more rows.
      */
-    static Statistics attachExternalMultiColumnStats(Statistics statistics, ExternalMultiColumnCombinedStatistics cached,
+    static Statistics attachExternalMcvStats(Statistics statistics, ExternalMcvStatistics cached,
                                                      Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
         Map<String, ColumnRefOperator> columnNameToRefMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         colRefToColumnMetaMap.keySet().forEach(ref -> columnNameToRefMap.putIfAbsent(ref.getName(), ref));
 
         Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> attached = new HashMap<>();
-        for (ExternalMultiColumnCombinedStatistics.Group group : cached.getGroups()) {
+        for (ExternalMcvStatistics.Group group : cached.getGroups()) {
             List<ColumnRefOperator> refs = new ArrayList<>(group.getColumnNames().size());
             Set<ColumnRefOperator> read = new HashSet<>();
             boolean duplicate = false;
@@ -225,8 +225,8 @@ public class StatisticsCalcUtils {
                 List<String> names = new ArrayList<>();
                 uniqueColumnIds.forEach(id -> names.add(uniqueIdToColumnNameMap.get(id)));
                 if (!names.contains(null)) {
-                    optimizerContext.getDumpInfo().addMultiColumnStatistics(table,
-                            new ExternalMultiColumnCombinedStatistics.Group(names, 0, ndv, List.of()));
+                    optimizerContext.getDumpInfo().addExternalMcvStatistics(table,
+                            new ExternalMcvStatistics.Group(names, 0, ndv, List.of()));
                 }
             }
 

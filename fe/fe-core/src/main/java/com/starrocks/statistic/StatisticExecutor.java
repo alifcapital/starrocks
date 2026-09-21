@@ -692,19 +692,19 @@ public class StatisticExecutor {
             } else if (statsJob.isMultiColumnStatsJob()) {
                 // for external table
                 for (List<String> columnGroup : statsJob.getColumnGroups()) {
-                    ExternalMultiColumnStatsMeta meta = new ExternalMultiColumnStatsMeta(statsJob.getCatalogName(),
+                    ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta(statsJob.getCatalogName(),
                             db.getFullName(), table.getName(), Lists.newArrayList(columnGroup),
                             statsJob.getAnalyzeType(), statsJob.getStatisticsTypes(), analyzeStatus.getEndTime(),
                             statsJob.getProperties());
                     try {
                         meta.setTableUUID(table.getUUID());
                     } catch (Exception e) {
-                        LOG.warn("Failed to resolve table UUID for external multi-column stats meta, table: {}.{}.{}",
+                        LOG.warn("Failed to resolve table UUID for external MCV stats meta, table: {}.{}.{}",
                                 statsJob.getCatalogName(), db.getFullName(), table.getName(), e);
                     }
-                    analyzeMgr.addExternalMultiColumnStatsMeta(meta);
+                    analyzeMgr.addExternalMcvStatsMeta(meta);
                 }
-                analyzeMgr.refreshExternalMultiColumnStatisticsCache(table.getUUID(), !refreshAsync);
+                analyzeMgr.refreshExternalMcvStatisticsCache(table.getUUID(), !refreshAsync);
             } else {
                 // for external table
                 ExternalBasicStatsMeta externalBasicStatsMeta = analyzeMgr.getExternalTableBasicStatsMeta(
@@ -822,24 +822,24 @@ public class StatisticExecutor {
                 StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(tableUUID, partitionNames));
     }
 
-    public List<List<String>> queryExternalMultiColumnStatistics(ConnectContext context, String tableUUID) {
-        if (!StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME))) {
+    public List<List<String>> queryExternalMcvStatistics(ConnectContext context, String tableUUID) {
+        if (!StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME))) {
             return Collections.emptyList();
         }
         return executeStatisticJsonDQL(context,
-                StatisticSQLBuilder.buildQueryExternalMultiColumnStatisticsSQL(tableUUID));
+                StatisticSQLBuilder.buildQueryExternalMcvStatisticsSQL(tableUUID));
     }
 
-    public void dropExternalMultiColumnStatistics(ConnectContext statsConnectCtx, String tableUUID) {
-        String sql = StatisticSQLBuilder.buildDropExternalMultiColumnStatisticsSQL(tableUUID);
+    public void dropExternalMcvStatistics(ConnectContext statsConnectCtx, String tableUUID) {
+        String sql = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(tableUUID);
         if (!executeDML(statsConnectCtx, sql)) {
             LOG.warn("Execute external multi-column statistic table expire fail.");
         }
     }
 
-    public void dropExternalMultiColumnStatistics(ConnectContext statsConnectCtx, String catalogName, String dbName,
+    public void dropExternalMcvStatistics(ConnectContext statsConnectCtx, String catalogName, String dbName,
                                                   String tableName) {
-        String sql = StatisticSQLBuilder.buildDropExternalMultiColumnStatisticsSQL(catalogName, dbName, tableName);
+        String sql = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(catalogName, dbName, tableName);
         if (!executeDML(statsConnectCtx, sql)) {
             LOG.warn("Execute external multi-column statistic table expire fail.");
         }

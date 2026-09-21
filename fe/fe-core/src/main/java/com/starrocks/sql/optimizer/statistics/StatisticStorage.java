@@ -102,14 +102,14 @@ public interface StatisticStorage {
     }
 
     // Multi-column statistics of an external table, looked up by its UUID.
-    default ExternalMultiColumnCombinedStatistics getExternalMultiColumnCombinedStatistics(Table table) {
-        return ExternalMultiColumnCombinedStatistics.EMPTY;
+    default ExternalMcvStatistics getExternalMcvStatistics(Table table) {
+        return ExternalMcvStatistics.EMPTY;
     }
 
-    default void expireExternalMultiColumnStatistics(String tableUUID) {
+    default void expireExternalMcvStatistics(String tableUUID) {
     }
 
-    default void refreshExternalMultiColumnStatistics(String tableUUID, boolean isSync) {
+    default void refreshExternalMcvStatistics(String tableUUID, boolean isSync) {
     }
 
     default void expireHistogramStatistics(Long tableId, List<String> columns) {
@@ -151,6 +151,6 @@ public interface StatisticStorage {
     default void addMultiColumnStatistics(Table table, MultiColumnCombinedStatistics statistics) {
     }
 
-    default void addExternalMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics statistics) {
+    default void addExternalMcvStatistics(Table table, ExternalMcvStatistics statistics) {
     }
 }

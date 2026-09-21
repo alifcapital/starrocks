@@ -201,6 +201,7 @@ import com.starrocks.sql.ast.ShowHistogramStatsMetaStmt;
 import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
 import com.starrocks.sql.ast.ShowPluginsStmt;
@@ -264,7 +265,7 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
-import com.starrocks.statistic.ExternalMultiColumnStatsMeta;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
@@ -2865,10 +2866,20 @@ public class ShowExecutor {
                 }
             }
 
-            List<ExternalMultiColumnStatsMeta> externalMetas = new ArrayList<>(
-                    context.getGlobalStateMgr().getAnalyzeMgr().getExternalMultiColumnStatsMetaMap().values());
-            for (ExternalMultiColumnStatsMeta meta : externalMetas) {
-                List<String> result = ShowExecutor.showExternalMultiColumnStatsMeta(context, meta);
+            ShowResultSetMetaData showResultSetMetaData = new ShowResultMetaFactory().getMetadata(stmt);
+            rows = doPredicate(stmt, showResultSetMetaData, rows);
+            rows = doOrderBy(rows, stmt.getOrderByPairs());
+            rows = doLimit(rows, stmt.getLimitElement());
+            return new ShowResultSet(showResultSetMetaData, rows);
+        }
+
+        @Override
+        public ShowResultSet visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt stmt, ConnectContext context) {
+            List<ExternalMcvStatsMeta> metas = new ArrayList<>(
+                    context.getGlobalStateMgr().getAnalyzeMgr().getExternalMcvStatsMetaMap().values());
+            List<List<String>> rows = Lists.newArrayList();
+            for (ExternalMcvStatsMeta meta : metas) {
+                List<String> result = ShowExecutor.showExternalMcvStatsMeta(context, meta);
                 if (result != null) {
                     rows.add(result);
                 }
@@ -3629,7 +3640,7 @@ public class ShowExecutor {
         return row;
     }
 
-    public static List<String> showExternalMultiColumnStatsMeta(ConnectContext context, ExternalMultiColumnStatsMeta meta) {
+    public static List<String> showExternalMcvStatsMeta(ConnectContext context, ExternalMcvStatsMeta meta) {
         Database db;
         Table table;
         try {

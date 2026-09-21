@@ -435,8 +435,8 @@ public class StatisticUtils {
                     new ColumnDef("ndv",  new TypeDef(IntegerType.BIGINT)),
                     new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
             );
-        } else if (tableName.equals(StatsConstants.EXTERNAL_MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
-            // column_ids: column names joined by '#', the key of the column group; column_names: the same
+        } else if (tableName.equals(StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
+            // column_ids: a digest of the sorted column names, the key of the column set; column_names: the same
             // names as a JSON array, in the order of the MCV tuple components; row_count: rows at collection
             // time; mcv: [[[value, ...], "count", ["component count", ...]], ...] with JSON null for NULL
             // values and, per component, the rows holding that value in its column.

@@ -84,8 +84,8 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             createAsyncLoadingCache(new MultiColumnCombinedStatsCacheLoader());
 
     // Keyed by table UUID.
-    AsyncLoadingCache<String, Optional<ExternalMultiColumnCombinedStatistics>> externalMultiColumnStats =
-            createAsyncLoadingCache(new ExternalMultiColumnStatsCacheLoader());
+    AsyncLoadingCache<String, Optional<ExternalMcvStatistics>> externalMcvStats =
+            createAsyncLoadingCache(new ExternalMcvStatsCacheLoader());
 
     AsyncLoadingCache<ExternalPartitionStatsKey, Optional<Map<String, ExternalPartitionStatistics.ColumnStats>>>
             externalPartitionStats = createAsyncLoadingCache(new ExternalPartitionStatsCacheLoader());
@@ -563,8 +563,8 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
-    public void addExternalMultiColumnStatistics(Table table, ExternalMultiColumnCombinedStatistics statistics) {
-        this.externalMultiColumnStats.synchronous().put(table.getUUID(), Optional.of(statistics));
+    public void addExternalMcvStatistics(Table table, ExternalMcvStatistics statistics) {
+        this.externalMcvStats.synchronous().put(table.getUUID(), Optional.of(statistics));
     }
 
     @Override
@@ -769,18 +769,18 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
-    public ExternalMultiColumnCombinedStatistics getExternalMultiColumnCombinedStatistics(Table table) {
+    public ExternalMcvStatistics getExternalMcvStatistics(Table table) {
         if (table == null || !StatisticUtils.checkStatisticTableStateNormal()) {
-            return ExternalMultiColumnCombinedStatistics.EMPTY;
+            return ExternalMcvStatistics.EMPTY;
         }
         try {
-            CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> result =
-                    externalMultiColumnStats.get(table.getUUID());
+            CompletableFuture<Optional<ExternalMcvStatistics>> result =
+                    externalMcvStats.get(table.getUUID());
             if (Config.enable_sync_statistics_load) {
                 result.get();
             }
             if (result.isDone()) {
-                return result.get().orElse(ExternalMultiColumnCombinedStatistics.EMPTY);
+                return result.get().orElse(ExternalMcvStatistics.EMPTY);
             }
         } catch (InterruptedException e) {
             LOG.warn("Failed to load external multi-column statistics", e);
@@ -788,7 +788,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
         } catch (Exception e) {
             LOG.warn("Failed to load external multi-column statistics", e);
         }
-        return ExternalMultiColumnCombinedStatistics.EMPTY;
+        return ExternalMcvStatistics.EMPTY;
     }
 
     @Override
@@ -829,28 +829,28 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
-    public void expireExternalMultiColumnStatistics(String tableUUID) {
+    public void expireExternalMcvStatistics(String tableUUID) {
         if (tableUUID == null || tableUUID.isEmpty()) {
             return;
         }
-        externalMultiColumnStats.synchronous().invalidate(tableUUID);
+        externalMcvStats.synchronous().invalidate(tableUUID);
     }
 
     @Override
-    public void refreshExternalMultiColumnStatistics(String tableUUID, boolean isSync) {
+    public void refreshExternalMcvStatistics(String tableUUID, boolean isSync) {
         if (tableUUID == null || tableUUID.isEmpty() || !StatisticUtils.checkStatisticTableStateNormal()) {
             return;
         }
         try {
-            ExternalMultiColumnStatsCacheLoader loader = new ExternalMultiColumnStatsCacheLoader();
-            CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> future =
+            ExternalMcvStatsCacheLoader loader = new ExternalMcvStatsCacheLoader();
+            CompletableFuture<Optional<ExternalMcvStatistics>> future =
                     loader.asyncLoad(tableUUID, statsCacheRefresherExecutor);
             if (isSync) {
-                externalMultiColumnStats.synchronous().put(tableUUID, future.get());
+                externalMcvStats.synchronous().put(tableUUID, future.get());
             } else {
                 future.whenComplete((res, e) -> {
                     if (e == null) {
-                        externalMultiColumnStats.synchronous().put(tableUUID, res);
+                        externalMcvStats.synchronous().put(tableUUID, res);
                     }
                 });
             }
@@ -871,7 +871,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Estimator.estimate(connectorTableCachedStatistics.synchronous().asMap(), 20) +
                 Estimator.estimate(connectorHistogramCache.synchronous().asMap(), 20) +
                 Estimator.estimate(multiColumnStats.synchronous().asMap(), 20) +
-                Estimator.estimate(externalMultiColumnStats.synchronous().asMap(), 20);
+                Estimator.estimate(externalMcvStats.synchronous().asMap(), 20);
     }
 
     @Override

@@ -33,6 +33,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.AnalyzeTypeDesc;
@@ -168,6 +169,29 @@ public class AnalyzeStmtAnalyzer {
                 }
             }
 
+            if (analyzeTypeDesc instanceof AnalyzeMcvDesc) {
+                if (columns.isEmpty()) {
+                    throw new SemanticException("MCV statistics need at least one column");
+                }
+                if (columns.size() > Config.statistics_max_multi_column_combined_num) {
+                    throw new SemanticException("column size " + columns.size() + " exceeded max size of "
+                            + Config.statistics_max_multi_column_combined_num + " on MCV analyze statement");
+                }
+                if (!CatalogMgr.isExternalCatalog(statement.getCatalogName())) {
+                    throw new SemanticException("MCV statistics are collected on external tables only");
+                }
+                if (statement.isSample()) {
+                    throw new SemanticException("MCV statistics are collected by a full scan, "
+                            + "use ANALYZE FULL TABLE ... MCV (...)");
+                }
+                if (statement.getPartitionNames() != null) {
+                    throw new SemanticException("not support specify partition names on MCV analyze statement");
+                }
+                if (statement.isAsync()) {
+                    throw new SemanticException("not support async analyze on MCV analyze statement");
+                }
+            }
+
             if (CollectionUtils.isNotEmpty(columns)) {
                 Set<String> mentionedColumns = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
                 // The actual column name, avoiding case sensitivity issues
@@ -253,11 +277,9 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException(
                             "Analyze external table only support hive, iceberg, deltalake, paimon and odps table",
                             tableName.toString());
-                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc && statement.isSample()) {
-                    // Multi-column statistics of an external table are collected by a full scan of the column
-                    // group; there is no sampled collection for them.
-                    throw new SemanticException("Multi-column combined statistics on external table only support "
-                            + "FULL collection, use ANALYZE FULL TABLE ... MULTIPLE COLUMNS");
+                } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc) {
+                    throw new SemanticException("Multi-column combined statistics are not supported on external "
+                            + "tables, use ANALYZE FULL TABLE ... MCV (...)");
                 }
 
                 statement.setExternal(true);
@@ -561,6 +583,13 @@ public class AnalyzeStmtAnalyzer {
             statement.setTableRef(tableRef);
             if (CatalogMgr.isExternalCatalog(tableRef.getCatalogName())) {
                 statement.setExternal(true);
+            }
+            if (statement.isMcv() && !statement.isExternal()) {
+                throw new SemanticException("MCV statistics exist on external tables only");
+            }
+            if (statement.isMultiColumn() && statement.isExternal()) {
+                throw new SemanticException("Multi-column combined statistics exist on native tables only, "
+                        + "use DROP MCV STATS");
             }
             return null;
         }

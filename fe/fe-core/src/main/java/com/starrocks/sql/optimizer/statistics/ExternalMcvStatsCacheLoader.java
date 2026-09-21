@@ -38,18 +38,18 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
 /**
- * Loads the multi-column statistics of an external table from
- * _statistics_.external_multi_column_statistics, keyed by table UUID.
+ * Loads the MCV statistics of an external table from
+ * _statistics_.external_mcv_statistics, keyed by table UUID.
  */
-public class ExternalMultiColumnStatsCacheLoader
-        implements AsyncCacheLoader<String, Optional<ExternalMultiColumnCombinedStatistics>> {
-    private static final Logger LOG = LogManager.getLogger(ExternalMultiColumnStatsCacheLoader.class);
+public class ExternalMcvStatsCacheLoader
+        implements AsyncCacheLoader<String, Optional<ExternalMcvStatistics>> {
+    private static final Logger LOG = LogManager.getLogger(ExternalMcvStatsCacheLoader.class);
     private static final Gson JSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private final StatisticExecutor statisticExecutor = new StatisticExecutor();
 
     @Override
-    public @NonNull CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> asyncLoad(
+    public @NonNull CompletableFuture<Optional<ExternalMcvStatistics>> asyncLoad(
             @NonNull String tableUUID, @NonNull Executor executor) {
         return CompletableFuture.supplyAsync(() -> {
             if (FeConstants.enableUnitStatistics) {
@@ -58,10 +58,10 @@ public class ExternalMultiColumnStatsCacheLoader
             try {
                 ConnectContext connectContext = StatisticUtils.buildConnectContext();
                 connectContext.setThreadLocalInfo();
-                List<List<String>> rows = statisticExecutor.queryExternalMultiColumnStatistics(connectContext, tableUUID);
-                List<ExternalMultiColumnCombinedStatistics.Group> groups = new ArrayList<>();
+                List<List<String>> rows = statisticExecutor.queryExternalMcvStatistics(connectContext, tableUUID);
+                List<ExternalMcvStatistics.Group> groups = new ArrayList<>();
                 for (List<String> row : rows) {
-                    ExternalMultiColumnCombinedStatistics.Group group = parseGroup(row);
+                    ExternalMcvStatistics.Group group = parseGroup(row);
                     if (group != null) {
                         groups.add(group);
                     }
@@ -69,9 +69,9 @@ public class ExternalMultiColumnStatsCacheLoader
                 if (groups.isEmpty()) {
                     return Optional.empty();
                 }
-                return Optional.of(new ExternalMultiColumnCombinedStatistics(groups));
+                return Optional.of(new ExternalMcvStatistics(groups));
             } catch (RuntimeException e) {
-                LOG.error("Failed to load external multi-column statistics of table {}", tableUUID, e);
+                LOG.error("Failed to load external MCV statistics of table {}", tableUUID, e);
                 throw new CompletionException(e);
             } catch (Exception e) {
                 throw new CompletionException(e);
@@ -82,14 +82,14 @@ public class ExternalMultiColumnStatsCacheLoader
     }
 
     @Override
-    public @NonNull CompletableFuture<Optional<ExternalMultiColumnCombinedStatistics>> asyncReload(
-            @NonNull String tableUUID, @NonNull Optional<ExternalMultiColumnCombinedStatistics> oldValue,
+    public @NonNull CompletableFuture<Optional<ExternalMcvStatistics>> asyncReload(
+            @NonNull String tableUUID, @NonNull Optional<ExternalMcvStatistics> oldValue,
             @NonNull Executor executor) {
         return asyncLoad(tableUUID, executor);
     }
 
-    // A row is [column_names, row_count, ndv, mcv]; see StatisticSQLBuilder.buildQueryExternalMultiColumnStatisticsSQL.
-    static ExternalMultiColumnCombinedStatistics.Group parseGroup(List<String> row) {
+    // A row is [column_names, row_count, ndv, mcv]; see StatisticSQLBuilder.buildQueryExternalMcvStatisticsSQL.
+    static ExternalMcvStatistics.Group parseGroup(List<String> row) {
         if (row.size() < 4 || row.get(0) == null) {
             return null;
         }
@@ -102,9 +102,9 @@ public class ExternalMultiColumnStatsCacheLoader
             long ndv = row.get(2) == null ? 0 : Long.parseLong(row.get(2));
             List<MultiColumnCombinedStats.McvEntry> mcv =
                     row.get(3) == null ? List.of() : parseMcv(row.get(3), columnNames.size());
-            return new ExternalMultiColumnCombinedStatistics.Group(columnNames, rowCount, ndv, mcv);
+            return new ExternalMcvStatistics.Group(columnNames, rowCount, ndv, mcv);
         } catch (RuntimeException e) {
-            LOG.warn("Ignore malformed external multi-column statistics row {}", row, e);
+            LOG.warn("Ignore malformed external MCV statistics row {}", row, e);
             return null;
         }
     }

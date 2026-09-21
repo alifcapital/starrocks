@@ -21,15 +21,21 @@ public class DropStatsStmt extends StatementBase {
     private TableRef tableRef;
     private boolean isExternal = false;
     private boolean isMultiColumn = false;
+    private boolean isMcv = false;
 
     public DropStatsStmt(TableRef tableRef) {
         this(tableRef, false, NodePosition.ZERO);
     }
 
     public DropStatsStmt(TableRef tableRef, boolean isMultiColumn, NodePosition pos) {
+        this(tableRef, isMultiColumn, false, pos);
+    }
+
+    public DropStatsStmt(TableRef tableRef, boolean isMultiColumn, boolean isMcv, NodePosition pos) {
         super(pos);
         this.tableRef = tableRef;
         this.isMultiColumn = isMultiColumn;
+        this.isMcv = isMcv;
     }
 
     public TableRef getTableRef() {
@@ -62,6 +68,10 @@ public class DropStatsStmt extends StatementBase {
 
     public boolean isMultiColumn() {
         return isMultiColumn;
+    }
+
+    public boolean isMcv() {
+        return isMcv;
     }
 
     @Override

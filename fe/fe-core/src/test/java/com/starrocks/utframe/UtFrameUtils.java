@@ -143,7 +143,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
-import com.starrocks.sql.optimizer.statistics.ExternalMultiColumnCombinedStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStatistics;
 import com.starrocks.sql.optimizer.transformer.LogicalPlan;
@@ -1260,15 +1260,15 @@ public class UtFrameUtils {
         }
         // mock multi-column statistics: an internal table takes the combined NDVs keyed by its recreated column
         // ids; an external-catalog table takes the groups with their MCV lists under its mock table's UUID.
-        for (Map.Entry<String, List<ExternalMultiColumnCombinedStatistics.Group>> entry :
-                replayDumpInfo.getMultiColumnStatisticsMap().entrySet()) {
+        for (Map.Entry<String, List<ExternalMcvStatistics.Group>> entry :
+                replayDumpInfo.getExternalMcvStatisticsMap().entrySet()) {
             String dbName = entry.getKey().split("\\.")[0];
             String tableName = entry.getKey().split("\\.")[1];
             Database replayDb = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(dbName);
             Table replayTable = replayDb == null ? null : replayDb.getTable(tableName);
             if (replayTable != null) {
                 MultiColumnCombinedStatistics statistics = null;
-                for (ExternalMultiColumnCombinedStatistics.Group group : entry.getValue()) {
+                for (ExternalMcvStatistics.Group group : entry.getValue()) {
                     Set<Integer> columnIds = new HashSet<>();
                     for (String columnName : group.getColumnNames()) {
                         Column column = replayTable.getColumn(columnName);
@@ -1294,8 +1294,8 @@ public class UtFrameUtils {
             Table externalTable = catalog == null ? null
                     : GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(connectContext, catalog, dbName, tableName);
             if (externalTable != null) {
-                GlobalStateMgr.getCurrentState().getStatisticStorage().addExternalMultiColumnStatistics(externalTable,
-                        new ExternalMultiColumnCombinedStatistics(entry.getValue()));
+                GlobalStateMgr.getCurrentState().getStatisticStorage().addExternalMcvStatistics(externalTable,
+                        new ExternalMcvStatistics(entry.getValue()));
             }
         }
         return replaySql;
