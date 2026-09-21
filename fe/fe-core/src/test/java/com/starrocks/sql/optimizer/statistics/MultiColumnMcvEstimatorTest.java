@@ -357,6 +357,9 @@ public class MultiColumnMcvEstimatorTest {
                 1e-6);
         // The narrowest group projects: two head values plus the one tail value.
         Assertions.assertEquals(3, MultiColumnMcvEstimator.projectedNdv(List.of(STATUS), statistics).orElseThrow(), 1e-9);
+        // GROUP BY the one column takes the group's own distinct count, not the single-column estimate.
+        Assertions.assertEquals(3, StatisticsCalculator.computeGroupByStatistics(List.of(STATUS), statistics,
+                new HashMap<>()), 1e-9);
 
         // Among groups covering the same predicate columns, the narrowest answers.
         Statistics both = statisticsWithSingleColumnGroup(statisticsWithComponentCounts(), 700);

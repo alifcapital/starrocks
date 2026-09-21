@@ -1212,6 +1212,13 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             groupStatisticsMap.put(groupByColumn, statsBuilder.build());
         }
 
+        // A group of exactly the group-by columns, read whole, has their distinct count; for one column it is
+        // the count of its own MCV statistics, which the combined-NDV lookup below leaves out.
+        MultiColumnCombinedStats own = inputStatistics.getMultiColumnCombinedStats().get(groupStatisticsMap.keySet());
+        if (own != null && own.isComplete() && own.getNdv() > 0) {
+            return Math.min(Math.max(1, own.getNdv()), inputStatistics.getOutputRowCount());
+        }
+
         // Use multi-column combined statistics for more accurate row count estimation
         double rowCount = 1;
         Set<ColumnRefOperator> columnsWithMultiColStats = new HashSet<>();
