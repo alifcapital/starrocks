@@ -77,6 +77,7 @@ set(EXEC_FILES
         ./exec/pipeline/schedule/observer_test.cpp
         ./exec/pipeline/schedule/pipeline_timer_test.cpp
         ./exec/pipeline/pipeline_control_flow_test.cpp
+        ./exec/pipeline_driver_memory_test.cpp
         ./exec/pipeline/pipeline_driver_queue_test.cpp
         ./exec/pipeline/pipeline_file_scan_node_test.cpp
         ./exec/pipeline/fragment_context_morsel_uaf_test.cpp
