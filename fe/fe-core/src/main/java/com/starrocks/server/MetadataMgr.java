@@ -880,10 +880,12 @@ public class MetadataMgr {
     // The internal statistics describe the whole table. When the scan reads some of its partitions,
     // restrict them to those: the per-partition rows of external_column_statistics are summed over the
     // partitions the scan reads, which an HMS table names from its selected partition keys and an
-    // Iceberg table from the data files the connector planned for the predicate. An Iceberg table
-    // without partition statistics takes the rows the connector counts from the manifests. In both
-    // cases the partition predicates are already in the row count (see
-    // StatisticsCalculator#removePartitionPredicate).
+    // Iceberg table from the data files the connector planned for the predicate. The partition columns
+    // then range over those partitions only, and the scan applies its partition predicates to them as
+    // usual: on an identity partition they select every row, on a transformed one (month(dt), bucket)
+    // the rows of the partition their value falls in. An Iceberg table without partition statistics
+    // takes the rows the connector counts from the manifests; that count is over whole partitions and
+    // already reflects the partition predicates (see StatisticsCalculator#removePartitionPredicate).
     private Statistics withSelectedPartitions(OptimizerContext session, String catalogName, Table table,
                                               Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
                                               ScalarOperator predicate, long limit, TvrVersionRange versionRange,
@@ -901,7 +903,6 @@ public class MetadataMgr {
                     .getExternalPartitionStatistics(table, partitionNames);
             Optional<Statistics> selected = partitionStatistics.aggregate(internalStatistics, columns, partitionNames);
             if (selected.isPresent()) {
-                session.setPartitionPrunedStatistics(true);
                 return selected.get();
             }
         }

@@ -78,8 +78,8 @@ public class OptimizerContext {
     // lifecycle instead of per materialized view.
 
     private boolean isObtainedFromInternalStatistics = false;
-    // The scan statistics already cover only the partitions the scan reads, so a predicate on the
-    // partition columns must not be applied to them again.
+    // The scan row count is the connector's count for the scan predicate over whole partitions, so a
+    // predicate on the partition columns must not be applied to it again.
     private boolean partitionPrunedStatistics = false;
     private boolean inMemoPhase = false;
 
