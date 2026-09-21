@@ -2470,11 +2470,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         boolean isTableTypeSupported = operator instanceof LogicalIcebergScanOperator ||
                 operator instanceof LogicalHiveScanOperator || operator instanceof LogicalHudiScanOperator ||
                 isOlapScanListPartitionTable(operator);
-        // Connector statistics count the selected partitions only, as do internal statistics restricted
-        // to them (see MetadataMgr#withSelectedPartitions).
-        boolean partitionPruned = !optimizerContext.isObtainedFromInternalStatistics() ||
-                optimizerContext.isPartitionPrunedStatistics();
-        if (isTableTypeSupported && partitionPruned) {
+        // Connector statistics count the selected partitions only; internal statistics restricted to
+        // them keep the predicates (see MetadataMgr#withSelectedPartitions).
+        if (isTableTypeSupported && !optimizerContext.isObtainedFromInternalStatistics()) {
             LogicalScanOperator scanOperator = operator.cast();
             // A copy: a Hive table hands out its own list of partition columns.
             Set<String> partitionColNames = new HashSet<>(scanOperator.getTable().getPartitionColumnNames());

@@ -78,9 +78,6 @@ public class OptimizerContext {
     // lifecycle instead of per materialized view.
 
     private boolean isObtainedFromInternalStatistics = false;
-    // The scan row count is the connector's count for the scan predicate over whole partitions, so a
-    // predicate on the partition columns must not be applied to it again.
-    private boolean partitionPrunedStatistics = false;
     private boolean inMemoPhase = false;
 
     // Is not null predicate can be derived from inner join or semi join,
@@ -246,13 +243,7 @@ public class OptimizerContext {
         isObtainedFromInternalStatistics = obtainedFromInternalStatistics;
     }
 
-    public boolean isPartitionPrunedStatistics() {
-        return partitionPrunedStatistics;
-    }
 
-    public void setPartitionPrunedStatistics(boolean partitionPrunedStatistics) {
-        this.partitionPrunedStatistics = partitionPrunedStatistics;
-    }
 
     public void setInMemoPhase(boolean inMemoPhase) {
         this.inMemoPhase = inMemoPhase;

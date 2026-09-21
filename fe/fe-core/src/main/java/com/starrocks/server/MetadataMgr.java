@@ -93,7 +93,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.ExternalPartitionStatistics;
 import com.starrocks.sql.optimizer.statistics.Histogram;
-import com.starrocks.sql.optimizer.statistics.PredicateStatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.thrift.TSinkCommitInfo;
@@ -829,7 +828,6 @@ public class MetadataMgr {
                                          ScalarOperator predicate,
                                          long limit,
                                          TvrVersionRange versionRange) {
-        session.setPartitionPrunedStatistics(false);
         // FIXME: In testing env, `_statistics_.external_column_statistics` is not created, ignore query columns stats from it.
         // Get basic/histogram stats from internal statistics.
         Statistics internalStatistics = FeConstants.runningUnitTest ? null :
@@ -883,9 +881,8 @@ public class MetadataMgr {
     // Iceberg table from the data files the connector planned for the predicate. The partition columns
     // then range over those partitions only, and the scan applies its partition predicates to them as
     // usual: on an identity partition they select every row, on a transformed one (month(dt), bucket)
-    // the rows of the partition their value falls in. An Iceberg table without partition statistics
-    // takes the rows the connector counts from the manifests; that count is over whole partitions and
-    // already reflects the partition predicates (see StatisticsCalculator#removePartitionPredicate).
+    // the rows of the partition their value falls in. Without partition statistics the table-level
+    // statistics stand, with the predicates applied to them as usual.
     private Statistics withSelectedPartitions(OptimizerContext session, String catalogName, Table table,
                                               Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
                                               ScalarOperator predicate, long limit, TvrVersionRange versionRange,
@@ -905,19 +902,6 @@ public class MetadataMgr {
             if (selected.isPresent()) {
                 return selected.get();
             }
-        }
-        if (table.isIcebergTable()) {
-            // No partition statistics: the connector's count for the predicate, over whole manifests,
-            // with the table-level column shape.
-            Statistics counted = icebergRowCount(session, catalogName, table, columns, partitionKeys, predicate, limit,
-                    versionRange);
-            if (counted == null) {
-                return internalStatistics;
-            }
-            Statistics.Builder builder = Statistics.buildFrom(internalStatistics).setOutputRowCount(counted.getOutputRowCount());
-            narrowPartitionColumns(builder, internalStatistics, table, columns, predicate);
-            session.setPartitionPrunedStatistics(true);
-            return builder.build();
         }
         return internalStatistics;
     }
@@ -974,49 +958,6 @@ public class MetadataMgr {
         return null;
     }
 
-    // The rows the connector counts for the scan predicate; null when it has no real count.
-    private Statistics icebergRowCount(OptimizerContext session, String catalogName, Table table,
-                                       Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
-                                       ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
-        Statistics connectorStatistics;
-        try {
-            connectorStatistics = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
-                    session, table, columns, partitionKeys, predicate, limit, versionRange)).orElse(null);
-        } catch (Exception e) {
-            LOG.warn("Failed to count the rows of iceberg table {} for the scan predicate", table.getName(), e);
-            return null;
-        }
-        // Without table metadata the connector answers with a default row count, not a count.
-        if (connectorStatistics == null || connectorStatistics.getStatsSource() != Statistics.StatsSource.TABLE_METADATA
-                || !Double.isFinite(connectorStatistics.getOutputRowCount())
-                || connectorStatistics.getOutputRowCount() < 0) {
-            return null;
-        }
-        return connectorStatistics;
-    }
-
-    // The predicates on the partition columns are dropped from the scan afterwards, since the row count
-    // already reflects them; keep their effect on the bounds of those columns.
-    private static void narrowPartitionColumns(Statistics.Builder builder, Statistics statistics, Table table,
-                                               Map<ColumnRefOperator, Column> columns, ScalarOperator predicate) {
-        List<ScalarOperator> conjuncts = partitionConjuncts(table, columns, predicate);
-        if (conjuncts.isEmpty()) {
-            return;
-        }
-        try {
-            Statistics narrowed = PredicateStatisticsCalculator.statisticsCalculate(Utils.compoundAnd(conjuncts), statistics);
-            for (ScalarOperator conjunct : conjuncts) {
-                for (ColumnRefOperator ref : Utils.extractColumnRef(conjunct)) {
-                    ColumnStatistic columnStatistic = narrowed.getColumnStatistics().get(ref);
-                    if (columnStatistic != null) {
-                        builder.addColumnStatistic(ref, columnStatistic);
-                    }
-                }
-            }
-        } catch (RuntimeException e) {
-            LOG.warn("Failed to narrow the partition columns of table {} by the scan predicate", table.getName(), e);
-        }
-    }
 
     public Statistics getTableStatistics(OptimizerContext session,
                                          String catalogName,

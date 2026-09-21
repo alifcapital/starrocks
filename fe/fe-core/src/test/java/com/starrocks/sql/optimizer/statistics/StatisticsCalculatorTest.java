@@ -346,15 +346,13 @@ public class StatisticsCalculatorTest {
         StatisticsCalculator statisticsCalculator = new StatisticsCalculator(expressionContext,
                 columnRefFactory, optimizerContext);
         statisticsCalculator.estimatorStats();
-        // The rows come from the connector for the scan predicate (the mock counts the whole table), so
-        // the partition predicate is not applied to them again; it still narrows the partition column.
-        Assertions.assertEquals(100, expressionContext.getStatistics().getOutputRowCount(), 0.001);
+        // Internal statistics without partition statistics: the table-level rows with the partition
+        // predicate applied as usual, half of the [0, 100] range.
+        Assertions.assertEquals(50, expressionContext.getStatistics().getOutputRowCount(), 0.001);
         Assertions.assertEquals(50, expressionContext.getStatistics().
                 getColumnStatistic(partitionColumn).getMaxValue(), 0.001);
         Assertions.assertTrue(optimizerContext.isObtainedFromInternalStatistics());
-        Assertions.assertTrue(optimizerContext.isPartitionPrunedStatistics());
         optimizerContext.setObtainedFromInternalStatistics(false);
-        optimizerContext.setPartitionPrunedStatistics(false);
     }
 
     @Test
