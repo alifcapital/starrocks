@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/config.h"
 #include "runtime/runtime_state.h"
 #include "testutil/assert.h"
 #include "testutil/sync_point.h"
@@ -113,6 +114,15 @@ TEST_F(InMemoryMultiCastLocalExchangerTest, test_push_pop) {
     for (int i = 0; i < consumer_number; i++) {
         exchanger.close_source_operator(i);
     }
+}
+
+TEST(SpillableMultiCastLocalExchangerTest, memory_limit_follows_producer_dop) {
+    size_t per_driver = config::local_exchange_buffer_mem_limit_per_driver;
+    ASSERT_EQ(per_driver, SpillableMultiCastLocalExchanger::memory_limit(false, 1));
+    ASSERT_EQ(per_driver * 8, SpillableMultiCastLocalExchanger::memory_limit(false, 8));
+    // A degree of parallelism of zero still leaves one driver's worth.
+    ASSERT_EQ(per_driver, SpillableMultiCastLocalExchanger::memory_limit(false, 0));
+    ASSERT_EQ(16L * 1024 * 1024, SpillableMultiCastLocalExchanger::memory_limit(true, 8));
 }
 
 } // namespace starrocks::pipeline
