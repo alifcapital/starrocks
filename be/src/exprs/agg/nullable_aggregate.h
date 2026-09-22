@@ -162,14 +162,11 @@ public:
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        auto serialize = [&](Column* output) {
-            nested_function->serialize_to_column(ctx, this->data(state).nested_state(), output);
-        };
         if constexpr (is_result_always_nullable) {
             // For the case that input is non-nullable but output is nullable, the serialized output type
             // is non-nullable, because only the state of input needs to be serialized.
             if (!to->is_nullable()) {
-                serialize(to);
+                nested_function->serialize_to_column(ctx, this->data(state).nested_state(), to);
                 return;
             }
         }
@@ -177,7 +174,8 @@ public:
         DCHECK(to->is_nullable());
         auto* nullable_column = down_cast<NullableColumn*>(to);
         if (LIKELY(!this->data(state).is_null)) {
-            serialize(nullable_column->data_column_raw_ptr());
+            nested_function->serialize_to_column(ctx, this->data(state).nested_state(),
+                                                 nullable_column->data_column_raw_ptr());
             nullable_column->null_column_data().push_back(0);
         } else {
             nullable_column->append_default();

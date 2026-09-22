@@ -108,7 +108,7 @@ protected:
 
     // A RAW record is exactly RAW_RECORD_SIZE bytes with the RAW tag at offset 0.
     // A legacy record is always far larger (>= sizeof(double) + an empty
-    // PercentileValue blob, ~69 bytes), so the size check is unambiguous; the
+    // PercentileValue blob, 57 bytes), so the size check is unambiguous; the
     // ctx-quantile branch in merge is therefore reached only for transient
     // exchange records, never for a persisted/legacy one.
     static bool is_raw_record(const Slice& src) {
