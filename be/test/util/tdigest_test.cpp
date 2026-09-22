@@ -445,6 +445,27 @@ TEST_F(TDigestTest, DeserializeRejectsInconsistentProcessedState) {
     }
 }
 
+TEST_F(TDigestTest, DeserializeRejectsNonFiniteExtrema) {
+    for (bool processed : {false, true}) {
+        TDigest source;
+        source.add(10);
+        source.add(20);
+        if (processed) source.compress();
+        std::vector<uint8_t> valid(source.serialize_size());
+        source.serialize(valid.data());
+        for (size_t field : {size_t(1), size_t(2)}) {
+            for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity()}) {
+                auto buffer = valid;
+                // Header fields begin with compression, min, and max, all floats.
+                memcpy(buffer.data() + field * sizeof(float), &bad, sizeof(bad));
+                TDigest decoded;
+                EXPECT_FALSE(decoded.deserialize(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
+            }
+        }
+    }
+}
+
 TEST_F(TDigestTest, DeserializeAcceptsEmptyAndUnprocessedStates) {
     for (int count : {0, 1, 30, 79999}) {
         TDigest source(10000);

@@ -581,7 +581,7 @@ bool TDigest::deserialize(const char* data, size_t size) {
         });
     };
     bool valid =
-            std::isfinite(_compression) && _compression > 0 &&
+            std::isfinite(_compression) && _compression > 0 && std::isfinite(_min) && std::isfinite(_max) &&
             static_cast<double>(_compression) < static_cast<double>(std::numeric_limits<Index>::max()) / 8 &&
             _max_processed > 0 && _max_unprocessed > 0 && std::isfinite(_processed_weight) && _processed_weight >= 0 &&
             std::isfinite(_unprocessed_weight) && _unprocessed_weight >= 0 && valid_centroids(_processed) &&
@@ -593,8 +593,8 @@ bool TDigest::deserialize(const char* data, size_t size) {
         valid = valid && _processed_weight == 0 &&
                 (_cumulative.empty() || (_cumulative.size() == 1 && _cumulative[0] == 0));
     } else {
-        valid = valid && _processed_weight > 0 && _cumulative.size() == _processed.size() + 1 && std::isfinite(_min) &&
-                std::isfinite(_max) && _min <= _processed.front().mean() && _max >= _processed.back().mean();
+        valid = valid && _processed_weight > 0 && _cumulative.size() == _processed.size() + 1 &&
+                _min <= _processed.front().mean() && _max >= _processed.back().mean();
     }
     valid = valid && (_unprocessed.empty() ? _unprocessed_weight == 0 : _unprocessed_weight > 0);
     if (!valid) {
