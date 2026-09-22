@@ -389,6 +389,12 @@ struct TQueryOptions {
   215: optional string http_request_host_allowlist_regexp = "";
   216: optional bool http_request_allow_private_in_allowlist = false;
   217: optional bool enable_cache_udaf = false;
+
+  // When true, percentile_approx* aggregation uses the compact intermediate
+  // serialization format for transient exchange/spill state. Global-only on FE
+  // and enabled only after a full cluster upgrade; see
+  // SessionVariable.ENABLE_PERCENTILE_COMPACT_INTERMEDIATE.
+  219: optional bool enable_percentile_compact_intermediate = false;
 }
 
 // A scan range plus the parameters needed to execute that scan.

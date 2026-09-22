@@ -37,3 +37,5 @@ ADD_BE_BENCH(${SRC_DIR}/bench/delta_decode_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/table_metrics_mgr_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/json_path_deriver_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/cast_overflow_check_bench)
+
+ADD_BE_BENCH(${SRC_DIR}/bench/percentile_compact_bench)
