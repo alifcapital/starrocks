@@ -680,4 +680,76 @@ TEST_F(PercentileApproxAggTest, nullable_batch_forwards_non_null_ranges) {
     EXPECT_TRUE(result->is_null(0));
 }
 
+TEST_F(PercentileApproxAggTest, array_exchange_and_persisted_states_preserve_quantiles) {
+    auto type = TypeDescriptor::from_logical_type(TYPE_DOUBLE);
+    auto array_type = TypeDescriptor::create_array_type(type);
+    for (bool weighted : {false, true}) {
+        for (bool compact : {false, true}) {
+            const auto* func = get_aggregate_function(weighted ? "percentile_approx_weighted" : "percentile_approx",
+                                                      TYPE_DOUBLE, TYPE_ARRAY, true);
+            ASSERT_NE(nullptr, func);
+            auto values = DoubleColumn::create();
+            auto weights = Int64Column::create();
+            for (double value : {10.0, 20.0, 30.0}) {
+                values->append(value);
+                weights->append(1);
+            }
+            auto qs = ColumnHelper::create_column(array_type, false);
+            qs->append_datum(DatumArray{Datum(0.0), Datum(0.5), Datum(1.0)});
+            ColumnPtr q = ConstColumn::create(std::move(qs), 3);
+            auto compression = ColumnHelper::create_const_column<TYPE_DOUBLE>(5000, 3);
+            Columns input{values};
+            Columns constants{nullptr};
+            std::vector<TypeDescriptor> types{type};
+            if (weighted) {
+                input.push_back(weights);
+                constants.push_back(nullptr);
+                types.push_back(TypeDescriptor::from_logical_type(TYPE_BIGINT));
+            }
+            input.insert(input.end(), {q, compression});
+            constants.insert(constants.end(), {q, compression});
+            types.insert(types.end(), {array_type, type});
+            auto ctx = make_ctx(types, array_type, constants);
+            TQueryOptions options;
+            options.__set_enable_percentile_compact_intermediate(compact);
+            RuntimeState runtime(TUniqueId(), options, TQueryGlobals(), nullptr);
+            ctx->set_runtime_state(&runtime);
+            MutableColumnPtr exchange = BinaryColumn::create();
+            func->convert_to_exchange_format(ctx.get(), input, 3, exchange);
+            if (compact) {
+                EXPECT_EQ(9U, down_cast<BinaryColumn*>(exchange.get())->get_slice(0).size);
+            }
+            // The merge phase omits the weighted function's non-constant weight argument.
+            auto merge_ctx = make_ctx({type, array_type, type}, array_type, {nullptr, q, compression});
+            merge_ctx->set_runtime_state(&runtime);
+            ManagedState state(merge_ctx.get(), func);
+            func->merge_batch_single_state(merge_ctx.get(), state.state(), exchange.get(), 0, 3);
+            auto result = ColumnHelper::create_column(array_type, true);
+            func->finalize_to_column(merge_ctx.get(), state.state(), result.get());
+            ASSERT_FALSE(result->is_null(0));
+            auto actual = result->get(0).get_array();
+            ASSERT_EQ(3U, actual.size());
+            for (size_t i = 0; i < 3; ++i) EXPECT_DOUBLE_EQ(10.0 * (i + 1), actual[i].get_double());
+            auto stored = BinaryColumn::create();
+            func->serialize_to_column(merge_ctx.get(), state.state(), stored.get());
+            EXPECT_GT(stored->get_slice(0).size, 9U);
+            auto wrong_qs = ColumnHelper::create_column(array_type, false);
+            wrong_qs->append_datum(DatumArray{Datum(0.99)});
+            ColumnPtr wrong_q = ConstColumn::create(std::move(wrong_qs), 1);
+            auto read_ctx = make_ctx({type, array_type, type}, array_type, {nullptr, wrong_q, compression});
+            ManagedState restored(read_ctx.get(), func);
+            func->merge(read_ctx.get(), stored.get(), restored.state(), 0);
+            result->reset_column();
+            func->finalize_to_column(read_ctx.get(), restored.state(), result.get());
+            ASSERT_FALSE(result->is_null(0));
+            actual = result->get(0).get_array();
+            ASSERT_EQ(3U, actual.size());
+            for (size_t i = 0; i < 3; ++i) EXPECT_DOUBLE_EQ(10.0 * (i + 1), actual[i].get_double());
+            EXPECT_FALSE(ctx->has_error());
+            EXPECT_FALSE(merge_ctx->has_error());
+            EXPECT_FALSE(read_ctx->has_error());
+        }
+    }
+}
+
 } // namespace starrocks

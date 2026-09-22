@@ -47,8 +47,9 @@
 
 namespace starrocks {
 
+// SQL uses the nullable result wrapper even when the input contains no NULLs.
 static const AggregateFunction* percentile_fn() {
-    return get_aggregate_function("percentile_approx", TYPE_DOUBLE, TYPE_DOUBLE, /*is_nullable=*/false);
+    return get_aggregate_function("percentile_approx", TYPE_DOUBLE, TYPE_DOUBLE, /*is_nullable=*/true);
 }
 
 // A column of n pseudo-random values, each a distinct group key in pass-through.

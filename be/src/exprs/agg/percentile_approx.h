@@ -268,6 +268,85 @@ public:
         ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
         data_column->append_numbers(&result, sizeof(result));
     }
+
+protected:
+    void merge_array(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const {
+        const auto* binary_column = down_cast<const BinaryColumn*>(column);
+        Slice src = binary_column->get_slice(row_num);
+        int64_t prev_memory = data(state).mem_usage();
+
+        if (is_raw_record(src)) {
+            float mean;
+            float weight;
+            memcpy(&mean, src.data + 1, sizeof(float));
+            memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
+            if (UNLIKELY(!data(state).compression_initialized)) {
+                data(state).reinit_with_compression(clamp_compression_factor(
+                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
+            }
+            data(state).percentile.add(mean, weight);
+            if (UNLIKELY(data(state).targetQuantiles.empty())) {
+                assign_target_quantiles_from_const_array(data(state), quantile_const_from_ctx(ctx).get());
+            }
+            ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+            return;
+        }
+
+        if (UNLIKELY(src.size < sizeof(uint32_t))) {
+            ctx->set_error("percentile_approx: truncated intermediate record", false);
+            return;
+        }
+        uint32_t count;
+        memcpy(&count, src.data, sizeof(uint32_t));
+        size_t header = sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(double);
+        if (UNLIKELY(src.size < header)) {
+            ctx->set_error("percentile_approx: truncated quantiles header", false);
+            return;
+        }
+        if (UNLIKELY(data(state).targetQuantiles.empty())) {
+            data(state).targetQuantiles.resize(count);
+            memcpy(data(state).targetQuantiles.data(), (char*)src.data + sizeof(uint32_t), count * sizeof(double));
+        }
+        // Deserialize the TDigest (skip the quantiles array) with a bounded read.
+        PercentileApproxState src_percentile;
+        if (UNLIKELY(!src_percentile.percentile.deserialize(src.data + header, src.size - header))) {
+            ctx->set_error("percentile_approx: malformed intermediate record", false);
+            return;
+        }
+        // Compression travels inside the serialized digest; adopt it instead of
+        // re-deriving from ctx (arity is unreliable at the merge phase).
+        if (UNLIKELY(!data(state).compression_initialized)) {
+            data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile.compression()));
+        }
+        merge_digest_into(data(state), src_percentile);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+    }
+
+    void serialize_array(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const {
+        size_t pv_size = data(state).percentile.serialize_size();
+        uint32_t count = static_cast<uint32_t>(data(state).targetQuantiles.size());
+        // Avoid stack VLA (see PercentileApproxAggregateFunctionBase::serialize_to_column).
+        std::vector<uint8_t> result(sizeof(uint32_t) + count * sizeof(double) + pv_size);
+        memcpy(result.data(), &count, sizeof(uint32_t));
+        memcpy(result.data() + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
+        data(state).percentile.serialize(result.data() + sizeof(uint32_t) + count * sizeof(double));
+        down_cast<BinaryColumn*>(to)->append(Slice(result.data(), result.size()));
+    }
+
+    void finalize_array(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const {
+        auto* array_column = down_cast<ArrayColumn*>(to);
+        // Calculate all quantiles and build DatumArray
+        int64_t prev_memory = data(state).mem_usage();
+        DatumArray result_array;
+        result_array.reserve(data(state).targetQuantiles.size());
+        for (double quantile : data(state).targetQuantiles) {
+            double result = data(state).percentile.quantile(quantile);
+            result_array.emplace_back(result);
+        }
+
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+        array_column->append_datum(Datum(result_array));
+    }
 };
 
 // PercentileApproxAggregateFunction: percentile_approx(expr, DOUBLE p[, DOUBLE compression])
@@ -597,7 +676,7 @@ public:
 };
 
 // PercentileApproxArrayAggregateFunction: percentile_approx(expr, ARRAY<DOUBLE> p[, DOUBLE compression])
-// Returns ARRAY<DOUBLE>, using new serialization format
+// Returns ARRAY<DOUBLE>.
 class PercentileApproxArrayAggregateFunction final : public PercentileApproxAggregateFunction {
 public:
     // The scalar single-state fast path inherited from
@@ -646,85 +725,19 @@ public:
     // the const ARRAY arg), or legacy self-contained
     // [count:4][q1..qn:8n][PercentileValue blob] for persisted/agg_state values.
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        const auto* binary_column = down_cast<const BinaryColumn*>(column);
-        Slice src = binary_column->get_slice(row_num);
-        int64_t prev_memory = data(state).mem_usage();
-
-        if (is_raw_record(src)) {
-            float mean;
-            float weight;
-            memcpy(&mean, src.data + 1, sizeof(float));
-            memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
-            if (UNLIKELY(!data(state).compression_initialized)) {
-                data(state).reinit_with_compression(clamp_compression_factor(
-                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
-            }
-            data(state).percentile.add(mean, weight);
-            if (UNLIKELY(data(state).targetQuantiles.empty())) {
-                assign_target_quantiles_from_const_array(data(state), quantile_const_from_ctx(ctx).get());
-            }
-            ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
-            return;
-        }
-
-        if (UNLIKELY(src.size < sizeof(uint32_t))) {
-            ctx->set_error("percentile_approx: truncated intermediate record", false);
-            return;
-        }
-        uint32_t count;
-        memcpy(&count, src.data, sizeof(uint32_t));
-        size_t header = sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(double);
-        if (UNLIKELY(src.size < header)) {
-            ctx->set_error("percentile_approx: truncated quantiles header", false);
-            return;
-        }
-        if (UNLIKELY(data(state).targetQuantiles.empty())) {
-            data(state).targetQuantiles.resize(count);
-            memcpy(data(state).targetQuantiles.data(), (char*)src.data + sizeof(uint32_t), count * sizeof(double));
-        }
-        // Deserialize the TDigest (skip the quantiles array) with a bounded read.
-        PercentileApproxState src_percentile;
-        if (UNLIKELY(!src_percentile.percentile.deserialize(src.data + header, src.size - header))) {
-            ctx->set_error("percentile_approx: malformed intermediate record", false);
-            return;
-        }
-        // Compression travels inside the serialized digest; adopt it instead of
-        // re-deriving from ctx (arity is unreliable at the merge phase).
-        if (UNLIKELY(!data(state).compression_initialized)) {
-            data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile.compression()));
-        }
-        merge_digest_into(data(state), src_percentile);
-        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+        merge_array(ctx, column, state, row_num);
     }
 
     // Always self-contained legacy [count:4][q1..qn:8n][PercentileValue blob],
     // regardless of the flag (see PercentileApproxAggregateFunctionBase::
     // serialize_to_column for why persisted/agg_state values must stay legacy).
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        size_t pv_size = data(state).percentile.serialize_size();
-        uint32_t count = static_cast<uint32_t>(data(state).targetQuantiles.size());
-        // Avoid stack VLA (see PercentileApproxAggregateFunctionBase::serialize_to_column).
-        std::vector<uint8_t> result(sizeof(uint32_t) + count * sizeof(double) + pv_size);
-        memcpy(result.data(), &count, sizeof(uint32_t));
-        memcpy(result.data() + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
-        data(state).percentile.serialize(result.data() + sizeof(uint32_t) + count * sizeof(double));
-        down_cast<BinaryColumn*>(to)->append(Slice(result.data(), result.size()));
+        serialize_array(ctx, state, to);
     }
 
     // Override finalize_to_column method, returns ARRAY<DOUBLE>
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        auto* array_column = down_cast<ArrayColumn*>(to);
-        // Calculate all quantiles and build DatumArray
-        int64_t prev_memory = data(state).mem_usage();
-        DatumArray result_array;
-        result_array.reserve(data(state).targetQuantiles.size());
-        for (double quantile : data(state).targetQuantiles) {
-            double result = data(state).percentile.quantile(quantile);
-            result_array.emplace_back(result);
-        }
-
-        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
-        array_column->append_datum(Datum(result_array));
+        finalize_array(ctx, state, to);
     }
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
@@ -786,7 +799,7 @@ public:
 };
 
 // PercentileApproxWeightedArrayAggregateFunction: percentile_approx_weighted(expr, weight, ARRAY<DOUBLE> p[, DOUBLE compression])
-// Returns ARRAY<DOUBLE>, using new serialization format
+// Returns ARRAY<DOUBLE>.
 class PercentileApproxWeightedArrayAggregateFunction final : public PercentileApproxWeightedAggregateFunction {
 public:
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr state, size_t row_num) const override {
@@ -832,85 +845,19 @@ public:
     // the const ARRAY arg), or legacy self-contained
     // [count:4][q1..qn:8n][PercentileValue blob] for persisted/agg_state values.
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        const auto* binary_column = down_cast<const BinaryColumn*>(column);
-        Slice src = binary_column->get_slice(row_num);
-        int64_t prev_memory = data(state).mem_usage();
-
-        if (is_raw_record(src)) {
-            float mean;
-            float weight;
-            memcpy(&mean, src.data + 1, sizeof(float));
-            memcpy(&weight, src.data + 1 + sizeof(float), sizeof(float));
-            if (UNLIKELY(!data(state).compression_initialized)) {
-                data(state).reinit_with_compression(clamp_compression_factor(
-                        ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
-            }
-            data(state).percentile.add(mean, weight);
-            if (UNLIKELY(data(state).targetQuantiles.empty())) {
-                assign_target_quantiles_from_const_array(data(state), quantile_const_from_ctx(ctx).get());
-            }
-            ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
-            return;
-        }
-
-        if (UNLIKELY(src.size < sizeof(uint32_t))) {
-            ctx->set_error("percentile_approx: truncated intermediate record", false);
-            return;
-        }
-        uint32_t count;
-        memcpy(&count, src.data, sizeof(uint32_t));
-        size_t header = sizeof(uint32_t) + static_cast<size_t>(count) * sizeof(double);
-        if (UNLIKELY(src.size < header)) {
-            ctx->set_error("percentile_approx: truncated quantiles header", false);
-            return;
-        }
-        if (UNLIKELY(data(state).targetQuantiles.empty())) {
-            data(state).targetQuantiles.resize(count);
-            memcpy(data(state).targetQuantiles.data(), (char*)src.data + sizeof(uint32_t), count * sizeof(double));
-        }
-        // Deserialize the TDigest (skip the quantiles array) with a bounded read.
-        PercentileApproxState src_percentile;
-        if (UNLIKELY(!src_percentile.percentile.deserialize(src.data + header, src.size - header))) {
-            ctx->set_error("percentile_approx: malformed intermediate record", false);
-            return;
-        }
-        // Compression travels inside the serialized digest; adopt it instead of
-        // re-deriving from ctx (arity is unreliable at the merge phase).
-        if (UNLIKELY(!data(state).compression_initialized)) {
-            data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile.compression()));
-        }
-        merge_digest_into(data(state), src_percentile);
-        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+        merge_array(ctx, column, state, row_num);
     }
 
     // Always self-contained legacy [count:4][q1..qn:8n][PercentileValue blob],
     // regardless of the flag (see PercentileApproxAggregateFunctionBase::
     // serialize_to_column for why persisted/agg_state values must stay legacy).
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        size_t pv_size = data(state).percentile.serialize_size();
-        uint32_t count = static_cast<uint32_t>(data(state).targetQuantiles.size());
-        // Avoid stack VLA (see PercentileApproxAggregateFunctionBase::serialize_to_column).
-        std::vector<uint8_t> result(sizeof(uint32_t) + count * sizeof(double) + pv_size);
-        memcpy(result.data(), &count, sizeof(uint32_t));
-        memcpy(result.data() + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
-        data(state).percentile.serialize(result.data() + sizeof(uint32_t) + count * sizeof(double));
-        down_cast<BinaryColumn*>(to)->append(Slice(result.data(), result.size()));
+        serialize_array(ctx, state, to);
     }
 
     // Override finalize_to_column method, returns ARRAY<DOUBLE>
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        auto* array_column = down_cast<ArrayColumn*>(to);
-        // Calculate all quantiles and build DatumArray
-        int64_t prev_memory = data(state).mem_usage();
-        DatumArray result_array;
-        result_array.reserve(data(state).targetQuantiles.size());
-        for (double quantile : data(state).targetQuantiles) {
-            double result = data(state).percentile.quantile(quantile);
-            result_array.emplace_back(result);
-        }
-
-        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
-        array_column->append_datum(Datum(result_array));
+        finalize_array(ctx, state, to);
     }
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
@@ -926,7 +873,7 @@ public:
         size_t old_size = bytes.size();
 
         // [count:4][q1..qn:8n][PercentileValue blob] per row. Array variants do
-        // not use the compact RAW form (see PercentileApproxArrayAggregateFunction).
+        // use the self-contained legacy form for storage and agg_state.
         const auto* array_column = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(src[2].get()));
         const auto* elements =
                 down_cast<const DoubleColumn*>(ColumnHelper::get_data_column(array_column->elements_column().get()));
