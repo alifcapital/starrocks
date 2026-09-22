@@ -2524,10 +2524,16 @@ TEST_F(AggregateTest, test_group_concatV2) {
         type_struct_char_int.field_names.emplace_back("sep");
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
+        // The all-NULL branch emits NULL without transferring the empty input columns.
+        // Their capacity stays owned by the state until it is destroyed.
+        const int64_t retained_memory = local_ctx->mem_usage();
+        ASSERT_GT(retained_memory, 0);
         gc_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
-        EXPECT_EQ(0, local_ctx->mem_usage());
+        EXPECT_EQ(retained_memory, local_ctx->mem_usage());
         ASSERT_EQ(res_struct_col->size(), 1); // empty also need output
 
+        state.reset();
+        EXPECT_EQ(0, local_ctx->mem_usage());
         state = ManagedAggrState::create(local_ctx.get(), gc_func);
         gc_func->merge_batch_single_state(local_ctx.get(), state->state(), res_struct_col.get(), 0,
                                           res_struct_col->size());
