@@ -40,3 +40,4 @@ ADD_BE_BENCH(${SRC_DIR}/bench/cast_overflow_check_bench)
 
 ADD_BE_BENCH(${SRC_DIR}/bench/simd_common_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/parquet_simd_bench)
+ADD_BE_BENCH(${SRC_DIR}/bench/column_ops_bench)
