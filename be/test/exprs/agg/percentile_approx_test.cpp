@@ -27,6 +27,7 @@
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/aggregate_factory.h"
 #include "exprs/agg/aggregate_state_allocator.h"
+#include "exprs/agg/nullable_aggregate.h"
 #include "exprs/function_context.h"
 #include "runtime/mem_pool.h"
 #include "runtime/memory/counting_allocator.h"
@@ -611,6 +612,37 @@ TEST_F(PercentileApproxAggTest, nullable_wrapper_preserves_exchange_and_storage_
                 ASSERT_FALSE(ctx->has_error());
             }
         }
+    }
+}
+
+TEST_F(PercentileApproxAggTest, tracks_heap_from_creation_through_finalize) {
+    for (bool nullable : {false, true}) {
+        const auto* func = get_aggregate_function("percentile_approx", TYPE_DOUBLE, TYPE_DOUBLE, nullable);
+        ASSERT_NE(nullptr, func);
+        auto type = TypeDescriptor::from_logical_type(TYPE_DOUBLE);
+        auto q = ColumnHelper::create_const_column<TYPE_DOUBLE>(0.5, 1);
+        auto ctx = make_ctx({type, type}, type, {nullptr, q});
+        ManagedState state(ctx.get(), func);
+        auto* digest_state = nullable
+                                     ? &reinterpret_cast<NullableAggregateFunctionState<PercentileApproxState, false>*>(
+                                                state.state())
+                                                ->_nested_state
+                                     : reinterpret_cast<PercentileApproxState*>(state.state());
+        EXPECT_EQ(0, ctx->mem_usage());
+        EXPECT_EQ(0, digest_state->mem_usage());
+        auto values = DoubleColumn::create();
+        for (double v : {10.0, 20.0, 30.0}) values->append(v);
+        const Column* columns[] = {values.get(), q.get()};
+        for (size_t i = 0; i < values->size(); ++i) {
+            func->update(ctx.get(), columns, state.state(), i);
+            EXPECT_EQ(digest_state->mem_usage(), ctx->mem_usage());
+        }
+        const int64_t before = ctx->mem_usage();
+        auto result = DoubleColumn::create();
+        func->finalize_to_column(ctx.get(), state.state(), result.get());
+        EXPECT_DOUBLE_EQ(20.0, result->get_data()[0]);
+        EXPECT_GT(ctx->mem_usage(), before);
+        EXPECT_EQ(digest_state->mem_usage(), ctx->mem_usage());
     }
 }
 
