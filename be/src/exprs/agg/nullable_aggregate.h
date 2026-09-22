@@ -162,11 +162,29 @@ public:
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        serialize_to_column_impl<false>(ctx, state, to);
+    }
+
+    void serialize_to_exchange_column(FunctionContext* ctx, ConstAggDataPtr __restrict state,
+                                      Column* to) const override {
+        serialize_to_column_impl<true>(ctx, state, to);
+    }
+
+private:
+    template <bool ForExchange>
+    void serialize_to_column_impl(FunctionContext* ctx, ConstAggDataPtr state, Column* to) const {
+        auto serialize = [&](Column* output) {
+            if constexpr (ForExchange) {
+                nested_function->serialize_to_exchange_column(ctx, this->data(state).nested_state(), output);
+            } else {
+                nested_function->serialize_to_column(ctx, this->data(state).nested_state(), output);
+            }
+        };
         if constexpr (is_result_always_nullable) {
             // For the case that input is non-nullable but output is nullable, the serialized output type
             // is non-nullable, because only the state of input needs to be serialized.
             if (!to->is_nullable()) {
-                nested_function->serialize_to_column(ctx, this->data(state).nested_state(), to);
+                serialize(to);
                 return;
             }
         }
@@ -174,14 +192,14 @@ public:
         DCHECK(to->is_nullable());
         auto* nullable_column = down_cast<NullableColumn*>(to);
         if (LIKELY(!this->data(state).is_null)) {
-            nested_function->serialize_to_column(ctx, this->data(state).nested_state(),
-                                                 nullable_column->data_column_raw_ptr());
+            serialize(nullable_column->data_column_raw_ptr());
             nullable_column->null_column_data().push_back(0);
         } else {
             nullable_column->append_default();
         }
     }
 
+public:
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
         if (LIKELY(!this->data(state).is_null && !null_pred(this->data(state).nested_state_with_type()))) {
             if (to->is_nullable()) {
@@ -213,12 +231,31 @@ public:
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
                                      MutableColumnPtr& dst) const override {
+        convert_to_serialize_format_impl<false>(ctx, src, chunk_size, dst);
+    }
+
+    void convert_to_exchange_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                    MutableColumnPtr& dst) const override {
+        convert_to_serialize_format_impl<true>(ctx, src, chunk_size, dst);
+    }
+
+private:
+    template <bool ForExchange>
+    void convert_to_serialize_format_impl(FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                          MutableColumnPtr& dst) const {
+        auto convert = [&](const Columns& input, size_t size, MutableColumnPtr& output) {
+            if constexpr (ForExchange) {
+                this->nested_function->convert_to_exchange_format(ctx, input, size, output);
+            } else {
+                this->nested_function->convert_to_serialize_format(ctx, input, size, output);
+            }
+        };
         if constexpr (is_result_always_nullable) {
             // For the case that input is non-nullable but output is nullable, the serialized output type
             // is non-nullable, because only the state of input needs to be serialized.
             if (!dst->is_nullable()) {
                 DCHECK(!src[0]->is_nullable());
-                nested_function->convert_to_serialize_format(ctx, src, chunk_size, dst);
+                convert(src, chunk_size, dst);
                 return;
             }
         }
@@ -230,7 +267,7 @@ public:
             const auto* nullable_column = down_cast<const NullableColumn*>(src[0].get());
             if constexpr (IsNeverNullFunctionState<State>) {
                 dst_nullable_column->null_column_data().resize(chunk_size);
-                nested_function->convert_to_serialize_format(ctx, src, chunk_size, dst_data_column);
+                convert(src, chunk_size, dst_data_column);
             } else if (nullable_column->has_null()) {
                 dst_nullable_column->set_has_null(true);
                 const auto src_null_data = nullable_column->immutable_null_column_data();
@@ -243,10 +280,9 @@ public:
                     if constexpr (IgnoreNull) {
                         Columns src_data_columns(1);
                         src_data_columns[0] = nullable_column->data_column();
-                        nested_function->convert_to_serialize_format(ctx, src_data_columns, chunk_size,
-                                                                     dst_data_column);
+                        convert(src_data_columns, chunk_size, dst_data_column);
                     } else {
-                        nested_function->convert_to_serialize_format(ctx, src, chunk_size, dst_data_column);
+                        convert(src, chunk_size, dst_data_column);
                     }
                 }
             } else {
@@ -254,15 +290,16 @@ public:
 
                 Columns src_data_columns(1);
                 src_data_columns[0] = nullable_column->data_column();
-                nested_function->convert_to_serialize_format(ctx, src_data_columns, chunk_size, dst_data_column);
+                convert(src_data_columns, chunk_size, dst_data_column);
             }
         } else {
             dst_nullable_column->null_column_data().resize(chunk_size);
-            nested_function->convert_to_serialize_format(ctx, src, chunk_size, dst_data_column);
+            convert(src, chunk_size, dst_data_column);
         }
         dst_nullable_column->data_column() = std::move(dst_data_column);
     }
 
+public:
     void get_values(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* dst, size_t start,
                     size_t end) const override {
         if (!dst->is_nullable()) {
@@ -1092,6 +1129,32 @@ public:
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
                                      MutableColumnPtr& dst) const override {
+        convert_to_serialize_format_impl<false>(ctx, src, chunk_size, dst);
+    }
+
+    void convert_to_exchange_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                    MutableColumnPtr& dst) const override {
+        convert_to_serialize_format_impl<true>(ctx, src, chunk_size, dst);
+    }
+
+private:
+    template <bool ForExchange>
+    void convert_to_serialize_format_impl(FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                          MutableColumnPtr& dst) const {
+        auto convert = [&](const Columns& input, size_t size, MutableColumnPtr& output) {
+            if constexpr (ForExchange) {
+                this->nested_function->convert_to_exchange_format(ctx, input, size, output);
+            } else {
+                this->nested_function->convert_to_serialize_format(ctx, input, size, output);
+            }
+        };
+        if constexpr (!std::is_same_v<AggNullPredType, AggNonNullPred<typename State::NestedState>>) {
+            if (!dst->is_nullable()) {
+                convert(src, chunk_size, dst);
+                return;
+            }
+        }
+        DCHECK(dst->is_nullable());
         auto* dst_nullable_column = down_cast<NullableColumn*>(dst.get());
 
         // dst's null_column, initial with false.
@@ -1136,14 +1199,15 @@ public:
 
         auto data_col = dst_nullable_column->data_column()->as_mutable_ptr();
         if (!has_nullable_column) {
-            this->nested_function->convert_to_serialize_format(ctx, src, chunk_size, data_col);
+            convert(src, chunk_size, data_col);
         } else {
-            this->nested_function->convert_to_serialize_format(ctx, data_columns, chunk_size, data_col);
+            convert(data_columns, chunk_size, data_col);
         }
         // since data_col maybe changed, we need to get it again
         dst_nullable_column->data_column() = std::move(data_col);
     }
 
+public:
     void retract(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                  size_t row_num) const override {
         auto column_size = ctx->get_num_args();

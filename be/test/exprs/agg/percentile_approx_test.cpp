@@ -511,4 +511,107 @@ TEST_F(PercentileApproxAggTest, storage_path_stays_legacy_under_flag) {
     EXPECT_LE(median, 40.0);
 }
 
+// Exercise the nullable factory used by SQL, including non-nullable inputs for
+// aggregates whose final result can still be NULL (e.g. an empty percentile).
+TEST_F(PercentileApproxAggTest, nullable_wrapper_preserves_exchange_and_storage_formats) {
+    for (bool weighted : {false, true}) {
+        for (bool compact : {false, true}) {
+            // 0: non-nullable, 1: nullable without NULLs, 2: mixed, 3: all NULL.
+            for (int null_mode : {0, 1, 2, 3}) {
+                SCOPED_TRACE(::testing::Message() << weighted << "/" << compact << "/" << null_mode);
+                const auto* func = get_aggregate_function(weighted ? "percentile_approx_weighted" : "percentile_approx",
+                                                          TYPE_DOUBLE, TYPE_DOUBLE, true);
+                ASSERT_NE(nullptr, func);
+                auto double_type = TypeDescriptor::from_logical_type(TYPE_DOUBLE);
+                std::vector<TypeDescriptor> arg_types{double_type};
+                Columns constants{ColumnHelper::create_const_column<TYPE_DOUBLE>(0, 1)};
+                auto values = DoubleColumn::create();
+                auto weights = Int64Column::create();
+                auto nulls = NullColumn::create();
+                for (int i = 0; i < 3; ++i) {
+                    values->append(10.0);
+                    weights->append(1);
+                    nulls->append(null_mode == 3 || (null_mode == 2 && i == 1));
+                }
+                Columns src;
+                if (null_mode == 0) {
+                    src.emplace_back(std::move(values));
+                } else {
+                    src.emplace_back(NullableColumn::create(std::move(values), std::move(nulls)));
+                }
+                if (weighted) {
+                    arg_types.push_back(TypeDescriptor::from_logical_type(TYPE_BIGINT));
+                    constants.emplace_back(ColumnHelper::create_const_column<TYPE_BIGINT>(1, 1));
+                    src.emplace_back(std::move(weights));
+                }
+                for (double param : {0.5, 2048.0}) {
+                    arg_types.push_back(double_type);
+                    auto column = ColumnHelper::create_const_column<TYPE_DOUBLE>(param, 3);
+                    constants.push_back(column);
+                    src.push_back(column);
+                }
+                auto ctx = make_ctx(arg_types, double_type, constants);
+                TQueryOptions opts;
+                opts.__set_enable_percentile_compact_intermediate(compact);
+                RuntimeState rs(TUniqueId(), opts, TQueryGlobals(), nullptr);
+                ctx->set_runtime_state(&rs);
+                auto make_intermediate = [&]() -> MutableColumnPtr {
+                    if (null_mode == 0) return BinaryColumn::create();
+                    return NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+                };
+                auto exchange = make_intermediate();
+                auto storage = make_intermediate();
+                func->convert_to_exchange_format(ctx.get(), src, 3, exchange);
+                func->convert_to_serialize_format(ctx.get(), src, 3, storage);
+                ASSERT_EQ(3U, exchange->size());
+                ASSERT_EQ(3U, storage->size());
+                const auto* exchange_data =
+                        down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(exchange.get()));
+                const auto* storage_data = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(storage.get()));
+                ManagedState state(ctx.get(), func);
+                for (size_t i = 0; i < 3; ++i) {
+                    bool is_null = null_mode == 3 || (null_mode == 2 && i == 1);
+                    EXPECT_EQ(is_null, exchange->is_null(i));
+                    EXPECT_EQ(is_null, storage->is_null(i));
+                    if (!is_null) {
+                        EXPECT_GT(storage_data->get_slice(i).size, 9U);
+                        if (compact) {
+                            EXPECT_EQ(9U, exchange_data->get_slice(i).size);
+                        } else {
+                            EXPECT_EQ(storage_data->get_slice(i), exchange_data->get_slice(i));
+                        }
+                    }
+                    func->merge(ctx.get(), exchange.get(), state.state(), i);
+                }
+                auto result = NullableColumn::create(DoubleColumn::create(), NullColumn::create());
+                func->finalize_to_column(ctx.get(), state.state(), result.get());
+                ASSERT_EQ(1U, result->size());
+                EXPECT_EQ(null_mode == 3, result->is_null(0));
+                if (null_mode != 3) {
+                    EXPECT_DOUBLE_EQ(10.0, down_cast<DoubleColumn*>(result->data_column_raw_ptr())->get_data()[0]);
+                }
+                // Aggregated states remain self-contained legacy records even
+                // with compact exchange enabled, including through the wrapper.
+                auto serialized = make_intermediate();
+                auto exchanged_state = make_intermediate();
+                func->serialize_to_column(ctx.get(), state.state(), serialized.get());
+                func->serialize_to_exchange_column(ctx.get(), state.state(), exchanged_state.get());
+                ASSERT_EQ(1U, serialized->size());
+                ASSERT_EQ(1U, exchanged_state->size());
+                EXPECT_EQ(serialized->is_null(0), exchanged_state->is_null(0));
+                if (null_mode != 3) {
+                    auto stored = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(serialized.get()))
+                                          ->get_slice(0);
+                    auto exchanged =
+                            down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(exchanged_state.get()))
+                                    ->get_slice(0);
+                    EXPECT_EQ(stored, exchanged);
+                    EXPECT_GT(stored.size, 9U);
+                }
+                ASSERT_FALSE(ctx->has_error());
+            }
+        }
+    }
+}
+
 } // namespace starrocks
