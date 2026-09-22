@@ -394,7 +394,7 @@ struct TQueryOptions {
   // serialization format for transient exchange/spill state. Global-only on FE
   // and enabled only after a full cluster upgrade; see
   // SessionVariable.ENABLE_PERCENTILE_COMPACT_INTERMEDIATE.
-  219: optional bool enable_percentile_compact_intermediate = false;
+  227: optional bool enable_percentile_compact_intermediate = false;
 }
 
 // A scan range plus the parameters needed to execute that scan.
