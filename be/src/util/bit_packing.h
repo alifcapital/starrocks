@@ -18,6 +18,7 @@
 #include <utility>
 #include "util/bit_packing_avx2.h"
 #include "util/bit_packing_default.h"
+#include "util/bit_packing_neon.h"
 
 namespace starrocks {
 
@@ -36,6 +37,8 @@ public:
         }
 #if defined(__AVX2__) && defined(__BMI2__)
         return starrocks::util::bitpacking_avx2::UnpackValues(bit_width, in, in_bytes, num_values, out);
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        return starrocks::util::bitpacking_neon::UnpackValues(bit_width, in, in_bytes, num_values, out);
 #else
         return starrocks::util::bitpacking_default::UnpackValues(bit_width, in, in_bytes, num_values, out);
 #endif

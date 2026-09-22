@@ -18,6 +18,12 @@
 #include <memory>
 #include <vector>
 
+#include "util/rle_encoding.h"
+#include "util/coding.h"
+#include "simd/expand.h"
+#include "simd/rle_simd.h"
+#include "simd/simd.h"
+#include "util/slice.h"
 #include "column/column.h"
 #include "column/column_helper.h"
 #include "column/nullable_column.h"
@@ -25,12 +31,20 @@
 #include "common/config.h"
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
-#include "simd/expand.h"
-#include "simd/simd.h"
-#include "util/coding.h"
 #include "util/cpu_info.h"
-#include "util/rle_encoding.h"
-#include "util/slice.h"
+
+namespace {
+// Single-pass min/max bounds check for dictionary indices. Reads the unsigned
+// indices through a signed reinterpret to feed SIMD min/max; any value
+// >= INT32_MAX surfaces as a negative min, which is also "out of bounds" for
+// any realistic dictionary, so the signed view is correct.
+inline bool indices_out_of_bounds(const uint32_t* indices, int32_t count, size_t dict_size) {
+    if (count <= 0) return false;
+    int32_t min_idx, max_idx;
+    starrocks::simd_minmax_int32(reinterpret_cast<const int32_t*>(indices), count, min_idx, max_idx);
+    return min_idx < 0 || static_cast<size_t>(max_idx) >= dict_size;
+}
+} // anonymous namespace
 
 namespace starrocks::parquet {
 
@@ -82,7 +96,7 @@ public:
 
 private:
     size_t _num_dict{};
-    std::map<T, int> _dict;
+    std::map<T, int> _dict; // not unordered_map: T=Slice has no std::hash specialisation.
     std::vector<T> _dict_vector;
     std::vector<int> _indexes;
     faststring _buffer;
@@ -160,10 +174,12 @@ public:
                 }
             }
 #endif
-            // process tail elements
+            // Tail: guard the load so we don't read past the last valid src element
+            // when the trailing batch ends with nulls.
             for (; i < count; ++i) {
-                dst_data[i] = src_data[cnt];
-                cnt += !nulls[i];
+                if (!nulls[i]) {
+                    dst_data[i] = src_data[cnt++];
+                }
             }
             DCHECK_EQ(cnt, num_non_nulls) << "count:" << count << " null_cnt:" << count - num_non_nulls;
         } else {
@@ -184,15 +200,15 @@ public:
         if (read_count == 0) {
             return Status::OK();
         }
-        // Reusable member rather than a VLA: read_count is page-sized and blows the stack.
-        _temp_dict_codes.resize(read_count + 1);
-        uint32_t* read_dict_data = _temp_dict_codes.data();
-        auto decoded_num = _rle_batch_reader.GetBatch(read_dict_data, read_count);
+        // Reuse the _indexes member buffer rather than a VLA — large batches blow the stack.
+        _indexes.resize(read_count + 1);
+        auto decoded_num = _rle_batch_reader.GetBatch(_indexes.data(), read_count);
         if (decoded_num < read_count) {
             return Status::InternalError("didn't get enough data from dict-decoder");
         }
 
-        assign_data_with_nulls(count, read_count, null_infos.nulls_data(), (int32_t*)read_dict_data, data);
+        assign_data_with_nulls(count, read_count, null_infos.nulls_data(), reinterpret_cast<int32_t*>(_indexes.data()),
+                               data);
 
         return Status::OK();
     }
@@ -203,8 +219,7 @@ protected:
     virtual Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                              Column* dst, const FilterData* filter) = 0;
     RleBatchDecoder<uint32_t> _rle_batch_reader;
-    // Scratch buffer for one batch of dictionary codes, reused across batches.
-    std::vector<uint32_t> _temp_dict_codes;
+    std::vector<uint32_t> _indexes;
 
 private:
     size_t _dict_size_threshold = 0;
@@ -292,18 +307,13 @@ public:
         }
 
         if (filter) {
-            _indexes.reserve(read_count);
-            auto decoded_num = _rle_batch_reader.GetBatch(&_indexes[0], read_count);
+            _indexes.resize(read_count);
+            auto decoded_num = _rle_batch_reader.GetBatch(_indexes.data(), read_count);
             if (decoded_num < read_count) {
                 return Status::InternalError("didn't get enough data from dict-decoder");
             }
 
-            auto flag = 0;
-            size_t size = _dict.size();
-            for (int i = 0; i < read_count; i++) {
-                flag |= _indexes[i] >= size;
-            }
-            if (UNLIKELY(flag)) {
+            if (UNLIKELY(indices_out_of_bounds(_indexes.data(), read_count, _dict.size()))) {
                 return Status::InternalError("Index not in dictionary bounds");
             }
 
@@ -315,15 +325,14 @@ public:
                 cnt += !is_nulls[i];
             }
         } else {
-            // Reusable member rather than a VLA: read_count is page-sized and blows the stack.
-            _temp_read_data.resize(read_count + 1);
-            T* read_data = _temp_read_data.data();
-            auto ret = _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), read_data, read_count);
+            _temp_read_data.resize(read_count);
+            auto ret =
+                    _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), _temp_read_data.data(), read_count);
             if (UNLIKELY(ret <= 0)) {
                 return Status::InternalError("DictDecoder GetBatchWithDict failed");
             }
 
-            assign_data_with_nulls(count, read_count, null_infos.nulls_data(), read_data, data);
+            assign_data_with_nulls(count, read_count, null_infos.nulls_data(), _temp_read_data.data(), data);
         }
 
         return Status::OK();
@@ -347,18 +356,13 @@ private:
         T* __restrict__ data = data_column->get_data().data() + cur_size;
 
         if (filter) {
-            _indexes.reserve(count);
-            auto decoded_num = _rle_batch_reader.GetBatch(&_indexes[0], count);
+            _indexes.resize(count);
+            auto decoded_num = _rle_batch_reader.GetBatch(_indexes.data(), count);
             if (decoded_num < count) {
                 return Status::InternalError("didn't get enough data from dict-decoder");
             }
 
-            auto flag = 0;
-            size_t size = _dict.size();
-            for (int i = 0; i < count; i++) {
-                flag |= _indexes[i] >= size;
-            }
-            if (UNLIKELY(flag)) {
+            if (UNLIKELY(indices_out_of_bounds(_indexes.data(), count, _dict.size()))) {
                 return Status::InternalError("Index not in dictionary bounds");
             }
 
@@ -380,8 +384,6 @@ private:
     enum { SIZE_OF_TYPE = sizeof(T) };
 
     std::vector<T> _dict;
-    std::vector<uint32_t> _indexes;
-    // Scratch buffer for one batch of decoded values, reused across batches.
     std::vector<T> _temp_read_data;
 };
 
@@ -572,17 +574,12 @@ private:
         }
 
         if (filter) {
-            _indexes.reserve(read_count);
+            _indexes.resize(read_count);
             auto decoded_num = _rle_batch_reader.GetBatch(_indexes.data(), read_count);
             if (decoded_num < read_count) {
                 return Status::InternalError("didn't get enough data from dict-decoder");
             }
-            bool flag = false;
-            size_t size = _dict.size();
-            for (int i = 0; i < read_count; i++) {
-                flag |= _indexes[i] >= size;
-            }
-            if (UNLIKELY(flag)) {
+            if (UNLIKELY(indices_out_of_bounds(_indexes.data(), read_count, _dict.size()))) {
                 return Status::InternalError("Index not in dictionary bounds");
             }
             // `_next_null_column` has already written this batch's NULL flags from the definition
@@ -617,7 +614,6 @@ private:
                 return Status::InternalError("DictDecoder<Slice> GetBatchWithDict failed");
             }
 
-            // Reusable members rather than VLAs: read_count is page-sized and blows the stack.
             _temp_lengths.resize(read_count + 1);
             _temp_datas.resize(read_count + 1);
             uint32_t* lengths = _temp_lengths.data();
@@ -650,17 +646,12 @@ private:
 
     Status _next_batch_value(size_t count, Column* dst, const FilterData* filter) override {
         if (filter) {
-            _indexes.reserve(count);
-            auto decoded_num = _rle_batch_reader.GetBatch(&_indexes[0], count);
+            _indexes.resize(count);
+            auto decoded_num = _rle_batch_reader.GetBatch(_indexes.data(), count);
             if (decoded_num < count) {
                 return Status::InternalError("didn't get enough data from dict-decoder");
             }
-            auto flag = 0;
-            size_t size = _dict.size();
-            for (int i = 0; i < count; i++) {
-                flag |= _indexes[i] >= size;
-            }
-            if (UNLIKELY(flag)) {
+            if (UNLIKELY(indices_out_of_bounds(_indexes.data(), count, _dict.size()))) {
                 return Status::InternalError("Index not in dictionary bounds");
             }
             uint8_t* null_data = nullptr;
@@ -710,10 +701,8 @@ private:
 
     std::vector<uint8_t> _dict_data;
     FixedSliceArray _dict;
-    std::vector<uint32_t> _indexes;
     FixedSliceArray _slices;
     size_t _max_value_length = 0;
-    // Scratch buffers for one batch of slices, reused across batches.
     std::vector<uint32_t> _temp_lengths;
     std::vector<char*> _temp_datas;
 };
