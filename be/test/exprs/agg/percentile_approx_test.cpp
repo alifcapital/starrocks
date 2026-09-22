@@ -582,8 +582,8 @@ TEST_F(PercentileApproxAggTest, nullable_wrapper_preserves_exchange_and_storage_
                             EXPECT_EQ(storage_data->get_slice(i), exchange_data->get_slice(i));
                         }
                     }
-                    func->merge(ctx.get(), exchange.get(), state.state(), i);
                 }
+                func->merge_batch_single_state(ctx.get(), state.state(), exchange.get(), 0, 3);
                 auto result = NullableColumn::create(DoubleColumn::create(), NullColumn::create());
                 func->finalize_to_column(ctx.get(), state.state(), result.get());
                 ASSERT_EQ(1U, result->size());
@@ -594,19 +594,11 @@ TEST_F(PercentileApproxAggTest, nullable_wrapper_preserves_exchange_and_storage_
                 // Aggregated states remain self-contained legacy records even
                 // with compact exchange enabled, including through the wrapper.
                 auto serialized = make_intermediate();
-                auto exchanged_state = make_intermediate();
                 func->serialize_to_column(ctx.get(), state.state(), serialized.get());
-                func->serialize_to_exchange_column(ctx.get(), state.state(), exchanged_state.get());
                 ASSERT_EQ(1U, serialized->size());
-                ASSERT_EQ(1U, exchanged_state->size());
-                EXPECT_EQ(serialized->is_null(0), exchanged_state->is_null(0));
                 if (null_mode != 3) {
                     auto stored = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(serialized.get()))
                                           ->get_slice(0);
-                    auto exchanged =
-                            down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(exchanged_state.get()))
-                                    ->get_slice(0);
-                    EXPECT_EQ(stored, exchanged);
                     EXPECT_GT(stored.size, 9U);
                 }
                 ASSERT_FALSE(ctx->has_error());
@@ -644,6 +636,48 @@ TEST_F(PercentileApproxAggTest, tracks_heap_from_creation_through_finalize) {
         EXPECT_GT(ctx->mem_usage(), before);
         EXPECT_EQ(digest_state->mem_usage(), ctx->mem_usage());
     }
+}
+
+TEST_F(PercentileApproxAggTest, nullable_batch_forwards_non_null_ranges) {
+    class BatchProbe final : public PercentileApproxAggregateFunction {
+    public:
+        mutable std::vector<std::pair<size_t, size_t>> ranges;
+        void merge_batch_single_state(FunctionContext* ctx, AggDataPtr state, const Column* column, size_t start,
+                                      size_t size) const override {
+            ranges.emplace_back(start, size);
+            PercentileApproxAggregateFunction::merge_batch_single_state(ctx, state, column, start, size);
+        }
+    } probe;
+    using State = NullableAggregateFunctionState<PercentileApproxState, false>;
+    NullableAggregateFunctionVariadic<State, PercentileApproxAggEmptyPred> wrapper(&probe);
+    auto type = TypeDescriptor::from_logical_type(TYPE_DOUBLE);
+    auto q = ColumnHelper::create_const_column<TYPE_DOUBLE>(0.5, 1);
+    auto c = ColumnHelper::create_const_column<TYPE_DOUBLE>(5000, 1);
+    auto ctx = make_ctx({type, type, type}, type, {nullptr, q, c});
+    auto values = DoubleColumn::create();
+    for (double v : {1000.0, 10.0, 20.0, 1000.0, 30.0, 1000.0}) values->append(v);
+    MutableColumnPtr binary = BinaryColumn::create();
+    probe.convert_to_serialize_format(ctx.get(), {values, q, c}, values->size(), binary);
+    auto nulls = NullColumn::create();
+    for (uint8_t n : {0, 0, 0, 1, 0, 0}) nulls->append(n);
+    auto input = NullableColumn::create(std::move(binary), std::move(nulls));
+    ManagedState state(ctx.get(), &wrapper);
+    wrapper.merge_batch_single_state(ctx.get(), state.state(), input.get(), 1, 4);
+    const std::vector<std::pair<size_t, size_t>> expected{{1, 2}, {4, 1}};
+    EXPECT_EQ(expected, probe.ranges);
+    auto result = NullableColumn::create(DoubleColumn::create(), NullColumn::create());
+    wrapper.finalize_to_column(ctx.get(), state.state(), result.get());
+    ASSERT_FALSE(result->is_null(0));
+    EXPECT_DOUBLE_EQ(20.0, result->get(0).get_double());
+    EXPECT_FALSE(ctx->has_error());
+    probe.ranges.clear();
+    ManagedState empty(ctx.get(), &wrapper);
+    wrapper.merge_batch_single_state(ctx.get(), empty.state(), input.get(), 3, 1);
+    wrapper.merge_batch_single_state(ctx.get(), empty.state(), input.get(), 0, 0);
+    EXPECT_TRUE(probe.ranges.empty());
+    result->reset_column();
+    wrapper.finalize_to_column(ctx.get(), empty.state(), result.get());
+    EXPECT_TRUE(result->is_null(0));
 }
 
 } // namespace starrocks

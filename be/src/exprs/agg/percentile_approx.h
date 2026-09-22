@@ -377,8 +377,18 @@ public:
     // different state and neither the accounting nor the reserve can be hoisted.
     void merge_batch_single_state(FunctionContext* ctx, AggDataPtr __restrict state, const Column* input, size_t start,
                                   size_t size) const override {
+        if (size == 0) return;
         const Column* column = ColumnHelper::get_data_column(input);
         int64_t prev_memory = data(state).mem_usage();
+        // Initialize compression before reserving so initialization retains the buffer.
+        if (UNLIKELY(!data(state).compression_initialized)) {
+            merge_record(ctx, column, state, start++);
+            --size;
+            if (ctx->has_error()) {
+                ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
+                return;
+            }
+        }
         data(state).percentile.reserve(size);
 
         const auto* binary_column = down_cast<const BinaryColumn*>(column);

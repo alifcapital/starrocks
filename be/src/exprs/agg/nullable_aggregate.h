@@ -162,23 +162,8 @@ public:
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
-        serialize_to_column_impl<false>(ctx, state, to);
-    }
-
-    void serialize_to_exchange_column(FunctionContext* ctx, ConstAggDataPtr __restrict state,
-                                      Column* to) const override {
-        serialize_to_column_impl<true>(ctx, state, to);
-    }
-
-private:
-    template <bool ForExchange>
-    void serialize_to_column_impl(FunctionContext* ctx, ConstAggDataPtr state, Column* to) const {
         auto serialize = [&](Column* output) {
-            if constexpr (ForExchange) {
-                nested_function->serialize_to_exchange_column(ctx, this->data(state).nested_state(), output);
-            } else {
-                nested_function->serialize_to_column(ctx, this->data(state).nested_state(), output);
-            }
+            nested_function->serialize_to_column(ctx, this->data(state).nested_state(), output);
         };
         if constexpr (is_result_always_nullable) {
             // For the case that input is non-nullable but output is nullable, the serialized output type
@@ -199,7 +184,6 @@ private:
         }
     }
 
-public:
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
         if (LIKELY(!this->data(state).is_null && !null_pred(this->data(state).nested_state_with_type()))) {
             if (to->is_nullable()) {
@@ -354,8 +338,31 @@ public:
 
     void merge_batch_single_state(FunctionContext* ctx, AggDataPtr __restrict state, const Column* column, size_t start,
                                   size_t size) const override {
-        for (size_t i = start; i < start + size; ++i) {
-            merge(ctx, column, state, i);
+        if (size == 0) return;
+        auto& nullable_state = this->data(state);
+        if (!column->is_nullable()) {
+            nullable_state.is_null = false;
+            nested_function->merge_batch_single_state(ctx, nullable_state.mutable_nest_state(), column, start, size);
+            return;
+        }
+        const auto* nullable_column = down_cast<const NullableColumn*>(column);
+        const auto& nulls = nullable_column->immutable_null_column_data();
+        const Column* values = nullable_column->data_column_raw_ptr();
+        const size_t end = start + size;
+        for (size_t i = start; i < end;) {
+            if (nulls[i]) {
+                if constexpr (!IgnoreNull) {
+                    nullable_state.is_null = false;
+                    nested_function->process_null(ctx, nullable_state.mutable_nest_state());
+                }
+                ++i;
+                continue;
+            }
+            const size_t begin = i++;
+            while (i < end && !nulls[i]) ++i;
+            nullable_state.is_null = false;
+            nested_function->merge_batch_single_state(ctx, nullable_state.mutable_nest_state(), values, begin,
+                                                      i - begin);
         }
     }
 

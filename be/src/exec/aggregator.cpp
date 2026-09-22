@@ -1277,8 +1277,8 @@ MutableColumns Aggregator::_create_group_by_columns(size_t num_rows) const {
 
 void Aggregator::_serialize_to_chunk(ConstAggDataPtr __restrict state, MutableColumns& agg_result_columns) {
     for (size_t i = 0; i < _agg_fn_ctxs.size(); i++) {
-        _agg_functions[i]->serialize_to_exchange_column(_agg_fn_ctxs[i], state + _agg_states_offsets[i],
-                                                        agg_result_columns[i].get());
+        _agg_functions[i]->serialize_to_column(_agg_fn_ctxs[i], state + _agg_states_offsets[i],
+                                               agg_result_columns[i].get());
     }
 }
 
