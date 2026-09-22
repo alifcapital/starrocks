@@ -801,6 +801,15 @@ FROM test;
 
 默认情况下，只有在查询发生错误时，BE 才会发送 profile 给 FE，用于查看错误。正常结束的查询不会发送 profile。发送 profile 会产生一定的网络开销，对高并发查询场景不利。当用户希望对一个查询的 profile 进行分析时，可以将这个变量设为 `true` 后，发送查询。查询结束后，可以通过在当前连接的 FE 的 web 页面（地址：fe_host:fe_http_port/query）查看 profile。该页面会显示最近 100 条开启了 `enable_profile` 的查询的 profile。
 
+### enable_percentile_compact_intermediate (global)
+
+* **范围**: 仅 Global。使用 `SET GLOBAL enable_percentile_compact_intermediate = true` 或 `false` 设置。
+* **默认值**: false
+* **数据类型**: boolean
+* **描述**: 在 exchange 和 spill 中，为 `percentile_approx`、`percentile_approx_weighted` 及其数组形式启用紧凑的直通记录。持久化聚合状态仍使用包含完整信息的格式。
+
+  滚动升级期间请保持关闭。仅在所有 FE、BE 和 CN 节点均支持紧凑格式后启用。每条语句在开始执行时读取全局设置，包括已有连接上的新语句。正在执行的语句保留原设置。将工作节点降级到不支持紧凑格式的版本之前，必须先关闭此选项，并等待所有在启用状态下启动的语句执行完毕。
+
 ### enable_query_cache
 
 * 描述：是否开启 Query Cache。取值范围：true 和 false。true 表示开启，false 表示关闭（默认值）。开启该功能后，只有当查询满足[Query Cache](../using_starrocks/caching/query_cache.md#应用场景) 所述条件时，才会启用 Query Cache。
