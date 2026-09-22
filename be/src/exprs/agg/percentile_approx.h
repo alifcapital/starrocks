@@ -16,10 +16,12 @@
 
 #include <cmath>
 
+#include "column/array_column.h"
 #include "column/column_helper.h"
 #include "column/object_column.h"
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/aggregate.h"
+#include "exprs/function_context.h"
 #include "gutil/casts.h"
 #include "util/percentile_value.h"
 #include "util/tdigest.h"
@@ -47,6 +49,14 @@ public:
     bool compression_initialized = false; // Flag to track if compression has been initialized from FunctionContext
     std::vector<double>
             targetQuantiles; // Stores target quantile(s), single value for scalar mode, multiple for array mode
+};
+
+// Null predicate for percentile_approx*. A state that received zero total
+// weight (no input rows, all inputs filtered out, all weights <= 0, all
+// values non-finite) must finalize to SQL NULL instead of NaN. Passed to
+// NullableAggregateFunctionVariadic via add_aggregate_mapping_variadic.
+struct PercentileApproxAggEmptyPred {
+    bool operator()(const PercentileApproxState& state) const { return state.percentile->is_empty(); }
 };
 
 class PercentileApproxAggregateFunctionBase
@@ -92,7 +102,19 @@ public:
         }
 
         int64_t prev_memory = data(state).percentile->mem_usage();
-        data(state).percentile->merge(src_percentile.percentile.get());
+        // Fast-path: when convert_to_serialize_format ships a single value
+        // per row (PASS_THROUGH / FORCE_STREAMING), every incoming digest is
+        // a singleton. TDigest::merge() would route it through a priority
+        // queue and a batched mergeProcessed/mergeUnprocessed cycle, which
+        // is overkill for one centroid. add() pushes directly into the
+        // target's _unprocessed buffer.
+        float singleton_mean;
+        float singleton_weight;
+        if (src_percentile.percentile->try_extract_singleton(&singleton_mean, &singleton_weight)) {
+            data(state).percentile->add(singleton_mean, singleton_weight);
+        } else {
+            data(state).percentile->merge(src_percentile.percentile.get());
+        }
         if (data(state).targetQuantiles.empty()) {
             data(state).targetQuantiles.push_back(quantile);
         }
@@ -101,12 +123,15 @@ public:
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
         size_t size = data(state).percentile->serialize_size();
-        uint8_t result[size + sizeof(double)];
+        size_t total = size + sizeof(double);
+        // Avoid a stack VLA: a high-compression digest can serialize to tens
+        // of KB of centroids, large enough to risk stack overflow.
+        std::vector<uint8_t> result(total);
         double quantile = data(state).targetQuantiles.empty() ? 0.0 : data(state).targetQuantiles[0];
-        memcpy(result, &quantile, sizeof(double));
-        data(state).percentile->serialize(result + sizeof(double));
+        memcpy(result.data(), &quantile, sizeof(double));
+        data(state).percentile->serialize(result.data() + sizeof(double));
         auto* column = down_cast<BinaryColumn*>(to);
-        column->append(Slice(result, size + sizeof(double)));
+        column->append(Slice(result.data(), total));
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
@@ -249,8 +274,10 @@ public:
 
         double column_value = data_column->immutable_data()[row_num];
         int64_t prev_memory = data(state).percentile->mem_usage();
-        // add value with weight
-        if (LIKELY(weight != 0)) {
+        // add value with weight. Reject w <= 0: a negative weight pushes
+        // _processed_weight negative and yields NaN from weightedAverageSorted().
+        // TDigest::add() also rejects non-positive weights as a second guard.
+        if (LIKELY(weight > 0)) {
             data(state).percentile->add(implicit_cast<float>(column_value), weight);
         }
         ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
@@ -271,11 +298,12 @@ public:
         result->get_offset().resize(chunk_size + 1);
 
         // argument 1, weight column can be int64 or const column
-        // serialize percentile one by one
+        // serialize percentile one by one. weight <= 0 must not be added: a
+        // negative weight corrupts the digest's running weight totals.
         size_t old_size = bytes.size();
         if (src[1]->is_constant()) {
             int64_t weight = src[1]->get(0).get_int64();
-            if (LIKELY(weight != 0)) {
+            if (LIKELY(weight > 0)) {
                 for (size_t i = 0; i < chunk_size; ++i) {
                     PercentileValue percentile(compression);
                     double value = data_column->immutable_data()[i];
@@ -306,7 +334,7 @@ public:
                 int64_t weight = weight_column->immutable_data()[i];
                 PercentileValue percentile(compression);
                 double value = data_column->immutable_data()[i];
-                if (LIKELY(weight != 0)) {
+                if (LIKELY(weight > 0)) {
                     percentile.add(implicit_cast<float>(value), weight);
                 }
                 size_t new_size = old_size + sizeof(double) + percentile.serialize_size();
@@ -382,7 +410,13 @@ public:
 
         // Merge into current state
         int64_t prev_memory = data(state).percentile->mem_usage();
-        data(state).percentile->merge(src_percentile.percentile.get());
+        float singleton_mean;
+        float singleton_weight;
+        if (src_percentile.percentile->try_extract_singleton(&singleton_mean, &singleton_weight)) {
+            data(state).percentile->add(singleton_mean, singleton_weight);
+        } else {
+            data(state).percentile->merge(src_percentile.percentile.get());
+        }
         ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
     }
 
@@ -392,19 +426,20 @@ public:
         uint32_t count = static_cast<uint32_t>(data(state).targetQuantiles.size());
         size_t total_size = sizeof(uint32_t) + count * sizeof(double) + tdigest_size;
 
-        uint8_t result[total_size];
+        // Avoid stack VLA (see PercentileApproxAggregateFunctionBase::serialize_to_column).
+        std::vector<uint8_t> result(total_size);
 
         // Write quantile count
-        memcpy(result, &count, sizeof(uint32_t));
+        memcpy(result.data(), &count, sizeof(uint32_t));
 
         // Write all quantiles
-        memcpy(result + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
+        memcpy(result.data() + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
 
         // Write TDigest data
-        data(state).percentile->serialize(result + sizeof(uint32_t) + count * sizeof(double));
+        data(state).percentile->serialize(result.data() + sizeof(uint32_t) + count * sizeof(double));
 
         auto* column = down_cast<BinaryColumn*>(to);
-        column->append(Slice(result, total_size));
+        column->append(Slice(result.data(), total_size));
     }
 
     // Override finalize_to_column method, returns ARRAY<DOUBLE>
@@ -507,8 +542,10 @@ public:
 
         double column_value = data_column->immutable_data()[row_num];
         int64_t prev_memory = data(state).percentile->mem_usage();
-        // add value with weight
-        if (LIKELY(weight != 0)) {
+        // add value with weight. Reject w <= 0: a negative weight pushes
+        // _processed_weight negative and yields NaN from weightedAverageSorted().
+        // TDigest::add() also rejects non-positive weights as a second guard.
+        if (LIKELY(weight > 0)) {
             data(state).percentile->add(implicit_cast<float>(column_value), weight);
         }
         ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
@@ -542,7 +579,13 @@ public:
 
         // Merge into current state
         int64_t prev_memory = data(state).percentile->mem_usage();
-        data(state).percentile->merge(src_percentile.percentile.get());
+        float singleton_mean;
+        float singleton_weight;
+        if (src_percentile.percentile->try_extract_singleton(&singleton_mean, &singleton_weight)) {
+            data(state).percentile->add(singleton_mean, singleton_weight);
+        } else {
+            data(state).percentile->merge(src_percentile.percentile.get());
+        }
         ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
     }
 
@@ -552,19 +595,20 @@ public:
         uint32_t count = static_cast<uint32_t>(data(state).targetQuantiles.size());
         size_t total_size = sizeof(uint32_t) + count * sizeof(double) + tdigest_size;
 
-        uint8_t result[total_size];
+        // Avoid stack VLA (see PercentileApproxAggregateFunctionBase::serialize_to_column).
+        std::vector<uint8_t> result(total_size);
 
         // Write quantile count
-        memcpy(result, &count, sizeof(uint32_t));
+        memcpy(result.data(), &count, sizeof(uint32_t));
 
         // Write all quantiles
-        memcpy(result + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
+        memcpy(result.data() + sizeof(uint32_t), data(state).targetQuantiles.data(), count * sizeof(double));
 
         // Write TDigest data
-        data(state).percentile->serialize(result + sizeof(uint32_t) + count * sizeof(double));
+        data(state).percentile->serialize(result.data() + sizeof(uint32_t) + count * sizeof(double));
 
         auto* column = down_cast<BinaryColumn*>(to);
-        column->append(Slice(result, total_size));
+        column->append(Slice(result.data(), total_size));
     }
 
     // Override finalize_to_column method, returns ARRAY<DOUBLE>
@@ -613,12 +657,13 @@ public:
         bytes.reserve(chunk_size * estimated_size_per_row);
         result->get_offset().resize(chunk_size + 1);
 
-        // argument 1, weight column can be int64 or const column
+        // argument 1, weight column can be int64 or const column. weight <= 0
+        // must not be added (see PercentileApproxWeightedAggregateFunction).
         // serialize percentile one by one
         size_t old_size = bytes.size();
         if (src[1]->is_constant()) {
             int64_t weight = src[1]->get(0).get_int64();
-            if (LIKELY(weight != 0)) {
+            if (LIKELY(weight > 0)) {
                 for (size_t i = 0; i < chunk_size; ++i) {
                     PercentileValue percentile(compression);
                     double value = data_column->immutable_data()[i];
@@ -663,7 +708,7 @@ public:
                 int64_t weight = weight_column->immutable_data()[i];
                 PercentileValue percentile(compression);
                 double value = data_column->immutable_data()[i];
-                if (LIKELY(weight != 0)) {
+                if (LIKELY(weight > 0)) {
                     percentile.add(implicit_cast<float>(value), weight);
                 }
 
