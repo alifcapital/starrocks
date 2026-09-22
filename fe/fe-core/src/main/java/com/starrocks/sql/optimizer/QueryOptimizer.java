@@ -1043,11 +1043,10 @@ public class QueryOptimizer extends Optimizer {
         // Flag a global aggregation feeding a small TopN(ORDER BY count(*) DESC) so the
         // backend can fuse them into a cache-conscious top-n aggregation. Pure annotation,
         // no tree restructure; gated off by default during bring-up.
-        // Not combined with partition-wise agg spill: that operator wraps the blocking agg
-        // and drives its own partition spill/restore, which the flip inside the wrapped
-        // operator would corrupt. The two are mutually exclusive for now.
+        // The backend selects sorted spill for marked aggregations because partition-wise
+        // spill only knows the ordinary hash table, not the post-flip FA/CA state.
         SessionVariable sv = rootTaskContext.getOptimizerContext().getSessionVariable();
-        if (sv.isEnableCacheConsciousTopn() && !(sv.isEnableSpill() && sv.getSpillPartitionWiseAgg())) {
+        if (sv.isEnableCacheConsciousTopn()) {
             result = new MarkCacheConsciousTopnRule().rewrite(result, rootTaskContext);
             // After the cc flag is set: pull the group-by column's MCV from the histogram storage
             // onto the agg so the backend can seed the FA. High-cardinality keys are untouched by the

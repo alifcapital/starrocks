@@ -19,6 +19,7 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.operator.Operator;
+import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashAggregateOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalTopNOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -100,6 +101,12 @@ public class MarkCacheConsciousTopnRule
 
     // Returns a context only for a real top-n (DESC, positive small LIMIT, no OFFSET, single key).
     private TopnContext buildContext(PhysicalTopNOperator topN) {
+        // Ranking may retain arbitrarily many ties, and partitioned TopN needs winners
+        // from every partition. A bounded global candidate set cannot preserve either.
+        if (topN.getTopNType() != TopNType.ROW_NUMBER ||
+                (topN.getPartitionByColumns() != null && !topN.getPartitionByColumns().isEmpty())) {
+            return null;
+        }
         if (topN.getOffset() != 0) {
             return null;
         }
