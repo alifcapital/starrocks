@@ -252,7 +252,7 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     COUNTER_UPDATE(gd_dict_code_reader_slots, _app_stats.global_dict_dict_code_reader_slots);
     COUNTER_UPDATE(gd_encode_reader_slots, _app_stats.global_dict_encode_reader_slots);
     if (_app_stats.global_dict_applied_row_groups > 0) {
-        root->add_info_string_if_not_exists("GlobalDictOptApplied", "true");
+        root->add_info_string("GlobalDictOptApplied", "true");
     }
 }
 
