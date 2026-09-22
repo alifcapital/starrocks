@@ -26,8 +26,6 @@
 #include <arm_neon.h>
 #endif
 
-#include "simd/rle_simd.h"
-#include "util/defer_op.h"
 #include "column/array_column.h"
 #include "column/column.h"
 #include "column/column_helper.h"
@@ -39,7 +37,9 @@
 #include "column/variant_column.h"
 #include "common/compiler_util.h"
 #include "gutil/casts.h"
+#include "simd/rle_simd.h"
 #include "types/date_value.h"
+#include "util/defer_op.h"
 #include "utils.h"
 
 namespace starrocks::parquet {

@@ -14,7 +14,6 @@
 #include <chrono>
 #include <memory>
 
-#include "simd/string_length_filter.h"
 #include "column/array_column.h"
 #include "column/column_builder.h"
 #include "column/column_hash.h"
@@ -28,6 +27,7 @@
 #include "exprs/function_helper.h"
 #include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
+#include "simd/string_length_filter.h"
 #include "types/logical_type.h"
 #include "util/bit_mask.h"
 #include "util/orlp/pdqsort.h"

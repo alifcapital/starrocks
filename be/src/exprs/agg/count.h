@@ -14,10 +14,10 @@
 
 #pragma once
 
-#include "simd/simd.h"
 #include "column/nullable_column.h"
 #include "exprs/agg/aggregate.h"
 #include "gutil/casts.h"
+#include "simd/simd.h"
 
 namespace starrocks {
 

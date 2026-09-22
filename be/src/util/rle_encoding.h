@@ -38,9 +38,9 @@
 #include "gutil/port.h"
 #include <cstring>
 
+#include "simd/rle_simd.h"
 #include "util/bit_stream_utils.inline.h"
 #include "util/bit_util.h"
-#include "simd/rle_simd.h"
 
 namespace starrocks {
 

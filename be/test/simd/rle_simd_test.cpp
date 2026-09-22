@@ -19,9 +19,9 @@
 #include <random>
 #include <vector>
 
+#include "gtest/gtest.h"
 #include "simd/simd_utils.h"
 #include "testutil/parallel_test.h"
-#include "gtest/gtest.h"
 
 namespace starrocks {
 

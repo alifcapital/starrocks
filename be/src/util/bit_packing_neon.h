@@ -20,8 +20,8 @@
 #include <arm_neon.h>
 #endif
 
+#include "common/logging.h"
 #include "util/bit_packing_default.h"
-#include "base/logging.h"
 
 namespace starrocks::util::bitpacking_neon {
 

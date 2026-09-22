@@ -16,10 +16,10 @@
 
 #include <type_traits>
 
-#include "simd/simd.h"
 #include "column/column.h"
 #include "column/nullable_column.h"
 #include "runtime/current_thread.h"
+#include "simd/simd.h"
 
 namespace starrocks {
 class FunctionContext;

@@ -17,8 +17,8 @@
 #include <cstring>
 
 #include "simd/multi_version.h"
-#include "util/int96.h"
 #include "simd/simd.h"
+#include "util/int96.h"
 
 #if defined(__AVX2__)
 #include <immintrin.h>

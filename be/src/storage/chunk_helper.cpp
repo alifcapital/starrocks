@@ -17,7 +17,6 @@
 #include <numeric>
 #include <utility>
 
-#include "simd/simd.h"
 #include "column/array_column.h"
 #include "column/chunk.h"
 #include "column/column_helper.h"
@@ -33,6 +32,7 @@
 #include "gutil/strings/substitute.h"
 #include "runtime/current_thread.h"
 #include "runtime/descriptors.h"
+#include "simd/simd.h"
 #include "storage/olap_type_infra.h"
 #include "storage/tablet_schema.h"
 #include "storage/type_traits.h"

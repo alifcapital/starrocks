@@ -23,7 +23,6 @@
 #include <arm_neon.h>
 #endif
 
-#include "simd/simd.h"
 #include "column/column_helper.h"
 #include "column/column_view/column_view.h"
 #include "column/datum.h"
@@ -34,6 +33,7 @@
 #include "gutil/bits.h"
 #include "gutil/casts.h"
 #include "gutil/strings/fastmem.h"
+#include "simd/simd.h"
 #include "util/mysql_row_buffer.h"
 
 namespace starrocks {
