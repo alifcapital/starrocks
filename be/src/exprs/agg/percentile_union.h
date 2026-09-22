@@ -24,10 +24,8 @@
 
 namespace starrocks {
 
-// Wrapper over PercentileValue that defers ctor compression until the first
-// incoming digest is observed. PercentileValue itself is a value-type stored on
-// disk and copied verbatim through merge/spill paths; adding a flag to it would
-// affect serialization layout, so the flag lives only in this aggregate state.
+// The first incoming digest selects the aggregate state compression. This
+// initialization flag belongs to aggregation, not to the stored digest value.
 struct PercentileUnionState {
     PercentileValue value;
     bool compression_initialized = false;
