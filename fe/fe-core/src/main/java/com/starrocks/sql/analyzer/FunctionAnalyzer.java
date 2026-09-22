@@ -73,6 +73,7 @@ import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -877,52 +878,34 @@ public class FunctionAnalyzer {
         fn.setFn(expanded);
     }
 
-    /**
-     * Canonicalize the compression argument of a percentile function. Only an
-     * integer literal, a user variable bound to an integer constant, or literal
-     * NULL is accepted; CAST, arithmetic, and column references (including
-     * CTE-projected ones) are rejected up front so the planner, MV rewrite, and
-     * BE all see one canonical compression literal rather than an expression that
-     * would only fold later. Values outside [MIN, MAX] and literal NULL are
-     * replaced with the default.
-     *
-     * AST mutation via {@code setChild} follows the established
-     * {@code FunctionAnalyzer} pattern (see {@code date_trunc} normalization).
-     * <p>
-     * The user-facing contract for compression is integer-only, but the
-     * registered BE function signature keeps DOUBLE for the compression slot:
-     * the percentile aggregates are registered via a variadic template on BE
-     * ({@code add_aggregate_mapping_variadic<DOUBLE, DOUBLE, ...>}) which forces
-     * a single trailing-arg type. Switching to BIGINT end-to-end would require
-     * a new fixed-arity BE template plus parallel changes to FunctionSet,
-     * gensrc, and the resolver — out of scope here. SR's standard implicit
-     * cast wraps this IntLiteral in a planner-side {@code CAST(int AS DOUBLE)}
-     * before the value reaches BE, so the wire format is unaffected.
-     */
+    // Compression is a constant integer value; its SQL type need not be integral.
     private static void clampCompressionLiteral(FunctionCallExpr fn, int argIdx) {
-        if (fn.getChildren().size() <= argIdx) {
-            return;
-        }
         Expr arg = fn.getChild(argIdx);
-        long c;
-        boolean isInvalid;
-        if (arg instanceof NullLiteral) {
-            isInvalid = true;
-            c = 0;
-        } else {
-            // extractIntegerValue accepts both literal ints and user variables
-            // bound to integer constants (`set @c = 5000`).
-            Optional<Long> extracted = extractIntegerValue(arg);
-            if (!extracted.isPresent()) {
-                throw new SemanticException(
-                        "compression must be an integer literal", fn.getPos());
-            }
-            c = extracted.get();
-            isInvalid = c < PercentileCompression.MIN || c > PercentileCompression.MAX;
+        if (!arg.isConstant()) {
+            throw new SemanticException("compression must be a constant integer value", arg.getPos());
         }
-        long finalC = isInvalid ? PercentileCompression.DEFAULT : c;
-        IntLiteral clamped = new IntLiteral(finalC, arg.getPos());
-        fn.setChild(argIdx, clamped);
+        Expr folded = ExprUtils.analyzeAndCastFold(arg.clone());
+        long compression = PercentileCompression.DEFAULT;
+        if (!(folded instanceof NullLiteral)) {
+            if (!(folded instanceof LiteralExpr) || !folded.getType().isNumericType()) {
+                throw new SemanticException("compression must be a constant integer value", arg.getPos());
+            }
+            BigDecimal value;
+            try {
+                value = new BigDecimal(((LiteralExpr) folded).getStringValue());
+            } catch (NumberFormatException e) {
+                throw new SemanticException("compression must be a finite integer value", arg.getPos());
+            }
+            if (value.stripTrailingZeros().scale() > 0) {
+                throw new SemanticException("compression must be an integer value; fractional values are not supported",
+                        arg.getPos());
+            }
+            if (value.compareTo(BigDecimal.valueOf(PercentileCompression.MIN)) >= 0 &&
+                    value.compareTo(BigDecimal.valueOf(PercentileCompression.MAX)) <= 0) {
+                compression = value.longValueExact();
+            }
+        }
+        fn.setChild(argIdx, new IntLiteral(compression, arg.getPos()));
     }
 
     /**

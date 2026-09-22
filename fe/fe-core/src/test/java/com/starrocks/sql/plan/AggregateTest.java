@@ -2531,7 +2531,7 @@ public class AggregateTest extends PlanTestBase {
         // FunctionAnalyzer pre-clamps the compression literal at analyze phase
         // and rejects non-constant inputs up front (SemanticException extends
         // StarRocksPlannerException so the assertion above still matches).
-        Assertions.assertTrue(exception.getMessage().contains("compression must be an integer literal"));
+        Assertions.assertTrue(exception.getMessage().contains("compression must be a constant integer value"));
 
         Throwable exception2 = assertThrows(StarRocksPlannerException.class, () -> {
             getCostExplain("select percentile_approx(1, cast(1.3 as DOUBLE));");
