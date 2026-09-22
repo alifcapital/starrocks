@@ -1079,6 +1079,28 @@ TEST_F(AggregateTest, test_group_concat) {
     ASSERT_EQ("starrocks0, starrocks1, starrocks2, starrocks3, starrocks4, starrocks5", result_column->get_data()[0]);
 }
 
+TEST_F(AggregateTest, CollectMemoryBatchResetAndDestroy) {
+    const auto* func = get_aggregate_function("group_concat", TYPE_VARCHAR, TYPE_VARCHAR, false);
+    auto values = BinaryColumn::create();
+    for (int i = 0; i < 1000; ++i) values->append(std::string(100, 'x'));
+    const Column* input = values.get();
+    EXPECT_EQ(0, ctx->mem_usage());
+    auto state = ManagedAggrState::create(ctx, func);
+    for (int pass = 0; pass < 2; ++pass) {
+        func->update_batch_single_state(ctx, values->size(), &input, state->state());
+        // The batch reserve happens before per-row updates and must be included.
+        EXPECT_GE(ctx->mem_usage(), 100000);
+        auto output = BinaryColumn::create();
+        func->finalize_to_column(ctx, state->state(), output.get());
+        EXPECT_EQ(1, output->size());
+        EXPECT_EQ(101998, output->get_slice(0).size);
+        func->reset(ctx, {}, state->state());
+        EXPECT_EQ(reinterpret_cast<GroupConcatAggregateState*>(state->state())->mem_usage(), ctx->mem_usage());
+    }
+    state.reset();
+    EXPECT_EQ(0, ctx->mem_usage());
+}
+
 TEST_F(AggregateTest, test_group_concat_const_seperator) {
     std::vector<TypeDescriptor> arg_types = {TypeDescriptor::from_logical_type(TYPE_VARCHAR),
                                              TypeDescriptor::from_logical_type(TYPE_VARCHAR)};
@@ -1919,6 +1941,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(),
                          "[{vchar:[NULL,'bcd','cdrdfe',NULL,'esfg'],int:[NULL,9,NULL,7,6]}]"),
                   0);
@@ -1990,6 +2013,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(),
                          "[{vchar:['','bcd','cdrdfe','Datum()','esfg'],int:[2,9,5,7,6]}]"),
                   0);
@@ -2047,6 +2071,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(),
                          "[{vchar:['','bcd','cdrdfe','Datum()','esfg',NULL,NULL],int:[2,9,5,7,6,3,3]}]"),
                   0);
@@ -2104,6 +2129,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(), "[{vchar:[NULL,NULL],int:[3,3]}]"), 0);
 
         state = ManagedAggrState::create(local_ctx.get(), array_agg_func);
@@ -2169,6 +2195,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(),
                          "[{vchar:[NULL,NULL,NULL,'bcd','cdrdfe',NULL,'esfg'],int:[3,3,NULL,9,NULL,7,6]}]"),
                   0);
@@ -2244,6 +2271,7 @@ TEST_F(AggregateTest, test_array_aggV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         array_agg_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(strcmp(res_struct_col->debug_string().c_str(),
                          "[{vchar:[NULL,'bcd','cdrdfe',NULL,'esfg'],int:[NULL,9,NULL,7,6]}]"),
                   0);
@@ -2263,6 +2291,8 @@ TEST_F(AggregateTest, test_array_aggV2) {
         array_agg_func->finalize_to_column(local_ctx.get(), state->state(), res_array_col.get());
         ASSERT_TRUE(local_ctx->has_error());
     }
+    state.reset();
+    EXPECT_EQ(0, local_ctx->mem_usage());
 }
 
 TEST_F(AggregateTest, test_group_concatV2) {
@@ -2339,6 +2369,7 @@ TEST_F(AggregateTest, test_group_concatV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         gc_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(res_struct_col->debug_string(), "[{vchar:['bcd','cdrdfe','esfg'],sep:[',',',',','],int:[9,NULL,6]}]");
 
         state = ManagedAggrState::create(local_ctx.get(), gc_func);
@@ -2413,6 +2444,7 @@ TEST_F(AggregateTest, test_group_concatV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         gc_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(res_struct_col->debug_string(),
                   "[{vchar:['','bcd','cdrdfe','Datum()','esfg'],sep:[',',',',',',',',','],int:[2,9,5,7,6]}]");
 
@@ -2473,6 +2505,7 @@ TEST_F(AggregateTest, test_group_concatV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         gc_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(res_struct_col->size(), 1); // empty also need output
 
         state = ManagedAggrState::create(local_ctx.get(), gc_func);
@@ -2548,6 +2581,7 @@ TEST_F(AggregateTest, test_group_concatV2) {
         type_struct_char_int.field_names.emplace_back("int");
         MutableColumnPtr res_struct_col = ColumnHelper::create_column(type_struct_char_int, true);
         gc_func->serialize_to_column(local_ctx.get(), state->state(), res_struct_col.get());
+        EXPECT_EQ(0, local_ctx->mem_usage());
         ASSERT_EQ(res_struct_col->debug_string(), "[{vchar:['bcd','cdrdfe','esfg'],sep:[',',',',','],int:[9,NULL,6]}]");
 
         state = ManagedAggrState::create(local_ctx.get(), gc_func);
@@ -2565,6 +2599,8 @@ TEST_F(AggregateTest, test_group_concatV2) {
         gc_func->finalize_to_column(local_ctx.get(), state->state(), res_col.get());
         ASSERT_TRUE(local_ctx->has_error());
     }
+    state.reset();
+    EXPECT_EQ(0, local_ctx->mem_usage());
 }
 
 TEST_F(AggregateTest, test_array_agg) {

@@ -24,6 +24,7 @@
 #include "common/status.h"
 #include "exec/agg_runtime_filter_builder.h"
 #include "exec/cache_conscious_topn.h"
+#include "exec/spill/spiller.h"
 #include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
 #include "util/race_detect.h"
@@ -116,6 +117,7 @@ Status AggregateBlockingSinkOperator::set_finishing(RuntimeState* state) {
 Status AggregateBlockingSinkOperator::reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks) {
     _is_finished = false;
     ONCE_RESET(_set_finishing_once);
+    _cache_conscious_evaluated = false;
     return _aggregator->reset_state(state, refill_chunks, this);
 }
 
@@ -183,6 +185,11 @@ void AggregateBlockingSinkOperator::_maybe_evaluate_cache_conscious_topn() {
     // a partition bound is not an upper bound on the global value and a true winner could be
     // pruned. Don't flip there; the normal plan handles it.
     if (!_aggregator->needs_finalize() || _aggregator->is_pre_cache()) {
+        return;
+    }
+    // Ordinary spill may already hold partial counts for these groups. A snapshot of the
+    // current map is then incomplete, so finish through the ordinary spill merge path.
+    if (_aggregator->spiller() != nullptr && _aggregator->spiller()->spilled()) {
         return;
     }
     const int64_t k = _aggregator->cache_conscious_topn_limit();

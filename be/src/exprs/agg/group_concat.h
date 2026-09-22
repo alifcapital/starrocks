@@ -22,6 +22,7 @@
 #include "column/struct_column.h"
 #include "column/type_traits.h"
 #include "exec/sorting/sorting.h"
+#include "exprs/agg/agg_state_memory.h"
 #include "exprs/agg/aggregate.h"
 #include "exprs/function_context.h"
 #include "gutil/casts.h"
@@ -33,7 +34,7 @@ namespace starrocks {
 template <LogicalType LT, typename = guard::Guard>
 inline constexpr LogicalType GroupConcatResultLT = TYPE_VARCHAR;
 
-struct GroupConcatAggregateState {
+struct GroupConcatAggregateState : public AggStateMemoryAccount {
     // intermediate_string.
     // concat with sep_length first.
     std::string intermediate_string{};
@@ -53,23 +54,22 @@ struct GroupConcatAggregateState {
 template <LogicalType LT, typename T = RunTimeCppType<LT>, LogicalType ResultLT = GroupConcatResultLT<LT>,
           typename TResult = RunTimeCppType<ResultLT>>
 class GroupConcatAggregateFunction final
-        : public AggregateFunctionBatchHelper<GroupConcatAggregateState,
-                                              GroupConcatAggregateFunction<LT, T, ResultLT, TResult>> {
+        : public MemoryTrackedAggregateFunctionBatchHelper<GroupConcatAggregateState,
+                                                           GroupConcatAggregateFunction<LT, T, ResultLT, TResult>> {
 public:
     using InputColumnType = RunTimeColumnType<ResultLT>;
     using ResultColumnType = InputColumnType;
 
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         this->data(state).intermediate_string = {};
         this->data(state).initial = false;
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         DCHECK(columns[0]->is_binary());
-        int64_t prev_memory = this->data(state).mem_usage();
         if (ctx->get_num_args() > 1) {
             if (!ctx->is_notnull_constant_column(1)) {
                 const auto* column_val = down_cast<const InputColumnType*>(columns[0]);
@@ -128,11 +128,11 @@ public:
                 result.append(", ").append(val.get_data(), val.get_size());
             }
         }
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void update_batch_single_state(FunctionContext* ctx, size_t chunk_size, const Column** columns,
                                    AggDataPtr __restrict state) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         if (ctx->get_num_args() > 1) {
             const auto* column_val = down_cast<const InputColumnType*>(columns[0]);
             if (!ctx->is_notnull_constant_column(1)) {
@@ -158,13 +158,14 @@ public:
     void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,
                                               int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
                                               int64_t frame_end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         for (size_t i = frame_start; i < frame_end; ++i) {
             update(ctx, columns, state, i);
         }
     }
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         Slice slice = column->get(row_num).get_slice();
         char* data = slice.data;
         uint32_t size_value = *reinterpret_cast<uint32_t*>(data);
@@ -178,10 +179,10 @@ public:
 
             this->data(state).intermediate_string.append(data, size_value - sizeof(uint32_t));
         }
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         DCHECK(to->is_binary());
 
         auto* column = down_cast<BinaryColumn*>(to);
@@ -296,6 +297,7 @@ public:
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const std::string& value = this->data(state).intermediate_string;
         if (value.empty()) {
             return;
@@ -317,7 +319,7 @@ public:
 
 // input columns result in intermediate result: struct{array[col0], array[col1], array[col2]... array[coln]}
 // return ordered string("col0col1...colnSEPcol0col1...coln...")
-struct GroupConcatAggregateStateV2 {
+struct GroupConcatAggregateStateV2 : public AggStateMemoryAccount {
     // update without null elements
     void update(FunctionContext* ctx, const Column& column, size_t index, size_t offset, size_t count) {
         (*data_columns)[index]->append(column, offset, count);
@@ -367,7 +369,8 @@ struct GroupConcatAggregateStateV2 {
 // keep 2 columns in intermediate results.
 // 3. refactor order-by and distinct function to a combinator to clean the code.
 class GroupConcatAggregateFunctionV2 final
-        : public AggregateFunctionBatchHelper<GroupConcatAggregateStateV2, GroupConcatAggregateFunctionV2> {
+        : public MemoryTrackedAggregateFunctionBatchHelper<GroupConcatAggregateStateV2,
+                                                           GroupConcatAggregateFunctionV2> {
 public:
     // group_concat(a, b order by c, d), the arguments are a,b,',',c,d
     bool support_nullable_immediate_input() const override { return true; }
@@ -397,24 +400,22 @@ public:
     }
 
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr __restrict state) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
-        int64_t prev_memory = state_impl.mem_usage();
         if (state_impl.data_columns != nullptr) {
             for (auto& col : *state_impl.data_columns) {
                 col->resize(0);
             }
         }
-        ctx->add_mem_usage(state_impl.mem_usage() - prev_memory);
     }
 
     // reject null for output columns, but non-output columns may be null
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto num = ctx->get_num_args();
         auto& state_impl = this->data(state);
-        int64_t prev_memory = state_impl.mem_usage();
         // DeferOp so the delta is reported on every early-return path below.
-        auto defer = DeferOp([&]() { ctx->add_mem_usage(state_impl.mem_usage() - prev_memory); });
         if (state_impl.data_columns == nullptr) {
             create_impl(ctx, state_impl);
         }
@@ -443,6 +444,7 @@ public:
 
     void update_batch_single_state(FunctionContext* ctx, size_t chunk_size, const Column** columns,
                                    AggDataPtr __restrict state) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
         if (state_impl.data_columns == nullptr) {
             create_impl(ctx, state_impl);
@@ -460,6 +462,7 @@ public:
     void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,
                                               int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
                                               int64_t frame_end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
         if (state_impl.data_columns == nullptr) {
             create_impl(ctx, state_impl);
@@ -476,6 +479,7 @@ public:
 
     // input struct column, array may be null, but array->elements of output columns should not null
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         if (UNLIKELY(row_num >= column->size())) {
             ctx->set_error(std::string(get_name() + " merge() row id overflow").c_str(), false);
             return;
@@ -486,9 +490,7 @@ public:
         }
         const auto& input_columns = down_cast<const StructColumn*>(ColumnHelper::get_data_column(column))->fields();
         auto& state_impl = this->data(state);
-        int64_t prev_memory = state_impl.mem_usage();
         // DeferOp so the delta is reported on every early-return path below.
-        auto defer = DeferOp([&]() { ctx->add_mem_usage(state_impl.mem_usage() - prev_memory); });
         if (state_impl.data_columns == nullptr) {
             create_impl(ctx, state_impl);
         }
@@ -513,6 +515,7 @@ public:
     // nullable struct {nullable array[nullable elements]...}, the struct may be null, array and array elements from
     // output columns wouldn't be null.
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
         DCHECK(state_impl.data_columns == nullptr || !state_impl.data_columns->empty());
         if (state_impl.data_columns == nullptr || (*state_impl.data_columns)[0]->size() == 0) {
@@ -625,6 +628,7 @@ public:
     // note as output columns and order-by columns are put in group-by clause if specify DISTINCT, so here need to do
     // distinct further after order by data columns.
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto defer = DeferOp([&]() {
             if (ctx->has_error() && to != nullptr) {
                 to->append_default();

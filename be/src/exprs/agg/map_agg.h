@@ -22,6 +22,7 @@
 #include "column/hash_set.h"
 #include "column/map_column.h"
 #include "column/type_traits.h"
+#include "exprs/agg/agg_state_memory.h"
 #include "exprs/agg/aggregate.h"
 #include "exprs/function_context.h"
 #include "gutil/casts.h"
@@ -31,7 +32,7 @@
 namespace starrocks {
 
 template <LogicalType KT, typename MyHashMap = std::map<int, size_t>>
-struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState {
+struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState, public AggStateMemoryAccount {
     using KeyColumnType = RunTimeColumnType<KT>;
     using KeyType = typename SliceHashSet::key_type;
 
@@ -81,42 +82,43 @@ struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState {
 };
 
 template <LogicalType KT, typename MyHashMap = std::map<int, size_t>>
-class MapAggAggregateFunction final : public AggregateFunctionBatchHelper<MapAggAggregateFunctionState<KT, MyHashMap>,
-                                                                          MapAggAggregateFunction<KT, MyHashMap>> {
+class MapAggAggregateFunction final
+        : public MemoryTrackedAggregateFunctionBatchHelper<MapAggAggregateFunctionState<KT, MyHashMap>,
+                                                           MapAggAggregateFunction<KT, MyHashMap>> {
 public:
     using KeyColumnType = RunTimeColumnType<KT>;
 
     void create(FunctionContext* ctx, AggDataPtr __restrict ptr) const override {
         auto* state = new (ptr) MapAggAggregateFunctionState<KT, MyHashMap>;
+        ScopedAggStateMemoryUsage memory_usage(ctx, *state);
         state->value_column = ctx->create_column(*ctx->get_arg_type(1), true);
     }
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // Key could not be null.
         if ((columns[0]->is_nullable() && columns[0]->is_null(row_num)) || columns[0]->only_null()) {
             return;
         }
         const auto& key_column = down_cast<const KeyColumnType&>(*ColumnHelper::get_data_column(columns[0]));
-        int64_t prev_memory = this->data(state).mem_usage();
         this->data(state).update(ctx->mem_pool(), key_column, *columns[1], row_num, 1);
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto map_column = down_cast<const MapColumn*>(ColumnHelper::get_data_column(column));
         auto& offsets = map_column->offsets().immutable_data();
-        int64_t prev_memory = this->data(state).mem_usage();
         if (offsets[row_num + 1] > offsets[row_num]) {
             this->data(state).update(
                     ctx->mem_pool(),
                     *down_cast<const KeyColumnType*>(ColumnHelper::get_data_column(map_column->keys_column().get())),
                     map_column->values(), offsets[row_num], offsets[row_num + 1] - offsets[row_num]);
         }
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
         auto* map_column = down_cast<MapColumn*>(ColumnHelper::get_data_column(to));
 
@@ -148,6 +150,7 @@ public:
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         serialize_to_column(ctx, state, to);
     }
 

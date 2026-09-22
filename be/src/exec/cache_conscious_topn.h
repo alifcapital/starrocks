@@ -134,6 +134,7 @@ public:
         }
 
         size_t size() const { return _size; }
+        size_t allocated_bytes() const { return _blocks.size() * kBlockBytes + _blocks.capacity() * sizeof(Block); }
         // Rows already committed to a block. The trailing < staging_slots() rows still in the
         // staging line are not addressable by at(), so a reader that must not disturb the staging
         // line (a probe of a partition that keeps receiving rows) iterates only [0, flushed_size()).
@@ -870,15 +871,14 @@ public:
         _partitions[_engine.bucket(key)].groups.push_back({key, partial});
     }
 
-    // Total bytes of physical tuples held in RAM across partitions — what the operator reports
-    // as revocable and sheds on spill. The logical stats are O(fanout) and non-revocable. Each
-    // tuple is a 16-byte {key, count} pair.
+    // Dynamic arena storage released on spill, including unused capacity in allocated blocks.
+    // The inline staging lines and logical statistics remain resident and are not revocable.
     size_t physical_tuples_bytes() const {
-        size_t rows = 0;
+        size_t bytes = 0;
         for (const auto& p : _partitions) {
-            rows += p.groups.size();
+            bytes += p.groups.allocated_bytes();
         }
-        return rows * sizeof(Group);
+        return bytes;
     }
 
     std::vector<Group> finalize(std::vector<Group> fa, size_t* pruned = nullptr) {

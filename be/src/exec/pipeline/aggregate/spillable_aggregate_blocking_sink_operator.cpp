@@ -200,6 +200,12 @@ Status SpillableAggregateBlockingSinkOperator::reset_state(RuntimeState* state,
 
 Status SpillableAggregateBlockingSinkOperator::_try_to_spill_by_force(RuntimeState* state, const ChunkPtr& chunk) {
     RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
+    // This very chunk may have activated TopN. Its snapshot now lives in FA; spilling
+    // the ordinary map as well would restore those same counts a second time.
+    if (_aggregator->cache_conscious_topn_active()) {
+        set_revocable_mem_bytes(_aggregator->cache_conscious_revocable_bytes());
+        return _aggregator->spill_cache_conscious_ca(state);
+    }
     set_revocable_mem_bytes(_aggregator->hash_map_memory_usage());
     return _spill_all_data(state, true);
 }

@@ -20,6 +20,7 @@
 #include "column/struct_column.h"
 #include "column/type_traits.h"
 #include "exec/sorting/sorting.h"
+#include "exprs/agg/agg_state_memory.h"
 #include "exprs/agg/aggregate.h"
 #include "exprs/function_context.h"
 #include "runtime/mem_pool.h"
@@ -29,7 +30,7 @@
 
 namespace starrocks {
 template <LogicalType PT, bool is_distinct, typename MyHashSet = std::set<int>>
-struct ArrayAggAggregateState {
+struct ArrayAggAggregateState : public AggStateMemoryAccount {
     using ColumnType = RunTimeColumnType<PT>;
     using CppType = RunTimeCppType<PT>;
     using KeyType = typename SliceHashSet::key_type;
@@ -122,8 +123,7 @@ struct ArrayAggAggregateState {
     // approximated from its slot count (phmap exposes no exact byte count). For string keys the
     // key bytes live in the operator mem pool (counted there); only the set's slots/control
     // bytes are added here, so there is no double counting. Distinct mode materializes the set
-    // into the value column lazily at output (get_data_column); that transient copy is not charged
-    // here -- only the build-time set drives sizing, and the query MemTracker still sees it.
+    // into the value column lazily at output; that retained buffer is counted too.
     int64_t mem_usage() const {
         int64_t usage = data_column.memory_usage();
         if constexpr (is_distinct) {
@@ -174,25 +174,26 @@ struct ArrayAggWindowState : public ArrayAggAggregateState<PT, is_distinct, MyHa
 template <LogicalType LT, bool is_distinct, template <LogicalType, bool, typename> typename State,
           typename MyHashSet = std::set<int>>
 class ArrayAggAggregateFunctionBase final
-        : public AggregateFunctionBatchHelper<State<LT, is_distinct, MyHashSet>,
-                                              ArrayAggAggregateFunctionBase<LT, is_distinct, State, MyHashSet>> {
+        : public MemoryTrackedAggregateFunctionBatchHelper<
+                  State<LT, is_distinct, MyHashSet>, ArrayAggAggregateFunctionBase<LT, is_distinct, State, MyHashSet>> {
 public:
     using InputColumnType = RunTimeColumnType<LT>;
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const auto& column = down_cast<const InputColumnType&>(*columns[0]);
         // TODO: update is random access, so we could not pre-reserve memory for State, which is the bottleneck
-        int64_t prev_memory = this->data(state).mem_usage();
         this->data(state).update(ctx->mem_pool(), column, row_num, 1);
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void process_null(FunctionContext* ctx, AggDataPtr __restrict state) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         this->data(state).append_null();
     }
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const auto* input_column = down_cast<const ArrayColumn*>(column);
         auto offset_size = input_column->get_element_offset_size(row_num);
         const auto& array_element = input_column->elements();
@@ -230,14 +231,13 @@ public:
                                             : 0;
         DCHECK_LE(element_null_count, offset_size.second);
 
-        int64_t prev_memory = this->data(state).mem_usage();
         this->data(state).update(ctx->mem_pool(), *down_cast<const InputColumnType*>(element_data_column),
                                  offset_size.first, offset_size.second - element_null_count);
         this->data(state).append_null(element_null_count);
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(const_cast<AggDataPtr>(state));
         // should check overflow before append, otherwise will generate invalid result.
         if (UNLIKELY(state_impl.check_overflow(ctx))) {
@@ -254,6 +254,7 @@ public:
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         return serialize_to_column(ctx, state, to);
     }
 
@@ -270,13 +271,13 @@ public:
     }
 
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr __restrict state) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         this->data(state).reset();
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void get_values(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* dst, size_t start,
                     size_t end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(const_cast<AggDataPtr>(state));
         const auto& data_column = state_impl.get_data_column();
         auto* array_column = down_cast<ArrayColumn*>(dst);
@@ -291,6 +292,7 @@ public:
     void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,
                                               int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
                                               int64_t frame_end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // For distinct mode, data_column used as a result cache for get_values method, any updates to
         // this state should invalidate the cache.
         this->data(state).data_column.resize(0);
@@ -301,6 +303,7 @@ public:
 
     void update_single_state_null(FunctionContext* ctx, AggDataPtr __restrict state, int64_t peer_group_start,
                                   int64_t peer_group_end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // For distinct mode, data_column used as a result cache for get_values method, any updates to
         // this state should invalidate the cache.
         this->data(state).data_column.resize(0);
@@ -318,7 +321,7 @@ using ArrayAggAggregateWindowFunction = ArrayAggAggregateFunctionBase<LT, is_dis
 
 // input columns result in intermediate result: struct{array[col0], array[col1], array[col2]... array[coln]}
 // return ordered array[col0']
-struct ArrayAggAggregateStateV2 {
+struct ArrayAggAggregateStateV2 : public AggStateMemoryAccount {
     void initialize(FunctionContext* ctx) const {
         for (auto i = 0; i < ctx->get_arg_types().size(); ++i) {
             data_columns.emplace_back(ctx->create_column(*ctx->get_arg_type(i), true));
@@ -398,23 +401,26 @@ struct ArrayAggWindowStateV2 : public ArrayAggAggregateStateV2 {
         DCHECK(data_columns.empty() && result_column == nullptr);
         initialize(ctx);
     }
+    int64_t mem_usage() const {
+        return Base::mem_usage() + (result_column != nullptr ? result_column->memory_usage() : 0);
+    }
     mutable MutableColumnPtr result_column;
 };
 
 template <typename AggState>
 class ArrayAggAggregateFunctionV2 final
-        : public AggregateFunctionBatchHelper<AggState, ArrayAggAggregateFunctionV2<AggState>> {
+        : public MemoryTrackedAggregateFunctionBatchHelper<AggState, ArrayAggAggregateFunctionV2<AggState>> {
 public:
     void create(FunctionContext* ctx, AggDataPtr __restrict ptr) const override {
         auto* state = new (ptr) AggState;
+        ScopedAggStateMemoryUsage memory_usage(ctx, *state);
         state->initialize(ctx);
     }
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // DeferOp so the delta is reported on every early-return path below.
-        auto defer = DeferOp([&]() { ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory); });
         for (auto i = 0; i < ctx->get_num_args(); ++i) {
             if (UNLIKELY(columns[i]->size() <= row_num)) {
                 ctx->set_error(std::string(get_name() + "'s update row number overflow").c_str(), false);
@@ -438,7 +444,7 @@ public:
 
     // struct and array elements aren't be null, as they consist from several columns
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const auto input_columns = down_cast<const StructColumn*>(ColumnHelper::get_data_column(column))->fields();
         for (auto i = 0; i < input_columns.size(); ++i) {
             auto array_column = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input_columns[i].get()));
@@ -446,11 +452,11 @@ public:
             this->data(state).update(array_column->elements(), i, offsets[row_num],
                                      offsets[row_num + 1] - offsets[row_num]);
         }
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     // serialize each state->column to a [nullable] array in a [nullable] struct
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(const_cast<AggDataPtr>(state));
         // should check overflow before append, otherwise will generate invalid result.
         if (UNLIKELY(state_impl.check_overflow(ctx))) {
@@ -491,6 +497,7 @@ public:
 
     // finalize each state->column to a [nullable] array
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto defer = DeferOp([&]() {
             if (ctx->has_error() && to != nullptr) {
                 to->append_default();
@@ -629,13 +636,13 @@ public:
     }
 
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr __restrict state) const override {
-        int64_t prev_memory = this->data(state).mem_usage();
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         this->data(state).reset(ctx);
-        ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
     void get_values(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* dst, size_t start,
                     size_t end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         if constexpr (std::is_same_v<AggState, ArrayAggWindowStateV2>) {
             auto& state_impl = this->data(const_cast<AggDataPtr>(state));
             auto* result_column = state_impl.result_column.get();
@@ -650,6 +657,7 @@ public:
     void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,
                                               int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
                                               int64_t frame_end) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         if constexpr (std::is_same_v<AggState, ArrayAggWindowStateV2>) {
             this->data(state).result_column->resize(0);
         }

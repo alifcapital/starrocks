@@ -924,6 +924,17 @@ Status Aggregator::_reset_state(RuntimeState* state, bool reset_sink_complete) {
     if (reset_sink_complete) {
         _is_sink_complete = false;
     }
+    _cache_conscious_active = false;
+    _cache_conscious_ca_spilled = false;
+    _cache_conscious_ca.reset();
+    _cache_conscious_fa.reset();
+    _prune_session.reset();
+    _cache_conscious_result_chunk.reset();
+    _cache_conscious_result_ready = false;
+    _cache_conscious_result_emitted = false;
+    _cache_conscious_pruned_mask.clear();
+    _cc_input_counts = nullptr;
+    _cc_count_deltas.reset();
     _inline_chunk = {}; // any pending fold died with the discarded input
     _it_hash.reset();
     _num_rows_processed = 0;

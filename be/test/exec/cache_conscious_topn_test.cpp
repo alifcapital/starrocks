@@ -174,9 +174,13 @@ TEST(CacheConsciousTopNTest, ModestHeadHugeTailStillPrunes) {
     for (uint64_t i = 0; i < 20; ++i) {
         groups[i].count = 200 + static_cast<int64_t>(i); // k-th highest exact ~ a couple hundred
     }
-    CacheConsciousTopN engine(/*k=*/5, /*fa_capacity=*/128, /*fanout=*/256);
+    // Exercise radix pruning directly: this distribution intentionally fails the separate
+    // 15% skew gate, so top_n() would correctly use its full-ranking fallback.
+    CacheConsciousCa ca(/*k=*/5, /*fa_capacity=*/128, /*fanout=*/256);
+    std::vector<Group> fa(groups.begin(), groups.begin() + 20);
+    for (size_t i = 20; i < groups.size(); ++i) ca.route(groups[i].key, groups[i].count);
     size_t pruned = 0;
-    auto got = engine.top_n(groups, &pruned);
+    auto got = ca.finalize(std::move(fa), &pruned);
 
     expect_same(got, brute_force_top_n(groups, 5));
     // Most of the count-1 tail must be pruned, not resolved one partition at a time.
@@ -313,9 +317,9 @@ TEST(CacheConsciousCaTest, SpillStatAndBytesInvariants) {
         for (size_t pid = 0; pid < ca.fanout(); ++pid) s += ca.partition_upper_bound(pid);
         return s;
     };
-    // After routing: stat == rows, physical bytes == rows * sizeof(Group).
+    // Revocable bytes include whole blocks, not just their occupied rows.
     EXPECT_EQ(total_ub(), n);
-    EXPECT_EQ(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
+    EXPECT_GT(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
 
     // Spill every partition out: the stat stays (prune still works), the RAM bytes drop to zero.
     std::vector<std::pair<uint64_t, int64_t>> spilled;
@@ -328,7 +332,7 @@ TEST(CacheConsciousCaTest, SpillStatAndBytesInvariants) {
     // Restore: bytes come back, the stat is NOT double-counted (restore_ does not bump it).
     for (const auto& [key, partial] : spilled) ca.restore_tuple(key, partial);
     EXPECT_EQ(total_ub(), n);
-    EXPECT_EQ(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
+    EXPECT_GT(ca.physical_tuples_bytes(), static_cast<size_t>(n) * sizeof(Group));
 }
 
 // Spilling the CA (take_) then restoring it must not change the local top-n: identical to a run
@@ -526,6 +530,52 @@ TEST(CacheConsciousFaTest, FuzzProbeRouteFinalizeMatchesBruteForce) {
         for (const auto& p : fap) fg.push_back({p.first, p.second});
         expect_same(ca.finalize(std::move(fg)), brute_force_stream_top_n(events, k));
     }
+}
+
+TEST(CacheConsciousFaTest, SwapBloomAndHistogramMatchBruteForce) {
+    std::mt19937_64 rng(0x51A9);
+    size_t promotions = 0;
+    size_t evictions = 0;
+    for (int trial = 0; trial < 200; ++trial) {
+        SCOPED_TRACE(trial);
+        const int64_t k = 1 + rng() % 7;
+        const size_t capacity = 8;
+        CacheConsciousFa fa;
+        CacheConsciousCa ca(k, capacity, 1 + rng() % 8, /*swap_cooldown_chunks=*/1);
+        std::vector<std::pair<uint64_t, int64_t>> events;
+        for (uint64_t key = 0; key < capacity; ++key) events.emplace_back(key, rng() % 10);
+        fa.build(events);
+        fa.seed_pinned(0);
+        fa.seed_pinned(20);
+        fa.seed_pinned(1000); // An absent histogram value must never become an output group.
+        fa.build_bloom();
+        fa.set_bloom_active(true);
+        ca.prime_swap(fa.kth_largest_count(k));
+        for (size_t batch = 0; batch < 80; ++batch) {
+            const size_t n = 1 + rng() % 100;
+            std::vector<uint64_t> keys(n);
+            std::vector<int64_t> weights(n);
+            std::vector<uint8_t> selection(n);
+            for (size_t i = 0; i < n; ++i) {
+                // Rotate the hot key so promotions, evictions and re-promotions all occur.
+                keys[i] = rng() % 5 ? 10 + batch / 10 : rng() % 25;
+                weights[i] = trial % 5 == 0 ? 0 : rng() % 4;
+                events.emplace_back(keys[i], weights[i]);
+            }
+            fa.probe_and_count(keys.data(), weights.data(), selection.data(), n);
+            ca.route_batch(keys.data(), weights.data(), selection.data(), n);
+            ca.swap_pass(&fa);
+        }
+        promotions += ca.swap_promotions();
+        evictions += ca.swap_evictions();
+        std::vector<std::pair<uint64_t, int64_t>> pairs;
+        fa.collect(&pairs);
+        std::vector<Group> groups;
+        for (const auto& [key, count] : pairs) groups.push_back({key, count});
+        expect_same(ca.finalize(std::move(groups)), brute_force_stream_top_n(events, k));
+    }
+    EXPECT_GT(promotions, 0);
+    EXPECT_GT(evictions, 0);
 }
 
 TEST(CacheConsciousTopNTest, FuzzMatchesBruteForce) {
