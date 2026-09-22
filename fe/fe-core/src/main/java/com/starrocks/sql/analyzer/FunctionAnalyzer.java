@@ -574,8 +574,7 @@ public class FunctionAnalyzer {
             // Validate second parameter (percentile) is numeric or array type
             validatePercentileParameter(functionCallExpr.getChild(1), "second", 
                     "percentile_approx", functionCallExpr.getPos());
-            // NULL is allowed past validate-numeric and routed through clamp,
-            // which canonicalizes it to DEFAULT just like out-of-range ints.
+            // NULL uses DEFAULT; finite integer values clamp to the nearest bound.
             if (children.size() == 3) {
                 Expr cArg = functionCallExpr.getChild(2);
                 if (!(cArg instanceof NullLiteral)) {
@@ -605,8 +604,7 @@ public class FunctionAnalyzer {
             // Validate third parameter (percentile) is numeric or array type
             validatePercentileParameter(functionCallExpr.getChild(2), "third", 
                     "percentile_approx_weighted", functionCallExpr.getPos());
-            // NULL is allowed past validate-numeric and routed through clamp,
-            // which canonicalizes it to DEFAULT just like out-of-range ints.
+            // NULL uses DEFAULT; finite integer values clamp to the nearest bound.
             if (children.size() == 4) {
                 Expr cArg = functionCallExpr.getChild(3);
                 if (!(cArg instanceof NullLiteral)) {
