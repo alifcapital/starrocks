@@ -372,13 +372,14 @@ public class AnalyzeAggregateTest {
         // Non-constant compression (column ref) must be rejected up front rather than
         // reaching BE, where get_const_value would do an invalid ConstColumn downcast.
         analyzeFail("select percentile_approx_raw(percentile_hash(tf, tc), 0.5) from tall",
-                "compression must be an integer literal");
-        // Non-integer literal compression is rejected.
-        analyzeFail("select percentile_approx_raw(percentile_hash(tf, 5000.0), 0.5) from tall",
-                "compression must be an integer literal");
-        // Casts and arithmetic expressions for compression are rejected.
-        analyzeFail("select percentile_approx_raw(percentile_hash(tf, CAST(5000 AS DOUBLE)), 0.5) from tall",
-                "compression must be an integer literal");
+                "compression must be a constant integer value");
+        for (String compression : new String[] {"5000.0", "CAST(5000 AS DOUBLE)", "2500 + 2500"}) {
+            analyzeSuccess("select percentile_approx_raw(percentile_hash(tf, " + compression + "), 0.5) from tall");
+        }
+        for (String compression : new String[] {"5000.5", "CAST(5000.5 AS DOUBLE)", "5000 + 0.5"}) {
+            analyzeFail("select percentile_approx_raw(percentile_hash(tf, " + compression + "), 0.5) from tall",
+                    "compression must be an integer value");
+        }
     }
 
     @Test
