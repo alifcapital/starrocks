@@ -65,6 +65,59 @@ void expect_same(const std::vector<Group>& got, const std::vector<Group>& want) 
 
 } // namespace
 
+TEST(CacheConsciousTopNTest, ArenaAppendAfterPartialFlush) {
+    // Partial reads must not leave holes when later batches cross a block boundary.
+    for (size_t prefix : {1, 2, 3}) {
+        CacheConsciousTopN::GroupArena arena;
+        const size_t rows = arena.block_slots() * 3 + prefix;
+        for (size_t i = 0; i < rows; ++i) {
+            arena.push_back({i, static_cast<int64_t>(i % 17)});
+            if (i + 1 == prefix) arena.flush();
+        }
+        size_t i = 0;
+        for (Group g : arena) {
+            ASSERT_LT(i, rows);
+            EXPECT_EQ(i, g.key);
+            EXPECT_EQ(i % 17, g.count);
+            ++i;
+        }
+        ASSERT_EQ(rows, i);
+        for (i = 0; i < rows; ++i) {
+            EXPECT_EQ(i, arena.at(i).key);
+        }
+        CacheConsciousTopN::GroupArena copy(arena);
+        CacheConsciousTopN::GroupArena moved(std::move(copy));
+        i = 0;
+        for (Group g : moved) EXPECT_EQ(i++, g.key);
+        EXPECT_EQ(rows, i);
+        EXPECT_TRUE(copy.empty());
+    }
+}
+
+TEST(CacheConsciousFaTest, HistogramHintsDoNotCreateGroups) {
+    CacheConsciousFa fa;
+    fa.build({{1, 0}, {2, 10}});
+    fa.seed_pinned(1); // A real COUNT(nullable) group may have a zero count.
+    fa.seed_pinned(3); // This histogram key never reaches the aggregate.
+    fa.seed_pinned(4);
+    fa.build_bloom();
+    fa.set_bloom_active(true);
+    EXPECT_EQ(INT64_MIN, fa.kth_largest_count(3));
+    uint64_t keys[] = {4, 2, 99};
+    int64_t weights[] = {0, 3, 0};
+    uint8_t selection[3] = {};
+    EXPECT_EQ(2, fa.probe_and_count(keys, weights, selection, 3));
+    EXPECT_EQ(0, selection[0]);
+    EXPECT_EQ(1, selection[2]);
+    std::vector<std::pair<uint64_t, int64_t>> collected;
+    fa.collect(&collected);
+    std::sort(collected.begin(), collected.end());
+    const std::vector<std::pair<uint64_t, int64_t>> expected{{1, 0}, {2, 13}, {4, 0}};
+    EXPECT_EQ(expected, collected);
+    EXPECT_EQ(0, fa.kth_largest_count(3));
+    EXPECT_EQ(INT64_MIN, fa.kth_largest_count(4));
+}
+
 TEST(CacheConsciousTopNTest, SkewTestUniformVsSkewed) {
     // Uniform: the top-k holds only k/n of the mass (10/1000), far below the 0.15 gate -> not skewed.
     std::vector<int64_t> uniform(1000, 7);

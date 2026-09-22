@@ -122,6 +122,7 @@ public:
 
 private:
     static constexpr size_t DEFAULT_L2_CACHE_SIZE = 1 * 1024 * 1024;
+    static constexpr size_t DEFAULT_L3_CACHE_SIZE = 32 * 1024 * 1024;
 
     /// Initialize NUMA-related state - called from Init();
     static void _init_numa();

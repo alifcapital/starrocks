@@ -41,6 +41,7 @@ bool SpillableAggregateBlockingSourceOperator::has_output() const {
     if (_is_finished) {
         return false;
     }
+    RETURN_TRUE_IF_SPILL_TASK_ERROR(_aggregator->spiller());
     // Cache-conscious with a spilled CA: restore the CA pull-driven, then emit one result chunk.
     if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
         if (!_aggregator->is_sink_complete()) {

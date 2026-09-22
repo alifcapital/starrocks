@@ -74,6 +74,7 @@ public:
             }
             auto it = _map.find(key, h);
             if (it != _map.end()) {
+                if (!_unseen_pinned.empty()) _unseen_pinned.erase(key);
                 it->second += (partials != nullptr) ? partials[i] : 1;
                 sel[i] = 0;
                 ++hits;
@@ -88,6 +89,7 @@ public:
     void collect(std::vector<std::pair<uint64_t, int64_t>>* out) const {
         out->reserve(_map.size());
         for (const auto& [key, count] : _map) {
+            if (!_unseen_pinned.empty() && _unseen_pinned.count(key) != 0) continue;
             out->emplace_back(key, count);
         }
     }
@@ -104,8 +106,10 @@ public:
         std::vector<int64_t> c;
         c.reserve(_map.size());
         for (const auto& kv : _map) {
+            if (!_unseen_pinned.empty() && _unseen_pinned.count(kv.first) != 0) continue;
             c.push_back(kv.second);
         }
+        if (c.size() < static_cast<size_t>(k)) return INT64_MIN;
         std::nth_element(c.begin(), c.begin() + (k - 1), c.end(), std::greater<int64_t>());
         return c[k - 1];
     }
@@ -122,7 +126,9 @@ public:
     // first evict_min victim). A key already present (its rows came pre-flip) keeps its real count and
     // is just pinned. Call before build_bloom so the bloom covers the seeded key.
     void seed_pinned(uint64_t key) {
-        _map.try_emplace(key, 0);
+        if (_map.try_emplace(key, 0).second) {
+            _unseen_pinned.insert(key);
+        }
         _pinned.insert(key);
     }
 
@@ -192,6 +198,8 @@ private:
     }
 
     Map _map;
+    // Histogram keys are hints; a group exists only after an input row reaches it.
+    phmap::flat_hash_set<uint64_t> _unseen_pinned;
     // FE-supplied MCV (known-hot) keys, pinned into FA and exempt from swap eviction. Small (<= the
     // histogram MCV size, ~100), so the membership check in evict_min is cheap.
     phmap::flat_hash_set<uint64_t> _pinned;

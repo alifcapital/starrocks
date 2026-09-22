@@ -3117,9 +3117,23 @@ Status Aggregator::probe_cache_conscious_fa(Chunk* chunk, size_t chunk_size) {
     }
     const LogicalType key_lt = _group_by_types[0].result_type.type;
     const bool merge_input = _is_merge_funcs[0] || use_intermediate;
-    const Int64Column* cnt_col =
-            merge_input ? down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()))
-                        : nullptr;
+    _cc_input_counts = nullptr;
+    if (merge_input) {
+        _cc_input_counts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()));
+    } else if (!_agg_input_columns[0].empty() && _agg_input_columns[0][0]->has_null()) {
+        // COUNT(expr) preserves groups with a zero count, but NULL rows add no weight.
+        const Column* input = _agg_input_columns[0][0].get();
+        if (_cc_count_deltas == nullptr) {
+            _cc_count_deltas = Int64Column::create();
+        }
+        auto& deltas = _cc_count_deltas->get_data();
+        deltas.resize(chunk_size);
+        for (size_t i = 0; i < chunk_size; ++i) {
+            deltas[i] = input->is_null(i) ? 0 : 1;
+        }
+        _cc_input_counts = _cc_count_deltas.get();
+    }
+    const Int64Column* cnt_col = _cc_input_counts;
     const Column* key_col = ColumnHelper::get_data_column(_group_by_columns[0].get());
     _streaming_selection.assign(chunk_size, 0);
     CacheConsciousFa* fa = _cache_conscious_fa.get();
@@ -3127,6 +3141,8 @@ Status Aggregator::probe_cache_conscious_fa(Chunk* chunk, size_t chunk_size) {
     size_t fa_hits = 0;
     switch (key_lt) {
     case TYPE_BOOLEAN:
+        fa_hits = probe_cc_fa<UInt8Column>(fa, key_col, cnt_col, sel, chunk_size);
+        break;
     case TYPE_TINYINT:
         fa_hits = probe_cc_fa<Int8Column>(fa, key_col, cnt_col, sel, chunk_size);
         break;
@@ -3169,14 +3185,13 @@ void Aggregator::route_cache_conscious_cold_rows(size_t chunk_size) {
     // plan merges the partial count from the first input column, a 1-phase colocate count(*) has
     // no input column so each row counts as 1.
     const LogicalType key_lt = _group_by_types[0].result_type.type;
-    const bool merge_input = _is_merge_funcs[0] || _use_intermediate_as_input();
-    const Int64Column* cnt_col =
-            merge_input ? down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()))
-                        : nullptr;
+    const Int64Column* cnt_col = _cc_input_counts;
     const Column* key_col = ColumnHelper::get_data_column(_group_by_columns[0].get());
     CacheConsciousCa* ca = _cache_conscious_ca.get();
     switch (key_lt) {
     case TYPE_BOOLEAN:
+        route_cold_rows<UInt8Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
+        break;
     case TYPE_TINYINT:
         route_cold_rows<Int8Column>(ca, key_col, cnt_col, _streaming_selection, chunk_size);
         break;
@@ -3424,6 +3439,8 @@ Status Aggregator::restore_cache_conscious_chunk(RuntimeState* state) {
     size_t pruned_rows = 0;
     switch (key_lt) {
     case TYPE_BOOLEAN:
+        pruned_rows = restore_cold_tuples<UInt8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        break;
     case TYPE_TINYINT:
         pruned_rows = restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
         break;

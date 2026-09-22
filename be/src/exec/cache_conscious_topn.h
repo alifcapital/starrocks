@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <numeric>
 #include <queue>
@@ -97,17 +98,16 @@ public:
             }
             return *this;
         }
-        GroupArena(const GroupArena& o) {
+        GroupArena(const GroupArena& o) : GroupArena() {
             for (Group g : o) push_back(g);
         }
         GroupArena& operator=(const GroupArena& o) {
             if (this != &o) {
-                _free();
-                for (Group g : o) push_back(g);
+                *this = GroupArena(o);
             }
             return *this;
         }
-        explicit GroupArena(const std::vector<Group>& v) {
+        explicit GroupArena(const std::vector<Group>& v) : GroupArena() {
             for (const auto& g : v) push_back(g);
         }
 
@@ -144,7 +144,7 @@ public:
         public:
             const_iterator(const GroupArena* a, size_t blk, size_t idx) : _a(a), _blk(blk), _idx(idx) {}
             Group operator*() const {
-                const uint64_t* blk = _a->_blocks[_blk];
+                const uint64_t* blk = _a->_blocks[_blk].get();
                 return Group{blk[_idx * 2], static_cast<int64_t>(blk[_idx * 2 + 1])};
             }
             const_iterator& operator++() {
@@ -181,7 +181,7 @@ public:
         // Lets the prune locality probe read scattered windows without iterating the whole arena.
         Group at(size_t i) const {
             const size_t bs = block_slots();
-            const uint64_t* blk = _blocks[i / bs];
+            const uint64_t* blk = _blocks[i / bs].get();
             const size_t j = i % bs;
             return Group{blk[j * 2], static_cast<int64_t>(blk[j * 2 + 1])};
         }
@@ -198,32 +198,35 @@ public:
         // multiple of 16; the alignment test below is a defensive guard on that invariant.
         void _flush_staging() {
             if (_stage_n == 0) return;
-            const size_t slots = _stage_n * 2;
-            if (_blocks.empty() || _tail_n + _stage_n > block_slots()) {
-                auto* blk = static_cast<uint64_t*>(::operator new(kBlockBytes, std::align_val_t(64)));
-                _blocks.push_back(blk);
-                _tail = blk;
-                _tail_n = 0;
-            }
-            const size_t off = _tail_n * 2;
-            uint64_t* dst = _tail + off;
+            size_t copied = 0;
+            while (copied < _stage_n) {
+                if (_blocks.empty() || _tail_n == block_slots()) {
+                    Block block(static_cast<uint64_t*>(::operator new(kBlockBytes, std::align_val_t(64))));
+                    _blocks.push_back(std::move(block));
+                    _tail = _blocks.back().get();
+                    _tail_n = 0;
+                }
+                // An earlier partial flush may leave fewer than four slots in this block.
+                // Fill it completely before allocating the next: logical indexing assumes
+                // every block except the last is full.
+                const size_t count = std::min(_stage_n - copied, block_slots() - _tail_n);
+                uint64_t* dst = _tail + _tail_n * 2;
+                const uint64_t* src = _staging + copied * 2;
 #if defined(__x86_64__)
-            if (_stage_n == staging_slots() && (reinterpret_cast<uintptr_t>(dst) & 15) == 0) {
-                __m128i a = _mm_load_si128(reinterpret_cast<const __m128i*>(_staging));
-                __m128i b = _mm_load_si128(reinterpret_cast<const __m128i*>(_staging + 2));
-                __m128i c = _mm_load_si128(reinterpret_cast<const __m128i*>(_staging + 4));
-                __m128i d = _mm_load_si128(reinterpret_cast<const __m128i*>(_staging + 6));
-                _mm_stream_si128(reinterpret_cast<__m128i*>(dst), a);
-                _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 2), b);
-                _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 4), c);
-                _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 6), d);
-            } else {
-                std::memcpy(dst, _staging, slots * sizeof(uint64_t));
-            }
+                if (count == staging_slots() && (reinterpret_cast<uintptr_t>(dst) & 63) == 0) {
+                    for (size_t i = 0; i < kStagingU64s; i += 2) {
+                        _mm_stream_si128(reinterpret_cast<__m128i*>(dst + i),
+                                         _mm_load_si128(reinterpret_cast<const __m128i*>(src + i)));
+                    }
+                } else {
+                    std::memcpy(dst, src, count * sizeof(Group));
+                }
 #else
-            std::memcpy(dst, _staging, slots * sizeof(uint64_t));
+                std::memcpy(dst, src, count * sizeof(Group));
 #endif
-            _tail_n += _stage_n;
+                _tail_n += count;
+                copied += count;
+            }
             _stage_n = 0;
         }
 
@@ -240,7 +243,6 @@ public:
             o._stage_n = 0;
         }
         void _free() {
-            for (auto* b : _blocks) ::operator delete(b, std::align_val_t(64));
             _blocks.clear();
             _tail = nullptr;
             _tail_n = 0;
@@ -251,7 +253,11 @@ public:
         // arena object. The rest of the metadata follows in line 1.
         alignas(64) uint64_t _staging[kStagingU64s] = {};
         size_t _stage_n = 0;
-        std::vector<uint64_t*> _blocks;
+        struct BlockDeleter {
+            void operator()(uint64_t* block) const { ::operator delete(block, std::align_val_t(64)); }
+        };
+        using Block = std::unique_ptr<uint64_t, BlockDeleter>;
+        std::vector<Block> _blocks;
         uint64_t* _tail = nullptr;
         size_t _tail_n = 0;
         size_t _size = 0;
@@ -580,6 +586,9 @@ private:
     // high-distinct buffer whose keys arrive in runs still reads as collapsible.
     static double probe_locality(const GroupArena& buf, size_t seg_len, size_t n_segments, uint64_t* top_key = nullptr,
                                  double* top_fraction = nullptr) {
+#if defined(__x86_64__)
+        _mm_sfence(); // Complete streaming writes before sampling the flushed prefix.
+#endif
         const size_t n = buf.flushed_size();
         if (n == 0) {
             if (top_key != nullptr) *top_key = 0;

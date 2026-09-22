@@ -707,6 +707,8 @@ protected:
     // post-flip chunks probe + count through it, and collect_cache_conscious_topn_groups reads it
     // rather than the now-dormant hash map.
     std::unique_ptr<CacheConsciousFa> _cache_conscious_fa;
+    Int64Column::Ptr _cc_count_deltas;
+    const Int64Column* _cc_input_counts = nullptr;
     ChunkPtr _cache_conscious_result_chunk;
     bool _cache_conscious_result_ready = false;
     bool _cache_conscious_result_emitted = false;
@@ -957,7 +959,7 @@ protected:
 
     int64_t get_two_level_threahold() {
         if (config::two_level_memory_threshold < 0) {
-            return agg::two_level_memory_threshold;
+            return agg::two_level_memory_threshold();
         }
         return config::two_level_memory_threshold;
     }
