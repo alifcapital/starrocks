@@ -252,6 +252,11 @@ TEST_F(TDigestTest, SerializeSizeMatchesSerialized) {
     std::vector<uint8_t> buffer(declared, 0xCC);
     const size_t written = digest.serialize(buffer.data());
     EXPECT_EQ(declared, written);
+    constexpr size_t header = 5 * sizeof(float) + 2 * sizeof(size_t) + 3 * sizeof(uint32_t);
+    const size_t cumulative_count = digest.processed().size() + 1;
+    EXPECT_EQ(header + (digest.processed().size() + digest.unprocessed().size()) * 2 * sizeof(float) +
+                      cumulative_count * sizeof(float),
+              declared);
 }
 
 TEST_F(TDigestTest, SerializeRoundTrip) {
@@ -405,6 +410,54 @@ TEST_F(TDigestTest, Montonicity) {
         double q = digest.cdf(z);
         EXPECT_GE(q, lastQuantile);
         lastQuantile = q;
+    }
+}
+
+TEST_F(TDigestTest, DeserializeRejectsInconsistentProcessedState) {
+    TDigest source(1000);
+    source.add(10);
+    source.add(20);
+    source.compress();
+    ASSERT_EQ(2, source.processed().size());
+    std::vector<uint8_t> valid(source.serialize_size());
+    source.serialize(valid.data());
+    constexpr size_t preamble = 5 * sizeof(float) + 2 * sizeof(size_t);
+    const size_t cumulative_offset = preamble + 2 * sizeof(uint32_t) + 4 * sizeof(float);
+    for (uint32_t count : {0, 1, 2}) {
+        auto buffer = valid;
+        memcpy(buffer.data() + cumulative_offset, &count, sizeof(count));
+        TDigest decoded;
+        ASSERT_FALSE(decoded.deserialize(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
+        EXPECT_TRUE(std::isnan(decoded.quantile(0.5)));
+    }
+    for (float compression :
+         {0.0f, -1.0f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        auto buffer = valid;
+        memcpy(buffer.data(), &compression, sizeof(compression));
+        TDigest decoded;
+        EXPECT_FALSE(decoded.deserialize(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
+    }
+    for (float weight : {0.0f, -1.0f, std::numeric_limits<float>::infinity()}) {
+        auto buffer = valid;
+        memcpy(buffer.data() + preamble + sizeof(uint32_t) + sizeof(float), &weight, sizeof(weight));
+        TDigest decoded;
+        EXPECT_FALSE(decoded.deserialize(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
+    }
+}
+
+TEST_F(TDigestTest, DeserializeAcceptsEmptyAndUnprocessedStates) {
+    for (int count : {0, 1, 30, 79999}) {
+        TDigest source(10000);
+        for (int i = 0; i < count; ++i) source.add(i);
+        std::vector<uint8_t> buffer(source.serialize_size());
+        source.serialize(buffer.data());
+        TDigest decoded;
+        ASSERT_TRUE(decoded.deserialize(reinterpret_cast<const char*>(buffer.data()), buffer.size())) << count;
+        if (count == 0) {
+            EXPECT_TRUE(std::isnan(decoded.quantile(0.5)));
+        } else {
+            EXPECT_NEAR((count - 1) / 2.0, decoded.quantile(0.5), 1.0);
+        }
     }
 }
 

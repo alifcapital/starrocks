@@ -90,6 +90,7 @@ public:
     // tag and leaves the digest in an empty state.
     bool deserialize(const char* data, size_t size) {
         if (size < 1) {
+            _tdigest = TDigest();
             LOG(WARNING) << "PercentileValue::deserialize: missing type tag";
             return false;
         }
@@ -98,6 +99,7 @@ public:
             _type = TDIGEST;
             break;
         default:
+            _tdigest = TDigest();
             LOG(WARNING) << "PercentileValue::deserialize: unknown type tag " << static_cast<int>(*data);
             return false;
         }

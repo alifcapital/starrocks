@@ -127,7 +127,7 @@ public:
     TDigest() : TDigest(1000) {}
     explicit TDigest(Value compression) : TDigest(compression, 0) {}
     explicit TDigest(const char* src) { this->deserialize(src); }
-    explicit TDigest(const Slice& src) { this->deserialize(src.data); }
+    explicit TDigest(const Slice& src) { this->deserialize(src.data, src.size); }
     TDigest(Value compression, Index bufferSize) : TDigest(compression, bufferSize, 0) {}
     TDigest(Value compression, Index unmergedSize, Index mergedSize);
     TDigest(std::vector<Centroid>&& processed, std::vector<Centroid>&& unprocessed, Value compression,

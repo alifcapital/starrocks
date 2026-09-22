@@ -356,6 +356,12 @@ Value TDigest::quantileProcessed(Value q) const {
     }
 
     auto iter = std::lower_bound(_cumulative.cbegin(), _cumulative.cend(), index);
+    if (iter == _cumulative.cbegin()) {
+        return _min;
+    }
+    if (iter == _cumulative.cend()) {
+        return _max;
+    }
 
     if (iter + 1 != _cumulative.cend()) {
         auto i = std::distance(_cumulative.cbegin(), iter);
@@ -568,6 +574,33 @@ bool TDigest::deserialize(const char* data, size_t size) {
     _cumulative.resize(cumulative_count);
     if (cumulative_count > 0) {
         memcpy(_cumulative.data(), reader, cumulative_bytes);
+    }
+    auto valid_centroids = [](const std::vector<Centroid>& centroids) {
+        return std::all_of(centroids.begin(), centroids.end(), [](const Centroid& c) {
+            return std::isfinite(c.mean()) && std::isfinite(c.weight()) && c.weight() > 0;
+        });
+    };
+    bool valid =
+            std::isfinite(_compression) && _compression > 0 &&
+            static_cast<double>(_compression) < static_cast<double>(std::numeric_limits<Index>::max()) / 8 &&
+            _max_processed > 0 && _max_unprocessed > 0 && std::isfinite(_processed_weight) && _processed_weight >= 0 &&
+            std::isfinite(_unprocessed_weight) && _unprocessed_weight >= 0 && valid_centroids(_processed) &&
+            valid_centroids(_unprocessed) &&
+            std::is_sorted(_processed.begin(), _processed.end(), CentroidComparator{}) &&
+            std::all_of(_cumulative.begin(), _cumulative.end(), [](Weight w) { return std::isfinite(w) && w >= 0; }) &&
+            std::is_sorted(_cumulative.begin(), _cumulative.end());
+    if (_processed.empty()) {
+        valid = valid && _processed_weight == 0 &&
+                (_cumulative.empty() || (_cumulative.size() == 1 && _cumulative[0] == 0));
+    } else {
+        valid = valid && _processed_weight > 0 && _cumulative.size() == _processed.size() + 1 && std::isfinite(_min) &&
+                std::isfinite(_max) && _min <= _processed.front().mean() && _max >= _processed.back().mean();
+    }
+    valid = valid && (_unprocessed.empty() ? _unprocessed_weight == 0 : _unprocessed_weight > 0);
+    if (!valid) {
+        LOG(WARNING) << "TDigest::deserialize: invalid digest state";
+        reset_to_empty();
+        return false;
     }
     return true;
 }
