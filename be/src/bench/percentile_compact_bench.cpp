@@ -23,7 +23,7 @@
 //   - groupby: convert + merge_batch() scattering records across N states (the
 //     GROUP BY merge phase, which stays per-row).
 // rows_per_s lets them be compared directly; bytes_per_chunk shows the wire
-// size (~77 B/row legacy vs 9 B/row compact).
+// size (65 B/row legacy vs 9 B/row compact).
 //
 // Build & run:
 //   cmake -DWITH_BENCH=ON -DCMAKE_BUILD_TYPE=Release -S be -B be/build_Release
