@@ -249,7 +249,7 @@ public:
         // regardless of the flag: serialize_to_column is reused by the agg_state
         // combinator for persisted values, which a later _merge/_union must read
         // without an original quantile in its context. Only pass-through
-        // (convert_to_serialize_format) uses the compact RAW form.
+        // (convert_to_exchange_format) uses the compact RAW form.
         size_t pv_size = data(state).percentile.serialize_size();
         // Avoid a stack VLA: a high-compression digest can serialize to tens of
         // KB of centroids, large enough to risk stack overflow.
@@ -751,10 +751,8 @@ public:
         result->get_offset().resize(chunk_size + 1);
         size_t old_size = bytes.size();
 
-        // [count:4][q1..qn:8n][PercentileValue blob] per row. Array variants do
-        // not use the compact RAW form: embedding count+quantiles to keep RAW
-        // self-contained would make it variable-length and indistinguishable from
-        // a legacy record by size.
+        // Persisted records include count and quantiles. The inherited exchange
+        // conversion may use RAW because its receiver retains the constant quantiles.
         const auto* array_column = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(src[1].get()));
         const auto* elements =
                 down_cast<const DoubleColumn*>(ColumnHelper::get_data_column(array_column->elements_column().get()));

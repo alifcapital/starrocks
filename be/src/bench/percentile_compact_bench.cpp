@@ -171,7 +171,7 @@ static void run_roundtrip_batch(benchmark::State& state, bool compact) {
 
 // GROUP BY merge phase: scatter the n records across `groups` states via
 // merge_batch (a different state per row). This path stays per-row regardless of
-// the override, so it only reflects the byte_size_in_memory inlining win.
+// the batch override, while still exercising compact conversion and per-record merging.
 static void run_groupby(benchmark::State& state, bool compact) {
     CountingAllocatorWithHook allocator;
     tls_agg_state_allocator = &allocator;
