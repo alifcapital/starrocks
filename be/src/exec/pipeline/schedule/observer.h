@@ -37,24 +37,26 @@ class PipelineObserver {
 public:
     PipelineObserver(DriverRawPtr driver) : _driver(driver) {}
 
+    virtual ~PipelineObserver() = default;
+
     DISALLOW_COPY_AND_MOVE(PipelineObserver);
 
-    void source_trigger() {
+    virtual void source_trigger() {
         _active_event(SOURCE_CHANGE_EVENT);
         _update([this](int event) { _do_update(event); });
     }
 
-    void sink_trigger() {
+    virtual void sink_trigger() {
         _active_event(SINK_CHANGE_EVENT);
         _update([this](int event) { _do_update(event); });
     }
 
-    void cancel_trigger() {
+    virtual void cancel_trigger() {
         _active_event(CANCEL_EVENT);
         _update([this](int event) { _do_update(event); });
     }
 
-    void all_trigger() {
+    virtual void all_trigger() {
         _active_event(SOURCE_CHANGE_EVENT | SINK_CHANGE_EVENT);
         _update([this](int event) { _do_update(event); });
     }
