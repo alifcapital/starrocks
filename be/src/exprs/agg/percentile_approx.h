@@ -402,12 +402,12 @@ public:
         // merge_record()'s RAW branch, so the digest stays byte-identical. Mixed or
         // legacy ranges fall back to the shared per-record path.
         if (size > 0 && offsets[start + size] - offsets[start] == static_cast<uint64_t>(size) * RAW_RECORD_SIZE &&
-            static_cast<uint8_t>(binary_column->raw_bytes()[offsets[start]]) == RECORD_RAW) {
+            static_cast<uint8_t>(binary_column->get_immutable_bytes().data()[offsets[start]]) == RECORD_RAW) {
             if (UNLIKELY(!data(state).compression_initialized)) {
                 data(state).reinit_with_compression(clamp_compression_factor(
                         ColumnHelper::get_const_value<TYPE_DOUBLE>(compression_const_from_ctx(ctx))));
             }
-            const uint8_t* p = binary_column->raw_bytes() + offsets[start];
+            const uint8_t* p = binary_column->get_immutable_bytes().data() + offsets[start];
             for (size_t i = 0; i < size; ++i, p += RAW_RECORD_SIZE) {
                 float mean;
                 float weight;
