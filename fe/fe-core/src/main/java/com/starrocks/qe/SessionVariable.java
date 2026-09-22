@@ -1997,7 +1997,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // enable only after a full rolling upgrade of all BE and CN, because the compact
     // percentile intermediate format is wire-incompatible with old workers.
     @VarAttr(name = ENABLE_PERCENTILE_COMPACT_INTERMEDIATE, flag = VariableMgr.GLOBAL)
-    private boolean enablePercentileCompactIntermediate = false;
+    private volatile boolean enablePercentileCompactIntermediate = false;
 
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
@@ -5103,6 +5103,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isEnableQueryCache() {
         return isEnablePipelineEngine() && enableQueryCache;
+    }
+
+    // One snapshot per statement keeps the cache key and worker options consistent.
+    public void refreshPercentileCompactIntermediate(VariableMgr variableMgr) {
+        enablePercentileCompactIntermediate =
+                variableMgr.getDefaultSessionVariable().enablePercentileCompactIntermediate;
     }
 
     public boolean isEnablePercentileCompactIntermediate() {
