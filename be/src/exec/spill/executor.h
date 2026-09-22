@@ -21,6 +21,7 @@
 #include "common/compiler_util.h"
 #include "exec/pipeline/pipeline_fwd.h"
 #include "exec/pipeline/query_context.h"
+#include "exec/spill/serde.h"
 #include "exec/workgroup/scan_executor.h"
 #include "exec/workgroup/scan_task_queue.h"
 #include "exec/workgroup/work_group_fwd.h"
@@ -93,6 +94,9 @@ private:
 
 struct SpillIOTaskContext {
     bool use_local_io_executor = true;
+    // the serialize buffer survives yields and re-submissions of the task,
+    // so it is allocated once per IO task instead of once per resumption
+    SerdeContext serde_ctx;
 };
 using SpillIOTaskContextPtr = std::shared_ptr<SpillIOTaskContext>;
 
