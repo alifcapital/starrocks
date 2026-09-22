@@ -1101,6 +1101,26 @@ TEST_F(AggregateTest, CollectMemoryBatchResetAndDestroy) {
     EXPECT_EQ(0, ctx->mem_usage());
 }
 
+TEST_F(AggregateTest, DistinctArrayWindowAccountsOwnedStringPool) {
+    const auto* func = get_window_function("array_agg_distinct", TYPE_VARCHAR, TYPE_ARRAY, false);
+    ASSERT_NE(nullptr, func);
+    auto values = BinaryColumn::create();
+    for (int i = 0; i < 1000; ++i) {
+        values->append(std::string(1024, 'x') + std::to_string(i));
+    }
+    const Column* input = values.get();
+    EXPECT_EQ(0, ctx->mem_usage());
+    auto state = ManagedAggrState::create(ctx, func);
+    for (int pass = 0; pass < 2; ++pass) {
+        func->update_batch_single_state(ctx, values->size(), &input, state->state());
+        // Distinct strings are copied into the state's own pool before output.
+        EXPECT_GE(ctx->mem_usage(), 1024 * 1000);
+        func->reset(ctx, {}, state->state());
+    }
+    state.reset();
+    EXPECT_EQ(0, ctx->mem_usage());
+}
+
 TEST_F(AggregateTest, test_group_concat_const_seperator) {
     std::vector<TypeDescriptor> arg_types = {TypeDescriptor::from_logical_type(TYPE_VARCHAR),
                                              TypeDescriptor::from_logical_type(TYPE_VARCHAR)};

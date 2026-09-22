@@ -169,6 +169,16 @@ struct ArrayAggWindowState : public ArrayAggAggregateState<PT, is_distinct, MyHa
             this->mem_pool.clear();
         }
     }
+
+    int64_t mem_usage() const {
+        int64_t usage = Base::mem_usage();
+        if constexpr (lt_is_string<PT>) {
+            // Window states own their string-key pool; unlike ordinary aggregation,
+            // these bytes are not part of the operator's shared mem pool.
+            usage += this->mem_pool.total_reserved_bytes();
+        }
+        return usage;
+    }
 };
 
 template <LogicalType LT, bool is_distinct, template <LogicalType, bool, typename> typename State,
