@@ -43,7 +43,10 @@ public:
         compression_initialized = true;
     }
 
-    int64_t mem_usage() const { return percentile->mem_usage(); }
+    // Heap footprint of the state. Includes the PercentileValue (capacity-
+    // based) plus the targetQuantiles vector capacity so push_back / resize
+    // of quantiles is also charged to FunctionContext::add_mem_usage.
+    int64_t mem_usage() const { return percentile->mem_usage() + targetQuantiles.capacity() * sizeof(double); }
 
     std::unique_ptr<PercentileValue> percentile;
     bool compression_initialized = false; // Flag to track if compression has been initialized from FunctionContext
@@ -101,7 +104,7 @@ public:
             data(state).reinit_with_compression(clamp_compression_factor(src_percentile.percentile->compression()));
         }
 
-        int64_t prev_memory = data(state).percentile->mem_usage();
+        int64_t prev_memory = data(state).mem_usage();
         // Fast-path: when convert_to_serialize_format ships a single value
         // per row (PASS_THROUGH / FORCE_STREAMING), every incoming digest is
         // a singleton. TDigest::merge() would route it through a priority
@@ -118,7 +121,7 @@ public:
         if (data(state).targetQuantiles.empty()) {
             data(state).targetQuantiles.push_back(quantile);
         }
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
@@ -175,14 +178,16 @@ public:
         // argument 1
         DCHECK(columns[1]->is_constant());
         DCHECK(!columns[1]->is_null(0));
+        // Capture before the first-update targetQuantiles push_back so that
+        // allocation is charged too (matches the merge path).
+        int64_t prev_memory = data(state).mem_usage();
         // first update
         if (UNLIKELY(data(state).targetQuantiles.empty())) {
             data(state).targetQuantiles.push_back(columns[1]->get(0).get_double());
         }
         double column_value = data_column->immutable_data()[row_num];
-        int64_t prev_memory = data(state).percentile->mem_usage();
         data(state).percentile->add(implicit_cast<float>(column_value));
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
@@ -268,19 +273,21 @@ public:
         // argument 2
         DCHECK(columns[2]->is_constant());
         DCHECK(!columns[2]->is_null(0));
+        // Capture before the first-update targetQuantiles push_back so that
+        // allocation is charged too (matches the merge path).
+        int64_t prev_memory = data(state).mem_usage();
         if (UNLIKELY(data(state).targetQuantiles.empty())) {
             data(state).targetQuantiles.push_back(columns[2]->get(0).get_double());
         }
 
         double column_value = data_column->immutable_data()[row_num];
-        int64_t prev_memory = data(state).percentile->mem_usage();
         // add value with weight. Reject w <= 0: a negative weight pushes
         // _processed_weight negative and yields NaN from weightedAverageSorted().
         // TDigest::add() also rejects non-positive weights as a second guard.
         if (LIKELY(weight > 0)) {
             data(state).percentile->add(implicit_cast<float>(column_value), weight);
         }
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
@@ -356,6 +363,9 @@ public:
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr state, size_t row_num) const override {
         // argument 1: array column wrapped in ConstColumn, no need to check is_null
         DCHECK(columns[1]->is_constant());
+        // Capture before the lazy-init reinit + targetQuantiles.assign so the
+        // quantile-vector allocation is charged too (matches the scalar path).
+        int64_t prev_memory = data(state).mem_usage();
         // Lazy initialization of compression factor on first update
         if (UNLIKELY(!data(state).compression_initialized)) {
             double compression = get_compression_factor(ctx);
@@ -377,13 +387,15 @@ public:
         const auto* data_column = down_cast<const DoubleColumn*>(columns[0]);
 
         double column_value = data_column->immutable_data()[row_num];
-        int64_t prev_memory = data(state).percentile->mem_usage();
         data(state).percentile->add(implicit_cast<float>(column_value));
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     // Override merge method, deserialize using new format: [count(4 bytes), q1...qn(8*n bytes), TDigest_data]
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        // Capture before lazy initialization and targetQuantiles allocation.
+        int64_t prev_memory = data(state).mem_usage();
+
         const auto* binary_column = down_cast<const BinaryColumn*>(column);
         Slice src = binary_column->get_slice(row_num);
 
@@ -409,7 +421,6 @@ public:
         }
 
         // Merge into current state
-        int64_t prev_memory = data(state).percentile->mem_usage();
         float singleton_mean;
         float singleton_weight;
         if (src_percentile.percentile->try_extract_singleton(&singleton_mean, &singleton_weight)) {
@@ -417,7 +428,7 @@ public:
         } else {
             data(state).percentile->merge(src_percentile.percentile.get());
         }
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     // Override serialize_to_column method, serialize using new format: [count(4 bytes), q1...qn(8*n bytes), TDigest_data]
@@ -517,6 +528,9 @@ public:
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr state, size_t row_num) const override {
         // argument 2: array column wrapped in ConstColumn, no need to check is_null
         DCHECK(columns[2]->is_constant());
+        // Capture before the lazy-init reinit + targetQuantiles.assign so the
+        // quantile-vector allocation is charged too (matches the scalar path).
+        int64_t prev_memory = data(state).mem_usage();
         // Lazy initialization of compression factor on first update
         if (UNLIKELY(!data(state).compression_initialized)) {
             double compression = get_compression_factor(ctx);
@@ -541,18 +555,20 @@ public:
         int64_t weight = columns[1]->get(real_row_num).get_int64();
 
         double column_value = data_column->immutable_data()[row_num];
-        int64_t prev_memory = data(state).percentile->mem_usage();
         // add value with weight. Reject w <= 0: a negative weight pushes
         // _processed_weight negative and yields NaN from weightedAverageSorted().
         // TDigest::add() also rejects non-positive weights as a second guard.
         if (LIKELY(weight > 0)) {
             data(state).percentile->add(implicit_cast<float>(column_value), weight);
         }
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     // Override merge method, deserialize using new format: [count(4 bytes), q1...qn(8*n bytes), TDigest_data]
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        // Capture before lazy initialization and targetQuantiles allocation.
+        int64_t prev_memory = data(state).mem_usage();
+
         const auto* binary_column = down_cast<const BinaryColumn*>(column);
         Slice src = binary_column->get_slice(row_num);
 
@@ -578,7 +594,6 @@ public:
         }
 
         // Merge into current state
-        int64_t prev_memory = data(state).percentile->mem_usage();
         float singleton_mean;
         float singleton_weight;
         if (src_percentile.percentile->try_extract_singleton(&singleton_mean, &singleton_weight)) {
@@ -586,7 +601,7 @@ public:
         } else {
             data(state).percentile->merge(src_percentile.percentile.get());
         }
-        ctx->add_mem_usage(data(state).percentile->mem_usage() - prev_memory);
+        ctx->add_mem_usage(data(state).mem_usage() - prev_memory);
     }
 
     // Override serialize_to_column method, serialize using new format: [count(4 bytes), q1...qn(8*n bytes), TDigest_data]
