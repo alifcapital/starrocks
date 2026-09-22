@@ -18,8 +18,8 @@
 #include <cstring>
 #include <string>
 
+#include "common/compiler_util.h"
 #include "exprs/agg/aggregate.h"
-#include "gutil/compiler_util.h"
 #include "util/slice.h"
 
 namespace starrocks {
