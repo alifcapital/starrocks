@@ -58,6 +58,8 @@ public class MarkCacheConsciousTopnRule
         }
     }
 
+    private static final TopnContext UNSUPPORTED_TOPN = new TopnContext(null, Operator.DEFAULT_LIMIT);
+
     @Override
     public OptExpression rewrite(OptExpression root, TaskContext taskContext) {
         return root.getOp().accept(this, root, null);
@@ -72,6 +74,13 @@ public class MarkCacheConsciousTopnRule
     @Override
     public OptExpression visitPhysicalTopN(OptExpression optExpr, TopnContext context) {
         PhysicalTopNOperator topN = (PhysicalTopNOperator) optExpr.getOp();
+        // SplitTopNRule gives the partial node ROW_NUMBER even for a final RANK/DENSE_RANK.
+        // PlanFragmentBuilder later applies the final mode to that partial sort. Carry the
+        // veto through the sort/exchange chain so the partial node cannot re-enable pruning.
+        if (context == UNSUPPORTED_TOPN || topN.getTopNType() != TopNType.ROW_NUMBER ||
+                (topN.getPartitionByColumns() != null && !topN.getPartitionByColumns().isEmpty())) {
+            return recurse(optExpr, UNSUPPORTED_TOPN);
+        }
         return recurse(optExpr, buildContext(topN));
     }
 
@@ -85,7 +94,7 @@ public class MarkCacheConsciousTopnRule
     @Override
     public OptExpression visitPhysicalHashAggregate(OptExpression optExpr, TopnContext context) {
         PhysicalHashAggregateOperator agg = (PhysicalHashAggregateOperator) optExpr.getOp();
-        if (context != null && matches(agg, context)) {
+        if (context != null && context != UNSUPPORTED_TOPN && matches(agg, context)) {
             agg.setCacheConsciousTopn(context.limit);
         }
         // The scan/join subtree below an aggregation never sees the agg value, clear context.
@@ -101,12 +110,6 @@ public class MarkCacheConsciousTopnRule
 
     // Returns a context only for a real top-n (DESC, positive small LIMIT, no OFFSET, single key).
     private TopnContext buildContext(PhysicalTopNOperator topN) {
-        // Ranking may retain arbitrarily many ties, and partitioned TopN needs winners
-        // from every partition. A bounded global candidate set cannot preserve either.
-        if (topN.getTopNType() != TopNType.ROW_NUMBER ||
-                (topN.getPartitionByColumns() != null && !topN.getPartitionByColumns().isEmpty())) {
-            return null;
-        }
         if (topN.getOffset() != 0) {
             return null;
         }
