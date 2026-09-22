@@ -208,9 +208,8 @@ public class FunctionAnalyzer {
         // because analyzeBuiltinAggFunction only runs for AggregateFunction.
         // percentile_hash(value [, compression]). The 1-arg overload keeps the
         // legacy storage compression (1000). The 2-arg overload requires a
-        // constant compression; out-of-range / NULL / non-finite values are
-        // canonicalized to DEFAULT_COMPRESSION_FACTOR so downstream code can
-        // trust the literal.
+        // constant integer compression. NULL uses the default; out-of-range
+        // integers are clamped to the nearest bound.
         if (fnName.equals(FunctionSet.PERCENTILE_HASH)) {
             List<Expr> percentileHashChildren = functionCallExpr.getChildren();
             if (percentileHashChildren.size() == 2) {
@@ -900,10 +899,8 @@ public class FunctionAnalyzer {
                 throw new SemanticException("compression must be an integer value; fractional values are not supported",
                         arg.getPos());
             }
-            if (value.compareTo(BigDecimal.valueOf(PercentileCompression.MIN)) >= 0 &&
-                    value.compareTo(BigDecimal.valueOf(PercentileCompression.MAX)) <= 0) {
-                compression = value.longValueExact();
-            }
+            compression = value.max(BigDecimal.valueOf(PercentileCompression.MIN))
+                    .min(BigDecimal.valueOf(PercentileCompression.MAX)).longValueExact();
         }
         fn.setChild(argIdx, new IntLiteral(compression, arg.getPos()));
     }

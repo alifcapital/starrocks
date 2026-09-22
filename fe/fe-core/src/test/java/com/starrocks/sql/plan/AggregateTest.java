@@ -2517,12 +2517,12 @@ public class AggregateTest extends PlanTestBase {
         // For compatibility
         String sql = "select percentile_approx(1, cast(0.4 as DOUBLE));";
         String plan = getCostExplain(sql);
-        assertContains(plan, "percentile_approx[(1.0, 0.4, 10000.0); args: DOUBLE,DOUBLE,DOUBLE");
+        assertContains(plan, "percentile_approx[(1.0, 0.4, 1000.0); args: DOUBLE,DOUBLE,DOUBLE");
 
         sql = "with cc as (select 1 as a) select percentile_approx(1, cc.a) from cc;";
         plan = getFragmentPlan(sql);
         assertContains(plan, "2:AGGREGATE (update finalize)\n" +
-                "  |  output: percentile_approx(1.0, 1.0, 10000.0)\n" +
+                "  |  output: percentile_approx(1.0, 1.0, 1000.0)\n" +
                 "  |  group by: ");
         Exception exception = Assertions.assertThrows(StarRocksPlannerException.class, () -> {
             String testSql = "with cc as (select 1 as a, v1 from t0) select percentile_approx(1, cc.a, cc.v1) from cc;";
@@ -2542,6 +2542,26 @@ public class AggregateTest extends PlanTestBase {
         // should success
         getCostExplain("select percentile_cont(1, cast(0.4 as DOUBLE));");
         getCostExplain("select PERCENTILE_DISC(1, cast(0.4 as DOUBLE));");
+    }
+
+    @Test
+    public void testPercentileCompressionPolicy() throws Exception {
+        String[][] cases = { {"NULL", "1000"}, {"50", "100"}, {"-1", "100"}, {"0", "100"},
+                {"100", "100"}, {"1000.0", "1000"}, {"CAST(1000 AS DOUBLE)", "1000"},
+                {"500 * 2", "1000"}, {"10000", "10000"}, {"10001", "10000"},
+                {"99999999999999999999999999999999999999", "10000"}};
+        String[] calls = {"percentile_approx(v1, 0.5%s)", "percentile_approx(v1, [0.1, 0.9]%s)",
+                "percentile_approx_weighted(v1, v2, 0.5%s)",
+                "percentile_approx_weighted(v1, v2, [0.1, 0.9]%s)", "percentile_hash(v1%s)"};
+        for (String call : calls) {
+            for (String[] entry : cases) {
+                String sql = "select " + String.format(call, ", " + entry[0]) + " from t0";
+                assertContains(getFragmentPlan(sql), ", " + entry[1] + ".0)");
+            }
+            if (!call.startsWith("percentile_hash")) {
+                assertContains(getFragmentPlan("select " + String.format(call, "") + " from t0"), ", 1000.0)");
+            }
+        }
     }
 
     @Test
@@ -2598,9 +2618,8 @@ public class AggregateTest extends PlanTestBase {
                 "the third parameter (percentile) to be ARRAY<NUMERIC>, but got: ARRAY<NULL_TYPE>."));
 
         // Compression literals outside [MIN_COMPRESSION, MAX_COMPRESSION] are
-        // canonicalized to DEFAULT_COMPRESSION_FACTOR by FunctionAnalyzer; the
-        // query plans successfully and the compression argument is rewritten to
-        // 10000 before reaching the optimizer.
+        // clamped to the nearest bound by FunctionAnalyzer. Zero and negative
+        // integers become 100 before reaching the optimizer.
         sql = "select percentile_approx_weighted(v1, v2, 0.5, 0) from t0;";
         plan = getFragmentPlan(sql);
         assertContains(plan, "percentile_approx_weighted");
@@ -2673,9 +2692,8 @@ public class AggregateTest extends PlanTestBase {
                 "percentile_approx requires the second parameter (percentile) to be ARRAY<NUMERIC>, but got: ARRAY<NULL_TYPE>."));
 
         // Compression literals outside [MIN_COMPRESSION, MAX_COMPRESSION] are
-        // canonicalized to DEFAULT_COMPRESSION_FACTOR by FunctionAnalyzer; the
-        // query plans successfully and the compression argument is rewritten to
-        // 10000 before reaching the optimizer.
+        // clamped to the nearest bound by FunctionAnalyzer. Zero and negative
+        // integers become 100 before reaching the optimizer.
         sql = "select percentile_approx(v1, 0.5, 0) from t0;";
         plan = getFragmentPlan(sql);
         assertContains(plan, "percentile_approx");

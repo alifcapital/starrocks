@@ -52,16 +52,20 @@ TEST(PercentileApproxCompressionTest, clampCompressionFactor) {
     const double hi = PercentileCompressionExposer::max_c();
     const double def = PercentileCompressionExposer::default_c();
 
+    EXPECT_DOUBLE_EQ(100.0, lo);
+    EXPECT_DOUBLE_EQ(10000.0, hi);
+    EXPECT_DOUBLE_EQ(1000.0, def);
+
     // In-range values pass through unchanged.
     EXPECT_DOUBLE_EQ(lo, PercentileCompressionExposer::clamp(lo));
     EXPECT_DOUBLE_EQ(hi, PercentileCompressionExposer::clamp(hi));
     EXPECT_DOUBLE_EQ(5000.0, PercentileCompressionExposer::clamp(5000.0));
 
-    // Below MIN, above MAX, non-positive and non-finite all canonicalize to the default.
-    EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(lo - 1));
-    EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(hi + 1));
-    EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(0.0));
-    EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(-5.0));
+    // Finite values clamp to the nearest bound; invalid non-finite legacy inputs use the default.
+    EXPECT_DOUBLE_EQ(lo, PercentileCompressionExposer::clamp(lo - 1));
+    EXPECT_DOUBLE_EQ(hi, PercentileCompressionExposer::clamp(hi + 1));
+    EXPECT_DOUBLE_EQ(lo, PercentileCompressionExposer::clamp(0.0));
+    EXPECT_DOUBLE_EQ(lo, PercentileCompressionExposer::clamp(-5.0));
     EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(std::nan("")));
     EXPECT_DOUBLE_EQ(def, PercentileCompressionExposer::clamp(std::numeric_limits<double>::infinity()));
 }
@@ -84,13 +88,13 @@ TEST(PercentileApproxCompressionTest, getCompressionFactorApprox) {
         ctx->set_constant_columns({nullptr, nullptr, const_double(5000.0)});
         EXPECT_DOUBLE_EQ(5000.0, fn.get_compression_factor(ctx.get()));
     }
-    // 3-arg call, out-of-range constant compression -> clamped to default.
+    // 3-arg call, out-of-range constant compression -> clamped to the minimum.
     {
         std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context(
                 {UTRawType{.type = TYPE_DOUBLE}, UTRawType{.type = TYPE_DOUBLE}, UTRawType{.type = TYPE_DOUBLE}},
                 UTRawType{.type = TYPE_DOUBLE}));
         ctx->set_constant_columns({nullptr, nullptr, const_double(1.0)});
-        EXPECT_DOUBLE_EQ(def, fn.get_compression_factor(ctx.get()));
+        EXPECT_DOUBLE_EQ(100.0, fn.get_compression_factor(ctx.get()));
     }
 }
 
@@ -114,14 +118,14 @@ TEST(PercentileApproxCompressionTest, getCompressionFactorWeighted) {
         ctx->set_constant_columns({nullptr, nullptr, const_double(0.5), const_double(5000.0)});
         EXPECT_DOUBLE_EQ(5000.0, fn.get_compression_factor(ctx.get()));
     }
-    // 4-arg form, out-of-range compression -> clamped to default.
+    // 4-arg form, out-of-range compression -> clamped to the maximum.
     {
         std::unique_ptr<FunctionContext> ctx(
                 FunctionContext::create_test_context({UTRawType{.type = TYPE_DOUBLE}, UTRawType{.type = TYPE_BIGINT},
                                                       UTRawType{.type = TYPE_DOUBLE}, UTRawType{.type = TYPE_DOUBLE}},
                                                      UTRawType{.type = TYPE_DOUBLE}));
         ctx->set_constant_columns({nullptr, nullptr, const_double(0.5), const_double(20000.0)});
-        EXPECT_DOUBLE_EQ(def, fn.get_compression_factor(ctx.get()));
+        EXPECT_DOUBLE_EQ(10000.0, fn.get_compression_factor(ctx.get()));
     }
 }
 

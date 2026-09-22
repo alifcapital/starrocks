@@ -49,14 +49,13 @@ StatusOr<ColumnPtr> PercentileFunctions::percentile_hash(FunctionContext* contex
 StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_with_compression(FunctionContext* context,
                                                                           const Columns& columns) {
     ColumnViewer<TYPE_DOUBLE> value_viewer(columns[0]);
-    // Compression is a const argument pre-clamped on FE side (see FunctionAnalyzer):
-    // NULL / non-finite / out-of-[MIN, MAX] literals are replaced with the default
-    // compression factor before reaching BE.
+    // FE supplies a finite constant: NULL uses the default, and out-of-range
+    // integer values are clamped to the nearest bound.
     double compression = ColumnHelper::get_const_value<TYPE_DOUBLE>(columns[1]);
     DCHECK(std::isfinite(compression));
     // Mirror PercentileCompression.MIN/MAX on the FE side; FunctionAnalyzer
-    // clamps any literal outside this range to the default before reaching BE.
-    DCHECK_GE(compression, 2048.0);
+    // clamps integer values to this range before reaching BE.
+    DCHECK_GE(compression, 100.0);
     DCHECK_LE(compression, 10000.0);
 
     auto percentile_column = PercentileColumn::create();

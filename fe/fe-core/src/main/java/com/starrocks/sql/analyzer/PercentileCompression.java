@@ -23,17 +23,17 @@ package com.starrocks.sql.analyzer;
  */
 public final class PercentileCompression {
     /** Lower bound of the accepted compression range. */
-    public static final long MIN = 2048;
+    public static final long MIN = 100;
 
     /** Upper bound of the accepted compression range. */
     public static final long MAX = 10000;
 
     /**
-     * Default applied when no explicit compression is given, or when a literal
-     * is out of range / NULL / non-finite. Matches BE
+     * Default applied when no explicit compression is given or the argument is NULL.
+     * Out-of-range integer values are clamped to MIN or MAX. Matches BE
      * {@code DEFAULT_COMPRESSION_FACTOR}.
      */
-    public static final long DEFAULT = 10000;
+    public static final long DEFAULT = 1000;
 
     private PercentileCompression() {
     }

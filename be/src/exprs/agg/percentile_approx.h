@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 #include "column/array_column.h"
@@ -61,12 +62,12 @@ struct PercentileApproxAggEmptyPred {
 class PercentileApproxAggregateFunctionBase
         : public AggregateFunctionBatchHelper<PercentileApproxState, PercentileApproxAggregateFunctionBase> {
 protected:
-    static constexpr double MIN_COMPRESSION = 2048.0;
+    static constexpr double MIN_COMPRESSION = 100.0;
     static constexpr double MAX_COMPRESSION = 10000.0;
     // Kept on BE for rolling upgrades from pre-canonicalization FEs. For
     // new-FE calls FunctionAnalyzer is the single source of truth and DEFAULT
     // lives there.
-    static constexpr double DEFAULT_COMPRESSION_FACTOR = 10000.0;
+    static constexpr double DEFAULT_COMPRESSION_FACTOR = 1000.0;
 
     static double clamp_compression_factor(double compression) {
         if (LIKELY(std::isfinite(compression) && compression >= MIN_COMPRESSION && compression <= MAX_COMPRESSION)) {
@@ -74,9 +75,10 @@ protected:
         }
         // Old FEs can still ship explicit compression literals without the
         // analyzer-side [MIN, MAX] clamp during a rolling upgrade.
-        LOG(WARNING) << "Compression factor out of range. Using default compression factor: "
-                     << DEFAULT_COMPRESSION_FACTOR;
-        return DEFAULT_COMPRESSION_FACTOR;
+        const double normalized = std::isfinite(compression) ? std::clamp(compression, MIN_COMPRESSION, MAX_COMPRESSION)
+                                                             : DEFAULT_COMPRESSION_FACTOR;
+        LOG(WARNING) << "Invalid compression factor " << compression << ". Using compression factor: " << normalized;
+        return normalized;
     }
 
     // Compact intermediate format for the transient exchange/spill path

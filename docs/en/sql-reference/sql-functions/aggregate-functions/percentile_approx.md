@@ -9,7 +9,7 @@ description: "Returns the approximate value for a given percentile p, or an arra
 
 Returns the approximate value for a given percentile p, or an array of values for corresponding percentiles if p is an array. All percentile values must be in the range [0,1].
 
-Compression parameter is optional and has a setting range of [2048, 10000]. The larger the value, the higher the accuracy, the larger the memory consumption, and the longer the calculation time. If it is not specified or beyond the range of [2048, 10000], the function runs with a default compression parameter of 10000.
+Compression is optional and ranges from 100 to 10000, with a default of 1000. Larger values use more memory and calculation time to retain more detail. Out-of-range integer values are clamped to the nearest bound.
 
 This function uses fixed size memory, so less memory can be used for columns with high cardinality, and can be used to calculate statistics such as tp99.
 
@@ -19,7 +19,7 @@ This function uses fixed size memory, so less memory can be used for columns wit
 DOUBLE PERCENTILE_APPROX(expr, DOUBLE|ARRAY<DOUBLE> p[, DOUBLE compression])
 ```
 
-`compression` must be a constant expression with an integer value. `5000`, `5000.0`, `CAST(5000 AS DOUBLE)`, and `2500 * 2` are accepted. Fractional values such as `5000.5` and non-constant expressions are rejected without rounding. An omitted argument, `NULL`, or an integer outside [2048, 10000] uses the default `10000`.
+`compression` must be a constant expression with an integer value. `5000`, `5000.0`, `CAST(5000 AS DOUBLE)`, and `2500 * 2` are accepted. Fractional values such as `5000.5` and non-constant expressions are rejected without rounding. An omitted argument or `NULL` uses the default `1000`. Integers below `100` use `100`; integers above `10000` use `10000`.
 
 ## Examples
 

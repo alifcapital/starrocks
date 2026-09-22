@@ -18,9 +18,9 @@ DOUBLE PERCENTILE_APPROX_WEIGHT(expr, BIGINT weight, DOUBLE|ARRAY<DOUBLE p[, DOU
 - `expr`: The column for which to calculate the percentile.
 - `p`: The percentile value, which must be a DOUBLE in the range [0, 1], or an `ARRAY<DOUBLE>` where each element is in the range [0, 1]. For example, 0.99 represents the 99th percentile.
 - `weight` : Weight column. It must be a positive constant number or column.
-- `compression` : (Optional) Compression ratio. Range: [2048, 10000]. The larger the value, the higher the precision, the larger the memory consumption, and the longer the calculation time. If this parameter is not specified or the value is beyond the range of [2048, 10000], the default value `10000` is used.
+- Compression is optional and ranges from 100 to 10000, with a default of 1000. Larger values use more memory and calculation time to retain more detail. Out-of-range integer values are clamped to the nearest bound.
 
-`compression` must be a constant expression with an integer value. `5000`, `5000.0`, `CAST(5000 AS DOUBLE)`, and `2500 * 2` are accepted. Fractional values such as `5000.5` and non-constant expressions are rejected without rounding. An omitted argument, `NULL`, or an integer outside [2048, 10000] uses the default `10000`.
+`compression` must be a constant expression with an integer value. `5000`, `5000.0`, `CAST(5000 AS DOUBLE)`, and `2500 * 2` are accepted. Fractional values such as `5000.5` and non-constant expressions are rejected without rounding. An omitted argument or `NULL` uses the default `1000`. Integers below `100` use `100`; integers above `10000` use `10000`.
 
 ## Examples
 

@@ -331,8 +331,8 @@ public class AnalyzeAggregateTest {
         analyzeFail("select percentile_approx(1,1,tc) from tall group by tb",
                 "compression must be a constant integer value");
         analyzeSuccess("select percentile_approx(1,5) from tall group by tb");
-        // Out-of-range integer literal: silently clamped to DEFAULT_COMPRESSION_FACTOR.
-        analyzeSuccess("select percentile_approx(1,0.5,1047) from tall group by tb");
+        // Below-range integer literal: clamped to the minimum compression.
+        analyzeSuccess("select percentile_approx(1,0.5,50) from tall group by tb");
         // NULL literal: canonicalized to DEFAULT.
         analyzeSuccess("select percentile_approx(1, 0.5, NULL) from tall group by tb");
         // Zero and negative integer literals are out-of-range and silently clamped.
