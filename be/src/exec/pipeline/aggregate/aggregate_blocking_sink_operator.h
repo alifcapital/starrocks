@@ -59,6 +59,7 @@ protected:
         return down_cast<AggregateBlockingSinkOperatorFactory*>(_factory);
     }
     void _build_in_runtime_filters(RuntimeState* state);
+    void _maybe_evaluate_cache_conscious_topn();
 
     DECLARE_ONCE_DETECTOR(_set_finishing_once);
     // It is used to perform aggregation algorithms shared by
@@ -68,6 +69,15 @@ protected:
     // - unreffed at close() of both sink and source operator.
     AggregatorPtr _aggregator = nullptr;
     bool _agg_group_by_with_limit = false;
+
+    // Cache-conscious top-n flip decision. When the live hash table first grows past this
+    // budget, the group counts are checked for skew once; on a skewed verdict the table is
+    // frozen as the exact FA and later cold groups route to the pruned CA tail.
+    // The FA budget (the frozen table is ~this size) is the mutable BE config
+    // config::cache_conscious_topn_l2_budget_bytes: it must sit in a core's L2 beside the CA
+    // working set, and is tunable so the L2/L3 operating point can be measured without a rebuild.
+    bool _cache_conscious_evaluated = false;
+    bool _cache_conscious_skewed = false;
 
     std::vector<RuntimeFilter*> _runtime_filters;
 

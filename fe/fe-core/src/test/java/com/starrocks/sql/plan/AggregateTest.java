@@ -698,9 +698,11 @@ public class AggregateTest extends PlanTestBase {
                 + "  |  aggregate: count[(if[([1: t1a, VARCHAR, true] IS NULL, NULL, [2: t1b, SMALLINT, true]); "
                 + "args: BOOLEAN,SMALLINT,SMALLINT; result: SMALLINT; args nullable: true; "
                 + "result nullable: true]); args: SMALLINT; result: BIGINT; args nullable: true; result nullable: false]");
+        // the merge-stage count call reports its child slot's real nullability (it is the
+        // producer's non-nullable count output), not the historical blanket "nullable"
         assertContains(plan, "4:AGGREGATE (merge finalize)\n"
                 + "  |  aggregate: count[([11: count, BIGINT, false]); args: SMALLINT; "
-                + "result: BIGINT; args nullable: true; result nullable: false]");
+                + "result: BIGINT; args nullable: false; result nullable: false]");
         FeConstants.runningUnitTest = false;
     }
 
@@ -3245,6 +3247,28 @@ public class AggregateTest extends PlanTestBase {
         };
 
         String sql = "select distinct v1, v2, v3 from t0";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "group by min-max stats:");
+        plan = getThriftPlan(sql);
+        assertContains(plan, "group_by_min_max:[TExpr(");
+    }
+
+    @Test
+    public void testGroupByCompressedKey_SingleIntRange() throws Exception {
+        // Single-INT GROUP BY with FE-supplied range that fits in ≤16
+        // bits: regression guard for the BE direct-array routing
+        // (AggHashMapWithCompressibleInt32Key, uint8/uint16 cells).  If
+        // ApplyMinMaxStatisticRule stops emitting min/max for plain INT
+        // GROUP BY columns, BE silently falls back to phmap<int32>.
+        final IMinMaxStatsMgr minMaxStatsMgr = IMinMaxStatsMgr.internalInstance();
+        new Expectations(minMaxStatsMgr) {
+            {
+                minMaxStatsMgr.getStats((ColumnIdentifier) any, (StatsVersion) any);
+                result = Optional.of(new IMinMaxStatsMgr.ColumnMinMax("0", "65535"));
+            }
+        };
+
+        String sql = "select v1, count(*) from t0 group by v1";
         String plan = getVerboseExplain(sql);
         assertContains(plan, "group by min-max stats:");
         plan = getThriftPlan(sql);

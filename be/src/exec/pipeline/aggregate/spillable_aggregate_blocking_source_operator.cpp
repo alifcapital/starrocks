@@ -41,6 +41,20 @@ bool SpillableAggregateBlockingSourceOperator::has_output() const {
     if (_is_finished) {
         return false;
     }
+    // Cache-conscious with a spilled CA: restore the CA pull-driven, then emit one result chunk.
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        if (!_aggregator->is_sink_complete()) {
+            return false;
+        }
+        // Still restoring: only runnable once the reader has a buffered chunk. has_output_data is
+        // null-safe, so this also blocks until the flush callback has acquired the reader stream
+        // (which happens after sink_complete) — never restore against a not-yet-acquired stream.
+        if (!_aggregator->is_spilled_eos()) {
+            return _aggregator->spiller()->has_output_data();
+        }
+        // Restored: one finalize + emit left.
+        return !_aggregator->cache_conscious_result_emitted();
+    }
     bool has_spilled = _aggregator->spiller()->spilled();
 
     if (!has_spilled && AggregateBlockingSourceOperator::has_output()) {
@@ -69,6 +83,9 @@ bool SpillableAggregateBlockingSourceOperator::is_finished() const {
     if (_is_finished) {
         return true;
     }
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        return _aggregator->cache_conscious_result_emitted();
+    }
     if (!_aggregator->spiller()->spilled()) {
         return AggregateBlockingSourceOperator::is_finished();
     }
@@ -96,6 +113,21 @@ Status SpillableAggregateBlockingSourceOperator::set_finished(RuntimeState* stat
 
 StatusOr<ChunkPtr> SpillableAggregateBlockingSourceOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_aggregator->spiller()->task_status());
+    // Cache-conscious with a spilled CA: restore one chunk per pull (re-routing it into the CA)
+    // until every spilled chunk is read back, then prune against FA and emit the local top-n once,
+    // then EOS. has_output gates each restore on the reader being ready, so this never spins on an
+    // empty restore nor touches a not-yet-acquired stream. (A non-spilled CA is finalized in the
+    // sink and emitted by the base pull_chunk's cache_conscious_result_ready path.)
+    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        if (!_aggregator->is_spilled_eos()) {
+            RETURN_IF_ERROR(_aggregator->restore_cache_conscious_chunk(state));
+            return std::make_shared<Chunk>(); // not done restoring; yield an empty chunk
+        }
+        if (!_aggregator->cache_conscious_result_ready()) {
+            RETURN_IF_ERROR(_aggregator->finalize_cache_conscious_ca(state));
+        }
+        return _aggregator->pull_cache_conscious_result_chunk();
+    }
     if (!_aggregator->spiller()->spilled()) {
         return AggregateBlockingSourceOperator::pull_chunk(state);
     }

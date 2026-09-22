@@ -359,6 +359,7 @@ struct TQueryOptions {
   162: optional bool enable_hash_join_range_direct_mapping_opt;
   163: optional bool enable_hash_join_linear_chained_opt;
   164: optional bool enable_hash_join_serialize_fixed_size_string;
+  165: optional bool enable_agg_consecutive_keys_cache;
 
   170: optional bool enable_parquet_reader_bloom_filter;
   171: optional bool enable_parquet_reader_page_index;
@@ -389,6 +390,11 @@ struct TQueryOptions {
   215: optional string http_request_host_allowlist_regexp = "";
   216: optional bool http_request_allow_private_in_allowlist = false;
   217: optional bool enable_cache_udaf = false;
+
+  // Inline a qualifying aggregate's accumulator (count/sum/min/max) into the
+  // group-by hash-map value slot for fixed-size keys, instead of a pointer to
+  // an arena-allocated state.
+  219: optional bool enable_agg_inline_accumulator;
 }
 
 // A scan range plus the parameters needed to execute that scan.

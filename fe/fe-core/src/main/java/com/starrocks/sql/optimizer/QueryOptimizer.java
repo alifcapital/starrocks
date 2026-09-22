@@ -105,6 +105,7 @@ import com.starrocks.sql.optimizer.rule.transformation.pruner.RboTablePruneRule;
 import com.starrocks.sql.optimizer.rule.transformation.pruner.UniquenessBasedTablePruneRule;
 import com.starrocks.sql.optimizer.rule.tree.AddDecodeNodeForDictStringRule;
 import com.starrocks.sql.optimizer.rule.tree.AddIndexOnlyPredicateRule;
+import com.starrocks.sql.optimizer.rule.tree.ApplyCacheConsciousMcvRule;
 import com.starrocks.sql.optimizer.rule.tree.ApplyMinMaxStatisticRule;
 import com.starrocks.sql.optimizer.rule.tree.ApplyTuningGuideRule;
 import com.starrocks.sql.optimizer.rule.tree.CloneDuplicateColRefRule;
@@ -115,6 +116,7 @@ import com.starrocks.sql.optimizer.rule.tree.ExtractAggregateColumn;
 import com.starrocks.sql.optimizer.rule.tree.InlineCteProjectPruneRule;
 import com.starrocks.sql.optimizer.rule.tree.JoinLocalShuffleRule;
 import com.starrocks.sql.optimizer.rule.tree.JsonPathRewriteRule;
+import com.starrocks.sql.optimizer.rule.tree.MarkCacheConsciousTopnRule;
 import com.starrocks.sql.optimizer.rule.tree.MarkParentRequiredDistributionRule;
 import com.starrocks.sql.optimizer.rule.tree.PhysicalDistributionAggOptRule;
 import com.starrocks.sql.optimizer.rule.tree.PreAggregateTurnOnRule;
@@ -1037,6 +1039,21 @@ public class QueryOptimizer extends Optimizer {
 
         // Rewrite Exchange on top of Sort to Final Sort
         result = new ExchangeSortToMergeRule().rewrite(result, rootTaskContext);
+
+        // Flag a global aggregation feeding a small TopN(ORDER BY count(*) DESC) so the
+        // backend can fuse them into a cache-conscious top-n aggregation. Pure annotation,
+        // no tree restructure; gated off by default during bring-up.
+        // Not combined with partition-wise agg spill: that operator wraps the blocking agg
+        // and drives its own partition spill/restore, which the flip inside the wrapped
+        // operator would corrupt. The two are mutually exclusive for now.
+        SessionVariable sv = rootTaskContext.getOptimizerContext().getSessionVariable();
+        if (sv.isEnableCacheConsciousTopn() && !(sv.isEnableSpill() && sv.getSpillPartitionWiseAgg())) {
+            result = new MarkCacheConsciousTopnRule().rewrite(result, rootTaskContext);
+            // After the cc flag is set: pull the group-by column's MCV from the histogram storage
+            // onto the agg so the backend can seed the FA. High-cardinality keys are untouched by the
+            // low-card rewrite, so this does not need to wait for it.
+            result = new ApplyCacheConsciousMcvRule().rewrite(result, rootTaskContext);
+        }
         result = new PruneAggregateNodeRule().rewrite(result, rootTaskContext);
         result = new PruneShuffleDistributionNodeRule().rewrite(result, rootTaskContext);
         result = new PruneShuffleColumnRule().rewrite(result, rootTaskContext);

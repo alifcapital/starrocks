@@ -15,6 +15,8 @@
 #include "exec/aggregate/agg_hash_variant.h"
 
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <variant>
 
 #include "runtime/runtime_state.h"
@@ -100,6 +102,50 @@
     M(phase2_slice_cx8)              \
     M(phase2_slice_cx16)
 
+// Map-only variants: enum entries live in AggHashMapVariant::Type but
+// NOT in AggHashSetVariant::Type, so they must stay out of the shared
+// APPLY_FOR_AGG_VARIANT_ALL macro that AggHashSetVariant::init expands.
+#define APPLY_FOR_AGG_MAP_VARIANT_EXTRA(M) \
+    M(phase1_int32_range_uint16)           \
+    M(phase1_null_int32_range_uint16)      \
+    M(phase2_int32_range_uint16)           \
+    M(phase2_null_int32_range_uint16)      \
+    M(phase1_int32_range_uint8)            \
+    M(phase1_null_int32_range_uint8)       \
+    M(phase2_int32_range_uint8)            \
+    M(phase2_null_int32_range_uint8)
+
+#define APPLY_FOR_AGG_MAP_VARIANT_ALL(M) \
+    APPLY_FOR_AGG_VARIANT_ALL(M)         \
+    APPLY_FOR_AGG_MAP_VARIANT_EXTRA(M)
+
+// Multi-aggregate pack flavors exist for the hash MAP variant only (a hash set has no
+// aggregate value to widen), so they live outside APPLY_FOR_AGG_VARIANT_ALL, which also
+// feeds the set variant's switch.
+#define APPLY_FOR_AGG_MAP_PACK(M) \
+    M(phase1_int32_pack)          \
+    M(phase1_int64_pack)          \
+    M(phase1_date_pack)           \
+    M(phase1_timestamp_pack)      \
+    M(phase1_null_int32_pack)     \
+    M(phase1_null_int64_pack)     \
+    M(phase1_null_date_pack)      \
+    M(phase1_null_timestamp_pack) \
+    M(phase1_slice_fx4_pack)      \
+    M(phase1_slice_fx8_pack)      \
+    M(phase1_slice_fx16_pack)     \
+    M(phase2_int32_pack)          \
+    M(phase2_int64_pack)          \
+    M(phase2_date_pack)           \
+    M(phase2_timestamp_pack)      \
+    M(phase2_null_int32_pack)     \
+    M(phase2_null_int64_pack)     \
+    M(phase2_null_date_pack)      \
+    M(phase2_null_timestamp_pack) \
+    M(phase2_slice_fx4_pack)      \
+    M(phase2_slice_fx8_pack)      \
+    M(phase2_slice_fx16_pack)
+
 namespace starrocks {
 namespace detail {
 template <AggHashMapVariant::Type>
@@ -149,6 +195,11 @@ DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx1, CompressedFixedSize1A
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx4, CompressedFixedSize4AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx8, CompressedFixedSize8AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_cx16, CompressedFixedSize16AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int32_range_uint16, CompressibleInt32AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int32_range_uint16, NullCompressibleInt32AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int32_range_uint8, CompressibleInt32Uint8AggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int32_range_uint8,
+                NullCompressibleInt32Uint8AggHashMap<PhmapSeed1>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_uint8, UInt8AggHashMapWithOneNumberKey<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int8, Int8AggHashMapWithOneNumberKey<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int16, Int16AggHashMapWithOneNumberKey<PhmapSeed2>);
@@ -187,6 +238,11 @@ DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx1, CompressedFixedSize1A
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx4, CompressedFixedSize4AggHashMap<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx8, CompressedFixedSize8AggHashMap<PhmapSeed2>);
 DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_cx16, CompressedFixedSize16AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int32_range_uint16, CompressibleInt32AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int32_range_uint16, NullCompressibleInt32AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int32_range_uint8, CompressibleInt32Uint8AggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int32_range_uint8,
+                NullCompressibleInt32Uint8AggHashMap<PhmapSeed2>);
 
 template <AggHashSetVariant::Type>
 struct AggHashSetVariantTypeTraits;
@@ -277,7 +333,54 @@ DEFINE_SET_TYPE(AggHashSetVariant::Type::phase2_slice_cx4, CompressedAggHashSetF
 DEFINE_SET_TYPE(AggHashSetVariant::Type::phase2_slice_cx8, CompressedAggHashSetFixedSize8<PhmapSeed2>);
 DEFINE_SET_TYPE(AggHashSetVariant::Type::phase2_slice_cx16, CompressedAggHashSetFixedSize16<PhmapSeed2>);
 
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int32_pack, Int32PackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_int64_pack, Int64PackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_date_pack, DatePackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_timestamp_pack, TimeStampPackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int32_pack, NullInt32PackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_int64_pack, NullInt64PackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_date_pack, NullDatePackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_null_timestamp_pack,
+                NullTimeStampPackAggHashMapWithOneNumberKey<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_fx4_pack, SerializedKeyFixedSize4PackAggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_fx8_pack, SerializedKeyFixedSize8PackAggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase1_slice_fx16_pack, SerializedKeyFixedSize16PackAggHashMap<PhmapSeed1>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int32_pack, Int32PackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_int64_pack, Int64PackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_date_pack, DatePackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_timestamp_pack, TimeStampPackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int32_pack, NullInt32PackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_int64_pack, NullInt64PackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_date_pack, NullDatePackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_null_timestamp_pack,
+                NullTimeStampPackAggHashMapWithOneNumberKey<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_fx4_pack, SerializedKeyFixedSize4PackAggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_fx8_pack, SerializedKeyFixedSize8PackAggHashMap<PhmapSeed2>);
+DEFINE_MAP_TYPE(AggHashMapVariant::Type::phase2_slice_fx16_pack, SerializedKeyFixedSize16PackAggHashMap<PhmapSeed2>);
+
 } // namespace detail
+
+namespace {
+
+template <typename Dst, typename Src>
+inline void _carry_over_post_init_state(Dst* dst, const Src* src) {
+    // The consecutive-keys cache holds session-gate state plus cumulative
+    // profile counters; without carry-over the two-level conversion would
+    // re-enable a cache the session disabled and reset cache hit/miss
+    // counters mid-query.
+    if constexpr (requires {
+                      dst->_consecutive_key_cache.cache_enabled;
+                      src->_consecutive_key_cache.cache_enabled;
+                  }) {
+        dst->_consecutive_key_cache.cache_enabled = src->_consecutive_key_cache.cache_enabled;
+        dst->_consecutive_key_cache.hits = src->_consecutive_key_cache.hits;
+        dst->_consecutive_key_cache.misses = src->_consecutive_key_cache.misses;
+        dst->_consecutive_key_cache.chunks_processed = src->_consecutive_key_cache.chunks_processed;
+    }
+}
+
+} // namespace
+
 void AggHashMapVariant::init(RuntimeState* state, Type type, AggStatistics* agg_stat) {
     _type = type;
     _agg_stat = agg_stat;
@@ -287,8 +390,63 @@ void AggHashMapVariant::init(RuntimeState* state, Type type, AggStatistics* agg_
         hash_map_with_key = std::make_unique<detail::AggHashMapVariantTypeTraits<Type::NAME>::HashMapWithKeyType>( \
                 state->chunk_size(), _agg_stat);                                                                   \
         break;
-        APPLY_FOR_AGG_VARIANT_ALL(M)
+        APPLY_FOR_AGG_MAP_VARIANT_ALL(M)
+        APPLY_FOR_AGG_MAP_PACK(M)
 #undef M
+    }
+}
+
+// Map a chosen single-op variant type onto its pack twin (same key handling, 32-byte pack
+// cell value). Returns the input unchanged when no pack flavor exists for the key -- the
+// caller treats that as "the pack gate does not apply".
+AggHashMapVariant::Type AggHashMapVariant::pack_type_for(Type type) {
+    switch (type) {
+    case Type::phase1_int32:
+        return Type::phase1_int32_pack;
+    case Type::phase1_int64:
+        return Type::phase1_int64_pack;
+    case Type::phase1_date:
+        return Type::phase1_date_pack;
+    case Type::phase1_timestamp:
+        return Type::phase1_timestamp_pack;
+    case Type::phase1_null_int32:
+        return Type::phase1_null_int32_pack;
+    case Type::phase1_null_int64:
+        return Type::phase1_null_int64_pack;
+    case Type::phase1_null_date:
+        return Type::phase1_null_date_pack;
+    case Type::phase1_null_timestamp:
+        return Type::phase1_null_timestamp_pack;
+    case Type::phase1_slice_fx4:
+        return Type::phase1_slice_fx4_pack;
+    case Type::phase1_slice_fx8:
+        return Type::phase1_slice_fx8_pack;
+    case Type::phase1_slice_fx16:
+        return Type::phase1_slice_fx16_pack;
+    case Type::phase2_int32:
+        return Type::phase2_int32_pack;
+    case Type::phase2_int64:
+        return Type::phase2_int64_pack;
+    case Type::phase2_date:
+        return Type::phase2_date_pack;
+    case Type::phase2_timestamp:
+        return Type::phase2_timestamp_pack;
+    case Type::phase2_null_int32:
+        return Type::phase2_null_int32_pack;
+    case Type::phase2_null_int64:
+        return Type::phase2_null_int64_pack;
+    case Type::phase2_null_date:
+        return Type::phase2_null_date_pack;
+    case Type::phase2_null_timestamp:
+        return Type::phase2_null_timestamp_pack;
+    case Type::phase2_slice_fx4:
+        return Type::phase2_slice_fx4_pack;
+    case Type::phase2_slice_fx8:
+        return Type::phase2_slice_fx8_pack;
+    case Type::phase2_slice_fx16:
+        return Type::phase2_slice_fx16_pack;
+    default:
+        return type;
     }
 }
 
@@ -306,6 +464,8 @@ void AggHashMapVariant::init(RuntimeState* state, Type type, AggStatistics* agg_
                         if (null_data_ptr != nullptr) {                                                               \
                             dst->set_null_key_data(null_data_ptr);                                                    \
                         }                                                                                             \
+                        _carry_over_post_init_state(dst.get(), hash_map_with_key.get());                              \
+                        agg_inline_transfer_null_state(*dst, *hash_map_with_key);                                     \
                     }                                                                                                 \
                 },                                                                                                    \
                 hash_map_with_key);                                                                                   \
@@ -337,16 +497,25 @@ size_t AggHashMapVariant::capacity() const {
 
 size_t AggHashMapVariant::size() const {
     return visit([](const auto& hash_map_with_key) {
-        return hash_map_with_key->hash_map.size() + (hash_map_with_key->get_null_key_data() != nullptr);
+        return hash_map_with_key->hash_map.size() + hash_map_with_key->has_null_key();
     });
 }
 
 bool AggHashMapVariant::need_expand(size_t increasement) const {
-    size_t capacity = this->capacity();
-    // TODO: think about two-level hashmap
-    size_t size = this->size() + increasement;
-    // see detail implement in reset_growth_left
-    return size >= capacity - capacity / 8;
+    // Direct-array hash maps (SmallFixedSizeHashMap for TINYINT/BOOL/SMALLINT
+    // and the low-card-dict uint8 variant) have a hard-coded full keyspace
+    // and never rehash, so streaming/spill paths should only fall back when
+    // the array is actually full -- not at the 87.5% growth-heuristic
+    // threshold used by phmap.
+    return visit([increasement](const auto& hash_map_with_key) {
+        using HashMap = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+        const size_t size = hash_map_with_key->hash_map.size() + increasement;
+        if constexpr (is_fixed_hash_map_v<HashMap>) {
+            return size > HashMap::hash_table_size;
+        }
+        const size_t capacity = hash_map_with_key->hash_map.capacity();
+        return size >= capacity - capacity / 8;
+    });
 }
 
 size_t AggHashMapVariant::reserved_memory_usage(const MemPool* pool) const {
@@ -358,9 +527,115 @@ size_t AggHashMapVariant::reserved_memory_usage(const MemPool* pool) const {
 
 size_t AggHashMapVariant::allocated_memory_usage(const MemPool* pool) const {
     return visit([pool](const auto& hash_map_with_key) {
-        return sizeof(typename decltype(hash_map_with_key->hash_map)::key_type) *
-                       hash_map_with_key->hash_map.capacity() +
-               pool->total_allocated_bytes();
+        using HashMap = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+        size_t hash_map_bytes;
+        if constexpr (is_fixed_hash_map_v<HashMap>) {
+            // SmallFixedSizeHashMap pre-allocates a dense pointer array; the
+            // SMALLINT path is ~512 KiB and must be reported as such, not as
+            // sizeof(KeyType) * capacity.
+            hash_map_bytes = HashMap::bucket_byte_size();
+        } else {
+            hash_map_bytes = sizeof(typename HashMap::key_type) * hash_map_with_key->hash_map.capacity();
+        }
+        const size_t pool_bytes = (pool != nullptr) ? pool->total_allocated_bytes() : 0;
+        return hash_map_bytes + pool_bytes;
+    });
+}
+
+void AggHashMapVariant::reserve(size_t count) {
+    visit([count](auto& hash_map_with_key) {
+        using HashMap = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+        // Fixed-size maps have a hard-coded full keyspace and never rehash.
+        if constexpr (!is_fixed_hash_map_v<HashMap>) {
+            hash_map_with_key->hash_map.reserve(count);
+        }
+    });
+}
+
+size_t AggHashMapVariant::reserve_bytes_estimate(size_t count) const {
+    return visit([count](const auto& hash_map_with_key) -> size_t {
+        using HashMap = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+        if constexpr (is_fixed_hash_map_v<HashMap>) {
+            return 0;
+        } else {
+            // phmap raw_hash_set holds one slot plus one control byte per bucket.
+            // reserve(count) first grows capacity to count*8/7 (the 7/8 load factor)
+            // then rounds up to a power-of-two minus one, so the worst case (just past
+            // a power-of-two boundary) approaches 16/7*count -- NOT < 2*count. Bound by
+            // that worst case so the byte cap stays a real upper bound on real memory.
+            const size_t per_slot = sizeof(typename HashMap::value_type) + 1;
+            return (count * 16 / 7 + 1) * per_slot;
+        }
+    });
+}
+
+bool AggHashMapVariant::supports_reserve() const {
+    // Every phmap-backed map (flat or two-level; numeric, slice/string, and the
+    // compressed-key / fixed-size-slice variants the optimizer picks once min-max
+    // stats are known) can be reserved. Only SmallFixedSizeHashMap has a hard-coded
+    // full keyspace and no reserve -- the same trait reserve() keys off.
+    return visit([](const auto& hash_map_with_key) {
+        using HashMap = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+        return !is_fixed_hash_map_v<HashMap>;
+    });
+}
+
+namespace {
+template <class T, class = void>
+struct HasConsecutiveKeyCacheStats : std::false_type {};
+
+template <class T>
+struct HasConsecutiveKeyCacheStats<T, std::void_t<decltype(std::declval<const T&>().get_cache_hits()),
+                                                  decltype(std::declval<const T&>().get_cache_misses())>>
+        : std::true_type {};
+
+} // namespace
+
+size_t AggHashMapVariant::consecutive_keys_cache_hits() const {
+    return visit([](const auto& hash_map_with_key) -> size_t {
+        if (!hash_map_with_key) return 0;
+        using MapType = std::remove_reference_t<decltype(*hash_map_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<MapType>::value) {
+            return hash_map_with_key->get_cache_hits();
+        } else {
+            return 0;
+        }
+    });
+}
+
+size_t AggHashMapVariant::consecutive_keys_cache_misses() const {
+    return visit([](const auto& hash_map_with_key) -> size_t {
+        if (!hash_map_with_key) return 0;
+        using MapType = std::remove_reference_t<decltype(*hash_map_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<MapType>::value) {
+            return hash_map_with_key->get_cache_misses();
+        } else {
+            return 0;
+        }
+    });
+}
+
+size_t AggHashSetVariant::consecutive_keys_cache_hits() const {
+    return visit([](const auto& hash_set_with_key) -> size_t {
+        if (!hash_set_with_key) return 0;
+        using SetType = std::remove_reference_t<decltype(*hash_set_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<SetType>::value) {
+            return hash_set_with_key->get_cache_hits();
+        } else {
+            return 0;
+        }
+    });
+}
+
+size_t AggHashSetVariant::consecutive_keys_cache_misses() const {
+    return visit([](const auto& hash_set_with_key) -> size_t {
+        if (!hash_set_with_key) return 0;
+        using SetType = std::remove_reference_t<decltype(*hash_set_with_key)>;
+        if constexpr (HasConsecutiveKeyCacheStats<SetType>::value) {
+            return hash_set_with_key->get_cache_misses();
+        } else {
+            return 0;
+        }
     });
 }
 
@@ -393,6 +668,7 @@ void AggHashSetVariant::init(RuntimeState* state, Type type, AggStatistics* agg_
                         if constexpr (SrcType::has_single_null_key && DstType::has_single_null_key) {                 \
                             dst->has_null_key = hash_set_with_key->has_null_key;                                      \
                         }                                                                                             \
+                        _carry_over_post_init_state(dst.get(), hash_set_with_key.get());                              \
                     }                                                                                                 \
                 },                                                                                                    \
                 hash_set_with_key);                                                                                   \
@@ -432,10 +708,17 @@ size_t AggHashSetVariant::size() const {
 }
 
 bool AggHashSetVariant::need_expand(size_t increasement) const {
-    size_t capacity = this->capacity();
-    size_t size = this->size() + increasement;
-    // see detail implement in reset_growth_left
-    return size >= capacity - capacity / 8;
+    // Direct-array hash sets (SmallFixedSizeHashSet for TINYINT/BOOL/SMALLINT)
+    // never rehash; only fall back when the array is actually full.
+    return visit([increasement](const auto& hash_set_with_key) {
+        using HashSet = std::remove_reference_t<decltype(hash_set_with_key->hash_set)>;
+        const size_t size = hash_set_with_key->hash_set.size() + increasement;
+        if constexpr (is_fixed_hash_set_v<HashSet>) {
+            return size > HashSet::hash_table_size;
+        }
+        const size_t capacity = hash_set_with_key->hash_set.capacity();
+        return size >= capacity - capacity / 8;
+    });
 }
 
 size_t AggHashSetVariant::reserved_memory_usage(const MemPool* pool) const {
@@ -447,9 +730,15 @@ size_t AggHashSetVariant::reserved_memory_usage(const MemPool* pool) const {
 
 size_t AggHashSetVariant::allocated_memory_usage(const MemPool* pool) const {
     return visit([&](auto& hash_set_with_key) {
-        return sizeof(typename decltype(hash_set_with_key->hash_set)::key_type) *
-                       hash_set_with_key->hash_set.capacity() +
-               pool->total_allocated_bytes();
+        using HashSet = std::remove_reference_t<decltype(hash_set_with_key->hash_set)>;
+        size_t hash_set_bytes;
+        if constexpr (is_fixed_hash_set_v<HashSet>) {
+            hash_set_bytes = HashSet::bucket_byte_size();
+        } else {
+            hash_set_bytes = sizeof(typename HashSet::key_type) * hash_set_with_key->hash_set.capacity();
+        }
+        const size_t pool_bytes = (pool != nullptr) ? pool->total_allocated_bytes() : 0;
+        return hash_set_bytes + pool_bytes;
     });
 }
 

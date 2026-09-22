@@ -289,6 +289,8 @@ Exchange Operator がクエリのボトルネックになる可能性のある�
 | `GetResultsTime` | 集計結果を抽出するのにかかった時間。 |
 | `HashTableSize` | ハッシュテーブルのサイズ。 |
 | `HashTableMemoryUsage` | ハッシュテーブルのメモリサイズ。 |
+| `ConsecutiveKeysCacheHits` | `GROUP BY` キーが直前の行と一致した行数。集約オペレーターは前回解決した状態を再利用し、ハッシュテーブル探索をスキップします。比率が高い場合、入力が group-by 列でクラスタ化されている（ソートスキャン、ソートキー先頭ストレージ、上流の事前集約などで一般的）ことを示し、集約の行あたりコストが下がっています。 |
+| `ConsecutiveKeysCacheMisses` | キーが直前の行と異なり、ハッシュテーブルの完全探索が必要だった行数。最初の数チャンクでヒット率（`Hits / (Hits + Misses)`）が低いままだと、キャッシュはクエリの残り期間で自動的に無効化されるため、無秩序な入力で misses が増え続けても hits が増えない状態は想定内です。 |
 | `InputRowCount` | 入力行数。 |
 | `PassThroughRowCount` | 自動モードで、低集計後にストリーミングモードに劣化した場合のストリーミングモードで処理されたデータ行数。 |
 | `ResultAggAppendTime` | 集計結果カラムを追加するのにかかった時間。 |

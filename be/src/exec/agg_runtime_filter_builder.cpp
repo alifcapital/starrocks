@@ -57,7 +57,7 @@ struct AggInRuntimeFilterBuilderImpl {
                     hash_map_with_key.insert_keys_to_columns(result_vector, group_by_columns, read_index);
                 }
                 if constexpr (HashMapWithKey::has_single_null_key) {
-                    if (hash_map_with_key.null_key_data != nullptr) {
+                    if (hash_map_with_key.has_null_key()) {
                         DCHECK(group_by_columns.size() == 1);
                         group_by_columns[0]->append_default();
                     }
@@ -172,7 +172,7 @@ struct AggTopRuntimeFilterBuilderImpl {
                     hash_map_with_key.insert_keys_to_columns(result_vector, group_by_columns, read_index);
                 }
                 if constexpr (HashMapWithKey::has_single_null_key) {
-                    if (hash_map_with_key.null_key_data != nullptr) {
+                    if (hash_map_with_key.has_null_key()) {
                         DCHECK(group_by_columns.size() == 1);
                         group_by_columns[build_expr_order]->append_default();
                     }

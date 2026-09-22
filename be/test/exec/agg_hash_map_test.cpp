@@ -91,9 +91,14 @@ TEST(HashMapTest, Basic) {
         AggHashMapVariant variant;
         variant.init(&dummy, hash_map_type, &statis);
         variant.visit([](auto& hash_map_with_key) {
-            if constexpr (std::is_same_v<typename decltype(hash_map_with_key->hash_map)::key_type, int32_t>) {
+            using MapT = std::remove_reference_t<decltype(hash_map_with_key->hash_map)>;
+            // The pack flavors hold a 32-byte cell value, not an AggDataPtr; this test's
+            // type list never selects them, so they only need to compile past the visit.
+            if constexpr (!std::is_same_v<typename MapT::mapped_type, AggDataPtr>) {
+                ASSERT_TRUE(false);
+            } else if constexpr (std::is_same_v<typename MapT::key_type, int32_t>) {
                 exec(hash_map_with_key->hash_map, get_keys<int32_t>());
-            } else if constexpr (std::is_same_v<typename decltype(hash_map_with_key->hash_map)::key_type, Slice>) {
+            } else if constexpr (std::is_same_v<typename MapT::key_type, Slice>) {
                 exec(hash_map_with_key->hash_map, get_keys<Slice>());
             } else {
                 ASSERT_TRUE(false);
@@ -176,6 +181,170 @@ TEST(HashMapTest, TwoLevelConvert) {
     for (const auto& key : set) {
         ASSERT_TRUE(two_level_set.contains(key));
     }
+}
+
+TEST(ConsecutiveKeyCacheTest, NumericKeyCacheHit) {
+    RuntimeProfile profile("ConsecutiveKeyCacheTest");
+    AggStatistics statis(&profile);
+    RuntimeState dummy;
+
+    using HashMapWithKey = Int32AggHashMapWithOneNumberKey<PhmapSeed1>;
+    HashMapWithKey hash_map_with_key(1024, &statis);
+
+    MemPool pool;
+    const int32_t chunk_size = 4;
+    Buffer<AggDataPtr> agg_states(chunk_size);
+
+    // keys: 1,1,2,2 => expected hits: 2, misses: 2
+    auto col = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), false);
+    col->append_datum(Datum(1));
+    col->append_datum(Datum(1));
+    col->append_datum(Datum(2));
+    col->append_datum(Datum(2));
+
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    auto allocate_func = [&pool](auto&) { return pool.allocate(16); };
+    hash_map_with_key.build_hash_map(chunk_size, key_columns, &pool, allocate_func, &agg_states);
+
+    ASSERT_EQ(agg_states[0], agg_states[1]);
+    ASSERT_EQ(agg_states[2], agg_states[3]);
+    ASSERT_NE(agg_states[0], agg_states[2]);
+
+    ASSERT_EQ(hash_map_with_key.get_cache_hits(), 2);
+    ASSERT_EQ(hash_map_with_key.get_cache_misses(), 2);
+    ASSERT_TRUE(hash_map_with_key.is_cache_enabled());
+}
+
+TEST(ConsecutiveKeyCacheTest, DisableForSmallFixedSizeHashMap) {
+    RuntimeProfile profile("ConsecutiveKeyCacheTest");
+    AggStatistics statis(&profile);
+    RuntimeState dummy;
+
+    using HashMapWithKey = Int8AggHashMapWithOneNumberKey<PhmapSeed1>;
+    HashMapWithKey hash_map_with_key(1024, &statis);
+
+    MemPool pool;
+    const int32_t chunk_size = 2;
+    Buffer<AggDataPtr> agg_states(chunk_size);
+
+    auto col = ColumnHelper::create_column(TypeDescriptor(TYPE_TINYINT), false);
+    col->append_datum(Datum(int8_t{7}));
+    col->append_datum(Datum(int8_t{7}));
+
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    auto allocate_func = [&pool](auto&) { return pool.allocate(16); };
+    hash_map_with_key.build_hash_map(chunk_size, key_columns, &pool, allocate_func, &agg_states);
+
+    ASSERT_EQ(agg_states[0], agg_states[1]);
+    ASSERT_EQ(hash_map_with_key.get_cache_hits(), 0);
+    ASSERT_EQ(hash_map_with_key.get_cache_misses(), 0);
+}
+
+TEST(ConsecutiveKeySetCacheTest, NumericKeyCacheHitAllocate) {
+    RuntimeProfile profile("ConsecutiveKeySetCacheTest");
+    AggStatistics statis(&profile);
+
+    using HashSetWithKey = Int32AggHashSetOfOneNumberKey<PhmapSeed1>;
+    HashSetWithKey hash_set_with_key(1024, &statis);
+
+    MemPool pool;
+    const int32_t chunk_size = 4;
+
+    auto col = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), false);
+    col->append_datum(Datum(1));
+    col->append_datum(Datum(1));
+    col->append_datum(Datum(2));
+    col->append_datum(Datum(2));
+
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    hash_set_with_key.build_hash_set(chunk_size, key_columns, &pool);
+
+    // Allocate mode: keys 1,1,2,2 -> first occurrence misses+inserts, second
+    // occurrence hits the cache and skips emplace.
+    ASSERT_EQ(hash_set_with_key.get_cache_hits(), 2);
+    ASSERT_EQ(hash_set_with_key.get_cache_misses(), 2);
+    ASSERT_TRUE(hash_set_with_key.is_cache_enabled());
+    ASSERT_EQ(hash_set_with_key.hash_set.size(), 2);
+}
+
+TEST(ConsecutiveKeySetCacheTest, ProbeOnlyAbsentKeysReplay) {
+    // The probe-only mode (compute_and_allocate=false) stores
+    // (last_key, last_found).  Repeated absent keys MUST still report
+    // not_founds[i]=1 on cache hit -- not 0 -- otherwise the streaming
+    // pre-aggregation first stage would misclassify new keys as known.
+    RuntimeProfile profile("ConsecutiveKeySetCacheTest");
+    AggStatistics statis(&profile);
+
+    using HashSetWithKey = Int32AggHashSetOfOneNumberKey<PhmapSeed1>;
+    HashSetWithKey hash_set_with_key(1024, &statis);
+
+    MemPool pool;
+
+    // Pre-seed the set so a probe of {5} would hit, {1,7} would miss.
+    {
+        auto seed_col = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), false);
+        seed_col->append_datum(Datum(5));
+        Columns seed_columns;
+        seed_columns.emplace_back(std::move(seed_col));
+        hash_set_with_key.build_hash_set(1, seed_columns, &pool);
+    }
+    const auto hits_before = hash_set_with_key.get_cache_hits();
+    const auto misses_before = hash_set_with_key.get_cache_misses();
+
+    // Probe with repeated absent keys.  Expectation: every (*not_founds)[i]
+    // ends up == 1, regardless of cache hit/miss.
+    const int32_t chunk_size = 4;
+    auto col = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), false);
+    col->append_datum(Datum(1));
+    col->append_datum(Datum(1)); // repeat -> cache hit on absent
+    col->append_datum(Datum(7));
+    col->append_datum(Datum(7)); // repeat -> cache hit on absent
+
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    Filter not_founds;
+    hash_set_with_key.build_hash_set_with_selection(chunk_size, key_columns, &pool, &not_founds);
+
+    for (int i = 0; i < chunk_size; ++i) {
+        ASSERT_EQ(not_founds[i], 1) << "row " << i << " incorrectly reported as found";
+    }
+
+    // The set must not have grown (probe-only mode doesn't insert).
+    ASSERT_EQ(hash_set_with_key.hash_set.size(), 1);
+
+    // Cache fired on the two repeats.
+    EXPECT_GE(hash_set_with_key.get_cache_hits() - hits_before, 2u);
+    EXPECT_GE(hash_set_with_key.get_cache_misses() - misses_before, 2u);
+}
+
+TEST(ConsecutiveKeySetCacheTest, DisableForSmallFixedSizeHashSet) {
+    RuntimeProfile profile("ConsecutiveKeySetCacheTest");
+    AggStatistics statis(&profile);
+
+    using HashSetWithKey = Int8AggHashSetOfOneNumberKey<PhmapSeed1>;
+    HashSetWithKey hash_set_with_key(1024, &statis);
+
+    MemPool pool;
+    const int32_t chunk_size = 2;
+    auto col = ColumnHelper::create_column(TypeDescriptor(TYPE_TINYINT), false);
+    col->append_datum(Datum(int8_t{7}));
+    col->append_datum(Datum(int8_t{7}));
+
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    hash_set_with_key.build_hash_set(chunk_size, key_columns, &pool);
+
+    // Direct-array set: cache is bypassed, counters stay at zero.
+    ASSERT_EQ(hash_set_with_key.get_cache_hits(), 0);
+    ASSERT_EQ(hash_set_with_key.get_cache_misses(), 0);
 }
 
 class AggHashMapKeyNotFoundsTest : public ::testing::Test {
@@ -327,6 +496,179 @@ TEST_F(AggHashMapKeyNotFoundsTest, TestAllocateAndComputeNonFounds_FixedSize16Sl
     using TestAggHashMap = FixedSize16SliceAggHashMap<PhmapSeed1>;
     using TestAggHashMapKey = AggHashMapWithSerializedKeyFixedSize<TestAggHashMap>;
     TestAggHashMapKeyWithIntType<TestAggHashMapKey>(true);
+}
+
+// Direct-array INT GROUP BY wrappers (P1.C): default min_value=0, so the
+// existing Int32TestData/{1,2,3,4,5} values fit both uint8 and uint16
+// cells unchanged. Reuses the shared not-founds harness so each variant
+// exercises the same four build paths the framework already covers.
+TEST_F(AggHashMapKeyNotFoundsTest, TestAllocateAndComputeNonFounds_CompressibleInt32_Uint8) {
+    using TestAggHashMapKey = AggHashMapWithOneCompressibleInt32Key<RangeUInt8AggHashMap<PhmapSeed1>>;
+    TestAggHashMapKeyWithIntType<TestAggHashMapKey>(false);
+}
+
+TEST_F(AggHashMapKeyNotFoundsTest, TestAllocateAndComputeNonFounds_NullCompressibleInt32_Uint8) {
+    using TestAggHashMapKey = AggHashMapWithOneNullableCompressibleInt32Key<RangeUInt8AggHashMap<PhmapSeed1>>;
+    TestAggHashMapKeyWithIntType<TestAggHashMapKey>(true);
+}
+
+TEST_F(AggHashMapKeyNotFoundsTest, TestAllocateAndComputeNonFounds_CompressibleInt32_Uint16) {
+    using TestAggHashMapKey = AggHashMapWithOneCompressibleInt32Key<RangeUInt16AggHashMap<PhmapSeed1>>;
+    TestAggHashMapKeyWithIntType<TestAggHashMapKey>(false);
+}
+
+TEST_F(AggHashMapKeyNotFoundsTest, TestAllocateAndComputeNonFounds_NullCompressibleInt32_Uint16) {
+    using TestAggHashMapKey = AggHashMapWithOneNullableCompressibleInt32Key<RangeUInt16AggHashMap<PhmapSeed1>>;
+    TestAggHashMapKeyWithIntType<TestAggHashMapKey>(true);
+}
+
+// ============================================================================
+// Round-trip + min_value handling for the compressible-int wrapper.
+// ============================================================================
+// Drives build_hash_map -> insert_keys_to_columns and asserts that the
+// stored uint8/uint16 keys correctly restore to (key + min_value) in the
+// output Int32Column. Two min_value setups: zero (canonical case) and
+// INT32_MIN (overflow-safe path: unsigned narrowing must not wrap).
+class CompressibleInt32KeyRoundTripTest : public ::testing::Test {
+protected:
+    template <typename KeyT>
+    void run(int32_t min_value, const std::vector<int32_t>& input) {
+        using HashMap = std::conditional_t<std::is_same_v<KeyT, uint8_t>, RangeUInt8AggHashMap<PhmapSeed1>,
+                                           RangeUInt16AggHashMap<PhmapSeed1>>;
+        using KeyImpl = AggHashMapWithOneCompressibleInt32Key<HashMap>;
+
+        RuntimeProfile profile("CompressibleInt32KeyRoundTripTest");
+        AggStatistics statis(&profile);
+        const int chunk_size = static_cast<int>(input.size());
+        KeyImpl key(chunk_size, &statis);
+        key.set_min(min_value);
+
+        // Build a single-column Int32 input chunk.
+        MutableColumns key_columns_mut;
+        key_columns_mut.emplace_back(ColumnHelper::create_column(TypeDescriptor(LogicalType::TYPE_INT), false));
+        for (int32_t v : input) {
+            key_columns_mut.back()->append_datum(Datum(v));
+        }
+        Columns key_columns = ColumnHelper::to_columns(std::move(key_columns_mut));
+
+        MemPool pool;
+        Buffer<AggDataPtr> agg_states(chunk_size);
+        auto allocate_func = [&pool](auto&) { return pool.allocate(16); };
+        key.build_hash_map(chunk_size, key_columns, &pool, allocate_func, &agg_states);
+
+        // Collect distinct keys in insertion order, then run them back
+        // through insert_keys_to_columns and check restored values match
+        // the input set. ResultVector uses ColumnAllocator (not the
+        // std default), so use the wrapper's own alias. The fixed-map
+        // iterator exposes only operator->, so iterate explicitly
+        // instead of using a structured-binding range-for.
+        typename KeyImpl::ResultVector resv;
+        std::set<int32_t> expected_distinct(input.begin(), input.end());
+        for (auto it = key.hash_map.begin(); it != key.hash_map.end(); ++it) {
+            resv.emplace_back(it->first);
+        }
+        ASSERT_EQ(resv.size(), expected_distinct.size());
+
+        MutableColumns res_columns;
+        res_columns.emplace_back(ColumnHelper::create_column(TypeDescriptor(LogicalType::TYPE_INT), false));
+        key.insert_keys_to_columns(resv, res_columns, resv.size());
+
+        auto& restored = down_cast<Int32Column*>(res_columns[0].get())->get_data();
+        std::set<int32_t> restored_set(restored.begin(), restored.end());
+        ASSERT_EQ(restored_set, expected_distinct) << "min_value=" << min_value << ", input_size=" << input.size();
+    }
+};
+
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint8_MinZero) {
+    run<uint8_t>(0, {0, 1, 2, 1, 255, 100, 255});
+}
+
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint8_MinPositive) {
+    run<uint8_t>(1000, {1000, 1001, 1002, 1000, 1255, 1100});
+}
+
+// INT32_MIN edge: (val - min) must use unsigned arithmetic so that
+// INT32_MIN - INT32_MIN = 0 in uint8, not signed overflow.
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint8_MinInt32) {
+    run<uint8_t>(INT32_MIN, {INT32_MIN, INT32_MIN + 1, INT32_MIN + 2, INT32_MIN + 255});
+}
+
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint16_MinZero) {
+    std::vector<int32_t> vals;
+    for (int32_t v : {0, 1, 100, 1000, 65535, 30000, 1000}) {
+        vals.push_back(v);
+    }
+    run<uint16_t>(0, vals);
+}
+
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint16_MinNegative) {
+    run<uint16_t>(-32768, {-32768, -32767, 0, 32767, -32768});
+}
+
+TEST_F(CompressibleInt32KeyRoundTripTest, Uint16_MinInt32) {
+    run<uint16_t>(INT32_MIN, {INT32_MIN, INT32_MIN + 1, INT32_MIN + 65535, INT32_MIN + 32768});
+}
+
+// Nullable path: only_null short-circuit + has_null mixed input.
+class NullCompressibleInt32KeyTest : public ::testing::Test {};
+
+TEST_F(NullCompressibleInt32KeyTest, OnlyNullShortCircuit) {
+    using KeyImpl = AggHashMapWithOneNullableCompressibleInt32Key<RangeUInt8AggHashMap<PhmapSeed1>>;
+    RuntimeProfile profile("NullCompressibleInt32KeyTest");
+    AggStatistics statis(&profile);
+    const int chunk_size = 4;
+    KeyImpl key(chunk_size, &statis);
+    key.set_min(0);
+
+    // Construct an only_null nullable Int32 column.
+    auto col = ColumnHelper::create_column(TypeDescriptor(LogicalType::TYPE_INT), true);
+    col->append_nulls(chunk_size);
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    MemPool pool;
+    Buffer<AggDataPtr> agg_states(chunk_size);
+    auto allocate_func = [&pool](auto&&...) { return pool.allocate(16); };
+    key.build_hash_map(chunk_size, key_columns, &pool, allocate_func, &agg_states);
+
+    // All four rows must resolve to the single null_key_data slot.
+    ASSERT_NE(agg_states[0], nullptr);
+    for (int i = 1; i < chunk_size; ++i) {
+        ASSERT_EQ(agg_states[i], agg_states[0]);
+    }
+    ASSERT_EQ(key.hash_map.size(), 0);
+}
+
+TEST_F(NullCompressibleInt32KeyTest, MixedNullAndValues) {
+    using KeyImpl = AggHashMapWithOneNullableCompressibleInt32Key<RangeUInt8AggHashMap<PhmapSeed1>>;
+    RuntimeProfile profile("NullCompressibleInt32KeyTest");
+    AggStatistics statis(&profile);
+    const int chunk_size = 6;
+    KeyImpl key(chunk_size, &statis);
+    key.set_min(0);
+
+    auto col = ColumnHelper::create_column(TypeDescriptor(LogicalType::TYPE_INT), true);
+    col->append_datum(Datum(int32_t{1}));
+    col->append_nulls(1);
+    col->append_datum(Datum(int32_t{1}));
+    col->append_datum(Datum(int32_t{2}));
+    col->append_nulls(1);
+    col->append_datum(Datum(int32_t{2}));
+    Columns key_columns;
+    key_columns.emplace_back(std::move(col));
+
+    MemPool pool;
+    Buffer<AggDataPtr> agg_states(chunk_size);
+    auto allocate_func = [&pool](auto&&...) { return pool.allocate(16); };
+    key.build_hash_map(chunk_size, key_columns, &pool, allocate_func, &agg_states);
+
+    // Distinct non-null keys (1, 2) -> 2 cells; nulls share null_key_data.
+    ASSERT_EQ(key.hash_map.size(), 2);
+    ASSERT_EQ(agg_states[0], agg_states[2]); // both rows with value 1
+    ASSERT_EQ(agg_states[3], agg_states[5]); // both rows with value 2
+    ASSERT_EQ(agg_states[1], agg_states[4]); // both null rows
+    ASSERT_NE(agg_states[0], agg_states[3]); // value 1 != value 2
+    ASSERT_NE(agg_states[0], agg_states[1]); // value 1 != null
 }
 
 } // namespace starrocks

@@ -226,6 +226,7 @@ import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamScanOperator;
 import com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldAccessPathNormalizer;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldExpressionCollector;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.transformer.LogicalPlan;
 import com.starrocks.thrift.TBrokerFileStatus;
@@ -2347,6 +2348,71 @@ public class PlanFragmentBuilder {
                     intermediateAggrExprs, removeDistinctFlags);
         }
 
+        // The catalog marks sum/min/max nullable, so buildAggregateTuple creates their output
+        // and intermediate slots nullable even when the argument can never be NULL. On a
+        // producer stage those slots only carry partial states to the merge stage, so narrow
+        // them to the exact nullability:
+        //     argument nullable || repeat/outer-join below the node
+        // This is the same disjunction the BE evaluates to pick the function variant
+        // (has_outer_join_child || has_nullable_child), so the producer's intermediate column
+        // representation and these slot descriptors agree by construction, and the merge-stage
+        // call (whose child is the SlotRef registered on the output slot) reports an honest
+        // hasNullableChild. count needs no narrowing: it is catalog-non-nullable already.
+        private void markHonestProducerAggSlotNullability(AggregationNode aggregationNode,
+                                                          List<FunctionCallExpr> aggregateExprList,
+                                                          List<Expr> intermediateAggrExprs) {
+            for (int i = 0; i < aggregateExprList.size(); i++) {
+                FunctionCallExpr aggExpr = aggregateExprList.get(i);
+                String fnName = aggExpr.getFunctionName();
+                if (!FunctionSet.SUM.equals(fnName) && !FunctionSet.MIN.equals(fnName) &&
+                        !FunctionSet.MAX.equals(fnName)) {
+                    continue;
+                }
+                if (aggExpr.isDistinct() || aggregationNode.isHasNullableGenerateChild() ||
+                        aggExpr.getChildren().stream().anyMatch(Expr::isNullable)) {
+                    continue;
+                }
+                SlotDescriptor intermediateSlot = ((SlotRef) intermediateAggrExprs.get(i)).getDesc();
+                intermediateSlot.setIsNullable(false);
+                // The output slot shares the intermediate slot's id and parent tuple; the merge
+                // stage reads the producer through the SlotRef registered on it.
+                for (SlotDescriptor slot : intermediateSlot.getParent().getSlots()) {
+                    if (slot.getId().equals(intermediateSlot.getId())) {
+                        slot.setIsNullable(false);
+                    }
+                }
+            }
+        }
+
+        // Below this NDV the BE hash table already starts large enough (chunk_size),
+        // so reserving buys nothing; do not bother propagating the estimate.
+        private static final long MIN_RESERVE_CARDINALITY = 4096;
+
+        // Returns the group-by NDV to send to the BE for hash-table reserve, or -1 to
+        // skip. Mirrors the unknown-stats detection in StatisticsCalculator: if any
+        // group-by input column stat is unknown, the cardinality is inputRows*0.5 (a
+        // correlation fallback, not a real NDV) and must not drive a reserve.
+        private long computeReservableCardinality(OptExpression optExpr, List<ColumnRefOperator> groupBys,
+                                                  long cardinality) {
+            if (groupBys.isEmpty() || cardinality <= MIN_RESERVE_CARDINALITY) {
+                return -1;
+            }
+            Statistics inputStatistics = optExpr.inputAt(0).getStatistics();
+            if (inputStatistics == null) {
+                return -1;
+            }
+            for (ColumnRefOperator groupBy : groupBys) {
+                // Use the raw map lookup, not getColumnStatistic(), which THROWS when the
+                // column is absent (it never returns null). A group-by column may be missing
+                // from the propagated input statistics; treat that like unknown -> no reserve.
+                ColumnStatistic columnStatistic = inputStatistics.getColumnStatistics().get(groupBy);
+                if (columnStatistic == null || columnStatistic.isUnknown()) {
+                    return -1;
+                }
+            }
+            return cardinality;
+        }
+
         @Override
         public PlanFragment visitPhysicalHashAggregate(OptExpression optExpr, ExecPlan context) {
             PhysicalHashAggregateOperator node = (PhysicalHashAggregateOperator) optExpr.getOp();
@@ -2489,6 +2555,16 @@ public class PlanFragmentBuilder {
             aggregationNode.setLocalLimit(node.getLocalLimit());
             aggregationNode.setStreamingPreaggregationMode(node.getNeededPreaggregationMode());
             aggregationNode.setHasNullableGenerateChild();
+            // Producer stages feed the later merge stage, not the user; state their aggregate
+            // slots' real nullability so the merge call sees an honest child (see
+            // FunctionSet.MERGE_HONEST_NULLABLE_CHILD_FUNCTIONS). Final stages keep the
+            // catalog-nullable slots: those are user-visible result metadata.
+            boolean producerStage = (node.getType().isLocal() && node.isSplit())
+                    || node.getType().isDistinctGlobal()
+                    || node.getType().isDistinctLocal();
+            if (producerStage) {
+                markHonestProducerAggSlotNullability(aggregationNode, aggregateExprList, intermediateAggrExprs);
+            }
             aggregationNode.computeStatistics(optExpr.getStatistics());
             aggregationNode.setGroupByMinMaxStats(node.getGroupByMinMaxStatistic());
 
@@ -2499,6 +2575,22 @@ public class PlanFragmentBuilder {
                 inputFragment.setWithLocalShuffleIfTrue(withLocalShuffle);
                 aggregationNode.setWithLocalShuffle(withLocalShuffle);
                 aggregationNode.setIdenticallyDistributed(true);
+            }
+
+            // Propagate the group-by NDV estimate so the BE can reserve the merge hash
+            // table, but only for aggregations that own ~the full keyspace (one-phase /
+            // merged-local / distinct-global / global) and only when the group-by stats
+            // are known. This is the full cluster-wide NDV; when the input is hash-shuffled
+            // it is sharded by the fragment instance count at schedule time (see
+            // ExecutionFragment#scaleAggReserveEstimateByInstanceCount). The BE additionally
+            // restricts reserve to hash-blocking sinks.
+            if (node.isOnePhaseAgg() || node.isMergedLocalAgg() || node.getType().isDistinctGlobal() ||
+                    node.getType().isGlobal()) {
+                long estimatedCardinality =
+                        computeReservableCardinality(optExpr, groupBys, aggregationNode.getCardinality());
+                if (estimatedCardinality > 0) {
+                    aggregationNode.setEstimatedCardinality(estimatedCardinality);
+                }
             }
 
             if (node.isTopNLocalAgg() && node.getTopNSortInfo() != null) {
@@ -2527,6 +2619,11 @@ public class PlanFragmentBuilder {
                         orderSpec.getOrderDescs().stream().map(Ordering::isNullsFirst).collect(Collectors.toList()));
                 aggregationNode.setTopNSortInfo(sortInfo);
                 aggregationNode.setTopNLimit(topNSortInfo.limit());
+            }
+
+            if (node.isCacheConsciousTopn()) {
+                aggregationNode.setCacheConsciousTopn(node.getCacheConsciousTopnLimit());
+                aggregationNode.setCacheConsciousMcv(node.getCacheConsciousMcv());
             }
 
             aggregationNode.getAggInfo().setIntermediateAggrExprs(intermediateAggrExprs);
