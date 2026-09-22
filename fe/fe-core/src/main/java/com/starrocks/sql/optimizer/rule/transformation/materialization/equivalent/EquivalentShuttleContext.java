@@ -28,11 +28,9 @@ public class EquivalentShuttleContext {
     private IRewriteEquivalent.RewriteEquivalentType rewriteEquivalentType;
     private Map<ColumnRefOperator, CallOperator> newColumnRefToAggFuncMap;
 
-    // Per-rewrite signal raised by PercentileRewriteEquivalent when the MV's
-    // stored compression is strictly smaller than the query's compression.
-    // BestMvSelector inspects the flag through MvRewriteContext / RewriteResult
-    // to prefer subsume MVs; strict mode (session var) turns this into a hard
-    // skip (caller emits a logMVRewriteFailReason and returns null).
+    // Set only for a chosen rewrite whose MV compression is lower than the
+    // query's. BestMvSelector uses it to prefer MVs with sufficient compression.
+    // Strict mode rejects individual equivalents before they can set this flag.
     private boolean hasPercentileNonSubsumeRewrite;
     private double percentileMismatchMvC;
     private double percentileMismatchQueryC;

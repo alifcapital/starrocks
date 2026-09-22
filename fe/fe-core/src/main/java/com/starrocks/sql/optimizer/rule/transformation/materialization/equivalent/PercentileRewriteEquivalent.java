@@ -17,6 +17,7 @@ import com.google.common.base.Preconditions;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.analyzer.PercentileCompression;
@@ -43,7 +44,7 @@ import static com.starrocks.catalog.FunctionSet.PERCENTILE_UNION;
 // non-subsume (silently downgrades precision). Signals via EquivalentShuttleContext;
 // flag flows into MvRewriteContext and BestMvSelector.CandidateScore which ranks
 // subsume rewrites first. Session var enable_mv_percentile_strict_match turns
-// the warning into a hard skip (fail reason logged via OptimizerTraceUtil).
+// mismatch into a candidate skip recorded in the MV trace.
 public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
     public static IAggregateRewriteEquivalent INSTANCE = new PercentileRewriteEquivalent();
     private static final long LEGACY_STORAGE = 1000;
@@ -115,6 +116,8 @@ public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
             double queryC = extractQueryCompression(aggFunc);
             double mvC = extractMvCompression(eqContext.getInput());
             if (mvC < queryC && isStrictMatchEnabled()) {
+                Tracers.log(Tracers.Module.MV,
+                        "Skip percentile equivalent {}: MV.c={} < query.c={} in strict mode", replace, mvC, queryC);
                 return null;
             }
             ScalarOperator rewritten = rewriteImpl(shuttleContext, aggFunc, replace);
