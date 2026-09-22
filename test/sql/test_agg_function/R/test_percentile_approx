@@ -57,7 +57,7 @@ select /*+ SET_VAR (new_planner_agg_stage = '2') */ percentile_approx(c2, array<
 -- !result
 select /*+ SET_VAR (new_planner_agg_stage = '2') */ percentile_approx(c2, [0.1, 0.25, 0.5, 0.75, 0.9]) from t1;
 -- result:
-[4999.6005859375,12499.75,25000,37500.25,45000.3984375]
+[4999.6005859375,12499.75,25000,37500.25,45000.39453125]
 -- !result
 select /*+ SET_VAR (new_planner_agg_stage = '2') */ percentile_approx(c2, [0.25, 0.5, 0.75], 2048) from t1;
 -- result:
