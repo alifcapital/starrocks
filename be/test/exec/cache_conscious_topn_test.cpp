@@ -472,6 +472,29 @@ TEST(CacheConsciousCaTest, FuzzTakeRestoreRoundtrip) {
 // CacheConsciousFa: build from a snapshot, probe a stream (hit -> inline increment + sel 0, miss ->
 // sel 1), collect back. Focused checks on the membership mask, the fused increment, and the
 // 2-phase partial-weight path.
+TEST(CacheConsciousFaTest, DenseIntegralKeysHaveBoundedProbeChains) {
+    // This is the key set at the flip in a hot-key/unique-tail stream. The identity hash
+    // mapped these 15K keys into only a few hundred starting buckets; lookup then needed
+    // about 32 extra probe/collision steps per key despite a table load below one half.
+    std::vector<uint64_t> keys;
+    for (uint64_t key = 0; key < 10; ++key) keys.push_back(key);
+    for (uint64_t row = 1; row <= 61440; ++row) {
+        if (row % 100 >= 75) keys.push_back(row + 100);
+    }
+    std::mt19937_64 random(92341);
+    std::shuffle(keys.begin(), keys.end(), random);
+    CacheConsciousFa::Map map;
+    map.reserve(keys.size());
+    for (uint64_t key : keys) map.emplace(key, 1);
+
+    using DebugAccess = phmap::priv::hashtable_debug_internal::HashtableDebugAccess<CacheConsciousFa::Map>;
+    size_t extra_steps = 0;
+    for (uint64_t key : keys) extra_steps += DebugAccess::GetNumProbes(map, key);
+    // A structural bound avoids a flaky wall-clock performance assertion. Allow substantial
+    // headroom for table-layout changes, while rejecting the clustered identity-hash case.
+    EXPECT_LT(extra_steps, keys.size());
+}
+
 TEST(CacheConsciousFaTest, BuildProbeCollect) {
     CacheConsciousFa fa;
     fa.build({{10, 3}, {20, 5}, {30, 1}});

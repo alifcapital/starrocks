@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "util/hash.h"
 #include "util/phmap/phmap.h"
 
 namespace starrocks {
@@ -33,14 +34,18 @@ namespace starrocks {
 // pointer). Here the value IS the int64 counter, so post-flip work collapses to one fused pass:
 // find + increment, on the raw group key (no bit-compress encode). The open-addressing table
 // itself is phmap's (a well-tuned SwissTable -- a hand-rolled flat array lost to it on the
-// miss-heavy probe); only the fused, batch-prefetched probe loop here is ours.
+// miss-heavy probe); only the fused batch probe loop here is ours.
 class CacheConsciousFa {
 public:
     // Key is the real group value widened to uint64 -- the same representation route_cold_rows /
     // route_batch use for CA, so FA and CA share one key space (a key lives in exactly one). Every supported
     // integral key (int8..int64, gated by cache_conscious_group_key_supported) round-trips through
     // uint64 exactly. Value is the count inline (no AggDataPtr indirection).
-    using Map = phmap::flat_hash_map<uint64_t, int64_t>;
+    // phmap's default integer hash is identity, and its internal mixing is disabled here.
+    // Adjacent keys then share the high bits used to select control groups, producing long
+    // probe chains even in an L2-sized FA. Use the same mixing as ordinary integer aggregation.
+    using Hash = StdHashWithSeed<uint64_t, PhmapSeed1>;
+    using Map = phmap::flat_hash_map<uint64_t, int64_t, Hash>;
 
     // Build from the FA snapshot taken at the flip: distinct real group keys with counts >= 1.
     void build(const std::vector<std::pair<uint64_t, int64_t>>& seed) {
@@ -65,9 +70,9 @@ public:
         for (size_t i = 0; i < n; ++i) {
             const uint64_t key = static_cast<uint64_t>(keys[i]);
             const size_t h = hasher(key);
-            // Optional bloom pre-filter (operator-activated on a miss-heavy probe): a definite miss
+            // Optional bloom pre-filter: a definite miss
             // skips the SwissTable group scan entirely -- the dominant probe cost on a cold-tail
-            // stream. When inactive the branch short-circuits, so it costs nothing on hit-heavy work.
+            // stream. The operator enables it at the flip by default, or after an observation window.
             if (_bloom_active && !_bloom_maybe(h)) {
                 sel[i] = 1;
                 continue;
@@ -159,7 +164,7 @@ public:
 
     // Build a small (L1-resident) bloom over the frozen FA keys: ~16 bits/key, 2 probes, power-of-two
     // sized. No false negatives -- the FA is frozen, so every member is in the bloom -- so a bloom
-    // miss is a definite FA miss. Built once; the operator activates it only on a miss-heavy probe.
+    // miss is a definite FA miss. The operator builds it when activating the filter.
     void build_bloom() {
         size_t nbits = 1024;
         while (nbits < _map.size() * 16) nbits <<= 1;
@@ -199,10 +204,10 @@ private:
 
     Map _map;
     // Histogram keys are hints; a group exists only after an input row reaches it.
-    phmap::flat_hash_set<uint64_t> _unseen_pinned;
+    phmap::flat_hash_set<uint64_t, Hash> _unseen_pinned;
     // FE-supplied MCV (known-hot) keys, pinned into FA and exempt from swap eviction. Small (<= the
     // histogram MCV size, ~100), so the membership check in evict_min is cheap.
-    phmap::flat_hash_set<uint64_t> _pinned;
+    phmap::flat_hash_set<uint64_t, Hash> _pinned;
     std::vector<uint64_t> _bloom;
     uint64_t _bloom_mask = 0;
     int _bloom_shift = 0;
