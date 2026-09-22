@@ -191,7 +191,8 @@ TEST_F(PercentileApproxAggTest, weighted_empty_state_finalizes_to_null) {
         values->null_column_data().push_back(0);
     }
 
-    auto weights = NullableColumn::create(weight_const->clone(), NullColumn::create(values->size(), 0));
+    auto weights =
+            NullableColumn::create(Int64Column::create(values->size(), 0), NullColumn::create(values->size(), 0));
 
     std::vector<const Column*> raw{values.get(), weights.get(), quantile_const.get()};
 
