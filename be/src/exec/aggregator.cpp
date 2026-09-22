@@ -431,6 +431,12 @@ Status Aggregator::open(RuntimeState* state) {
     }
 #endif
 
+    // open() may follow a reset; determine inline eligibility from the newly selected map.
+    _inline_agg = false;
+    _inline_pack = false;
+    _inline_pack_n = 0;
+    _inline_pack_fused = false;
+
     // For SQL: select distinct id from table or select id from from table group by id;
     // we don't need to allocate memory for agg states.
     if (_is_only_group_by_columns) {
@@ -977,7 +983,7 @@ Status Aggregator::_reset_state(RuntimeState* state, bool reset_sink_complete) {
     } else if (_is_only_group_by_columns) {
         TRY_CATCH_BAD_ALLOC(_init_agg_hash_variant(_hash_set_variant));
     } else {
-        TRY_CATCH_BAD_ALLOC(_init_agg_hash_variant(_hash_map_variant));
+        TRY_CATCH_BAD_ALLOC(_init_agg_hash_variant(_hash_map_variant, /*want_pack=*/_inline_pack));
     }
 
     // _state_allocator holds the entries of the hash_map/hash_set, when iterating a hash_map/set, the _state_allocator
@@ -2859,7 +2865,7 @@ bool Aggregator::collect_cache_conscious_topn_groups(std::vector<std::pair<uint6
     auto st = _hash_map_variant.visit([&](auto& variant_value) {
         using HashMapWithKey = std::remove_reference_t<decltype(*variant_value)>;
         using KeyType = typename HashMapWithKey::KeyType;
-        if constexpr (std::is_integral_v<KeyType>) {
+        if constexpr (std::is_integral_v<KeyType> || is_compressed_fixed_size_key<HashMapWithKey>) {
             const size_t n = _hash_map_variant.size();
             typename HashMapWithKey::ResultVector raw_keys;
             raw_keys.reserve(n);
@@ -2882,7 +2888,9 @@ bool Aggregator::collect_cache_conscious_topn_groups(std::vector<std::pair<uint6
                 const auto end = _state_allocator.end();
                 while (it != end) {
                     const uint8_t* value = it.value();
-                    raw_keys.push_back(*reinterpret_cast<const KeyType*>(value));
+                    KeyType key;
+                    memcpy(&key, value, sizeof(key));
+                    raw_keys.push_back(key);
                     counts.push_back(*reinterpret_cast<const int64_t*>(value + count_offset));
                     it.next();
                 }
