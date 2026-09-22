@@ -16,8 +16,10 @@
 #include <gtest/gtest.h>
 
 #include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "common/config.h"
 #include "exec/aggregator.h"
+#include "exec/cache_conscious_topn.h"
 #include "exec/pipeline/aggregate/aggregate_distinct_streaming_sink_operator.h"
 #include "exec/pipeline/aggregate/aggregate_streaming_sink_operator.h"
 #include "gen_cpp/PlanNodes_types.h"
@@ -67,6 +69,52 @@ TEST_F(LimitedMemAggStateTest, budget_is_always_positive) {
     const int64_t usages[] = {0, 1, 24, 256, kCap - 1, kCap, kCap + 1, kCap * 10};
     for (int64_t usage : usages) {
         EXPECT_GT(LimitedMemAggState::clamp_budget(usage, kCap), 0u) << "usage=" << usage;
+    }
+}
+
+TEST(CacheConsciousAggregatorTest, PostFlipCountStarAndNullableInput) {
+    for (bool nullable_input : {false, true}) {
+        RuntimeProfile profile("count-input");
+        AggStatistics statistics(&profile);
+        Aggregator aggregator(std::make_shared<AggregatorParams>());
+        aggregator._agg_stat = &statistics;
+        aggregator._agg_fn_ctxs = {nullptr};
+        aggregator._agg_expr_ctxs.resize(1);
+        aggregator._agg_input_columns = {{nullptr}};
+        aggregator._is_merge_funcs = {false};
+        aggregator._group_by_types = {{TypeDescriptor(TYPE_BIGINT), false}};
+        auto keys = Int64Column::create();
+        keys->append(1);
+        keys->append(1);
+        keys->append(2);
+        aggregator._group_by_columns = {keys};
+        if (nullable_input) {
+            auto values = Int64Column::create(3, 42);
+            auto nulls = NullColumn::create();
+            nulls->append(1);
+            nulls->append(0);
+            nulls->append(1);
+            aggregator._agg_input_columns[0][0] = NullableColumn::create(std::move(values), std::move(nulls));
+        }
+        aggregator._cache_conscious_fa = std::make_unique<CacheConsciousFa>();
+        aggregator._cache_conscious_fa->build({{1, 4}});
+        Chunk chunk;
+        chunk.append_column(keys, 0);
+        ASSERT_TRUE(aggregator.probe_cache_conscious_fa(&chunk, 3).ok());
+        std::vector<std::pair<uint64_t, int64_t>> groups;
+        aggregator._cache_conscious_fa->collect(&groups);
+        ASSERT_EQ(1, groups.size());
+        EXPECT_EQ(nullable_input ? 5 : 6, groups[0].second);
+        EXPECT_EQ((Filter{0, 0, 1}), aggregator._streaming_selection);
+        if (nullable_input) {
+            ASSERT_NE(nullptr, aggregator._cc_input_counts);
+            const auto deltas = aggregator._cc_input_counts->get_data();
+            EXPECT_EQ(0, deltas[0]);
+            EXPECT_EQ(1, deltas[1]);
+            EXPECT_EQ(0, deltas[2]);
+        } else {
+            EXPECT_EQ(nullptr, aggregator._cc_input_counts);
+        }
     }
 }
 

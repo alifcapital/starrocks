@@ -3133,7 +3133,7 @@ Status Aggregator::probe_cache_conscious_fa(Chunk* chunk, size_t chunk_size) {
     _cc_input_counts = nullptr;
     if (merge_input) {
         _cc_input_counts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(_agg_input_columns[0][0].get()));
-    } else if (!_agg_input_columns[0].empty() && _agg_input_columns[0][0]->has_null()) {
+    } else if (_agg_input_columns[0][0] != nullptr && _agg_input_columns[0][0]->has_null()) {
         // COUNT(expr) preserves groups with a zero count, but NULL rows add no weight.
         const Column* input = _agg_input_columns[0][0].get();
         if (_cc_count_deltas == nullptr) {
