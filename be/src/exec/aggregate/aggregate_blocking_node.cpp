@@ -309,8 +309,8 @@ pipeline::OpFactories AggregateBlockingNode::decompose_to_pipeline(pipeline::Pip
             // Cache-conscious TopN spills cold tuples separately from its resident FA.
             // Its restore path needs a sorted key stream; partition-wise spill only drains
             // the ordinary hash map and would lose post-flip counts under memory pressure.
-            const bool cache_conscious_topn = _tnode.agg_node.__isset.enable_cache_conscious_topn &&
-                                             _tnode.agg_node.enable_cache_conscious_topn;
+            const bool cache_conscious_topn =
+                    _tnode.agg_node.__isset.enable_cache_conscious_topn && _tnode.agg_node.enable_cache_conscious_topn;
             if (runtime_state()->enable_spill_partitionwise_agg() && !cache_conscious_topn) {
                 ops_with_source =
                         _decompose_to_pipeline<AggregatorFactory, SpillablePartitionWiseAggregateSourceOperatorFactory,
