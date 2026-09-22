@@ -114,22 +114,29 @@ public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
             // mvC >= queryC means the MV digest is at least as precise as asked.
             double queryC = extractQueryCompression(aggFunc);
             double mvC = extractMvCompression(eqContext.getInput());
-            if (mvC < queryC) {
-                // Carry the flag + both values on the shuttle so the per-MV
-                // MvRewriteContext / BestMvSelector can prefer subsume MVs, and
-                // strict-mode trace can quote the actual compressions.
+            if (mvC < queryC && isStrictMatchEnabled()) {
+                return null;
+            }
+            ScalarOperator rewritten = rewriteImpl(shuttleContext, aggFunc, replace);
+            if (rewritten != null && mvC < queryC) {
+                // Only a chosen rewrite contributes to the MV's precision penalty.
                 shuttleContext.setPercentileNonSubsumeRewrite(true);
                 shuttleContext.setPercentileMismatchMvC(mvC);
                 shuttleContext.setPercentileMismatchQueryC(queryC);
-                if (isStrictMatchEnabled()) {
-                    // Strict: refuse this MV; caller falls back to base scan.
-                    return null;
-                }
-                // Legacy: still rewrite but downstream picks subsume if available.
             }
-            return rewriteImpl(shuttleContext, aggFunc, replace);
+            return rewritten;
         }
         return null;
+    }
+
+    public boolean isNonSubsume(RewriteEquivalentContext context, ScalarOperator input) {
+        if (!(input instanceof CallOperator)) {
+            return false;
+        }
+        CallOperator call = (CallOperator) input;
+        return PERCENTILE_APPROX.equalsIgnoreCase(call.getFnName()) &&
+                context.getEquivalent().equals(call.getChild(0)) &&
+                extractMvCompression(context.getInput()) < extractQueryCompression(call);
     }
 
     public static boolean isStrictMatchEnabled() {
