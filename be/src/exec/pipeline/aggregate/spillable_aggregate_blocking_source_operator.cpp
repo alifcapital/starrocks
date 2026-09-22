@@ -114,11 +114,8 @@ Status SpillableAggregateBlockingSourceOperator::set_finished(RuntimeState* stat
 
 StatusOr<ChunkPtr> SpillableAggregateBlockingSourceOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_aggregator->spiller()->task_status());
-    // Cache-conscious with a spilled CA: restore one chunk per pull (re-routing it into the CA)
-    // until every spilled chunk is read back, then prune against FA and emit the local top-n once,
-    // then EOS. has_output gates each restore on the reader being ready, so this never spins on an
-    // empty restore nor touches a not-yet-acquired stream. (A non-spilled CA is finalized in the
-    // sink and emitted by the base pull_chunk's cache_conscious_result_ready path.)
+    // Restore sorted cold groups incrementally, keeping only the best K candidates.
+    // FA counts are final and supply both the initial candidates and the pruning bound.
     if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
         if (!_aggregator->is_spilled_eos()) {
             RETURN_IF_ERROR(_aggregator->restore_cache_conscious_chunk(state));
@@ -127,7 +124,7 @@ StatusOr<ChunkPtr> SpillableAggregateBlockingSourceOperator::pull_chunk(RuntimeS
         if (!_aggregator->cache_conscious_result_ready()) {
             RETURN_IF_ERROR(_aggregator->finalize_cache_conscious_ca(state));
         }
-        return _aggregator->pull_cache_conscious_result_chunk();
+        return _aggregator->pull_cache_conscious_result_chunk(state->chunk_size());
     }
     if (!_aggregator->spiller()->spilled()) {
         return AggregateBlockingSourceOperator::pull_chunk(state);

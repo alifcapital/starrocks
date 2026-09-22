@@ -51,7 +51,7 @@ StatusOr<ChunkPtr> AggregateBlockingSourceOperator::pull_chunk(RuntimeState* sta
     // Conjuncts / runtime-filter eval are intentionally skipped: the flip is gated to no HAVING
     // and the result is already the finalized top-n. TODO: revisit if HAVING is ever allowed.
     if (_aggregator->cache_conscious_result_ready()) {
-        return _aggregator->pull_cache_conscious_result_chunk();
+        return _aggregator->pull_cache_conscious_result_chunk(state->chunk_size());
     }
     // The non-spill prune is split into bounded driver visits so a large CA cannot block the
     // pipeline. Step the session here; the next pull will either emit (when the result chunk
@@ -59,7 +59,7 @@ StatusOr<ChunkPtr> AggregateBlockingSourceOperator::pull_chunk(RuntimeState* sta
     if (_aggregator->cache_conscious_prune_active()) {
         RETURN_IF_ERROR(_aggregator->advance_cache_conscious_prune());
         if (_aggregator->cache_conscious_result_ready()) {
-            return _aggregator->pull_cache_conscious_result_chunk();
+            return _aggregator->pull_cache_conscious_result_chunk(state->chunk_size());
         }
         return std::make_shared<Chunk>();
     }

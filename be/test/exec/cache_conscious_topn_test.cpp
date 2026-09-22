@@ -65,6 +65,38 @@ void expect_same(const std::vector<Group>& got, const std::vector<Group>& want) 
 
 } // namespace
 
+TEST(CacheConsciousTopNTest, SortedSpillMergeMatchesBruteForce) {
+    std::mt19937_64 rng(0x59111);
+    for (int trial = 0; trial < 200; ++trial) {
+        const int64_t k = 1 + rng() % 40;
+        CacheConsciousTopN::SpillMerge merge(k);
+        std::vector<std::pair<uint64_t, int64_t>> events;
+        for (uint64_t key = 10000; key < 10020; ++key) {
+            const int64_t count = rng() % 100;
+            merge.add_exact({key, count});
+            events.emplace_back(key, count);
+        }
+        // Cold groups are contiguous in the merged spill stream, including groups whose
+        // partial COUNT values are all zero. Calls may straddle any chunk boundary.
+        for (uint64_t key = 0; key < 1000; ++key) {
+            for (size_t i = 0, n = 1 + rng() % 20; i < n; ++i) {
+                const int64_t count = trial % 3 == 0 ? 0 : rng() % 8;
+                merge.merge_sorted(key, count);
+                events.emplace_back(key, count);
+            }
+            ASSERT_LE(merge.candidate_count(), k);
+        }
+        expect_same(merge.finish(), brute_force_stream_top_n(events, k));
+    }
+}
+
+TEST(CacheConsciousTopNTest, SortedSpillMergeEmptyColdTail) {
+    CacheConsciousTopN::SpillMerge merge(10);
+    merge.add_exact({7, 0});
+    merge.add_exact({9, 2});
+    expect_same(merge.finish(), {{9, 2}, {7, 0}});
+}
+
 TEST(CacheConsciousTopNTest, ArenaAppendAfterPartialFlush) {
     // Partial reads must not leave holes when later batches cross a block boundary.
     for (size_t prefix : {1, 2, 3}) {

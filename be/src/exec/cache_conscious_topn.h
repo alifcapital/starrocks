@@ -54,6 +54,52 @@ public:
         int64_t count;
     };
 
+    // The spill writer merges runs in group-key order. Keep only one unfinished
+    // cold group and a bounded top-k heap instead of restoring the cold tail into RAM.
+    class SpillMerge {
+    public:
+        explicit SpillMerge(int64_t k) : _k(std::max<int64_t>(0, k)) {}
+
+        void add_exact(Group group) {
+            if (_k == 0) return;
+            if (_top.size() < _k) {
+                _top.push_back(group);
+                std::push_heap(_top.begin(), _top.end(), _better);
+            } else if (_better(group, _top.front())) {
+                std::pop_heap(_top.begin(), _top.end(), _better);
+                _top.back() = group;
+                std::push_heap(_top.begin(), _top.end(), _better);
+            }
+        }
+        void merge_sorted(uint64_t key, int64_t count) {
+            if (_has_pending && key == _pending.key) {
+                _pending.count += count;
+                return;
+            }
+            if (_has_pending) add_exact(_pending);
+            _pending = {key, count};
+            _has_pending = true;
+        }
+        size_t candidate_count() const { return _top.size(); }
+        std::vector<Group> finish() {
+            if (_has_pending) {
+                add_exact(_pending);
+                _has_pending = false;
+            }
+            std::sort(_top.begin(), _top.end(), _better);
+            return std::move(_top);
+        }
+
+    private:
+        static bool _better(const Group& a, const Group& b) {
+            return a.count != b.count ? a.count > b.count : a.key < b.key;
+        }
+        size_t _k;
+        std::vector<Group> _top;
+        Group _pending{};
+        bool _has_pending = false;
+    };
+
     // Append-only block arena for the cold partition tuples, with a per-arena software
     // write-combine buffer ("staging") at the front. The cold tail is written once on the scan and
     // then mostly pruned WITHOUT being read back, so the write path is what matters; an earlier

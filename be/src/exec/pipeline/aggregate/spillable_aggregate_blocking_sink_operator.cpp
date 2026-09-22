@@ -63,12 +63,11 @@ Status SpillableAggregateBlockingSinkOperator::set_finishing(RuntimeState* state
         _aggregator->spiller()->cancel();
     }
 
-    // Cache-conscious with a spilled CA: the CA (key, partial) chunks are already in the spiller.
-    // Just flush them so the source can restore; do NOT queue the hash-map spill task — the hash
-    // map is the frozen FA and the source needs it intact for finalize after restoring the CA.
-    // The base set_finishing (whose finalize defers to the source when the CA spilled) runs in the
-    // flush callback.
+    // Finish draining the resident tail after earlier drain tasks. The sorted spill
+    // reader then sees every cold tuple; the source merges them with bounded memory.
+    // FA remains resident and must not also enter the ordinary hash-map spill path.
     if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
+        _aggregator->queue_cache_conscious_ca_tail(state);
         auto flush_function = [this](RuntimeState* state) {
             auto& spiller = _aggregator->spiller();
             return spiller->flush(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller));

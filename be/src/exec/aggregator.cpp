@@ -929,8 +929,10 @@ Status Aggregator::_reset_state(RuntimeState* state, bool reset_sink_complete) {
     _cache_conscious_ca.reset();
     _cache_conscious_fa.reset();
     _prune_session.reset();
+    _cc_spill_merge.reset();
     _cache_conscious_result_chunk.reset();
     _cache_conscious_result_ready = false;
+    _cc_result_offset = 0;
     _cache_conscious_result_emitted = false;
     _cache_conscious_pruned_mask.clear();
     _cc_input_counts = nullptr;
@@ -2968,19 +2970,11 @@ size_t probe_cc_fa(CacheConsciousFa* fa, const Column* key_col, const Int64Colum
     return fa->probe_and_count(keys.data(), partials, sel, n);
 }
 
-// Re-route every row of a restored spill chunk back into its CA partition. Unlike routing on
-// push, restore always carries an explicit count column (the spill chunk stored it), and there
-// is no selection — every restored row belongs to the CA. restore_tuple does not bump the stat.
-// `pruned_mask`, if non-null, is the per-partition pruned bitmap pre-computed at restore start
-// from the frozen FA threshold and the CA's logical stats: a row whose key buckets into a pruned
-// partition is dropped here so it never touches the arena again. Skipping the re-route is a
-// straight CPU win; the disk bytes were already read by the spill engine (a per-partition
-// block-group writer would skip those too, but is a bigger refactor; not done here).
-// Returns the number of rows dropped by the prune mask (0 when the mask is null), so the caller
-// can split the restored chunk into re-routed vs early-pruned rows for the profile.
+// Merge the sorted cold stream without reconstructing its tuple arenas. The partition
+// bitmap drops only whole groups, so surviving rows of a key remain contiguous.
 template <typename KeyColumn>
-size_t restore_cold_tuples(CacheConsciousCa* ca, const Column* key_col, const Int64Column* cnt_col, size_t n,
-                           const uint8_t* pruned_mask) {
+size_t restore_cold_tuples(CacheConsciousCa* ca, CacheConsciousTopN::SpillMerge* merge, const Column* key_col,
+                           const Int64Column* cnt_col, size_t n, const uint8_t* pruned_mask) {
     const auto& keys = down_cast<const KeyColumn*>(key_col)->get_data();
     const auto& counts = cnt_col->get_data();
     size_t pruned = 0;
@@ -2991,11 +2985,11 @@ size_t restore_cold_tuples(CacheConsciousCa* ca, const Column* key_col, const In
                 ++pruned;
                 continue;
             }
-            ca->restore_tuple(k, counts[i]);
+            merge->merge_sorted(k, counts[i]);
         }
     } else {
         for (size_t i = 0; i < n; ++i) {
-            ca->restore_tuple(static_cast<uint64_t>(keys[i]), counts[i]);
+            merge->merge_sorted(static_cast<uint64_t>(keys[i]), counts[i]);
         }
     }
     return pruned;
@@ -3218,6 +3212,11 @@ void Aggregator::route_cache_conscious_cold_rows(size_t chunk_size) {
     default:
         break; // unsupported key gated out at flip time
     }
+#if defined(__x86_64__)
+    // A driver or spill task may resume on another thread after this chunk.
+    // Publish all non-temporal arena writes before handing off the state.
+    _mm_sfence();
+#endif
 }
 
 void Aggregator::maybe_swap_cache_conscious() {
@@ -3300,7 +3299,7 @@ Status Aggregator::advance_cache_conscious_prune() {
     }
     _prune_session.reset();
     // Free the CA tuples once the result is ready; the source's has_output stays on the cc
-    // branch until the result is pulled (see _emit_cache_conscious_local_topn).
+    // branch until every result chunk has been pulled.
     _cache_conscious_ca.reset();
     std::vector<std::pair<uint64_t, int64_t>> result;
     result.reserve(top.size());
@@ -3311,6 +3310,7 @@ Status Aggregator::advance_cache_conscious_prune() {
 }
 
 Status Aggregator::_build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result) {
+    _cc_result_offset = 0;
     const size_t n = result.size();
     MutableColumns group_by_columns = _create_group_by_columns(n);
     // The flip is gated to a finalizing, non-pre-cache operator (see the sink's flip guard), so
@@ -3410,29 +3410,29 @@ Status Aggregator::spill_cache_conscious_ca(RuntimeState* state) {
     return Status::OK();
 }
 
+void Aggregator::queue_cache_conscious_ca_tail(RuntimeState* state) {
+    _spill_channel->add_spill_task({_build_cache_conscious_ca_spill_task(state)});
+}
+
 Status Aggregator::restore_cache_conscious_chunk(RuntimeState* state) {
-    // Restore one spilled (key, partial) chunk and re-route it into its CA partition. The stat was
-    // already counted on the original route, so restore_tuple appends without bumping it. The
-    // caller gates on spiller()->has_output_data(), so the reader stream is acquired and the
-    // prefetch is buffered; an empty chunk here just means nothing this turn.
+    // Runs are merged by group key. Aggregate one cold group across chunk boundaries and
+    // retain only its top-k candidate; no cold tuples are materialized back into the arenas.
     auto& spiller = _spiller;
     ASSIGN_OR_RETURN(ChunkPtr chunk, spiller->restore(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller)));
     if (chunk == nullptr || chunk->is_empty()) {
         return Status::OK();
     }
-    // Lazy-compute the pruned-partition bitmap on the first restored chunk. FA is frozen at
-    // set_finishing (which happens before any restore), so its k-th highest count is the sound
-    // prune threshold. The threshold is monotone non-decreasing as resolved CA partitions feed
-    // exact counts into the heap during finalize -- a partition whose upper bound is already below
-    // this snapshot stays below it for the rest of the run. So early-pruning at restore is
-    // correctness-safe and lifts the dead rows off the re-route loop and the arena.
-    if (_cache_conscious_pruned_mask.empty()) {
+    // FA is final before restore. Its k-th count is a safe lower bound for the result,
+    // so partitions below it may be skipped without entering the sorted group merger.
+    if (_cc_spill_merge == nullptr) {
+        _cc_spill_merge = std::make_unique<CacheConsciousTopN::SpillMerge>(cache_conscious_topn_limit());
         std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
         if (collect_cache_conscious_topn_groups(&fa_pairs)) {
             std::vector<CacheConsciousTopN::Group> fa;
             fa.reserve(fa_pairs.size());
             for (const auto& [key, count] : fa_pairs) {
                 fa.push_back({key, count});
+                _cc_spill_merge->add_exact({key, count});
             }
             const int64_t threshold = _cache_conscious_ca->topk_threshold(fa);
             _cache_conscious_pruned_mask = _cache_conscious_ca->pruned_mask(threshold);
@@ -3450,19 +3450,24 @@ Status Aggregator::restore_cache_conscious_chunk(RuntimeState* state) {
     size_t pruned_rows = 0;
     switch (key_lt) {
     case TYPE_BOOLEAN:
-        pruned_rows = restore_cold_tuples<UInt8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        pruned_rows = restore_cold_tuples<UInt8Column>(_cache_conscious_ca.get(), _cc_spill_merge.get(), key_col,
+                                                       cnt_col, n, pruned);
         break;
     case TYPE_TINYINT:
-        pruned_rows = restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        pruned_rows = restore_cold_tuples<Int8Column>(_cache_conscious_ca.get(), _cc_spill_merge.get(), key_col,
+                                                      cnt_col, n, pruned);
         break;
     case TYPE_SMALLINT:
-        pruned_rows = restore_cold_tuples<Int16Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        pruned_rows = restore_cold_tuples<Int16Column>(_cache_conscious_ca.get(), _cc_spill_merge.get(), key_col,
+                                                       cnt_col, n, pruned);
         break;
     case TYPE_INT:
-        pruned_rows = restore_cold_tuples<Int32Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        pruned_rows = restore_cold_tuples<Int32Column>(_cache_conscious_ca.get(), _cc_spill_merge.get(), key_col,
+                                                       cnt_col, n, pruned);
         break;
     case TYPE_BIGINT:
-        pruned_rows = restore_cold_tuples<Int64Column>(_cache_conscious_ca.get(), key_col, cnt_col, n, pruned);
+        pruned_rows = restore_cold_tuples<Int64Column>(_cache_conscious_ca.get(), _cc_spill_merge.get(), key_col,
+                                                       cnt_col, n, pruned);
         break;
     default:
         return Status::InternalError("cache-conscious top-n: unexpected group key type");
@@ -3475,40 +3480,21 @@ Status Aggregator::restore_cache_conscious_chunk(RuntimeState* state) {
 }
 
 Status Aggregator::finalize_cache_conscious_ca(RuntimeState* state) {
-    // Called once the source has restored every spilled chunk (is_spilled_eos()); the CA now holds
-    // all cold tuples again (restored + any RAM tail), so prune + build the result like the
-    // in-memory path.
-    return _emit_cache_conscious_local_topn();
-}
-
-Status Aggregator::_emit_cache_conscious_local_topn() {
-    // Free the CA tuples once the result is built, but keep _cache_conscious_active set: the
-    // source's has_output/is_finished stay on the cache-conscious branch (which reports
-    // emitted -> finished). Clearing active would drop a spilled-CA source into the normal
-    // spilled-source path after emit, which would mishandle the already-finished stream.
-    auto reset_mode = DeferOp([this]() { _cache_conscious_ca.reset(); });
-
-    // FA: exact (key, count) read straight from the frozen hash map.
-    std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
-    if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
-        return Status::OK(); // unsupported key slipped through; the normal convert still emits FA
+    // An empty cold stream never entered restore_cache_conscious_chunk; seed from FA here.
+    if (_cc_spill_merge == nullptr) {
+        _cc_spill_merge = std::make_unique<CacheConsciousTopN::SpillMerge>(cache_conscious_topn_limit());
+        std::vector<std::pair<uint64_t, int64_t>> fa_pairs;
+        if (!collect_cache_conscious_topn_groups(&fa_pairs)) {
+            return Status::InternalError("cache-conscious top-n: cannot collect final groups");
+        }
+        for (const auto& [key, count] : fa_pairs) _cc_spill_merge->add_exact({key, count});
     }
-    std::vector<CacheConsciousTopN::Group> fa;
-    fa.reserve(fa_pairs.size());
-    for (const auto& [key, count] : fa_pairs) {
-        fa.push_back({key, count});
-    }
-
-    // CA was partitioned incrementally on push. finalize prunes FA + CA partitions against the
-    // k-th highest exact FA count and resolves only survivors — the result is the exact local
-    // top-n (≤ k rows) the source emits. Pruned partitions are never resolved: that is the win.
-    auto top = _cache_conscious_ca->finalize(std::move(fa));
-
+    const auto top = _cc_spill_merge->finish();
+    _cc_spill_merge.reset();
+    _cache_conscious_ca.reset();
     std::vector<std::pair<uint64_t, int64_t>> result;
     result.reserve(top.size());
-    for (const auto& g : top) {
-        result.emplace_back(g.key, g.count);
-    }
+    for (const auto& g : top) result.emplace_back(g.key, g.count);
     return _build_cache_conscious_result_chunk(result);
 }
 

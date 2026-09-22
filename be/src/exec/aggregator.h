@@ -363,17 +363,17 @@ public:
     // (need_input gates on is_full / has_task) paces it instead of bursting past the mem-table
     // pool. The partition stays routable — later misses refill it and can be spilled again (cyclic).
     Status spill_cache_conscious_ca(RuntimeState* state);
+    // Queue the remaining resident tail after prior drain tasks and before the final flush.
+    void queue_cache_conscious_ca_tail(RuntimeState* state);
     // Called once after the sink is complete: start the multi-pass prune of FA + CA. Non-spill
     // path: opens a PruneSession the source drives one step per pull. Spill path: returns OK and
     // the source drives restore + finalize_cache_conscious_ca instead.
     Status finalize_cache_conscious_topn(RuntimeState* state);
-    // Source side when the CA spilled, pull-driven (one chunk per call): restore the next spilled
-    // (key, partial) chunk and re-route it into its CA partition without re-counting the stat.
-    // Call while !is_spilled_eos(); gate each call on spiller()->has_output_data() so the reader
-    // stream is ready (never touch a not-yet-acquired stream) and the prefetch is buffered (never
-    // spin on empty restores).
+    // Merge the next sorted spill chunk into one pending cold group and a bounded top-k heap.
+    // Whole partitions whose upper bounds cannot reach the FA threshold are skipped.
+    // Call only while !is_spilled_eos() and the spill reader has output available.
     Status restore_cache_conscious_chunk(RuntimeState* state);
-    // Source side once is_spilled_eos(): prune FA + the restored CA and build the result chunk.
+    // At spill EOF, finish the pending group and build the result from the bounded heap.
     Status finalize_cache_conscious_ca(RuntimeState* state);
     // Source side, non-spill: while the prune session has work, run one step per call (one
     // partition resolve / re-partition). When the session finishes, builds the local top-n
@@ -384,10 +384,24 @@ public:
     // The source drives emission: a ready result is pulled exactly once, then EOS.
     bool cache_conscious_result_ready() const { return _cache_conscious_result_ready; }
     bool cache_conscious_result_emitted() const { return _cache_conscious_result_emitted; }
-    ChunkPtr pull_cache_conscious_result_chunk() {
-        _cache_conscious_result_emitted = true;
-        set_ht_eos();
-        return std::move(_cache_conscious_result_chunk);
+    ChunkPtr pull_cache_conscious_result_chunk(size_t chunk_size) {
+        const size_t remaining = _cache_conscious_result_chunk->num_rows() - _cc_result_offset;
+        const size_t n = std::min(chunk_size, remaining);
+        ChunkPtr chunk;
+        if (_cc_result_offset == 0 && n == remaining) {
+            chunk = std::move(_cache_conscious_result_chunk);
+        } else {
+            chunk = _cache_conscious_result_chunk->clone_empty();
+            chunk->append(*_cache_conscious_result_chunk, _cc_result_offset, n);
+        }
+        _cc_result_offset += n;
+        update_num_rows_returned(n);
+        if (n == remaining) {
+            _cache_conscious_result_chunk.reset();
+            _cache_conscious_result_emitted = true;
+            set_ht_eos();
+        }
+        return chunk;
     }
     bool is_ht_eos() { return _is_ht_eos; }
     void set_ht_eos() { _is_ht_eos = true; }
@@ -692,10 +706,6 @@ protected:
     // hash map above is frozen as FA and post-flip cold miss chunks accumulate here as CA.
     // finalize_cache_conscious_topn prunes them into the local top-n result chunk the source
     // emits in place of the normal convert path.
-    // TODO: the CA physical tuples accumulate in RAM with no memory accounting and no spill.
-    // A large cold tail can blow the query memory budget — track their bytes against the mem
-    // tracker and spill the physical tuples per partition (the logical stat stays in RAM and
-    // keeps prune working) when enable_spill is on; the spillable operator owns that path.
     bool _cache_conscious_active = false;
     bool _cache_conscious_ca_spilled = false;
     bool _cc_bloom_decided = false; // whether the post-flip bloom-activation decision has run
@@ -710,6 +720,7 @@ protected:
     Int64Column::Ptr _cc_count_deltas;
     const Int64Column* _cc_input_counts = nullptr;
     ChunkPtr _cache_conscious_result_chunk;
+    size_t _cc_result_offset = 0;
     bool _cache_conscious_result_ready = false;
     bool _cache_conscious_result_emitted = false;
     // Pre-computed at the first restore call from the frozen FA's k-th-highest count: each pid
@@ -721,6 +732,7 @@ protected:
     // partitions instead of monopolizing the driver thread inside a single sink finalize. Set
     // up by finalize_cache_conscious_topn (non-spill) and reset once the result chunk is built.
     std::unique_ptr<CacheConsciousTopN::PruneSession> _prune_session;
+    std::unique_ptr<CacheConsciousTopN::SpillMerge> _cc_spill_merge;
     // Cache-conscious top-n profile counters: registered in prepare() only when
     // enable_cache_conscious_topn, null and untouched otherwise. They expose where the rows went
     // (pre-flip build / FA hit / CA route) and how hard the end-of-input Phase-3 prune worked, so a
@@ -912,7 +924,7 @@ protected:
     Status _build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result);
     // Shared tail of both finalize paths (in-memory and post-restore): read the frozen FA out of
     // the hash map, prune it against the CA, build the result chunk, and release the CA.
-    Status _emit_cache_conscious_local_topn();
+
     // Resumable generator yielding the CA partitions' tuples as (key, partial) intermediate
     // chunks (or EndOfFile when drained). The caller spills the returned chunks; the spill
     // channel drives the same generator for whatever did not fit inline (backpressure).
