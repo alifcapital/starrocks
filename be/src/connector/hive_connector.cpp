@@ -1118,7 +1118,6 @@ FooterPrefetchPlan HiveDataSourceProvider::build_footer_prefetch_items(
 
     // Build the shared open context once and reuse it across incremental batches so the
     // FileSystem is created a single time per scan, not per batch on the coordinator RPC thread.
-    // (Initial build and incremental appends for one scan node run sequentially, never racing.)
     if (_footer_open_ctx == nullptr) {
         _footer_open_ctx = std::make_shared<pipeline::FooterOpenContext>();
         _footer_open_ctx->case_sensitive = _hdfs_scan_node.__isset.case_sensitive && _hdfs_scan_node.case_sensitive;

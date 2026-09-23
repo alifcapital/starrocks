@@ -122,6 +122,7 @@ public:
     // then we can use inited column collect io range.
     Status init();
     Status prepare();
+    void select_page_ranges();
     const tparquet::ColumnChunk* get_chunk_metadata(SlotId slot_id);
     const ParquetField* get_column_parquet_field(SlotId slot_id);
     ColumnReader* get_column_reader(SlotId slot_id);

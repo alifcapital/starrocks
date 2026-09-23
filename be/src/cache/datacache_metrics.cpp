@@ -71,6 +71,20 @@ static void update_datacache_metrics(bool use_same_instance) {
     StarRocksMetrics::instance()->datacache_disk_used_bytes.set_value(disk_metrics.disk_used_bytes);
     StarRocksMetrics::instance()->datacache_meta_used_bytes.set_value(meta_used_bytes);
 
+    // Starcache detail_l2 carries cumulative populate (write_bytes) and eviction (remove_bytes)
+    // totals. Sample them so dashboards can derive eviction pressure (evict-rate vs write-rate)
+    // without scraping the HTTP /api/datacache/stat endpoint.
+    if (local_disk_cache != nullptr && local_disk_cache->is_initialized()) {
+        auto* starcache = static_cast<StarCacheEngine*>(local_disk_cache);
+        auto detail_metrics = starcache->starcache_metrics(2);
+        if (detail_metrics.detail_l2 != nullptr) {
+            StarRocksMetrics::instance()->datacache_block_cache_write_bytes.set_value(
+                    detail_metrics.detail_l2->write_bytes);
+            StarRocksMetrics::instance()->datacache_block_cache_evict_bytes.set_value(
+                    detail_metrics.detail_l2->remove_bytes);
+        }
+    }
+
     // Update hit rate metrics from DataCacheHitRateCounter
     auto* hit_rate_counter = DataCacheHitRateCounter::instance();
     StarRocksMetrics::instance()->block_cache_hit_bytes.set_value(hit_rate_counter->block_cache_hit_bytes());

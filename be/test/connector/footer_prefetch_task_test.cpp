@@ -21,7 +21,6 @@
 #include <thread>
 #include <vector>
 
-#include "testutil/assert.h"
 #include "cache/datacache.h"
 #include "cache/disk_cache/test_cache_utils.h"
 #include "cache/mem_cache/lrucache_engine.h"
@@ -33,9 +32,9 @@
 #include "fs/fs.h"
 #include "runtime/descriptor_helper.h"
 #include "runtime/descriptors.h"
-#include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
 #include "types/logical_type.h"
 
 namespace starrocks::connector {

@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "exec/pipeline/scan/footer_prefetch_state.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
-
-#include "exec/pipeline/scan/footer_prefetch_state.h"
 
 namespace starrocks::pipeline {
 

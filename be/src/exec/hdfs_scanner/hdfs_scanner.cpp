@@ -32,6 +32,7 @@
 #include "types/timestamp_value.h"
 #include "util/compression/compression_utils.h"
 #include "util/compression/stream_decompressor.h"
+#include "util/starrocks_metrics.h"
 namespace starrocks {
 
 static const std::string kCountOptColumnName = "___count___";
@@ -369,8 +370,8 @@ StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_fi
                     shared_buffered_input_stream, filename, file_size, datacache_options.modification_time);
             // CacheSelectInputStream only writes explicit IO ranges. Use io::CacheInputStream for
             // reader-owned reads through _file so CACHE SELECT can populate those blocks too.
-            auto populate_stream = std::make_shared<io::CacheInputStream>(shared_buffered_input_stream, filename, file_size,
-                                                                      datacache_options.modification_time);
+            auto populate_stream = std::make_shared<io::CacheInputStream>(
+                    shared_buffered_input_stream, filename, file_size, datacache_options.modification_time);
             populate_stream->set_enable_populate_cache(datacache_options.enable_populate_datacache);
             populate_stream->set_enable_async_populate_mode(datacache_options.enable_datacache_async_populate_mode);
             populate_stream->set_enable_cache_io_adaptor(datacache_options.enable_datacache_io_adaptor);
@@ -557,6 +558,14 @@ void HdfsScanner::update_counter() {
 
     DataCacheHitRateCounter::instance()->update_page_cache_stat(_app_stats.page_cache_read_counter,
                                                                 _app_stats.page_read_counter);
+
+    // Per-scan parquet footer hit/miss → BE-global counters. footer_cache_read_count is hits
+    // (page-cache lookup returned cached FileMetaData); footer_cache_write_count is misses that
+    // resulted in a parse + populate; footer_cache_write_fail_count is a miss that failed to
+    // populate. Both write counters contribute to the miss aggregate.
+    StarRocksMetrics::instance()->parquet_footer_cache_hit_count.increment(_app_stats.footer_cache_read_count);
+    StarRocksMetrics::instance()->parquet_footer_cache_miss_count.increment(_app_stats.footer_cache_write_count +
+                                                                            _app_stats.footer_cache_write_fail_count);
 
     if (_scanner_ctx->datacache_options.enable_datacache && _cache_input_stream) {
         // CACHE SELECT routes reader-owned reads through a separate populate stream; fold its

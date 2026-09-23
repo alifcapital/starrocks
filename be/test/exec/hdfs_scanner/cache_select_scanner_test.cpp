@@ -43,7 +43,7 @@ public:
     void TearDown() override {}
 
 protected:
-    void _create_runtime_state(const std::string& timezone);
+    void _create_runtime_state(const std::string& timezone, bool footer_only = false);
     HdfsScannerContext* _create_ctx(const std::string& file, THdfsScanRange* range, TupleDescriptor* tuple_desc);
     THdfsScanRange* _create_scan_range(const std::string& file, uint64_t offset, uint64_t length,
                                        const THdfsFileFormat::type& type);
@@ -53,9 +53,10 @@ protected:
     RuntimeState* _runtime_state = nullptr;
 };
 
-void CacheSelectScannerTest::_create_runtime_state(const std::string& timezone) {
+void CacheSelectScannerTest::_create_runtime_state(const std::string& timezone, bool footer_only) {
     TUniqueId fragment_id;
     TQueryOptions query_options;
+    query_options.__set_cache_select_footer_only(footer_only);
     TQueryGlobals query_globals;
     if (timezone != "") {
         query_globals.__set_time_zone(timezone);
@@ -151,4 +152,24 @@ TEST_F(CacheSelectScannerTest, TestUnknowFormat) {
     status = scanner->get_next(_runtime_state, &chunk);
     ASSERT_TRUE(status.is_end_of_file());
 }
+TEST_F(CacheSelectScannerTest, FooterOnlyParquetDoesNotPrepareRowGroups) {
+    _create_runtime_state("", true);
+    const std::string file = "./be/test/exec/test_data/parquet_scanner/col_not_null.parquet";
+    auto size = FileSystem::Default()->get_file_size(file);
+    ASSERT_TRUE(size.ok()) << size.status();
+    SlotDesc slots[] = {{"c1", TypeDescriptor::from_logical_type(TYPE_INT)}, {""}};
+    auto* tuple_desc = _create_tuple_desc(slots);
+    auto* range = _create_scan_range(file, 0, size.value(), THdfsFileFormat::PARQUET);
+    range->file_length = size.value();
+    auto* ctx = _create_ctx(file, range, tuple_desc);
+    CacheSelectScanner scanner;
+    ASSERT_OK(scanner.init(_runtime_state, ctx));
+    ASSERT_OK(scanner.open(_runtime_state));
+    ChunkPtr chunk;
+    EXPECT_TRUE(scanner.get_next(_runtime_state, &chunk).is_end_of_file());
+    EXPECT_GT(scanner.num_bytes_read(), 0);
+    EXPECT_EQ(0, ctx->stats->total_row_groups);
+    scanner.close();
+}
+
 } // namespace starrocks
