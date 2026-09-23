@@ -29,15 +29,17 @@
 #include "exec/hdfs_scanner/hdfs_scanner_text.h"
 #include "exec/hdfs_scanner/jni_scanner.h"
 #include "exec/pipeline/fragment_context.h"
+#include "exprs/runtime_filter_bank.h"
 #include "runtime/descriptor_helper.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
 #include "storage/chunk_helper.h"
 #include "storage/column_predicate.h"
 #include "storage/predicate_tree/predicate_tree.h"
-#include "storage/runtime_range_pruner.h"
+#include "storage/runtime_range_pruner.hpp"
 #include "storage/types.h"
 #include "testutil/assert.h"
+#include "testutil/exprs_test_helper.h"
 
 namespace starrocks {
 
@@ -449,6 +451,26 @@ TEST_F(HdfsScannerTest, TestDecodeMinMaxEndpointUnsupportedTypes) {
                                                              v, &mn, &mx));
 }
 
+TEST_F(HdfsScannerTest, TestDecodeMinMaxEndpointRejectsIncompleteBounds) {
+    const auto type = TypeDescriptor::from_logical_type(TYPE_BIGINT);
+    Datum mn;
+    Datum mx;
+    TExprMinMaxValue v;
+    v.__set_type(TExprNodeType::INT_LITERAL);
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+    v.__set_min_int_value(10);
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+    v.__set_max_int_value(20);
+    EXPECT_TRUE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+    v.__isset.min_int_value = false;
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+    v.__set_min_int_value(30);
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+    v.__set_min_int_value(10);
+    v.__set_type(TExprNodeType::FLOAT_LITERAL);
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(type, v, &mn, &mx));
+}
+
 TEST_F(HdfsScannerTest, TestDecodeMinMaxEndpointNullLiteral) {
     TExprMinMaxValue v;
     v.__set_type(TExprNodeType::NULL_LITERAL);
@@ -476,6 +498,60 @@ static TExprMinMaxValue topn_int_min_max(int64_t mn, int64_t mx, bool has_null, 
 }
 
 // Single bigint sort key; _create_tuple_desc numbers slots from 0, so the slot id is 0.
+TEST_F(HdfsScannerTest, TopnLateFilterDoesNotConsumeFooterPruner) {
+    SlotDesc descs[] = {{"id", TypeDescriptor::from_logical_type(TYPE_INT)}, {""}};
+    auto* tuple = _create_tuple_desc(descs);
+    TRuntimeFilterDescription desc;
+    desc.__set_filter_id(1);
+    desc.__set_has_remote_targets(false);
+    desc.__set_build_plan_node_id(1);
+    desc.__set_build_join_mode(TRuntimeFilterBuildJoinMode::BROADCAST);
+    desc.__set_filter_type(TRuntimeFilterBuildType::TOPN_FILTER);
+    desc.__isset.plan_node_id_to_target_expr = true;
+    desc.plan_node_id_to_target_expr.emplace(1, ExprsTestHelper::create_column_ref_t_expr<TYPE_INT>(0, true));
+    RuntimeFilterProbeDescriptor rf_desc;
+    ASSERT_OK(rf_desc.init(&_pool, desc, 1, _runtime_state));
+    THdfsScanRange range;
+    range.min_max_values[0] = topn_int_min_max(0, 10, false, false);
+    range.__isset.min_max_values = true;
+    HdfsScannerContext ctx;
+    ctx.tuple_desc = tuple;
+    ctx.slot_descs = tuple->slots();
+    ctx.scan_range = &range;
+    ctx.options.topn_reorder_slot_id = 0;
+    ctx.predicates.predicate_parser = std::make_unique<ConnectorPredicateParser>(&ctx.slot_descs);
+    UnarrivedRuntimeFilterList pending;
+    pending.add_unarrived_rf(&rf_desc, tuple->slots()[0], 1);
+    ctx.predicates.runtime_filter_scan_range_pruner =
+            std::make_unique<RuntimeScanRangePruner>(ctx.predicates.predicate_parser.get(), pending);
+    auto before = ctx.should_skip_scan_range_by_topn_min_max();
+    ASSERT_TRUE(before.ok());
+    EXPECT_FALSE(before.value());
+    MinMaxRuntimeFilter<TYPE_INT> rf;
+    rf.insert(10);
+    rf.insert(100);
+    rf_desc.set_runtime_filter(&rf);
+    // Equality at the boundary must survive, including ties on secondary sort keys.
+    auto equal = ctx.should_skip_scan_range_by_topn_min_max();
+    ASSERT_TRUE(equal.ok());
+    EXPECT_FALSE(equal.value());
+    range.min_max_values[0].__set_max_int_value(9);
+    auto excluded = ctx.should_skip_scan_range_by_topn_min_max();
+    ASSERT_TRUE(excluded.ok());
+    EXPECT_TRUE(excluded.value());
+    size_t calls = 0;
+    ASSERT_OK(ctx.predicates.runtime_filter_scan_range_pruner->update_range_if_arrived(
+            ctx.global_dictmaps,
+            [&](int cid, const std::vector<const ColumnPredicate*>& preds) {
+                EXPECT_EQ(0, cid);
+                EXPECT_FALSE(preds.empty());
+                ++calls;
+                return Status::OK();
+            },
+            false, 0));
+    EXPECT_EQ(1u, calls);
+}
+
 TEST_F(HdfsScannerTest, TopnSkipKeepsFileMatchingOneOrArm) {
     SlotDesc descs[] = {{"id", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)}, {""}};
     auto* tuple_desc = _create_tuple_desc(descs);

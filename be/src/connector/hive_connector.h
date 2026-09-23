@@ -45,12 +45,6 @@ public:
     friend class HiveDataSource;
     HiveDataSourceProvider(ConnectorScanNode* scan_node, const TPlanNode& plan_node);
     HiveDataSourceProvider(ConnectorScanNode* scan_node, const THdfsScanNode& hdfs_scan_node);
-    DataSourcePtr create_data_source(const TScanRange& scan_range) override;
-    const TupleDescriptor* tuple_descriptor(RuntimeState* state) const override;
-
-    void prepare_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override;
-    void default_data_source_mem_bytes(int64_t* min_value, int64_t* max_value) override;
-
     int32_t topn_reorder_slot_id() const override {
         return _hdfs_scan_node.__isset.topn_reorder_slot_id ? _hdfs_scan_node.topn_reorder_slot_id : -1;
     }
@@ -60,6 +54,12 @@ public:
     bool topn_reorder_nulls_first() const override {
         return _hdfs_scan_node.__isset.topn_reorder_nulls_first && _hdfs_scan_node.topn_reorder_nulls_first;
     }
+
+    DataSourcePtr create_data_source(const TScanRange& scan_range) override;
+    const TupleDescriptor* tuple_descriptor(RuntimeState* state) const override;
+
+    void prepare_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override;
+    void default_data_source_mem_bytes(int64_t* min_value, int64_t* max_value) override;
 
     friend class HiveDataSource;
 
