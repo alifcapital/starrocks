@@ -15,7 +15,6 @@
 ADD_BE_BENCH(${SRC_DIR}/bench/chunks_sorter_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/agg_consec_keys_cache_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/agg_inline_accumulator_bench)
-ADD_BE_BENCH(${SRC_DIR}/bench/cache_conscious_topn_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/agg_hash_map_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/runtime_filter_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/csv_reader_bench)

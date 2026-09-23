@@ -948,22 +948,6 @@ struct TAggregationNode {
   // hash table once, avoiding incremental rehashing on high-cardinality keys.
   // Absent => no estimate; BE must not reserve.
   32: optional i64 estimated_cardinality
-  // When set, the global aggregation fuses the downstream TopN and runs a
-  // cache-conscious top-n aggregation: only the (likely) top-n groups are kept
-  // exact while the tail is held as pruned partition bounds. The fused limit is
-  // carried here because the LIMIT lives on the SortNode above the agg, not on
-  // this node's TPlanNode.limit.
-  33: optional bool enable_cache_conscious_topn = false
-  34: optional i64 cache_conscious_topn_limit
-  // Test/debug only: force the runtime flip past the limit, bypassing the L2-budget and skew
-  // gates, so the fused emit path runs deterministically on small data.
-  35: optional bool cache_conscious_topn_force_flip = false
-
-  // Most-common values of the (single) group-by column, from the histogram statistics, carried as
-  // typed literals so the cache-conscious operator can seed the frozen FA with the known hot keys.
-  // Parallel lists: cache_conscious_topn_mcv_keys[i] has frequency cache_conscious_topn_mcv_counts[i].
-  36: optional list<Exprs.TExpr> cache_conscious_topn_mcv_keys
-  37: optional list<i64> cache_conscious_topn_mcv_counts
 
 }
 

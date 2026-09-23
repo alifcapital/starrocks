@@ -2621,11 +2621,6 @@ public class PlanFragmentBuilder {
                 aggregationNode.setTopNLimit(topNSortInfo.limit());
             }
 
-            if (node.isCacheConsciousTopn()) {
-                aggregationNode.setCacheConsciousTopn(node.getCacheConsciousTopnLimit());
-                aggregationNode.setCacheConsciousMcv(node.getCacheConsciousMcv());
-            }
-
             aggregationNode.getAggInfo().setIntermediateAggrExprs(intermediateAggrExprs);
             // enable group execution for:
             // any aggregate stage

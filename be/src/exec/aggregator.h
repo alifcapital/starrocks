@@ -30,8 +30,6 @@
 #include "exec/aggregate/agg_hash_variant.h"
 #include "exec/aggregate/agg_profile.h"
 #include "exec/aggregator_fwd.h"
-#include "exec/cache_conscious_fa.h"
-#include "exec/cache_conscious_topn.h"
 #include "exec/limited_pipeline_chunk_buffer.h"
 #include "exec/pipeline/context_with_dependency.h"
 #include "exec/pipeline/schedule/observer.h"
@@ -236,18 +234,6 @@ struct AggregatorParams {
     std::vector<TExpr> intermediate_aggr_exprs;
     std::vector<TExpr> grouping_min_max;
 
-    // Cache-conscious top-n aggregation: when enabled, the global aggregation fuses
-    // the downstream TopN and keeps only the candidate top-n groups exact. The limit
-    // is the fused TopN's k (it lives on the SortNode, not on this node's limit).
-    bool enable_cache_conscious_topn = false;
-    int64_t cache_conscious_topn_limit = -1;
-    // Test/debug only: force the flip past the limit, bypassing the L2-budget and skew gates.
-    bool cache_conscious_topn_force_flip = false;
-    // Most-common values of the group-by column from the histogram statistics: hot-key literals
-    // (parallel to cc_mcv_counts) for seeding the FA. Empty when no histogram is available.
-    std::vector<TExpr> cc_mcv_keys;
-    std::vector<int64_t> cc_mcv_counts;
-
     // Incremental MV
     // Whether it's testing, use MemStateTable in testing, instead use IMTStateTable.
     bool is_testing;
@@ -309,12 +295,6 @@ public:
     // mem limit; the caller treats that as non-fatal and falls back to growth.
     Status reserve_hash_table_from_estimate();
 
-    // Finish the reserve the cache-conscious L2 cap deferred, once the flip verdict
-    // lands "not skewed": the map keeps growing organically from here, so jump it to
-    // the full estimate in one rehash instead of a doubling chain. No-op when the
-    // initial reserve was not capped.
-    Status complete_cache_conscious_deferred_reserve();
-
     const MemPool* mem_pool() const { return _mem_pool.get(); }
     bool is_none_group_by_exprs() { return _group_by_expr_ctxs.empty(); }
     bool only_group_by_exprs() { return _is_only_group_by_columns; }
@@ -324,85 +304,6 @@ public:
     const std::vector<std::vector<ExprContext*>>& agg_expr_ctxs() { return _agg_expr_ctxs; }
     int64_t limit() { return _limit; }
     bool needs_finalize() { return _needs_finalize; }
-    // Cache-conscious top-n: the gated extension point for the blocking/spillable agg
-    // operators. When enabled, the global aggregation keeps only the candidate top-n
-    // groups exact and prunes the tail; the limit is the fused TopN's k.
-    bool enable_cache_conscious_topn() const { return _params->enable_cache_conscious_topn; }
-    int64_t cache_conscious_topn_limit() const { return _params->cache_conscious_topn_limit; }
-    bool cache_conscious_topn_force_flip() const { return _params->cache_conscious_topn_force_flip; }
-    // After the flip the live hash map is frozen as FA; post-flip miss rows are routed into CA
-    // partitions (a logical count stat + physical tuples) on push. finalize prunes FA + CA into
-    // the local top-n the source emits in place of the normal convert path.
-    bool cache_conscious_topn_active() const { return _cache_conscious_active; }
-    // Freeze FA and create the CA sized to the given FA candidate capacity.
-    void activate_cache_conscious_topn(size_t fa_capacity);
-    // Post-flip per-row FA work: probe the dense FA for each row, bump its inline counter on a
-    // hit, and mark misses in _streaming_selection for route_cache_conscious_cold_rows. Replaces
-    // the build_hash_map_with_selection + compute_batch_agg_states_with_selection pair (the phmap
-    // probe + the separate count-update pass) on the cc path. Evaluates the agg input columns the
-    // 2-phase route reads for the partial count (a no-op for argument-less count(*)).
-    Status probe_cache_conscious_fa(Chunk* chunk, size_t chunk_size);
-    // Route post-flip miss rows (streaming_selection == 1) to their CA partitions, bumping each
-    // partition's logical count stat. Called per chunk on push.
-    void route_cache_conscious_cold_rows(size_t chunk_size);
-    // Post-flip late-hot-key promotion (CA->FA swap); dormant until a CA partition out-accumulates
-    // the k-th FA winner, so a no-op on workloads whose hot set is captured before the flip.
-    void maybe_swap_cache_conscious();
-    // True only for a single integral group-by key that fits a uint64 exactly (so the engine
-    // can use it as a group id without collisions). LARGEINT/strings are unsupported.
-    bool cache_conscious_group_key_supported() const;
-    // Bytes of CA physical tuples held in RAM — the operator reports this as revocable. The
-    // logical stats are O(fanout) and stay (prune needs them), so they are not revocable.
-    int64_t cache_conscious_revocable_bytes() const {
-        return _cache_conscious_ca ? static_cast<int64_t>(_cache_conscious_ca->physical_tuples_bytes()) : 0;
-    }
-    bool cache_conscious_ca_spilled() const { return _cache_conscious_ca_spilled; }
-    // On memory pressure: spill the CA partitions' tuples to the spiller as (key, partial) chunks
-    // and free the RAM (the logical stats stay, so prune still works). Spills inline while the
-    // spiller is not full, then hands the remainder to the spill channel so backpressure
-    // (need_input gates on is_full / has_task) paces it instead of bursting past the mem-table
-    // pool. The partition stays routable — later misses refill it and can be spilled again (cyclic).
-    Status spill_cache_conscious_ca(RuntimeState* state);
-    // Queue the remaining resident tail after prior drain tasks and before the final flush.
-    void queue_cache_conscious_ca_tail(RuntimeState* state);
-    // Called once after the sink is complete: start the multi-pass prune of FA + CA. Non-spill
-    // path: opens a PruneSession the source drives one step per pull. Spill path: returns OK and
-    // the source drives restore + finalize_cache_conscious_ca instead.
-    Status finalize_cache_conscious_topn(RuntimeState* state);
-    // Merge the next sorted spill chunk into one pending cold group and a bounded top-k heap.
-    // Whole partitions whose upper bounds cannot reach the FA threshold are skipped.
-    // Call only while !is_spilled_eos() and the spill reader has output available.
-    Status restore_cache_conscious_chunk(RuntimeState* state);
-    // At spill EOF, finish the pending group and build the result from the bounded heap.
-    Status finalize_cache_conscious_ca(RuntimeState* state);
-    // Source side, non-spill: while the prune session has work, run one step per call (one
-    // partition resolve / re-partition). When the session finishes, builds the local top-n
-    // result chunk so the next pull emits it. The driver yields between calls so a large CA
-    // does not monopolize this driver thread.
-    bool cache_conscious_prune_active() const { return _prune_session != nullptr; }
-    Status advance_cache_conscious_prune();
-    // The source drives emission: a ready result is pulled exactly once, then EOS.
-    bool cache_conscious_result_ready() const { return _cache_conscious_result_ready; }
-    bool cache_conscious_result_emitted() const { return _cache_conscious_result_emitted; }
-    ChunkPtr pull_cache_conscious_result_chunk(size_t chunk_size) {
-        const size_t remaining = _cache_conscious_result_chunk->num_rows() - _cc_result_offset;
-        const size_t n = std::min(chunk_size, remaining);
-        ChunkPtr chunk;
-        if (_cc_result_offset == 0 && n == remaining) {
-            chunk = std::move(_cache_conscious_result_chunk);
-        } else {
-            chunk = _cache_conscious_result_chunk->clone_empty();
-            chunk->append(*_cache_conscious_result_chunk, _cc_result_offset, n);
-        }
-        _cc_result_offset += n;
-        update_num_rows_returned(n);
-        if (n == remaining) {
-            _cache_conscious_result_chunk.reset();
-            _cache_conscious_result_emitted = true;
-            set_ht_eos();
-        }
-        return chunk;
-    }
     bool is_ht_eos() { return _is_ht_eos; }
     void set_ht_eos() { _is_ht_eos = true; }
     bool is_sink_complete() { return _is_sink_complete.load(std::memory_order_acquire); }
@@ -702,70 +603,6 @@ protected:
     AggHashSetVariant _hash_set_variant;
     std::any _it_hash;
 
-    // Cache-conscious top-n state (see enable_cache_conscious_topn). Once the sink flips, the
-    // hash map above is frozen as FA and post-flip cold miss chunks accumulate here as CA.
-    // finalize_cache_conscious_topn prunes them into the local top-n result chunk the source
-    // emits in place of the normal convert path.
-    bool _cache_conscious_active = false;
-    bool _cache_conscious_ca_spilled = false;
-    bool _cc_bloom_decided = false; // whether the post-flip bloom-activation decision has run
-    int64_t _cc_postflip_rows = 0;  // rows probed since the flip (the bloom decision window)
-    int64_t _cc_postflip_hits = 0;  // of those, rows that hit FA (miss rate = 1 - hits/rows)
-    std::unique_ptr<CacheConsciousCa> _cache_conscious_ca;
-    // The frozen FA as a phmap-backed count(*) table with the count inline (built at the flip from
-    // the live map's (key, count) snapshot). Once set it is the source of truth for FA counts:
-    // post-flip chunks probe + count through it, and collect_cache_conscious_topn_groups reads it
-    // rather than the now-dormant hash map.
-    std::unique_ptr<CacheConsciousFa> _cache_conscious_fa;
-    Int64Column::MutablePtr _cc_count_deltas;
-    const Int64Column* _cc_input_counts = nullptr;
-    ChunkPtr _cache_conscious_result_chunk;
-    size_t _cc_result_offset = 0;
-    bool _cache_conscious_result_ready = false;
-    bool _cache_conscious_result_emitted = false;
-    // Pre-computed at the first restore call from the frozen FA's k-th-highest count: each pid
-    // whose partition stat is already below threshold is marked so the restore loop drops its
-    // rows without re-routing them back into the CA. The mask only ever grows tighter (the FA
-    // threshold is monotone non-decreasing), so it is computed once.
-    std::vector<uint8_t> _cache_conscious_pruned_mask;
-    // Multi-step prune state: live across pull_chunk calls so the source can yield between
-    // partitions instead of monopolizing the driver thread inside a single sink finalize. Set
-    // up by finalize_cache_conscious_topn (non-spill) and reset once the result chunk is built.
-    std::unique_ptr<CacheConsciousTopN::PruneSession> _prune_session;
-    std::unique_ptr<CacheConsciousTopN::SpillMerge> _cc_spill_merge;
-    // Cache-conscious top-n profile counters: registered in prepare() only when
-    // enable_cache_conscious_topn, null and untouched otherwise. They expose where the rows went
-    // (pre-flip build / FA hit / CA route) and how hard the end-of-input Phase-3 prune worked, so a
-    // cc query's behavior is readable straight off EXPLAIN ANALYZE.
-    RuntimeProfile::Counter* _cc_flipped = nullptr;                  // 1 if the flip engaged
-    RuntimeProfile::Counter* _cc_preflip_rows = nullptr;             // rows aggregated into the FA seed before the flip
-    RuntimeProfile::Counter* _cc_fa_keys = nullptr;                  // distinct keys frozen in FA at the flip
-    RuntimeProfile::Counter* _cc_fa_hit_rows = nullptr;              // post-flip rows that hit FA (exact)
-    RuntimeProfile::Counter* _cc_ca_routed_rows = nullptr;           // post-flip rows routed to CA (miss)
-    RuntimeProfile::Counter* _cc_bloom_active = nullptr;             // 1 if the bloom pre-filter was activated
-    RuntimeProfile::Counter* _cc_ca_partitions = nullptr;            // CA partition fanout
-    RuntimeProfile::Counter* _cc_partitions_resolved = nullptr;      // Phase-3 partitions aggregated exactly
-    RuntimeProfile::Counter* _cc_partitions_repartitioned = nullptr; // Phase-3 partitions split to a deeper level
-    RuntimeProfile::Counter* _cc_partitions_pruned = nullptr;        // partitions dropped whole by the UB prune
-    RuntimeProfile::Counter* _cc_reprocessed_tuples = nullptr;       // tuples re-touched across all Phase-3 steps
-    RuntimeProfile::Counter* _cc_pruned_groups = nullptr;            // groups inside pruned partitions
-    RuntimeProfile::Counter* _cc_max_radix_level = nullptr;          // deepest radix level reached
-    RuntimeProfile::Counter* _cc_mcv_keys = nullptr;                 // FE-supplied histogram MCV hot keys received
-    RuntimeProfile::Counter* _cc_mcv_seeded = nullptr; // MCV keys pinned into FA (not already live at flip)
-    // Late hot-key swap (CA->FA promotion): whether it ever armed and what it did over the run.
-    RuntimeProfile::Counter* _cc_swap_arm_chunk = nullptr;         // post-flip chunk the swap armed at (-1 if never)
-    RuntimeProfile::Counter* _cc_swap_promotions = nullptr;        // keys promoted CA->FA mid-run
-    RuntimeProfile::Counter* _cc_swap_evictions = nullptr;         // FA keys flushed back to CA to free a slot
-    RuntimeProfile::Counter* _cc_swap_skipped_scattered = nullptr; // crossings left in place (no dominant key)
-    RuntimeProfile::Counter* _cc_swap_declined = nullptr;          // crossings not promoted (dominant key below bound)
-    RuntimeProfile::Counter* _cc_swap_estimate_skipped =
-            nullptr; // concentrated crossings whose sample estimate skipped the scan
-    RuntimeProfile::Counter* _cc_swap_reaggregated_tuples = nullptr; // tuples re-scanned across the swap's passes
-    // CA spill: whether the cold tail spilled and what restore re-routed vs early-pruned off disk.
-    RuntimeProfile::Counter* _cc_ca_spilled = nullptr;             // 1 if the CA tuples spilled to disk
-    RuntimeProfile::Counter* _cc_ca_restored_rows = nullptr;       // spilled rows re-routed into the CA on restore
-    RuntimeProfile::Counter* _cc_ca_restore_pruned_rows = nullptr; // spilled rows dropped at restore by the prune mask
-
     // The offset of the n-th aggregate function in a row of aggregate functions.
     std::vector<size_t> _agg_states_offsets;
     // The total size of the row for the aggregate function state.
@@ -798,11 +635,6 @@ protected:
     // Exprs used to evaluate group by column
     std::vector<ExprContext*> _group_by_expr_ctxs;
     std::vector<ExprContext*> _group_by_min_max;
-    // Cache-conscious top-n MCV (most-common group-by values) supplied by the FE from the histogram
-    // statistics: hot-key literal exprs (parallel to _cc_mcv_counts). Received and counted; the FA
-    // seeding that consumes them is a follow-on.
-    std::vector<ExprContext*> _cc_mcv_key_ctxs;
-    std::vector<int64_t> _cc_mcv_counts;
     std::vector<std::optional<std::pair<VectorizedLiteral*, VectorizedLiteral*>>> _ranges;
     Columns _group_by_columns;
     std::vector<ColumnType> _group_by_types;
@@ -840,10 +672,6 @@ protected:
     bool _initial_reserve_applied = false;
     // Last observed hash-map capacity, to count rehashes (HashTableGrowCount).
     size_t _prev_hash_map_capacity = 0;
-    // Full-estimate slot count the cache-conscious L2 cap held back from the initial
-    // reserve; consumed by complete_cache_conscious_deferred_reserve() on a
-    // "not skewed" flip verdict. 0 = nothing deferred.
-    int64_t _cc_deferred_reserve_slots = 0;
 
     // aggregate combinator functions since they are not persisted in agg hash map
     std::vector<const AggregateFunction*> _combinator_function;
@@ -860,18 +688,6 @@ public:
     void build_hash_map_with_topn_runtime_filter(size_t chunk_size);
     Status convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk,
                                      bool force_use_intermediate_as_output = false);
-
-    // Read the current per-group count(*) values straight out of the live hash table, used by
-    // the cache-conscious top-n flip decision. Only valid for a single count(*) aggregate
-    // (the FE gating guarantees this); the count state is the int64 at the first agg offset.
-    // The optional NULL-key group is skipped — one group cannot change the skew verdict.
-    void collect_cache_conscious_topn_counts(std::vector<int64_t>* counts);
-
-    // Read (group key, count) pairs out of the live hash table, used to seed the frozen FA
-    // and to emit. Only integral group keys are supported (the key is exact as a uint64, so
-    // there are no identity collisions); returns false for string/serialized keys, letting
-    // the operator fall back to plain aggregation. NULL-key group is skipped.
-    bool collect_cache_conscious_topn_groups(std::vector<std::pair<uint64_t, int64_t>>* groups);
 
     void build_hash_set(size_t chunk_size);
     void build_hash_set_with_selection(size_t chunk_size);
@@ -920,15 +736,6 @@ protected:
                                  bool use_intermediate);
     ChunkPtr _build_output_chunk(MutableColumns&& group_by_columns, MutableColumns&& agg_result_columns,
                                  bool use_intermediate);
-    // Materialize the pruned local top-n (key, count) pairs into the result chunk.
-    Status _build_cache_conscious_result_chunk(const std::vector<std::pair<uint64_t, int64_t>>& result);
-    // Shared tail of both finalize paths (in-memory and post-restore): read the frozen FA out of
-    // the hash map, prune it against the CA, build the result chunk, and release the CA.
-
-    // Resumable generator yielding the CA partitions' tuples as (key, partial) intermediate
-    // chunks (or EndOfFile when drained). The caller spills the returned chunks; the spill
-    // channel drives the same generator for whatever did not fit inline (backpressure).
-    std::function<StatusOr<ChunkPtr>()> _build_cache_conscious_ca_spill_task(RuntimeState* state);
 
     void _set_passthrough(bool flag) { _is_passthrough = flag; }
     bool is_passthrough() const { return _is_passthrough; }

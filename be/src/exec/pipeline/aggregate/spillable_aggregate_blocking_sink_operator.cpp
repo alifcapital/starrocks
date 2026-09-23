@@ -63,31 +63,6 @@ Status SpillableAggregateBlockingSinkOperator::set_finishing(RuntimeState* state
         _aggregator->spiller()->cancel();
     }
 
-    // Finish draining the resident tail after earlier drain tasks. The sorted spill
-    // reader then sees every cold tuple; the source merges them with bounded memory.
-    // FA remains resident and must not also enter the ordinary hash-map spill path.
-    if (_aggregator->cache_conscious_topn_active() && _aggregator->cache_conscious_ca_spilled()) {
-        _aggregator->queue_cache_conscious_ca_tail(state);
-        auto flush_function = [this](RuntimeState* state) {
-            auto& spiller = _aggregator->spiller();
-            return spiller->flush(state, TRACKER_WITH_SPILLER_READER_GUARD(state, spiller));
-        };
-        _aggregator->ref();
-        auto set_call_back_function = [this](RuntimeState* state) {
-            return _aggregator->spiller()->set_flush_all_call_back(
-                    [this, state]() {
-                        auto defer = DeferOp([&]() { _aggregator->unref(state); });
-                        RETURN_IF_ERROR(AggregateBlockingSinkOperator::set_finishing(state));
-                        return Status::OK();
-                    },
-                    state, TRACKER_WITH_SPILLER_READER_GUARD(state, _aggregator->spiller()));
-        };
-        SpillProcessTasksBuilder task_builder(state);
-        task_builder.then(flush_function).finally(set_call_back_function);
-        RETURN_IF_ERROR(_aggregator->spill_channel()->execute(task_builder));
-        return Status::OK();
-    }
-
     if (!_aggregator->spiller()->spilled() && _streaming_chunks.empty()) {
         RETURN_IF_ERROR(AggregateBlockingSinkOperator::set_finishing(state));
         return Status::OK();
@@ -155,28 +130,7 @@ Status SpillableAggregateBlockingSinkOperator::push_chunk(RuntimeState* state, c
 
     if (_spill_strategy == spill::SpillStrategy::NO_SPILL) {
         RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
-        // The base push may flip into cache-conscious top-n; once it has, the CA physical tuples
-        // are the revocable memory, not the hash map (which is now the frozen, tiny FA).
-        set_revocable_mem_bytes(_aggregator->cache_conscious_topn_active()
-                                        ? _aggregator->cache_conscious_revocable_bytes()
-                                        : _aggregator->memory_usage());
-        return Status::OK();
-    }
-
-    // Under spill pressure: if cache-conscious flipped, it owns its own CA spill. Keep routing on
-    // push (FA stays frozen, misses route to CA) and shed the CA tuples to the spiller; do not
-    // take the hash-map spill path — the hash map is the frozen FA and must stay for finalize.
-    if (_aggregator->cache_conscious_topn_active()) {
-        RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
-        // Read the revocable size once on the driver before any spill: spill_cache_conscious_ca may
-        // hand the remainder to the channel, after which the CA is drained on the IO thread and must
-        // not be read here. Accumulate the CA in RAM and only shed it once it outgrows the spill
-        // mem-table budget, mirroring the hash-map path's accumulate-then-spill — not every chunk.
-        const int64_t revocable = _aggregator->cache_conscious_revocable_bytes();
-        set_revocable_mem_bytes(revocable);
-        if (revocable > static_cast<int64_t>(state->spill_mem_table_size())) {
-            RETURN_IF_ERROR(_aggregator->spill_cache_conscious_ca(state));
-        }
+        set_revocable_mem_bytes(_aggregator->memory_usage());
         return Status::OK();
     }
 
@@ -199,12 +153,6 @@ Status SpillableAggregateBlockingSinkOperator::reset_state(RuntimeState* state,
 
 Status SpillableAggregateBlockingSinkOperator::_try_to_spill_by_force(RuntimeState* state, const ChunkPtr& chunk) {
     RETURN_IF_ERROR(AggregateBlockingSinkOperator::push_chunk(state, chunk));
-    // This very chunk may have activated TopN. Its snapshot now lives in FA; spilling
-    // the ordinary map as well would restore those same counts a second time.
-    if (_aggregator->cache_conscious_topn_active()) {
-        set_revocable_mem_bytes(_aggregator->cache_conscious_revocable_bytes());
-        return _aggregator->spill_cache_conscious_ca(state);
-    }
     set_revocable_mem_bytes(_aggregator->memory_usage());
     return _spill_all_data(state, true);
 }

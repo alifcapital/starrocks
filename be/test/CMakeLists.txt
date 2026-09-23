@@ -119,7 +119,6 @@ set(EXEC_FILES
         ./exec/stream/stream_pipeline_test.cpp
         ./exec/tablet_info_test.cpp
         ./exec/agg_hash_map_test.cpp
-        ./exec/cache_conscious_topn_test.cpp
         ./exec/hash_variant_test.cpp
         ./storage/tablet_schema_helper.cpp
         ./exec/pipeline/olap_scan_operator_test.cpp

@@ -20,11 +20,8 @@
 
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
-#include "common/config.h"
 #include "common/status.h"
 #include "exec/agg_runtime_filter_builder.h"
-#include "exec/cache_conscious_topn.h"
-#include "exec/spill/spiller.h"
 #include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
 #include "util/race_detect.h"
@@ -86,15 +83,7 @@ Status AggregateBlockingSinkOperator::set_finishing(RuntimeState* state) {
         return Status::OK();
     }
 
-    // Prune the cold tail into the local top-n result chunk before the source emits.
-    if (_aggregator->cache_conscious_topn_active()) {
-        RETURN_IF_ERROR(_aggregator->finalize_cache_conscious_topn(state));
-    }
-
-    if (_aggregator->cache_conscious_result_ready()) {
-        // The source emits the prebuilt top-n result chunk, not the hash map, so skip the
-        // normal iterator setup.
-    } else if (!_aggregator->is_none_group_by_exprs()) {
+    if (!_aggregator->is_none_group_by_exprs()) {
         _aggregator->update_hash_map_profile_counters();
         // If hash map is empty, we don't need to return value
         if (_aggregator->hash_map_variant().size() == 0) {
@@ -117,7 +106,6 @@ Status AggregateBlockingSinkOperator::set_finishing(RuntimeState* state) {
 Status AggregateBlockingSinkOperator::reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks) {
     _is_finished = false;
     ONCE_RESET(_set_finishing_once);
-    _cache_conscious_evaluated = false;
     return _aggregator->reset_state(state, refill_chunks, this);
 }
 
@@ -133,20 +121,16 @@ Status AggregateBlockingSinkOperator::push_chunk(RuntimeState* state, const Chun
 
     SCOPED_TIMER(_aggregator->agg_compute_timer());
     TRY_CATCH_ALLOC_SCOPE_START()
-    if (_aggregator->is_none_group_by_exprs()) {
-        RETURN_IF_ERROR(_aggregator->compute_single_agg_state(chunk.get(), chunk_size));
-    } else if (_aggregator->cache_conscious_topn_active()) {
-        // Post-flip: FA is frozen as a dense count-specialized table. One fused pass probes it for
-        // each row and bumps the inline counter on a hit -- no phmap probe, no AggDataPtr
-        // materialization, no separate count-update pass. Misses are marked in streaming_selection
-        // and routed into their CA partitions. probe_cache_conscious_fa also evaluates the
-        // agg-input columns the 2-phase router reads for the partial count.
-        RETURN_IF_ERROR(_aggregator->probe_cache_conscious_fa(chunk.get(), chunk_size));
-        _aggregator->route_cache_conscious_cold_rows(chunk_size);
-        _aggregator->maybe_swap_cache_conscious();
-    } else {
+    // try to build hash table if has group by keys
+    if (!_aggregator->is_none_group_by_exprs()) {
         _aggregator->build_hash_map(chunk_size, _shared_limit_countdown, _agg_group_by_with_limit);
         _aggregator->try_convert_to_two_level_map();
+    }
+
+    // batch compute aggregate states
+    if (_aggregator->is_none_group_by_exprs()) {
+        RETURN_IF_ERROR(_aggregator->compute_single_agg_state(chunk.get(), chunk_size));
+    } else {
         if (_agg_group_by_with_limit) {
             // use `_aggregator->streaming_selection()` here to mark whether needs to filter key when compute agg states,
             // it's generated in `build_hash_map`
@@ -165,62 +149,7 @@ Status AggregateBlockingSinkOperator::push_chunk(RuntimeState* state, const Chun
     _aggregator->update_num_input_rows(chunk_size);
     RETURN_IF_ERROR(_aggregator->check_has_error());
 
-    _maybe_evaluate_cache_conscious_topn();
-
     return Status::OK();
-}
-
-void AggregateBlockingSinkOperator::_maybe_evaluate_cache_conscious_topn() {
-    // Evaluate the flip verdict exactly once, the first time the hash table outgrows the L2
-    // budget. Gated off by default; only meaningful for a grouped single count(*) feeding a
-    // small TopN over an integral key, which the FE flag and the key-support check guarantee.
-    // On a skewed verdict the aggregator flips: the live map freezes as FA and later misses
-    // route to CA (see push_chunk).
-    if (!_aggregator->enable_cache_conscious_topn() || _cache_conscious_evaluated ||
-        _aggregator->is_none_group_by_exprs() || !_aggregator->cache_conscious_group_key_supported()) {
-        return;
-    }
-    // Pruning the tail is only sound where this operator owns complete groups, i.e. it
-    // finalizes the aggregate. If it emits an intermediate (partial) result for a later phase,
-    // a partition bound is not an upper bound on the global value and a true winner could be
-    // pruned. Don't flip there; the normal plan handles it.
-    if (!_aggregator->needs_finalize() || _aggregator->is_pre_cache()) {
-        return;
-    }
-    // Ordinary spill may already hold partial counts for these groups. A snapshot of the
-    // current map is then incomplete, so finish through the ordinary spill merge path.
-    if (_aggregator->spiller() != nullptr && _aggregator->spiller()->spilled()) {
-        return;
-    }
-    const int64_t k = _aggregator->cache_conscious_topn_limit();
-    // Flip once the live table outgrows the L2 budget -- the same trigger with or without force, so
-    // FA freezes at its natural capacity either way. Force changes only the skew gate below, never
-    // the flip timing, so a forced run exercises the real post-flip FA/CA sizing.
-    const int64_t l2_budget = config::cache_conscious_topn_l2_budget_bytes;
-    const bool force = _aggregator->cache_conscious_topn_force_flip();
-    if (_aggregator->hash_map_memory_usage() <= l2_budget) {
-        return;
-    }
-    _cache_conscious_evaluated = true;
-
-    std::vector<int64_t> counts;
-    _aggregator->collect_cache_conscious_topn_counts(&counts);
-    // FA candidate capacity: how many per-group slots fit half the L2 budget at a 0.5
-    // open-addressing load factor. The slot is the full group state blob (key + count state).
-    const size_t slot_bytes = std::max<size_t>(16, _aggregator->state_allocator().aggregate_key_size);
-    const size_t fa_capacity = std::max<size_t>(static_cast<size_t>(k), (l2_budget / 2) / slot_bytes / 2);
-    // Force bypasses the skew gate: flip even on a non-skewed stream (the prune just won't help) so
-    // tests and swap benchmarks can drive the post-flip CA path on demand. The result is still exact.
-    _cache_conscious_skewed =
-            force || CacheConsciousTopN::is_skewed(counts, k, config::cache_conscious_topn_skew_min_fraction);
-    if (_cache_conscious_skewed) {
-        _aggregator->activate_cache_conscious_topn(fa_capacity);
-    } else {
-        // Not skewed: the map keeps growing as a normal aggregation, so finish the
-        // full-estimate reserve the cache-conscious L2 cap deferred (no-op without one).
-        // Best-effort like the initial reserve -- an OOM falls back to organic growth.
-        (void)_aggregator->complete_cache_conscious_deferred_reserve();
-    }
 }
 
 void AggregateBlockingSinkOperator::_build_in_runtime_filters(RuntimeState* state) {

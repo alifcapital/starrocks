@@ -1808,35 +1808,6 @@ CONF_Int64(local_exchange_buffer_mem_limit_per_driver, "134217728"); // 128MB
 CONF_mBool(local_exchange_buffer_mem_limit_by_consumer_dop, "true");
 // only used for test. default: 128M
 CONF_mInt64(streaming_agg_limited_memory_size, "134217728");
-// Cache-conscious top-n: the live aggregation hash table freezes as the FA once it first grows
-// past this many bytes (the FA budget, sized to sit in a core's L2 beside the CA working set).
-// Mutable so the L2/L3 operating point can be tuned without a rebuild. Default 512 KiB.
-CONF_mInt64(cache_conscious_topn_l2_budget_bytes, "524288");
-// Cache-conscious top-n late hot-key swap (CA->FA promotion). Mutable so it can be toggled and
-// tuned without a rebuild. enable_swap turns the whole swap off (the late hot keys fall back to the
-// end-of-input prune); swap_cooldown_chunks is how many post-flip chunks a partition rests before
-// the swap may re-examine it -- a larger value cuts how often a still-growing hot partition is
-// re-aggregated.
-CONF_mBool(cache_conscious_topn_enable_swap, "true");
-CONF_mInt64(cache_conscious_topn_swap_cooldown_chunks, "8");
-// CA partition fanout. 0 = derive from the cache budget (paper: one staging cache line per
-// partition resident in the CA half of the cache, so ~budget/cacheline, power-of-two, capped well
-// below that bound because each non-empty partition also holds a 64 KiB arena block in RAM). A
-// positive value overrides it (power-of-two recommended for the masked bucket); for tuning sweeps.
-CONF_mInt64(cache_conscious_topn_ca_fanout, "0");
-// Skew gate for the flip: cc only flips (freezes FA, routes the tail to CA) if the top-k groups hold
-// at least this fraction of the rows seen at the flip point; below it the input is too uniform to
-// prune, so cc stays a plain aggregation. Default 0.15 -- measured: cc already wins once the top-k
-// holds ~15-20% of the mass, while a near-uniform stream (top-k mass approaching k/n) still falls
-// well below it and bails. Lower it further to flip on even weaker skew (reaching late risers for the
-// swap), at the cost of flipping streams that may then bail out. Mutable for tuning sweeps.
-CONF_mDouble(cache_conscious_topn_skew_min_fraction, "0.15");
-// Bloom pre-filter for the post-flip FA probe: a definite miss skips the SwissTable group scan
-// (~half the probe). Measured to help across the whole hit-rate range (a clean win even at 90% FA
-// hits), so it is ON by default. The value is the post-flip miss-rate gate: <= 0 builds it at the
-// flip unconditionally (the default); a value in (0, 1] only turns it on once the measured miss rate
-// clears the gate; > 1 disables it. Mutable, so it doubles as a runtime kill-switch.
-CONF_mDouble(cache_conscious_topn_bloom_miss_threshold, "0");
 // mem limit for partition hash join probe side buffer
 CONF_mInt64(partition_hash_join_probe_limit_size, "134217728");
 // pipeline streaming aggregate chunk buffer size

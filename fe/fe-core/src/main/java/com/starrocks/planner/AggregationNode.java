@@ -134,14 +134,6 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
     // giving est / (instances * dop).
     private int groupByKeyspaceShards = 1;
 
-    // used for cache-conscious top-n aggregation: when set, the backend fuses the
-    // downstream TopN and keeps only the candidate top-n groups exact.
-    private boolean cacheConsciousTopn = false;
-    private long cacheConsciousTopnLimit = -1;
-    // Most-common values of the group-by column (value, frequency) from the histogram statistics,
-    // carried to the backend as typed literals so the cache-conscious operator can seed the FA.
-    private List<Pair<ConstantOperator, Long>> cacheConsciousMcv = Lists.newArrayList();
-
     /**
      * Create an agg node that is not an intermediate node.
      * isIntermediate is true if it is a slave node in a 2-part agg plan.
@@ -276,15 +268,6 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
         return topNSortInfo;
     }
 
-    public void setCacheConsciousTopn(long limit) {
-        this.cacheConsciousTopn = true;
-        this.cacheConsciousTopnLimit = limit;
-    }
-
-    public void setCacheConsciousMcv(List<Pair<ConstantOperator, Long>> cacheConsciousMcv) {
-        this.cacheConsciousMcv = cacheConsciousMcv;
-    }
-
     public void setTopNLimit(long topNLimit) {
         this.topNLimit = topNLimit;
     }
@@ -372,31 +355,6 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
             if (minMaxStats.size() == 2 * groupingExprs.size()) {
                 msg.agg_node.setGroup_by_min_max(ExprToThrift.treesToThrift(minMaxStats));
             }
-
-            // Cache-conscious top-n MCV: carry the group-by column's hot values as typed literals,
-            // built from (value-string, key-type) exactly like group_by_min_max above. counts[i] is
-            // the frequency of keys[i]. Only the single-key cc case is populated.
-            if (cacheConsciousMcv != null && !cacheConsciousMcv.isEmpty() && groupingExprs.size() == 1) {
-                Type mcvType = groupingExprs.get(0).getType();
-                List<Expr> mcvKeys = Lists.newArrayList();
-                List<Long> mcvCounts = Lists.newArrayList();
-                for (Pair<ConstantOperator, Long> mcv : cacheConsciousMcv) {
-                    try {
-                        LiteralExpr keyExpr = LiteralExprFactory.create(mcv.first.getVarchar(), mcvType);
-                        if (keyExpr instanceof DecimalLiteral) {
-                            keyExpr = (LiteralExpr) ExprCastFunction.uncheckedCastTo(keyExpr, mcvType);
-                        }
-                        mcvKeys.add(keyExpr);
-                        mcvCounts.add(mcv.second);
-                    } catch (AnalysisException e) {
-                        // skip a value that does not parse to the key type
-                    }
-                }
-                if (!mcvKeys.isEmpty()) {
-                    msg.agg_node.setCache_conscious_topn_mcv_keys(ExprToThrift.treesToThrift(mcvKeys));
-                    msg.agg_node.setCache_conscious_topn_mcv_counts(mcvCounts);
-                }
-            }
         }
 
         List<Expr> intermediateAggrExprs = aggInfo.getIntermediateAggrExprs();
@@ -428,13 +386,6 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
                 ConnectContext.get().getSessionVariable().getEnableAggregationPipelineShareLimit());
         if (estimatedCardinality > 0) {
             msg.agg_node.setEstimated_cardinality(estimatedCardinality / groupByKeyspaceShards);
-        }
-
-        if (cacheConsciousTopn) {
-            msg.agg_node.setEnable_cache_conscious_topn(true);
-            msg.agg_node.setCache_conscious_topn_limit(cacheConsciousTopnLimit);
-            msg.agg_node.setCache_conscious_topn_force_flip(
-                    ConnectContext.get().getSessionVariable().isCacheConsciousTopnForceFlip());
         }
     }
 
@@ -477,14 +428,6 @@ public class AggregationNode extends PlanNode implements RuntimeFilterBuildNode 
         }
         if (useSortAgg) {
             output.append(detailPrefix).append("sorted streaming: true\n");
-        }
-        if (cacheConsciousTopn) {
-            output.append(detailPrefix).append("cache-conscious topn: limit=").append(cacheConsciousTopnLimit)
-                    .append("\n");
-        }
-        if (cacheConsciousMcv != null && !cacheConsciousMcv.isEmpty()) {
-            output.append(detailPrefix).append("cache-conscious topn mcv: ").append(cacheConsciousMcv.size())
-                    .append(" keys ").append(cacheConsciousMcv).append("\n");
         }
         if (detailLevel == TExplainLevel.VERBOSE && !AUTO.equalsIgnoreCase(streamingPreaggregationMode)) {
             output.append(detailPrefix).append("streaming preaggregation mode: ")
