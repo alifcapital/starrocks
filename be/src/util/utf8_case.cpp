@@ -27,6 +27,7 @@ namespace {
 struct CaseConverters {
     UTF8CaseConverter lower = sz_utf8_case_lower_serial;
     UTF8CaseConverter upper = sz_utf8_case_upper_serial;
+    sz_utf8_case_initcap_t initcap = sz_utf8_case_initcap_serial;
 
     CaseConverters() {
 #if defined(__x86_64__)
@@ -34,12 +35,14 @@ struct CaseConverters {
         if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2")) {
             lower = sz_utf8_case_lower_haswell;
             upper = sz_utf8_case_upper_haswell;
+            initcap = sz_utf8_case_initcap_haswell;
             if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512vl") &&
                 __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") &&
                 __builtin_cpu_supports("avx512vbmi") && __builtin_cpu_supports("avx512vbmi2") &&
                 __builtin_cpu_supports("lzcnt") && __builtin_cpu_supports("popcnt")) {
                 lower = sz_utf8_case_lower_icelake;
                 upper = sz_utf8_case_upper_icelake;
+                initcap = sz_utf8_case_initcap_icelake;
             }
         }
 #endif
@@ -57,6 +60,9 @@ UTF8CaseConverter utf8_lower_converter() {
 }
 UTF8CaseConverter utf8_upper_converter() {
     return converters().upper;
+}
+size_t utf8_initcap(const char* src, size_t length, char* dst, size_t* error_offset) {
+    return converters().initcap(src, length, dst, error_offset);
 }
 void utf8_tolower(const char* src, size_t length, std::string& dst) {
     if (length > dst.max_size() / 3) {

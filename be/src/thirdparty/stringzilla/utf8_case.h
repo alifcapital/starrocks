@@ -14,6 +14,15 @@ extern "C" {
 #endif
 SZ_API_RUNTIME sz_size_t sz_utf8_case_lower(sz_cptr_t source, sz_size_t source_length, sz_ptr_t destination);
 SZ_API_RUNTIME sz_size_t sz_utf8_case_upper(sz_cptr_t source, sz_size_t source_length, sz_ptr_t destination);
+/**
+ *  @brief Capitalizes runs of Unicode Letters and Decimal_Number characters with simple mappings.
+ *  Separators are unchanged. This is not Unicode titlecase or locale-sensitive casing.
+ *  Destination capacity must be at least 3 * length; buffers must not overlap.
+ *  Returns bytes written, or SZ_SIZE_MAX for invalid UTF-8. error_offset, when non-null,
+ *  receives the start of the invalid sequence, or SZ_SIZE_MAX on success.
+ */
+SZ_API_RUNTIME sz_size_t sz_utf8_case_initcap(sz_cptr_t source, sz_size_t length, sz_ptr_t target,
+                                              sz_size_t *error_offset);
 #include "stringzilla/utf8_case/serial.h"
 #include "stringzilla/utf8_case/haswell.h"
 #include "stringzilla/utf8_case/icelake.h"
@@ -34,6 +43,16 @@ SZ_API_RUNTIME sz_size_t sz_utf8_case_upper(sz_cptr_t source, sz_size_t length, 
     return sz_utf8_case_upper_haswell(source, length, target);
 #else
     return sz_utf8_case_upper_serial(source, length, target);
+#endif
+}
+SZ_API_RUNTIME sz_size_t sz_utf8_case_initcap(sz_cptr_t source, sz_size_t length, sz_ptr_t target,
+                                              sz_size_t *error_offset) {
+#if SZ_USE_ICELAKE
+    return sz_utf8_case_initcap_icelake(source, length, target, error_offset);
+#elif SZ_USE_HASWELL
+    return sz_utf8_case_initcap_haswell(source, length, target, error_offset);
+#else
+    return sz_utf8_case_initcap_serial(source, length, target, error_offset);
 #endif
 }
 #endif

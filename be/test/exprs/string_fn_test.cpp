@@ -4547,6 +4547,26 @@ PARALLEL_TEST(VecStringFunctionsTest, regexpCountTest) {
     }
 }
 
+PARALLEL_TEST(VecStringFunctionsTest, initcapUnicodeSimpleMappingTest) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    const std::vector<std::pair<std::string, std::string>> cases = {{"ßETA ẞETA", "ßeta ẞeta"},
+                                                                    {"aİ İSTANBUL", "Ai İstanbul"},
+                                                                    {"ΟΣ ΟΣΑ", "Οσ Οσα"},
+                                                                    {"e\u0301COLE", "E\u0301Cole"},
+                                                                    {"\u2160ABC", "\u2160Abc"},
+                                                                    {"\U00016EBB\U00016EA0", "\U00016EA0\U00016EBB"},
+                                                                    {std::string("a\0B", 3), std::string("A\0B", 3)}};
+    auto input = BinaryColumn::create();
+    for (const auto& [value, expected] : cases) {
+        input->append(Slice(value));
+    }
+    auto result = StringFunctions::initcap(ctx.get(), Columns{input});
+    ASSERT_TRUE(result.ok()) << result.status();
+    for (size_t i = 0; i < cases.size(); ++i) {
+        EXPECT_EQ(cases[i].second, result.value()->get(i).get_slice().to_string());
+    }
+}
+
 PARALLEL_TEST(VecStringFunctionsTest, initcapTest) {
     std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
     Columns columns;

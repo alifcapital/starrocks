@@ -26,6 +26,10 @@ using UTF8CaseConverter = size_t (*)(const char*, size_t, char*);
 UTF8CaseConverter utf8_lower_converter();
 UTF8CaseConverter utf8_upper_converter();
 
+// Simple Unicode 17 casing of letter/digit runs. Returns SIZE_MAX on invalid UTF-8,
+// with the invalid sequence offset in error_offset. Capacity must be at least 3 * length.
+size_t utf8_initcap(const char* src, size_t length, char* dst, size_t* error_offset);
+
 // Source must not refer to dst storage.
 void utf8_tolower(const char* src, size_t length, std::string& dst);
 

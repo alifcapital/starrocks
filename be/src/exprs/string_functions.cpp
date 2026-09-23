@@ -4921,72 +4921,20 @@ StatusOr<ColumnPtr> StringFunctions::raise_error(FunctionContext* context, const
 }
 
 static Status initcap_impl(const Slice& str, std::string* result) {
-    if (str.empty()) {
-        return Status::OK();
+    if (str.size > result->max_size() / 3) {
+        return Status::InvalidArgument("INITCAP input exceeds string capacity");
     }
-
-    if (validate_ascii_fast(str.data, str.size)) {
-        result->resize(str.size);
-        const char* src = str.data;
-        char* dst = result->data();
-        bool word_start = true;
-
-        for (size_t i = 0; i < str.size; ++i) {
-            unsigned char c = static_cast<unsigned char>(src[i]);
-            if (std::isalnum(c)) {
-                if (word_start) {
-                    dst[i] = std::toupper(c);
-                    word_start = false;
-                } else {
-                    dst[i] = std::tolower(c);
-                }
-            } else {
-                dst[i] = c;
-                word_start = true;
-            }
-        }
-        return Status::OK();
+    result->resize(str.size * 3);
+    size_t error_offset;
+    size_t written = utf8_initcap(str.data, str.size, result->data(), &error_offset);
+    if (written == std::numeric_limits<size_t>::max()) {
+        unsigned char bad_byte = static_cast<unsigned char>(str.data[error_offset]);
+        std::stringstream ss;
+        ss << "0x" << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(bad_byte);
+        return Status::InvalidArgument(
+                strings::Substitute("Invalid UTF-8 sequence at index $0, byte: $1", error_offset, ss.str()));
     }
-
-    result->reserve(str.size);
-    int32_t len = static_cast<int32_t>(str.size);
-    int32_t i = 0;
-    bool word_start = true;
-
-    while (i < len) {
-        UChar32 c;
-        int32_t old_i = i;
-        U8_NEXT(str.data, i, len, c);
-
-        if (c < 0) {
-            unsigned char bad_byte = static_cast<unsigned char>(str.data[old_i]);
-            std::stringstream ss;
-            ss << "0x" << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(bad_byte);
-            return Status::InvalidArgument(
-                    strings::Substitute("Invalid UTF-8 sequence at index $0, byte: $1", old_i, ss.str()));
-        }
-
-        if (u_isalnum(c)) {
-            if (word_start) {
-                c = u_toupper(c);
-                word_start = false;
-            } else {
-                c = u_tolower(c);
-            }
-        } else {
-            word_start = true;
-        }
-
-        char temp[4];
-        int32_t offset = 0;
-        UBool is_error = false;
-        U8_APPEND(temp, offset, 4, c, is_error);
-
-        if (is_error) {
-            return Status::InvalidArgument("Invalid UTF-8 sequence during encoding");
-        }
-        result->append(temp, offset);
-    }
+    result->resize(written);
     return Status::OK();
 }
 
