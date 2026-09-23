@@ -508,7 +508,8 @@ public:
 
     static StatusOr<std::unique_ptr<RandomAccessFile>> create_random_access_file(
             std::shared_ptr<io::SharedBufferedInputStream>& shared_buffered_input_stream,
-            std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options);
+            std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options,
+            std::shared_ptr<io::CacheInputStream>* populate_input_stream = nullptr);
 
 protected:
     Status open_random_access_file();
@@ -533,6 +534,10 @@ protected:
     // by default it's no compression.
     CompressionTypePB _compression_type = CompressionTypePB::NO_COMPRESSION;
     std::shared_ptr<io::CacheInputStream> _cache_input_stream = nullptr;
+    // CACHE SELECT only: reader-owned reads are routed through this populate stream so they
+    // warm the cache too (cache_input_stream is a CacheSelectInputStream that writes only the
+    // explicit IO ranges). Held so its cache stats are folded into the scan's DataCache counters.
+    std::shared_ptr<io::CacheInputStream> _cache_select_populate_stream = nullptr;
     std::shared_ptr<io::SharedBufferedInputStream> _shared_buffered_input_stream = nullptr;
     int64_t _total_running_time = 0;
 

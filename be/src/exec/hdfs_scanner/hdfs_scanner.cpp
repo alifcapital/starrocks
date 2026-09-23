@@ -340,7 +340,8 @@ void HdfsScanner::close() noexcept {
 
 StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_file(
         std::shared_ptr<io::SharedBufferedInputStream>& shared_buffered_input_stream,
-        std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options) {
+        std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options,
+        std::shared_ptr<io::CacheInputStream>* populate_input_stream) {
     ASSIGN_OR_RETURN(std::unique_ptr<RandomAccessFile> raw_file, options.fs->new_random_access_file(options.file_path))
     int64_t file_size = options.file_size;
     if (file_size < 0) {
@@ -360,12 +361,29 @@ StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_fi
     shared_buffered_input_stream->set_coalesce_options(shared_options);
     input_stream = shared_buffered_input_stream;
 
-    // input_stream = CacheInputStream(input_stream)
+    // input_stream = io::CacheInputStream(input_stream)
     const DataCacheOptions& datacache_options = options.datacache_options;
     if (datacache_options.enable_datacache) {
         if (datacache_options.enable_cache_select) {
             cache_input_stream = std::make_shared<io::CacheSelectInputStream>(
                     shared_buffered_input_stream, filename, file_size, datacache_options.modification_time);
+            // CacheSelectInputStream only writes explicit IO ranges. Use io::CacheInputStream for
+            // reader-owned reads through _file so CACHE SELECT can populate those blocks too.
+            auto populate_stream = std::make_shared<io::CacheInputStream>(shared_buffered_input_stream, filename, file_size,
+                                                                      datacache_options.modification_time);
+            populate_stream->set_enable_populate_cache(datacache_options.enable_populate_datacache);
+            populate_stream->set_enable_async_populate_mode(datacache_options.enable_datacache_async_populate_mode);
+            populate_stream->set_enable_cache_io_adaptor(datacache_options.enable_datacache_io_adaptor);
+            populate_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+            populate_stream->set_priority(datacache_options.datacache_priority);
+            populate_stream->set_ttl_seconds(datacache_options.datacache_ttl_seconds);
+            input_stream = populate_stream;
+            // CacheSelectInputStream (cache_input_stream) only accounts the explicit IO-range
+            // writes; populate_stream serves the reader-owned reads. Hand it back so its cache
+            // stats are folded into the scan's DataCache counters (see update_counter()).
+            if (populate_input_stream != nullptr) {
+                *populate_input_stream = populate_stream;
+            }
         } else {
             cache_input_stream = std::make_shared<io::CacheInputStream>(shared_buffered_input_stream, filename,
                                                                         file_size, datacache_options.modification_time);
@@ -394,7 +412,7 @@ StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_fi
     // NOTE: make sure `CountedInputStream` is last applied, so io time can be accurately timed.
     input_stream = std::make_shared<CountedSeekableInputStream>(input_stream, options.app_stats);
 
-    // so wrap function is f(x) = (CountedInputStream (CacheInputStream (DecompressInputStream (CountedInputStream x))))
+    // so wrap function is f(x) = (CountedInputStream (io::CacheInputStream (DecompressInputStream (CountedInputStream x))))
     auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
     file->set_size(file_size);
     return file;
@@ -409,7 +427,8 @@ Status HdfsScanner::open_random_access_file() {
                             .datacache_options = _scanner_ctx->datacache_options,
                             .compression_type = _compression_type};
 
-    ASSIGN_OR_RETURN(_file, create_random_access_file(_shared_buffered_input_stream, _cache_input_stream, options));
+    ASSIGN_OR_RETURN(_file, create_random_access_file(_shared_buffered_input_stream, _cache_input_stream, options,
+                                                      &_cache_select_populate_stream));
     if (_cache_input_stream) {
         _cache_input_stream->set_peer_cache_node(_scanner_ctx->scan_range->candidate_node);
     }
@@ -540,7 +559,12 @@ void HdfsScanner::update_counter() {
                                                                 _app_stats.page_read_counter);
 
     if (_scanner_ctx->datacache_options.enable_datacache && _cache_input_stream) {
-        const io::CacheInputStream::Stats& stats = _cache_input_stream->stats();
+        // CACHE SELECT routes reader-owned reads through a separate populate stream; fold its
+        // cache stats in so footer/init reads it warms are reflected in the DataCache counters.
+        io::CacheInputStream::Stats stats = _cache_input_stream->stats();
+        if (_cache_select_populate_stream) {
+            stats += _cache_select_populate_stream->stats();
+        }
         COUNTER_UPDATE(profile->datacache_read_counter, stats.read_block_cache_count);
         COUNTER_UPDATE(profile->datacache_read_bytes, stats.read_block_cache_bytes);
         COUNTER_UPDATE(profile->datacache_read_mem_bytes, stats.read_mem_cache_bytes);
