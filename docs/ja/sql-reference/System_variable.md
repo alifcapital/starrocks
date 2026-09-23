@@ -607,6 +607,11 @@ StarRocks は 2 種類の RF を提供します：ローカル RF とグロー�
 * **デフォルト**: false、つまりこの機能は無効です。
 * **導入バージョン**: v3.1.4
 
+### enable_iceberg_topn_scan_pruning
+
+* **説明**: `ORDER BY <column> LIMIT <k>` クエリにおいて、Iceberg データファイルをファイルごとの min/max 統計情報に基づいて枝刈りするかどうか。有効にすると、スキャンはソート列の min/max でファイルを並べ替え、TopN Runtime Filter がより早く収束するようにします。さらに、min/max が top-k に到達できないファイルは footer を読む前にスキップするため、読み取るファイル数が減ります。クエリ結果は変わりません。この機能には `enable_topn_runtime_filter` が必要で、先頭のソート列は整数、date、または datetime 型である必要があります。
+* **デフォルト**: false
+
 ### enable_incremental_mv
 
 * **説明**: セッションフラグで、サーバーが増分リフレッシュを使用するマテリアライズドビューに対してプランを生成し、インメモリのプランを保持するかを制御します。有効にすると、`MaterializedViewAnalyzer.planMVQuery` はリフレッシュスキームが `IncrementalRefreshSchemeDesc` である create-MV ステートメントに対して処理を行います：ビュークエリの論理・物理プランを構築し、セッションの `enableMVPlanner` フラグを設定します（`setMVPlanner(true)`）。無効にすると、増分リフレッシュ MV のプラン作成はスキップされます。`SessionVariable` の `isEnableIncrementalRefreshMV()` および `setEnableIncrementalRefreshMv(boolean)` からアクセス可能です。
