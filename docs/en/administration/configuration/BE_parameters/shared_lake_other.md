@@ -603,7 +603,7 @@ This topic introduces the following types of BE configurations:
 - Type: Boolean
 - Unit: -
 - Is mutable: Yes
-- Description: Whether to prefetch the footers (file metadata) of upcoming Parquet files ahead of an external (data lake) table scan. While the scan runs, the BE warms the footers of files it is about to read into cache, using the scan executor's spare io-task slots. By the time the scan reaches a file, its footer is already cached, which avoids a separate remote footer read on the scan's critical path. `true` enables this behavior; `false` disables it. Only the footers of Parquet files read by the native reader are prefetched.
+- Description: Whether to prefetch the footers (file metadata) of upcoming Parquet files ahead of an external (data lake) table scan. While the scan runs, the BE warms the footers of files it is about to read into cache, using the scan executor's spare io-task slots. By the time the scan reaches a file, its footer is already cached, which avoids a separate remote footer read on the scan's critical path. `true` enables this behavior; `false` disables it. Only the footers of Parquet files read by the native reader are prefetched. When Iceberg TopN scan reordering is active, pending footer tasks follow the same file-bound priority as the scan, including newly received files.
 - Introduced in: -
 
 ### connector_footer_prefetch_max_inflight
@@ -621,7 +621,7 @@ This topic introduces the following types of BE configurations:
 - Type: Int
 - Unit: -
 - Is mutable: Yes
-- Description: Controls how far ahead of the scan cursor footers are prefetched, measured in files: the lead window equals `scan_dop * connector_footer_prefetch_max_inflight * this value`. A larger value lets the prefetcher run further ahead and raises the footer cache-hit rate, at the cost of possibly warming footers that an early-terminating scan never reaches. Only takes effect when `enable_connector_footer_prefetch` is `true`.
+- Description: Controls how far ahead of the scan cursor footers are prefetched, measured in files: the lead window equals `scan_dop * connector_footer_prefetch_max_inflight * this value`. A larger value lets the prefetcher run further ahead and raises the footer cache-hit rate, at the cost of possibly warming footers that an early-terminating scan never reaches. Only takes effect when `enable_connector_footer_prefetch` is `true`. For Iceberg TopN scans, the window limits the number of files issued for prefetch whose scan has not started. Reordering pending files does not release the budget of already issued tasks.
 - Introduced in: -
 
 ## Other

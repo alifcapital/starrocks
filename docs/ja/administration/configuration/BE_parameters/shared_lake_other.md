@@ -594,7 +594,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - タイプ: Boolean
 - 単位: -
 - 変更可能: はい
-- 説明: 外部（データレイク）テーブルのスキャンの進行中に、後続の Parquet ファイルの footer（ファイルメタデータ）を先読み（プリフェッチ）するかどうか。スキャンの実行中、BE はスキャンエグゼキューターの空いている io-task スロットを利用して、これから読み取るファイルの footer をキャッシュに先読みします。スキャンがファイルに到達したときには、その footer はすでにキャッシュされているため、スキャンのクリティカルパス上でファイルごとに個別のリモート footer 読み取りを行う必要がなくなります。`true` は有効、`false` は無効を示します。native reader で読み取られる Parquet ファイルの footer のみがプリフェッチされます。
+- 説明: 外部（データレイク）テーブルのスキャンの進行中に、後続の Parquet ファイルの footer（ファイルメタデータ）を先読み（プリフェッチ）するかどうか。スキャンの実行中、BE はスキャンエグゼキューターの空いている io-task スロットを利用して、これから読み取るファイルの footer をキャッシュに先読みします。スキャンがファイルに到達したときには、その footer はすでにキャッシュされているため、スキャンのクリティカルパス上でファイルごとに個別のリモート footer 読み取りを行う必要がなくなります。`true` は有効、`false` は無効を示します。native reader で読み取られる Parquet ファイルの footer のみがプリフェッチされます。 Iceberg TopN のスキャン順序変更が有効な場合、後から受信したファイルも含め、未実行の footer プリフェッチはスキャンと同じファイル統計の境界値に基づく優先順位に従います。
 - 導入バージョン: -
 
 ### connector_footer_prefetch_max_inflight
@@ -612,7 +612,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - タイプ: Int
 - 単位: -
 - 変更可能: はい
-- 説明: footer をスキャンカーソルのどれだけ先まで先読みするかを、ファイル数で制御します。先読みウィンドウ = `scan_dop * connector_footer_prefetch_max_inflight * この値`。値が大きいほどプリフェッチはより先まで進み、footer のキャッシュヒット率が高くなりますが、早期に終了するスキャンが到達しないファイルの footer まで先読みする可能性があります。`enable_connector_footer_prefetch` が `true` の場合にのみ有効です。
+- 説明: footer をスキャンカーソルのどれだけ先まで先読みするかを、ファイル数で制御します。先読みウィンドウ = `scan_dop * connector_footer_prefetch_max_inflight * この値`。値が大きいほどプリフェッチはより先まで進み、footer のキャッシュヒット率が高くなりますが、早期に終了するスキャンが到達しないファイルの footer まで先読みする可能性があります。`enable_connector_footer_prefetch` が `true` の場合にのみ有効です。 Iceberg TopN スキャンでは、このウィンドウはプリフェッチに発行済みで、まだスキャンを開始していないファイル数を制限します。待機中のファイルを並べ替えても、発行済みタスクの枠は解放されません。
 - 導入バージョン: -
 
 ## その他

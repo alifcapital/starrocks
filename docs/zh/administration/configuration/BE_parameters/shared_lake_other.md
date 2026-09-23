@@ -591,7 +591,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 类型：Boolean
 - 单位：-
 - 是否动态：是
-- 描述：是否在外部（数据湖）表扫描进行时，提前预取后续 Parquet 文件的 footer（文件元数据）。扫描运行期间，BE 利用扫描执行器空闲的 io-task 槽位，提前将即将读取的文件的 footer 读入缓存。当扫描到达某个文件时，其 footer 已在缓存中，从而避免在扫描关键路径上为该文件单独发起一次远程 footer 读取。`true` 表示启用该行为，`false` 表示禁用。仅预取由 native reader 读取的 Parquet 文件的 footer。
+- 描述：是否在外部（数据湖）表扫描进行时，提前预取后续 Parquet 文件的 footer（文件元数据）。扫描运行期间，BE 利用扫描执行器空闲的 io-task 槽位，提前将即将读取的文件的 footer 读入缓存。当扫描到达某个文件时，其 footer 已在缓存中，从而避免在扫描关键路径上为该文件单独发起一次远程 footer 读取。`true` 表示启用该行为，`false` 表示禁用。仅预取由 native reader 读取的 Parquet 文件的 footer。 启用 Iceberg TopN 扫描重排时，待执行的 footer 预取任务按与扫描相同的文件统计边界优先级排序，包括后续接收的文件。
 - 引入版本：-
 
 ### connector_footer_prefetch_max_inflight
@@ -609,7 +609,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 类型：Int
 - 单位：-
 - 是否动态：是
-- 描述：控制 footer 预取相对扫描游标提前的距离（以文件数计）：提前窗口 = `scan_dop * connector_footer_prefetch_max_inflight * 该值`。该值越大，预取可以运行得越靠前，footer 缓存命中率越高，但也可能预热到提前结束的扫描永远不会读取的文件的 footer。仅当 `enable_connector_footer_prefetch` 为 `true` 时生效。
+- 描述：控制 footer 预取相对扫描游标提前的距离（以文件数计）：提前窗口 = `scan_dop * connector_footer_prefetch_max_inflight * 该值`。该值越大，预取可以运行得越靠前，footer 缓存命中率越高，但也可能预热到提前结束的扫描永远不会读取的文件的 footer。仅当 `enable_connector_footer_prefetch` 为 `true` 时生效。 对于 Iceberg TopN 扫描，该窗口限制已提交预取但尚未开始扫描的文件数量。重新排列待执行文件不会释放已提交任务占用的额度。
 - 引入版本：-
 
 ## 其他
