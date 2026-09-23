@@ -17,6 +17,7 @@ package com.starrocks.connector.iceberg;
 import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Assertions;
@@ -55,9 +56,9 @@ public class IcebergPartitionsTableScannerTest {
 
     private static Object partitionValuesOf(IcebergPartitionsTableScanner scanner, PartitionData data) throws Exception {
         Method method = IcebergPartitionsTableScanner.class
-                .getDeclaredMethod("getPartitionValues", PartitionData.class);
+                .getDeclaredMethod("getPartitionValues", StructLike.class, Types.StructType.class);
         method.setAccessible(true);
-        return method.invoke(scanner, data);
+        return method.invoke(scanner, data, data.getPartitionType());
     }
 
     @Test
