@@ -6229,8 +6229,6 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return mcvRowPercentagePropagationThreshold;
     }
 
-    // Serialize to thrift object
-    // used for rest api
     public boolean isEnableJsonExtractFusion() {
         return enableJsonExtractFusion;
     }
@@ -6239,6 +6237,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         enableJsonExtractFusion = value;
     }
 
+    // Serialize to thrift object
+    // used for rest api
     public TQueryOptions toThrift() {
         TQueryOptions tResult = new TQueryOptions();
         tResult.setCatalog(catalog);
