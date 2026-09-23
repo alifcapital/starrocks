@@ -1,0 +1,1206 @@
+/* Generated Unicode 17 byte transforms. See UNICODE-LICENSE.txt. */
+#ifndef STRINGZILLA_UTF8_CASE_HASWELL_MAPPINGS_H_
+#define STRINGZILLA_UTF8_CASE_HASWELL_MAPPINGS_H_
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_greek_basic_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pce = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)206)), continuations);
+    sz_u32_t pce_bits = (sz_u32_t)_mm256_movemask_epi8(pce);
+    allowed |= (pce_bits >> 0) | (pce_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)163))))) >> 1;
+    __m256i pcf = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)207)), continuations);
+    sz_u32_t pcf_bits = (sz_u32_t)_mm256_movemask_epi8(pcf);
+    allowed |= (pcf_bits >> 0) | (pcf_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)134)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)38)));
+    __m256i match1 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 136, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)37)));
+    __m256i match2 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match2), _mm256_set1_epi8((char)1)));
+    __m256i match3 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 142, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)255)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)1)));
+    __m256i match4 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 145, 15));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)32)));
+    __m256i match5 = _mm256_and_si256(
+        pce, _mm256_or_si256(sz_haswell_in_byte_range_(v, 160, 2), sz_haswell_in_byte_range_(v, 164, 8)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match5, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)1)));
+    __m256i match6 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)143)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)8)));
+    __m256i match7 = _mm256_and_si256(
+        pcf, _mm256_or_si256(
+                 _mm256_or_si256(
+                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 152, 23),
+                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))),
+                     _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)183))),
+                 _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)186))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)1)));
+    __m256i match8 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)180)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)4)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)255)));
+    __m256i match9 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)185)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)249)));
+    __m256i match10 = _mm256_and_si256(pcf, sz_haswell_in_byte_range_(v, 189, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)254)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)254)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_latin1_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pc2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)194)), continuations);
+    sz_u32_t pc2_bits = (sz_u32_t)_mm256_movemask_epi8(pc2);
+    allowed |= (pc2_bits >> 0) | (pc2_bits >> 1);
+    __m256i pc3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)195)), continuations);
+    sz_u32_t pc3_bits = (sz_u32_t)_mm256_movemask_epi8(pc3);
+    allowed |= (pc3_bits >> 0) | (pc3_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(
+        pc3, _mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 23), sz_haswell_in_byte_range_(v, 152, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)32)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_latin_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pc2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)194)), continuations);
+    sz_u32_t pc2_bits = (sz_u32_t)_mm256_movemask_epi8(pc2);
+    allowed |= (pc2_bits >> 0) | (pc2_bits >> 1);
+    __m256i pc3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)195)), continuations);
+    sz_u32_t pc3_bits = (sz_u32_t)_mm256_movemask_epi8(pc3);
+    allowed |= (pc3_bits >> 0) | (pc3_bits >> 1);
+    __m256i pc4 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)196)), continuations);
+    sz_u32_t pc4_bits = (sz_u32_t)_mm256_movemask_epi8(pc4);
+    allowed |= (pc4_bits >> 0) | (pc4_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pc4, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176))))) >> 1;
+    __m256i pc5 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)197)), continuations);
+    sz_u32_t pc5_bits = (sz_u32_t)_mm256_movemask_epi8(pc5);
+    allowed |= (pc5_bits >> 0) | (pc5_bits >> 1);
+    __m256i pc6 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)198)), continuations);
+    sz_u32_t pc6_bits = (sz_u32_t)_mm256_movemask_epi8(pc6);
+    allowed |= (pc6_bits >> 0) | (pc6_bits >> 1);
+    __m256i pe1b8 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)184)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b8_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b8);
+    allowed |= (pe1b8_bits >> 0) | (pe1b8_bits >> 1) | (pe1b8_bits >> 2);
+    __m256i pe1b9 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)185)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b9_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b9);
+    allowed |= (pe1b9_bits >> 0) | (pe1b9_bits >> 1) | (pe1b9_bits >> 2);
+    __m256i pe1ba = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)186)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1ba_bits = (sz_u32_t)_mm256_movemask_epi8(pe1ba);
+    allowed |= (pe1ba_bits >> 0) | (pe1ba_bits >> 1) | (pe1ba_bits >> 2);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)158))))) >>
+        2;
+    __m256i pe1bb = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)187)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bb_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bb);
+    allowed |= (pe1bb_bits >> 0) | (pe1bb_bits >> 1) | (pe1bb_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(
+        pc3, _mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 23), sz_haswell_in_byte_range_(v, 152, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)32)));
+    __m256i match1 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_and_si256(
+                pc4, _mm256_or_si256(
+                         _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 47),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(0))),
+                                         _mm256_and_si256(sz_haswell_in_byte_range_(v, 178, 5),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(0)))),
+                         _mm256_and_si256(
+                             sz_haswell_in_byte_range_(v, 185, 5),
+                             _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))))),
+            _mm256_and_si256(
+                pc5, _mm256_or_si256(
+                         _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 7),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(1))),
+                                         _mm256_and_si256(sz_haswell_in_byte_range_(v, 138, 45),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(0)))),
+                         _mm256_and_si256(
+                             sz_haswell_in_byte_range_(v, 185, 5),
+                             _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1)))))),
+        _mm256_and_si256(
+            pc6,
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_or_si256(
+                            _mm256_or_si256(
+                                _mm256_or_si256(
+                                    _mm256_or_si256(
+                                        _mm256_or_si256(
+                                            _mm256_or_si256(
+                                                _mm256_or_si256(
+                                                    _mm256_or_si256(
+                                                        _mm256_and_si256(
+                                                            sz_haswell_in_byte_range_(v, 130, 3),
+                                                            _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                              _mm256_set1_epi8(0))),
+                                                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)135))),
+                                                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)139))),
+                                                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)145))),
+                                            _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)152))),
+                                        _mm256_and_si256(sz_haswell_in_byte_range_(v, 160, 5),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(0)))),
+                                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)167))),
+                                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)172))),
+                            _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)175))),
+                        _mm256_and_si256(
+                            sz_haswell_in_byte_range_(v, 179, 3),
+                            _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1)))),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)184))),
+                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)188)))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)1)));
+    __m256i match2 = _mm256_and_si256(pc4, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)191)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)193)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match2), _mm256_set1_epi8((char)1)));
+    __m256i match3 = _mm256_and_si256(pc5, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)184)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)254)));
+    __m256i match4 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)129)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)18)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match4), _mm256_set1_epi8((char)3)));
+    __m256i match5 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)134)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match5, _mm256_set1_epi8((char)14)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)3)));
+    __m256i match6 = _mm256_and_si256(
+        pc6, _mm256_or_si256(sz_haswell_in_byte_range_(v, 137, 2), _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)147))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)13)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match6), _mm256_set1_epi8((char)3)));
+    __m256i match7 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)142)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)15)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match7), _mm256_set1_epi8((char)1)));
+    __m256i match8 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)143)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)10)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)3)));
+    __m256i match9 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)144)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)11)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match9), _mm256_set1_epi8((char)3)));
+    __m256i match10 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)148)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)15)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)3)));
+    __m256i match11 = _mm256_and_si256(pc6, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)150)),
+                                                            _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)156))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match11, _mm256_set1_epi8((char)19)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match11), _mm256_set1_epi8((char)3)));
+    __m256i match12 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)151)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match12, _mm256_set1_epi8((char)17)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match12), _mm256_set1_epi8((char)3)));
+    __m256i match13 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)157)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match13, _mm256_set1_epi8((char)21)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match13), _mm256_set1_epi8((char)3)));
+    __m256i match14 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)159)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match14, _mm256_set1_epi8((char)22)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match14), _mm256_set1_epi8((char)3)));
+    __m256i match15 = _mm256_and_si256(
+        pc6, _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)166)),
+                                             _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)169))),
+                             _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)174))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match15, _mm256_set1_epi8((char)218)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match15), _mm256_set1_epi8((char)4)));
+    __m256i match16 = _mm256_and_si256(pc6, sz_haswell_in_byte_range_(v, 177, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match16, _mm256_set1_epi8((char)217)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match16), _mm256_set1_epi8((char)4)));
+    __m256i match17 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)183)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match17, _mm256_set1_epi8((char)219)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match17), _mm256_set1_epi8((char)4)));
+    __m256i match18 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_and_si256(pe1b8, _mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 63),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(0)))),
+                _mm256_and_si256(pe1b9, _mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 63),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(0))))),
+            _mm256_and_si256(
+                pe1ba, _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 21),
+                                                        _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                          _mm256_set1_epi8(0))),
+                                       _mm256_and_si256(sz_haswell_in_byte_range_(v, 160, 31),
+                                                        _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                          _mm256_set1_epi8(0)))))),
+        _mm256_and_si256(
+            pe1bb, _mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 63),
+                                    _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0)))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match18, _mm256_set1_epi8((char)1)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_cyrillic_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pd0 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)208)), continuations);
+    sz_u32_t pd0_bits = (sz_u32_t)_mm256_movemask_epi8(pd0);
+    allowed |= (pd0_bits >> 0) | (pd0_bits >> 1);
+    __m256i pd1 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)209)), continuations);
+    sz_u32_t pd1_bits = (sz_u32_t)_mm256_movemask_epi8(pd1);
+    allowed |= (pd1_bits >> 0) | (pd1_bits >> 1);
+    __m256i pd2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)210)), continuations);
+    sz_u32_t pd2_bits = (sz_u32_t)_mm256_movemask_epi8(pd2);
+    allowed |= (pd2_bits >> 0) | (pd2_bits >> 1);
+    __m256i pd3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)211)), continuations);
+    sz_u32_t pd3_bits = (sz_u32_t)_mm256_movemask_epi8(pd3);
+    allowed |= (pd3_bits >> 0) | (pd3_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(pd0, sz_haswell_in_byte_range_(v, 128, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)16)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)1)));
+    __m256i match1 = _mm256_and_si256(pd0, sz_haswell_in_byte_range_(v, 144, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)32)));
+    __m256i match2 = _mm256_and_si256(pd0, sz_haswell_in_byte_range_(v, 160, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match2), _mm256_set1_epi8((char)1)));
+    __m256i match3 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_and_si256(pd1, _mm256_and_si256(sz_haswell_in_byte_range_(v, 160, 31),
+                                                   _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                     _mm256_set1_epi8(0)))),
+            _mm256_and_si256(
+                pd2, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)128)),
+                                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 138, 53),
+                                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                        _mm256_set1_epi8(0)))))),
+        _mm256_and_si256(
+            pd3,
+            _mm256_or_si256(
+                _mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 13),
+                                 _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))),
+                _mm256_and_si256(sz_haswell_in_byte_range_(v, 144, 47),
+                                 _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)1)));
+    __m256i match4 = _mm256_and_si256(pd3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)128)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)15)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_greek_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pce = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)206)), continuations);
+    sz_u32_t pce_bits = (sz_u32_t)_mm256_movemask_epi8(pce);
+    allowed |= (pce_bits >> 0) | (pce_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)163))))) >> 1;
+    __m256i pcf = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)207)), continuations);
+    sz_u32_t pcf_bits = (sz_u32_t)_mm256_movemask_epi8(pcf);
+    allowed |= (pcf_bits >> 0) | (pcf_bits >> 1);
+    __m256i pe1bc = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)188)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bc_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bc);
+    allowed |= (pe1bc_bits >> 0) | (pe1bc_bits >> 1) | (pe1bc_bits >> 2);
+    __m256i pe1bd = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)189)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bd_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bd);
+    allowed |= (pe1bd_bits >> 0) | (pe1bd_bits >> 1) | (pe1bd_bits >> 2);
+    __m256i pe1be = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)190)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1be_bits = (sz_u32_t)_mm256_movemask_epi8(pe1be);
+    allowed |= (pe1be_bits >> 0) | (pe1be_bits >> 1) | (pe1be_bits >> 2);
+    __m256i pe1bf = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)191)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bf_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bf);
+    allowed |= (pe1bf_bits >> 0) | (pe1bf_bits >> 1) | (pe1bf_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)134)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)38)));
+    __m256i match1 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 136, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)37)));
+    __m256i match2 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match2), _mm256_set1_epi8((char)1)));
+    __m256i match3 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 142, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)255)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)1)));
+    __m256i match4 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 145, 15));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)32)));
+    __m256i match5 = _mm256_and_si256(
+        pce, _mm256_or_si256(sz_haswell_in_byte_range_(v, 160, 2), sz_haswell_in_byte_range_(v, 164, 8)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match5, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)1)));
+    __m256i match6 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)143)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)8)));
+    __m256i match7 = _mm256_and_si256(
+        pcf, _mm256_or_si256(
+                 _mm256_or_si256(
+                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 152, 23),
+                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))),
+                     _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)183))),
+                 _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)186))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)1)));
+    __m256i match8 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)180)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)4)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)255)));
+    __m256i match9 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)185)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)249)));
+    __m256i match10 = _mm256_and_si256(pcf, sz_haswell_in_byte_range_(v, 189, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)254)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)254)));
+    __m256i match11 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_and_si256(pe1bc,
+                                 _mm256_or_si256(_mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 136, 8),
+                                                                                 sz_haswell_in_byte_range_(v, 152, 6)),
+                                                                 sz_haswell_in_byte_range_(v, 168, 8)),
+                                                 sz_haswell_in_byte_range_(v, 184, 8))),
+                _mm256_and_si256(
+                    pe1bd,
+                    _mm256_or_si256(
+                        _mm256_or_si256(sz_haswell_in_byte_range_(v, 136, 6),
+                                        _mm256_and_si256(sz_haswell_in_byte_range_(v, 153, 7),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(1)))),
+                        sz_haswell_in_byte_range_(v, 168, 8)))),
+            _mm256_and_si256(pe1be,
+                             _mm256_or_si256(_mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 136, 8),
+                                                                             sz_haswell_in_byte_range_(v, 152, 8)),
+                                                             sz_haswell_in_byte_range_(v, 168, 8)),
+                                             sz_haswell_in_byte_range_(v, 184, 2)))),
+        _mm256_and_si256(pe1bf,
+                         _mm256_or_si256(sz_haswell_in_byte_range_(v, 152, 2), sz_haswell_in_byte_range_(v, 168, 2))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match11, _mm256_set1_epi8((char)248)));
+    __m256i match12 = _mm256_and_si256(pe1be, sz_haswell_in_byte_range_(v, 186, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match12, _mm256_set1_epi8((char)246)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match12), _mm256_set1_epi8((char)255)));
+    __m256i match13 = _mm256_or_si256(
+        _mm256_and_si256(pe1be, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)188))),
+        _mm256_and_si256(pe1bf, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140)),
+                                                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)188)))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match13, _mm256_set1_epi8((char)247)));
+    __m256i match14 = _mm256_and_si256(pe1bf, sz_haswell_in_byte_range_(v, 136, 4));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match14, _mm256_set1_epi8((char)42)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match14), _mm256_set1_epi8((char)254)));
+    __m256i match15 = _mm256_and_si256(pe1bf, sz_haswell_in_byte_range_(v, 154, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match15, _mm256_set1_epi8((char)28)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match15), _mm256_set1_epi8((char)254)));
+    __m256i match16 = _mm256_and_si256(pe1bf, sz_haswell_in_byte_range_(v, 170, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match16, _mm256_set1_epi8((char)16)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match16), _mm256_set1_epi8((char)254)));
+    __m256i match17 = _mm256_and_si256(pe1bf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)172)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match17, _mm256_set1_epi8((char)249)));
+    __m256i match18 = _mm256_and_si256(pe1bf, sz_haswell_in_byte_range_(v, 184, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match18), _mm256_set1_epi8((char)254)));
+    __m256i match19 = _mm256_and_si256(pe1bf, sz_haswell_in_byte_range_(v, 186, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match19, _mm256_set1_epi8((char)2)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match19), _mm256_set1_epi8((char)254)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_georgian_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pe182 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)130)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe182_bits = (sz_u32_t)_mm256_movemask_epi8(pe182);
+    allowed |= (pe182_bits >> 0) | (pe182_bits >> 1) | (pe182_bits >> 2);
+    __m256i pe183 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)131)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe183_bits = (sz_u32_t)_mm256_movemask_epi8(pe183);
+    allowed |= (pe183_bits >> 0) | (pe183_bits >> 1) | (pe183_bits >> 2);
+    __m256i pe1b2 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)178)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b2_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b2);
+    allowed |= (pe1b2_bits >> 0) | (pe1b2_bits >> 1) | (pe1b2_bits >> 2);
+    __m256i pe1b3 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)179)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b3_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b3);
+    allowed |= (pe1b3_bits >> 0) | (pe1b3_bits >> 1) | (pe1b3_bits >> 2);
+    __m256i pe2b4 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)180)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)226))),
+                                     continuations);
+    sz_u32_t pe2b4_bits = (sz_u32_t)_mm256_movemask_epi8(pe2b4);
+    allowed |= (pe2b4_bits >> 0) | (pe2b4_bits >> 1) | (pe2b4_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(pe182, sz_haswell_in_byte_range_(v, 160, 32));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)50)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match0)), _mm256_set1_epi8((char)1)));
+    __m256i match1 = _mm256_and_si256(
+        pe183, _mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 6),
+                                               _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)135))),
+                               _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)141))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)49)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match1)), _mm256_set1_epi8((char)1)));
+    __m256i match2 = _mm256_and_si256(pe1b2, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)137)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)1)));
+    __m256i match3 = _mm256_and_si256(
+        pe1b2, _mm256_or_si256(sz_haswell_in_byte_range_(v, 144, 43), sz_haswell_in_byte_range_(v, 189, 3)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)209)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_armenian_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pd4 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)212)), continuations);
+    sz_u32_t pd4_bits = (sz_u32_t)_mm256_movemask_epi8(pd4);
+    allowed |= (pd4_bits >> 0) | (pd4_bits >> 1);
+    __m256i pd5 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)213)), continuations);
+    sz_u32_t pd5_bits = (sz_u32_t)_mm256_movemask_epi8(pd5);
+    allowed |= (pd5_bits >> 0) | (pd5_bits >> 1);
+    __m256i pd6 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)214)), continuations);
+    sz_u32_t pd6_bits = (sz_u32_t)_mm256_movemask_epi8(pd6);
+    allowed |= (pd6_bits >> 0) | (pd6_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(
+        pd4, _mm256_and_si256(sz_haswell_in_byte_range_(v, 128, 47),
+                              _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)1)));
+    __m256i match1 = _mm256_or_si256(_mm256_and_si256(pd4, sz_haswell_in_byte_range_(v, 177, 15)),
+                                     _mm256_and_si256(pd5, sz_haswell_in_byte_range_(v, 144, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)240)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)1)));
+    __m256i match2 = _mm256_and_si256(pd5, sz_haswell_in_byte_range_(v, 128, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)48)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_lower_haswell_fullwidth_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pefbc = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)188)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)239))),
+                                     continuations);
+    sz_u32_t pefbc_bits = (sz_u32_t)_mm256_movemask_epi8(pefbc);
+    allowed |= (pefbc_bits >> 0) | (pefbc_bits >> 1) | (pefbc_bits >> 2);
+    __m256i pefbd = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)189)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)239))),
+                                     continuations);
+    sz_u32_t pefbd_bits = (sz_u32_t)_mm256_movemask_epi8(pefbd);
+    allowed |= (pefbd_bits >> 0) | (pefbd_bits >> 1) | (pefbd_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_false_k);
+    __m256i match0 = _mm256_and_si256(pefbc, sz_haswell_in_byte_range_(v, 161, 26));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)1)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_greek_basic_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pce = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)206)), continuations);
+    sz_u32_t pce_bits = (sz_u32_t)_mm256_movemask_epi8(pce);
+    allowed |= (pce_bits >> 0) | (pce_bits >> 1);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(
+                _mm256_and_si256(pce, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)144)),
+                                                      _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176)))))) >>
+            1;
+    __m256i pcf = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)207)), continuations);
+    sz_u32_t pcf_bits = (sz_u32_t)_mm256_movemask_epi8(pcf);
+    allowed |= (pcf_bits >> 0) | (pcf_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)172)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)218)));
+    __m256i match1 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 173, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)219)));
+    __m256i match2 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 177, 15));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)224)));
+    __m256i match3 = _mm256_and_si256(
+        pcf, _mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 2), sz_haswell_in_byte_range_(v, 131, 9)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)255)));
+    __m256i match4 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)130)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)33)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match4), _mm256_set1_epi8((char)255)));
+    __m256i match5 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)255)));
+    __m256i match6 = _mm256_and_si256(pcf, sz_haswell_in_byte_range_(v, 141, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)1)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match6), _mm256_set1_epi8((char)255)));
+    __m256i match7 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)144)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)2)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match7), _mm256_set1_epi8((char)255)));
+    __m256i match8 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)145)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)255)));
+    __m256i match9 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)149)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)17)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match9), _mm256_set1_epi8((char)255)));
+    __m256i match10 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)150)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)10)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)255)));
+    __m256i match11 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)151)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match11, _mm256_set1_epi8((char)248)));
+    __m256i match12 = _mm256_and_si256(
+        pcf, _mm256_or_si256(
+                 _mm256_or_si256(
+                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 153, 23),
+                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))),
+                     _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)184))),
+                 _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)187))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match12, _mm256_set1_epi8((char)255)));
+    __m256i match13 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match13, _mm256_set1_epi8((char)234)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match13), _mm256_set1_epi8((char)255)));
+    __m256i match14 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)177)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match14, _mm256_set1_epi8((char)240)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match14), _mm256_set1_epi8((char)255)));
+    __m256i match15 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)178)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match15, _mm256_set1_epi8((char)7)));
+    __m256i match16 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)179)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match16, _mm256_set1_epi8((char)12)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match16), _mm256_set1_epi8((char)254)));
+    __m256i match17 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)181)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match17, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match17), _mm256_set1_epi8((char)255)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_latin1_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pc2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)194)), continuations);
+    sz_u32_t pc2_bits = (sz_u32_t)_mm256_movemask_epi8(pc2);
+    allowed |= (pc2_bits >> 0) | (pc2_bits >> 1);
+    __m256i pc3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)195)), continuations);
+    sz_u32_t pc3_bits = (sz_u32_t)_mm256_movemask_epi8(pc3);
+    allowed |= (pc3_bits >> 0) | (pc3_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pc2, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)181)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)231)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)12)));
+    __m256i match1 = _mm256_and_si256(pc3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)159)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)180)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)144)));
+    __m256i match2 = _mm256_and_si256(
+        pc3, _mm256_or_si256(sz_haswell_in_byte_range_(v, 160, 23), sz_haswell_in_byte_range_(v, 184, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)224)));
+    __m256i match3 = _mm256_and_si256(pc3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)191)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)249)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)2)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_latin_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pc2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)194)), continuations);
+    sz_u32_t pc2_bits = (sz_u32_t)_mm256_movemask_epi8(pc2);
+    allowed |= (pc2_bits >> 0) | (pc2_bits >> 1);
+    __m256i pc3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)195)), continuations);
+    sz_u32_t pc3_bits = (sz_u32_t)_mm256_movemask_epi8(pc3);
+    allowed |= (pc3_bits >> 0) | (pc3_bits >> 1);
+    __m256i pc4 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)196)), continuations);
+    sz_u32_t pc4_bits = (sz_u32_t)_mm256_movemask_epi8(pc4);
+    allowed |= (pc4_bits >> 0) | (pc4_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pc4, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)177))))) >> 1;
+    __m256i pc5 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)197)), continuations);
+    sz_u32_t pc5_bits = (sz_u32_t)_mm256_movemask_epi8(pc5);
+    allowed |= (pc5_bits >> 0) | (pc5_bits >> 1);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(
+                _mm256_and_si256(pc5, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)137)),
+                                                      _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)191)))))) >>
+            1;
+    __m256i pc6 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)198)), continuations);
+    sz_u32_t pc6_bits = (sz_u32_t)_mm256_movemask_epi8(pc6);
+    allowed |= (pc6_bits >> 0) | (pc6_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)155))))) >> 1;
+    __m256i pe1b8 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)184)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b8_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b8);
+    allowed |= (pe1b8_bits >> 0) | (pe1b8_bits >> 1) | (pe1b8_bits >> 2);
+    __m256i pe1b9 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)185)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b9_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b9);
+    allowed |= (pe1b9_bits >> 0) | (pe1b9_bits >> 1) | (pe1b9_bits >> 2);
+    __m256i pe1ba = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)186)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1ba_bits = (sz_u32_t)_mm256_movemask_epi8(pe1ba);
+    allowed |= (pe1ba_bits >> 0) | (pe1ba_bits >> 1) | (pe1ba_bits >> 2);
+    __m256i pe1bb = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)187)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bb_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bb);
+    allowed |= (pe1bb_bits >> 0) | (pe1bb_bits >> 1) | (pe1bb_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pc2, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)181)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)231)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)12)));
+    __m256i match1 = _mm256_and_si256(pc3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)159)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)180)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)144)));
+    __m256i match2 = _mm256_and_si256(
+        pc3, _mm256_or_si256(sz_haswell_in_byte_range_(v, 160, 23), sz_haswell_in_byte_range_(v, 184, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)224)));
+    __m256i match3 = _mm256_and_si256(pc3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)191)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)249)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)2)));
+    __m256i match4 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_and_si256(
+                pc4, _mm256_or_si256(
+                         _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 47),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(1))),
+                                         _mm256_and_si256(sz_haswell_in_byte_range_(v, 179, 5),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(1)))),
+                         _mm256_and_si256(
+                             sz_haswell_in_byte_range_(v, 186, 5),
+                             _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))))),
+            _mm256_and_si256(
+                pc5, _mm256_or_si256(
+                         _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 130, 7),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(0))),
+                                         _mm256_and_si256(sz_haswell_in_byte_range_(v, 139, 45),
+                                                          _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                            _mm256_set1_epi8(1)))),
+                         _mm256_and_si256(
+                             sz_haswell_in_byte_range_(v, 186, 5),
+                             _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0)))))),
+        _mm256_and_si256(
+            pc6,
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_or_si256(
+                            _mm256_or_si256(
+                                _mm256_or_si256(
+                                    _mm256_or_si256(
+                                        _mm256_or_si256(
+                                            _mm256_or_si256(
+                                                _mm256_or_si256(
+                                                    _mm256_or_si256(
+                                                        _mm256_and_si256(
+                                                            sz_haswell_in_byte_range_(v, 131, 3),
+                                                            _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                              _mm256_set1_epi8(1))),
+                                                        _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)136))),
+                                                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140))),
+                                                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)146))),
+                                            _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)153))),
+                                        _mm256_and_si256(sz_haswell_in_byte_range_(v, 161, 5),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(1)))),
+                                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)168))),
+                                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)173))),
+                            _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176))),
+                        _mm256_and_si256(
+                            sz_haswell_in_byte_range_(v, 180, 3),
+                            _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0)))),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)185))),
+                _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)189)))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)255)));
+    __m256i match5 = _mm256_and_si256(pc5, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)128)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match5, _mm256_set1_epi8((char)63)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)255)));
+    __m256i match6 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)128)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)3)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match6), _mm256_set1_epi8((char)3)));
+    __m256i match7 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)149)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)33)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match7), _mm256_set1_epi8((char)1)));
+    __m256i match8 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)154)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)35)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)2)));
+    __m256i match9 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)158)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)2)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match9), _mm256_set1_epi8((char)2)));
+    __m256i match10 = _mm256_and_si256(pc6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)191)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)248)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)1)));
+    __m256i match11 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_and_si256(pe1b8, _mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 63),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(1)))),
+                _mm256_and_si256(pe1b9, _mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 63),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(1))))),
+            _mm256_and_si256(
+                pe1ba, _mm256_or_si256(_mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 21),
+                                                        _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                          _mm256_set1_epi8(1))),
+                                       _mm256_and_si256(sz_haswell_in_byte_range_(v, 161, 31),
+                                                        _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                          _mm256_set1_epi8(1)))))),
+        _mm256_and_si256(
+            pe1bb, _mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 63),
+                                    _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1)))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match11, _mm256_set1_epi8((char)255)));
+    __m256i match12 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)150)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match12, _mm256_set1_epi8((char)27)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match12), _mm256_set1_epi8((char)18)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match12)), _mm256_set1_epi8((char)103)));
+    __m256i match13 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)151)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match13, _mm256_set1_epi8((char)241)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match13), _mm256_set1_epi8((char)18)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match13)), _mm256_set1_epi8((char)115)));
+    __m256i match14 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)152)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match14, _mm256_set1_epi8((char)242)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match14), _mm256_set1_epi8((char)18)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match14)), _mm256_set1_epi8((char)118)));
+    __m256i match15 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)153)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match15, _mm256_set1_epi8((char)241)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match15), _mm256_set1_epi8((char)18)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match15)), _mm256_set1_epi8((char)120)));
+    __m256i match16 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)154)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match16, _mm256_set1_epi8((char)36)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match16), _mm256_set1_epi8((char)16)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match16)), _mm256_set1_epi8((char)96)));
+    __m256i match17 = _mm256_and_si256(pe1ba, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)155)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match17, _mm256_set1_epi8((char)5)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match17), _mm256_set1_epi8((char)255)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_cyrillic_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pd0 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)208)), continuations);
+    sz_u32_t pd0_bits = (sz_u32_t)_mm256_movemask_epi8(pd0);
+    allowed |= (pd0_bits >> 0) | (pd0_bits >> 1);
+    __m256i pd1 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)209)), continuations);
+    sz_u32_t pd1_bits = (sz_u32_t)_mm256_movemask_epi8(pd1);
+    allowed |= (pd1_bits >> 0) | (pd1_bits >> 1);
+    __m256i pd2 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)210)), continuations);
+    sz_u32_t pd2_bits = (sz_u32_t)_mm256_movemask_epi8(pd2);
+    allowed |= (pd2_bits >> 0) | (pd2_bits >> 1);
+    __m256i pd3 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)211)), continuations);
+    sz_u32_t pd3_bits = (sz_u32_t)_mm256_movemask_epi8(pd3);
+    allowed |= (pd3_bits >> 0) | (pd3_bits >> 1);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pd0, sz_haswell_in_byte_range_(v, 176, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)224)));
+    __m256i match1 = _mm256_and_si256(pd1, sz_haswell_in_byte_range_(v, 128, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)255)));
+    __m256i match2 = _mm256_and_si256(pd1, sz_haswell_in_byte_range_(v, 144, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)240)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match2), _mm256_set1_epi8((char)255)));
+    __m256i match3 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_and_si256(pd1, _mm256_and_si256(sz_haswell_in_byte_range_(v, 161, 31),
+                                                   _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                     _mm256_set1_epi8(1)))),
+            _mm256_and_si256(
+                pd2, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)129)),
+                                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 139, 53),
+                                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                        _mm256_set1_epi8(1)))))),
+        _mm256_and_si256(
+            pd3,
+            _mm256_or_si256(
+                _mm256_and_si256(sz_haswell_in_byte_range_(v, 130, 13),
+                                 _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0))),
+                _mm256_and_si256(sz_haswell_in_byte_range_(v, 145, 47),
+                                 _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)255)));
+    __m256i match4 = _mm256_and_si256(pd3, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)143)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)241)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_greek_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pce = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)206)), continuations);
+    sz_u32_t pce_bits = (sz_u32_t)_mm256_movemask_epi8(pce);
+    allowed |= (pce_bits >> 0) | (pce_bits >> 1);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(
+                _mm256_and_si256(pce, _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)144)),
+                                                      _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176)))))) >>
+            1;
+    __m256i pcf = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)207)), continuations);
+    sz_u32_t pcf_bits = (sz_u32_t)_mm256_movemask_epi8(pcf);
+    allowed |= (pcf_bits >> 0) | (pcf_bits >> 1);
+    __m256i pe1bc = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)188)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bc_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bc);
+    allowed |= (pe1bc_bits >> 0) | (pe1bc_bits >> 1) | (pe1bc_bits >> 2);
+    __m256i pe1bd = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)189)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bd_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bd);
+    allowed |= (pe1bd_bits >> 0) | (pe1bd_bits >> 1) | (pe1bd_bits >> 2);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(
+                pe1bd,
+                _mm256_and_si256(sz_haswell_in_byte_range_(v, 144, 7),
+                                 _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(0)))))) >>
+            2;
+    __m256i pe1be = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)190)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1be_bits = (sz_u32_t)_mm256_movemask_epi8(pe1be);
+    allowed |= (pe1be_bits >> 0) | (pe1be_bits >> 1) | (pe1be_bits >> 2);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(
+                pe1be, _mm256_or_si256(_mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 48),
+                                                                       sz_haswell_in_byte_range_(v, 178, 3)),
+                                                       sz_haswell_in_byte_range_(v, 182, 2)),
+                                       _mm256_and_si256(sz_haswell_in_byte_range_(v, 188, 3),
+                                                        _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                          _mm256_set1_epi8(0))))))) >>
+            2;
+    __m256i pe1bf = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)191)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1bf_bits = (sz_u32_t)_mm256_movemask_epi8(pe1bf);
+    allowed |= (pe1bf_bits >> 0) | (pe1bf_bits >> 1) | (pe1bf_bits >> 2);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(
+            pe1bf, _mm256_or_si256(
+                       _mm256_or_si256(
+                           _mm256_or_si256(
+                               _mm256_or_si256(
+                                   _mm256_or_si256(
+                                       _mm256_or_si256(
+                                           _mm256_or_si256(
+                                               _mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 130, 3),
+                                                                               sz_haswell_in_byte_range_(v, 134, 2)),
+                                                               _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140))),
+                                               sz_haswell_in_byte_range_(v, 146, 2)),
+                                           sz_haswell_in_byte_range_(v, 150, 2)),
+                                       sz_haswell_in_byte_range_(v, 162, 3)),
+                                   sz_haswell_in_byte_range_(v, 166, 2)),
+                               sz_haswell_in_byte_range_(v, 178, 3)),
+                           sz_haswell_in_byte_range_(v, 182, 2)),
+                       _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)188)))))) >>
+        2;
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pce, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)172)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)218)));
+    __m256i match1 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 173, 3));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)219)));
+    __m256i match2 = _mm256_and_si256(pce, sz_haswell_in_byte_range_(v, 177, 15));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)224)));
+    __m256i match3 = _mm256_and_si256(
+        pcf, _mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 2), sz_haswell_in_byte_range_(v, 131, 9)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)255)));
+    __m256i match4 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)130)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)33)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match4), _mm256_set1_epi8((char)255)));
+    __m256i match5 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)140)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match5), _mm256_set1_epi8((char)255)));
+    __m256i match6 = _mm256_and_si256(pcf, sz_haswell_in_byte_range_(v, 141, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match6, _mm256_set1_epi8((char)1)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match6), _mm256_set1_epi8((char)255)));
+    __m256i match7 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)144)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match7, _mm256_set1_epi8((char)2)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match7), _mm256_set1_epi8((char)255)));
+    __m256i match8 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)145)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match8, _mm256_set1_epi8((char)7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match8), _mm256_set1_epi8((char)255)));
+    __m256i match9 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)149)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match9, _mm256_set1_epi8((char)17)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match9), _mm256_set1_epi8((char)255)));
+    __m256i match10 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)150)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match10, _mm256_set1_epi8((char)10)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match10), _mm256_set1_epi8((char)255)));
+    __m256i match11 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)151)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match11, _mm256_set1_epi8((char)248)));
+    __m256i match12 = _mm256_and_si256(
+        pcf, _mm256_or_si256(
+                 _mm256_or_si256(
+                     _mm256_and_si256(sz_haswell_in_byte_range_(v, 153, 23),
+                                      _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))),
+                     _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)184))),
+                 _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)187))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match12, _mm256_set1_epi8((char)255)));
+    __m256i match13 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)176)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match13, _mm256_set1_epi8((char)234)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match13), _mm256_set1_epi8((char)255)));
+    __m256i match14 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)177)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match14, _mm256_set1_epi8((char)240)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match14), _mm256_set1_epi8((char)255)));
+    __m256i match15 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)178)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match15, _mm256_set1_epi8((char)7)));
+    __m256i match16 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)179)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match16, _mm256_set1_epi8((char)12)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match16), _mm256_set1_epi8((char)254)));
+    __m256i match17 = _mm256_and_si256(pcf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)181)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match17, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match17), _mm256_set1_epi8((char)255)));
+    __m256i match18 = _mm256_or_si256(
+        _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_and_si256(pe1bc,
+                                 _mm256_or_si256(_mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 8),
+                                                                                 sz_haswell_in_byte_range_(v, 144, 6)),
+                                                                 sz_haswell_in_byte_range_(v, 160, 8)),
+                                                 sz_haswell_in_byte_range_(v, 176, 8))),
+                _mm256_and_si256(
+                    pe1bd,
+                    _mm256_or_si256(
+                        _mm256_or_si256(sz_haswell_in_byte_range_(v, 128, 6),
+                                        _mm256_and_si256(sz_haswell_in_byte_range_(v, 145, 7),
+                                                         _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)),
+                                                                           _mm256_set1_epi8(1)))),
+                        sz_haswell_in_byte_range_(v, 160, 8)))),
+            _mm256_and_si256(pe1be, sz_haswell_in_byte_range_(v, 176, 2))),
+        _mm256_and_si256(pe1bf,
+                         _mm256_or_si256(sz_haswell_in_byte_range_(v, 144, 2), sz_haswell_in_byte_range_(v, 160, 2))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match18, _mm256_set1_epi8((char)8)));
+    __m256i match19 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 176, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match19, _mm256_set1_epi8((char)10)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match19), _mm256_set1_epi8((char)1)));
+    __m256i match20 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 178, 4));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match20, _mm256_set1_epi8((char)214)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match20), _mm256_set1_epi8((char)2)));
+    __m256i match21 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 182, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match21, _mm256_set1_epi8((char)228)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match21), _mm256_set1_epi8((char)2)));
+    __m256i match22 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 184, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match22), _mm256_set1_epi8((char)2)));
+    __m256i match23 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 186, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match23, _mm256_set1_epi8((char)240)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match23), _mm256_set1_epi8((char)2)));
+    __m256i match24 = _mm256_and_si256(pe1bd, sz_haswell_in_byte_range_(v, 188, 2));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match24, _mm256_set1_epi8((char)254)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match24), _mm256_set1_epi8((char)2)));
+    __m256i match25 = _mm256_and_si256(pe1bf, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)165)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match25, _mm256_set1_epi8((char)7)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_georgian_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pe182 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)130)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe182_bits = (sz_u32_t)_mm256_movemask_epi8(pe182);
+    allowed |= (pe182_bits >> 0) | (pe182_bits >> 1) | (pe182_bits >> 2);
+    __m256i pe183 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)131)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe183_bits = (sz_u32_t)_mm256_movemask_epi8(pe183);
+    allowed |= (pe183_bits >> 0) | (pe183_bits >> 1) | (pe183_bits >> 2);
+    __m256i pe1b2 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)178)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b2_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b2);
+    allowed |= (pe1b2_bits >> 0) | (pe1b2_bits >> 1) | (pe1b2_bits >> 2);
+    stop |= ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pe1b2, sz_haswell_in_byte_range_(v, 128, 8)))) >> 2;
+    __m256i pe1b3 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)179)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)225))),
+                                     continuations);
+    sz_u32_t pe1b3_bits = (sz_u32_t)_mm256_movemask_epi8(pe1b3);
+    allowed |= (pe1b3_bits >> 0) | (pe1b3_bits >> 1) | (pe1b3_bits >> 2);
+    __m256i pe2b4 = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)180)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)226))),
+                                     continuations);
+    sz_u32_t pe2b4_bits = (sz_u32_t)_mm256_movemask_epi8(pe2b4);
+    allowed |= (pe2b4_bits >> 0) | (pe2b4_bits >> 1) | (pe2b4_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(
+        pe183, _mm256_or_si256(sz_haswell_in_byte_range_(v, 144, 43), sz_haswell_in_byte_range_(v, 189, 3)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)47)));
+    __m256i match1 = _mm256_and_si256(pe1b2, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)136)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)2)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)231)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match1)), _mm256_set1_epi8((char)9)));
+    __m256i match2 = _mm256_and_si256(pe1b2, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)138)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)255)));
+    __m256i match3 = _mm256_and_si256(pe2b4, sz_haswell_in_byte_range_(v, 128, 32));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match3, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match3), _mm256_set1_epi8((char)206)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match3)), _mm256_set1_epi8((char)255)));
+    __m256i match4 = _mm256_and_si256(
+        pe2b4, _mm256_or_si256(_mm256_or_si256(sz_haswell_in_byte_range_(v, 160, 6),
+                                               _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)167))),
+                               _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)173))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match4, _mm256_set1_epi8((char)224)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match4), _mm256_set1_epi8((char)207)));
+    result = _mm256_add_epi8(
+        result, _mm256_and_si256(sz_haswell_next_bytes_(sz_haswell_next_bytes_(match4)), _mm256_set1_epi8((char)255)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_armenian_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pd4 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)212)), continuations);
+    sz_u32_t pd4_bits = (sz_u32_t)_mm256_movemask_epi8(pd4);
+    allowed |= (pd4_bits >> 0) | (pd4_bits >> 1);
+    __m256i pd5 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)213)), continuations);
+    sz_u32_t pd5_bits = (sz_u32_t)_mm256_movemask_epi8(pd5);
+    allowed |= (pd5_bits >> 0) | (pd5_bits >> 1);
+    __m256i pd6 = _mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)214)), continuations);
+    sz_u32_t pd6_bits = (sz_u32_t)_mm256_movemask_epi8(pd6);
+    allowed |= (pd6_bits >> 0) | (pd6_bits >> 1);
+    stop |=
+        ((sz_u32_t)_mm256_movemask_epi8(_mm256_and_si256(pd6, _mm256_cmpeq_epi8(v, _mm256_set1_epi8((char)135))))) >> 1;
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(
+        pd4, _mm256_and_si256(sz_haswell_in_byte_range_(v, 129, 47),
+                              _mm256_cmpeq_epi8(_mm256_and_si256(v, _mm256_set1_epi8(1)), _mm256_set1_epi8(1))));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)255)));
+    __m256i match1 = _mm256_or_si256(_mm256_and_si256(pd5, sz_haswell_in_byte_range_(v, 161, 15)),
+                                     _mm256_and_si256(pd6, sz_haswell_in_byte_range_(v, 128, 7)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match1, _mm256_set1_epi8((char)16)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match1), _mm256_set1_epi8((char)255)));
+    __m256i match2 = _mm256_and_si256(pd5, sz_haswell_in_byte_range_(v, 176, 16));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match2, _mm256_set1_epi8((char)208)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+SZ_HELPER_AUTO sz_size_t sz_utf8_upper_haswell_fullwidth_(__m256i v, sz_ptr_t target, sz_size_t available) {
+    __m256i prev1 = sz_haswell_previous_bytes_(v, 1);
+    __m256i prev2 = sz_haswell_previous_bytes_(v, 2);
+    __m256i continuations = sz_haswell_in_byte_range_(v, 0x80, 0x40);
+    sz_u32_t allowed = ~(sz_u32_t)_mm256_movemask_epi8(v);
+    sz_u32_t stop = 0;
+    __m256i pefbc = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)188)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)239))),
+                                     continuations);
+    sz_u32_t pefbc_bits = (sz_u32_t)_mm256_movemask_epi8(pefbc);
+    allowed |= (pefbc_bits >> 0) | (pefbc_bits >> 1) | (pefbc_bits >> 2);
+    __m256i pefbd = _mm256_and_si256(_mm256_and_si256(_mm256_cmpeq_epi8(prev1, _mm256_set1_epi8((char)189)),
+                                                      _mm256_cmpeq_epi8(prev2, _mm256_set1_epi8((char)239))),
+                                     continuations);
+    sz_u32_t pefbd_bits = (sz_u32_t)_mm256_movemask_epi8(pefbd);
+    allowed |= (pefbd_bits >> 0) | (pefbd_bits >> 1) | (pefbd_bits >> 2);
+    sz_unused_(available);
+    stop |= ~allowed;
+    sz_size_t length = stop ? (sz_size_t)_tzcnt_u32(stop) : 32;
+    if (!length) return 0;
+    __m256i result = sz_utf8_case_haswell_ascii_(v, sz_true_k);
+    __m256i match0 = _mm256_and_si256(pefbd, sz_haswell_in_byte_range_(v, 129, 26));
+    result = _mm256_add_epi8(result, _mm256_and_si256(match0, _mm256_set1_epi8((char)32)));
+    result = _mm256_add_epi8(result, _mm256_and_si256(sz_haswell_next_bytes_(match0), _mm256_set1_epi8((char)255)));
+    _mm256_storeu_si256((__m256i *)target, result);
+    return length;
+}
+#endif

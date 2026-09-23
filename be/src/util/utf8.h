@@ -17,13 +17,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <string>
 #include <vector>
-
-#include "thirdparty/stringzilla/utf8_case.h"
 
 #include "simdutf.h"
 #include "util/slice.h"
+#include "util/utf8_case.h"
 
 namespace starrocks {
 
@@ -184,29 +182,6 @@ static inline size_t incomplete_trailing_utf8_len(const char* data, size_t len) 
         return i < width ? i : 0;
     }
     return 0;
-}
-
-// UTF-8 aware tolower using StringZilla (full Unicode case folding)
-static inline void utf8_tolower(const char* src, size_t src_len, std::string& dst) {
-    dst.resize(src_len * 3);
-    size_t result_len = sz_utf8_case_fold(src, src_len, dst.data());
-    dst.resize(result_len);
-}
-
-// UTF-8 aware toupper using StringZilla (full Unicode uppercase)
-static inline void utf8_toupper(const char* src, size_t src_len, std::string& dst) {
-    dst.resize(src_len * 3);
-    size_t result_len = sz_utf8_case_upper(src, src_len, dst.data());
-    dst.resize(result_len);
-}
-
-// Convenience overloads for std::string
-static inline void utf8_tolower(const std::string& src, std::string& dst) {
-    utf8_tolower(src.data(), src.size(), dst);
-}
-
-static inline void utf8_toupper(const std::string& src, std::string& dst) {
-    utf8_toupper(src.data(), src.size(), dst);
 }
 
 } // namespace starrocks

@@ -1609,31 +1609,6 @@ build_tenann() {
     cp -r $TP_SOURCE_DIR/$TENANN_SOURCE/lib/libtenann-bundl*.a $TP_INSTALL_DIR/lib/
 }
 
-build_icu() {
-    check_if_source_exist $ICU_SOURCE
-    cd $TP_SOURCE_DIR/$ICU_SOURCE/source
-
-    sed -i 's/\r$//' ./runConfigureICU
-    sed -i 's/\r$//' ./config.*
-    sed -i 's/\r$//' ./configure
-    sed -i 's/\r$//' ./mkinstalldirs
-
-    unset CPPFLAGS
-    unset CXXFLAGS
-    unset CFLAGS
-
-    # Use a subshell to prevent LD_LIBRARY_PATH from affecting the external environment
-    (
-        export LD_LIBRARY_PATH=${STARROCKS_GCC_HOME}/lib:${STARROCKS_GCC_HOME}/lib64:${LD_LIBRARY_PATH:-}
-        export CFLAGS="-O3 -fno-omit-frame-pointer -fPIC"
-        export CXXFLAGS="-O3 -fno-omit-frame-pointer -fPIC"
-        ./runConfigureICU Linux --prefix=$TP_INSTALL_DIR --enable-static --disable-shared
-        make -j$PARALLEL
-        make install
-    )
-    restore_compile_flags
-}
-
 build_xsimd() {
     check_if_source_exist $XSIMD_SOURCE
     cd $TP_SOURCE_DIR/$XSIMD_SOURCE
@@ -1643,16 +1618,6 @@ build_xsimd() {
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_INSTALL_PREFIX="$TP_INSTALL_DIR"
     ${BUILD_SYSTEM} install
-}
-
-build_stringzilla() {
-    check_if_source_exist $STRINGZILLA_SOURCE
-    cd $TP_SOURCE_DIR/$STRINGZILLA_SOURCE
-
-    # stringzilla is header-only, just copy headers
-    mkdir -p $TP_INSTALL_DIR/include
-    cp -r include/stringzilla $TP_INSTALL_DIR/include/
-    cp -r include/stringzillas $TP_INSTALL_DIR/include/
 }
 
 build_libxml2() {
@@ -1819,7 +1784,6 @@ declare -a all_packages=(
     clucene
     simdutf
     poco
-    icu
     xsimd
     libxml2
     azure
@@ -1828,7 +1792,6 @@ declare -a all_packages=(
     tenann
     xxhash
     pprof
-    stringzilla
 )
 
 # Machine specific packages

@@ -90,6 +90,7 @@ set(UTIL_FILES
   slice.cpp
   sm3.cpp
   frame_of_reference_coding.cpp
+  utf8_case.cpp
   utf8_check.cpp
   path_util.cpp
   monotime.cpp
@@ -131,3 +132,6 @@ set(UTIL_FILES
 ADD_BE_LIB(Util
     ${UTIL_FILES}
 )
+
+set_source_files_properties(utf8_case.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/thirdparty")

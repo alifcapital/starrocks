@@ -1492,12 +1492,14 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
     src->append("ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ");
     src->append("AbCd_EfG_HiGk_LmN_oPq_RsT_UvW_xYz");
     src->append("三aBcD十eFg年HiGk众生LmN牛马oPq六十年RsT诸uVw佛XyZ龙象");
-    // Full-Unicode case folding/upper: verify explicit expected strings.
+    // Full Unicode lowercase and uppercase mappings.
     src->append("Ёлка über Größe");
     columns.emplace_back(src);
 
     std::vector<std::string> expected_upper = {
-            "", "A", "1",
+            "",
+            "A",
+            "1",
             "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
             "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
             "ABCD_EFG_HIGK_LMN_OPQ_RST_UVW_XYZ",
@@ -1505,7 +1507,9 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
             "ЁЛКА ÜBER GRÖSSE",
     };
     std::vector<std::string> expected_lower = {
-            "", "a", "1",
+            "",
+            "a",
+            "1",
             "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
             "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
             "abcd_efg_higk_lmn_opq_rst_uvw_xyz",
@@ -1531,6 +1535,76 @@ PARALLEL_TEST(VecStringFunctionsTest, caseToggleTest) {
     for (auto i = 0; i < size; ++i) {
         ASSERT_EQ(binary_upper_dst->get_slice(i).to_string(), expected_upper[i]);
         ASSERT_EQ(binary_lower_dst->get_slice(i).to_string(), expected_lower[i]);
+    }
+}
+
+PARALLEL_TEST(VecStringFunctionsTest, unicode17CaseConversion) {
+    struct Case {
+        std::string input;
+        std::string lower;
+        std::string upper;
+    };
+    std::vector<Case> cases = {
+            {"Größe ßẞ", "größe ßß", "GRÖSSE SSẞ"},
+            {"İIıi", "i\u0307iıi", "İIII"},
+            {"ΟΣ", "ος", "ΟΣ"},
+            {"Α", "α", "Α"},
+            {"Σ", "σ", "Σ"},
+            {"ΟΣ\u0301Α", "οσ\u0301α", "ΟΣ\u0301Α"},
+            {"ΟΣ\u0301", "ος\u0301", "ΟΣ\u0301"},
+            {"ﬃΐև", "ﬃΐև", "FFIΙ\u0308\u0301ԵՒ"},
+            {"\U00001C89\U00001C8A", "\U00001C8A\U00001C8A", "\U00001C89\U00001C89"},
+            {std::string("A\0Z", 3), std::string("a\0z", 3), std::string("A\0Z", 3)},
+            {std::string("A\xffZ", 3), std::string("a\xffz", 3), std::string("A\xffZ", 3)},
+            {"", "", ""},
+    };
+    for (size_t offset = 0; offset <= 65; ++offset) {
+        const std::string prefix(offset, ' ');
+        cases.push_back({prefix + "ΟΣ", prefix + "ος", prefix + "ΟΣ"});
+        std::string greek, latin;
+        for (size_t i = 0; i < 40; ++i) {
+            greek += "Ά";
+            latin += "ἀ";
+        }
+        std::string lower_greek, upper_latin;
+        for (size_t i = 0; i < 40; ++i) {
+            lower_greek += "ά";
+            upper_latin += "Ἀ";
+        }
+        cases.push_back({prefix + greek, prefix + lower_greek, prefix + greek});
+        cases.push_back({prefix + "ỹ" + latin, prefix + "ỹ" + latin, prefix + "Ỹ" + upper_latin});
+    }
+    for (bool upper : {false, true}) {
+        std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+        auto prepare = upper ? StringFunctions::upper_prepare : StringFunctions::lower_prepare;
+        auto evaluate = upper ? StringFunctions::upper : StringFunctions::lower;
+        auto close = upper ? StringFunctions::upper_close : StringFunctions::lower_close;
+        ASSERT_TRUE(prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        auto data = BinaryColumn::create();
+        for (const auto& c : cases) data->append(c.input);
+        auto result = evaluate(ctx.get(), {data});
+        ASSERT_TRUE(result.ok()) << result.status();
+        for (size_t i = 0; i < cases.size(); ++i) {
+            ASSERT_EQ(upper ? cases[i].upper : cases[i].lower, result.value()->get(i).get_slice().to_string()) << i;
+        }
+        auto nulls = NullColumn::create();
+        nulls->get_data().assign(cases.size(), 0);
+        nulls->get_data()[1] = 1;
+        auto nullable = NullableColumn::create(data, nulls);
+        result = evaluate(ctx.get(), {nullable});
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result.value()->is_null(1));
+        ASSERT_EQ(upper ? cases[0].upper : cases[0].lower, result.value()->get(0).get_slice().to_string());
+        auto constant = ColumnHelper::create_const_column<TYPE_VARCHAR>("ΟΣ", 9);
+        result = evaluate(ctx.get(), {constant});
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result.value()->is_constant());
+        ASSERT_EQ(9, result.value()->size());
+        ASSERT_EQ(upper ? "ΟΣ" : "ος", result.value()->get(0).get_slice().to_string());
+        result = evaluate(ctx.get(), {BinaryColumn::create()});
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(0, result.value()->size());
+        ASSERT_TRUE(close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
     }
 }
 
