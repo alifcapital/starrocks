@@ -76,7 +76,8 @@ public:
                io::SharedBufferedInputStream* sb_stream = nullptr, SkipRowsContextPtr skipRowsContext = nullptr);
     ~FileReader();
 
-    Status init(HdfsScannerContext* scanner_ctx);
+    enum class InitMode { READ_DATA, CACHE_SELECT };
+    Status init(HdfsScannerContext* scanner_ctx, InitMode mode = InitMode::READ_DATA);
 
     Status get_next(ChunkPtr* chunk);
 
@@ -95,7 +96,7 @@ private:
 
     void _prepare_read_columns(std::unordered_set<std::string>& existed_column_names);
 
-    Status _init_group_readers();
+    Status _init_group_readers(InitMode mode);
 
     // filter row group by conjuncts
     bool _filter_group(const GroupReaderPtr& group_reader);

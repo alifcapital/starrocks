@@ -14,13 +14,19 @@
 
 #include "exec/pipeline/scan/connector_scan_operator.h"
 
+#include "connector/footer_prefetch_task.h"
+#include "connector/hive_connector.h"
 #include "connector/lake_connector.h"
 #include "exec/connector_scan_node.h"
 #include "exec/pipeline/pipeline_driver.h"
 #include "exec/pipeline/scan/balanced_chunk_buffer.h"
+#include "exec/workgroup/scan_executor.h"
+#include "exec/workgroup/scan_task_queue.h"
+#include "runtime/current_thread.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "util/defer_op.h"
 #include "util/starrocks_metrics.h"
 
 namespace starrocks::pipeline {
@@ -148,12 +154,34 @@ Status ConnectorScanOperatorFactory::do_prepare(RuntimeState* state) {
 }
 
 void ConnectorScanOperatorFactory::do_close(RuntimeState* state) {
+    // Cancel footer prefetch first: queued metadata tasks cannot be removed from the scan
+    // executor, so they drain by observing the flag and returning. Tasks hold a shared_ptr to
+    // the state and copied file context, so they are safe even if they run after this close.
+    if (_footer_prefetch_state != nullptr) {
+        _footer_prefetch_state->cancel();
+    }
     const auto& conjunct_ctxs = _scan_node->conjunct_ctxs();
     Expr::close(conjunct_ctxs, state);
 }
 
 OperatorPtr ConnectorScanOperatorFactory::do_create(int32_t dop, int32_t driver_sequence) {
     return std::make_shared<ConnectorScanOperator>(this, _id, driver_sequence, dop, _scan_node);
+}
+
+void ConnectorScanOperatorFactory::append_footer_prefetch_ranges(RuntimeState* state,
+                                                                 const std::vector<TScanRangeParams>& scan_ranges) {
+    if (_footer_prefetch_state == nullptr || _footer_prefetch_state->cancelled() || scan_ranges.empty()) {
+        return;
+    }
+    auto* node = down_cast<ConnectorScanNode*>(_scan_node);
+    auto* hive = dynamic_cast<connector::HiveDataSourceProvider*>(node->data_source_provider());
+    if (hive == nullptr) {
+        return;
+    }
+    connector::FooterPrefetchPlan plan = hive->build_footer_prefetch_items(state, scan_ranges);
+    if (!plan.items.empty()) {
+        _footer_prefetch_state->append(std::move(plan.items));
+    }
 }
 
 const std::vector<ExprContext*>& ConnectorScanOperatorFactory::partition_exprs() const {
@@ -210,8 +238,11 @@ Status ConnectorScanOperatorFactory::mark_split_source_morsel_finished() {
 // ===============================================================
 struct ConnectorScanOperatorAdaptiveProcessor {
     // ----------------------
-    // op expected io tasks in this cycle.
-    int expected_io_tasks = 0;
+    // op expected io tasks in this cycle. Atomic because the adaptive governor writes it on the
+    // pull thread (available_pickup_morsel_count) while the footer prefetcher reads it on executor
+    // threads (current_io_task_target from io-finish / warm-resubmit); the write publishes a fully
+    // computed value (store once at end), never mid-adjustment intermediates.
+    std::atomic<int> expected_io_tasks{0};
     // if scan operator is in drive process cycle.
     bool in_driver_process = false;
 
@@ -311,15 +342,132 @@ void ConnectorScanOperator::do_close(RuntimeState* state) {
     if (c == 1) {
         _adjust_scan_mem_limit(L->get_arb_chunk_source_mem_bytes(), 0);
     }
+
+    // Surface the node-wide footer-prefetch warm counts once (the state is shared across drivers
+    // so only driver 0 reports, to avoid the per-driver counter merge summing it dop times).
+    // Best-effort: tasks still draining after this read are not counted.
+    const std::shared_ptr<FooterPrefetchState>& fp = factory->footer_prefetch_state();
+    if (fp != nullptr && get_driver_sequence() == 0) {
+        COUNTER_SET(ADD_COUNTER(_unique_metrics.get(), "FooterPrefetchPageCacheWrites", TUnit::UNIT),
+                    fp->warmed_pagecache());
+        COUNTER_SET(ADD_COUNTER(_unique_metrics.get(), "FooterPrefetchBlockCacheWrites", TUnit::UNIT),
+                    fp->warmed_blockcache());
+    }
 }
 
 ChunkSourcePtr ConnectorScanOperator::create_chunk_source(MorselPtr morsel, int32_t chunk_source_index) {
     auto* scan_node = down_cast<ConnectorScanNode*>(_scan_node);
     auto* factory = down_cast<ConnectorScanOperatorFactory*>(_factory);
 
+    // Advance the footer-prefetch frontier when the real scan starts a root file (a split
+    // morsel reuses an already-parsed footer, so it must not move the frontier). Mark before
+    // the morsel is moved into the chunk source.
+    const auto& fp = factory->footer_prefetch_state();
+    if (fp != nullptr) {
+        auto* scan_morsel = down_cast<ScanMorsel*>(morsel.get());
+        const TScanRange* scan_range = scan_morsel->get_scan_range();
+        if (scan_morsel->get_split_context() == nullptr && scan_range->__isset.hdfs_scan_range) {
+            fp->mark_started(connector::footer_prefetch_key(*scan_range));
+        }
+    }
+
     return std::make_shared<ConnectorChunkSource>(this, _chunk_source_profiles[chunk_source_index].get(),
                                                   std::move(morsel), scan_node, factory->get_chunk_buffer(),
                                                   _enable_adaptive_io_tasks);
+}
+
+void ConnectorScanOperator::try_submit_metadata_prefetch(RuntimeState* state) {
+    // Stop feeding warm once the pushed-down LIMIT is reached: otherwise a small-LIMIT query whose
+    // downstream stopped consuming keeps is_buffer_full() true, and the warm self-re-submit loop
+    // would drain the entire lead window of footers before pending_finish() (which waits on the
+    // warm count) can drain -- a large teardown latency on the cheapest queries.
+    // Bailing here leaves only the already-in-flight warm tasks (<= connector_footer_prefetch_max_inflight)
+    // to drain, so the operator finishes promptly. reach_limit() reads MorselQueue's atomic flag (set
+    // on the pull thread), so this is race-free -- unlike the non-atomic _is_finished, which
+    // set_finishing writes under _task_mutex and this executor-thread path must not read unlocked.
+    // Cancel and fragment-level early finish (timeout, error, LIMIT above a join, etc.) are covered by
+    // state->is_cancelled(), an acquire-load atomic set promptly by FragmentContext::cancel()/finish();
+    // reading it here stops warm before teardown instead of waiting for the late fp->cancelled() in the
+    // factory close, which would otherwise let the whole lead window warm first. Natural frontier
+    // catch-up on exhaustion covers the remaining case.
+    if ((_morsel_queue != nullptr && _morsel_queue->reach_limit()) || (state != nullptr && state->is_cancelled())) {
+        return;
+    }
+    auto* factory = down_cast<ConnectorScanOperatorFactory*>(_factory);
+    const std::shared_ptr<FooterPrefetchState>& fp = factory->footer_prefetch_state();
+    if (fp == nullptr || fp->cancelled() || !fp->warmable()) {
+        return;
+    }
+    const int max_warm_inflight = config::connector_footer_prefetch_max_inflight;
+    try {
+        while (true) {
+            int data_reserved = std::max<int>(_num_running_io_tasks.load(), current_io_task_target());
+            if (!_warm_slots.try_reserve(max_warm_inflight, data_reserved, _io_tasks_per_scan_operator)) {
+                break;
+            }
+            CancelableDefer release_slot([&]() { _warm_slots.release(); });
+            FooterPrefetchItem item;
+            if (!fp->try_take_next(&item) || !_submit_footer_prefetch_task(state, fp, item)) {
+                break;
+            }
+            release_slot.cancel();
+        }
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "Connector footer prefetch submission failed: " << e.what();
+    }
+}
+
+bool ConnectorScanOperator::_submit_footer_prefetch_task(RuntimeState* state,
+                                                         const std::shared_ptr<FooterPrefetchState>& fp,
+                                                         const FooterPrefetchItem& item) {
+    // The caller owns one reservation. Transfer it only after a successful submission.
+    auto* executor = scan_executor();
+    if (executor == nullptr) {
+        fp->untake(item.key);
+        return false;
+    }
+    workgroup::ScanTask task(scan_workgroup(), [wp = query_ctx(), this, state, fp, item](workgroup::YieldContext&) {
+        if (auto sp = wp.lock()) {
+            auto notify = scan_defer_notify(this);
+            CancelableDefer release_slot([&]() { _warm_slots.release(); });
+            SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(state->instance_mem_tracker());
+            try {
+                auto stopped = [&]() {
+                    return state->is_cancelled() || _warm_slots.disabled() || fp->cancelled() ||
+                           (_morsel_queue != nullptr && _morsel_queue->reach_limit());
+                };
+                if (stopped()) {
+                    return;
+                }
+                connector::FooterWarmResult r = connector::warm_footer(item, fp->metacache_on());
+                fp->record_warm(r.wrote_pagecache, r.wrote_blockcache);
+
+                // A parked driver cannot submit more work. Pass this slot to the next file without
+                // dropping the lifetime guard or trying to reserve a second slot at the inflight cap.
+                // Each footer gets a separate queued task so data tasks can run between them.
+                int data_reserved = std::max<int>(_num_running_io_tasks.load(), current_io_task_target());
+                if (!stopped() && is_buffer_full() &&
+                    _warm_slots.can_continue(config::connector_footer_prefetch_max_inflight, data_reserved,
+                                             _io_tasks_per_scan_operator)) {
+                    FooterPrefetchItem next;
+                    if (fp->try_take_next(&next) && _submit_footer_prefetch_task(state, fp, next)) {
+                        release_slot.cancel();
+                    }
+                }
+            } catch (const std::exception& e) {
+                LOG(WARNING) << "Connector footer prefetch failed: " << e.what();
+            }
+        }
+    });
+    task.task_group = down_cast<const ScanOperatorFactory*>(_factory)->scan_task_group();
+    task.set_query_type(state->query_options().query_type);
+    // Background work stays below the data scan's priority range.
+    task.priority = 0;
+    if (!executor->submit(std::move(task))) {
+        fp->untake(item.key);
+        return false;
+    }
+    return true;
 }
 
 void ConnectorScanOperator::attach_chunk_source(int32_t source_index) {
@@ -383,7 +531,8 @@ bool ConnectorScanOperator::is_running_all_io_tasks() const {
     }
 
     ConnectorScanOperatorAdaptiveProcessor& P = *_adaptive_processor;
-    bool ret = (P.expected_io_tasks != 0) && (_num_running_io_tasks >= P.expected_io_tasks);
+    const int expected = P.expected_io_tasks.load();
+    bool ret = (expected != 0) && (_num_running_io_tasks >= expected);
 
     // when in poll state, we don't want this operator sleeps too long time and miss out the chance
     // to adjust io tasks. so we will break it when it runs for too long time
@@ -400,6 +549,19 @@ bool ConnectorScanOperator::is_running_all_io_tasks() const {
     }
     return ret;
 }
+int ConnectorScanOperator::current_io_task_target() const {
+    if (!_enable_adaptive_io_tasks) {
+        return _io_tasks_per_scan_operator;
+    }
+    int target = _adaptive_processor->expected_io_tasks.load();
+    // Before the governor establishes a target (0), leave no spare so warm does not grab slots data
+    // is about to take. Clamp to the cap.
+    if (target <= 0 || target > _io_tasks_per_scan_operator) {
+        return _io_tasks_per_scan_operator;
+    }
+    return target;
+}
+
 int ConnectorScanOperator::available_pickup_morsel_count() {
     if (!_enable_adaptive_io_tasks) return _io_tasks_per_scan_operator;
 
@@ -423,11 +585,14 @@ int ConnectorScanOperator::available_pickup_morsel_count() {
         P.cs_total_halt_time += halt_time;
     }
 
-    // to avoid frequent adjustment.
-    int& io_tasks = P.expected_io_tasks;
+    // to avoid frequent adjustment. Work on a local and publish once (store) at each return so
+    // concurrent readers (current_io_task_target on executor threads) never see a mid-adjustment
+    // intermediate.
+    int io_tasks = P.expected_io_tasks.load();
     io_tasks = std::max(min_io_tasks, io_tasks);
     io_tasks = std::min(max_io_tasks, io_tasks);
     if ((now - P.adjust_io_tasks_last_timestamp) <= config::connector_io_tasks_adjust_interval_ms * 1000) {
+        P.expected_io_tasks.store(io_tasks);
         return io_tasks;
     }
     P.adjust_io_tasks_last_timestamp = now;
@@ -550,6 +715,7 @@ int ConnectorScanOperator::available_pickup_morsel_count() {
 
     P.last_cs_scan_speed = cs_scan_speed;
     P.last_cs_total_scan_bytes = cs_total_scan_bytes;
+    P.expected_io_tasks.store(io_tasks);
     return io_tasks;
 }
 

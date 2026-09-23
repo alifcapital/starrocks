@@ -1,4 +1,7 @@
 set(EXEC_FILES
+        ./connector/footer_prefetch_task_test.cpp
+        ./exec/pipeline/scan/footer_prefetch_state_test.cpp
+        ./exec/pipeline/scan/warm_slot_reservation_test.cpp
         ./exec/aggregator_limited_mem_state_test.cpp
         ./agent/agent_task_test.cpp
         ./agent/heartbeat_server_test.cpp

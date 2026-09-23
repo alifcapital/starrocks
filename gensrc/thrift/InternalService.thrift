@@ -341,6 +341,12 @@ struct TQueryOptions {
   134: optional i32 datacache_priority;
   135: optional i64 datacache_ttl_seconds;
   136: optional bool enable_cache_select;
+  // When true, CacheSelectScanner stops after the file footer is in block_cache and skips the
+  // column data + Iceberg delete-file fetch. Set only by
+  // IcebergMetadataRefreshFooterPrefetcher.warmup on its own cloned ConnectContext, never by
+  // user sessions — the public user-facing knob is the FE-only Session var
+  // enable_iceberg_metadata_refresh_footer_prefetch.
+  220: optional bool cache_select_footer_only = false;
   137: optional i64 datacache_sharing_work_period;
   138: optional bool enable_file_pagecache;
 

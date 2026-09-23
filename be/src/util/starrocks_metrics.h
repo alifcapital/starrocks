@@ -98,6 +98,9 @@ public:
     METRIC_DEFINE_INT_GAUGE(query_scan_bytes_per_second, MetricUnit::BYTES);
     METRIC_DEFINE_INT_GAUGE(runtime_filter_event_queue_len, MetricUnit::NOUNIT);
     METRIC_DEFINE_INT_COUNTER(query_scan_bytes, MetricUnit::BYTES);
+    // Parsed Parquet footer cache hit/miss counts, aggregated from scanner statistics.
+    METRIC_DEFINE_INT_COUNTER(parquet_footer_cache_hit_count, MetricUnit::OPERATIONS);
+    METRIC_DEFINE_INT_COUNTER(parquet_footer_cache_miss_count, MetricUnit::OPERATIONS);
     METRIC_DEFINE_INT_COUNTER(query_scan_rows, MetricUnit::ROWS);
     METRIC_DEFINE_INT_GAUGE(pipe_drivers, MetricUnit::NOUNIT);
 
@@ -463,6 +466,9 @@ public:
     METRIC_DEFINE_INT_GAUGE(datacache_disk_quota_bytes, MetricUnit::BYTES);
     METRIC_DEFINE_INT_GAUGE(datacache_disk_used_bytes, MetricUnit::BYTES);
     METRIC_DEFINE_INT_GAUGE(datacache_meta_used_bytes, MetricUnit::BYTES);
+    // Cumulative StarCache populate/eviction bytes, sampled from detail_l2.
+    METRIC_DEFINE_INT_GAUGE(datacache_block_cache_write_bytes, MetricUnit::BYTES);
+    METRIC_DEFINE_INT_GAUGE(datacache_block_cache_evict_bytes, MetricUnit::BYTES);
     METRIC_DEFINE_INT_ATOMIC_COUNTER(block_cache_hit_bytes, MetricUnit::BYTES);
     METRIC_DEFINE_INT_ATOMIC_COUNTER(block_cache_miss_bytes, MetricUnit::BYTES);
     METRIC_DEFINE_INT_ATOMIC_COUNTER(block_cache_hit_count, MetricUnit::NOUNIT);

@@ -1174,6 +1174,31 @@ TEST_F(FileReaderTest, TestInit) {
     ASSERT_TRUE(status.ok());
 }
 
+TEST_F(FileReaderTest, CacheSelectKeepsRangesWithoutPreparingDataReaders) {
+    auto check = [&](const std::string& path, auto make_context) {
+        auto read = _create_file_reader(path);
+        ASSERT_OK(read->init(make_context()));
+        auto cache = _create_file_reader(path);
+        ASSERT_OK(cache->init(make_context(), FileReader::InitMode::CACHE_SELECT));
+        std::vector<io::SharedBufferedInputStream::IORange> read_ranges;
+        std::vector<io::SharedBufferedInputStream::IORange> cache_ranges;
+        ASSERT_OK(read->collect_scan_io_ranges(&read_ranges));
+        ASSERT_OK(cache->collect_scan_io_ranges(&cache_ranges));
+        auto normalize = [](const auto& ranges) {
+            std::vector<std::pair<int64_t, int64_t>> result;
+            for (const auto& range : ranges) result.emplace_back(range.offset, range.size);
+            std::sort(result.begin(), result.end());
+            return result;
+        };
+        EXPECT_EQ(normalize(read_ranges), normalize(cache_ranges));
+        EXPECT_EQ(read->row_group_size(), cache->row_group_size());
+        for (const auto& group : cache->group_readers()) EXPECT_FALSE(group->_has_prepared);
+    };
+    check(_file1_path, [&]() { return _create_file1_base_context(); });
+    check(_file1_path, [&]() { return _create_context_for_not_exist(); });
+    check(_file2_path, [&]() { return _create_context_for_dict_filter(); });
+}
+
 TEST_F(FileReaderTest, TestGetNext) {
     auto file_reader = _create_file_reader(_file1_path);
 

@@ -54,6 +54,8 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_STARROCKS_METRIC(http_requests_total);
     REGISTER_STARROCKS_METRIC(http_request_send_bytes);
     REGISTER_STARROCKS_METRIC(query_scan_bytes);
+    REGISTER_STARROCKS_METRIC(parquet_footer_cache_hit_count);
+    REGISTER_STARROCKS_METRIC(parquet_footer_cache_miss_count);
     REGISTER_STARROCKS_METRIC(query_scan_rows);
 
     REGISTER_STARROCKS_METRIC(load_channel_add_chunks_total);
@@ -281,6 +283,8 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_STARROCKS_METRIC(datacache_disk_quota_bytes);
     REGISTER_STARROCKS_METRIC(datacache_disk_used_bytes);
     REGISTER_STARROCKS_METRIC(datacache_meta_used_bytes);
+    REGISTER_STARROCKS_METRIC(datacache_block_cache_write_bytes);
+    REGISTER_STARROCKS_METRIC(datacache_block_cache_evict_bytes);
     REGISTER_STARROCKS_METRIC(block_cache_hit_bytes);
     REGISTER_STARROCKS_METRIC(block_cache_miss_bytes);
     REGISTER_STARROCKS_METRIC(block_cache_hit_count);
