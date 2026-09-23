@@ -147,6 +147,63 @@ SZ_API_COMPTIME sz_size_t sz_utf8_case_upper_icelake(sz_cptr_t source, sz_size_t
     }
     return (sz_size_t)(target - start);
 }
+#include "stringzilla/utf8_case/initcap_icelake_mappings.h"
+SZ_API_COMPTIME sz_size_t sz_utf8_case_initcap_icelake(sz_cptr_t source, sz_size_t length, sz_ptr_t target,
+                                                       sz_size_t *error_offset) {
+    if (error_offset) *error_offset = SZ_SIZE_MAX;
+    if (!length) return 0;
+    sz_cptr_t begin = source, end = source + length;
+    sz_ptr_t start = target;
+    sz_bool_t word_start = sz_true_k;
+    while (source != end) {
+        if ((sz_size_t)(end - source) >= 64) {
+            __m512i v = _mm512_loadu_si512((void const *)source);
+            if (!_mm512_movepi8_mask(v)) {
+                __m512i lower = _mm512_or_si512(v, _mm512_set1_epi8(32));
+                sz_u64_t letters = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')),
+                                                          _mm512_set1_epi8(26));
+                sz_u64_t alnum = letters | _mm512_cmplt_epu8_mask(_mm512_sub_epi8(v, _mm512_set1_epi8('0')),
+                                                                  _mm512_set1_epi8(10));
+                sz_u64_t capitalize = letters & ~((alnum << 1) | (word_start ? 0ull : 1ull));
+                __m512i result = _mm512_mask_mov_epi8(v, letters, lower);
+                result = _mm512_mask_sub_epi8(result, capitalize, result, _mm512_set1_epi8(32));
+                _mm512_storeu_si512((void *)target, result);
+                word_start = (sz_bool_t) !(alnum >> 63);
+                source += 64;
+                target += 64;
+                continue;
+            }
+            sz_u64_t non_ascii = _mm512_movepi8_mask(v);
+            sz_size_t first = (sz_size_t)_tzcnt_u64(non_ascii);
+            unsigned int family = sz_utf8_case_family_(source + first, (sz_size_t)(end - source) - first);
+            sz_size_t handled = 0;
+            switch (family) {
+            case 1: handled = sz_utf8_initcap_icelake_latin_(v, target, &word_start); break;
+            case 2: handled = sz_utf8_initcap_icelake_cyrillic_(v, target, &word_start); break;
+            case 3: handled = sz_utf8_initcap_icelake_greek_(v, target, &word_start); break;
+            case 4: handled = sz_utf8_initcap_icelake_georgian_(v, target, &word_start); break;
+            case 5: handled = sz_utf8_initcap_icelake_armenian_(v, target, &word_start); break;
+            case 6: handled = sz_utf8_initcap_icelake_fullwidth_(v, target, &word_start); break;
+            case 7: handled = sz_utf8_initcap_icelake_latin1_(v, target, &word_start); break;
+            case 8: handled = sz_utf8_initcap_icelake_greek_basic_(v, target, &word_start); break;
+            default: break;
+            }
+            if (handled) {
+                source += handled;
+                target += handled;
+                continue;
+            }
+        }
+        sz_size_t consumed, written = sz_utf8_initcap_one_(source, end, target, &word_start, &consumed);
+        if (written == SZ_SIZE_MAX) {
+            if (error_offset) *error_offset = (sz_size_t)(source - begin);
+            return SZ_SIZE_MAX;
+        }
+        source += consumed;
+        target += written;
+    }
+    return (sz_size_t)(target - start);
+}
 #if defined(__clang__)
 #pragma clang attribute pop
 #elif defined(__GNUC__)

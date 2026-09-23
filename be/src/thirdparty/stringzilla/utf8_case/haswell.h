@@ -136,6 +136,71 @@ SZ_API_COMPTIME sz_size_t sz_utf8_case_upper_haswell(sz_cptr_t source, sz_size_t
     }
     return (sz_size_t)(target - start);
 }
+SZ_HELPER_INLINE __m256i sz_utf8_initcap_haswell_expand_mask_(sz_u32_t bits) {
+    __m256i selectors = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
+                                         3, 3, 3, 3, 3, 3);
+    __m256i powers = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128, 1, 2, 4, 8, 16, 32, 64, (char)128, 1, 2, 4, 8,
+                                      16, 32, 64, (char)128, 1, 2, 4, 8, 16, 32, 64, (char)128);
+    __m256i bytes = _mm256_shuffle_epi8(_mm256_set1_epi32((int)bits), selectors);
+    return _mm256_cmpeq_epi8(_mm256_and_si256(bytes, powers), powers);
+}
+#include "stringzilla/utf8_case/initcap_haswell_mappings.h"
+SZ_API_COMPTIME sz_size_t sz_utf8_case_initcap_haswell(sz_cptr_t source, sz_size_t length, sz_ptr_t target,
+                                                       sz_size_t *error_offset) {
+    if (error_offset) *error_offset = SZ_SIZE_MAX;
+    if (!length) return 0;
+    sz_cptr_t begin = source, end = source + length;
+    sz_ptr_t start = target;
+    sz_bool_t word_start = sz_true_k;
+    while (source != end) {
+        if ((sz_size_t)(end - source) >= 32) {
+            __m256i v = _mm256_loadu_si256((__m256i const *)source);
+            if (!_mm256_movemask_epi8(v)) {
+                __m256i lower = _mm256_or_si256(v, _mm256_set1_epi8(32));
+                __m256i letters = sz_haswell_in_byte_range_(lower, 'a', 26);
+                __m256i alnum = _mm256_or_si256(letters, sz_haswell_in_byte_range_(v, '0', 10));
+                __m256i previous = _mm256_alignr_epi8(alnum, _mm256_permute2x128_si256(alnum, alnum, 0x08), 15);
+                previous = _mm256_insert_epi8(previous, word_start ? 0 : -1, 0);
+                __m256i capitalize = _mm256_andnot_si256(previous, letters);
+                __m256i result = _mm256_blendv_epi8(v, lower, letters);
+                result = _mm256_sub_epi8(result, _mm256_and_si256(capitalize, _mm256_set1_epi8(32)));
+                _mm256_storeu_si256((__m256i *)target, result);
+                word_start = (sz_bool_t) !((sz_u32_t)_mm256_movemask_epi8(alnum) >> 31);
+                source += 32;
+                target += 32;
+                continue;
+            }
+            sz_u32_t non_ascii = (sz_u32_t)_mm256_movemask_epi8(v);
+            sz_size_t first = (sz_size_t)_tzcnt_u32(non_ascii);
+            unsigned int family = sz_utf8_case_family_(source + first, (sz_size_t)(end - source) - first);
+            sz_size_t handled = 0;
+            switch (family) {
+            case 1: handled = sz_utf8_initcap_haswell_latin_(v, target, &word_start); break;
+            case 2: handled = sz_utf8_initcap_haswell_cyrillic_(v, target, &word_start); break;
+            case 3: handled = sz_utf8_initcap_haswell_greek_(v, target, &word_start); break;
+            case 4: handled = sz_utf8_initcap_haswell_georgian_(v, target, &word_start); break;
+            case 5: handled = sz_utf8_initcap_haswell_armenian_(v, target, &word_start); break;
+            case 6: handled = sz_utf8_initcap_haswell_fullwidth_(v, target, &word_start); break;
+            case 7: handled = sz_utf8_initcap_haswell_latin1_(v, target, &word_start); break;
+            case 8: handled = sz_utf8_initcap_haswell_greek_basic_(v, target, &word_start); break;
+            default: break;
+            }
+            if (handled) {
+                source += handled;
+                target += handled;
+                continue;
+            }
+        }
+        sz_size_t consumed, written = sz_utf8_initcap_one_(source, end, target, &word_start, &consumed);
+        if (written == SZ_SIZE_MAX) {
+            if (error_offset) *error_offset = (sz_size_t)(source - begin);
+            return SZ_SIZE_MAX;
+        }
+        source += consumed;
+        target += written;
+    }
+    return (sz_size_t)(target - start);
+}
 #if defined(__clang__)
 #pragma clang attribute pop
 #elif defined(__GNUC__)
