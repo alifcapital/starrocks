@@ -46,6 +46,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.common.util.UnicodeCase;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.server.GlobalStateMgr;
@@ -1553,12 +1554,12 @@ public class ScalarOperatorFunctions {
 
     @ConstantFunction(name = "lower", argTypes = {VARCHAR}, returnType = VARCHAR)
     public static ConstantOperator lower(ConstantOperator str) {
-        return ConstantOperator.createVarchar(StringUtils.lowerCase(str.getVarchar()));
+        return ConstantOperator.createVarchar(UnicodeCase.lower(str.getVarchar()));
     }
 
     @ConstantFunction(name = "upper", argTypes = {VARCHAR}, returnType = VARCHAR)
     public static ConstantOperator upper(ConstantOperator str) {
-        return ConstantOperator.createVarchar(StringUtils.upperCase(str.getVarchar()));
+        return ConstantOperator.createVarchar(UnicodeCase.upper(str.getVarchar()));
     }
 
     @ConstantFunction(name = "replace", argTypes = {VARCHAR, VARCHAR, VARCHAR}, returnType = VARCHAR)
