@@ -616,7 +616,7 @@ public class IcebergScanNodeTest {
         IcebergScanNode scanNode = Mockito.mock(IcebergScanNode.class);
         Mockito.when(scanNode.getPlanNodeName()).thenReturn("IcebergScanNode");
         Mockito.when(scanNode.getPosAppliedDeleteFiles()).thenReturn(posDeletes);
-        Mockito.when(scanNode.getEqualAppliedDeleteFiles()).thenReturn(eqDeletes);
+        Mockito.when(scanNode.getAppliedEqualDeleteFiles()).thenReturn(eqDeletes);
         Mockito.when(scanNode.getScannedDataFiles()).thenReturn(scannedDataFiles);
 
         PlanFragment fragment = Mockito.mock(PlanFragment.class);
