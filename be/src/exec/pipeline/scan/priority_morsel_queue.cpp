@@ -23,41 +23,10 @@ namespace starrocks::pipeline {
 PriorityMorselQueue::Entry PriorityMorselQueue::make_entry(MorselPtr&& morsel) {
     Entry e;
     e.seq = _seq++;
-    bool has_null = false;
-    bool all_null = false;
-    bool has_bound = false;
-    int64_t key = 0;
-
     auto* scan_morsel = down_cast<ScanMorsel*>(morsel.get());
-    TScanRange* scan_range = scan_morsel->get_scan_range();
-    if (scan_range != nullptr && scan_range->__isset.hdfs_scan_range &&
-        scan_range->hdfs_scan_range.__isset.min_max_values) {
-        const auto& min_max_values = scan_range->hdfs_scan_range.min_max_values;
-        auto it = min_max_values.find(_reorder_slot_id);
-        if (it != min_max_values.end()) {
-            const TExprMinMaxValue& v = it->second;
-            has_null = v.has_null;
-            all_null = v.all_null;
-            if (!all_null) {
-                // Raw int64 endpoint (see class comment): max for DESC, min for ASC.
-                if (_desc && v.__isset.max_int_value) {
-                    key = v.max_int_value;
-                    has_bound = true;
-                } else if (!_desc && v.__isset.min_int_value) {
-                    key = v.min_int_value;
-                    has_bound = true;
-                }
-            }
-        }
-    }
-
-    if (_nulls_first && (all_null || has_null)) {
-        e.rank = 0; // nulls lead -> serve first
-    } else if (has_bound) {
-        e.rank = 1;
-        e.key = key;
-    } else {
-        e.rank = 2; // no usable bound -> serve last
+    const TScanRange* range = scan_morsel->get_scan_range();
+    if (range != nullptr && range->__isset.hdfs_scan_range) {
+        e.priority = topn_scan_priority(range->hdfs_scan_range, _reorder_slot_id, _desc, _nulls_first);
     }
     e.morsel = std::move(morsel);
     return e;
@@ -68,7 +37,7 @@ Status PriorityMorselQueue::append_morsels(Morsels&& morsels) {
     const int64_t added = static_cast<int64_t>(morsels.size());
     for (auto& m : morsels) {
         auto entry = make_entry(std::move(m));
-        if (entry.rank == 1) {
+        if (entry.priority.rank == 1) {
             _eligible_morsels.fetch_add(1, std::memory_order_relaxed);
         } else {
             _no_bound_morsels.fetch_add(1, std::memory_order_relaxed);

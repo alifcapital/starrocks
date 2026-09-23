@@ -1188,6 +1188,10 @@ FooterPrefetchPlan HiveDataSourceProvider::build_footer_prefetch_items(
         item.file_size = hdfs.file_length;
         item.modification_time = hdfs.__isset.modification_time ? hdfs.modification_time : 0;
         item.open_ctx = open_ctx;
+        if (topn_reorder_slot_id() >= 0) {
+            item.priority = pipeline::topn_scan_priority(hdfs, topn_reorder_slot_id(), topn_reorder_desc(),
+                                                         topn_reorder_nulls_first());
+        }
         plan.items.emplace_back(std::move(item));
     }
     if (open_ctx->fs == nullptr) {

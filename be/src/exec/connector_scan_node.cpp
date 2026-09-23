@@ -168,7 +168,8 @@ pipeline::OpFactories ConnectorScanNode::decompose_to_pipeline(pipeline::Pipelin
                 const int lead_distance = static_cast<int>(dop) * config::connector_footer_prefetch_max_inflight *
                                           config::connector_footer_prefetch_lead_multiplier;
                 scan_op->set_footer_prefetch_state(std::make_shared<pipeline::FooterPrefetchState>(
-                        std::move(plan.items), lead_distance, plan.metacache_on, plan.datacache_populate_on));
+                        std::move(plan.items), lead_distance, plan.metacache_on, plan.datacache_populate_on,
+                        hive_provider->topn_reorder_slot_id() >= 0, hive_provider->topn_reorder_desc()));
             }
         }
     }

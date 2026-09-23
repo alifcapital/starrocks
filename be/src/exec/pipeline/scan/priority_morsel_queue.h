@@ -20,6 +20,7 @@
 #include <set>
 
 #include "exec/pipeline/scan/morsel.h"
+#include "exec/pipeline/scan/topn_scan_priority.h"
 
 namespace starrocks::pipeline {
 
@@ -69,20 +70,15 @@ private:
     // rank 1: has a numeric bound -> serve ordered by key;
     // rank 2: no usable bound -> serve last.
     struct Entry {
-        int rank = 2;
-        int64_t key = 0;
+        TopnScanPriority priority;
         uint64_t seq = 0;
         mutable MorselPtr morsel;
     };
     struct Cmp {
         bool desc;
         bool operator()(const Entry& a, const Entry& b) const {
-            if (a.rank != b.rank) {
-                return a.rank < b.rank;
-            }
-            if (a.rank == 1 && a.key != b.key) {
-                return desc ? a.key > b.key : a.key < b.key;
-            }
+            const int order = a.priority.compare(b.priority, desc);
+            if (order != 0) return order < 0;
             return a.seq < b.seq; // stable tiebreak (and total order for non-bound ranks)
         }
     };

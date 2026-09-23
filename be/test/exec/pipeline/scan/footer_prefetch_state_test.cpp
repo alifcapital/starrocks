@@ -16,7 +16,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace starrocks::pipeline {
@@ -147,6 +151,183 @@ TEST(FooterPrefetchStateTest, WarmableFlags) {
     FooterPrefetchState block(make_items(1), 4, /*metacache_on=*/false, /*datacache_populate_on=*/true);
     EXPECT_TRUE(block.warmable());
     EXPECT_TRUE(block.datacache_populate_on());
+}
+
+static FooterPrefetchItem ranked_item(const std::string& key, int rank, int64_t value = 0) {
+    auto item = make_item(key);
+    item.priority = {rank, value};
+    return item;
+}
+
+TEST(FooterPrefetchStateTest, TopnOrdersBoundsNullsAndUnknowns) {
+    for (bool desc : {false, true}) {
+        FooterPrefetchState st({ranked_item("unknown", 2), ranked_item("high", 1, 90), ranked_item("null", 0),
+                                ranked_item("low", 1, -10), ranked_item("tie", 1, -10)},
+                               10, true, false, true, desc);
+        const std::vector<std::string> expected =
+                desc ? std::vector<std::string>{"null", "high", "low", "tie", "unknown"}
+                     : std::vector<std::string>{"null", "low", "tie", "high", "unknown"};
+        FooterPrefetchItem out;
+        for (const auto& key : expected) {
+            ASSERT_TRUE(st.try_take_next(&out));
+            EXPECT_EQ(key, out.key);
+        }
+        EXPECT_FALSE(st.try_take_next(&out));
+    }
+}
+
+TEST(FooterPrefetchStateTest, FifoIgnoresTopnPriority) {
+    FooterPrefetchState st({ranked_item("first", 2), ranked_item("second", 0)}, 1, true, false);
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("first", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.mark_started("first");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("second", out.key);
+}
+
+TEST(FooterPrefetchStateTest, TopnStartsReleaseBudgetWithoutManifestFrontier) {
+    FooterPrefetchState st({ranked_item("last", 1, 100), ranked_item("first", 1, 1), ranked_item("second", 1, 2)}, 1,
+                           true, false, true);
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("first", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.mark_started("first");
+    st.mark_started("first");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("second", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.mark_started("second");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("last", out.key);
+}
+
+TEST(FooterPrefetchStateTest, TopnNewBatchPrecedesPendingButKeepsIssuedBudget) {
+    FooterPrefetchState st({ranked_item("issued", 1, 20), ranked_item("pending", 1, 30)}, 1, true, false, true);
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("issued", out.key);
+    st.append({ranked_item("new", 1, -10), ranked_item("issued", 1, 20)});
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.mark_started("issued");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("new", out.key);
+    st.mark_started("new");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("pending", out.key);
+    st.mark_started("pending");
+    EXPECT_FALSE(st.try_take_next(&out));
+}
+
+TEST(FooterPrefetchStateTest, TopnStartBeforeAppendAndBeforeTake) {
+    FooterPrefetchState st({}, 1, true, false, true);
+    st.mark_started("early");
+    st.append({ranked_item("early", 1, -10), ranked_item("overtaken", 1, 0), ranked_item("next", 1, 10)});
+    st.mark_started("overtaken");
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("next", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.untake("early");
+    st.untake("overtaken");
+    st.untake("missing");
+    EXPECT_FALSE(st.try_take_next(&out));
+}
+
+TEST(FooterPrefetchStateTest, TopnUntakeAnyIssuedFileAndRetainPriority) {
+    FooterPrefetchState st({ranked_item("a", 1, 1), ranked_item("b", 1, 2), ranked_item("c", 1, 3)}, 2, true, false,
+                           true);
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.untake("a");
+    st.untake("a");
+    st.append({ranked_item("new", 1, 0)});
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("new", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+    st.mark_started("b");
+    st.untake("b");
+    ASSERT_TRUE(st.try_take_next(&out));
+    EXPECT_EQ("a", out.key);
+    EXPECT_FALSE(st.try_take_next(&out));
+}
+
+TEST(FooterPrefetchStateTest, TopnZeroLeadAndCancellation) {
+    for (int lead : {0, -1}) {
+        FooterPrefetchState st(make_items(1), lead, true, false, true);
+        FooterPrefetchItem out;
+        EXPECT_FALSE(st.try_take_next(&out));
+    }
+    FooterPrefetchState st(make_items(2), 1, true, false, true);
+    FooterPrefetchItem out;
+    ASSERT_TRUE(st.try_take_next(&out));
+    st.cancel();
+    st.untake(out.key);
+    st.append(make_items(3));
+    EXPECT_FALSE(st.try_take_next(&out));
+}
+
+TEST(FooterPrefetchStateTest, TopnConcurrentTakeHonorsLead) {
+    FooterPrefetchState st(make_items(1000), 17, true, false, true);
+    std::mutex mu;
+    std::set<std::string> keys;
+    std::atomic<int> count = 0;
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; ++i) {
+        workers.emplace_back([&] {
+            FooterPrefetchItem out;
+            while (st.try_take_next(&out)) {
+                ++count;
+                std::lock_guard<std::mutex> lock(mu);
+                keys.insert(out.key);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    EXPECT_EQ(17, count.load());
+    EXPECT_EQ(17, keys.size());
+}
+
+TEST(FooterPrefetchStateTest, TopnConcurrentStartAndTakeDrainsOnce) {
+    FooterPrefetchState st(make_items(1000), 3, true, false, true);
+    std::mutex mu;
+    std::set<std::string> keys;
+    std::atomic<int> count = 0;
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; ++i) {
+        workers.emplace_back([&] {
+            FooterPrefetchItem out;
+            while (st.try_take_next(&out)) {
+                st.mark_started(out.key);
+                st.mark_started(out.key);
+                ++count;
+                std::lock_guard<std::mutex> lock(mu);
+                keys.insert(out.key);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    EXPECT_EQ(1000, count.load());
+    EXPECT_EQ(1000, keys.size());
+}
+
+TEST(FooterPrefetchStateTest, TopnUntakeRacingWithStartDoesNotRewarm) {
+    for (int i = 0; i < 100; ++i) {
+        FooterPrefetchState st(make_items(2), 1, true, false, true);
+        FooterPrefetchItem out;
+        ASSERT_TRUE(st.try_take_next(&out));
+        std::thread start([&] { st.mark_started("f0"); });
+        std::thread retry([&] { st.untake("f0"); });
+        start.join();
+        retry.join();
+        ASSERT_TRUE(st.try_take_next(&out));
+        EXPECT_EQ("f1", out.key);
+        EXPECT_FALSE(st.try_take_next(&out));
+    }
 }
 
 } // namespace starrocks::pipeline

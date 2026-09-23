@@ -225,6 +225,7 @@ set(EXEC_FILES
     pipeline/scan/chunk_source.cpp
     pipeline/scan/morsel.cpp
     pipeline/scan/priority_morsel_queue.cpp
+    pipeline/scan/topn_scan_priority.cpp
     pipeline/scan/scan_operator.cpp
     pipeline/scan/olap_chunk_source.cpp
     pipeline/scan/olap_scan_operator.cpp

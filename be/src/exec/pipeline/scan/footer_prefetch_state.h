@@ -20,11 +20,14 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "exec/pipeline/scan/topn_scan_priority.h"
 
 namespace starrocks::pipeline {
 
@@ -44,16 +47,16 @@ struct FooterPrefetchItem {
     int64_t file_size = 0;
     int64_t modification_time = 0; // per-file; fills DataCacheOptions.modification_time on warm
     std::shared_ptr<const FooterOpenContext> open_ctx;
+    TopnScanPriority priority;
 };
 
-// Shared, factory-owned state for footer prefetch. Tracks an explicit contiguous frontier of
-// root files the real scan has started, how far the prefetcher has submitted ahead, and a
-// cancel flag. Concurrency is bounded by each operator's free io-task slots, not here. Every
+// Shared, factory-owned state for footer prefetch. FIFO scans track a contiguous Started
+// frontier. TopN scans order pending files by their bounds and count issued, unstarted files. Concurrency is bounded by each operator's free io-task slots, not here. Every
 // method is per-file (root start, submit, incremental append) -- never per-row -- so a single
 // mutex is cheap.
 class FooterPrefetchState {
 public:
-    // lead_distance (files ahead) bounds how far the warm cursor may run past the real-scan frontier
+    // lead_distance bounds FIFO cursor distance or the count of issued, unstarted TopN files
     // -- cache footprint / wasted reads if the scan terminates early. The scan node derives it as
     // scan_dop * connector_footer_prefetch_max_inflight * connector_footer_prefetch_lead_multiplier.
     // Concurrency is NOT bounded here -- each operator caps its own warm tasks against its free
@@ -61,8 +64,10 @@ public:
     // metacache_on / datacache_populate_on: which caches can hold a warmed footer; if neither
     // is set the prefetcher never warms.
     FooterPrefetchState(std::vector<FooterPrefetchItem> files, int lead_distance, bool metacache_on,
-                        bool datacache_populate_on)
-            : _lead_distance(lead_distance < 0 ? 0 : static_cast<size_t>(lead_distance)),
+                        bool datacache_populate_on, bool topn_order = false, bool desc = false)
+            : _topn_order(topn_order),
+              _topn_pending(PriorityCmp{desc}),
+              _lead_distance(lead_distance < 0 ? 0 : static_cast<size_t>(lead_distance)),
               _metacache_on(metacache_on),
               _datacache_populate_on(datacache_populate_on) {
         _set_files(std::move(files));
@@ -74,7 +79,8 @@ public:
 
     // The real scan started a root file (split_context == nullptr): mark it Started and advance the
     // contiguous Started prefix. If the key is not in the sidecar yet (its range has not reached
-    // append()), remember it so append() applies the start. O(1) amortized.
+    // append()), remember it so append() applies the start. TopN also removes pending work and
+    // releases the lead budget for an issued file. FIFO is O(1) amortized; TopN is O(log files).
     void mark_started(const std::string& key) {
         std::lock_guard<std::mutex> l(_mu);
         auto it = _index_of.find(key);
@@ -83,6 +89,14 @@ public:
             // reaches append(). Remember the start so append() applies it, instead of dropping it and
             // freezing the frontier behind a file the scan already started.
             _pending_started.insert(key);
+            return;
+        }
+        if (_topn_order) {
+            const size_t index = it->second;
+            if (_started[index] != 0) return;
+            _started[index] = 1;
+            _topn_pending.erase(PriorityEntry{_files[index].priority, index});
+            if (_topn_taken[index] != 0) --_topn_ahead;
             return;
         }
         _started[it->second] = 1;
@@ -95,7 +109,7 @@ public:
     // for the contiguous-prefix frontier -- the frontier extends into them as the real scan
     // reaches them. Deduped by key: a file already in the sidecar (e.g. another offset split
     // of the same path, or re-delivered) is dropped, so mark_started always resolves and the
-    // frontier never stalls on an un-markable duplicate index.
+    // frontier never stalls on an un-markable duplicate index. TopN inserts pending files by priority.
     void append(std::vector<FooterPrefetchItem> more) {
         std::lock_guard<std::mutex> l(_mu);
         _files.reserve(_files.size() + more.size());
@@ -110,6 +124,7 @@ public:
                 }
                 _files.emplace_back(std::move(item));
                 _started.emplace_back(started);
+                _append_topn_entry(_files.size() - 1);
             }
         }
         // A pending start may have landed at the frontier; extend the contiguous Started prefix.
@@ -123,11 +138,22 @@ public:
     // scan operator) loops until this returns false or it runs out of free io-task slots. The submit
     // cursor never falls behind the real-scan frontier, and already-Started files are skipped, so a
     // file the scan overtook is never re-warmed. Shared across operators; the mutex + monotonic
-    // cursor hand each concurrent caller a distinct file.
+    // cursor hand each concurrent caller a distinct file. TopN selects the highest-priority pending
+    // file while the count of issued, unstarted files is below lead_distance.
     bool try_take_next(FooterPrefetchItem* out) {
         std::lock_guard<std::mutex> l(_mu);
         if (_cancelled.load(std::memory_order_relaxed)) {
             return false;
+        }
+        if (_topn_order) {
+            if (_topn_ahead >= _lead_distance || _topn_pending.empty()) return false;
+            auto it = _topn_pending.begin();
+            const size_t index = it->index;
+            *out = _files[index];
+            _topn_taken[index] = 1;
+            ++_topn_ahead;
+            _topn_pending.erase(it);
+            return true;
         }
         if (_submit_cursor < _frontier) {
             _submit_cursor = _frontier;
@@ -148,9 +174,21 @@ public:
     // the prefetcher re-offers it. Best-effort: rolls back only if no other caller took past it (the
     // cursor still sits just after this key). If it cannot roll back, only the footer PREFETCH for
     // that file is skipped -- the real scan still opens the file and reads its footer normally, so no
-    // query data is lost (a missed prefetch just means one cold footer read).
+    // query data is lost (a missed prefetch just means one cold footer read). TopN returns any
+    // issued, unstarted file to the priority queue and releases its lead budget.
     void untake(const std::string& key) {
         std::lock_guard<std::mutex> l(_mu);
+        if (_topn_order) {
+            auto it = _index_of.find(key);
+            if (it == _index_of.end()) return;
+            const size_t index = it->second;
+            if (_topn_taken[index] != 0 && _started[index] == 0) {
+                _topn_pending.insert(PriorityEntry{_files[index].priority, index});
+                _topn_taken[index] = 0;
+                --_topn_ahead;
+            }
+            return;
+        }
         if (_submit_cursor > _frontier && _submit_cursor <= _files.size() && _files[_submit_cursor - 1].key == key) {
             --_submit_cursor;
         }
@@ -171,6 +209,26 @@ public:
     int64_t warmed_blockcache() const { return _warmed_blockcache.load(std::memory_order_relaxed); }
 
 private:
+    struct PriorityEntry {
+        TopnScanPriority priority;
+        size_t index;
+    };
+    struct PriorityCmp {
+        bool desc;
+        bool operator()(const PriorityEntry& a, const PriorityEntry& b) const {
+            const int order = a.priority.compare(b.priority, desc);
+            return order != 0 ? order < 0 : a.index < b.index;
+        }
+    };
+
+    void _append_topn_entry(size_t index) {
+        if (!_topn_order) return;
+        _topn_taken.emplace_back(0);
+        if (_started[index] == 0) {
+            _topn_pending.insert(PriorityEntry{_files[index].priority, index});
+        }
+    }
+
     void _set_files(std::vector<FooterPrefetchItem> files) {
         _index_of.reserve(files.size());
         _files.reserve(files.size());
@@ -180,10 +238,17 @@ private:
             if (_index_of.emplace(item.key, _files.size()).second) {
                 _files.emplace_back(std::move(item));
                 _started.emplace_back(0);
+                _append_topn_entry(_files.size() - 1);
             }
         }
     }
 
+    // TopN bounds the number of issued footers whose files have not started. A later
+    // batch can precede pending files, but cannot reclaim the budget of issued work.
+    const bool _topn_order;
+    std::set<PriorityEntry, PriorityCmp> _topn_pending;
+    std::vector<uint8_t> _topn_taken;
+    size_t _topn_ahead = 0;
     mutable std::mutex _mu;
     std::vector<FooterPrefetchItem> _files;            // append-only
     std::vector<uint8_t> _started;                     // per-file STARTED flag, parallel to _files
