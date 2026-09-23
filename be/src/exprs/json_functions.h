@@ -24,11 +24,39 @@
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
 #include "types/logical_type.h"
+#include "util/faststring.h"
 
 namespace starrocks {
 
 // Forward declarations
 struct JsonPath;
+template <LogicalType LT>
+class ColumnBuilder;
+namespace vpack = arangodb::velocypack;
+
+// Pre-planned move step for fast simdjson path. Owned by NativeJsonState (FRAGMENT_LOCAL),
+// shared read-only between cloned drivers.
+struct JsonMoveStep {
+    enum class Kind : uint8_t { Field, ArrayIndex };
+    Kind kind;
+    std::string field;  // owned; non-empty only when kind==Field
+    int32_t index = -1; // valid only when kind==ArrayIndex
+};
+
+enum class JsonPathShape : uint8_t {
+    Unsupported, // wildcard / slice / unrecognized -> legacy fallback
+    SimpleFlat,  // only Field steps
+    HasIndex,    // Field + ArrayIndex steps (chained selectors OK)
+};
+
+// Mutable scratch shared by calls on one OS thread. Columns own copies of extracted values.
+struct JsonGetThreadState {
+    simdjson::ondemand::parser parser; // reused across calls on this OS thread
+    faststring padded_scratch;         // input copy + SIMDJSON_PADDING zero tail
+    faststring unescape_scratch;       // backs value_get_string_safe outputs
+    faststring key_scratch;            // backs field_unescaped_key_safe during object descent
+    vpack::Builder leaf_builder;       // .clear()-ed before each leaf conversion
+};
 
 extern const re2::RE2 SIMPLE_JSONPATH_PATTERN;
 
@@ -73,6 +101,8 @@ public:
     DEFINE_VECTORIZED_FN(get_json_bigint);
     DEFINE_VECTORIZED_FN(get_json_double);
     DEFINE_VECTORIZED_FN(get_json_string);
+    DEFINE_VECTORIZED_FN(get_json_bool);          // (VARCHAR, VARCHAR) -> BOOLEAN
+    DEFINE_VECTORIZED_FN(json_query_from_string); // (VARCHAR, VARCHAR) -> JSON, FE-fusion target
 
     /**
      * @param: [json, tagged_value]
@@ -243,6 +273,35 @@ private:
     template <LogicalType RresultType>
     DEFINE_VECTORIZED_FN(_get_json_value);
 
+    // Pre-decompose a constant JsonPath into flat moves + classify shape.
+    // Sets state->fast_shape and state->fast_moves. Called once at FRAGMENT_LOCAL prepare.
+    static void _plan_fast_moves(const JsonPath& path, struct NativeJsonState* state);
+
+    enum class ExtractResult : uint8_t {
+        Handled,       // value or NULL appended; row complete
+        FallbackRow,   // caller should invoke _fallback_extract_one for this row
+        FallbackBatch, // reserved for future; v4 does not use it
+    };
+
+    // Per-row fast extraction. Returns Handled when the row produced output via the simdjson path,
+    // FallbackRow for bare-scalar / empty / whitespace-only inputs that need legacy parse_json_or_string semantics.
+    template <LogicalType ResultType>
+    static ExtractResult _fused_extract_one(const Slice& raw_json, const struct NativeJsonState* fragment_state,
+                                            JsonGetThreadState* thread_state, ColumnBuilder<ResultType>& out);
+
+    // Per-row fallback that mirrors legacy parse_json_or_string + JsonPath::extract + cast_vpjson_to.
+    // Always appends exactly one row (value or NULL). Status::OK is the only return.
+    template <LogicalType ResultType>
+    static Status _fallback_extract_one(const Slice& raw_json, const struct NativeJsonState* fragment_state,
+                                        JsonGetThreadState* thread_state, ColumnBuilder<ResultType>& out);
+
+    // Drives the fully-fused per-row loop. Caller has already verified fast-path eligibility.
+    template <LogicalType ResultType>
+    static StatusOr<ColumnPtr> _fused_get_json_value(FunctionContext* context, const Columns& columns,
+                                                     const struct NativeJsonState* fstate, JsonGetThreadState* tstate);
+
+    friend void set_json_fast_path_disabled_for_test(FunctionContext*, bool);
+
     /**
      * @param: [json_object, json_path]
      * @paramType: [JsonColumn, BinaryColumn]
@@ -255,5 +314,10 @@ private:
     // Helper function to check if target JSON contains candidate JSON
     static bool json_value_contains(JsonValue* target, JsonValue* candidate);
 };
+
+// Test-only: force the fused fast path on/off for the given FunctionContext after
+// FRAGMENT_LOCAL prepare. Differential tests and the json-extract benchmark use this
+// to feed identical inputs through both paths and compare results.
+void set_json_fast_path_disabled_for_test(FunctionContext* ctx, bool disabled);
 
 } // namespace starrocks

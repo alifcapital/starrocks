@@ -389,6 +389,11 @@ struct TQueryOptions {
   215: optional string http_request_host_allowlist_regexp = "";
   216: optional bool http_request_allow_private_in_allowlist = false;
   217: optional bool enable_cache_udaf = false;
+
+  // Enable fused JSON-extract fast path (simdjson::ondemand) for get_json_*(VARCHAR, VARCHAR)
+  // and json_query_from_string. Default true; set false to fall back to the legacy
+  // parse_json+JsonPath::extract pipeline.
+  220: optional bool enable_json_extract_fusion = true;
 }
 
 // A scan range plus the parameters needed to execute that scan.

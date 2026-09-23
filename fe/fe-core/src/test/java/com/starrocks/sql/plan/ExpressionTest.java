@@ -1972,26 +1972,42 @@ public class ExpressionTest extends PlanTestBase {
     }
 
     @Test
+    public void testJsonFusionSwitchAndCast() throws Exception {
+        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+        try {
+            String sql = "select cast(json_query(parse_json(cast(v4 as varchar)), '$.a') as tinyint) from t1";
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "CAST(json_query_from_string(", "AS TINYINT");
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "CAST(json_query(parse_json(", "AS TINYINT");
+        } finally {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
+        }
+    }
+
+    @Test
     public void testJsonQuery() throws Exception {
         String sql = "select parse_json('{\"a\": true}')->\"a\"->\"b\"->\"c\"->\"d\"";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.b.c.d')");
+        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.b.c.d')");
 
         sql = "select parse_json('{\"a\": true}')->\"$.a\"->\"$.b\"->\"$.c\"->\"$.d\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(parse_json('{\"a\": true}'), '$.a.b.c.d')");
+        assertContains(plan, "json_query_from_string('{\"a\": true}', '$.a.b.c.d')");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$.*\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.*");
+        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.*");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$$$$\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.$$$$')");
+        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.$$$$')");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$....\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(json_query(parse_json('{\"a\": true}'), 'a'), '$....')");
+        assertContains(plan, "json_query(json_query_from_string('{\"a\": true}', 'a'), '$....')");
     }
 
     @Test
