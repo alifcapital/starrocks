@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+SR=$HOME/starrocks/output
+bash "$SR/be/bin/stop_cn.sh"
+bash "$SR/fe/bin/stop_fe.sh"
+echo 'Cluster stopped'

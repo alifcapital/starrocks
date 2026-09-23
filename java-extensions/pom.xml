@@ -67,7 +67,22 @@
         <httpcore5.version>5.4.3</httpcore5.version>
         <bouncycastle.version>1.85</bouncycastle.version>
         <thrift.version>0.24.0</thrift.version>
+
+        <!-- Empty unless the jdk-allow-security-manager profile below activates it. -->
+        <security.manager.arg></security.manager.arg>
     </properties>
+
+    <profiles>
+        <profile>
+            <id>jdk-allow-security-manager</id>
+            <activation>
+                <jdk>[18,24)</jdk>
+            </activation>
+            <properties>
+                <security.manager.arg>-Djava.security.manager=allow</security.manager.arg>
+            </properties>
+        </profile>
+    </profiles>
 
     <dependencyManagement>
         <dependencies>
