@@ -26,6 +26,7 @@
 
 #include "butil/time.h"
 #include "column/column.h"
+#include "column/column_viewer.h"
 #include "column/const_column.h"
 #include "column/map_column.h"
 #include "column/nullable_column.h"
