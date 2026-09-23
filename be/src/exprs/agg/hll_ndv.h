@@ -23,6 +23,7 @@
 #include "exprs/function_context.h"
 #include "gutil/casts.h"
 #include "types/hll.h"
+#include "util/coding.h"
 
 namespace starrocks {
 
@@ -103,9 +104,8 @@ public:
         DCHECK(column->is_binary());
 
         const auto* hll_column = down_cast<const BinaryColumn*>(column);
-        HyperLogLog hll(hll_column->get(row_num).get_slice());
         int64_t prev_memory = this->data(state).mem_usage();
-        this->data(state).merge(hll);
+        this->data(state).merge(hll_column->get(row_num).get_slice());
         ctx->add_mem_usage(this->data(state).mem_usage() - prev_memory);
     }
 
@@ -144,7 +144,6 @@ public:
         size_t old_size = bytes.size();
         uint64_t value = 0;
         for (size_t i = 0; i < chunk_size; ++i) {
-            HyperLogLog hll;
             if constexpr (lt_is_string_or_binary<LT>) {
                 Slice s = column->get_slice(i);
                 value = HashUtil::murmur_hash64A(s.data, s.size, HashUtil::MURMUR_SEED);
@@ -152,13 +151,24 @@ public:
                 auto v = column->immutable_data()[i];
                 value = HashUtil::murmur_hash64A(&v, sizeof(v), HashUtil::MURMUR_SEED);
             }
-            if (value != 0) {
-                hll.update(value);
-            }
 
-            size_t new_size = old_size + hll.max_serialized_size();
-            bytes.resize(new_size);
-            hll.serialize(bytes.data() + old_size);
+            // A single hashed value serializes to a one-element EXPLICIT record (or an
+            // EMPTY record when the hash is 0). Emit it directly instead of building a
+            // temporary HyperLogLog, which heap-allocates a flat_hash_set for the one
+            // element. Byte-identical to update()+serialize().
+            size_t new_size;
+            if (value == 0) {
+                new_size = old_size + HLL_EMPTY_SIZE;
+                bytes.resize(new_size);
+                bytes[old_size] = HLL_DATA_EMPTY;
+            } else {
+                new_size = old_size + 1 + 1 + sizeof(uint64_t);
+                bytes.resize(new_size);
+                uint8_t* p = bytes.data() + old_size;
+                p[0] = HLL_DATA_EXPLICIT;
+                p[1] = 1;
+                encode_fixed64_le(p + 2, value);
+            }
 
             result->get_offset()[i + 1] = new_size;
             old_size = new_size;
