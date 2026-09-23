@@ -16,16 +16,17 @@
 package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.Expr;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
-import com.starrocks.catalog.PrimitiveType;
-import com.starrocks.catalog.Type;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
+import com.starrocks.type.JsonType;
+import com.starrocks.type.PrimitiveType;
+import com.starrocks.type.Type;
 
 /**
  * Extract a constant path from VARCHAR JSON without materializing the entire VPack document.
@@ -45,10 +46,10 @@ public class JsonExtractFusionRule extends BottomUpScalarOperatorRewriteRule {
             if (isParseJsonOverVarchar(inner) && isConstStringPath(path)) {
                 ScalarOperator x = inner.getChild(0);
                 Type[] argTypes = new Type[] {x.getType(), path.getType()};
-                Function fn = Expr.getBuiltinFunction(FunctionSet.JSON_QUERY_FROM_STRING, argTypes,
+                Function fn = ExprUtils.getBuiltinFunction(FunctionSet.JSON_QUERY_FROM_STRING, argTypes,
                         Function.CompareMode.IS_IDENTICAL);
                 if (fn != null) {
-                    return new CallOperator(fn.functionName(), Type.JSON,
+                    return new CallOperator(fn.functionName(), JsonType.JSON,
                             Lists.newArrayList(x, path), fn);
                 }
             }
