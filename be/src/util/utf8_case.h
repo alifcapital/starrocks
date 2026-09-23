@@ -37,4 +37,7 @@ inline void utf8_tolower(const std::string& src, std::string& dst) {
     utf8_tolower(src.data(), src.size(), dst);
 }
 
+// Full default Unicode 17 folding for index keys. Source must not refer to dst storage.
+void utf8_casefold(const char* src, size_t length, std::string& dst);
+
 } // namespace starrocks

@@ -211,15 +211,13 @@ public:
         size_t gram_num = this->_bf_options.gram_num;
         const auto* cur_slice = reinterpret_cast<const Slice*>(values);
         for (int i = 0; i < count; ++i) {
-            // For a case-insensitive index, lowercase the whole value once and build ngrams from the
-            // lowercased copy. The reader lowercases the whole needle before splitting it, so the writer
-            // must split in the same order: lowercasing each ngram after slicing would disagree with the
-            // reader for context-dependent or length-changing case mappings (e.g. Turkish 'İ').
+            // Fold before splitting: mappings such as sharp S -> ss change the number of characters.
+            // Context-free folding keeps index keys consistent between a value and its substrings.
             Slice value = *cur_slice;
-            std::string lower_buf;
+            std::string folded_buf;
             if (!this->_bf_options.case_sensitive) {
-                utf8_tolower(value.get_data(), value.get_size(), lower_buf);
-                value = Slice(lower_buf.data(), lower_buf.size());
+                utf8_casefold(value.get_data(), value.get_size(), folded_buf);
+                value = Slice(folded_buf.data(), folded_buf.size());
             }
 
             std::vector<size_t> index;

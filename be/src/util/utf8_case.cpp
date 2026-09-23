@@ -21,12 +21,14 @@
 #define SZ_USE_ICELAKE 1
 #endif
 #include "stringzilla/utf8_case.h"
+#include "stringzilla/utf8_uncased_fold.h"
 
 namespace starrocks {
 namespace {
 struct CaseConverters {
     UTF8CaseConverter lower = sz_utf8_case_lower_serial;
     UTF8CaseConverter upper = sz_utf8_case_upper_serial;
+    UTF8CaseConverter fold = sz_utf8_uncased_fold_serial;
     sz_utf8_case_initcap_t initcap = sz_utf8_case_initcap_serial;
 
     CaseConverters() {
@@ -35,6 +37,7 @@ struct CaseConverters {
         if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2")) {
             lower = sz_utf8_case_lower_haswell;
             upper = sz_utf8_case_upper_haswell;
+            fold = sz_utf8_uncased_fold_haswell;
             initcap = sz_utf8_case_initcap_haswell;
             if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512vl") &&
                 __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") &&
@@ -42,6 +45,7 @@ struct CaseConverters {
                 __builtin_cpu_supports("lzcnt") && __builtin_cpu_supports("popcnt")) {
                 lower = sz_utf8_case_lower_icelake;
                 upper = sz_utf8_case_upper_icelake;
+                fold = sz_utf8_uncased_fold_icelake;
                 initcap = sz_utf8_case_initcap_icelake;
             }
         }
@@ -71,6 +75,16 @@ void utf8_tolower(const char* src, size_t length, std::string& dst) {
     dst.resize(length * 3);
     if (length != 0) {
         dst.resize(utf8_lower_converter()(src, length, dst.data()));
+    }
+}
+
+void utf8_casefold(const char* src, size_t length, std::string& dst) {
+    if (length > dst.max_size() / 3) {
+        throw std::length_error("UTF-8 case folding exceeds string capacity");
+    }
+    dst.resize(length * 3);
+    if (length != 0) {
+        dst.resize(converters().fold(src, length, dst.data()));
     }
 }
 

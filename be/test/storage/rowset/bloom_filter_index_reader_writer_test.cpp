@@ -301,12 +301,6 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_decimal) {
     delete[] val;
 }
 
-// ---------------------------------------------------------------------------
-// Ngram bloom filter index writer with UTF-8 input under case_insensitive
-// indexing must store Unicode-lowercased ngrams. The byte-wise tolower path used in
-// the ascii branch must remain bit-identical for pure ASCII rows.
-// ---------------------------------------------------------------------------
-
 TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_insensitive) {
     BloomFilterOptions bf_options;
     bf_options.use_ngram = true;
@@ -383,7 +377,7 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_ascii_case_insensitive) {
     std::unique_ptr<BloomFilter> bf;
     ASSERT_OK(iter->read_bloom_filter(0, &bf));
 
-    // ASCII fast-path: Slice::tolower turns "HELLO" into "hello"; trigrams are 3 bytes each.
+    // ASCII folding maps "HELLO" to "hello"; trigrams are 3 bytes each.
     EXPECT_TRUE(bf->test_bytes("hel", 3));
     EXPECT_TRUE(bf->test_bytes("ell", 3));
     EXPECT_TRUE(bf->test_bytes("llo", 3));
@@ -433,13 +427,7 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_sensitive_preserve
     delete reader;
 }
 
-// The reader lowercases the whole needle before splitting it into ngrams, so the writer must do the
-// same: fold the whole value first, then split. For a length-changing case mapping the two orders
-// diverge -- U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to 'i' + U+0307 (combining
-// dot above) in the root locale, turning one source character into two. Splitting "Aİ" before
-// folding yields a single 2-char gram that folds to a 4-byte ngram, while the reader, folding
-// first, sees three characters ('a','i',U+0307) and probes the 2-char grams "ai" and "i"+U+0307.
-// Per-ngram folding would never store those, so the index would drop matching pages.
+// Folding Aİ produces three codepoints: a, i, and U+0307. Both two-character grams must be stored.
 TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_insensitive_length_changing_fold) {
     BloomFilterOptions bf_options;
     bf_options.use_ngram = true;
@@ -472,15 +460,49 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_insensitive_length
     std::unique_ptr<BloomFilter> bf;
     ASSERT_OK(iter->read_bloom_filter(0, &bf));
 
-    // utf8_tolower("Aİ") == 'a' 'i' U+0307 (bytes 61 69 cc 87, three characters). These are the
+    // utf8_casefold("Aİ") == 'a' 'i' U+0307 (bytes 61 69 cc 87, three characters). These are the
     // 2-char ngrams the reader probes; the writer must store exactly them.
     EXPECT_TRUE(bf->test_bytes("\x61\x69", 2));     // "ai"
     EXPECT_TRUE(bf->test_bytes("\x69\xcc\x87", 3)); // "i" + U+0307
-    // The pre-fix per-ngram path stored the whole gram folded into one 4-byte ngram; fold-before
-    // -split no longer produces it.
+    // A three-character sequence is not a two-character index gram.
     EXPECT_FALSE(bf->test_bytes("\x61\x69\xcc\x87", 4));
 
     delete reader;
+}
+
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_unicode_folded_keys) {
+    for (bool case_sensitive : {false, true}) {
+        BloomFilterOptions options;
+        options.use_ngram = true;
+        options.gram_num = 2;
+        options.case_sensitive = case_sensitive;
+        const std::string file_name = case_sensitive ? "ngram_original_keys" : "ngram_folded_keys";
+        ColumnIndexMetaPB meta;
+        std::string text = "ΟΣΑ Straße ﬃ Aİ";
+        Slice value(text);
+        {
+            ASSIGN_OR_ABORT(auto file, _fs->new_writable_file(kTestDir + "/" + file_name));
+            std::unique_ptr<BloomFilterIndexWriter> writer;
+            ASSERT_OK(BloomFilterIndexWriter::create(options, get_type_info(TYPE_VARCHAR), &writer));
+            writer->add_values(&value, 1);
+            ASSERT_OK(writer->flush());
+            ASSERT_OK(writer->finish(file.get(), &meta));
+            ASSERT_OK(file->close());
+        }
+        std::unique_ptr<RandomAccessFile> file;
+        BloomFilterIndexReader* reader = nullptr;
+        std::unique_ptr<BloomFilterIndexIterator> iter;
+        get_bloom_filter_reader_iter(file_name, meta, &file, &reader, &iter);
+        std::unique_ptr<BloomFilter> bf;
+        ASSERT_OK(iter->read_bloom_filter(0, &bf));
+        const std::vector<std::string> expected =
+                case_sensitive ? std::vector<std::string>{"ΟΣ", "ΣΑ", "aß", "ße", " ﬃ", "Aİ"}
+                               : std::vector<std::string>{"οσ", "σα", "as", "ss", "se", "ff", "fi", "ai", "i̇"};
+        for (const auto& gram : expected) {
+            EXPECT_TRUE(bf->test_bytes(gram.data(), gram.size())) << gram;
+        }
+        delete reader;
+    }
 }
 
 } // namespace starrocks

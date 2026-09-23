@@ -259,9 +259,9 @@ bool VectorizedFunctionCallExpr::ngram_bloom_filter(ExprContext* context, const 
             return true;
         }
         if (!reader_options.index_case_sensitive) {
-            std::string lower_needle;
-            utf8_tolower(needle, lower_needle);
-            needle = std::move(lower_needle);
+            std::string folded_needle;
+            utf8_casefold(needle.data(), needle.size(), folded_needle);
+            needle = std::move(folded_needle);
         }
         if (_fn_desc->name == "LIKE") {
             index_useful = split_like_string_to_ngram(needle, reader_options, ngram_set);

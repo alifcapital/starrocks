@@ -488,4 +488,59 @@ TEST_F(NgramBloomFilterPushdownTest, InvalidUtf8NeedleDisablesIndex) {
     Expr::close(expr_ctxs, &_runtime_state);
 }
 
+TEST_F(NgramBloomFilterPushdownTest, FoldedIndexCandidatesPreserveSqlSemantics) {
+    struct Probe {
+        const char* function;
+        int fid;
+        const char* needle;
+        std::vector<std::string> stored_grams;
+        bool expected;
+    };
+    const std::vector<Probe> probes = {
+            {"LIKE", 60010, "%ΟΣ%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%ΣΑ%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%Ος%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%ΟΣ%", {"ab", "bc"}, false},
+            {"LIKE", 60010, "%Straße%", {"st", "tr", "ra", "as", "ss", "se"}, true},
+            {"LIKE", 60010, "%ﬃ%", {"ff", "fi"}, true},
+            {"ngram_search", 30440, "ΟΣ", {"οσ", "σα"}, true},
+            {"ngram_search_case_insensitive", 30441, "ος", {"οσ", "σα"}, true},
+            {"ngram_search_case_insensitive", 30441, "aß", {"as", "ss"}, true},
+    };
+    for (const auto& probe : probes) {
+        SCOPED_TRACE(std::string(probe.function) + ": " + probe.needle);
+        const bool is_like = std::string(probe.function) == "LIKE";
+        TExprNode parent = build_ngram_call_node();
+        parent.fn.name.__set_function_name(probe.function);
+        parent.fn.__set_fid(probe.fid);
+        if (is_like) {
+            parent.num_children = 2;
+            parent.type = gen_type_desc(TPrimitiveType::BOOLEAN);
+            parent.fn.__set_ret_type(parent.type);
+            parent.fn.arg_types.resize(2);
+        }
+        VectorizedFunctionCallExpr expr(parent);
+        auto varchar_node = make_typed_node(TPrimitiveType::VARCHAR);
+        MockColumnExpr haystack(varchar_node, BinaryColumn::create());
+        MockConstVectorizedExpr<TYPE_VARCHAR> needle(varchar_node, probe.needle);
+        MockConstVectorizedExpr<TYPE_INT> gram_num(make_typed_node(TPrimitiveType::INT), 2);
+        expr.add_child(&haystack);
+        expr.add_child(&needle);
+        if (!is_like) expr.add_child(&gram_num);
+        ExprContext context(&expr);
+        std::vector<ExprContext*> contexts = {&context};
+        ASSERT_OK(Expr::prepare(contexts, &_runtime_state));
+        ASSERT_OK(Expr::open(contexts, &_runtime_state));
+        std::unique_ptr<BloomFilter> bf;
+        ASSERT_OK(BloomFilter::create(BLOCK_BLOOM_FILTER, &bf));
+        ASSERT_OK(bf->init(16, 0.0001, HashStrategyPB::HASH_MURMUR3_X64_64));
+        for (const auto& gram : probe.stored_grams) {
+            bf->add_bytes(gram.data(), gram.size());
+        }
+        NgramBloomFilterReaderOptions options{2, false};
+        EXPECT_EQ(probe.expected, expr.ngram_bloom_filter(&context, bf.get(), options));
+        Expr::close(contexts, &_runtime_state);
+    }
+}
+
 } // namespace starrocks
