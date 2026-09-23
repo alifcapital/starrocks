@@ -165,7 +165,7 @@ TEST_F(CacheSelectScannerTest, FooterOnlyParquetDoesNotPrepareRowGroups) {
     CacheSelectScanner scanner;
     ASSERT_OK(scanner.init(_runtime_state, ctx));
     ASSERT_OK(scanner.open(_runtime_state));
-    ChunkPtr chunk;
+    ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
     EXPECT_TRUE(scanner.get_next(_runtime_state, &chunk).is_end_of_file());
     EXPECT_GT(scanner.num_bytes_read(), 0);
     EXPECT_EQ(0, ctx->stats->total_row_groups);
