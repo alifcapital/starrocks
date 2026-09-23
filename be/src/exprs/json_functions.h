@@ -101,7 +101,8 @@ public:
     DEFINE_VECTORIZED_FN(get_json_bigint);
     DEFINE_VECTORIZED_FN(get_json_double);
     DEFINE_VECTORIZED_FN(get_json_string);
-    DEFINE_VECTORIZED_FN(get_json_bool);          // (VARCHAR, VARCHAR) -> BOOLEAN
+    DEFINE_VECTORIZED_FN(get_json_bool); // (VARCHAR, VARCHAR) -> BOOLEAN
+    DEFINE_VECTORIZED_FN(json_query_many_from_string);
     DEFINE_VECTORIZED_FN(json_query_from_string); // (VARCHAR, VARCHAR) -> JSON, FE-fusion target
 
     /**
@@ -214,6 +215,9 @@ public:
      * Return json built from struct/map
      */
     DEFINE_VECTORIZED_FN(to_json);
+
+    static Status json_query_many_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+    static Status json_query_many_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
     static Status native_json_path_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status native_json_path_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
