@@ -25,9 +25,12 @@ using UTF8CaseConverter = size_t (*)(const char*, size_t, char*);
 // Source and destination must not overlap. Destination capacity must be at least 3 * length.
 UTF8CaseConverter utf8_lower_converter();
 UTF8CaseConverter utf8_upper_converter();
-UTF8CaseConverter utf8_fold_converter();
 
 // Source must not refer to dst storage.
-void utf8_casefold(const char* src, size_t length, std::string& dst);
+void utf8_tolower(const char* src, size_t length, std::string& dst);
+
+inline void utf8_tolower(const std::string& src, std::string& dst) {
+    utf8_tolower(src.data(), src.size(), dst);
+}
 
 } // namespace starrocks

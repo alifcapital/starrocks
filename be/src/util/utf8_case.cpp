@@ -21,14 +21,12 @@
 #define SZ_USE_ICELAKE 1
 #endif
 #include "stringzilla/utf8_case.h"
-#include "stringzilla/utf8_uncased_fold.h"
 
 namespace starrocks {
 namespace {
 struct CaseConverters {
     UTF8CaseConverter lower = sz_utf8_case_lower_serial;
     UTF8CaseConverter upper = sz_utf8_case_upper_serial;
-    UTF8CaseConverter fold = sz_utf8_uncased_fold_serial;
 
     CaseConverters() {
 #if defined(__x86_64__)
@@ -36,18 +34,14 @@ struct CaseConverters {
         if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2")) {
             lower = sz_utf8_case_lower_haswell;
             upper = sz_utf8_case_upper_haswell;
-            fold = sz_utf8_uncased_fold_haswell;
             if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512vl") &&
                 __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") &&
                 __builtin_cpu_supports("avx512vbmi") && __builtin_cpu_supports("avx512vbmi2") &&
                 __builtin_cpu_supports("lzcnt") && __builtin_cpu_supports("popcnt")) {
                 lower = sz_utf8_case_lower_icelake;
                 upper = sz_utf8_case_upper_icelake;
-                fold = sz_utf8_uncased_fold_icelake;
             }
         }
-#elif SZ_USE_NEON
-        fold = sz_utf8_uncased_fold_neon;
 #endif
     }
 };
@@ -64,17 +58,13 @@ UTF8CaseConverter utf8_lower_converter() {
 UTF8CaseConverter utf8_upper_converter() {
     return converters().upper;
 }
-UTF8CaseConverter utf8_fold_converter() {
-    return converters().fold;
-}
-
-void utf8_casefold(const char* src, size_t length, std::string& dst) {
+void utf8_tolower(const char* src, size_t length, std::string& dst) {
     if (length > dst.max_size() / 3) {
-        throw std::length_error("UTF-8 case folding exceeds string capacity");
+        throw std::length_error("UTF-8 lowercase exceeds string capacity");
     }
     dst.resize(length * 3);
     if (length != 0) {
-        dst.resize(utf8_fold_converter()(src, length, dst.data()));
+        dst.resize(utf8_lower_converter()(src, length, dst.data()));
     }
 }
 
