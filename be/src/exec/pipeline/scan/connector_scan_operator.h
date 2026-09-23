@@ -29,6 +29,7 @@ namespace pipeline {
 
 struct ConnectorScanOperatorIOTasksMemLimiter;
 class FooterPrefetchState;
+struct FooterPrefetchItem;
 
 struct ConnectorScanOperatorMemShareArbitrator {
     static constexpr double kChunkBufferMemRatio = 0.5;
@@ -153,6 +154,8 @@ public:
     int64_t get_scan_table_id() const override;
 
 private:
+    bool _submit_footer_prefetch_task(RuntimeState* state, const std::shared_ptr<FooterPrefetchState>& fp,
+                                      const FooterPrefetchItem& item);
     int64_t _adjust_scan_mem_limit(int64_t old_chunk_source_mem_bytes, int64_t new_chunk_source_mem_bytes);
     mutable ConnectorScanOperatorAdaptiveProcessor* _adaptive_processor;
     bool _enable_adaptive_io_tasks = true;
