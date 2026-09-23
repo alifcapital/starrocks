@@ -194,7 +194,7 @@ private:
             std::string buf;
             for (size_t r = 0; r < src->size(); r++) {
                 Slice s = src->get_slice(r);
-                utf8_tolower(s.get_data(), s.get_size(), buf);
+                utf8_casefold(s.get_data(), s.get_size(), buf);
                 lower_col->append(Slice(buf.data(), buf.size()));
             }
             haystackPtr = std::move(lower_col);

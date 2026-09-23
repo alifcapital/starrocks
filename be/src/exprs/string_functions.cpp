@@ -22,11 +22,10 @@
 #include <mmintrin.h>
 #endif
 
-#include "thirdparty/stringzilla/utf8_case.h"
-
 #include <algorithm>
 #include <cctype>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -55,6 +54,7 @@
 #include "util/raw_container.h"
 #include "util/sm3.h"
 #include "util/utf8.h"
+#include "util/utf8_case.h"
 #include "util/utf8_encoding.h"
 
 namespace starrocks {
@@ -1928,82 +1928,36 @@ StatusOr<ColumnPtr> StringFunctions::utf8_length(FunctionContext* context, const
     return VectorizedStrictUnaryFunction<utf8LengthImpl>::evaluate<TYPE_VARCHAR, TYPE_INT>(columns[0]);
 }
 
-// UTF-8 lowercase using StringZilla (full Unicode case folding)
-void utf8_lower(const Bytes& src_bytes, const Offsets& src_offsets, Bytes* dst_bytes, Offsets* dst_offsets) {
-    size_t num_rows = src_offsets.size() - 1;
-    // Reserve 3x space for worst-case expansion (e.g., İ -> i + combining dot)
-    dst_bytes->resize(src_bytes.size() * 3);
-
-    size_t current_offset = 0;
-    (*dst_offsets)[0] = 0;
-
-    for (size_t i = 0; i < num_rows; i++) {
-        const auto* src_data = reinterpret_cast<const char*>(src_bytes.data() + src_offsets[i]);
-        size_t src_len = src_offsets[i + 1] - src_offsets[i];
-        auto* dst_data = reinterpret_cast<char*>(dst_bytes->data() + current_offset);
-
-        size_t dst_size = sz_utf8_case_fold(src_data, src_len, dst_data);
-        current_offset += dst_size;
-        (*dst_offsets)[i + 1] = current_offset;
-    }
-
-    dst_bytes->resize(current_offset);
-}
-
-// UTF-8 uppercase using StringZilla (full Unicode uppercase)
-void utf8_upper(const Bytes& src_bytes, const Offsets& src_offsets, Bytes* dst_bytes, Offsets* dst_offsets) {
-    size_t num_rows = src_offsets.size() - 1;
-    // Reserve 3x space for worst-case expansion (e.g., ß -> SS, ﬃ -> FFI)
-    dst_bytes->resize(src_bytes.size() * 3);
-
-    size_t current_offset = 0;
-    (*dst_offsets)[0] = 0;
-
-    for (size_t i = 0; i < num_rows; i++) {
-        const auto* src_data = reinterpret_cast<const char*>(src_bytes.data() + src_offsets[i]);
-        size_t src_len = src_offsets[i + 1] - src_offsets[i];
-        auto* dst_data = reinterpret_cast<char*>(dst_bytes->data() + current_offset);
-
-        size_t dst_size = sz_utf8_case_upper(src_data, src_len, dst_data);
-        current_offset += dst_size;
-        (*dst_offsets)[i + 1] = current_offset;
-    }
-
-    dst_bytes->resize(current_offset);
-}
-
-// UTF-8 lowercase function - StringZilla has internal ASCII fast-path
-struct UTF8LowerFunction {
+template <bool to_upper>
+struct UTF8StringCaseToggleFunction {
     template <LogicalType Type, LogicalType ResultType>
     static ColumnPtr evaluate(const ColumnPtr& v1) {
         const auto* src = down_cast<const BinaryColumn*>(v1.get());
-        auto src_bytes = src->get_immutable_bytes();
+        const auto src_bytes = src->get_immutable_bytes();
         const auto& src_offsets = src->get_offset();
-        auto dst = RunTimeColumnType<TYPE_VARCHAR>::create();
+        auto dst = BinaryColumn::create();
         auto& dst_offsets = dst->get_offset();
         auto& dst_bytes = dst->get_bytes();
-
         dst_offsets.resize(src_offsets.size());
-        utf8_lower(src_bytes, src_offsets, &dst_bytes, &dst_offsets);
-
-        return dst;
-    }
-};
-
-// UTF-8 uppercase function - StringZilla has internal ASCII fast-path
-struct UTF8UpperFunction {
-    template <LogicalType Type, LogicalType ResultType>
-    static ColumnPtr evaluate(const ColumnPtr& v1) {
-        const auto* src = down_cast<const BinaryColumn*>(v1.get());
-        const auto& src_bytes = src->get_bytes();
-        const auto& src_offsets = src->get_offset();
-        auto dst = RunTimeColumnType<TYPE_VARCHAR>::create();
-        auto& dst_offsets = dst->get_offset();
-        auto& dst_bytes = dst->get_bytes();
-
-        dst_offsets.resize(src_offsets.size());
-        utf8_upper(src_bytes, src_offsets, &dst_bytes, &dst_offsets);
-
+        if (src_bytes.size() > dst_bytes.max_size() / 3) {
+            throw RuntimeException("UTF-8 case conversion exceeds column capacity");
+        }
+        dst_bytes.resize(src_bytes.size() * 3);
+        const auto convert = to_upper ? utf8_upper_converter() : utf8_lower_converter();
+        size_t offset = 0;
+        dst_offsets[0] = 0;
+        for (size_t i = 0; i + 1 < src_offsets.size(); ++i) {
+            const size_t length = src_offsets[i + 1] - src_offsets[i];
+            if (length != 0) {
+                offset += convert(reinterpret_cast<const char*>(src_bytes.data() + src_offsets[i]), length,
+                                  reinterpret_cast<char*>(dst_bytes.data() + offset));
+            }
+            if (offset > std::numeric_limits<Offsets::value_type>::max()) {
+                throw RuntimeException("UTF-8 case conversion exceeds column capacity");
+            }
+            dst_offsets[i + 1] = offset;
+        }
+        dst_bytes.resize(offset);
         return dst;
     }
 };
@@ -2013,8 +1967,7 @@ Status StringFunctions::lower_prepare(FunctionContext* context, FunctionContext:
         return Status::OK();
     }
     auto state = new LowerUpperState();
-    // Use UTF8LowerFunction with StringZilla - fast path for ASCII is handled internally
-    state->impl_func = VectorizedUnaryFunction<UTF8LowerFunction>::evaluate<TYPE_VARCHAR>;
+    state->impl_func = VectorizedUnaryFunction<UTF8StringCaseToggleFunction<false>>::evaluate<TYPE_VARCHAR>;
     context->set_function_state(scope, state);
     return Status::OK();
 }
@@ -2037,8 +1990,7 @@ Status StringFunctions::upper_prepare(FunctionContext* context, FunctionContext:
         return Status::OK();
     }
     auto state = new LowerUpperState();
-    // Use UTF8UpperFunction with StringZilla - fast path for ASCII is handled internally
-    state->impl_func = VectorizedUnaryFunction<UTF8UpperFunction>::evaluate<TYPE_VARCHAR>;
+    state->impl_func = VectorizedUnaryFunction<UTF8StringCaseToggleFunction<true>>::evaluate<TYPE_VARCHAR>;
     context->set_function_state(scope, state);
     return Status::OK();
 }
