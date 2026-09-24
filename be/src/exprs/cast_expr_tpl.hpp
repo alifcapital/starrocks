@@ -1198,6 +1198,18 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, ptr));
 
+        ExprContext::DatetimeCastCache* cache = nullptr;
+        if constexpr (FromType == TYPE_VARCHAR && ToType == TYPE_DATETIME) {
+            if (context != nullptr && _children[0]->is_slotref()) {
+                cache = context->datetime_cast_cache();
+                if (cache != nullptr && cache->input.get() == column.get() &&
+                    cache->allow_throw_exception == AllowThrowException) {
+                    return cache->result;
+                }
+            }
+        }
+        // Cast helpers may consume the input pointer. Retain it only during shared evaluation.
+        ColumnPtr cache_input = cache != nullptr ? column : nullptr;
         size_t col_size = column->size();
         if (col_size != 0 && ColumnHelper::count_nulls(column) == col_size) {
             return ColumnHelper::create_const_null_column(col_size);
@@ -1268,6 +1280,11 @@ public:
         DCHECK(result_column.get() != nullptr);
         if (result_column->is_constant()) {
             result_column->as_mutable_raw_ptr()->resize(col_size);
+        }
+        if (cache != nullptr) {
+            cache->input = std::move(cache_input);
+            cache->result = result_column;
+            cache->allow_throw_exception = AllowThrowException;
         }
         return result_column;
     };
