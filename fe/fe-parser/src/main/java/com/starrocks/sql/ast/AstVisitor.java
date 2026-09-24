@@ -983,6 +983,10 @@ public interface AstVisitor<R, C> {
         return visitBaseCreateAlterUserStmt(statement, context);
     }
 
+    default R visitAlterUserAccountLockStatement(AlterUserAccountLockStmt statement, C context) {
+        return visitDDLStatement(statement, context);
+    }
+
     // ------------------------------------------- Show Statement ----------------------------------------------------
 
     default R visitShowGrantsStatement(ShowGrantsStmt statement, C context) {

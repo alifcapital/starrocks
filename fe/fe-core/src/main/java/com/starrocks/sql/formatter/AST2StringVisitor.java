@@ -27,6 +27,7 @@ import com.starrocks.common.util.PrintableMap;
 import com.starrocks.common.util.SqlCredentialRedactor;
 import com.starrocks.mysql.privilege.AuthPlugin;
 import com.starrocks.sql.ast.AlterStorageVolumeStmt;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
 import com.starrocks.sql.ast.BaseGrantRevokePrivilegeStmt;
@@ -195,6 +196,12 @@ public class AST2StringVisitor implements AstVisitorExtendInterface<String, Void
         sb.append(buildAuthOptionSql(stmt.getAuthOption()));
 
         return sb.toString();
+    }
+
+    @Override
+    public String visitAlterUserAccountLockStatement(AlterUserAccountLockStmt stmt, Void context) {
+        return "ALTER USER " + (stmt.isIfExists() ? "IF EXISTS " : "") + stmt.getUser()
+                + (stmt.isLock() ? " ACCOUNT LOCK" : " ACCOUNT UNLOCK");
     }
 
     public StringBuilder buildAuthOptionSql(UserAuthOption authOption) {

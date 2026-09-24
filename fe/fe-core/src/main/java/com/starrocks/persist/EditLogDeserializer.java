@@ -236,6 +236,7 @@ public class EditLogDeserializer {
             .put(OperationType.OP_INSERT_OVERWRITE_STATE_CHANGE, InsertOverwriteStateChangeInfo.class)
             .put(OperationType.OP_CREATE_USER_V2, CreateUserInfo.class)
             .put(OperationType.OP_ALTER_USER_V2, AlterUserInfo.class)
+            .put(OperationType.OP_ALTER_USER_ACCOUNT_LOCK, AccountLockInfo.class)
             .put(OperationType.OP_UPDATE_USER_PROP_V3, UserPropertyInfo.class)
             .put(OperationType.OP_DROP_USER_V3, UserIdentity.class)
             .put(OperationType.OP_UPDATE_USER_PRIVILEGE_V2, UserPrivilegeCollectionInfo.class)

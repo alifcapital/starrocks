@@ -267,6 +267,9 @@ public enum ErrorCode {
     ERR_AUTHENTICATION_FAIL_IN_AUTH_CHAIN(5208, new byte[] {'4', '2', '0', '0', '0'},
             "Access denied; No authentication was successful in the authentication chain : [%s]"),
 
+    ERR_ACCOUNT_LOCKED(5209, new byte[] {'H', 'Y', '0', '0', '0'},
+            "Access denied for user '%s'. Account is locked."),
+
     /**
      * 5300 - 5399: Lock and Transaction
      */

@@ -1091,6 +1091,12 @@ public class EditLog {
                             info.getUserIdentity(), info.getAuthenticationInfo(), info.getProperties());
                     break;
                 }
+                case OperationType.OP_ALTER_USER_ACCOUNT_LOCK: {
+                    AccountLockInfo info = (AccountLockInfo) journal.data();
+                    globalStateMgr.getAuthenticationMgr().replaySetAccountLock(
+                            info.getUserIdentity(), info.isLocked());
+                    break;
+                }
                 case OperationType.OP_UPDATE_USER_PROP_V3: {
                     UserPropertyInfo info = (UserPropertyInfo) journal.data();
                     globalStateMgr.getAuthenticationMgr().replayUpdateUserProperty(info);
@@ -2135,6 +2141,10 @@ public class EditLog {
 
     public void logAlterUser(AlterUserInfo info, WALApplier walApplier) {
         logJsonObject(OperationType.OP_ALTER_USER_V2, info, walApplier);
+    }
+
+    public void logAlterUserAccountLock(AccountLockInfo info, WALApplier walApplier) {
+        logJsonObject(OperationType.OP_ALTER_USER_ACCOUNT_LOCK, info, walApplier);
     }
 
     public void logUpdateUserPropertyV2(UserPropertyInfo propertyInfo, WALApplier walApplier) {

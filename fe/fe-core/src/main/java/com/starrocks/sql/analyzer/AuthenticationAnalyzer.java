@@ -23,6 +23,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.PatternMatcher;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
 import com.starrocks.sql.ast.CreateUserStmt;
@@ -128,6 +129,23 @@ public class AuthenticationAnalyzer {
             if (stmt.getUser().equals(UserRef.ROOT)) {
                 throw new SemanticException("Operation DROP USER failed for " + UserIdentity.ROOT +
                         " : cannot drop user " + UserIdentity.ROOT);
+            }
+            return null;
+        }
+
+        @Override
+        public Void visitAlterUserAccountLockStatement(AlterUserAccountLockStmt stmt, ConnectContext session) {
+            UserRef user = stmt.getUser();
+            analyzeUser(user);
+            checkUserExist(user, !stmt.isIfExists());
+
+            if (user.equals(UserRef.ROOT)) {
+                throw new SemanticException("Operation ACCOUNT LOCK failed for " + UserIdentity.ROOT +
+                        " : cannot lock or unlock user " + UserIdentity.ROOT);
+            }
+            if (needProtectAdminUser(user, session)) {
+                throw new SemanticException("'admin' user cannot be locked or unlocked because of " +
+                        "'authorization_enable_admin_user_protection' configuration is enabled");
             }
             return null;
         }

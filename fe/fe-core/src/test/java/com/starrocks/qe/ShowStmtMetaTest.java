@@ -787,11 +787,12 @@ public class ShowStmtMetaTest {
     public void testShowAuthenticationStmt() {
         ShowAuthenticationStmt stmt = new ShowAuthenticationStmt(null, false);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(4, metaData.getColumnCount());
+        Assertions.assertEquals(5, metaData.getColumnCount());
         Assertions.assertEquals("UserIdentity", metaData.getColumn(0).getName());
         Assertions.assertEquals("Password", metaData.getColumn(1).getName());
         Assertions.assertEquals("AuthPlugin", metaData.getColumn(2).getName());
         Assertions.assertEquals("UserForAuthPlugin", metaData.getColumn(3).getName());
+        Assertions.assertEquals("IsLocked", metaData.getColumn(4).getName());
     }
 
     @Test

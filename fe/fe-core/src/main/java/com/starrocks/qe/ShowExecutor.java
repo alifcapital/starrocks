@@ -2974,7 +2974,8 @@ public class ShowExecutor {
                         entry.getKey().toString(),
                         userAuthenticationInfo.getPassword().length == 0 ? "No" : "Yes",
                         userAuthenticationInfo.getAuthPlugin(),
-                        userAuthenticationInfo.getAuthString()));
+                        userAuthenticationInfo.getAuthString(),
+                        userAuthenticationInfo.isAccountLocked() ? "Yes" : "No"));
             }
 
             return new ShowResultSet(showResultMetaFactory.getMetadata(statement), userAuthInfos);

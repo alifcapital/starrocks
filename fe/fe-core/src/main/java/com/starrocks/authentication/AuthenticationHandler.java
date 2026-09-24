@@ -168,6 +168,13 @@ public class AuthenticationHandler {
             authContext.setAuthenticationProvider(provider);
 
             if (Config.enable_auth_check) {
+                // Account lock is a login gate on the matched account: reject before password
+                // verification (don't leak password validity for a locked account). Kept inside
+                // enable_auth_check so the global auth bypass also lifts the lock.
+                if (matchedUserIdentity.getValue().isAccountLocked()) {
+                    throw new AuthenticationException(ErrorCode.ERR_ACCOUNT_LOCKED,
+                            matchedUserIdentity.getKey().getUser());
+                }
                 //Throw an exception directly and feedback to the client
                 provider.authenticate(authContext, matchedUserIdentity.getKey(), authResponse);
             }

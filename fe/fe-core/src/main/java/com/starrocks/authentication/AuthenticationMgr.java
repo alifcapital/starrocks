@@ -22,6 +22,7 @@ import com.starrocks.authorization.UserPrivilegeCollectionV2;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
+import com.starrocks.persist.AccountLockInfo;
 import com.starrocks.persist.AlterUserInfo;
 import com.starrocks.persist.CreateUserInfo;
 import com.starrocks.persist.EditLog;
@@ -261,12 +262,18 @@ public class AuthenticationMgr {
                           Map<String, String> properties) throws DdlException {
         writeLock();
         try {
-            if (!userToAuthenticationInfo.containsKey(userIdentity)) {
+            UserAuthenticationInfo existing = userToAuthenticationInfo.get(userIdentity);
+            if (existing == null) {
                 // Existence verification has been performed in the Analyzer stage. If it not exists here,
                 // it may be that other threads have performed the same operation, and return directly here
                 LOG.info("Operation ALTER USER failed for " + userIdentity + " : user " + userIdentity + " not exists");
                 return;
             }
+
+            // ALTER USER rebuilds UserAuthenticationInfo from the auth option only, which defaults
+            // accountLocked to false; carry the lock state forward so a password/property change
+            // does not silently unlock the account. Set before logging so the journal/replay agree.
+            userAuthenticationInfo.setAccountLocked(existing.isAccountLocked());
 
             UserProperty.UpdateInfo updateInfo = null;
             if (properties != null && !properties.isEmpty()) {
@@ -284,6 +291,39 @@ public class AuthenticationMgr {
                             userProperty.update(finalUpdateInfo);
                         }
                     });
+        } finally {
+            writeUnlock();
+        }
+    }
+
+    // Lock or unlock an account. Mutates only the accountLocked flag on the stored
+    // UserAuthenticationInfo, leaving password / auth plugin untouched.
+    public void setAccountLock(UserIdentity userIdentity, boolean locked) throws DdlException {
+        writeLock();
+        try {
+            UserAuthenticationInfo info = userToAuthenticationInfo.get(userIdentity);
+            if (info == null) {
+                // Analyzer already enforced existence unless IF EXISTS was given; here a missing
+                // user means IF EXISTS (or a concurrent drop) -> no-op, mirroring alterUser.
+                LOG.info("Operation ACCOUNT LOCK skipped for {} : user not exists", userIdentity);
+                return;
+            }
+            GlobalStateMgr.getCurrentState().getEditLog().logAlterUserAccountLock(
+                    new AccountLockInfo(userIdentity, locked),
+                    wal -> info.setAccountLocked(locked));
+            LOG.info("{} account {}", locked ? "locked" : "unlocked", userIdentity);
+        } finally {
+            writeUnlock();
+        }
+    }
+
+    public void replaySetAccountLock(UserIdentity userIdentity, boolean locked) {
+        writeLock();
+        try {
+            UserAuthenticationInfo info = userToAuthenticationInfo.get(userIdentity);
+            if (info != null) {
+                info.setAccountLocked(locked);
+            }
         } finally {
             writeUnlock();
         }

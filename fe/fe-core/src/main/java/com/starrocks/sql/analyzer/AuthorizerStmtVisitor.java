@@ -82,6 +82,7 @@ import com.starrocks.sql.ast.AlterRoutineLoadStmt;
 import com.starrocks.sql.ast.AlterStorageVolumeStmt;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.AlterTableStmt;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterViewClause;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
@@ -1294,6 +1295,21 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
                 throw new SemanticException("Can not modify root user, except root itself");
             }
 
+            Authorizer.checkSystemAction(context, PrivilegeType.GRANT);
+        } catch (AccessDeniedException e) {
+            AccessDeniedException.reportAccessDenied(
+                    InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME,
+                    context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
+                    PrivilegeType.GRANT.name(), ObjectType.SYSTEM.name(), null);
+        }
+        return null;
+    }
+
+    @Override
+    public Void visitAlterUserAccountLockStatement(AlterUserAccountLockStmt statement, ConnectContext context) {
+        // root protection is enforced unconditionally in AuthenticationAnalyzer (runs first),
+        // so no root branch here -- same as visitDropUserStatement.
+        try {
             Authorizer.checkSystemAction(context, PrivilegeType.GRANT);
         } catch (AccessDeniedException e) {
             AccessDeniedException.reportAccessDenied(
