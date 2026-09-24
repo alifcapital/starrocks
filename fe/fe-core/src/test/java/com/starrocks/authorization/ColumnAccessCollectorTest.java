@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -417,6 +418,52 @@ public class ColumnAccessCollectorTest {
         assertTrue(v6.contains(ColumnAccessKind.PROJECTION),
                 "first_value(v6) makes v6 visible to the user — must be PROJECTION, got " + v6);
         // It's also still an aggregate-shaped argument; AGG_ARG can coexist.
+    }
+
+    @Test
+    public void minMaxWindowOutputsExposeTheirArguments() {
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "SELECT min(v6) OVER (PARTITION BY v4), max(v5) OVER (PARTITION BY v4) FROM piidb.t1");
+        for (String column : List.of("t1.v6", "t1.v5")) {
+            assertTrue(roles.get(column).contains(ColumnAccessKind.PROJECTION), column);
+            assertTrue(roles.get(column).contains(ColumnAccessKind.AGG_ARG), column);
+        }
+        assertTrue(roles.get("t1.v4").contains(ColumnAccessKind.FILTER));
+    }
+
+    @Test
+    public void orderByAggregateRetainsDependenciesWithoutExposingInput() {
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "SELECT v4, sum(v6) AS total FROM piidb.t1 GROUP BY v4 ORDER BY total LIMIT 10");
+        assertEquals(EnumSet.of(ColumnAccessKind.AGG_ARG, ColumnAccessKind.FILTER), roles.get("t1.v6"));
+    }
+
+    @Test
+    public void filterAboveLimitRetainsAggregateDependencies() {
+        // LIMIT prevents pushing this predicate into HAVING. Its ref passes through a Project
+        // and TopN before reaching the outer filter.
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "SELECT v4 FROM (SELECT v4, sum(v6) AS total FROM piidb.t1 "
+                        + "GROUP BY v4 ORDER BY v4 LIMIT 10) q WHERE total > 100");
+        assertEquals(EnumSet.of(ColumnAccessKind.AGG_ARG, ColumnAccessKind.FILTER), roles.get("t1.v6"));
+    }
+
+    @Test
+    public void joinOnAggregateRetainsDependenciesWithoutProjection() {
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "SELECT t.v4 FROM (SELECT v4, sum(v6) AS total FROM piidb.t1 GROUP BY v4) q "
+                        + "JOIN piidb.t2 t ON q.total = t.v7");
+        EnumSet<ColumnAccessKind> input = roles.get("t1.v6");
+        assertTrue(input.contains(ColumnAccessKind.AGG_ARG));
+        assertTrue(input.contains(ColumnAccessKind.JOIN_KEY));
+        Assertions.assertFalse(input.contains(ColumnAccessKind.PROJECTION));
+    }
+
+    @Test
+    public void valueReturningWindowOverAggregateDoesNotExposeRawInput() {
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "SELECT min(total) OVER () FROM (SELECT v4, sum(v6) AS total FROM piidb.t1 GROUP BY v4) q");
+        assertEquals(EnumSet.of(ColumnAccessKind.AGG_ARG), roles.get("t1.v6"));
     }
 
     @Test

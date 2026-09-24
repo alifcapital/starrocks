@@ -322,6 +322,8 @@ public class ColumnPrivilege {
         // purpose (which functions accept IGNORE NULLS) and changing it would have side-effects
         // outside auditing.
         private static final Set<String> VALUE_RETURNING_WINDOWS = ImmutableSet.<String>builder()
+                .add(FunctionSet.MIN)
+                .add(FunctionSet.MAX)
                 .add(FunctionSet.FIRST_VALUE)
                 .add(FunctionSet.FIRST_VALUE_REWRITE)
                 .add(FunctionSet.LAST_VALUE)
@@ -344,10 +346,12 @@ public class ColumnPrivilege {
 
         private final Map<TableName, Map<String, EnumSet<ColumnAccessKind>>> scanColumns;
         private final Map<Table, TableName> tableObjToTableName;
-        // ColumnRefOperator → set of base columns it ultimately resolves to. A single ref can
-        // resolve to multiple base columns when the introducing expression mixes them, e.g.
-        // `pii || other AS combined` makes `combined` map to {pii, other}.
+        // Full expression dependencies, including derived aggregate/window outputs. These are
+        // needed when SUM(pii), for example, is later used in ORDER BY or a predicate.
         private final Map<ColumnRefOperator, Set<BaseColumn>> refToBases = new HashMap<>();
+        // Value visibility is narrower: SUM(pii) depends on pii without returning its raw value.
+        // Only this map is used to assign PROJECTION at the plan root.
+        private final Map<ColumnRefOperator, Set<BaseColumn>> refToVisibleBases = new HashMap<>();
 
         public ColumnAccessCollector(
                 Map<Table, TableName> tableObjToTableName,
@@ -382,18 +386,15 @@ public class ColumnPrivilege {
             } else if (op instanceof LogicalProjectOperator) {
                 extendByRefMap(((LogicalProjectOperator) op).getColumnRefMap());
             } else if (op instanceof LogicalAggregationOperator) {
-                // Most aggregates (count/sum/avg/...) collapse args into a derived scalar — the
-                // user never sees the raw value, so we do NOT map output refs to arg bases.
-                // Value-returning aggregates (array_agg, group_concat, min, max, ...) DO expose
-                // the raw column values in the result, so we propagate bases there. See
-                // VALUE_RETURNING_AGGREGATES below for the whitelist.
+                // Every aggregate depends on its arguments; only value-returning aggregates
+                // expose those values in a projected result.
                 LogicalAggregationOperator agg = (LogicalAggregationOperator) op;
                 for (Map.Entry<ColumnRefOperator, CallOperator> e : agg.getAggregations().entrySet()) {
                     CallOperator call = e.getValue();
-                    if (!isValueReturningAggregate(call)) {
-                        continue;
+                    addBases(e.getKey(), collectBases(call));
+                    if (isValueReturningAggregate(call)) {
+                        addVisibleBases(e.getKey(), visibleAggregateBases(call));
                     }
-                    addBases(e.getKey(), visibleAggregateBases(call));
                 }
             } else if (op instanceof LogicalSetOperator) {
                 LogicalSetOperator set = (LogicalSetOperator) op;
@@ -415,6 +416,7 @@ public class ColumnPrivilege {
                     boolean isExcept = op instanceof LogicalExceptOperator;
                     for (int i = 0; i < outputs.size(); i++) {
                         Set<BaseColumn> bases = new HashSet<>();
+                        Set<BaseColumn> visibleBases = new HashSet<>();
                         for (int b = 0; b < children.size(); b++) {
                             ColumnRefOperator childRef = children.get(b).get(i);
                             if (isExcept && b > 0) {
@@ -425,25 +427,31 @@ public class ColumnPrivilege {
                             if (childBases != null) {
                                 bases.addAll(childBases);
                             }
+                            Set<BaseColumn> childVisibleBases = refToVisibleBases.get(childRef);
+                            if (childVisibleBases != null) {
+                                visibleBases.addAll(childVisibleBases);
+                            }
                         }
                         addBases(outputs.get(i), bases);
+                        addVisibleBases(outputs.get(i), visibleBases);
                     }
                 }
             } else if (op instanceof LogicalApplyOperator) {
                 // Apply's scalar output may either be a derived value (aggregate or window inside
                 // the subquery) OR a passthrough of a raw base column, e.g.
                 //   SELECT (SELECT v7 FROM t2 WHERE ...) FROM t1
-                // where the user actually sees v7. Pull bases from the subquery expression: if the
-                // inner output is an aggregate ref it has no bases (aggregate branch above doesn't
-                // seed them), so this naturally collapses to "no leak"; for passthrough columns
-                // bases propagate and markRootOutputProjection() correctly marks them PROJECTION.
+                // where the user actually sees v7. Derived aggregate refs have dependencies but
+                // no visible bases; passthrough columns retain their visibility through Apply.
                 //
                 // ONLY scalar Apply: IN/EXISTS produce a boolean — propagating bases would mark
                 // inner columns as PROJECTION even though the user only sees true/false.
                 LogicalApplyOperator apply = (LogicalApplyOperator) op;
                 ColumnRefOperator output = apply.getOutput();
-                if (output != null && apply.isScalar()) {
+                if (output != null) {
                     addBases(output, collectBases(apply.getSubqueryOperator()));
+                }
+                if (output != null && apply.isScalar()) {
+                    addVisibleBases(output, collectVisibleBases(apply.getSubqueryOperator()));
                 } else if (apply.getSubqueryOperator() != null) {
                     // Quantified (IN) / existential (EXISTS) Apply: the subquery output drives a
                     // boolean predicate. The inner columns are not seen by the user but are used
@@ -466,14 +474,17 @@ public class ColumnPrivilege {
                 // params so root-output PROJECTION reaches the source columns.
                 LogicalTableFunctionOperator tf = (LogicalTableFunctionOperator) op;
                 Set<BaseColumn> inputBases = new HashSet<>();
+                Set<BaseColumn> visibleInputBases = new HashSet<>();
                 if (tf.getFnParamColumnProject() != null) {
                     for (Pair<ColumnRefOperator, ScalarOperator> p : tf.getFnParamColumnProject()) {
                         inputBases.addAll(collectBases(p.second));
+                        visibleInputBases.addAll(collectVisibleBases(p.second));
                     }
                 }
                 if (tf.getFnResultColRefs() != null && !inputBases.isEmpty()) {
                     for (ColumnRefOperator out : tf.getFnResultColRefs()) {
                         addBases(out, inputBases);
+                        addVisibleBases(out, visibleInputBases);
                     }
                 }
             } else if (op instanceof LogicalCTEConsumeOperator) {
@@ -485,6 +496,10 @@ public class ColumnPrivilege {
                         if (b != null) {
                             addBases(e.getKey(), b);
                         }
+                        Set<BaseColumn> visible = refToVisibleBases.get(e.getValue());
+                        if (visible != null) {
+                            addVisibleBases(e.getKey(), visible);
+                        }
                     }
                 }
             } else if (op instanceof LogicalWindowOperator) {
@@ -492,14 +507,25 @@ public class ColumnPrivilege {
                 //   * value-returning (first_value, last_value, lead, lag, nth_value): the user
                 //     reads RAW arg values back through the window output. Map output → arg bases
                 //     so markRootOutputProjection() flags them as PROJECTION.
-                //   * aggregating (sum/avg/count/row_number/...): output is a derived scalar; do
-                //     not propagate bases so PROJECTION is not leaked onto the raw column.
+                //   * aggregating (sum/avg/count/row_number/...): retain dependencies, but not
+                //     value visibility, so PROJECTION is not leaked onto the raw column.
                 LogicalWindowOperator win = (LogicalWindowOperator) op;
                 if (win.getWindowCall() != null) {
                     for (Map.Entry<ColumnRefOperator, CallOperator> e : win.getWindowCall().entrySet()) {
                         CallOperator call = e.getValue();
+                        addBases(e.getKey(), collectBases(call));
                         if (isValueReturningWindow(call)) {
-                            addBases(e.getKey(), collectBases(call));
+                            addVisibleBases(e.getKey(), collectVisibleBases(call));
+                        }
+                    }
+                }
+            } else if (op instanceof LogicalTopNOperator) {
+                LogicalTopNOperator topn = (LogicalTopNOperator) op;
+                if (topn.getPartitionPreAggCall() != null) {
+                    for (Map.Entry<ColumnRefOperator, CallOperator> e : topn.getPartitionPreAggCall().entrySet()) {
+                        addBases(e.getKey(), collectBases(e.getValue()));
+                        if (isValueReturningAggregate(e.getValue())) {
+                            addVisibleBases(e.getKey(), visibleAggregateBases(e.getValue()));
                         }
                     }
                 }
@@ -563,13 +589,8 @@ public class ColumnPrivilege {
                 for (CallOperator call : agg.getAggregations().values()) {
                     applyRole(call, ColumnAccessKind.AGG_ARG);
                 }
-                // HAVING and any post-aggregation predicates collapsed onto the agg node.
-                // The predicate references aggregate output ColumnRefs (e.g. `count(v6) > 1`
-                // becomes `count_v6_ref > 1` in the optimized plan). Aggregate outputs have no
-                // bases on purpose (see seed branch above), so applyRole() would no-op on them.
-                // Resolve such refs back to the aggregate's CallOperator arguments and mark THOSE
-                // columns as FILTER, so HAVING shows up in audit.
-                applyHavingPredicate(agg);
+                // HAVING can reference derived aggregate outputs through the full dependency map.
+                applyRole(agg.getPredicate(), ColumnAccessKind.FILTER);
             } else if (op instanceof LogicalTopNOperator) {
                 LogicalTopNOperator topn = (LogicalTopNOperator) op;
                 if (topn.getOrderByElements() != null) {
@@ -587,8 +608,6 @@ public class ColumnPrivilege {
                 }
                 if (topn.getPartitionPreAggCall() != null) {
                     for (Map.Entry<ColumnRefOperator, CallOperator> e : topn.getPartitionPreAggCall().entrySet()) {
-                        // Tag args first; aggregate output refs intentionally have no bases (same
-                        // rationale as LogicalAggregationOperator branch).
                         applyRole(e.getValue(), ColumnAccessKind.AGG_ARG);
                     }
                 }
@@ -623,6 +642,7 @@ public class ColumnPrivilege {
             for (Map.Entry<ColumnRefOperator, Column> e : scan.getColRefToColumnMetaMap().entrySet()) {
                 BaseColumn base = new BaseColumn(tableName, e.getValue().getName());
                 refToBases.computeIfAbsent(e.getKey(), k -> new HashSet<>()).add(base);
+                refToVisibleBases.computeIfAbsent(e.getKey(), k -> new HashSet<>()).add(base);
                 // Ensure every scanned column has a result entry, even if no role gets applied.
                 // Matches legacy behavior where the column showed up in scanColumns regardless of usage.
                 scanColumns.computeIfAbsent(tableName, k -> new HashMap<>())
@@ -633,23 +653,42 @@ public class ColumnPrivilege {
         private void extendByRefMap(Map<ColumnRefOperator, ScalarOperator> map) {
             for (Map.Entry<ColumnRefOperator, ScalarOperator> e : map.entrySet()) {
                 addBases(e.getKey(), collectBases(e.getValue()));
+                addVisibleBases(e.getKey(), collectVisibleBases(e.getValue()));
             }
         }
 
         private void addBases(ColumnRefOperator ref, Set<BaseColumn> bases) {
+            addBases(refToBases, ref, bases);
+        }
+
+        private void addVisibleBases(ColumnRefOperator ref, Set<BaseColumn> bases) {
+            addBases(refToVisibleBases, ref, bases);
+        }
+
+        private void addBases(Map<ColumnRefOperator, Set<BaseColumn>> lineage,
+                              ColumnRefOperator ref, Set<BaseColumn> bases) {
             if (bases == null || bases.isEmpty()) {
                 return;
             }
-            refToBases.computeIfAbsent(ref, k -> new HashSet<>()).addAll(bases);
+            lineage.computeIfAbsent(ref, k -> new HashSet<>()).addAll(bases);
         }
 
         private Set<BaseColumn> collectBases(ScalarOperator expr) {
+            return collectBases(expr, refToBases);
+        }
+
+        private Set<BaseColumn> collectVisibleBases(ScalarOperator expr) {
+            return collectBases(expr, refToVisibleBases);
+        }
+
+        private Set<BaseColumn> collectBases(ScalarOperator expr,
+                                             Map<ColumnRefOperator, Set<BaseColumn>> lineage) {
             if (expr == null) {
                 return new HashSet<>();
             }
             Set<BaseColumn> bases = new HashSet<>();
             for (ColumnRefOperator ref : Utils.extractColumnRef(expr)) {
-                Set<BaseColumn> b = refToBases.get(ref);
+                Set<BaseColumn> b = lineage.get(ref);
                 if (b != null) {
                     bases.addAll(b);
                 }
@@ -682,7 +721,7 @@ public class ColumnPrivilege {
             Set<BaseColumn> bases = new HashSet<>();
             int max = Math.min(visibleArgs, childCount);
             for (int i = 0; i < max; i++) {
-                bases.addAll(collectBases(call.getChild(i)));
+                bases.addAll(collectVisibleBases(call.getChild(i)));
             }
             return bases;
         }
@@ -703,24 +742,6 @@ public class ColumnPrivilege {
             return VALUE_RETURNING_WINDOWS.contains(name.toLowerCase(java.util.Locale.ROOT));
         }
 
-        private void applyHavingPredicate(LogicalAggregationOperator agg) {
-            ScalarOperator predicate = agg.getPredicate();
-            if (predicate == null) {
-                return;
-            }
-            Map<ColumnRefOperator, CallOperator> aggregations = agg.getAggregations();
-            for (ColumnRefOperator ref : Utils.extractColumnRef(predicate)) {
-                CallOperator aggCall = aggregations.get(ref);
-                if (aggCall != null) {
-                    // ref names an aggregate output — resolve to its arg columns
-                    applyRole(aggCall, ColumnAccessKind.FILTER);
-                } else {
-                    // direct grouping-key ref or other passthrough column
-                    applyRoleByRef(ref, ColumnAccessKind.FILTER);
-                }
-            }
-        }
-
         private void applyRole(ScalarOperator expr, ColumnAccessKind role) {
             if (expr == null) {
                 return;
@@ -731,7 +752,7 @@ public class ColumnPrivilege {
         }
 
         private void applyRoleByRef(ColumnRefOperator ref, ColumnAccessKind role) {
-            Set<BaseColumn> bases = refToBases.get(ref);
+            Set<BaseColumn> bases = (role == ColumnAccessKind.PROJECTION ? refToVisibleBases : refToBases).get(ref);
             if (bases == null) {
                 return;
             }
