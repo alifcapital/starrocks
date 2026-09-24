@@ -339,6 +339,62 @@ bool date::from_string_to_date(const char* date_str, size_t len, int* year, int*
 }
 
 #ifdef __SSE4_1__
+// Parses fixed-width timestamps without reading beyond the input buffer.
+// Unsupported formats are handled by the general parsing path.
+enum class FixedDatetimeParseResult { UNSUPPORTED, INVALID, VALID };
+
+inline FixedDatetimeParseResult parse_fixed_datetime(const char* p, size_t len, date::ToDatetimeResult* res) {
+    if (len != 19 && len != 26 && len != 27) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+    if (p[4] != '-' || p[7] != '-' || (p[10] != 'T' && p[10] != ' ') || p[13] != ':' || p[16] != ':' ||
+        (len != 19 && p[19] != '.') || (len == 27 && p[26] != 'Z')) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+
+    const __m128i zero = _mm_set1_epi8('0');
+    const __m128i nine = _mm_set1_epi8(9);
+    const __m128i tens = _mm_set1_epi16(0x010a);
+    const __m128i date_bytes = _mm_sub_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)), zero);
+    const __m128i time_input = len == 19 ? _mm_slli_si128(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p + 11)), 1)
+                                         : _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 10));
+    const __m128i time_bytes = _mm_sub_epi8(time_input, zero);
+    const __m128i date_digits =
+            _mm_shuffle_epi8(date_bytes, _mm_setr_epi8(0, 1, 2, 3, 5, 6, 8, 9, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i time_digits =
+            _mm_shuffle_epi8(time_bytes, _mm_setr_epi8(1, 2, 4, 5, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i digits = _mm_unpacklo_epi64(date_digits, time_digits);
+    const __m128i fraction_digits =
+            len == 19 ? _mm_setzero_si128()
+                      : _mm_shuffle_epi8(time_bytes,
+                                         _mm_setr_epi8(-1, -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i all_digits = _mm_max_epu8(digits, fraction_digits);
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(all_digits, nine), all_digits)) != 0xffff) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+
+    // Each 16-bit lane holds a two-digit number: YY, YY, MM, DD, hh, mm, ss, 00.
+    const __m128i pairs = _mm_maddubs_epi16(digits, tens);
+    const __m128i limits = _mm_setr_epi16(99, 99, 12, 31, 23, 59, 59, 0);
+    if (_mm_movemask_epi8(_mm_cmpgt_epi16(pairs, limits)) != 0) {
+        return FixedDatetimeParseResult::INVALID;
+    }
+    const int year = _mm_extract_epi16(pairs, 0) * 100 + _mm_extract_epi16(pairs, 1);
+    const int month = _mm_extract_epi16(pairs, 2);
+    const int day = _mm_extract_epi16(pairs, 3);
+    if (month == 0 || day == 0 || day > DAYS_IN_MONTH[date::is_leap(year)][month]) {
+        return FixedDatetimeParseResult::INVALID;
+    }
+    const int hour = _mm_extract_epi16(pairs, 4);
+    const int minute = _mm_extract_epi16(pairs, 5);
+    const int second = _mm_extract_epi16(pairs, 6);
+    const __m128i fraction_pairs = _mm_maddubs_epi16(fraction_digits, tens);
+    const __m128i quads = _mm_madd_epi16(fraction_pairs, _mm_set1_epi32(0x00010064));
+    const int microsecond = _mm_cvtsi128_si32(quads) * 10000 + _mm_extract_epi32(quads, 1);
+    *res = {year, month, day, hour, minute, second, microsecond};
+    return FixedDatetimeParseResult::VALID;
+}
+
 inline __m128i load_xmm_safe(const char* p) {
 #ifndef ADDRESS_SANITIZER
     constexpr uintptr_t PAGE_MASK = 4096 - 1;
@@ -366,6 +422,12 @@ inline __m128i load_xmm_safe(const char* p) {
 //     is_only_date is true if the date_str only contains date part.
 //         hour, minute, second, and microsecond of res will be undefined if is_only_date is true.
 std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t len, ToDatetimeResult* res) {
+#ifdef __SSE4_1__
+    const auto parsed = parse_fixed_datetime(date_str, len, res);
+    if (parsed != FixedDatetimeParseResult::UNSUPPORTED) {
+        return {parsed == FixedDatetimeParseResult::VALID, false};
+    }
+#endif
     auto& [year, month, day, hour, minute, second, microsecond] = *res;
 
     // Reset result values

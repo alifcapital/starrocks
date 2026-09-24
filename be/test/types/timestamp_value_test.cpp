@@ -15,6 +15,10 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstring>
+#include <memory>
+
 #define private public
 
 #include "types/date_value.h"
@@ -162,6 +166,59 @@ TEST(TimestampValueTest, from_date_format_str_rejects_zero_day_or_month) {
     const char* dt_fmt = "%Y-%m-%d %H:%i:%s";
     ASSERT_FALSE(ts2.from_datetime_format_str("0000-01-00 00:00:00", 19, dt_fmt));
     ASSERT_TRUE(ts2.from_datetime_format_str("2020-01-01 00:00:00", 19, dt_fmt));
+}
+
+TEST(TimestampValueTest, fixed_datetime_simd) {
+    for (int i = 0; i < 1000; ++i) {
+        const int year = 1900 + i % 200;
+        const int month = 1 + i % 12;
+        const int day = 1 + i % 28;
+        const int hour = i % 24;
+        const int minute = (i * 7) % 60;
+        const int second = (i * 13) % 60;
+        const int usec = (i * 971) % 1000000;
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%06dZ", year, month, day, hour, minute, second,
+                 usec);
+        for (size_t length : {19, 26, 27}) {
+            for (char separator : {'T', ' '}) {
+                buffer[10] = separator;
+                // An exact allocation makes SIMD overreads visible to ASAN.
+                auto input = std::make_unique<char[]>(length);
+                memcpy(input.get(), buffer, length);
+                TimestampValue value;
+                ASSERT_TRUE(value.from_string(input.get(), length));
+                const auto expected =
+                        TimestampValue::create(year, month, day, hour, minute, second, length == 19 ? 0 : usec);
+                ASSERT_EQ(expected.timestamp(), value.timestamp());
+            }
+        }
+    }
+}
+
+TEST(TimestampValueTest, fixed_datetime_compatibility) {
+    const std::pair<std::string, std::string> cases[] = {
+            {"2026-09-22T17:26:26.679658Z", "2026-09-22 17:26:26.679658"},
+            {"2023-12-25 12", "2023-12-25 12:00:00"},
+            {"2023-12-25 12:34", "2023-12-25 12:34:00"},
+            {"2026-09-22T17:26:26.1Z", "2026-09-22 17:26:26.100000"},
+            {"2026-09-22T17:26:26.123Z", "2026-09-22 17:26:26.123000"},
+            {"2026-09-22T17:26:26.1234567Z", "2026-09-22 17:26:26.123456"},
+            {" 2026-09-22T17:26:26.679658Z\t", "2026-09-22 17:26:26.679658"},
+            {"2026/09/22 17:26:26", "2026-09-22 17:26:26"},
+            {"2000-02-29T23:59:59.999999Z", "2000-02-29 23:59:59.999999"},
+    };
+    for (const auto& [input, expected] : cases) {
+        TimestampValue value;
+        ASSERT_TRUE(value.from_string(input.data(), input.size())) << input;
+        ASSERT_EQ(expected, value.to_string()) << input;
+    }
+    for (std::string input :
+         {"2024-01-01 01:61:00", "2024-01-01 24:00:00", "2024-01-01 00:00:60", "1900-02-29T00:00:00.000000Z",
+          "2026-00-22T17:26:26.679658Z", "2026-09-00T17:26:26.679658Z", "2026-09-31T17:26:26.679658Z"}) {
+        TimestampValue value;
+        ASSERT_FALSE(value.from_string(input.data(), input.size())) << input;
+    }
 }
 
 } // namespace starrocks
