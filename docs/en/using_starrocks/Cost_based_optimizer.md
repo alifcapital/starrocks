@@ -203,6 +203,7 @@ The following table describes the default settings. If you need to modify them, 
 | statistic_auto_collect_small_table_size     | LONG    | 5368709120   | The threshold for determining whether a table is a small table for automatic full collection. A table whose size is greater than this value is considered a large table, whereas a table whose size is less than or equal to this value is considered a small table. Unit: Byte. Default value: 5368709120 (5 GB).                         |
 | statistic_auto_collect_small_table_interval | LONG    | 0         | The interval for automatically collecting full statistics of small tables. Unit: seconds.                              |
 | statistic_auto_collect_large_table_interval | LONG    | 43200        | The interval for automatically collecting full statistics of large tables. Unit: seconds. Default value: 43200 (12 hours).                               |
+| enable_statistic_auto_collect_staggered_schedule | BOOLEAN | FALSE | Spread existing and new automatic collection jobs by table within the interval and daily analyze window; applies to native/external tables and database-wide jobs. |
 | statistic_auto_collect_ratio          | FLOAT    | 0.8               | The threshold for determining  whether the statistics for automatic collection are healthy. If statistics health is below this threshold, automatic collection is triggered. |
 | statistic_auto_collect_sample_threshold  | DOUBLE | 0.3   | The statistics health threshold for triggering automatic sampled collection. If the health value of statistics is lower than this threshold, automatic sampled collection is triggered. |
 | statistic_max_full_collect_data_size | LONG      | 107374182400      | The data size of the partitions for automatic collection to collect data. Unit: Byte. Default value: 107374182400 (100 GB). If the data size exceeds this value, full collection is discarded and sampled collection is performed instead. |
@@ -895,6 +896,21 @@ PROPERTIES ("statistic_auto_collect_interval" = "5");
 
 Query OK, 0 rows affected (0.01 sec)
 ```
+
+#### Spread automatic collection across the interval
+
+Set `enable_statistic_auto_collect_staggered_schedule=true` to distribute automatic collection by **table** within the configured collection interval and daily analyze window. The default is `false`.
+
+For example, with a 604800-second interval and an analyze window of 01:00–05:00, tables receive different weekday/time slots inside those seven nightly windows. This applies to existing jobs as well as new jobs, including native and external tables and jobs covering a database or all databases. Recreating existing jobs is unnecessary.
+
+- The first scheduler pass assigns slots **before collecting**. With a weekly interval, each table's first slot is within the coming week, not one week after its old due date. The collector initializes existing schedules even outside the nightly window when the option is first enabled; collection itself remains restricted to that window.
+- Slots are derived from stable job/table identities and the interval. A successful collection or a check that finds no eligible changes advances to the next calendar slot, rather than one interval after completion. Delayed completion therefore does not shift all jobs to the same phase.
+- Future deadlines survive metadata replay. Missed deadlines after restart or outside an expired collection window are moved to future calendar slots, rather than drained as a catch-up batch. With a weekly interval, these replacement slots are within the next week. A failed collection can retry in the same open window; it does not consume a successful collection slot.
+- Scheduling uses the same time zone and daily window as the auto collector, including windows crossing midnight. One polling interval is reserved before closing (at most half a short window), reducing deadlines that a normal collector pass could not reach.
+- The interval comes from `statistic_auto_collect_interval` when set. Otherwise the existing small/large table or histogram interval applies. A non-positive interval retains the legacy behavior. For external tables without row-count statistics, the existing default is the small-table interval; set an explicit interval to schedule their first collection.
+- New columns and tables without statistics also wait for their automatic slot. Manual `ANALYZE TABLE` and query-triggered collection keep their existing behavior and do not advance this schedule.
+
+The distribution spreads **task start times**, not estimated CPU or IO cost. The number of jobs per night is approximate. Collection remains subject to change/health checks, polling frequency, available capacity and FE availability. For intervals shorter than the closed portion of the daily window, the next permitted slot can be more than one interval away. Changing the interval or daily window recalculates future slots.
 
 #### View the status of an automatic collection task
 

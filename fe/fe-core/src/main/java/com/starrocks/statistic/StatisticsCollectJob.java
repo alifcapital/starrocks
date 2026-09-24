@@ -85,6 +85,18 @@ public abstract class StatisticsCollectJob {
     // partition_id -> tablet_id -> row_count
     protected com.google.common.collect.Table<Long, Long, Long> partitionTabletRowCounts = HashBasedTable.create();
 
+    private AutoStatisticsSchedule.Attempt collectScheduleAttempt;
+
+    void setCollectScheduleAttempt(AutoStatisticsSchedule.Attempt attempt) {
+        collectScheduleAttempt = attempt;
+    }
+
+    void completeCollectSchedule() {
+        if (collectScheduleAttempt != null) {
+            collectScheduleAttempt.complete(AutoStatisticsSchedule.now());
+        }
+    }
+
     protected StatisticsCollectJob(Database db, Table table, List<String> columnNames,
                                    StatsConstants.AnalyzeType analyzeType, StatsConstants.ScheduleType scheduleType,
                                    Map<String, String> properties) {

@@ -252,6 +252,100 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
     }
 
     @Test
+    public void testStaggeredDatabaseJobsScheduleEachTableBeforeFirstCollection() {
+        boolean oldEnabled = Config.enable_statistic_auto_collect_staggered_schedule;
+        String oldStart = Config.statistic_auto_analyze_start_time;
+        String oldEnd = Config.statistic_auto_analyze_end_time;
+        LocalDateTime[] now = {LocalDateTime.of(2026, 9, 25, 12, 0)};
+        new MockUp<AutoStatisticsSchedule>() {
+            @Mock
+            public LocalDateTime now() {
+                return now[0];
+            }
+        };
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public void updateAnalyzeJobWithLog(AnalyzeJob job) {
+            }
+
+            @Mock
+            public Map<AnalyzeMgr.StatsMetaKey, ExternalBasicStatsMeta> getExternalBasicStatsMetaMap() {
+                return Maps.newHashMap();
+            }
+
+            @Mock
+            public BasicStatsMeta getTableBasicStatsMeta(long tableId) {
+                return null;
+            }
+        };
+        try {
+            Config.enable_statistic_auto_collect_staggered_schedule = true;
+            Config.statistic_auto_analyze_start_time = "01:00:00";
+            Config.statistic_auto_analyze_end_time = "05:00:00";
+            Map<String, String> properties = Map.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "604800");
+            Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb("test");
+            NativeAnalyzeJob nativeJob = new NativeAnalyzeJob(db.getId(), StatsConstants.DEFAULT_ALL_ID, null, null,
+                    StatsConstants.AnalyzeType.SAMPLE, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            nativeJob.setId(101);
+            Assertions.assertTrue(nativeJob.instantiateJobs().isEmpty());
+            String key0 = "101:" + db.getFullName() + ":" + db.getTable("t0_stats").getUUID();
+            String key1 = "101:" + db.getFullName() + ":" + db.getTable("t1_stats").getUUID();
+            LocalDateTime slot0 = nativeJob.getCollectSchedule().getNext(key0);
+            LocalDateTime slot1 = nativeJob.getCollectSchedule().getNext(key1);
+            Assertions.assertNotNull(slot0);
+            Assertions.assertNotNull(slot1);
+            Assertions.assertNotEquals(slot0, slot1);
+            now[0] = slot0;
+            List<StatisticsCollectJob> due = nativeJob.instantiateJobs();
+            StatisticsCollectJob first = due.stream().filter(j -> j.getTable().getId() == t0StatsTableId)
+                    .findFirst().orElseThrow();
+            first.completeCollectSchedule();
+            Assertions.assertEquals(slot0.plusWeeks(1), nativeJob.getCollectSchedule().getNext(key0));
+
+            now[0] = LocalDateTime.of(2026, 9, 25, 12, 0);
+            ExternalAnalyzeJob externalJob = new ExternalAnalyzeJob("hive0", "partitioned_db", null, null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            externalJob.setId(102);
+            Assertions.assertTrue(externalJob.instantiateJobs().isEmpty());
+            Database externalDb = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                    .getDb(connectContext, "hive0", "partitioned_db");
+            Table externalTable = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                    .getTable(connectContext, "hive0", "partitioned_db", "t1");
+            String externalKey = "102:" + externalDb.getFullName() + ":" + externalTable.getUUID();
+            LocalDateTime externalSlot = externalJob.getCollectSchedule().getNext(externalKey);
+            Assertions.assertNotNull(externalSlot);
+            Assertions.assertFalse(externalSlot.isAfter(now[0].plusWeeks(1)));
+            now[0] = externalSlot;
+            StatisticsCollectJob externalRun = externalJob.instantiateJobs().stream()
+                    .filter(j -> j.getTable().getUUID().equals(externalTable.getUUID())).findFirst().orElseThrow();
+            externalRun.completeCollectSchedule();
+            Assertions.assertEquals(externalSlot.plusWeeks(1), externalJob.getCollectSchedule().getNext(externalKey));
+
+            now[0] = LocalDateTime.of(2026, 9, 25, 12, 0);
+            NativeAnalyzeJob allNative = new NativeAnalyzeJob(StatsConstants.DEFAULT_ALL_ID, StatsConstants.DEFAULT_ALL_ID,
+                    null, null, StatsConstants.AnalyzeType.SAMPLE, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            allNative.setId(103);
+            Assertions.assertTrue(allNative.instantiateJobs().isEmpty());
+            Assertions.assertNotNull(allNative.getCollectSchedule().getNext(
+                    "103:" + db.getFullName() + ":" + db.getTable("t0_stats").getUUID()));
+            ExternalAnalyzeJob allExternal = new ExternalAnalyzeJob("hive0", null, null, null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            allExternal.setId(104);
+            Assertions.assertTrue(allExternal.instantiateJobs().isEmpty());
+            Assertions.assertNotNull(allExternal.getCollectSchedule().getNext(
+                    "104:" + externalDb.getFullName() + ":" + externalTable.getUUID()));
+        } finally {
+            Config.enable_statistic_auto_collect_staggered_schedule = oldEnabled;
+            Config.statistic_auto_analyze_start_time = oldStart;
+            Config.statistic_auto_analyze_end_time = oldEnd;
+        }
+    }
+
+    @Test
     public void testAnalyzeALLDB() {
         List<StatisticsCollectJob> jobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(
                 new NativeAnalyzeJob(StatsConstants.DEFAULT_ALL_ID, StatsConstants.DEFAULT_ALL_ID, null, null,

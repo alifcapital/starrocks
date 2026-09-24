@@ -61,6 +61,8 @@ public interface AnalyzeJob {
 
     boolean isAnalyzeAllTable();
 
+    AutoStatisticsSchedule getCollectSchedule();
+
     List<StatisticsCollectJob> instantiateJobs();
 
     default void run(ConnectContext statsConnectContext, StatisticExecutor statisticExecutor) {
