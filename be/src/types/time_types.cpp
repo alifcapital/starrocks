@@ -234,10 +234,10 @@ bool date::from_string(const char* date_str, size_t len, int* year, int* month, 
         bool scan_to_delim = (!is_interval_format) && (field_idx != 6);
         while (ptr < end && isdigit(*ptr) && (scan_to_delim || field_len--)) {
             temp_val = temp_val * 10 + (*ptr++ - '0');
-        }
-        // Imposible
-        if (temp_val > 999999L) {
-            return false;
+            // Bound each step so the next multiply cannot overflow on a long numeric field.
+            if (temp_val > 999999) {
+                return false;
+            }
         }
         date_val[field_idx] = temp_val;
         date_len[field_idx] = ptr - start;

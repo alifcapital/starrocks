@@ -27,6 +27,31 @@
 
 namespace starrocks {
 
+TEST(TimestampValueTest, numeric_field_overflow) {
+    // Values that used to wrap to a valid date/time component in a 32-bit accumulator.
+    const std::vector<std::string> invalid = {"4294969322-09-22",
+                                              "2026-4294967305-22",
+                                              "2026-09-4294967318",
+                                              "2026-09-22 4294967313:26:26",
+                                              "2026-09-22 17:4294967322:26",
+                                              "2026-09-22 17:26:4294967322",
+                                              "2147483648-01-01",
+                                              std::string(100, '9') + "-01-01"};
+    for (const auto& text : invalid) {
+        SCOPED_TRACE(text);
+        date::ToDatetimeResult result;
+        EXPECT_FALSE(date::from_string(text.data(), text.size(), &result.year, &result.month, &result.day, &result.hour,
+                                       &result.minute, &result.second, &result.microsecond));
+        TimestampValue timestamp;
+        EXPECT_FALSE(timestamp.from_string(text.data(), text.size()));
+    }
+    // Leading zeroes are accepted; the bound applies to the value, not the field width.
+    const std::string padded = "0000000000002026-00000009-00000022 00000017:00000026:00000026.123456";
+    TimestampValue timestamp;
+    ASSERT_TRUE(timestamp.from_string(padded.data(), padded.size()));
+    EXPECT_EQ("2026-09-22 17:26:26.123456", timestamp.to_string());
+}
+
 TEST(TimestampValueTest, normal) {
     LOG(INFO) << "MAX: " << timestamp::from_julian_and_time(date::MAX_DATE, 86400 * USECS_PER_SEC - 1);
     LOG(INFO) << "MIN: " << timestamp::from_julian_and_time(date::MIN_DATE, 0);
