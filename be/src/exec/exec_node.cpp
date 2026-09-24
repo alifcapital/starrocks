@@ -764,8 +764,10 @@ StatusOr<size_t> ExecNode::eval_conjuncts_into_filter(const std::vector<ExprCont
     if (chunk->num_rows() == 0) {
         return 0;
     }
+    ExprContext::DatetimeCastCache cast_cache;
     for (auto* ctx : ctxs) {
-        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk, filter->data()))
+        // This loop only updates the selection mask; input columns remain unchanged.
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate_with_cast_cache(chunk, filter->data(), &cast_cache))
         size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {

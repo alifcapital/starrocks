@@ -47,6 +47,7 @@
 #include "exprs/expr.h"
 #include "runtime/mem_pool.h"
 #include "runtime/runtime_state.h"
+#include "util/defer_op.h"
 
 namespace starrocks {
 
@@ -158,6 +159,26 @@ std::string ExprContext::get_error_msg() const {
         }
     }
     return "";
+}
+
+StatusOr<ColumnPtr> ExprContext::evaluate_with_cast_cache(Chunk* chunk, uint8_t* filter, DatetimeCastCache* cache) {
+    // Restrict sharing to ordinary comparisons. More complex expressions can evaluate
+    // their children on temporary or filtered chunks.
+    const auto is_slot_cast = [](const Expr* expr) {
+        return expr->is_cast_expr() && expr->get_num_children() == 1 && expr->get_child(0)->is_slotref();
+    };
+    const bool comparison = _root->node_type() == TExprNodeType::BINARY_PRED && _root->get_num_children() == 2;
+    const bool cast_comparison =
+            comparison && ((is_slot_cast(_root->get_child(0)) && _root->get_child(1)->is_constant()) ||
+                           (is_slot_cast(_root->get_child(1)) && _root->get_child(0)->is_constant()));
+    if (!cast_comparison) {
+        *cache = {};
+        return evaluate(chunk, filter);
+    }
+    auto* previous = _datetime_cast_cache;
+    _datetime_cast_cache = cache;
+    DeferOp restore([&] { _datetime_cast_cache = previous; });
+    return evaluate(chunk, filter);
 }
 
 StatusOr<ColumnPtr> ExprContext::evaluate(Chunk* chunk, uint8_t* filter) {

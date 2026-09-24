@@ -20,12 +20,17 @@
 #include <limits>
 
 #include "butil/time.h"
+#include "column/column_builder.h"
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
 #include "column/type_traits.h"
 #include "column/variant_column.h"
 #include "column/vectorized_fwd.h"
+#include "exec/exec_node.h"
+#include "exprs/binary_predicate.h"
+#include "exprs/column_ref.h"
 #include "exprs/exprs_test_helper.h"
+#include "exprs/literal.h"
 #include "exprs/mock_vectorized_expr.h"
 #include "gen_cpp/Exprs_types.h"
 #include "gen_cpp/Types_types.h"
@@ -56,6 +61,133 @@ public:
     RuntimeState runtime_state;
     TExprNode expr_node;
 };
+
+class DatetimeCastReuseTest : public ::testing::Test {
+protected:
+    ExprContext* comparison(TExprOpcode::type op, const TimestampValue& bound, bool strict = false, SlotId slot = 1,
+                            Expr* source = nullptr) {
+        auto* ref = source != nullptr ? source : pool.add(new ColumnRef(TypeDescriptor(TYPE_VARCHAR), slot));
+        auto* cast = VectorizedCastExprFactory::from_type(TypeDescriptor(TYPE_VARCHAR), TypeDescriptor(TYPE_DATETIME),
+                                                          ref, &pool, strict);
+        auto* literal = pool.add(new VectorizedLiteral(ColumnHelper::create_const_column<TYPE_DATETIME>(bound, 1),
+                                                       TypeDescriptor(TYPE_DATETIME)));
+        TExprNode node;
+        node.__set_node_type(TExprNodeType::BINARY_PRED);
+        node.__set_opcode(op);
+        node.__set_child_type(TPrimitiveType::DATETIME);
+        node.__set_type(gen_type_desc(TPrimitiveType::BOOLEAN));
+        node.__set_num_children(2);
+        auto* predicate = pool.add(VectorizedBinaryPredicateFactory::from_thrift(node));
+        predicate->add_child(cast);
+        predicate->add_child(literal);
+        auto* context = pool.add(new ExprContext(predicate));
+        EXPECT_TRUE(context->prepare(&state).ok());
+        EXPECT_TRUE(context->open(&state).ok());
+        contexts.push_back(context);
+        return context;
+    }
+    void TearDown() override {
+        for (auto* context : contexts) context->close(&state);
+    }
+    RuntimeState state;
+    ObjectPool pool;
+    std::vector<ExprContext*> contexts;
+};
+
+TEST_F(DatetimeCastReuseTest, ShareNullableResultAndKeepErrorPolicy) {
+    ColumnBuilder<TYPE_VARCHAR> builder(3);
+    builder.append(Slice("2026-09-22 12:00:00"));
+    builder.append(Slice("invalid"));
+    builder.append_null();
+    Chunk chunk;
+    chunk.append_column(builder.build(false), 1);
+    auto* lower = comparison(TExprOpcode::GE, TimestampValue::create(2026, 3, 23, 0, 0, 0));
+    auto* upper = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0));
+    auto* strict = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0), true);
+    ExprContext::DatetimeCastCache cache;
+    Filter filter(3, 1);
+    auto first = lower->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    ASSERT_TRUE(first.ok());
+    auto saved = cache.result;
+    ASSERT_NE(nullptr, saved);
+    EXPECT_EQ(2, ColumnHelper::count_nulls(saved));
+    auto second = upper->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    ASSERT_TRUE(second.ok());
+    EXPECT_EQ(saved.get(), cache.result.get());
+    Filter selected(3, 1);
+    ColumnHelper::merge_two_filters(second.value(), &selected);
+    EXPECT_EQ((Filter{1, 0, 0}), selected);
+    EXPECT_EQ(2, ColumnHelper::count_nulls(cache.result));
+    EXPECT_EQ(nullptr, lower->datetime_cast_cache());
+    EXPECT_EQ(nullptr, upper->datetime_cast_cache());
+    auto error = strict->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    EXPECT_FALSE(error.ok());
+    EXPECT_EQ(nullptr, strict->datetime_cast_cache());
+
+    // A different input column must be parsed even within the same evaluation scope.
+    ColumnBuilder<TYPE_VARCHAR> other(3);
+    other.append(Slice("2000-01-01"));
+    other.append(Slice("2000-01-01"));
+    other.append(Slice("2000-01-01"));
+    Chunk other_chunk;
+    other_chunk.append_column(other.build(false), 1);
+    ASSERT_TRUE(lower->evaluate_with_cast_cache(&other_chunk, filter.data(), &cache).ok());
+    EXPECT_NE(saved.get(), cache.result.get());
+    EXPECT_EQ(0, ColumnHelper::count_nulls(cache.result));
+}
+
+TEST_F(DatetimeCastReuseTest, ComplexCastClearsCache) {
+    auto input = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("2026-09-22"), 2);
+    Chunk chunk;
+    chunk.append_column(input, 1);
+    auto bound = TimestampValue::create(2026, 3, 23, 0, 0, 0);
+    auto* direct = comparison(TExprOpcode::GE, bound);
+    auto* computed =
+            comparison(TExprOpcode::GE, bound, false, 1, pool.add(new MockExpr(TypeDescriptor(TYPE_VARCHAR), input)));
+    ExprContext::DatetimeCastCache cache;
+    Filter filter(2, 1);
+    ASSERT_TRUE(direct->evaluate_with_cast_cache(&chunk, filter.data(), &cache).ok());
+    ASSERT_NE(nullptr, cache.result);
+    ASSERT_TRUE(computed->evaluate_with_cast_cache(&chunk, filter.data(), &cache).ok());
+    EXPECT_EQ(nullptr, cache.input);
+    EXPECT_EQ(nullptr, cache.result);
+    EXPECT_EQ(nullptr, computed->datetime_cast_cache());
+}
+
+TEST_F(DatetimeCastReuseTest, ConjunctScopeAndShortCircuit) {
+    auto* lower = comparison(TExprOpcode::GE, TimestampValue::create(2026, 3, 23, 0, 0, 0));
+    auto* upper = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0));
+    auto* strict_other = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0), true, 2);
+    auto input = BinaryColumn::create();
+    input->append(Slice("2026-09-22 12:00:00"));
+    input->append(Slice("2026-10-01 12:00:00"));
+    Chunk chunk;
+    chunk.append_column(input, 1);
+    chunk.append_column(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("invalid"), 2), 2);
+    Filter filter(2, 1);
+    auto rows = ExecNode::eval_conjuncts_into_filter({lower, upper}, &chunk, &filter);
+    ASSERT_TRUE(rows.ok());
+    EXPECT_EQ(1, rows.value());
+    EXPECT_EQ((Filter{1, 0}), filter);
+    EXPECT_EQ(nullptr, lower->datetime_cast_cache());
+
+    // Reusing the same chunk and column address must not reuse the previous batch's result.
+    input->reset_column();
+    input->append(Slice("2000-01-01"));
+    input->append(Slice("2000-01-02"));
+    filter.assign(2, 1);
+    rows = ExecNode::eval_conjuncts_into_filter({lower, strict_other}, &chunk, &filter);
+    ASSERT_TRUE(rows.ok());
+    EXPECT_EQ(0, rows.value()); // The strict cast is not evaluated after full rejection.
+
+    input->reset_column();
+    input->append(Slice("2026-09-22"));
+    input->append(Slice("2000-01-01"));
+    filter.assign(2, 1);
+    rows = ExecNode::eval_conjuncts_into_filter({lower, strict_other}, &chunk, &filter);
+    EXPECT_FALSE(rows.ok());
+    EXPECT_EQ(nullptr, strict_other->datetime_cast_cache());
+}
 
 TEST_F(VectorizedCastExprTest, IntCastToDate) {
     expr_node.child_type = TPrimitiveType::INT;
