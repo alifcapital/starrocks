@@ -106,10 +106,6 @@ bool TimestampValue::from_string(const char* date_str, size_t len) {
         return false;
     }
 
-    if (!is_only_date && !timestamp::check_time(res.hour, res.minute, res.second, res.microsecond)) {
-        return false;
-    }
-
     // The from_string_to_datetime function already validates parsed values
     // in both SIMD and generic parsing paths, so no need for redundant checks
     _timestamp = is_only_date ? timestamp::from_datetime(res.year, res.month, res.day, 0, 0, 0, 0)

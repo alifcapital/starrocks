@@ -14,6 +14,8 @@
 
 #include <benchmark/benchmark.h>
 
+#include <cstdio>
+
 #include "column/binary_column.h"
 #include "column/column_helper.h"
 #include "runtime/time_types.h"
@@ -123,6 +125,31 @@ static void BM_TimestampValue_FromString_Batch(benchmark::State& state) {
 
     state.SetItemsProcessed(items_processed);
 }
+
+static void BM_TimestampValue_FromString_Fraction(benchmark::State& state) {
+    std::vector<std::string> rows;
+    for (int i = 0; i < 1024; ++i) {
+        char value[32];
+        snprintf(value, sizeof(value), "2026-%02d-%02dT%02d:%02d:%02d.%06dZ", 1 + i % 12, 1 + i % 28, i % 24, i % 60,
+                 (i * 7) % 60, (i * 971) % 1000000);
+        std::string input(value, state.range(0));
+        if (state.range(0) == 23) {
+            input += 'Z';
+        }
+        rows.emplace_back(std::move(input));
+    }
+    for (auto _ : state) {
+        for (const auto& input : rows) {
+            TimestampValue value;
+            bool success = value.from_string(input.data(), input.size());
+            benchmark::DoNotOptimize(success);
+            benchmark::DoNotOptimize(value);
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * rows.size());
+}
+
+BENCHMARK(BM_TimestampValue_FromString_Fraction)->Arg(19)->Arg(23)->Arg(26)->Arg(27);
 
 BENCHMARK(BM_TimestampValue_FromString_Date);
 BENCHMARK(BM_TimestampValue_FromString_Datetime_Space);
