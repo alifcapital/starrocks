@@ -99,22 +99,6 @@ int64_t TimestampValue::diff_microsecond(TimestampValue other) const {
            (timestamp::to_time(_timestamp) - timestamp::to_time(other._timestamp));
 }
 
-bool TimestampValue::from_string(const char* date_str, size_t len) {
-    date::ToDatetimeResult res;
-    const auto [is_valid, is_only_date] = date::from_string_to_datetime(date_str, len, &res);
-    if (!is_valid) {
-        return false;
-    }
-
-    // The from_string_to_datetime function already validates parsed values
-    // in both SIMD and generic parsing paths, so no need for redundant checks
-    _timestamp = is_only_date ? timestamp::from_datetime(res.year, res.month, res.day, 0, 0, 0, 0)
-                              : timestamp::from_datetime(res.year, res.month, res.day, res.hour, res.minute, res.second,
-                                                         res.microsecond);
-
-    return true;
-}
-
 // process string content based on format like "%Y-%m-%d". '-' means any char.
 // string content must match digit parts and chats parts.
 bool TimestampValue::from_date_format_str(const char* value, int value_len, const char* str_format) {

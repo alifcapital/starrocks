@@ -210,4 +210,22 @@ TEST(TimestampValueTest, fixed_datetime_compatibility) {
     }
 }
 
+TEST(TimestampValueTest, fixed_datetime_date_cache_boundaries) {
+    for (int year : {0, 1, 1582, 1900, 1989, 1990, 2000, 2049, 2050, 9999}) {
+        for (int month = 1; month <= 12; ++month) {
+            for (int day : {1, static_cast<int>(DAYS_IN_MONTH[date::is_leap(year)][month])}) {
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT23:59:59.999999Z", year, month, day);
+                for (size_t length : {19, 26, 27}) {
+                    TimestampValue value;
+                    ASSERT_TRUE(value.from_string(buffer, length));
+                    const auto expected =
+                            TimestampValue::create(year, month, day, 23, 59, 59, length == 19 ? 0 : 999999);
+                    ASSERT_EQ(expected.timestamp(), value.timestamp()) << std::string(buffer, length);
+                }
+            }
+        }
+    }
+}
+
 } // namespace starrocks
