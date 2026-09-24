@@ -109,6 +109,10 @@ set(EXPR_FILES
   runtime_filter_layout.cpp
   dictionary_get_expr.cpp
   ngram.cpp
+  levenshtein.cpp
+  levenshtein_tj.cpp
+  norm_tj.cpp
+  lat_to_cyr.cpp
   match_expr.cpp
   bit_functions.cpp
   hash_functions.cpp
@@ -125,3 +129,7 @@ if(STARROCKS_JIT_ENABLE)
 endif()
 
 ADD_BE_LIB(Exprs ${EXPR_FILES})
+
+# StringZillas CPU similarity headers use include paths relative to the vendored root.
+set_source_files_properties(levenshtein.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/thirdparty")
