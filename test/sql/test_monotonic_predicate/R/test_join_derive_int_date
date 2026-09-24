@@ -1,0 +1,144 @@
+-- name: test_join_derive_int_date
+create database db_${uuid0};
+-- result:
+-- !result
+use db_${uuid0};
+-- result:
+-- !result
+select cast(10000101 as date), cast(20260630 as date), cast(99991231 as date);
+-- result:
+1000-01-01	2026-06-30	9999-12-31
+-- !result
+select cast(101 as date), cast(690315 as date), cast(691231 as date), cast(700101 as date), cast(700520 as date), cast(991231 as date);
+-- result:
+2000-01-01	2069-03-15	2069-12-31	1970-01-01	1970-05-20	1999-12-31
+-- !result
+select cast(100 as date), cast(9991231 as date), cast(20240732 as date), cast(20261301 as date), cast(99991232 as date);
+-- result:
+None	None	None	None	None
+-- !result
+select cast(101000000 as date);
+-- result:
+2000-01-01
+-- !result
+create table fact_month (id bigint not null, dmonth date not null, v bigint null)
+duplicate key(id, dmonth)
+partition by range(dmonth) (
+ partition p202401 values [('2024-01-01'), ('2024-02-01')),
+ partition p202402 values [('2024-02-01'), ('2024-03-01')),
+ partition p202403 values [('2024-03-01'), ('2024-04-01')),
+ partition p202404 values [('2024-04-01'), ('2024-05-01')),
+ partition p202405 values [('2024-05-01'), ('2024-06-01')),
+ partition p202406 values [('2024-06-01'), ('2024-07-01')),
+ partition p202407 values [('2024-07-01'), ('2024-08-01')),
+ partition p202408 values [('2024-08-01'), ('2024-09-01')))
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into fact_month values (1,'2024-01-01',1),(3,'2024-03-01',1),(4,'2024-03-01',2),(5,'2024-04-01',1),(6,'2024-05-01',1),(7,'2024-07-01',1);
+-- result:
+-- !result
+create table event_dates_int (id bigint not null, datadate int not null)
+duplicate key(id, datadate)
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into event_dates_int values (1,20240115),(3,20240310),(4,20240320),(5,20240405),(6,20240515),(7,20240732);
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 20240305 and 20240410 order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 20240305 and 20240410 order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+function: assert_explain_contains("select f.id from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 20240305 and 20240410", 'partitions=2/8')
+-- result:
+None
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 20240305 and 20240801 order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+6	2024-05-01
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 20240305 and 20240801 order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+6	2024-05-01
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+create table fact_any (id bigint not null, datamonth int not null)
+duplicate key(id, datamonth)
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into fact_any values (1,206903),(2,197005),(3,197101);
+-- result:
+-- !result
+create table event_int_legacy (id bigint not null, datadate int not null)
+duplicate key(id, datadate)
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into event_int_legacy values (1,690315),(2,700520),(3,710101);
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.datamonth from fact_any f join event_int_legacy e on f.id = e.id and f.datamonth = date_format(cast(e.datadate as date), '%Y%m') where e.datadate between 690101 and 710101 order by f.id;
+-- result:
+1	206903
+2	197005
+3	197101
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.datamonth from fact_any f join event_int_legacy e on f.id = e.id and f.datamonth = date_format(cast(e.datadate as date), '%Y%m') where e.datadate between 690101 and 710101 order by f.id;
+-- result:
+1	206903
+2	197005
+3	197101
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+function: assert_explain_contains("select f.id from fact_month f join event_dates_int e on f.id = e.id and f.dmonth = date_trunc('month', cast(e.datadate as date)) where e.datadate between 690101 and 20240410", 'partitions=5/8')
+-- result:
+None
+-- !result
+drop database db_${uuid0};
+-- result:
+-- !result

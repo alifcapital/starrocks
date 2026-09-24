@@ -37,8 +37,18 @@ import java.util.Map;
 import java.util.Set;
 
 public class RangeExtractor {
+    private final boolean includeStringRanges;
+
+    public RangeExtractor() {
+        this(false);
+    }
+
+    RangeExtractor(boolean includeStringRanges) {
+        this.includeStringRanges = includeStringRanges;
+    }
+
     public Map<ScalarOperator, ValueDescriptor> apply(ScalarOperator scalarOperator, Void context) {
-        Map<ScalarOperator, ValueDescriptor> values = new RangeValueExtractor().apply(scalarOperator, context);
+        Map<ScalarOperator, ValueDescriptor> values = new RangeValueExtractor(includeStringRanges).apply(scalarOperator, context);
         Map<ScalarOperator, ValueDescriptor> relations =
                 new RangeRelationExtractor(values).apply(scalarOperator, context);
         if (!values.isEmpty() && !relations.isEmpty()) {
@@ -48,6 +58,12 @@ public class RangeExtractor {
     }
 
     private static class RangeValueExtractor extends ScalarOperatorVisitor<Void, Void> {
+        private final boolean includeStringRanges;
+
+        RangeValueExtractor(boolean includeStringRanges) {
+            this.includeStringRanges = includeStringRanges;
+        }
+
         protected Map<ScalarOperator, ValueDescriptor> descMap = Maps.newHashMap();
 
         public Map<ScalarOperator, ValueDescriptor> apply(ScalarOperator scalarOperator, Void context) {
@@ -65,7 +81,8 @@ public class RangeExtractor {
             if (predicate.getChild(1).isConstantRef() && predicate.getBinaryType() != BinaryType.NE
                     && predicate.getBinaryType() != BinaryType.EQ_FOR_NULL) {
 
-                if (predicate.getChild(0).getType().isStringType() && predicate.getBinaryType() != BinaryType.EQ) {
+                if (!includeStringRanges && predicate.getChild(0).getType().isStringType()
+                        && predicate.getBinaryType() != BinaryType.EQ) {
                     return visit(predicate.getChild(0), context);
                 }
                 Preconditions.checkState(!descMap.containsKey(predicate.getChild(0)));
@@ -97,9 +114,9 @@ public class RangeExtractor {
             }
 
             Map<ScalarOperator, ValueDescriptor> leftMap =
-                    new RangeValueExtractor().apply(predicate.getChild(0), context);
+                    new RangeValueExtractor(includeStringRanges).apply(predicate.getChild(0), context);
             Map<ScalarOperator, ValueDescriptor> rightMap =
-                    new RangeValueExtractor().apply(predicate.getChild(1), context);
+                    new RangeValueExtractor(includeStringRanges).apply(predicate.getChild(1), context);
             descMap = mergeValues(predicate.isOr(), leftMap, rightMap);
             return null;
         }

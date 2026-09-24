@@ -24,6 +24,23 @@ import java.util.Map;
 public class SessionVariableTest {
 
     @Test
+    public void testStringDatePredicateDefaultsAndClone() {
+        SessionVariable variables = new SessionVariable();
+        Assertions.assertFalse(variables.isEnableStringDatePredicatePushdown());
+        Assertions.assertEquals("", variables.getStringDatePredicateFormat());
+        variables.setEnableStringDatePredicatePushdown(true);
+        variables.setStringDatePredicateFormat("%Y-%m-%dT%H:%i:%s.%f");
+        SessionVariable copy = (SessionVariable) variables.clone();
+        Assertions.assertTrue(copy.isEnableStringDatePredicatePushdown());
+        Assertions.assertEquals("%Y-%m-%dT%H:%i:%s.%f", copy.getStringDatePredicateFormat());
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> variables.setStringDatePredicateFormat("%d-%m-%Y"));
+        Assertions.assertEquals("%Y-%m-%dT%H:%i:%s.%f", variables.getStringDatePredicateFormat());
+        variables.setStringDatePredicateFormat("");
+        Assertions.assertEquals("", variables.getStringDatePredicateFormat());
+    }
+
+    @Test
     public void testNonDefaultVariables() {
         SessionVariable sessionVariable = new SessionVariable();
         Map<String, SessionVariable.NonDefaultValue> nonDefaultVariables = sessionVariable.getNonDefaultVariables();
