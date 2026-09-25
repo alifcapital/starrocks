@@ -114,6 +114,16 @@ public:
 
     std::string get_error_msg() const;
 
+    // Reuses the last VARCHAR -> DATETIME cast while conjuncts inspect an unchanged chunk.
+    // Own the input as well as the result, so a temporary column's address cannot be reused.
+    struct DatetimeCastCache {
+        ColumnPtr input;
+        ColumnPtr result;
+        bool allow_throw_exception = false;
+    };
+    StatusOr<ColumnPtr> evaluate_with_cast_cache(Chunk* chunk, uint8_t* filter, DatetimeCastCache* cache);
+    DatetimeCastCache* datetime_cast_cache() const { return _datetime_cast_cache; }
+
     StatusOr<ColumnPtr> evaluate(Chunk* chunk, uint8_t* filter = nullptr);
     StatusOr<ColumnPtr> evaluate(Expr* expr, Chunk* chunk, uint8_t* filter = nullptr);
     bool ngram_bloom_filter(const BloomFilter* bf, const NgramBloomFilterReaderOptions& reader_options);
@@ -143,6 +153,7 @@ private:
     /// Pool backing fn_contexts_. Counts against the runtime state's UDF mem tracker.
     std::unique_ptr<MemPool> _pool;
 
+    DatetimeCastCache* _datetime_cast_cache = nullptr;
     RuntimeState* _runtime_state = nullptr;
     /// The expr tree this context is for.
     Expr* _root;

@@ -15,6 +15,10 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstring>
+#include <memory>
+
 #define private public
 
 #include "butil/time.h"
@@ -24,6 +28,31 @@
 #include "types/timestamp_value.h"
 
 namespace starrocks {
+
+TEST(TimestampValueTest, numeric_field_overflow) {
+    // Values that used to wrap to a valid date/time component in a 32-bit accumulator.
+    const std::vector<std::string> invalid = {"4294969322-09-22",
+                                              "2026-4294967305-22",
+                                              "2026-09-4294967318",
+                                              "2026-09-22 4294967313:26:26",
+                                              "2026-09-22 17:4294967322:26",
+                                              "2026-09-22 17:26:4294967322",
+                                              "2147483648-01-01",
+                                              std::string(100, '9') + "-01-01"};
+    for (const auto& text : invalid) {
+        SCOPED_TRACE(text);
+        date::ToDatetimeResult result;
+        EXPECT_FALSE(date::from_string(text.data(), text.size(), &result.year, &result.month, &result.day, &result.hour,
+                                       &result.minute, &result.second, &result.microsecond));
+        TimestampValue timestamp;
+        EXPECT_FALSE(timestamp.from_string(text.data(), text.size()));
+    }
+    // Leading zeroes are accepted; the bound applies to the value, not the field width.
+    const std::string padded = "0000000000002026-00000009-00000022 00000017:00000026:00000026.123456";
+    TimestampValue timestamp;
+    ASSERT_TRUE(timestamp.from_string(padded.data(), padded.size()));
+    EXPECT_EQ("2026-09-22 17:26:26.123456", timestamp.to_string());
+}
 
 TEST(TimestampValueTest, normal) {
     LOG(INFO) << "MAX: " << timestamp::from_julian_and_time(date::MAX_DATE, 86400 * USECS_PER_SEC - 1);
@@ -150,6 +179,77 @@ TEST(TimestampValueTest, from_uncommon_format_str_microsecond) {
         bool result = ts.from_uncommon_format_str(format.c_str(), format.size(), value.c_str(), value.size());
         ASSERT_TRUE(result);
         EXPECT_EQ("2026-02-09 12:30:45", ts.to_string());
+    }
+}
+
+TEST(TimestampValueTest, fixed_datetime_simd) {
+    for (int i = 0; i < 1000; ++i) {
+        const int year = 1900 + i % 200;
+        const int month = 1 + i % 12;
+        const int day = 1 + i % 28;
+        const int hour = i % 24;
+        const int minute = (i * 7) % 60;
+        const int second = (i * 13) % 60;
+        const int usec = (i * 971) % 1000000;
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%06dZ", year, month, day, hour, minute, second,
+                 usec);
+        for (size_t length : {19, 26, 27}) {
+            for (char separator : {'T', ' '}) {
+                buffer[10] = separator;
+                // An exact allocation makes SIMD overreads visible to ASAN.
+                auto input = std::make_unique<char[]>(length);
+                memcpy(input.get(), buffer, length);
+                TimestampValue value;
+                ASSERT_TRUE(value.from_string(input.get(), length));
+                const auto expected =
+                        TimestampValue::create(year, month, day, hour, minute, second, length == 19 ? 0 : usec);
+                ASSERT_EQ(expected.timestamp(), value.timestamp());
+            }
+        }
+    }
+}
+
+TEST(TimestampValueTest, fixed_datetime_compatibility) {
+    const std::pair<std::string, std::string> cases[] = {
+            {"2026-09-22T17:26:26.679658Z", "2026-09-22 17:26:26.679658"},
+            {"2023-12-25 12", "2023-12-25 12:00:00"},
+            {"2023-12-25 12:34", "2023-12-25 12:34:00"},
+            {"2026-09-22T17:26:26.1Z", "2026-09-22 17:26:26.100000"},
+            {"2026-09-22T17:26:26.123Z", "2026-09-22 17:26:26.123000"},
+            {"2026-09-22T17:26:26.1234567Z", "2026-09-22 17:26:26.123456"},
+            {" 2026-09-22T17:26:26.679658Z\t", "2026-09-22 17:26:26.679658"},
+            {"2026/09/22 17:26:26", "2026-09-22 17:26:26"},
+            {"2000-02-29T23:59:59.999999Z", "2000-02-29 23:59:59.999999"},
+    };
+    for (const auto& [input, expected] : cases) {
+        TimestampValue value;
+        ASSERT_TRUE(value.from_string(input.data(), input.size())) << input;
+        ASSERT_EQ(expected, value.to_string()) << input;
+    }
+    for (std::string input :
+         {"2024-01-01 01:61:00", "2024-01-01 24:00:00", "2024-01-01 00:00:60", "1900-02-29T00:00:00.000000Z",
+          "2026-00-22T17:26:26.679658Z", "2026-09-00T17:26:26.679658Z", "2026-09-31T17:26:26.679658Z"}) {
+        TimestampValue value;
+        ASSERT_FALSE(value.from_string(input.data(), input.size())) << input;
+    }
+}
+
+TEST(TimestampValueTest, fixed_datetime_date_cache_boundaries) {
+    for (int year : {0, 1, 1582, 1900, 1989, 1990, 2000, 2049, 2050, 9999}) {
+        for (int month = 1; month <= 12; ++month) {
+            for (int day : {1, static_cast<int>(DAYS_IN_MONTH[date::is_leap(year)][month])}) {
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT23:59:59.999999Z", year, month, day);
+                for (size_t length : {19, 26, 27}) {
+                    TimestampValue value;
+                    ASSERT_TRUE(value.from_string(buffer, length));
+                    const auto expected =
+                            TimestampValue::create(year, month, day, 23, 59, 59, length == 19 ? 0 : 999999);
+                    ASSERT_EQ(expected.timestamp(), value.timestamp()) << std::string(buffer, length);
+                }
+            }
+        }
     }
 }
 

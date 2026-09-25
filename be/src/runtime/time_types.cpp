@@ -15,18 +15,17 @@
 #include "runtime/time_types.h"
 
 #include <string>
+#include <type_traits>
 
 #ifdef __SSE4_1__
 #include <smmintrin.h> // SSE4.1 intrinsics
 #endif
 
 #include "gutil/strings/substitute.h"
+#include "types/timestamp_value.h"
 #include "util/raw_container.h"
 
 namespace starrocks {
-
-// two-digit years < this are 20..; >= this are 19..
-const int YY_PART_YEAR = 70;
 
 const uint64_t LOG_10_INT[] = {1,         10,         100,         1000,         10000UL,       100000UL,
                                1000000UL, 10000000UL, 100000000UL, 1000000000UL, 10000000000UL, 100000000000UL};
@@ -235,10 +234,10 @@ bool date::from_string(const char* date_str, size_t len, int* year, int* month, 
         bool scan_to_delim = (!is_interval_format) && (field_idx != 6);
         while (ptr < end && isdigit(*ptr) && (scan_to_delim || field_len--)) {
             temp_val = temp_val * 10 + (*ptr++ - '0');
-        }
-        // Imposible
-        if (temp_val > 999999L) {
-            return false;
+            // Bound each step so the next multiply cannot overflow on a long numeric field.
+            if (temp_val > 999999) {
+                return false;
+            }
         }
         date_val[field_idx] = temp_val;
         date_len[field_idx] = ptr - start;
@@ -338,7 +337,96 @@ bool date::from_string_to_date(const char* date_str, size_t len, int* year, int*
     return false;
 }
 
+static inline JulianDate julian_from_date(int year, int month, int day) {
+    JulianDate century;
+    JulianDate julian;
+
+    if (month > 2) {
+        month += 1;
+        year += 4800;
+    } else {
+        month += 13;
+        year += 4799;
+    }
+
+    century = year / 100;
+    julian = year * 365 - 32167;
+    julian += year / 4 - century + century / 4;
+    julian += 7834 * month / 256 + day;
+    return julian;
+}
+
 #ifdef __SSE4_1__
+// Parses fixed-width timestamps without reading beyond the input buffer.
+// Unsupported formats are handled by the general parsing path.
+enum class FixedDatetimeParseResult { UNSUPPORTED, INVALID, VALID };
+
+template <typename Result>
+inline FixedDatetimeParseResult parse_fixed_datetime(const char* p, size_t len, Result* res) {
+    if (len != 19 && len != 26 && len != 27) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+    if (p[4] != '-' || p[7] != '-' || (p[10] != 'T' && p[10] != ' ') || p[13] != ':' || p[16] != ':' ||
+        (len != 19 && p[19] != '.') || (len == 27 && p[26] != 'Z')) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+
+    const __m128i zero = _mm_set1_epi8('0');
+    const __m128i nine = _mm_set1_epi8(9);
+    const __m128i tens = _mm_set1_epi16(0x010a);
+    const __m128i date_bytes = _mm_sub_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)), zero);
+    const __m128i time_input = len == 19 ? _mm_slli_si128(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p + 11)), 1)
+                                         : _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 10));
+    const __m128i time_bytes = _mm_sub_epi8(time_input, zero);
+    const __m128i date_digits =
+            _mm_shuffle_epi8(date_bytes, _mm_setr_epi8(0, 1, 2, 3, 5, 6, 8, 9, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i time_digits =
+            _mm_shuffle_epi8(time_bytes, _mm_setr_epi8(1, 2, 4, 5, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i digits = _mm_unpacklo_epi64(date_digits, time_digits);
+    const __m128i fraction_digits =
+            len == 19 ? _mm_setzero_si128()
+                      : _mm_shuffle_epi8(time_bytes,
+                                         _mm_setr_epi8(-1, -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i all_digits = _mm_max_epu8(digits, fraction_digits);
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(all_digits, nine), all_digits)) != 0xffff) {
+        return FixedDatetimeParseResult::UNSUPPORTED;
+    }
+
+    // Each 16-bit lane holds a two-digit number: YY, YY, MM, DD, hh, mm, ss, 00.
+    const __m128i pairs = _mm_maddubs_epi16(digits, tens);
+    const __m128i limits = _mm_setr_epi16(99, 99, 12, 31, 23, 59, 59, 0);
+    if (_mm_movemask_epi8(_mm_cmpgt_epi16(pairs, limits)) != 0) {
+        return FixedDatetimeParseResult::INVALID;
+    }
+    const int year = _mm_extract_epi16(pairs, 0) * 100 + _mm_extract_epi16(pairs, 1);
+    const int month = _mm_extract_epi16(pairs, 2);
+    const int day = _mm_extract_epi16(pairs, 3);
+    if (month == 0 || day == 0 || day > DAYS_IN_MONTH[date::is_leap(year)][month]) {
+        return FixedDatetimeParseResult::INVALID;
+    }
+    const __m128i fraction_pairs = _mm_maddubs_epi16(fraction_digits, tens);
+    const __m128i quads = _mm_madd_epi16(fraction_pairs, _mm_set1_epi32(0x00010064));
+    const int microsecond = _mm_cvtsi128_si32(quads) * 10000 + _mm_extract_epi32(quads, 1);
+    if constexpr (std::is_same_v<Result, Timestamp>) {
+        const uint32_t date_key = (year << 9) | (month << 5) | day;
+        const JulianDate julian = date_key >= CACHE_DATE_LOGIC_START && date_key < CACHE_DATE_LOGIC_END
+                                          ? g_mysql_date_to_julian_cache[date_key - CACHE_DATE_LOGIC_START]
+                                          : julian_from_date(year, month, day);
+        const __m128i time_parts = _mm_madd_epi16(pairs, _mm_setr_epi16(0, 0, 0, 0, 3600, 60, 1, 0));
+        const int64_t seconds = _mm_extract_epi32(time_parts, 2) + _mm_extract_epi32(time_parts, 3);
+        *res = timestamp::from_julian_and_time(julian, seconds * USECS_PER_SEC + microsecond);
+    } else {
+        *res = {year,
+                month,
+                day,
+                _mm_extract_epi16(pairs, 4),
+                _mm_extract_epi16(pairs, 5),
+                _mm_extract_epi16(pairs, 6),
+                microsecond};
+    }
+    return FixedDatetimeParseResult::VALID;
+}
+
 inline __m128i load_xmm_safe(const char* p) {
 #ifndef ADDRESS_SANITIZER
     constexpr uintptr_t PAGE_MASK = 4096 - 1;
@@ -365,7 +453,7 @@ inline __m128i load_xmm_safe(const char* p) {
 //     is_valid is true if the date_str is valid datetime string.
 //     is_only_date is true if the date_str only contains date part.
 //         hour, minute, second, and microsecond of res will be undefined if is_only_date is true.
-std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t len, ToDatetimeResult* res) {
+static std::pair<bool, bool> parse_datetime_fallback(const char* date_str, size_t len, date::ToDatetimeResult* res) {
     auto& [year, month, day, hour, minute, second, microsecond] = *res;
 
     // Reset result values
@@ -387,7 +475,7 @@ std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t
     // Exit early if string is too short to contain a date
     if (length < 10) {
         // Fall back to generic parser as last resort
-        return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+        return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
     }
 
     //
@@ -437,15 +525,16 @@ std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t
         month = (ptr[5] - '0') * 10 + (ptr[6] - '0');
         day = (ptr[8] - '0') * 10 + (ptr[9] - '0');
 
-        bool date_valid = (month > 0 && month <= 12 && day > 0 && day <= DAYS_IN_MONTH[is_leap(year)][month]);
+        bool date_valid = (month > 0 && month <= 12 && day > 0 && day <= DAYS_IN_MONTH[date::is_leap(year)][month]);
 
         // If date parsing failed, fall back to generic parser
         if (!date_valid) {
-            return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+            return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond),
+                    false};
         }
     } else {
         // If validation failed, fall back to generic parser
-        return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+        return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
     }
 
     // Date is valid - if we're at the end of the string, return date-only result
@@ -478,7 +567,7 @@ std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t
         return {true, true};
     } else if ((end - time_ptr) < 8) {
         // try to parse with generic parser
-        return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+        return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
     }
 
     //
@@ -528,11 +617,12 @@ std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t
 
         // If time validation failed, fall back to generic parser
         if (!time_valid) {
-            return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+            return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond),
+                    false};
         }
     } else {
         // If format validation failed, fall back to generic parser
-        return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+        return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
     }
 
     //
@@ -585,26 +675,39 @@ std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t
     }
 
     // If we're here, the microsecond format is invalid - fall back to generic parser
-    return {from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+    return {date::from_string(date_str, len, &year, &month, &day, &hour, &minute, &second, &microsecond), false};
+}
+
+std::pair<bool, bool> date::from_string_to_datetime(const char* date_str, size_t len, ToDatetimeResult* res) {
+#ifdef __SSE4_1__
+    const auto parsed = parse_fixed_datetime(date_str, len, res);
+    if (parsed != FixedDatetimeParseResult::UNSUPPORTED) {
+        return {parsed == FixedDatetimeParseResult::VALID, false};
+    }
+#endif
+    return parse_datetime_fallback(date_str, len, res);
+}
+
+bool TimestampValue::from_string(const char* date_str, size_t len) {
+#ifdef __SSE4_1__
+    const auto parsed = parse_fixed_datetime(date_str, len, &_timestamp);
+    if (parsed != FixedDatetimeParseResult::UNSUPPORTED) {
+        return parsed == FixedDatetimeParseResult::VALID;
+    }
+#endif
+    date::ToDatetimeResult res;
+    const auto [is_valid, is_only_date] = parse_datetime_fallback(date_str, len, &res);
+    if (!is_valid) {
+        return false;
+    }
+    _timestamp = is_only_date ? timestamp::from_datetime(res.year, res.month, res.day, 0, 0, 0, 0)
+                              : timestamp::from_datetime(res.year, res.month, res.day, res.hour, res.minute, res.second,
+                                                         res.microsecond);
+    return true;
 }
 
 JulianDate date::from_date(int year, int month, int day) {
-    JulianDate century;
-    JulianDate julian;
-
-    if (month > 2) {
-        month += 1;
-        year += 4800;
-    } else {
-        month += 13;
-        year += 4799;
-    }
-
-    century = year / 100;
-    julian = year * 365 - 32167;
-    julian += year / 4 - century + century / 4;
-    julian += 7834 * month / 256 + day;
-    return julian;
+    return julian_from_date(year, month, day);
 }
 
 JulianDate date::from_date_literal(uint64_t date_literal) {
