@@ -149,7 +149,7 @@ TEST_F(SelectedCollectionFunctionsTest, PercentileReadPreservesSource) {
     auto values = PercentileColumn::create();
     for (int row = 0; row < 5; ++row) {
         PercentileValue value;
-        for (int i = 0; i < row * 100; ++i) value.add(i, i % 3 + 1);
+        for (int i = 0; i < row * 100; ++i) value.add(static_cast<float>(i), static_cast<int64_t>(i % 3 + 1));
         if (row == 4) value.quantile(0.5);
         values->append(&value);
     }
