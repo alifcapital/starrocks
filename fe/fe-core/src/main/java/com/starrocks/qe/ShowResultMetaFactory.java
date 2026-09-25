@@ -176,7 +176,8 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("Properties", TypeFactory.createVarcharType(200)))
                 .addColumn(new Column("Status", TypeFactory.createVarcharType(20)))
                 .addColumn(new Column("LastWorkTime", TypeFactory.createVarcharType(60)))
-                .addColumn(new Column("Reason", TypeFactory.createVarcharType(100)));
+                .addColumn(new Column("Reason", TypeFactory.createVarcharType(100)))
+                .addColumn(new Column("CollectionWarehouse", TypeFactory.createVarcharType(256)));
         return builder.build();
     }
 
@@ -362,6 +363,7 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("Time", TypeFactory.createVarcharType(16)))
                 .addColumn(new Column("State", TypeFactory.createVarcharType(16)))
                 .addColumn(new Column("Statement", TypeFactory.createVarcharType(128)))
+                .addColumn(new Column("Warehouse", TypeFactory.createVarcharType(256)))
                 .build();
     }
 
@@ -597,6 +599,7 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("EndTime", TypeFactory.createVarcharType(60)))
                 .addColumn(new Column("Properties", TypeFactory.createVarcharType(200)))
                 .addColumn(new Column("Reason", TypeFactory.createVarcharType(100)))
+                .addColumn(new Column("Warehouse", TypeFactory.createVarcharType(256)))
                 .build();
     }
 
@@ -722,6 +725,8 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("BEMemPool", TypeFactory.createVarcharType(64)))
                 .addColumn(new Column("BEMemPoolInUseMemBytes", TypeFactory.createVarcharType(64)))
                 .addColumn(new Column("BEMemPoolMemLimitBytes", TypeFactory.createVarcharType(64)))
+                .addColumn(new Column("Warehouse", TypeFactory.createVarcharType(64)))
+                .addColumn(new Column("BackendId", TypeFactory.createVarcharType(64)))
                 .build();
     }
 
@@ -776,6 +781,7 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("DOP", TypeFactory.createVarcharType(64)))
                 .addColumn(new Column("Frontend", TypeFactory.createVarcharType(64)))
                 .addColumn(new Column("FeStartTime", TypeFactory.createVarcharType(64)))
+                .addColumn(new Column("Warehouse", TypeFactory.createVarcharType(64)))
                 .build();
     }
 

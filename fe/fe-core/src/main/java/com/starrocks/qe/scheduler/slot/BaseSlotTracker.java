@@ -34,7 +34,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,12 +59,12 @@ public abstract class BaseSlotTracker {
             Comparator.comparingLong(LogicalSlot::getExpiredPendingTimeMs)
                     .thenComparing(LogicalSlot::getSlotId));
 
-    protected final Map<TUniqueId, LogicalSlot> pendingSlots = new HashMap<>();
-    protected final Map<TUniqueId, LogicalSlot> allocatedSlots = new HashMap<>();
+    protected final Map<TUniqueId, LogicalSlot> pendingSlots = new ConcurrentHashMap<>();
+    protected final Map<TUniqueId, LogicalSlot> allocatedSlots = new ConcurrentHashMap<>();
     protected final ResourceUsageMonitor resourceUsageMonitor;
     protected final long warehouseId;
 
-    protected int numAllocatedSlots = 0;
+    protected volatile int numAllocatedSlots = 0;
     protected Optional<String> warehouseName = Optional.empty();
 
     protected List<BaseSlotTracker.Listener> listeners;
@@ -365,7 +364,15 @@ public abstract class BaseSlotTracker {
     }
 
     public static class SlotListenerForPipelineDriverAllocator implements BaseSlotTracker.Listener {
-        private final PipelineDriverAllocator pipelineDriverAllocator = new PipelineDriverAllocator();
+        private final PipelineDriverAllocator pipelineDriverAllocator;
+
+        public SlotListenerForPipelineDriverAllocator() {
+            this(WarehouseManager.DEFAULT_WAREHOUSE_ID);
+        }
+
+        public SlotListenerForPipelineDriverAllocator(long warehouseId) {
+            pipelineDriverAllocator = new PipelineDriverAllocator(warehouseId);
+        }
 
         @Override
         public void onRequireSlot(LogicalSlot slot) {

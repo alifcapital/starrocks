@@ -77,7 +77,7 @@ public class DictionaryMgrEditLogTest2 {
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt stmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
 
-        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
 
         // 2. Verify initial state
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName(TEST_DICTIONARY_NAME);
@@ -122,7 +122,7 @@ public class DictionaryMgrEditLogTest2 {
         properties.put("dictionary_warm_up", "false");
         CreateDictionaryStmt stmt = createTestDictionaryStmt(TEST_DICTIONARY_NAME, properties);
 
-        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME);
+        masterDictionaryMgr.createDictionary(stmt, TEST_CATALOG_NAME, TEST_DB_NAME, 0L);
 
         Dictionary dictionary = masterDictionaryMgr.getDictionaryByName(TEST_DICTIONARY_NAME);
         // Ensure dictionary is not already in unfinishedRefreshTasks

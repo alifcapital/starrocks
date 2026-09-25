@@ -15,6 +15,7 @@
 package com.starrocks.load.batchwrite;
 
 import com.starrocks.catalog.UserIdentity;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.proc.ProcResult;
@@ -32,6 +33,7 @@ import com.starrocks.warehouse.cngroup.ComputeResource;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -50,6 +52,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BatchWriteMgrTest extends BatchWriteTestBase {
+    private boolean savedMultiWarehouse;
+
+    @BeforeEach
+    public void enableWarehouses() {
+        savedMultiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
+    }
+
+    @AfterEach
+    public void restoreWarehouses() {
+        Config.enable_multi_warehouse = savedMultiWarehouse;
+    }
+
 
     private BatchWriteMgr batchWriteMgr;
 
@@ -217,6 +232,10 @@ public class BatchWriteMgrTest extends BatchWriteTestBase {
 
         new MockUp<Utils>() {
             @Mock
+            public void checkWarehouseUsage(UserIdentity userIdentity, String warehouseName) {
+            }
+
+            @Mock
             public Optional<String> getUserDefaultWarehouse(UserIdentity userIdentity) {
                 return Optional.of(warehouse);
             }
@@ -327,12 +346,16 @@ public class BatchWriteMgrTest extends BatchWriteTestBase {
     }
 
     @Test
-    public void testRequestMergeCommitWithUserWarehouseMismatch() {
+    public void testRequestMergeCommitWithSeparateUserWarehouses() {
         String user = "user1";
         String warehouse1 = "warehouse_1";
         String warehouse2 = "warehouse_2";
 
         new MockUp<Utils>() {
+            @Mock
+            public void checkWarehouseUsage(UserIdentity userIdentity, String warehouseName) {
+            }
+
             private int count = 0;
 
             @Mock
@@ -353,7 +376,7 @@ public class BatchWriteMgrTest extends BatchWriteTestBase {
 
             @Mock
             public Warehouse getWarehouse(String warehouseName) {
-                return new Warehouse(1L, warehouseName, "wyb") {
+                return new Warehouse(warehouseName.equals(warehouse1) ? 1L : 2L, warehouseName, "wyb") {
                     @Override
                     public long getResumeTime() {
                         return 0L;
@@ -445,8 +468,11 @@ public class BatchWriteMgrTest extends BatchWriteTestBase {
 
         RequestCoordinatorBackendResult result2 = batchWriteMgr.requestCoordinatorBackends(
                 tableId1, params, new UserIdentity(user, "%"));
-        assertFalse(result2.isOk());
-        assertEquals(TStatusCode.INVALID_ARGUMENT, result2.getStatus().getStatus_code());
-        assertTrue(result2.getStatus().getError_msgs().get(0).contains("does not match"));
+        assertTrue(result2.isOk());
+        assertEquals(2, batchWriteMgr.numJobs());
+        ConcurrentHashMap<BatchWriteId, MergeCommitJob> jobs = Deencapsulation.getField(batchWriteMgr, "mergeCommitJobs");
+        assertEquals(java.util.Set.of(warehouse1, warehouse2), jobs.values().stream()
+                .map(job -> (String) Deencapsulation.getField(job, "warehouseName"))
+                .collect(java.util.stream.Collectors.toSet()));
     }
 }

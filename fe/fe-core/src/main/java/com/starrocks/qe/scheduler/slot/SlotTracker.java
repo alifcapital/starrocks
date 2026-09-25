@@ -27,11 +27,15 @@ import java.util.Optional;
 public class SlotTracker extends BaseSlotTracker {
 
     public SlotTracker(SlotManager slotManager, ResourceUsageMonitor resourceUsageMonitor) {
-        super(resourceUsageMonitor, WarehouseManager.DEFAULT_WAREHOUSE_ID);
+        this(slotManager, resourceUsageMonitor, WarehouseManager.DEFAULT_WAREHOUSE_ID);
+    }
+
+    public SlotTracker(SlotManager slotManager, ResourceUsageMonitor resourceUsageMonitor, long warehouseId) {
+        super(resourceUsageMonitor, warehouseId);
 
         this.slotSelectionStrategy = createSlotSelectionStrategy(slotManager, resourceUsageMonitor);
         this.listeners = ImmutableList.of(slotSelectionStrategy,
-                new SlotListenerForPipelineDriverAllocator());
+                new SlotListenerForPipelineDriverAllocator(warehouseId));
     }
 
     @VisibleForTesting
@@ -53,12 +57,16 @@ public class SlotTracker extends BaseSlotTracker {
             return new SlotSelectionStrategyV2(slotManager, this.warehouseId);
         } else {
             return new DefaultSlotSelectionStrategy(
-                    resourceUsageMonitor::isGlobalResourceOverloaded, resourceUsageMonitor::isGroupResourceOverloaded);
+                    () -> resourceUsageMonitor.isWarehouseResourceOverloaded(warehouseId),
+                    groupId -> resourceUsageMonitor.isGroupResourceOverloaded(warehouseId, groupId));
         }
     }
 
     @Override
     public Optional<Integer> getMaxSlots() {
+        if (slotSelectionStrategy instanceof SlotSelectionStrategyV2) {
+            return Optional.of(QueryQueueOptions.createFromEnv(warehouseId).v2().getTotalSlots());
+        }
         return Optional.empty();
     }
 }

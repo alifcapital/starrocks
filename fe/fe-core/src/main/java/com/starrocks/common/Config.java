@@ -493,6 +493,17 @@ public class Config extends ConfigBase {
     public static String ext_dir = System.getenv("STARROCKS_HOME") + "/lib";
 
     /**
+     * Enable multi-warehouse support (CREATE/DROP/ALTER WAREHOUSE, ALTER SYSTEM ADD COMPUTE NODE ... INTO
+     * WAREHOUSE, SET warehouse = '...'). Each warehouse owns a StarMgr worker group, so queries pinned to a
+     * warehouse only ever schedule fragments onto that warehouse's compute nodes.
+     *
+     * Requires shared_data mode and a restart. Set it identically on every FE. When disabled, execution
+     * uses default_warehouse. Warehouse metadata and node membership are retained for re-enabling it.
+     */
+    @ConfField
+    public static boolean enable_multi_warehouse = false;
+
+    /**
      * Labels of finished or cancelled load jobs will be removed
      * 1. after *label_keep_max_second*
      * or
@@ -3698,6 +3709,10 @@ public class Config extends ConfigBase {
 
     @ConfField(mutable = true)
     public static String lake_background_warehouse = "default_warehouse";
+
+    @ConfField(mutable = true, comment = "Warehouse for automatic statistics collection. Empty uses " +
+            "lake_background_warehouse. Manual ANALYZE uses its session warehouse.")
+    public static String statistic_collect_warehouse = "";
 
     @ConfField(mutable = true)
     public static int lake_warehouse_max_compute_replica = 3;

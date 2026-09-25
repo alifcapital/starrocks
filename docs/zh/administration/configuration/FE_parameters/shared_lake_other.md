@@ -318,6 +318,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述: 是否允许 StarRocks 使用 FE 配置文件中指定的对象存储相关属性创建内置存储卷。从 v3.4.1 开始，默认值从 `true` 更改为 `false`。
 - 引入版本: v3.1.0
 
+### `enable_multi_warehouse`
+
+- 默认值: false
+- 类型: Boolean
+- 单位: -
+- 是否可变: No
+- 描述: 在存算分离集群中启用 `CREATE WAREHOUSE`、`DROP WAREHOUSE`、`ALTER WAREHOUSE` 和 `ALTER SYSTEM ADD COMPUTE NODE ... INTO WAREHOUSE`。每个 Warehouse 拥有独立的 Worker Group 和 CN，表及数据仍然共享。`SET warehouse = '<name>'` 选择查询和导入使用的计算资源。所有 FE 必须使用相同配置，修改后需要重启。为保护现有元数据，Warehouse 日志回放和持久化不依赖此开关，但关闭开关不是受支持的多 Warehouse 部署回退方式。后台任务和 Compaction 分别使用 `lake_background_warehouse` 和 `lake_compaction_warehouse`。
+- 引入版本: v4.1（PR #78027 的定制回移版本）
+
 ### `gcp_gcs_impersonation_service_account`
 
 - 默认值: 空字符串

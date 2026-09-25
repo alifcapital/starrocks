@@ -131,7 +131,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
-
 import javax.annotation.Nullable;
 
 public class OlapScanNode extends AbstractOlapTableScanNode {
@@ -606,7 +605,7 @@ public class OlapScanNode extends AbstractOlapTableScanNode {
         // frontend if there are many calls per request (e.g. one per partition when there are many partitions).
         if (RunMode.getCurrentRunMode() == RunMode.SHARED_DATA) {
             WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            if (CollectionUtils.isEmpty(warehouseManager.getAliveComputeNodes(computeResource))) {
+            if (CollectionUtils.isEmpty(warehouseManager.getAliveWarehouseComputeNodes(computeResource))) {
                 Warehouse warehouse = warehouseManager.getWarehouse(computeResource.getWarehouseId());
                 throw ErrorReportException.report(ErrorCode.ERR_NO_NODES_IN_WAREHOUSE, warehouse.getName());
             }

@@ -148,9 +148,9 @@ public class LakeAggregatePublishTest {
             Assertions.assertThrows(NoAliveBackendException.class, () -> Utils.aggregatePublishVersion(tablets, null, 1, 2, null,
                         null, WarehouseManager.DEFAULT_RESOURCE, null));
 
-            when(mockManager.getAliveComputeNodes(any())).thenReturn(null);
+            when(mockManager.getAliveWarehouseComputeNodes(any())).thenReturn(null);
             LakeAggregator lakeAggregator = new LakeAggregator();
-            Assertions.assertNotNull(lakeAggregator.chooseAggregatorNode(WarehouseComputeResource.of(10), null));
+            Assertions.assertNull(lakeAggregator.chooseMaintenanceAggregatorNode(WarehouseComputeResource.of(10), null));
         } finally {
             Field warehouseMgrField = GlobalStateMgr.class.getDeclaredField("warehouseMgr");
             warehouseMgrField.setAccessible(true);

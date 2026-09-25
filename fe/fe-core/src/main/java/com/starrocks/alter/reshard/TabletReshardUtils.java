@@ -141,7 +141,7 @@ public class TabletReshardUtils {
      */
     public static int computeNodeCount(ComputeResource computeResource) {
         return Math.max(1, GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                .getAllComputeNodeIds(computeResource).size());
+                .getWarehouseComputeNodeIds(computeResource).size());
     }
 
     /**

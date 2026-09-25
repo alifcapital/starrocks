@@ -595,7 +595,7 @@ public class VariableMgr {
                     break;
                 case "String":
                     desc.setType(VarcharType.VARCHAR);
-                    desc.setValue((String) field.get(obj));
+                    desc.setValue(getValue(obj, field));
                     break;
                 default:
                     desc.setType(VarcharType.VARCHAR);
@@ -808,6 +808,9 @@ public class VariableMgr {
                 case "double":
                     return Double.toString(field.getDouble(obj));
                 case "String":
+                    if (obj instanceof SessionVariable && "warehouseName".equals(field.getName())) {
+                        return ((SessionVariable) obj).getWarehouseName();
+                    }
                     return (String) field.get(obj);
                 default:
                     return "";

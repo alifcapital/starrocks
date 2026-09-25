@@ -93,7 +93,7 @@ public class LoadAction extends RestBaseAction {
         List<Long> nodeIds = new ArrayList<>();
         if (RunMode.isSharedDataMode()) {
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            final List<Long> computeIds = warehouseManager.getAllComputeNodeIds(computeResource);
+            final List<Long> computeIds = warehouseManager.getWarehouseComputeNodeIds(computeResource);
             for (long nodeId : computeIds) {
                 ComputeNode node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
                 if (node != null && node.isAvailable()) {
@@ -199,11 +199,12 @@ public class LoadAction extends RestBaseAction {
             ConnectContext ctx = request.getConnectContext();
             if (ctx != null) {
                 Optional<String> userWarehouseName = Utils.getUserDefaultWarehouse(ctx.getCurrentUserIdentity());
-                if (userWarehouseName.isPresent() && warehouseManager.warehouseExists(userWarehouseName.get())) {
+                if (userWarehouseName.isPresent()) {
                     warehouseName = userWarehouseName.get();
                 }
             }
         }
+        Utils.checkWarehouseUsage(request.getConnectContext(), warehouseName);
         final CRAcquireContext acquireContext = CRAcquireContext.of(warehouseName);
         final ComputeResource computeResource = warehouseManager.acquireComputeResource(acquireContext);
 
@@ -252,4 +253,3 @@ public class LoadAction extends RestBaseAction {
         }
     }
 }
-

@@ -318,6 +318,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 説明：StarRocks が FE 設定ファイルで指定されたオブジェクトストレージ関連プロパティを使用して、組み込みストレージボリュームを作成することを許可するかどうか。デフォルト値は v3.4.1 以降 `true` から `false` に変更されました。
 - 導入時期：v3.1.0
 
+### `enable_multi_warehouse`
+
+- デフォルト：false
+- タイプ：Boolean
+- 単位：-
+- 変更可能：No
+- 説明：共有データクラスタで `CREATE WAREHOUSE`、`DROP WAREHOUSE`、`ALTER WAREHOUSE`、`ALTER SYSTEM ADD COMPUTE NODE ... INTO WAREHOUSE` を有効にします。各ウェアハウスは専用の Worker Group と CN を持ち、テーブルとデータは共有されます。`SET warehouse = '<name>'` でクエリとロードの計算リソースを選択します。すべての FE に同じ値を設定し、変更後に再起動してください。既存のメタデータを保護するため、ウェアハウスのログ再生と永続化はこのフラグに依存しません。ただし、フラグの無効化によるマルチウェアハウス構成のロールバックはサポートされません。バックグラウンド処理と Compaction はそれぞれ `lake_background_warehouse` と `lake_compaction_warehouse` を使用します。
+- 導入バージョン：v4.1（PR #78027 のカスタムバックポート）
+
 ### `gcp_gcs_impersonation_service_account`
 
 - デフォルト：Empty string

@@ -330,7 +330,7 @@ public class TabletTaskExecutor {
             if (Config.lake_create_tablet_max_retries <= 0) {
                 throw e;
             }
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
+            List<ComputeNode> aliveNodes = warehouseManager.getAliveWarehouseComputeNodes(computeResource);
             if (aliveNodes.isEmpty()) {
                 throw e;
             }
@@ -397,7 +397,7 @@ public class TabletTaskExecutor {
                     retry + 1, failedTasks.size(), excludeNodes);
 
             final WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
+            List<ComputeNode> aliveNodes = warehouseManager.getAliveWarehouseComputeNodes(computeResource);
             List<ComputeNode> candidates = aliveNodes.stream()
                     .filter(n -> !excludeNodes.contains(n.getId()))
                     .collect(Collectors.toList());

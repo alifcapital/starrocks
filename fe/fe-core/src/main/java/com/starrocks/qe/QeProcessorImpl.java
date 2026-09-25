@@ -210,7 +210,7 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
                 continue;
             }
 
-            final String queryIdStr = DebugUtil.printId(info.getConnectContext().getExecutionId());
+            final String queryIdStr = DebugUtil.printId(entry.getKey());
             String execState = (
                     info.getConnectContext().isPending() ?
                             LogicalSlot.State.REQUIRING :
@@ -218,7 +218,7 @@ public final class QeProcessorImpl implements QeProcessor, MemoryTrackable {
             final QueryStatisticsItem item = new QueryStatisticsItem.Builder()
                     .customQueryId(context.getCustomQueryId())
                     .queryId(queryIdStr)
-                    .executionId(info.getConnectContext().getExecutionId())
+                    .executionId(entry.getKey())
                     .queryStartTime(info.getStartExecTime())
                     .sql(info.getSql())
                     .user(context.getQualifiedUser())

@@ -36,6 +36,17 @@ public class UpdateDictionaryLog implements Writable {
     @SerializedName("resetStateBeforeRefresh")
     private boolean resetStateBeforeRefresh;
 
+    @SerializedName("refreshWarehouseId")
+    private Long refreshWarehouseId;
+
+    public Long getRefreshWarehouseId() {
+        return refreshWarehouseId;
+    }
+
+    public void setRefreshWarehouseId(Long warehouseId) {
+        this.refreshWarehouseId = warehouseId;
+    }
+
     public UpdateDictionaryLog(long dictionaryId, long ts) {
         this.dictionaryId = dictionaryId;
         this.ts = ts;

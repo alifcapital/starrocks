@@ -86,7 +86,7 @@ public class MockedWarehouseManager extends WarehouseManager {
     }
 
     @Override
-    public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+    public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
         if (throwUnknownWarehouseException) {
             throw ErrorReportException.report(ErrorCode.ERR_UNKNOWN_WAREHOUSE, String.format("id: %d", 1L));
         }
@@ -161,8 +161,8 @@ public class MockedWarehouseManager extends WarehouseManager {
     }
 
     @Override
-    public List<ComputeNode> getAliveComputeNodes(ComputeResource computeResource) {
-        if (getAllComputeNodeIds(computeResource).isEmpty())  {
+    public List<ComputeNode> getAliveWarehouseComputeNodes(ComputeResource computeResource) {
+        if (getWarehouseComputeNodeIds(computeResource).isEmpty())  {
             return Lists.newArrayList();
         }
         if (!aliveComputeNodes.isEmpty()) {

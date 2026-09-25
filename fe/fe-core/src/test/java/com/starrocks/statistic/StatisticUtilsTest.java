@@ -17,8 +17,11 @@ package com.starrocks.statistic;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.plan.PlanTestBase;
 import com.starrocks.system.SystemInfoService;
@@ -29,6 +32,8 @@ import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 import com.starrocks.utframe.UtFrameUtils;
+import com.starrocks.warehouse.multi.MultiWarehouse;
+import com.starrocks.warehouse.multi.MultiWarehouseManager;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
@@ -37,6 +42,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.Arrays;
+import java.util.Map;
 
 class StatisticUtilsTest extends PlanTestBase {
 
@@ -127,6 +133,48 @@ class StatisticUtilsTest extends PlanTestBase {
         } finally {
             globalDefault.setEnableProfile(savedEnableProfile);
             globalDefault.setBigQueryProfileThreshold(savedBigQueryThresholdMs + "ms");
+        }
+    }
+
+    @Test
+    void statisticsCollectionWarehouseIsIndependentOfMaintenanceAndManualAnalyze() {
+        WarehouseManager warehouses = new MultiWarehouseManager();
+        warehouses.initDefaultWarehouse();
+        warehouses.addWarehouse(new MultiWarehouse(101, "stats", "", 201, Map.of(), 0));
+        warehouses.addWarehouse(new MultiWarehouse(102, "etl", "", 202, Map.of(), 0));
+        warehouses.addWarehouse(new MultiWarehouse(103, "maintenance", "", 203, Map.of(), 0));
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public WarehouseManager getWarehouseMgr() {
+                return warehouses;
+            }
+        };
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        String background = Config.lake_background_warehouse;
+        String collect = Config.statistic_collect_warehouse;
+        try {
+            Config.enable_multi_warehouse = true;
+            Config.lake_background_warehouse = "maintenance";
+            Config.statistic_collect_warehouse = "";
+            Assertions.assertEquals("maintenance", StatisticUtils.buildStatisticsCollectContext().getCurrentWarehouseName());
+            Config.statistic_collect_warehouse = "stats";
+            Assertions.assertEquals("stats", StatisticUtils.buildStatisticsCollectContext().getCurrentWarehouseName());
+            Assertions.assertEquals("maintenance", StatisticUtils.buildConnectContext().getCurrentWarehouseName());
+            ConnectContext manual = StatisticUtils.buildConnectContext("etl");
+            Assertions.assertEquals("etl", manual.getCurrentWarehouseName());
+            Assertions.assertFalse(manual.getSessionVariable().isEnableMaterializedViewRewrite());
+            Assertions.assertEquals(1, manual.getSessionVariable().getParallelExecInstanceNum());
+
+            Config.statistic_collect_warehouse = "missing";
+            Assertions.assertThrows(ErrorReportException.class, StatisticUtils::buildStatisticsCollectContext);
+            Assertions.assertEquals("etl", StatisticUtils.buildConnectContext("etl").getCurrentWarehouseName());
+            Config.statistic_collect_warehouse = "stats";
+            Config.lake_background_warehouse = "missing";
+            Assertions.assertEquals("stats", StatisticUtils.buildStatisticsCollectContext().getCurrentWarehouseName());
+        } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
+            Config.lake_background_warehouse = background;
+            Config.statistic_collect_warehouse = collect;
         }
     }
 

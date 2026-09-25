@@ -842,6 +842,15 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Description: The interval for checking data updates during automatic collection.
 - Introduced in: -
 
+### `statistic_collect_warehouse`
+
+- Default: Empty string
+- Type: String
+- Unit: -
+- Is mutable: Yes
+- Description: Warehouse for automatic statistics collection in shared-data clusters. An empty value uses `lake_background_warehouse`, whose default is `default_warehouse`. This setting applies to existing and new scheduled ANALYZE jobs, their immediate execution after creation, collection after loading, and automatic connector statistics collection. It is read when collection starts; changing it does not move an already running collection. Manual `ANALYZE TABLE`, including asynchronous execution, uses the warehouse selected in the submitting session and requires USAGE on that warehouse. Statistics cache reads and metadata maintenance continue to use `lake_background_warehouse`. If the configured warehouse is missing or has no available compute nodes, collection fails or retries without falling back to another warehouse. Configure the same value on all FEs and persist it in `fe.conf` for restarts. For example, create a warehouse named `stats`, add compute nodes to it, and set `statistic_collect_warehouse = stats` to separate automatic collection from other background work. A warehouse referenced by this setting cannot be dropped until the setting is changed.
+- Introduced in: Multi-warehouse 4.1 backport
+
 ### `statistic_max_full_collect_data_size`
 
 - Default: 100 * 1024 * 1024 * 1024

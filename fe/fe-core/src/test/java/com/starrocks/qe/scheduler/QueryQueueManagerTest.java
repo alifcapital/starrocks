@@ -1568,7 +1568,7 @@ public class QueryQueueManagerTest extends SchedulerTestBase {
         {
             String res = starRocksAssert.executeShowResourceUsageSql("SHOW USAGE RESOURCE GROUPS;");
             assertThat(res).isEqualTo("Name|Id|Backend|BEInUseCpuCores|BEInUseMemBytes|BERunningQueries" +
-                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes\n");
+                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes|Warehouse|BackendId\n");
         }
 
         {
@@ -1659,17 +1659,17 @@ public class QueryQueueManagerTest extends SchedulerTestBase {
 
             final String result = starRocksAssert.executeShowResourceUsageSql("SHOW USAGE RESOURCE GROUPS;");
             assertThat(result).isEqualTo("Name|Id|Backend|BEInUseCpuCores|BEInUseMemBytes|BERunningQueries" +
-                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes\n" +
-                    "default_wg|2|be0-host|3.112|39|38|40|default_mem_pool|55|100\n" +
-                    "default_mv_wg|3|be1-host|4.11|49|48|50|default_mem_pool|85|200\n" +
-                    "wg0|10|be0-host|0.112|9|8|10|default_mem_pool|55|100\n" +
-                    "wg0|10|be1-host|1.11|19|18|20|default_mem_pool|85|200\n" +
-                    "wg1|11|be0-host|0.1|0|0|0|default_mem_pool|55|100\n" +
-                    "wg1|11|be1-host|1.1|0|0|0|default_mem_pool|85|200\n" +
-                    "wg2|12|be0-host|0.12|7|6|10|default_mem_pool|55|100\n" +
-                    "wg2|12|be1-host|1.12|17|16|20|default_mem_pool|85|200\n" +
-                    "wg3|13|be0-host|0.03|0|0|0|default_mem_pool|55|100\n" +
-                    "wg3|13|be1-host|0.13|0|0|0|default_mem_pool|85|200"
+                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes|Warehouse|BackendId\n" +
+                    "default_wg|2|be0-host|3.112|39|38|40|default_mem_pool|55|100|default_warehouse|0\n" +
+                    "default_mv_wg|3|be1-host|4.11|49|48|50|default_mem_pool|85|200|default_warehouse|1\n" +
+                    "wg0|10|be0-host|0.112|9|8|10|default_mem_pool|55|100|default_warehouse|0\n" +
+                    "wg0|10|be1-host|1.11|19|18|20|default_mem_pool|85|200|default_warehouse|1\n" +
+                    "wg1|11|be0-host|0.1|0|0|0|default_mem_pool|55|100|default_warehouse|0\n" +
+                    "wg1|11|be1-host|1.1|0|0|0|default_mem_pool|85|200|default_warehouse|1\n" +
+                    "wg2|12|be0-host|0.12|7|6|10|default_mem_pool|55|100|default_warehouse|0\n" +
+                    "wg2|12|be1-host|1.12|17|16|20|default_mem_pool|85|200|default_warehouse|1\n" +
+                    "wg3|13|be0-host|0.03|0|0|0|default_mem_pool|55|100|default_warehouse|0\n" +
+                    "wg3|13|be1-host|0.13|0|0|0|default_mem_pool|85|200|default_warehouse|1"
             );
         }
 
@@ -1725,11 +1725,11 @@ public class QueryQueueManagerTest extends SchedulerTestBase {
 
             final String res = starRocksAssert.executeShowResourceUsageSql("SHOW USAGE RESOURCE GROUPS;");
             assertThat(res).isEqualTo("Name|Id|Backend|BEInUseCpuCores|BEInUseMemBytes|BERunningQueries" +
-                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes\n" +
-                    "wg0|10|be0-host|0.21|29|28|30|mem_pool_0|29|100\n" +
-                    "wg1|11|be0-host|0.2|0|0|30|mem_pool_0|29|100\n" +
-                    "wg2|12|be1-host|1.22|27|26|50|mem_pool_1|27|200\n" +
-                    "wg3|13|be1-host|0.23|0|0|50|mem_pool_1|27|200"
+                    "|BEMemLimitBytes|BEMemPool|BEMemPoolInUseMemBytes|BEMemPoolMemLimitBytes|Warehouse|BackendId\n" +
+                    "wg0|10|be0-host|0.21|29|28|30|mem_pool_0|29|100|default_warehouse|0\n" +
+                    "wg1|11|be0-host|0.2|0|0|30|mem_pool_0|29|100|default_warehouse|0\n" +
+                    "wg2|12|be1-host|1.22|27|26|50|mem_pool_1|27|200|default_warehouse|1\n" +
+                    "wg3|13|be1-host|0.23|0|0|50|mem_pool_1|27|200|default_warehouse|1"
             );
         }
     }

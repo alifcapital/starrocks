@@ -41,6 +41,8 @@ import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.persist.ModifyTablePropertyOperationLog;
 import com.starrocks.persist.gson.GsonPostProcessable;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.Backend;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.task.AgentBatchTask;
@@ -66,6 +68,7 @@ import com.starrocks.transaction.TabletCommitInfo;
 import com.starrocks.transaction.TabletFailInfo;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TransactionStatus;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -921,9 +924,12 @@ public class ReplicationJob implements GsonPostProcessable {
         TransactionState.LoadJobSourceType loadJobSourceType = TransactionState.LoadJobSourceType.REPLICATION;
         TransactionState.TxnCoordinator coordinator = TransactionState.TxnCoordinator.fromThisFE();
         String label = String.format("REPLICATION_%d_%d_%s", databaseId, tableId, jobId);
+        ComputeResource computeResource = RunMode.isSharedDataMode()
+                ? GlobalStateMgr.getServingState().getWarehouseMgr().getBackgroundComputeResource(tableId)
+                : WarehouseManager.DEFAULT_RESOURCE;
         transactionId = GlobalStateMgr.getServingState().getGlobalTransactionMgr().beginTransaction(databaseId,
                 Lists.newArrayList(tableId), label, coordinator, loadJobSourceType,
-                Config.replication_transaction_timeout_sec);
+                Config.replication_transaction_timeout_sec, computeResource);
 
         // Register loaded indexes so prePrepared() validates the same indexes that were collected,
         // not the latest (which may change due to tablet split).

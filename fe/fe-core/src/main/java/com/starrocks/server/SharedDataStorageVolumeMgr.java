@@ -729,7 +729,7 @@ public class SharedDataStorageVolumeMgr extends StorageVolumeMgr {
                 vTabletId = GlobalStateMgr.getCurrentState().getNextId();
 
                 starOSAgent.createShardWithVirtualTabletId(pathInfo, cacheInfo, shardGroupId, properties, vTabletId,
-                        WarehouseManager.DEFAULT_RESOURCE);
+                        GlobalStateMgr.getCurrentState().getWarehouseMgr().getBackgroundComputeResource());
                 LOG.info("Created shard for storage volume: {}, vTablet id: {}, group id: {}, src service id: {}",
                         storageVolumeName, vTabletId, shardGroupId, srcServiceId);
 

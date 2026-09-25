@@ -26,6 +26,7 @@ import com.starrocks.catalog.TableName;
 import com.starrocks.common.AlreadyExistsException;
 import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
+import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DDLStmtExecutor;
 import com.starrocks.qe.SetExecutor;
@@ -34,6 +35,7 @@ import com.starrocks.qe.StmtExecutor;
 import com.starrocks.scheduler.history.TableKeeper;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
@@ -63,8 +65,10 @@ import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.NativeAnalyzeJob;
 import com.starrocks.statistic.NativeAnalyzeStatus;
+import com.starrocks.statistic.StatisticExecutor;
 import com.starrocks.statistic.StatisticSQLBuilder;
 import com.starrocks.statistic.StatisticUtils;
+import com.starrocks.statistic.StatisticsCollectJob;
 import com.starrocks.statistic.StatisticsMetaManager;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.columns.ColumnUsage;
@@ -73,11 +77,14 @@ import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.statistic.columns.PredicateColumnsStorage;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
+import com.starrocks.warehouse.multi.MultiWarehouse;
+import com.starrocks.warehouse.multi.MultiWarehouseManager;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -87,6 +94,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeFail;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeSuccess;
@@ -316,7 +325,7 @@ public class AnalyzeStmtTest {
                 StatsConstants.AnalyzeType.FULL,
                 StatsConstants.ScheduleType.ONCE, Maps.newHashMap(),
                 StatsConstants.ScheduleStatus.FINISH, LocalDateTime.MIN);
-        Assertions.assertEquals("[-1, default_catalog, test, t0, ALL, FULL, ONCE, {}, FINISH, None, ]",
+        Assertions.assertEquals("[-1, default_catalog, test, t0, ALL, FULL, ONCE, {}, FINISH, None, , default_warehouse]",
                 ShowAnalyzeJobStmt.showAnalyzeJobs(getConnectContext(), nativeAnalyzeJob).toString());
 
         ExternalAnalyzeJob externalAnalyzeJob = new ExternalAnalyzeJob("hive0", "partitioned_db",
@@ -324,7 +333,7 @@ public class AnalyzeStmtTest {
                 StatsConstants.AnalyzeType.FULL,
                 StatsConstants.ScheduleType.ONCE, Maps.newHashMap(), StatsConstants.ScheduleStatus.FINISH,
                 LocalDateTime.MIN);
-        Assertions.assertEquals("[-1, hive0, partitioned_db, t1, ALL, FULL, ONCE, {}, FINISH, None, ]",
+        Assertions.assertEquals("[-1, hive0, partitioned_db, t1, ALL, FULL, ONCE, {}, FINISH, None, , default_warehouse]",
                 ShowAnalyzeJobStmt.showAnalyzeJobs(getConnectContext(), externalAnalyzeJob).toString());
 
         sql = "show analyze job";
@@ -365,7 +374,7 @@ public class AnalyzeStmtTest {
         analyzeStatus.setReason("Test Failed");
         Assertions.assertEquals("[-1, default_catalog.test, t0, ALL, FULL, ONCE, FAILED, " +
                         "2020-01-01 01:01:00, 2020-01-01 01:01:00, " +
-                        "{}, Test Failed]",
+                        "{}, Test Failed, ]",
                 ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
 
         // SHOW ANALYZE STATUS now resolves external tables via MetadataMgr.getBasicTable(...,
@@ -821,22 +830,22 @@ public class AnalyzeStmtTest {
         analyzeStatus.setStatus(StatsConstants.ScheduleStatus.RUNNING);
         Assertions.assertEquals(
                 "[-1, default_catalog.test, t0, ALL, FULL, ONCE, RUNNING (0%), 2020-01-01 01:01:00, 2020-01-01 01:01:00," +
-                        " {}, ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
+                        " {}, , ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
 
         analyzeStatus.setProgress(50);
         Assertions.assertEquals(
                 "[-1, default_catalog.test, t0, ALL, FULL, ONCE, RUNNING (50%), 2020-01-01 01:01:00, 2020-01-01 01:01:00," +
-                        " {}, ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
+                        " {}, , ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
 
         analyzeStatus.setStatus(StatsConstants.ScheduleStatus.FINISH);
         Assertions.assertEquals(
                 "[-1, default_catalog.test, t0, ALL, FULL, ONCE, SUCCESS, 2020-01-01 01:01:00, 2020-01-01 01:01:00," +
-                        " {}, ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
+                        " {}, , ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
 
         analyzeStatus.setStatus(StatsConstants.ScheduleStatus.FAILED);
         Assertions.assertEquals(
                 "[-1, default_catalog.test, t0, ALL, FULL, ONCE, FAILED, 2020-01-01 01:01:00, 2020-01-01 01:01:00," +
-                        " {}, ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
+                        " {}, , ]", ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), analyzeStatus).toString());
     }
 
     @Test
@@ -972,10 +981,94 @@ public class AnalyzeStmtTest {
     }
 
     @Test
+    public void testAsyncAnalyzeKeepsSubmittedWarehouse() throws Exception {
+        verifyManualAnalyzeWarehouse(true);
+    }
+
+    @Test
+    public void testSyncAnalyzeUsesSessionWarehouse() throws Exception {
+        verifyManualAnalyzeWarehouse(false);
+    }
+
+    private void verifyManualAnalyzeWarehouse(boolean async) throws Exception {
+        WarehouseManager warehouses = new MultiWarehouseManager();
+        warehouses.initDefaultWarehouse();
+        warehouses.addWarehouse(new MultiWarehouse(101, "etl", "", 201, Map.of(), 0));
+        warehouses.addWarehouse(new MultiWarehouse(102, "interactive", "", 202, Map.of(), 0));
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public WarehouseManager getWarehouseMgr() {
+                return warehouses;
+            }
+        };
+        new MockUp<StatisticUtils>() {
+            @Mock
+            public static boolean isEmptyTable(Table table) {
+                return false;
+            }
+        };
+        AtomicReference<Runnable> pending = new AtomicReference<>();
+        ExecutorService pool = Mockito.mock(ExecutorService.class);
+        Mockito.doAnswer(call -> {
+            Runnable task = call.getArgument(0);
+            if (async) {
+                pending.set(task);
+            } else {
+                task.run();
+            }
+            return null;
+        }).when(pool).execute(Mockito.any(Runnable.class));
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public ExecutorService getAnalyzeTaskThreadPool() {
+                return pool;
+            }
+        };
+        AtomicReference<ConnectContext> collected = new AtomicReference<>();
+        new MockUp<StatisticExecutor>() {
+            @Mock
+            public AnalyzeStatus collectStatistics(ConnectContext ctx, StatisticsCollectJob job,
+                                                    AnalyzeStatus status, boolean refreshAsync, boolean resetWarehouse) {
+                Assertions.assertFalse(resetWarehouse);
+                collected.set(ctx);
+                status.setStatus(StatsConstants.ScheduleStatus.FINISH);
+                return status;
+            }
+        };
+
+        ConnectContext session = UtFrameUtils.createDefaultCtx();
+        session.setCurrentWarehouse("etl");
+        session.getSessionVariable().setStatisticCollectParallelism(7);
+        String background = Config.lake_background_warehouse;
+        try {
+            // Manual collection must not depend on the automatic collector's warehouse.
+            Config.lake_background_warehouse = "missing_background";
+            AnalyzeStmt stmt = (AnalyzeStmt) UtFrameUtils.parseStmtWithNewParser(
+                    "analyze table db.tbl with " + (async ? "async" : "sync") + " mode", session);
+            StmtExecutor executor = StmtExecutor.newInternalExecutor(session, stmt);
+            executor.setProxy();
+            Deencapsulation.invoke(executor, "handleAnalyzeStmt");
+            if (async) {
+                Assertions.assertNull(collected.get());
+                session.setCurrentWarehouse("interactive");
+                session.getSessionVariable().setStatisticCollectParallelism(2);
+                Assertions.assertNotNull(pending.get());
+                pending.get().run();
+            }
+            Assertions.assertNotNull(collected.get());
+            Assertions.assertEquals("etl", collected.get().getCurrentWarehouseName());
+            Assertions.assertEquals(7, collected.get().getSessionVariable().getStatisticCollectParallelism());
+            Assertions.assertFalse(collected.get().getSessionVariable().isEnableMaterializedViewRewrite());
+        } finally {
+            Config.lake_background_warehouse = background;
+        }
+    }
+
+    @Test
     public void testKillAllPendingTasks() throws Exception {
         new MockUp<StmtExecutor>() {
             @Mock
-            private void executeAnalyze(AnalyzeStmt analyzeStmt, AnalyzeStatus analyzeStatus,
+            private void executeAnalyze(ConnectContext statsConnectCtx, AnalyzeStmt analyzeStmt, AnalyzeStatus analyzeStatus,
                                         Database db, Table table) throws InterruptedException {
                 Thread.sleep(100000);
             }

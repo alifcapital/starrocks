@@ -43,6 +43,7 @@ import com.starrocks.common.util.TimeUtils;
 import com.starrocks.service.FrontendOptions;
 import com.starrocks.thrift.TQueryStatisticsInfo;
 
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -376,13 +377,17 @@ public class QueryStatisticsInfo {
     }
 
     public static List<QueryStatisticsInfo> makeListFromMetricsAndMgrs() throws AnalysisException {
+        return makeListFromMetricsAndMgrs(true);
+    }
+
+    public static List<QueryStatisticsInfo> makeListFromMetricsAndMgrs(boolean collectMetrics) throws AnalysisException {
         final Map<String, QueryStatisticsItem> statistic =
                 QeProcessorImpl.INSTANCE.getQueryStatistics();
         final List<QueryStatisticsInfo> sortedRowData = Lists.newArrayList();
 
         final CurrentQueryInfoProvider provider = new CurrentQueryInfoProvider();
         final Map<String, CurrentQueryInfoProvider.QueryStatistics> statisticsMap
-                = provider.getQueryStatistics(statistic.values());
+                = collectMetrics ? provider.getQueryStatistics(statistic.values()) : Collections.emptyMap();
         final List<QueryStatisticsItem> sorted =
                 statistic.values().stream()
                         .sorted(Comparator.comparingLong(QueryStatisticsItem::getQueryStartTime))
@@ -398,7 +403,7 @@ public class QueryStatisticsInfo {
                     .withDb(item.getDb())
                     .withUser(item.getUser())
                     .withExecTime(item.getQueryExecTime())
-                    .withExecProgress(getExecProgress(item.getQueryId()))
+                    .withExecProgress(collectMetrics ? getExecProgress(item.getQueryId()) : "")
                     .withExecState(item.getExecState())
                     .withWareHouseName(item.getWarehouseName())
                     .withCustomQueryId(item.getCustomQueryId())

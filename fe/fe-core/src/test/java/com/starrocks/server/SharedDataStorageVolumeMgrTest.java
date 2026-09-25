@@ -1536,6 +1536,14 @@ public class SharedDataStorageVolumeMgrTest {
     public void testGetOrCreateVirtualTabletIdNormal()
             throws DdlException, AlreadyExistsException, StarClientException, MetaNotFoundException {
 
+        com.starrocks.warehouse.cngroup.ComputeResource systemResource =
+                com.starrocks.warehouse.cngroup.WarehouseComputeResource.of(99L);
+        new MockUp<WarehouseManager>() {
+            @Mock
+            public com.starrocks.warehouse.cngroup.ComputeResource getBackgroundComputeResource() {
+                return systemResource;
+            }
+        };
         long expectedVirtualTabletId = 20001;
         new MockUp<GlobalStateMgr>() {
 
@@ -1575,7 +1583,7 @@ public class SharedDataStorageVolumeMgrTest {
                 result = groupId;
 
                 starOSAgent.createShardWithVirtualTabletId(pathInfo, (FileCacheInfo) any, groupId, (HashMap) any,
-                        expectedVirtualTabletId, WarehouseManager.DEFAULT_RESOURCE);
+                        expectedVirtualTabletId, systemResource);
                 result = null;
             }
         };

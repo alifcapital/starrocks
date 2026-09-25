@@ -181,6 +181,7 @@ public class ProfileManager implements MemoryTrackable {
                 statement = statement.substring(0, 124) + " ...";
             }
             res.add(statement);
+            res.add(infoStrings.getOrDefault(WAREHOUSE_CNGROUP, ""));
             return res;
         }
     }

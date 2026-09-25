@@ -14,7 +14,6 @@
 
 package com.starrocks.lake;
 
-import com.starrocks.common.StarRocksException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
@@ -43,35 +42,37 @@ public class LakeAggregator {
     //
     // Prefer picking an aggregator that already owns at least one tablet of the batch so
     // that the first tablet id can be resolved locally without an extra RPC. Fall back to
-    // the original "random alive node" / "seq-chosen node" strategy only when no candidate
-    // is available or alive.
-    public static ComputeNode chooseAggregatorNode(ComputeResource computeResource,
+    // a random alive node in the selected warehouse when no candidate is available or alive.
+    public static ComputeNode chooseQueryAggregatorNode(ComputeResource computeResource,
+                                                        Collection<ComputeNode> candidateNodes) {
+        return chooseWarehouseAggregatorNode(computeResource, candidateNodes);
+    }
+
+    public static ComputeNode chooseMaintenanceAggregatorNode(ComputeResource computeResource,
+                                                              Collection<ComputeNode> candidateNodes) {
+        return chooseWarehouseAggregatorNode(computeResource, candidateNodes);
+    }
+
+    private static ComputeNode chooseWarehouseAggregatorNode(ComputeResource computeResource,
                                                    Collection<ComputeNode> candidateNodes) {
-        try {
-            WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
-            List<ComputeNode> aliveNodes = warehouseManager.getAliveComputeNodes(computeResource);
-            if (aliveNodes != null && !aliveNodes.isEmpty()
-                    && candidateNodes != null && !candidateNodes.isEmpty()) {
-                Set<Long> aliveIds = aliveNodes.stream().map(ComputeNode::getId).collect(Collectors.toSet());
-                List<ComputeNode> preferred = candidateNodes.stream()
-                        .filter(n -> n != null && aliveIds.contains(n.getId()))
-                        .distinct()
-                        .collect(Collectors.toList());
-                if (!preferred.isEmpty()) {
-                    return preferred.get(ThreadLocalRandom.current().nextInt(preferred.size()));
-                }
-                LOG.debug("no candidate node is alive in warehouse {}, fall back to random alive node",
-                        computeResource);
+        WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        List<ComputeNode> aliveNodes = warehouseManager.getAliveWarehouseComputeNodes(computeResource);
+        if (aliveNodes != null && !aliveNodes.isEmpty()
+                && candidateNodes != null && !candidateNodes.isEmpty()) {
+            Set<Long> aliveIds = aliveNodes.stream().map(ComputeNode::getId).collect(Collectors.toSet());
+            List<ComputeNode> preferred = candidateNodes.stream()
+                    .filter(n -> n != null && aliveIds.contains(n.getId()))
+                    .distinct()
+                    .collect(Collectors.toList());
+            if (!preferred.isEmpty()) {
+                return preferred.get(ThreadLocalRandom.current().nextInt(preferred.size()));
             }
-            if (aliveNodes != null && !aliveNodes.isEmpty()) {
-                return aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size()));
-            }
-            Long nodeId = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
-                            .getNodeSelector().seqChooseBackendOrComputeId();
-            return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
-                    .getBackendOrComputeNode(nodeId);
-        } catch (StarRocksException e) {
-            return null;
+            LOG.debug("no candidate node is alive in warehouse {}, fall back to random alive node",
+                    computeResource);
         }
+        if (aliveNodes != null && !aliveNodes.isEmpty()) {
+            return aliveNodes.get(ThreadLocalRandom.current().nextInt(aliveNodes.size()));
+        }
+        return null;
     }
 }

@@ -17,6 +17,7 @@ package com.starrocks.analysis;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.ExceptionChecker;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.common.util.UUIDUtil;
@@ -28,9 +29,9 @@ import com.starrocks.scheduler.Task;
 import com.starrocks.scheduler.TaskBuilder;
 import com.starrocks.scheduler.TaskManager;
 import com.starrocks.scheduler.TaskRun;
+import com.starrocks.scheduler.TaskRunBuilder;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
-import com.starrocks.sql.analyzer.TaskAnalyzer;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.SubmitTaskStmt;
 import com.starrocks.sql.common.AuditEncryptionChecker;
@@ -166,19 +167,13 @@ public class SubmitTaskStmtTest extends MVTestBase {
     public void testSubmitWithWarehouse() throws Exception {
         TaskManager tm = GlobalStateMgr.getCurrentState().getTaskManager();
 
-        // not supported
-        Exception e = assertThrows(AnalysisException.class, () ->
+        Exception e = assertThrows(ErrorReportException.class, () ->
                 starRocksAssert.ddl("submit task t_warehouse properties('warehouse'='w1') as " +
                         "insert into tbl1 select * from tbl1")
         );
-        Assertions.assertEquals("Getting analyzing error. Detail message: Invalid parameter warehouse.", e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("Warehouse name: w1 not exist"), e.getMessage());
 
         // mock the warehouse
-        new MockUp<TaskAnalyzer>() {
-            @Mock
-            public void analyzeTaskProperties(Map<String, String> properties) {
-            }
-        };
         new MockUp<WarehouseManager>() {
             @Mock
             public Warehouse getWarehouse(String name) {
@@ -196,6 +191,12 @@ public class SubmitTaskStmtTest extends MVTestBase {
         Assertions.assertTrue(task.getProperties().containsKey(PropertyAnalyzer.PROPERTIES_WAREHOUSE),
                 task.getProperties().toString());
         Assertions.assertEquals("('warehouse'='w1')", task.getPropertiesString());
+        TaskRun queuedRun = TaskRunBuilder.newBuilder(task).build();
+        starRocksAssert.ddl("alter task t_warehouse set ('WAREHOUSE'='w2')");
+        Assertions.assertEquals("w2", task.getProperties().get(PropertyAnalyzer.PROPERTIES_WAREHOUSE));
+        Assertions.assertEquals("w1", queuedRun.getProperties().get(PropertyAnalyzer.PROPERTIES_WAREHOUSE));
+        Assertions.assertEquals("w2", TaskRunBuilder.newBuilder(task).build().getProperties()
+                .get(PropertyAnalyzer.PROPERTIES_WAREHOUSE));
     }
 
     @Test

@@ -145,7 +145,7 @@ public class FrontendServiceImplUpdateImmutablePartitionTest {
 
             // nodes_info is built from the node ids of the given resource's worker group.
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 return Lists.newArrayList(
                         nodeIdOf(computeResource, loadComputeResource, acquiredComputeResource));
             }

@@ -17,6 +17,7 @@ package com.starrocks.sql.ast;
 import com.google.common.collect.ImmutableList;
 import com.starrocks.catalog.Column;
 import com.starrocks.common.Pair;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.type.TypeFactory;
@@ -49,7 +50,15 @@ public class ShowResourceGroupUsageStmt extends ShowStmt {
                     Pair.create(new Column("BEMemPoolInUseMemBytes", TypeFactory.createVarcharType(64)),
                             item -> Long.toString(item.usage.getMemPoolMemUsageBytes())),
                     Pair.create(new Column("BEMemPoolMemLimitBytes", TypeFactory.createVarcharType(64)),
-                            item -> Long.toString(item.usage.getMemPoolMemLimitBytes()))
+                            item -> Long.toString(item.usage.getMemPoolMemLimitBytes())),
+                    Pair.create(new Column("Warehouse", TypeFactory.createVarcharType(64)),
+                            item -> {
+                                var warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr()
+                                        .getWarehouseAllowNull(item.worker.getWarehouseId());
+                                return warehouse == null ? "" : warehouse.getName();
+                            }),
+                    Pair.create(new Column("BackendId", TypeFactory.createVarcharType(64)),
+                            item -> Long.toString(item.worker.getId()))
             );
 
     private static final List<Function<ShowItem, String>> COLUMN_SUPPLIERS = META_DATA.stream()

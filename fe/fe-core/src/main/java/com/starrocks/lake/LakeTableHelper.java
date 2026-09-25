@@ -100,12 +100,12 @@ public class LakeTableHelper {
         return new LakeTableRollupBuilder(table);
     }
 
-    static boolean removeShardRootDirectory(ShardInfo shardInfo) {
+    static boolean removeShardRootDirectory(ShardInfo shardInfo, ComputeResource computeResource) {
         DropTableRequest request = new DropTableRequest();
         final String path = shardInfo.getFilePath().getFullPath();
         request.tabletId = shardInfo.getShardId();
         request.path = path;
-        ComputeNode node = Utils.chooseNode(shardInfo);
+        ComputeNode node = Utils.chooseMaintenanceNode(shardInfo, computeResource);
         if (node == null) {
             LOG.warn("Fail to remove {}: no alive node", path);
             return false;
@@ -270,7 +270,7 @@ public class LakeTableHelper {
                 LOG.info("Skipped remove possible directory shared by multiple partitions: {}", path);
                 continue;
             }
-            if (removedPaths.add(path) && !removeShardRootDirectory(shardInfo)) {
+            if (removedPaths.add(path) && !removeShardRootDirectory(shardInfo, computeResource)) {
                 ret = false;
             }
         }

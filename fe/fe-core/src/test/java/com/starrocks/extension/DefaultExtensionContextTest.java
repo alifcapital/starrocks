@@ -14,6 +14,9 @@
 
 package com.starrocks.extension;
 
+import com.starrocks.common.Config;
+import com.starrocks.server.WarehouseManager;
+import com.starrocks.warehouse.multi.MultiWarehouseManager;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -271,6 +274,41 @@ public class DefaultExtensionContextTest {
         Assertions.assertNotNull(context.get(com.starrocks.qe.scheduler.slot.ResourceUsageMonitor.class));
         Assertions.assertNotNull(context.get(com.starrocks.qe.scheduler.slot.BaseSlotManager.class));
         Assertions.assertNotNull(context.get(com.starrocks.persist.gson.IGsonBuilderFactory.class));
+    }
+
+    @Test
+    public void testWarehouseImplementationSelectedAfterConfigLoad() {
+        boolean saved = Config.enable_multi_warehouse;
+        try {
+            Config.enable_multi_warehouse = false;
+            DefaultExtensionContext beforeConfigLoad = new DefaultExtensionContext();
+            Config.enable_multi_warehouse = true;
+            Assertions.assertInstanceOf(MultiWarehouseManager.class, beforeConfigLoad.get(WarehouseManager.class));
+
+            Config.enable_multi_warehouse = false;
+            Assertions.assertEquals(WarehouseManager.class,
+                    new DefaultExtensionContext().get(WarehouseManager.class).getClass());
+        } finally {
+            Config.enable_multi_warehouse = saved;
+        }
+    }
+
+    @Test
+    public void testExplicitWarehouseRegistrationOverridesConfig() {
+        boolean saved = Config.enable_multi_warehouse;
+        try {
+            Config.enable_multi_warehouse = true;
+            DefaultExtensionContext registeredContext = new DefaultExtensionContext();
+            WarehouseManager registered = new WarehouseManager();
+            registeredContext.register(WarehouseManager.class, registered);
+            Assertions.assertSame(registered, registeredContext.get(WarehouseManager.class));
+
+            DefaultExtensionContext constructorContext = new DefaultExtensionContext();
+            constructorContext.registerConstructor(WarehouseManager.class, WarehouseManager.class);
+            Assertions.assertEquals(WarehouseManager.class, constructorContext.get(WarehouseManager.class).getClass());
+        } finally {
+            Config.enable_multi_warehouse = saved;
+        }
     }
 
     @Test

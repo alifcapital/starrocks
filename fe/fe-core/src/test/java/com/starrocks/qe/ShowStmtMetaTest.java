@@ -568,7 +568,7 @@ public class ShowStmtMetaTest {
     public void testShowAnalyzeJobStmt() {
         ShowAnalyzeJobStmt stmt = new ShowAnalyzeJobStmt(null, null, null, null);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(11, metaData.getColumnCount());
+        Assertions.assertEquals(12, metaData.getColumnCount());
         Assertions.assertEquals("Id", metaData.getColumn(0).getName());
         Assertions.assertEquals("Catalog", metaData.getColumn(1).getName());
         Assertions.assertEquals("Database", metaData.getColumn(2).getName());
@@ -580,13 +580,14 @@ public class ShowStmtMetaTest {
         Assertions.assertEquals("Status", metaData.getColumn(8).getName());
         Assertions.assertEquals("LastWorkTime", metaData.getColumn(9).getName());
         Assertions.assertEquals("Reason", metaData.getColumn(10).getName());
+        Assertions.assertEquals("CollectionWarehouse", metaData.getColumn(11).getName());
     }
 
     @Test
     public void testShowAnalyzeStatusStmt() {
         ShowAnalyzeStatusStmt stmt = new ShowAnalyzeStatusStmt(null, null, null, null);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(11, metaData.getColumnCount());
+        Assertions.assertEquals(12, metaData.getColumnCount());
         Assertions.assertEquals("Id", metaData.getColumn(0).getName());
         Assertions.assertEquals("Database", metaData.getColumn(1).getName());
         Assertions.assertEquals("Table", metaData.getColumn(2).getName());
@@ -598,6 +599,7 @@ public class ShowStmtMetaTest {
         Assertions.assertEquals("EndTime", metaData.getColumn(8).getName());
         Assertions.assertEquals("Properties", metaData.getColumn(9).getName());
         Assertions.assertEquals("Reason", metaData.getColumn(10).getName());
+        Assertions.assertEquals("Warehouse", metaData.getColumn(11).getName());
     }
 
     @Test
@@ -819,7 +821,7 @@ public class ShowStmtMetaTest {
     public void testShowResourceGroupUsageStmt() {
         ShowResourceGroupUsageStmt stmt = new ShowResourceGroupUsageStmt("test_group", null);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(10, metaData.getColumnCount());
+        Assertions.assertEquals(12, metaData.getColumnCount());
         Assertions.assertEquals("Name", metaData.getColumn(0).getName());
         Assertions.assertEquals("Id", metaData.getColumn(1).getName());
         Assertions.assertEquals("Backend", metaData.getColumn(2).getName());
@@ -830,6 +832,8 @@ public class ShowStmtMetaTest {
         Assertions.assertEquals("BEMemPool", metaData.getColumn(7).getName());
         Assertions.assertEquals("BEMemPoolInUseMemBytes", metaData.getColumn(8).getName());
         Assertions.assertEquals("BEMemPoolMemLimitBytes", metaData.getColumn(9).getName());
+        Assertions.assertEquals("Warehouse", metaData.getColumn(10).getName());
+        Assertions.assertEquals("BackendId", metaData.getColumn(11).getName());
     }
 
     @Test
@@ -1333,12 +1337,13 @@ public class ShowStmtMetaTest {
     public void testShowProfilelistStmt() {
         ShowProfilelistStmt stmt = new ShowProfilelistStmt(10, NodePosition.ZERO);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(5, metaData.getColumnCount());
+        Assertions.assertEquals(6, metaData.getColumnCount());
         Assertions.assertEquals("QueryId", metaData.getColumn(0).getName());
         Assertions.assertEquals("StartTime", metaData.getColumn(1).getName());
         Assertions.assertEquals("Time", metaData.getColumn(2).getName());
         Assertions.assertEquals("State", metaData.getColumn(3).getName());
         Assertions.assertEquals("Statement", metaData.getColumn(4).getName());
+        Assertions.assertEquals("Warehouse", metaData.getColumn(5).getName());
     }
 
     @Test
@@ -1368,7 +1373,7 @@ public class ShowStmtMetaTest {
     public void testShowRunningQueriesStmt() {
         ShowRunningQueriesStmt stmt = new ShowRunningQueriesStmt(10, NodePosition.ZERO);
         ShowResultSetMetaData metaData = new ShowResultMetaFactory().getMetadata(stmt);
-        Assertions.assertEquals(12, metaData.getColumnCount());
+        Assertions.assertEquals(13, metaData.getColumnCount());
         Assertions.assertEquals("QueryId", metaData.getColumn(0).getName());
         Assertions.assertEquals("WarehouseId", metaData.getColumn(1).getName());
         Assertions.assertEquals("ResourceGroupId", metaData.getColumn(2).getName());
@@ -1381,6 +1386,7 @@ public class ShowStmtMetaTest {
         Assertions.assertEquals("DOP", metaData.getColumn(9).getName());
         Assertions.assertEquals("Frontend", metaData.getColumn(10).getName());
         Assertions.assertEquals("FeStartTime", metaData.getColumn(11).getName());
+        Assertions.assertEquals("Warehouse", metaData.getColumn(12).getName());
     }
 
     @Test

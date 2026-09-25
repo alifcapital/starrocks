@@ -16,9 +16,17 @@ package com.starrocks.warehouse;
 
 import com.google.common.base.Strings;
 import com.starrocks.authentication.UserProperty;
+import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ObjectType;
+import com.starrocks.authorization.PrivilegeType;
+import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.UserIdentity;
+import com.starrocks.common.Config;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
+import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.analyzer.SemanticException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -29,6 +37,31 @@ public class Utils {
     private static final Logger LOG = LogManager.getLogger(Utils.class);
 
     private Utils() {
+    }
+
+    public static void checkWarehouseUsage(UserIdentity userIdentity, String warehouseName) {
+        ConnectContext context = new ConnectContext();
+        context.setCurrentUserIdentity(userIdentity);
+        if (userIdentity != null) {
+            context.setCurrentRoleIds(userIdentity);
+        }
+        checkWarehouseUsage(context, warehouseName);
+    }
+
+    public static void checkWarehouseUsage(ConnectContext context, String warehouseName) {
+        if (!Config.enable_multi_warehouse || WarehouseManager.DEFAULT_WAREHOUSE_NAME.equalsIgnoreCase(warehouseName)) {
+            return;
+        }
+        if (context == null || context.getCurrentUserIdentity() == null) {
+            throw new SemanticException("An authenticated user is required to use warehouse " + warehouseName);
+        }
+        try {
+            Authorizer.checkWarehouseAction(context, warehouseName, PrivilegeType.USAGE);
+        } catch (AccessDeniedException e) {
+            AccessDeniedException.reportAccessDenied(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME,
+                    context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
+                    PrivilegeType.USAGE.name(), ObjectType.WAREHOUSE.name(), warehouseName);
+        }
     }
 
     public static Optional<String> getUserDefaultWarehouse(UserIdentity userIdentity) {

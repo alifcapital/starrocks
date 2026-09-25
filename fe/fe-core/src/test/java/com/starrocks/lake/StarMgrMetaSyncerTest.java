@@ -67,6 +67,7 @@ import com.starrocks.server.LocalMetastore;
 import com.starrocks.server.NodeMgr;
 import com.starrocks.server.SharedDataStorageVolumeMgr;
 import com.starrocks.server.StorageVolumeMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.KeysType;
 import com.starrocks.system.Backend;
 import com.starrocks.system.ComputeNode;
@@ -76,6 +77,7 @@ import com.starrocks.transaction.GtidGenerator;
 import com.starrocks.utframe.UtFrameUtils;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import com.starrocks.warehouse.cngroup.WarehouseComputeResourceProvider;
+import com.starrocks.warehouse.multi.MultiWarehouse;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -339,6 +341,16 @@ public class StarMgrMetaSyncerTest {
 
     @Test
     public void testDeleteUnusedWorker() throws Exception {
+        WarehouseManager manager = new WarehouseManager();
+        manager.initDefaultWarehouse();
+        manager.addWarehouse(new MultiWarehouse(201L, "etl", "", 20L, java.util.Map.of(), 0L));
+        Set<String> removed = new HashSet<>();
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public WarehouseManager getWarehouseMgr() {
+                return manager;
+            }
+        };
         new MockUp<SystemInfoService>() {
             @Mock
             public List<Backend> getBackends() {
@@ -359,12 +371,20 @@ public class StarMgrMetaSyncerTest {
                 computeNodes.add(cn1);
                 ComputeNode cn2 = new ComputeNode(10004, "host4", 1004);
                 computeNodes.add(cn2);
+                ComputeNode etl = new ComputeNode(10005, "host6", 1005);
+                etl.setWorkerGroupId(20L);
+                etl.setWarehouseId(201L);
+                etl.setStarletPort(999);
+                computeNodes.add(etl);
                 return computeNodes;
             }
         };
         new MockUp<StarOSAgent>() {
             @Mock
             public List<String> listWorkerGroupIpPort(long workerGroupId) {
+                if (workerGroupId == 20L) {
+                    return new ArrayList<>(List.of("host6:999", "orphan:888"));
+                }
                 List<String> addresses = new ArrayList<>();
                 addresses.add("host0:777");
                 addresses.add("host1:888");
@@ -372,9 +392,15 @@ public class StarMgrMetaSyncerTest {
                 addresses.add("host5:1000");
                 return addresses;
             }
+
+            @Mock
+            public void removeWorker(String address, long workerGroupId) {
+                removed.add(workerGroupId + "/" + address);
+            }
         };
 
-        Assertions.assertEquals(2, starMgrMetaSyncer.deleteUnusedWorker());
+        Assertions.assertEquals(3, starMgrMetaSyncer.deleteUnusedWorker());
+        Assertions.assertEquals(Set.of("0/host0:777", "0/host5:1000", "20/orphan:888"), removed);
     }
 
     @Test
@@ -1309,7 +1335,7 @@ public class StarMgrMetaSyncerTest {
         // test aggregator
         new MockUp<LakeAggregator>() {
             @Mock
-            public static ComputeNode chooseAggregatorNode(ComputeResource computeResource,
+            public static ComputeNode chooseMaintenanceAggregatorNode(ComputeResource computeResource,
                                                            java.util.Collection<ComputeNode> candidateNodes) {
                 return null;
             }

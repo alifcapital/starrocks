@@ -320,11 +320,11 @@ public class StreamLoadInfo {
         if (request.isSetBackend_id()) {
             SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
             warehouseId = com.starrocks.lake.Utils.getWarehouseIdByNodeId(systemInfo, request.getBackend_id())
-                    .orElse(WarehouseManager.DEFAULT_WAREHOUSE_ID);
+                    .orElseThrow(() -> new StarRocksException("Unknown compute node " + request.getBackend_id()));
         } else if (request.getWarehouse() != null && !request.getWarehouse().isEmpty()) {
             // For backward, we keep this else branch. We should prioritize using the method to get the warehouse by backend.
             String warehouseName = request.getWarehouse();
-            Warehouse warehouse = warehouseManager.getWarehouse(warehouseName);
+            Warehouse warehouse = warehouseManager.getWarehouseForExecution(warehouseName);
             warehouseId = warehouse.getId();
         }
 

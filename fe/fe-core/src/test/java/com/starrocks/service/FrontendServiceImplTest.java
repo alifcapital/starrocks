@@ -49,6 +49,7 @@ import com.starrocks.http.rest.MetricsAction;
 import com.starrocks.load.batchwrite.BatchWriteMgr;
 import com.starrocks.load.batchwrite.RequestLoadResult;
 import com.starrocks.load.batchwrite.TableId;
+import com.starrocks.load.streamload.StreamLoadInfo;
 import com.starrocks.load.streamload.StreamLoadKvParams;
 import com.starrocks.load.streamload.StreamLoadTask;
 import com.starrocks.metric.MetricRepo;
@@ -1603,6 +1604,12 @@ public class FrontendServiceImplTest {
 
     @Test
     public void testStreamLoadPutColumnMapException() {
+        new MockUp<GlobalTransactionMgr>() {
+            @Mock
+            public TransactionState getTransactionState(long dbId, long transactionId) {
+                return new TransactionState();
+            }
+        };
         FrontendServiceImpl impl = new FrontendServiceImpl(exeEnv);
         TStreamLoadPutRequest request = new TStreamLoadPutRequest();
         request.setDb("test");
@@ -1895,6 +1902,34 @@ public class FrontendServiceImplTest {
         loadRequest.setUser_ip("127.0.0.1");
         TStreamLoadPutResult loadResult1 = impl.streamLoadPut(loadRequest);
         TStreamLoadPutResult loadResult2 = impl.streamLoadPut(loadRequest);
+    }
+
+    @Test
+    public void testStreamLoadCannotChangeTransactionWarehouse() throws Exception {
+        FrontendServiceImpl impl = new FrontendServiceImpl(exeEnv);
+        TLoadTxnBeginRequest begin = new TLoadTxnBeginRequest();
+        begin.setLabel("warehouse_mismatch");
+        begin.setDb("test");
+        begin.setTbl("site_access_auto");
+        begin.setUser("root");
+        begin.setPasswd("");
+        TLoadTxnBeginResult transaction = impl.loadTxnBegin(begin);
+        Assertions.assertEquals(TStatusCode.OK, transaction.getStatus().getStatus_code());
+        StreamLoadInfo info = Mockito.mock(StreamLoadInfo.class);
+        Mockito.when(info.getComputeResource()).thenReturn(com.starrocks.warehouse.cngroup.WarehouseComputeResource.of(123L));
+        new MockUp<StreamLoadInfo>() {
+            @Mock
+            public StreamLoadInfo fromTStreamLoadPutRequest(TStreamLoadPutRequest request, Database db) {
+                return info;
+            }
+        };
+        TStreamLoadPutRequest load = new TStreamLoadPutRequest();
+        load.setDb("test");
+        load.setTbl("site_access_auto");
+        load.setTxnId(transaction.getTxnId());
+        StarRocksException error = Assertions.assertThrows(StarRocksException.class,
+                () -> impl.streamLoadPutImpl(new ConnectContext(), load));
+        Assertions.assertTrue(error.getMessage().contains("does not match the transaction warehouse"));
     }
 
     @Test

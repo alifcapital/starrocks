@@ -16,6 +16,7 @@ package com.starrocks.qe;
 
 import com.google.gson.JsonObject;
 import com.starrocks.common.StarRocksException;
+import com.starrocks.common.proc.CurrentQueryInfoProvider;
 import com.starrocks.common.util.ProfileManager;
 import com.starrocks.common.util.ProfilingExecPlan;
 import com.starrocks.common.util.RuntimeProfile;
@@ -26,10 +27,36 @@ import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collection;
+import java.util.Map;
+
 import static com.starrocks.common.proc.CurrentGlobalQueryStatisticsProcDirTest.QUERY_ONE_LOCAL;
 
 public class QueryStatisticsInfoTest {
     QueryStatisticsInfo firstQuery = QUERY_ONE_LOCAL;
+
+    @Test
+    public void testWarehouseSnapshotDoesNotFetchBackendMetrics() throws Exception {
+        new MockUp<QeProcessorImpl>() {
+            @Mock
+            public Map<String, QueryStatisticsItem> getQueryStatistics() {
+                return Map.of("query", new QueryStatisticsItem.Builder().queryId("query")
+                        .warehouseName("etl").execState("PENDING").queryType("Statistics").build());
+            }
+        };
+        new MockUp<CurrentQueryInfoProvider>() {
+            @Mock
+            public Map<String, CurrentQueryInfoProvider.QueryStatistics> getQueryStatistics(
+                    Collection<QueryStatisticsItem> items) {
+                throw new AssertionError("Warehouse counts must not fetch backend metrics");
+            }
+        };
+        var snapshot = QueryStatisticsInfo.makeListFromMetricsAndMgrs(false);
+        Assertions.assertEquals(1, snapshot.size());
+        Assertions.assertEquals("etl", snapshot.get(0).getWareHouseName());
+        Assertions.assertEquals("PENDING", snapshot.get(0).getExecState());
+        Assertions.assertEquals("Statistics", snapshot.get(0).getQueryType());
+    }
 
     @Test
     public void testEquality() {

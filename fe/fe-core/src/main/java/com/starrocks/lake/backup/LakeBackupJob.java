@@ -38,7 +38,6 @@ import com.starrocks.rpc.LakeService;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
-import com.starrocks.system.Backend;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.THdfsProperties;
 import org.apache.logging.log4j.LogManager;
@@ -57,7 +56,7 @@ public class LakeBackupJob extends BackupJob {
 
     private Map<SnapshotInfo, LockTabletMetadataRequest> lockRequests = Maps.newHashMap();
 
-    private Map<Backend, UploadSnapshotsRequest> uploadRequests = Maps.newHashMap();
+    private Map<ComputeNode, UploadSnapshotsRequest> uploadRequests = Maps.newHashMap();
 
     private Map<SnapshotInfo, Future<LockTabletMetadataResponse>> lockResponses = Maps.newHashMap();
 
@@ -105,9 +104,9 @@ public class LakeBackupJob extends BackupJob {
     protected void prepareSnapshotTask(PhysicalPartition partition, Table tbl, Tablet tablet, MaterializedIndex index,
                                        long visibleVersion, int schemaHash) {
         try {
-            // TODO(ComputeResource): support more better compute resource acquiring.
-            ComputeNode computeNode = GlobalStateMgr.getCurrentState().getWarehouseMgr()
-                    .getComputeNodeAssignedToTablet(WarehouseManager.DEFAULT_RESOURCE, tablet.getId());
+            WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+            ComputeNode computeNode = warehouseManager.getComputeNodeAssignedToTablet(
+                    warehouseManager.getBackgroundComputeResource(tbl.getId()), tablet.getId());
             LakeTableSnapshotInfo snapshotInfo = new LakeTableSnapshotInfo(dbId,
                     tbl.getId(), partition.getId(), index.getId(), tablet.getId(),
                     computeNode.getId(), schemaHash, visibleVersion);
@@ -129,7 +128,8 @@ public class LakeBackupJob extends BackupJob {
     @Override
     protected void sendSnapshotRequests() {
         for (Map.Entry<SnapshotInfo, LockTabletMetadataRequest> entry : lockRequests.entrySet()) {
-            Backend backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackend(entry.getKey().getBeId());
+            ComputeNode backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
+                    .getBackendOrComputeNode(entry.getKey().getBeId());
             LakeService lakeService = null;
             try {
                 lakeService = BrpcProxy.getLakeService(backend.getHost(), backend.getBrpcPort());
@@ -152,7 +152,8 @@ public class LakeBackupJob extends BackupJob {
             request.tabletId = info.getTabletId();
             request.version = ((LakeTableSnapshotInfo) info).getVersion();
             request.expireTime = (createTime + timeoutMs) / 1000;
-            Backend backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackend(info.getBeId());
+            ComputeNode backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
+                    .getBackendOrComputeNode(info.getBeId());
             LakeService lakeService = null;
             try {
                 lakeService = BrpcProxy.getLakeService(backend.getHost(),
@@ -181,14 +182,15 @@ public class LakeBackupJob extends BackupJob {
             snapshot.destPath = repo.getRepoTabletPathBySnapshotInfo(label, info);
             request.snapshots.put(lakeInfo.getTabletId(), snapshot);
         }
-        Backend backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackend(beId);
+        ComputeNode backend = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
+                    .getBackendOrComputeNode(beId);
         unfinishedTaskIds.put(beId, 1L);
         uploadRequests.put(backend, request);
     }
 
     @Override
     protected void sendUploadTasks() {
-        for (Map.Entry<Backend, UploadSnapshotsRequest> entry : uploadRequests.entrySet()) {
+        for (Map.Entry<ComputeNode, UploadSnapshotsRequest> entry : uploadRequests.entrySet()) {
             LakeService lakeService = null;
             try {
                 lakeService = BrpcProxy.getLakeService(entry.getKey().getHost(), entry.getKey().getBrpcPort());

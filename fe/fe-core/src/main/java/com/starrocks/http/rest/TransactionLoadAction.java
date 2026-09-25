@@ -339,8 +339,7 @@ public class TransactionLoadAction extends RestBaseAction {
             ConnectContext ctx = request.getConnectContext();
             if (ctx != null) {
                 Optional<String> userWarehouseName = Utils.getUserDefaultWarehouse(ctx.getCurrentUserIdentity());
-                if (userWarehouseName.isPresent() &&
-                        GlobalStateMgr.getCurrentState().getWarehouseMgr().warehouseExists(userWarehouseName.get())) {
+                if (userWarehouseName.isPresent()) {
                     warehouseName = userWarehouseName.get();
                 }
             }
@@ -355,6 +354,9 @@ public class TransactionLoadAction extends RestBaseAction {
         TransactionOperation txnOperation = TransactionOperation.parse(request.getSingleParameter(TXN_OP_KEY))
                 .orElseThrow(() -> new StarRocksException(
                         "Unknown transaction operation: " + request.getSingleParameter(TXN_OP_KEY)));
+        if (txnOperation == TransactionOperation.TXN_BEGIN || txnOperation == TransactionOperation.TXN_LOAD) {
+            Utils.checkWarehouseUsage(request.getConnectContext(), warehouseName);
+        }
         Long timeoutMillis = Optional.ofNullable(request.getRequest().headers().get(TIMEOUT_KEY))
                 .map(Long::parseLong)
                 .map(sec -> sec * 1000L)
@@ -460,4 +462,3 @@ public class TransactionLoadAction extends RestBaseAction {
         }
     }
 }
-

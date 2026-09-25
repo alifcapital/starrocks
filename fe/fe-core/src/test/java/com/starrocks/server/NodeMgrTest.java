@@ -19,9 +19,17 @@ import com.starrocks.common.Pair;
 import com.starrocks.ha.FrontendNodeType;
 import com.starrocks.ha.HAProtocol;
 import com.starrocks.leader.CheckpointController;
+import com.starrocks.rpc.ThriftConnectionPool;
+import com.starrocks.rpc.ThriftRPCRequestExecutor;
 import com.starrocks.system.Frontend;
 import com.starrocks.system.FrontendHbResponse;
+import com.starrocks.thrift.TGetQueryStatisticsResponse;
+import com.starrocks.thrift.TNetworkAddress;
+import com.starrocks.thrift.TStatus;
+import com.starrocks.thrift.TStatusCode;
 import com.starrocks.utframe.UtFrameUtils;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -40,6 +48,32 @@ public class NodeMgrTest {
     @BeforeAll
     public static void setUp() {
         UtFrameUtils.setUpForPersistTest();
+    }
+
+    @Test
+    public void testQueryStatisticsSkipUnavailableFrontends() {
+        NodeMgr nodeMgr = new NodeMgr(FrontendNodeType.FOLLOWER, "self", Pair.create("127.0.0.1", 9010));
+        Frontend self = new Frontend(FrontendNodeType.FOLLOWER, "self", "127.0.0.1", 9010);
+        Frontend alive = new Frontend(FrontendNodeType.FOLLOWER, "alive", "127.0.0.2", 9010);
+        Frontend dead = new Frontend(FrontendNodeType.FOLLOWER, "dead", "127.0.0.3", 9010);
+        self.setAlive(true);
+        alive.setAlive(true);
+        nodeMgr.getFrontends().put("self", self);
+        nodeMgr.getFrontends().put("alive", alive);
+        nodeMgr.getFrontends().put("dead", dead);
+        List<String> contacted = new ArrayList<>();
+        new MockUp<ThriftRPCRequestExecutor>() {
+            @Mock
+            public <RESULT, SERVER_CLIENT extends org.apache.thrift.TServiceClient> RESULT call(
+                    ThriftConnectionPool<SERVER_CLIENT> pool, TNetworkAddress address,
+                    int timeoutMs, int tryTimes,
+                    ThriftRPCRequestExecutor.MethodCallable<SERVER_CLIENT, RESULT> callable) {
+                contacted.add(address.getHostname());
+                return (RESULT) new TGetQueryStatisticsResponse().setStatus(new TStatus(TStatusCode.OK));
+            }
+        };
+        Assertions.assertTrue(nodeMgr.getQueryStatisticsInfoFromOtherFEs(false).isEmpty());
+        Assertions.assertEquals(List.of("127.0.0.2"), contacted);
     }
 
     @Test

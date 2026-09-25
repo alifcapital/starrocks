@@ -283,6 +283,7 @@ import com.starrocks.thrift.TTableInfo;
 import com.starrocks.transaction.GlobalTransactionMgr;
 import com.starrocks.type.TypeFactory;
 import com.starrocks.warehouse.Warehouse;
+import com.starrocks.warehouse.WarehouseProcDir;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -3286,7 +3287,7 @@ public class ShowExecutor {
             }
             PatternMatcher finalMatcher = matcher;
 
-            List<List<String>> rowSet = warehouseMgr.getAllWarehouses().stream()
+            List<Warehouse> visibleWarehouses = warehouseMgr.getAllWarehouses().stream()
                     .filter(warehouse -> finalMatcher == null || finalMatcher.match(warehouse.getName()))
                     .filter(warehouse -> {
                         try {
@@ -3295,9 +3296,9 @@ public class ShowExecutor {
                             return false;
                         }
                         return true;
-                    }).sorted(Comparator.comparing(Warehouse::getId)).map(Warehouse::getWarehouseInfo)
-                    .collect(Collectors.toList());
-            return new ShowResultSet(showResultMetaFactory.getMetadata(statement), rowSet);
+                    }).sorted(Comparator.comparing(Warehouse::getId)).collect(Collectors.toList());
+            return new ShowResultSet(showResultMetaFactory.getMetadata(statement),
+                    WarehouseProcDir.buildResult(visibleWarehouses).getRows());
         }
 
         @Override

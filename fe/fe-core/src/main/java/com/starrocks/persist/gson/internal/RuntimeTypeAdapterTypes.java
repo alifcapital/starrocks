@@ -179,6 +179,7 @@ import com.starrocks.warehouse.DefaultWarehouse;
 import com.starrocks.warehouse.Warehouse;
 import com.starrocks.warehouse.cngroup.ComputeResource;
 import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
+import com.starrocks.warehouse.multi.MultiWarehouse;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -350,7 +351,8 @@ public class RuntimeTypeAdapterTypes {
 
         final RuntimeTypeAdapterFactory<Warehouse> warehouse_type_adapter_factory = RuntimeTypeAdapterFactory
                 .of(Warehouse.class, "clazz")
-                .registerSubtype(DefaultWarehouse.class, "DefaultWarehouse");
+                .registerSubtype(DefaultWarehouse.class, "DefaultWarehouse")
+                .registerSubtype(MultiWarehouse.class, "MultiWarehouse");
         CLAZZ_TO_RUNTIME_TYPE_ADAPTOR_FACTORIES.put(Warehouse.class, warehouse_type_adapter_factory);
 
         final RuntimeTypeAdapterFactory<LoadJob> load_job_type_runtime_adapter_factory =

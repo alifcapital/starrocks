@@ -38,6 +38,7 @@ import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.warehouse.cngroup.ComputeResource;
 import org.apache.hadoop.util.BlockingThreadPoolExecutorService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -168,11 +169,12 @@ public class FullVacuumDaemon extends FrontendDaemon implements Writable {
 
         ClusterSnapshotMgr clusterSnapshotMgr = GlobalStateMgr.getCurrentState().getClusterSnapshotMgr();
         WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        ComputeResource vacuumResource = warehouseManager.getBackgroundComputeResource(table.getId());
         Set<ComputeNode> involvedNodes = new HashSet<>();
         Map<ComputeNode, Tablet> nodeToTablet = new HashMap<>();
 
         for (Tablet tablet : tablets) {
-            ComputeNode node = warehouseManager.getComputeNodeAssignedToTablet(WarehouseManager.DEFAULT_RESOURCE, tablet.getId());
+            ComputeNode node = warehouseManager.getComputeNodeAssignedToTablet(vacuumResource, tablet.getId());
 
             if (node == null) {
                 LOG.error("Could not get CN for tablet={}, returning early.", tablet.getId());

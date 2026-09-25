@@ -80,7 +80,7 @@ public class LoadPlanNodeTest {
 
         new Expectations() {
             {
-                GlobalStateMgr.getCurrentState().getWarehouseMgr().getAllComputeNodeIds(
+                GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseComputeNodeIds(
                         WarehouseComputeResource.of(1));
                 result = nodeIds;
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();

@@ -1345,7 +1345,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
     }
 
     private long loadTxnBeginImpl(TLoadTxnBeginRequest request, String clientIp) throws Exception {
-        checkPasswordAndLoadPriv(request.getUser(), request.getPasswd(), request.getDb(),
+        UserIdentity loadUser = checkPasswordAndLoadPriv(request.getUser(), request.getPasswd(), request.getDb(),
                 request.getTbl(), request.getUser_ip());
 
         // check txn
@@ -1382,15 +1382,18 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         if (backendId > 0) {
             SystemInfoService systemInfo = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo();
             warehouseId = Utils.getWarehouseIdByNodeId(systemInfo, request.getBackend_id())
-                    .orElse(WarehouseManager.DEFAULT_WAREHOUSE_ID);
+                    .orElseThrow(() -> new StarRocksException("Unknown compute node " + request.getBackend_id()));
         } else if (request.getWarehouse() != null && !request.getWarehouse().isEmpty()) {
             // For backward, we keep this else branch. We should prioritize using the method to get the warehouse by backend.
             String warehouseName = request.getWarehouse();
-            Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(warehouseName);
+            Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseForExecution(warehouseName);
             warehouseId = warehouse.getId();
         }
 
-        ComputeResource computeResource = GlobalStateMgr.getCurrentState().getWarehouseMgr().acquireComputeResource(warehouseId);
+        WarehouseManager warehouseManager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        String warehouseName = warehouseManager.getWarehouseForExecution(warehouseId).getName();
+        com.starrocks.warehouse.Utils.checkWarehouseUsage(loadUser, warehouseName);
+        ComputeResource computeResource = warehouseManager.acquireComputeResource(warehouseId);
         TransactionResult resp = new TransactionResult();
         StreamLoadMgr streamLoadManager = GlobalStateMgr.getCurrentState().getStreamLoadMgr();
         streamLoadManager.beginLoadTaskFromBackend(dbName, table.getName(), request.getLabel(), request.getRequest_id(),
@@ -1755,6 +1758,14 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         }
         try {
             StreamLoadInfo streamLoadInfo = StreamLoadInfo.fromTStreamLoadPutRequest(request, db);
+            TransactionState txnState = globalStateMgr.getGlobalTransactionMgr()
+                    .getTransactionState(db.getId(), request.getTxnId());
+            if (txnState == null) {
+                throw new StarRocksException("txn does not exist: " + request.getTxnId());
+            }
+            if (streamLoadInfo.getComputeResource().getWarehouseId() != txnState.getWarehouseId()) {
+                throw new StarRocksException("Stream load warehouse does not match the transaction warehouse");
+            }
             StreamLoadPlanner planner = new StreamLoadPlanner(context, db, (OlapTable) table, streamLoadInfo);
             TExecPlanFragmentParams plan = planner.plan(streamLoadInfo.getId());
 
@@ -1775,13 +1786,6 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             }
 
             plan.query_options.setLoad_job_type(TLoadJobType.STREAM_LOAD);
-            // add table indexes to transaction state
-            TransactionState txnState =
-                    GlobalStateMgr.getCurrentState().getGlobalTransactionMgr()
-                            .getTransactionState(db.getId(), request.getTxnId());
-            if (txnState == null) {
-                throw new StarRocksException("txn does not exist: " + request.getTxnId());
-            }
             plan.setImport_label(txnState.getLabel());
             plan.setDb_name(dbName);
             plan.setLoad_job_id(request.getTxnId());
@@ -2190,7 +2194,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
 
         // build nodes from the same compute resource used for the tablet locations above, so every
         // location node id is guaranteed to be present in nodes_info.
-        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createNodesInfo(computeResource,
+        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createWarehouseNodesInfo(computeResource,
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
         result.setNodes(nodesInfo.nodes);
         result.setStatus(new TStatus(OK));
@@ -2654,7 +2658,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         result.setTablets(tablets);
 
         // build nodes
-        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createNodesInfo(txnState.getComputeResource(),
+        TNodesInfo nodesInfo = GlobalStateMgr.getCurrentState().createWarehouseNodesInfo(txnState.getComputeResource(),
                 GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
         result.setNodes(nodesInfo.nodes);
         result.setStatus(new TStatus(OK));
@@ -2788,7 +2792,8 @@ public class FrontendServiceImpl implements FrontendService.Iface {
     @Override
     public TGetQueryStatisticsResponse getQueryStatistics(TGetQueryStatisticsRequest request) throws TException {
         try {
-            List<QueryStatisticsInfo> queryStatisticsInfos = QueryStatisticsInfo.makeListFromMetricsAndMgrs();
+            List<QueryStatisticsInfo> queryStatisticsInfos = QueryStatisticsInfo.makeListFromMetricsAndMgrs(
+                    !request.isSetCollect_metrics() || request.isCollect_metrics());
             List<TQueryStatisticsInfo> queryStatisticsThrift = queryStatisticsInfos
                     .stream()
                     .map(QueryStatisticsInfo::toThrift)
@@ -3067,7 +3072,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             response.setLocation(OlapTableSink.createLocation(
                     dictTable, partitionParam, dictTable.enableReplicatedStorage(), null));
             // TODO(ComputeResource): support more better compute resource acquiring.
-            response.setNodes_info(GlobalStateMgr.getCurrentState().createNodesInfo(WarehouseManager.DEFAULT_RESOURCE,
+            response.setNodes_info(GlobalStateMgr.getCurrentState().createWarehouseNodesInfo(WarehouseManager.DEFAULT_RESOURCE,
                     GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()));
         } catch (StarRocksException e) {
             SemanticException semanticException = new SemanticException("build DictQueryParams error in dict_query_expr.");

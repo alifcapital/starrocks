@@ -66,9 +66,11 @@ public class WarehouseQueryMetrics {
         long allocateSlots = slot.getAllocatedNumPhysicalSlots().map(s -> QueryQueueOptions.correctSlotNum(s)).orElse(0);
 
         Optional<LogicalSlot.ExtraMessage> extraMessage = slot.getExtraMessage();
+        String query = slot.getQuery().isEmpty()
+                ? extraMessage.map(LogicalSlot.ExtraMessage::getQuery).orElse("") : slot.getQuery();
         return new WarehouseQueryMetrics(slot.getWarehouseId(), slot.getWarehouseName(),
                 slot.getSlotId(), slot.getState(), estCostsSlots, allocateSlots,
-                slot.getQueuedWaitSeconds(), extraMessage.map(e -> e.getQuery()).orElse(""), extraMessage);
+                slot.getQueuedWaitSeconds(), query, extraMessage);
     }
 
     public TGetWarehouseQueriesResponseItem toThrift() {

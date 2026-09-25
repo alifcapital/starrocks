@@ -465,7 +465,7 @@ public class SlotSelectionStrategyV2Test {
             int concurrency = slotTracker.getCurrentCurrency();
             int numPeakedSmallSlots = 0;
             List<LogicalSlot> runningSmallSlots = com.google.common.collect.Lists.newArrayList();
-            while (concurrency < 9) {
+            while (concurrency < 10) {
                 List<LogicalSlot> peakSlots = strategy.peakSlotsToAllocate(slotTracker);
                 Assertions.assertThat(peakSlots.isEmpty()).isFalse();
                 numPeakedSmallSlots += peakSlots.size();
@@ -473,11 +473,17 @@ public class SlotSelectionStrategyV2Test {
                 concurrency = slotTracker.getCurrentCurrency();
                 runningSmallSlots.addAll(peakSlots);
             }
-            Assertions.assertThat(numPeakedSmallSlots == 10);
-            // since concurrency is 10, all small slots are blocked.
+            Assertions.assertThat(concurrency).isEqualTo(10);
+            Assertions.assertThat(numPeakedSmallSlots).isEqualTo(9);
+            // No further query fits the concurrency limit.
             Assertions.assertThat(strategy.peakSlotsToAllocate(slotTracker)).isEmpty();
             // release all running slots
             runningSmallSlots.forEach(slot -> Assertions.assertThat(slotTracker.releaseSlot(slot.getSlotId())).isSameAs(slot));
+            List<LogicalSlot> remaining = strategy.peakSlotsToAllocate(slotTracker);
+            Assertions.assertThat(remaining).hasSize(1);
+            Assertions.assertThat(smallSlots).containsAll(remaining);
+            remaining.forEach(slotTracker::allocateSlot);
+            remaining.forEach(slot -> slotTracker.releaseSlot(slot.getSlotId()));
         }
         Assertions.assertThat(slotTracker.getCurrentCurrency()).isEqualTo(1);
 

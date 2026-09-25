@@ -65,26 +65,18 @@ public class Utils {
     private Utils() {
     }
 
-    public static Long chooseNodeId(ShardInfo shardInfo) {
+    public static ComputeNode chooseMaintenanceNode(ShardInfo shardInfo, ComputeResource computeResource) {
+        List<ComputeNode> candidates = new ArrayList<>();
         try {
-            return GlobalStateMgr.getCurrentState().getStarOSAgent().getPrimaryComputeNodeIdByShard(shardInfo);
+            long nodeId = GlobalStateMgr.getCurrentState().getStarOSAgent().getPrimaryComputeNodeIdByShard(shardInfo);
+            ComputeNode node = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
+            if (node != null) {
+                candidates.add(node);
+            }
         } catch (StarRocksException e) {
-            // do nothing
+            LOG.debug("No primary node for shard {}, choose a maintenance node in {}", shardInfo.getShardId(), computeResource);
         }
-        try {
-            return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo()
-                    .getNodeSelector().seqChooseBackendOrComputeId();
-        } catch (StarRocksException e) {
-            return null;
-        }
-    }
-
-    public static ComputeNode chooseNode(ShardInfo shardInfo) {
-        Long nodeId = chooseNodeId(shardInfo);
-        if (nodeId == null) {
-            return null;
-        }
-        return GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(nodeId);
+        return LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidates);
     }
 
     public static Map<Long, List<Long>> groupTabletID(Collection<Partition> partitions,
@@ -450,7 +442,7 @@ public class Utils {
         // resolved locally via the staros worker cache (no extra get-shard-info RPC).
         // The compute-node ids are embedded in the request (see createSubRequestForAggregatePublish).
         Set<ComputeNode> candidateAggregatorNodes = collectCandidateAggregatorNodes(request);
-        ComputeNode aggregatorNode = LakeAggregator.chooseAggregatorNode(computeResource, candidateAggregatorNodes);
+        ComputeNode aggregatorNode = LakeAggregator.chooseMaintenanceAggregatorNode(computeResource, candidateAggregatorNodes);
         if (aggregatorNode == null) {
             throw new NoAliveBackendException("No alive compute node for handle aggregate publish version");
         }

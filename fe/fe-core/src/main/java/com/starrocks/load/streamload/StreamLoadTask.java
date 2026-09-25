@@ -1079,7 +1079,8 @@ public class StreamLoadTask extends AbstractStreamLoadTask {
         }
         this.txnId = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr().beginTransaction(
                 dbId, Lists.newArrayList(tableId), label, requestId, txnCoordinator,
-                sourceType, id, timeoutMs / 1000, computeResource);
+                sourceType, id, timeoutMs / 1000,
+                Config.enable_multi_warehouse ? computeResource : WarehouseManager.DEFAULT_RESOURCE);
     }
 
     public void unprotectedPrepareTxn(long preparedTimeoutMs) throws StarRocksException, LockTimeoutException {

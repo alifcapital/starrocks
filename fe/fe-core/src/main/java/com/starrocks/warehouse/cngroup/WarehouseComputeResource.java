@@ -15,6 +15,8 @@
 package com.starrocks.warehouse.cngroup;
 
 import com.google.gson.annotations.SerializedName;
+import com.starrocks.common.ErrorCode;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.lake.StarOSAgent;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
@@ -58,7 +60,8 @@ public final class WarehouseComputeResource implements ComputeResource {
             return StarOSAgent.DEFAULT_WORKER_GROUP_ID;
         }
         return selectWorkerGroupInternal(warehouseId)
-                .orElse(StarOSAgent.DEFAULT_WORKER_GROUP_ID);
+                .orElseThrow(() -> ErrorReportException.report(ErrorCode.ERR_WAREHOUSE_UNAVAILABLE,
+                        String.valueOf(warehouseId)));
     }
 
     private Optional<Long> selectWorkerGroupInternal(long warehouseId) {
