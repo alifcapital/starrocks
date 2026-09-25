@@ -20,6 +20,7 @@
 #include "column/map_column.h"
 #include "column/struct_column.h"
 #include "column/type_traits.h"
+#include "common/config.h"
 #include "fmt/core.h"
 #include "udf/java/java_udf.h"
 #include "util/defer_op.h"
@@ -635,6 +636,7 @@ std::unique_ptr<JniScanner> create_iceberg_metadata_jni_scanner(const JniScanner
     jni_scanner_params["serialized_table"] = options.scan_node->serialized_table;
     jni_scanner_params["load_column_stats"] = options.scan_node->load_column_stats ? "true" : "false";
     jni_scanner_params["scanner_type"] = options.scan_node->metadata_table_type;
+    jni_scanner_params["table_cache_max_entries"] = std::to_string(config::iceberg_metadata_table_cache_capacity);
 
     const std::string scanner_factory_class = "com/starrocks/connector/iceberg/IcebergMetadataScannerFactory";
     return std::make_unique<JniScanner>(scanner_factory_class, jni_scanner_params);
