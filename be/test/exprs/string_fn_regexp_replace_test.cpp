@@ -148,7 +148,7 @@ TEST_F(StringFunctionRegexpReplaceTest, testMultipleRowsWithPackagePattern) {
     state->size_of_pattern = int(pattern.size());
 
     if (hs_compile(pattern.c_str(), HS_FLAG_ALLOWEMPTY | HS_FLAG_DOTALL | HS_FLAG_UTF8 | HS_FLAG_SOM_LEFTMOST,
-                   HS_MODE_VECTORED, nullptr, &state->database, &state->compile_err) != HS_SUCCESS) {
+                   HS_MODE_BLOCK, nullptr, &state->database, &state->compile_err) != HS_SUCCESS) {
         std::stringstream error;
         error << "Invalid regex expression: " << pattern << ": " << state->compile_err->message;
         hs_free_compile_error(state->compile_err);
