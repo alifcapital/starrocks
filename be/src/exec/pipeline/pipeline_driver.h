@@ -78,7 +78,8 @@ enum DriverState : uint32_t {
     // in the working thread other than moving the driver frequently between ready queue and pending queue, which
     // will lead to drastic performance deduction (the "ScheduleTime" in profile will be super high).
     // We can enable this optimization by overriding SourceOperator::is_mutable to return true.
-    LOCAL_WAITING = 12
+    LOCAL_WAITING = 12,
+    INTERMEDIATE_BLOCK = 13
 };
 
 [[maybe_unused]] static inline std::string ds_to_string(DriverState ds) {
