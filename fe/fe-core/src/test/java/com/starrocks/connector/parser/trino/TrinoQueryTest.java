@@ -1013,10 +1013,10 @@ public class TrinoQueryTest extends TrinoTestBase {
         analyzeFail(sql);
 
         sql = "select approx_percentile(2.25, 1.79E-10)";
-        assertPlanContains(sql, "percentile_approx(2.25, 1.79E-10)");
+        assertPlanContains(sql, "percentile_approx(2.25, 1.79E-10, 1000.0)");
 
         sql = "select approx_percentile(2.25, 0.4)";
-        assertPlanContains(sql, "percentile_approx(2.25, 0.4)");
+        assertPlanContains(sql, "percentile_approx(2.25, 0.4, 1000.0)");
     }
 
     @Test
@@ -1101,7 +1101,7 @@ public class TrinoQueryTest extends TrinoTestBase {
         assertPlanContains(sql, "json_array(CAST(1: ta AS JSON), CAST(2: tb AS JSON), CAST(3: tc AS JSON), CAST(7: tg AS JSON))");
 
         sql = "SELECT json_array_get('[\"a\", [3, 9], \"c\"]', 0);";
-        assertPlanContains(sql, "json_query(parse_json('[\"a\", [3, 9], \"c\"]'), '$.[0]')");
+        assertPlanContains(sql, "json_query_from_string('[\"a\", [3, 9], \"c\"]', '$.[0]')");
 
         sql = "select json_array_get(json_array(true, 12e-1, 'text'), 2);";
         assertPlanContains(sql, "json_query(json_array(CAST(TRUE AS JSON), CAST(1.2 AS JSON), CAST('text' AS JSON)), '$.[2]')");

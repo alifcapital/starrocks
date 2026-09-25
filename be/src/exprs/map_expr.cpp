@@ -24,6 +24,13 @@
 namespace starrocks {
 
 StatusOr<ColumnPtr> MapExpr::evaluate_checked(ExprContext* context, Chunk* chunk) {
+    return evaluate_impl(context, chunk, nullptr);
+}
+StatusOr<ColumnPtr> MapExpr::evaluate_selected(ExprContext* context, Chunk* chunk, const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), false);
+    return evaluate_impl(context, chunk, &rows);
+}
+StatusOr<ColumnPtr> MapExpr::evaluate_impl(ExprContext* context, Chunk* chunk, const std::vector<uint32_t>* rows) {
     if (UNLIKELY(_children.size() % 2 == 1)) {
         return Status::RuntimeError(fmt::format("Map expressions' keys and values should be in pair."));
     }
@@ -31,13 +38,14 @@ StatusOr<ColumnPtr> MapExpr::evaluate_checked(ExprContext* context, Chunk* chunk
     size_t num_rows = 1;
     // when num_pairs == 0, we should generate right num_rows.
     if (num_pairs == 0 && chunk) {
-        num_rows = chunk->num_rows();
+        num_rows = rows == nullptr ? chunk->num_rows() : rows->size();
     }
 
     bool all_const = true;
     Columns pairs_columns(num_pairs);
     for (size_t i = 0; i < num_pairs; i++) {
-        ASSIGN_OR_RETURN(auto col, _children[i]->evaluate_checked(context, chunk));
+        ASSIGN_OR_RETURN(auto col, rows == nullptr ? _children[i]->evaluate_checked(context, chunk)
+                                                   : _children[i]->evaluate_selected(context, chunk, *rows));
         num_rows = std::max(num_rows, col->size());
         all_const &= col->is_constant();
         pairs_columns[i] = std::move(col);

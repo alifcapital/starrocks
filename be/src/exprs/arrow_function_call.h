@@ -37,6 +37,9 @@ public:
     void close(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override;
     bool is_constant() const override;
 
+    // An Arrow/Python UDF is always expensive (external call), so a conditional branch holding one is filtered.
+    bool is_expensive_node() const override { return true; }
+
 private:
     std::unique_ptr<UDFCallStub> _build_stub(int32_t driver_id, FunctionContext* context);
     RuntimeState* _runtime_state = nullptr;

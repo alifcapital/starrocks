@@ -42,6 +42,8 @@ public:
     Expr* clone(ObjectPool* pool) const override { return pool->add(new ArrayMapExpr(*this)); }
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
+    bool is_expensive_node() const override { return true; }
     std::string debug_string() const override;
     int get_slot_ids(std::vector<SlotId>* slot_ids) const override;
 

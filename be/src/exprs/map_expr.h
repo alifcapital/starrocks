@@ -31,6 +31,8 @@ public:
     bool maybe_duplicated_keys() { return !_children[0]->is_slotref(); }
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, Chunk*, const std::vector<uint32_t>*);
 
     Expr* clone(ObjectPool* pool) const override { return pool->add(new MapExpr(*this)); }
 };

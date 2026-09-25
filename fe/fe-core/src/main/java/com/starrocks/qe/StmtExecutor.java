@@ -920,6 +920,8 @@ public class StmtExecutor {
         context.setIsForward(false);
         context.setCurrentThreadId(Thread.currentThread().getId());
 
+        context.getSessionVariable().refreshPercentileCompactIntermediate(
+                GlobalStateMgr.getCurrentState().getVariableMgr());
         SessionVariable sessionVariableBackup = context.getSessionVariable();
         ComputeResource computeResourceBackup = context.getCurrentComputeResourceNoAcquire();
         // set true to change session variable

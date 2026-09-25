@@ -747,6 +747,20 @@ Default value: `true`, which means global RF is enabled. If this feature is disa
 * **Default**: true
 * **Introduced in**: v3.3.20, v3.4.9, v3.5.8, v4.0.2
 
+### enable_conditional_two_phase_eval
+
+* **Default**: false
+* **Type**: Boolean
+* **Description**: Evaluates eligible expensive value expressions in CASE, IF, IFNULL, and COALESCE only for the rows that need them. This saves expression computation but does not defer reading their input columns from storage. Requires no global late materialization. Expensive expressions are classified by a fixed function list, not a selectivity or cost estimate; enabling it may slow queries where most rows need the expensive branch. A qualifying CASE uses this evaluation path instead of CASE JIT. Functions in unselected value branches are not evaluated and therefore do not raise their evaluation errors. Disabled by default.
+
+### enable_json_extract_fusion
+
+* **Description**: Enables fast extraction from VARCHAR JSON for constant paths. Default: `true`. `SET` changes the current session; `SET GLOBAL` sets the default for new sessions. The optimizer can also fuse `json_query(parse_json(value), path)` and arrow expressions. Casts retain their target type and error handling.
+
+  With `sql_mode` containing `ALLOW_THROW_EXCEPTION`, extraction validates the entire document and reports JSON parse errors. Without that mode, the fast path reads the requested value and does not guarantee detection of malformed values outside the path. Errors encountered during extraction return NULL. Wildcards, slices, and nonconstant paths use the full parser. Set this variable to `false` to disable both optimizer fusion and fast extraction and restore full-document parsing.
+
+  Sync stream load and routine load do not propagate this session variable to the backend; fast extraction remains disabled for those paths.
+
 ### enable_insert_strict
 
 * **Description**: Whether to enable strict mode while loading data using INSERT from files(). Valid values: `true` and `false` (Default). When strict mode is enabled, the system loads only qualified rows. It filters out unqualified rows and returns details about the unqualified rows. For more information, see [Strict mode](../loading/strict_mode.md). In versions earlier than v3.4.0, when `enable_insert_strict` is set to `true`, the INSERT jobs fails when there is an unqualified rows.
@@ -946,6 +960,12 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
 * **Data type**: boolean
 * **Introduced in**: v3.2.0
 
+### enable_mv_percentile_strict_match
+
+* **Default**: false
+* **Data type**: boolean
+* **Description**: When `true`, percentile materialized-view rewrites reject stored digests whose compression is lower than the query requests. The optimizer can use a suitable digest from the same or another materialized view, or fall back to the base table. When `false`, lower-compression candidates remain eligible, but candidates with sufficient compression are preferred. Rejected equivalents are recorded in the MV trace.
+
 ### enable_profile
 
 * **Description**: Specifies whether to send the profile of a query for analysis. The default value is `false`, which means no profile is required.
@@ -955,6 +975,15 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
   If you need to analyze the profile of a query, you can set this variable to `true`. After the query is completed, the profile can be viewed on the web page of the currently connected FE (address: `fe_host:fe_http_port/query`). This page displays the profiles of the latest 100 queries with `enable_profile` turned on.
 
 * **Default**: false
+
+### enable_percentile_compact_intermediate (global)
+
+* **Scope**: Global only. Set with `SET GLOBAL enable_percentile_compact_intermediate = true` or `false`.
+* **Default**: false
+* **Data type**: boolean
+* **Description**: Enables compact pass-through records for `percentile_approx` and `percentile_approx_weighted`, including their array variants, in exchange and spill. Persisted aggregate states continue to use the self-contained format.
+
+  Keep this option disabled during a rolling upgrade. Enable it only after all FE, BE, and CN nodes support the compact format. Each statement reads the global setting when execution begins, including statements on existing connections. Already running statements keep their original setting. Before downgrading workers that cannot read compact records, disable the option and wait for all statements started with it enabled to finish.
 
 ### enable_query_cache
 

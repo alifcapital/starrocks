@@ -1,0 +1,191 @@
+-- name: test_selected_collections
+
+CREATE DATABASE selected_collections_${uuid0};
+
+USE selected_collections_${uuid0};
+
+SET enable_conditional_two_phase_eval=true;
+
+SET jit_level=0;
+
+CREATE TABLE inputs(id INT, payload_small VARCHAR(4096), payload_large VARCHAR(8192)) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1");
+
+INSERT INTO inputs VALUES (0,'{"body":{"txn":{"originator":{"number":"0"}}}}','{"number":0,"padding":"longer number"}'),(1,'{"body":{"txn":{"originator":{"number":"1"}}}}','{"number":1,"padding":"longer number"}'),(2,'{"body":{"txn":{"originator":{"number":"2"}}}}','{"number":2,"padding":"longer number"}'),(3,'{"body":{"txn":{"originator":{"number":"3"}}}}','{"number":3,"padding":"longer number"}'),(4,'{"body":{"txn":{"originator":{"number":"4"}}}}','{"number":4,"padding":"longer number"}'),(5,'{"body":{"txn":{"originator":{"number":"5"}}}}','{"number":5,"padding":"longer number"}'),(6,'{"body":{"txn":{"originator":{"number":"6"}}}}','{"number":6,"padding":"longer number"}'),(7,'{"body":{"txn":{"originator":{"number":"7"}}}}','{"number":7,"padding":"longer number"}'),(8,'{"body":{"txn":{"originator":{"number":"8"}}}}','{"number":8,"padding":"longer number"}'),(9,'{"body":{"txn":{"originator":{"number":"9"}}}}','{"number":9,"padding":"longer number"}');
+
+SELECT id,CASE WHEN id%10<3 THEN array_sort(a) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_sortby(a,b) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_sortby(a,b,[4,3,2,1]) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_intersect(a,b) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_filter(a,[true,false,NULL,true]) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_distinct([a,b,a]) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map(x->md5(cast(x AS CHAR)),a) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map(x->concat(cast(x AS CHAR),p),a) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map((x,y)->x+y,a,b) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map(x->id+1,a) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map(x->md5("abc"),a) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN array_map(x->array_map(y->y+id,x),[a,b]) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN map_apply((k,v)->(k,md5(v)),m) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN map_apply((k,v)->(k,concat(v,cast(id AS CHAR))),m) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN map_apply((k,v)->("same",v),m) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN map_filter(m,[true,false]) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN distinct_map_keys(m) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN json_string(to_json(m)) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN json_string(to_json(map("a",a,"b",b))) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN percentile_approx_raw(percentile_hash(cast(id AS DOUBLE)),0.7) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(concat("[",cast(id AS CHAR),",2]") AS ARRAY<BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(parse_json(concat("[",cast(id AS CHAR),",null]")) AS ARRAY<BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(parse_json(concat("{\"x\":",cast(id AS CHAR),"}")) AS MAP<VARCHAR,BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(parse_json(concat("{\"x\":",cast(id AS CHAR),"}")) AS STRUCT<x BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(CAST(concat("[",cast(id AS CHAR),",null]") AS VARIANT) AS ARRAY<BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(CAST(concat("{\"x\":",cast(id AS CHAR),"}") AS VARIANT) AS MAP<VARCHAR,BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN CAST(CAST(concat("{\"x\":",cast(id AS CHAR),"}") AS VARIANT) AS STRUCT<x BIGINT>) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN regexp_replace(p,"number","#") ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,CASE WHEN id%10<3 THEN regexp_replace(p,"number",cast(id AS CHAR)) ELSE NULL END FROM (SELECT id, payload_small p,
+ CASE WHEN id%7=0 THEN NULL ELSE [id%5,cast(NULL AS BIGINT),id%11,id%5] END a,
+ CASE WHEN id%9=0 THEN NULL ELSE [id%3,id%2,id%7,id%3] END b,
+ CASE WHEN id%11=0 THEN NULL ELSE map('a',cast(id AS CHAR),'b',payload_small) END m
+ FROM inputs WHERE id<1000) s ORDER BY id;
+
+SELECT id,percentile_approx_raw(percentile_hash(10),IF(id%2=0,0.5,NULL)) FROM inputs ORDER BY id;
+
+DROP DATABASE selected_collections_${uuid0};

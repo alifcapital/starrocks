@@ -35,6 +35,9 @@ public:
     void close(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override;
     bool is_constant() const override;
 
+    // A Java UDF is always expensive (external JNI call), so a conditional branch holding one is filtered.
+    bool is_expensive_node() const override { return true; }
+
 private:
     StatusOr<std::shared_ptr<JavaUDFContext>> _build_udf_func_desc(FunctionContext::FunctionStateScope scope,
                                                                    const std::string& libpath);

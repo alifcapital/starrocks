@@ -1161,7 +1161,17 @@ public:
     DEFINE_CAST_CONSTRUCT(VectorizedCastExpr);
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, ptr));
+        return cast_column(context, std::move(column));
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_selected(context, chunk, rows));
+        return cast_column(context, std::move(column));
+    }
+
+    StatusOr<ColumnPtr> cast_column(ExprContext* context, ColumnPtr column) {
         size_t col_size = column->size();
         if (col_size != 0 && ColumnHelper::count_nulls(column) == col_size) {
             return ColumnHelper::create_const_null_column(col_size);
@@ -1484,6 +1494,17 @@ public:
     DEFINE_CAST_CONSTRUCT(VectorizedCastToStringExpr);
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, ptr));
+        return cast_column(context, std::move(column));
+    }
+
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_selected(context, chunk, rows));
+        return cast_column(context, std::move(column));
+    }
+
+    StatusOr<ColumnPtr> cast_column(ExprContext* context, ColumnPtr column) {
         if (ColumnHelper::count_nulls(column) == column->size() && column->size() != 0) {
             return ColumnHelper::create_const_null_column(column->size());
         }

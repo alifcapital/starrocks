@@ -26,6 +26,10 @@
 #include "gutil/casts.h"
 #include "runtime/types.h"
 #include "simd/selector.h"
+#include "exprs/conditional_two_phase.h"
+#include "util/dispatch.h"
+#include "gutil/casts.h"
+#include "runtime/runtime_state.h"
 #include "types/logical_type.h"
 #include "util/dispatch.h"
 #include "util/percentile_value.h"
@@ -81,7 +85,20 @@ class VectorizedIfNullExpr : public Expr {
 public:
     DEFINE_CLASS_CONSTRUCT_FN(VectorizedIfNullExpr);
 
+    Status open(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override {
+        RETURN_IF_ERROR(Expr::open(state, context, scope));
+        if (state->query_options().enable_conditional_two_phase_eval) {
+            // arg1 is the only deferrable value (arg0's null-ness is the guard, always evaluated full).
+            _two_phase_eligible = _children[1]->contains_expensive() && !_children[1]->is_constant();
+        }
+        return Status::OK();
+    }
+
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        if (_two_phase_eligible && ptr != nullptr) {
+            return two_phase_eval_null_routed(context, ptr, this->type(), {_children[0], _children[1]}, {0, 1});
+        }
+
         ASSIGN_OR_RETURN(auto lhs, _children[0]->evaluate_checked(context, ptr));
 
         int null_count = ColumnHelper::count_nulls(lhs);
@@ -103,6 +120,8 @@ public:
     }
 
 private:
+    bool _two_phase_eligible = false;
+
     ColumnPtr _evaluate_general(const Columns& columns) {
         ColumnViewer<Type> lhs_viewer(columns[0]);
         ColumnViewer<Type> rhs_viewer(columns[1]);
@@ -227,7 +246,28 @@ class VectorizedIfExpr : public Expr {
 public:
     DEFINE_CLASS_CONSTRUCT_FN(VectorizedIfExpr);
 
+    Status open(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override {
+        RETURN_IF_ERROR(Expr::open(state, context, scope));
+        if (state->query_options().enable_conditional_two_phase_eval) {
+            _true_arm_two_phase = _children[1]->contains_expensive() && !_children[1]->is_constant();
+            _false_arm_two_phase = _children[2]->contains_expensive() && !_children[2]->is_constant();
+            _two_phase_eligible = _true_arm_two_phase || _false_arm_two_phase;
+        }
+        return Status::OK();
+    }
+
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        if (_two_phase_eligible && ptr != nullptr) {
+            std::vector<Expr*> then_exprs = {_children[1]};
+            std::vector<uint8_t> then_two_phase = {static_cast<uint8_t>(_true_arm_two_phase ? 1 : 0)};
+            auto guard_fn = [this, context, ptr](int /*branch*/) -> StatusOr<ColumnPtr> {
+                return _children[0]->evaluate_checked(context, ptr);
+            };
+            return two_phase_eval_predicate_routed(context, ptr, this->type(), /*num_branches=*/1, guard_fn, then_exprs,
+                                                   then_two_phase, _children[2], _false_arm_two_phase,
+                                                   /*enable_first_all_true_shortcut=*/true);
+        }
+
         ASSIGN_OR_RETURN(auto bhs, _children[0]->evaluate_checked(context, ptr));
         const int true_count = ColumnHelper::count_true_with_notnull(bhs);
 
@@ -289,6 +329,10 @@ public:
     }
 
 private:
+    bool _two_phase_eligible = false;
+    bool _true_arm_two_phase = false;
+    bool _false_arm_two_phase = false;
+
     ColumnPtr get_null_column(int num_rows, ColumnPtr& input_col) {
         if (input_col->only_null()) {
             return ColumnHelper::create_const_column<TYPE_BOOLEAN>(1, num_rows);
@@ -381,7 +425,26 @@ class VectorizedCoalesceExpr : public Expr {
 public:
     DEFINE_CLASS_CONSTRUCT_FN(VectorizedCoalesceExpr);
 
+    Status open(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override {
+        RETURN_IF_ERROR(Expr::open(state, context, scope));
+        if (state->query_options().enable_conditional_two_phase_eval) {
+            const int n = static_cast<int>(_children.size());
+            _arg_two_phase.assign(n, 0);
+            // arg0's null-ness gates routing, so it is always evaluated full; only args at position >= 1 defer.
+            for (int i = 1; i < n; ++i) {
+                _arg_two_phase[i] = (_children[i]->contains_expensive() && !_children[i]->is_constant()) ? 1 : 0;
+                _two_phase_eligible |= (_arg_two_phase[i] != 0);
+            }
+        }
+        return Status::OK();
+    }
+
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        if (_two_phase_eligible && ptr != nullptr) {
+            std::vector<Expr*> arg_exprs(_children.begin(), _children.end());
+            return two_phase_eval_null_routed(context, ptr, this->type(), arg_exprs, _arg_two_phase);
+        }
+
         Columns columns;
         for (int i = 0; i < _children.size(); ++i) {
             ASSIGN_OR_RETURN(auto value, _children[i]->evaluate_checked(context, ptr));
@@ -424,6 +487,9 @@ public:
     }
 
 private:
+    bool _two_phase_eligible = false;
+    std::vector<uint8_t> _arg_two_phase; // index-aligned with args; [0] is always 0 (arg0 is full)
+
     StatusOr<ColumnPtr> _evaluate_general(const Columns& columns) {
         std::vector<ColumnViewer<Type>> viewers;
         for (auto& value : columns) {

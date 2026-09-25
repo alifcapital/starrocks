@@ -1,0 +1,192 @@
+-- name: test_selected_function_families
+CREATE DATABASE selected_families_${uuid0};
+-- result:
+-- !result
+USE selected_families_${uuid0};
+-- result:
+-- !result
+SET enable_conditional_two_phase_eval=true;
+-- result:
+-- !result
+SET jit_level=0;
+-- result:
+-- !result
+CREATE TABLE t(id INT, p VARCHAR(8192), doc VARCHAR(8192), dt VARCHAR(30), url VARCHAR(100), kv VARCHAR(100), a ARRAY<VARCHAR(100)>)
+DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1");
+-- result:
+-- !result
+INSERT INTO t VALUES
+(0,'abc0','{"n":0}','2024-03-01','https://a.example/x?k=0','a:0,b:1',['a',NULL,'a']),
+(1,'abc1','{"n":1}','2024-03-02','https://a.example/x?k=1','a:1,b:2',['a','b']),
+(2,NULL,NULL,NULL,NULL,NULL,NULL),
+(3,'abc3',NULL,'invalid','invalid','',[]),
+(4,'abc4','{"n":4}','2024-03-05','https://b.example/x?k=4','b:4,a:2',['b',NULL,'a']),
+(5,'abc5','invalid','invalid','invalid','x:5',['x']);
+-- result:
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN md5(p) ELSE NULL END,
+CASE WHEN id%2=0 THEN sha2(p,256) ELSE NULL END,
+CASE WHEN id%2=0 THEN from_base64(to_base64(p)) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	577571be4de9dcce85a041ba0410f29f	56abfbd7d2ea606e667945422de5a368b8b0272b8f29081cb058b594dd7e3249	abc0
+1	None	None	None
+2	None	None	None
+3	None	None	None
+4	1ab3168356216e0c9d97d7bca8ff190b	7bb3daccaf354e7e2f3471fc688c8b3d12d970f365816324c36c981bc3a99f25	abc4
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN md5sum(p,doc) ELSE NULL END,
+CASE WHEN id%2=0 THEN aes_decrypt(aes_encrypt(p,"secret"),"secret") ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	0944eb30d3f79143cc03d9002d0c7763	abc0
+1	None	None
+2	d41d8cd98f00b204e9800998ecf8427e	None
+3	None	None
+4	27cf8090130f9323a118db6d1e712437	abc4
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN regexp_count(p,"[0-9]+") ELSE NULL END,
+CASE WHEN id%2=0 THEN regexp_replace(p,"[0-9]+","#") ELSE NULL END,
+CASE WHEN id%2=0 THEN p REGEXP "[0-9]+" ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	1	abc#	1
+1	None	None	None
+2	None	None	None
+3	None	None	None
+4	1	abc#	1
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN regexp_extract_all(p,"([0-9]+)",1) ELSE NULL END,
+CASE WHEN id%2=0 THEN regexp_split(p,"[0-9]+") ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	["0"]	["abc",""]
+1	None	None
+2	None	None
+3	None	None
+4	["4"]	["abc",""]
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN get_json_int(doc,"$.n") ELSE NULL END,
+CASE WHEN id%2=0 THEN json_string(json_array(id,p)) ELSE NULL END,
+CASE WHEN id%2=0 THEN json_string(json_remove(parse_json(doc),"$.n")) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	0	[0, "abc0"]	{}
+1	None	None	None
+2	None	[2, null]	None
+3	None	None	None
+4	4	[4, "abc4"]	{}
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN str_to_date(dt,"%Y-%m-%d") ELSE NULL END,
+CASE WHEN id%2=0 THEN str_to_jodatime(dt,"yyyy-MM-dd") ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	2024-03-01	2024-03-01 00:00:00
+1	None	None
+2	None	None
+3	None	None
+4	2024-03-05	2024-03-05 00:00:00
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN url_extract_host(url) ELSE NULL END,
+CASE WHEN id%2=0 THEN url_extract_parameter(url,"k") ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	a.example	0
+1	None	None
+2	None	None
+3	None	None
+4	b.example	4
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN ngram_search(p,"abc",3) ELSE NULL END,
+CASE WHEN id%2=0 THEN ngram_search_case_insensitive(p,"ABC",3) ELSE NULL END,
+CASE WHEN id%2=0 THEN tokenize("standard",p) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	1.0	1.0	["abc0"]
+1	None	None	None
+2	None	None	None
+3	None	None	None
+4	1.0	1.0	["abc4"]
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN bitmap_to_string(to_bitmap(id)) ELSE NULL END,
+CASE WHEN id%2=0 THEN bitmap_to_string(bitmap_hash(p)) ELSE NULL END,
+CASE WHEN id%2=0 THEN hll_cardinality(hll_hash(p)) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	0	2189152411	1
+1	None	None	None
+2	2		0
+3	None	None	None
+4	4	4056956654	1
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN bitmap_to_array(bitmap_from_string("1,2,4")) ELSE NULL END,
+CASE WHEN id%2=0 THEN bitmap_count(bitmap_and(to_bitmap(id),bitmap_from_string("1,2,4"))) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	[1,2,4]	0
+1	None	None
+2	[1,2,4]	1
+3	None	None
+4	[1,2,4]	1
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN st_x(st_point(id,10)) ELSE NULL END,
+CASE WHEN id%2=0 THEN st_astext(st_point(id,10)) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	0.0	POINT (0 10)
+1	None	None
+2	2.0	POINT (2 10)
+3	None	None
+4	4.000000000000001	POINT (4 10)
+5	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN str_to_map(kv,",",":") ELSE NULL END,
+CASE WHEN id%2=0 THEN array_join(a,",") ELSE NULL END,
+CASE WHEN id%2=0 THEN array_join(a,",","NULL") ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	{"a":"0","b":"1"}	a,a	a,NULL,a
+1	None	None	None
+2	None	None	None
+3	None	None	None
+4	{"b":"4","a":"2"}	b,a	b,NULL,a
+5	None	None	None
+-- !result
+SELECT id,
+CASE WHEN id%2=0 THEN array_distinct(a) ELSE NULL END,
+CASE WHEN id%2=0 THEN all_match([id%3=0,NULL,id%7=0]) ELSE NULL END,
+CASE WHEN id%2=0 THEN any_match([id%3=0,NULL,id%7=0]) ELSE NULL END
+FROM t ORDER BY id;
+-- result:
+0	["a",null]	None	1
+1	None	None	None
+2	None	0	None
+3	None	None	None
+4	["b",null,"a"]	0	None
+5	None	None	None
+-- !result
+DROP DATABASE selected_families_${uuid0};
+-- result:
+-- !result

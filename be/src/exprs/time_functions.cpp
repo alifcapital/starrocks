@@ -24,6 +24,7 @@
 
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
+#include "exprs/selected_column.h"
 #include "gutil/port.h"
 
 // Fix for ulong type on macOS
@@ -844,12 +845,15 @@ Status TimeFunctions::to_tera_date_close(FunctionContext* context, FunctionConte
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> TimeFunctions::to_tera_date(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::to_tera_date_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
-    size_t size = columns[0]->size(); // minimum number of rows.
+    size_t size = input_num_rows(columns); // minimum number of rows.
     ColumnBuilder<TYPE_DATE> result(size);
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
 
     auto state = reinterpret_cast<TeradataFormatState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     if (!state->formatter) {
@@ -874,7 +878,15 @@ StatusOr<ColumnPtr> TimeFunctions::to_tera_date(FunctionContext* context, const 
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> TimeFunctions::to_tera_date(FunctionContext* context, const Columns& columns) {
+    return to_tera_date_impl(context, columns);
+}
+StatusOr<ColumnPtr> TimeFunctions::to_tera_date_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                         size_t) {
+    return to_tera_date_impl(context, columns);
 }
 
 // to_tera_timestamp
@@ -907,12 +919,15 @@ Status TimeFunctions::to_tera_timestamp_close(FunctionContext* context, Function
 }
 
 // to_tera_timestamp
-StatusOr<ColumnPtr> TimeFunctions::to_tera_timestamp(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::to_tera_timestamp_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
-    size_t size = columns[0]->size(); // minimum number of rows.
+    size_t size = input_num_rows(columns); // minimum number of rows.
     ColumnBuilder<TYPE_DATETIME> result(size);
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
 
     auto state = reinterpret_cast<TeradataFormatState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     if (!state->formatter) {
@@ -937,7 +952,15 @@ StatusOr<ColumnPtr> TimeFunctions::to_tera_timestamp(FunctionContext* context, c
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> TimeFunctions::to_tera_timestamp(FunctionContext* context, const Columns& columns) {
+    return to_tera_timestamp_impl(context, columns);
+}
+StatusOr<ColumnPtr> TimeFunctions::to_tera_timestamp_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                              size_t) {
+    return to_tera_timestamp_impl(context, columns);
 }
 
 template <TimeUnit UNIT>
@@ -2422,16 +2445,15 @@ Status TimeFunctions::str_to_date_prepare(FunctionContext* context, FunctionCont
 // try to transfer content to date format based on "%Y-%m-%d",
 // if successful, return result TimestampValue
 // else take a uncommon approach to process this content.
-template <bool isYYYYMMDD>
-StatusOr<ColumnPtr> TimeFunctions::str_to_date_from_date_format(FunctionContext* context,
-                                                                const starrocks::Columns& columns,
+template <bool isYYYYMMDD, typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::str_to_date_from_date_format(FunctionContext* context, const Inputs& columns,
                                                                 const char* str_format) {
-    size_t size = columns[0]->size();
+    size_t size = input_num_rows(columns);
     ColumnBuilder<TYPE_DATETIME> result(size);
 
     TimestampValue ts;
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto fmt_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto fmt_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
     for (size_t i = 0; i < size; ++i) {
         if (str_viewer.is_null(i)) {
             result.append_null();
@@ -2447,7 +2469,7 @@ StatusOr<ColumnPtr> TimeFunctions::str_to_date_from_date_format(FunctionContext*
             }
         }
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
 // uncommon approach to process string content, based on uncommon string format.
@@ -2466,14 +2488,17 @@ Status TimeFunctions::str_to_date_internal(FunctionContext* context, TimestampVa
 }
 
 // Try to process string content, based on uncommon string format
-StatusOr<ColumnPtr> TimeFunctions::str_to_date_uncommon(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::str_to_date_uncommon(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
-    size_t size = columns[0]->size(); // minimum number of rows.
+    size_t size = input_num_rows(columns); // minimum number of rows.
     ColumnBuilder<TYPE_DATETIME> result(size);
 
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto fmt_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto fmt_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
     for (size_t i = 0; i < size; ++i) {
         if (str_viewer.is_null(i) || fmt_viewer.is_null(i)) {
             result.append_null();
@@ -2485,7 +2510,7 @@ StatusOr<ColumnPtr> TimeFunctions::str_to_date_uncommon(FunctionContext* context
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
 Status TimeFunctions::ParseJodaState::prepare(std::string_view format_str) {
@@ -2518,12 +2543,15 @@ Status TimeFunctions::parse_joda_close(FunctionContext* context, FunctionContext
     return {};
 }
 
-StatusOr<ColumnPtr> TimeFunctions::parse_jodatime(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::parse_jodatime_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
-    size_t size = columns[0]->size(); // minimum number of rows.
+    size_t size = input_num_rows(columns); // minimum number of rows.
     ColumnBuilder<TYPE_DATETIME> result(size);
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
 
     auto state = reinterpret_cast<ParseJodaState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     auto& formatter = state->joda;
@@ -2552,11 +2580,20 @@ StatusOr<ColumnPtr> TimeFunctions::parse_jodatime(FunctionContext* context, cons
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> TimeFunctions::parse_jodatime(FunctionContext* context, const Columns& columns) {
+    return parse_jodatime_impl(context, columns);
+}
+StatusOr<ColumnPtr> TimeFunctions::parse_jodatime_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                           size_t) {
+    return parse_jodatime_impl(context, columns);
 }
 
 // str_to_date, for the "str_to_date" in sql.
-StatusOr<ColumnPtr> TimeFunctions::str_to_date(FunctionContext* context, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::str_to_date_impl(FunctionContext* context, const Inputs& columns) {
     auto* ctx = reinterpret_cast<StrToDateCtx*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     if (ctx == nullptr) {
         return str_to_date_uncommon(context, columns);
@@ -2565,6 +2602,14 @@ StatusOr<ColumnPtr> TimeFunctions::str_to_date(FunctionContext* context, const C
     } else { // for string format like "%Y-%m-%d %H:%i:%s"
         return str_to_date_from_date_format<false>(context, columns, ctx->fmt);
     }
+}
+
+StatusOr<ColumnPtr> TimeFunctions::str_to_date(FunctionContext* context, const Columns& columns) {
+    return str_to_date_impl(context, columns);
+}
+StatusOr<ColumnPtr> TimeFunctions::str_to_date_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                        size_t) {
+    return str_to_date_impl(context, columns);
 }
 
 // reclaim memory for str_to_date.
@@ -2585,9 +2630,17 @@ DEFINE_UNARY_FN_WITH_IMPL(TimestampToDate, value) {
     return DateValue{timestamp::to_julian(value._timestamp)};
 }
 
-StatusOr<ColumnPtr> TimeFunctions::str2date(FunctionContext* context, const Columns& columns) {
-    ASSIGN_OR_RETURN(ColumnPtr datetime, str_to_date(context, columns));
+template <typename Inputs>
+StatusOr<ColumnPtr> TimeFunctions::str2date_impl(FunctionContext* context, const Inputs& columns) {
+    ASSIGN_OR_RETURN(ColumnPtr datetime, str_to_date_impl(context, columns));
     return VectorizedStrictUnaryFunction<TimestampToDate>::evaluate<TYPE_DATETIME, TYPE_DATE>(datetime);
+}
+
+StatusOr<ColumnPtr> TimeFunctions::str2date(FunctionContext* context, const Columns& columns) {
+    return str2date_impl(context, columns);
+}
+StatusOr<ColumnPtr> TimeFunctions::str2date_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return str2date_impl(context, columns);
 }
 
 Status TimeFunctions::format_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {

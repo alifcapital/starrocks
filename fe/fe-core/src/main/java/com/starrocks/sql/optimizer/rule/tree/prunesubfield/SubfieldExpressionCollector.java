@@ -127,7 +127,44 @@ public class SubfieldExpressionCollector extends ScalarOperatorVisitor<Void, Voi
             }
         }
 
+        // A json/variant path function only maps to a storage subfield (flat-json / variant) read when its
+        // source argument roots at a json/variant/complex column. When the source is a computed value such
+        // as parse_json(varchar), there is no stored subfield to prune: collecting the call would hoist the
+        // expensive computation below the scan and out of any guarding CASE/IF/COALESCE, forcing it to run
+        // for every row. Skip such calls (still descend into children). Mirrors the column rooting in
+        // SubfieldAccessPathNormalizer, which already produces no access path for a computed source.
+        boolean isPathFunction = PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(call.getFnName());
+        if (isPathFunction && !isColumnRootedSource(call.getChild(0))) {
+            return visit(call, context);
+        }
+
         complexExpressions.add(call);
         return null;
+    }
+
+    // Returns true when {@code source} (the first argument of a json/variant path function) bottoms out at
+    // a json/variant/complex column, traversed only through subfield accesses, collection-element accesses,
+    // and nested json/variant path functions. A computed source such as parse_json(varchar) or a cast does
+    // not root at such a column. Mirrors the rooting in SubfieldAccessPathNormalizer.Collector.
+    private static boolean isColumnRootedSource(ScalarOperator source) {
+        ScalarOperator current = source;
+        while (current instanceof SubfieldOperator || current instanceof CollectionElementOperator
+                || current instanceof CallOperator) {
+            if (current instanceof CallOperator) {
+                String fnName = ((CallOperator) current).getFnName();
+                if (!PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(fnName)) {
+                    return false;
+                }
+            }
+            if (current.getChildren().isEmpty()) {
+                return false;
+            }
+            current = current.getChild(0);
+        }
+        if (current instanceof ColumnRefOperator) {
+            Type type = current.getType();
+            return type.isComplexType() || type.isJsonType() || type.isVariantType();
+        }
+        return false;
     }
 }

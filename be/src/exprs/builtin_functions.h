@@ -20,6 +20,7 @@
 #include "column/column.h"
 #include "common/status.h"
 #include "exprs/function_context.h"
+#include "exprs/selected_column.h"
 
 namespace starrocks {
 
@@ -27,12 +28,15 @@ using PrepareFunction = std::function<Status(FunctionContext* context, FunctionC
 using CloseFunction = std::function<Status(FunctionContext* context, FunctionContext::FunctionStateScope scope)>;
 using ScalarFunction = std::function<StatusOr<ColumnPtr>(FunctionContext* context, const Columns& columns)>;
 
+using SelectedScalarFunction = StatusOr<ColumnPtr> (*)(FunctionContext*, const SelectedColumns&, size_t);
+
 struct FunctionDescriptor {
     std::string name;
 
     uint8_t args_nums;
 
     ScalarFunction scalar_function;
+    SelectedScalarFunction selected_function = nullptr;
 
     PrepareFunction prepare_function;
 
@@ -46,10 +50,11 @@ struct FunctionDescriptor {
 
     FunctionDescriptor(std::string nm, uint8_t args, ScalarFunction sf, PrepareFunction pf, CloseFunction cf,
                        bool exception_safe_, bool check_overflow_, const char* in_return_type = nullptr,
-                       std::vector<const char*> in_arg_types = {})
+                       std::vector<const char*> in_arg_types = {}, SelectedScalarFunction selected = nullptr)
             : name(std::move(nm)),
               args_nums(args),
               scalar_function(std::move(sf)),
+              selected_function(selected),
               prepare_function(std::move(pf)),
               close_function(std::move(cf)),
               exception_safe(exception_safe_),
@@ -58,10 +63,12 @@ struct FunctionDescriptor {
               arg_types(std::move(in_arg_types)) {}
 
     FunctionDescriptor(std::string nm, uint8_t args, ScalarFunction sf, bool exception_safe_, bool check_overflow_,
-                       const char* in_return_type = nullptr, std::vector<const char*> in_arg_types = {})
+                       const char* in_return_type = nullptr, std::vector<const char*> in_arg_types = {},
+                       SelectedScalarFunction selected = nullptr)
             : name(std::move(nm)),
               args_nums(args),
               scalar_function(std::move(sf)),
+              selected_function(selected),
               prepare_function(nullptr),
               close_function(nullptr),
               exception_safe(exception_safe_),

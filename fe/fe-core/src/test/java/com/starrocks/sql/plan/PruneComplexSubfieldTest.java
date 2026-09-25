@@ -1267,7 +1267,41 @@ public class PruneComplexSubfieldTest extends PlanTestNoneDBBase {
                 "  |  join op: INNER JOIN (BROADCAST)\n" +
                 "  |  equal join conjunct: [3: v1, BIGINT, true] = [2: v2, BIGINT, true]\n" +
                 "  |  other join predicates: " +
-                "cast(cast([13: json_query, JSON, true] as INT) as BIGINT) + [2: v2, BIGINT, true] > 1");
+                "cast(cast([12: json_query, JSON, true] as INT) as BIGINT) + [2: v2, BIGINT, true] > 1");
+    }
+
+    @Test
+    public void testPushDownSubfieldSkipsComputedJsonSource() throws Exception {
+        boolean oldFusion = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+        connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+        try {
+            connectContext.getSessionVariable().setCboPruneJsonSubfieldDepth(20);
+
+            // FIRES: the json-path source roots at a stored json column (js0.j1). Across the join,
+            // PushDownSubfieldRule pushes the call down to the js0 scan side (node 1:Project) and
+            // PruneSubfieldRule turns it into a storage subfield read (ColumnAccessPath). This is the case the
+            // rule is meant to optimize, and it must keep working.
+            String fire = "select json_query(js0.j1, '$.a.b') from t0 join js0 on t0.v1 = js0.v1";
+            String firePlan = getVerboseExplain(fire);
+            assertContains(firePlan, "ColumnAccessPath: [/j1/a/b(json)]");
+            assertContains(firePlan, "9 <-> json_query[([4: j1, JSON, true], '$.a.b')");
+
+            // DOES NOT FIRE: the json-path source is computed (parse_json over a string column t1.c1). There is
+            // no stored subfield to prune. Before the fix the whole call was hoisted to the t1 scan side, so
+            // parse_json ran on every pre-join row for no storage benefit (and, inside a CASE/IF/COALESCE branch,
+            // that defeated short-circuit / two-phase evaluation). After the fix the call stays inline in the
+            // project above the join (node 5:Project, parent of 4:HASH JOIN) and produces no ColumnAccessPath.
+            String noFire = "select json_query(parse_json(t1.c1), '$.a.b') from t0 join t1 on t0.v1 = t1.id";
+            String noFirePlan = getVerboseExplain(noFire);
+            assertNotContains(noFirePlan, "ColumnAccessPath");
+            assertContains(noFirePlan, "  5:Project\n" +
+                    "  |  output columns:\n" +
+                    "  |  7 <-> json_query[(parse_json[([5: c1, VARCHAR, true]); args: VARCHAR; result: JSON; " +
+                    "args nullable: true; result nullable: true], '$.a.b');");
+            assertContains(noFirePlan, "4:HASH JOIN");
+        } finally {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(oldFusion);
+        }
     }
 
     @Test

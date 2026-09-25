@@ -57,6 +57,7 @@ public:
      * @return: BooleanColumn
      */
     DEFINE_VECTORIZED_FN(regex);
+    static StatusOr<ColumnPtr> regex_selected(FunctionContext*, const SelectedColumns&, size_t);
 
 private:
     /**
@@ -142,9 +143,11 @@ private:
     static StatusOr<ColumnPtr> regex_match_full(FunctionContext* context, const Columns& columns);
 
     static StatusOr<ColumnPtr> regex_match_partial(FunctionContext* context, const Columns& columns);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regex_match_partial_impl(FunctionContext*, const Inputs&);
 
-    template <bool full_match>
-    static StatusOr<ColumnPtr> match_fn_with_long_constant_pattern(FunctionContext* context, const Columns& columns);
+    template <bool full_match, typename Inputs>
+    static StatusOr<ColumnPtr> match_fn_with_long_constant_pattern(FunctionContext* context, const Inputs& columns);
 
     /// Convert a LIKE pattern (with embedded % and _) into the corresponding
     /// regular expression pattern. Escaped chars are copied verbatim.
@@ -154,9 +157,9 @@ private:
     static void remove_escape_character(std::string* search_string);
 
 private:
+    template <typename Viewer>
     static StatusOr<ColumnPtr> _predicate_const_regex(FunctionContext* context, ColumnBuilder<TYPE_BOOLEAN>* result,
-                                                      const ColumnViewer<TYPE_VARCHAR>& value_viewer,
-                                                      const ColumnPtr& value_column);
+                                                      const Viewer& value_viewer, const ColumnPtr& value_column);
 
     // This is used when pattern is empty string, &_DUMMY_STRING_FOR_EMPTY_PATTERN used as not null pointer
     // to avoid crash with hs_scan.

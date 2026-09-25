@@ -30,16 +30,32 @@ namespace starrocks {
 * @paramType: [BinaryColumn, BinaryColumn, BinaryColumn]
 * @return: MapColumn map<string,string>
 */
-StatusOr<ColumnPtr> StringFunctions::str_to_map(FunctionContext* context, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::str_to_map_impl(FunctionContext* context, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 3);
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
     // split first
-    Columns split_columns{columns[0], columns[1]};
-    ASSIGN_OR_RETURN(auto splited, StringFunctions::split(context, split_columns));
+    Inputs split_columns{columns[0], columns[1]};
+    StatusOr<ColumnPtr> split_result;
+    if constexpr (std::is_same_v<Inputs, Columns>)
+        split_result = StringFunctions::split(context, split_columns);
+    else
+        split_result = StringFunctions::split_selected(context, split_columns, input_num_rows(columns));
+    ASSIGN_OR_RETURN(auto splited, std::move(split_result));
 
-    Columns splited_columns{splited, columns[2]};
-    return str_to_map_v1(context, splited_columns);
+    Inputs splited_columns{compact_input<Inputs>(splited), columns[2]};
+    return str_to_map_v1_impl(context, splited_columns);
+}
+
+StatusOr<ColumnPtr> StringFunctions::str_to_map(FunctionContext* context, const Columns& columns) {
+    return str_to_map_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::str_to_map_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                         size_t) {
+    return str_to_map_impl(context, columns);
 }
 
 Status StringFunctions::str_to_map_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -63,11 +79,14 @@ Status StringFunctions::str_to_map_close(FunctionContext* context, FunctionConte
  TODO: split UTF8 chinese character according to its size, which would be greater than 1.
 */
 
-StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::str_to_map_v1_impl(FunctionContext* context, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 2);
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
     // decompose array<string>
-    auto array_str_column = ColumnHelper::unpack_and_duplicate_const_column(columns[0]->size(), columns[0]);
+    auto array_str_column = input_column(columns[0]);
     NullColumn::Ptr nulls = nullptr;
     if (array_str_column->is_nullable()) {
         nulls = down_cast<const NullableColumn*>(array_str_column.get())->null_column();
@@ -77,13 +96,17 @@ StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, con
     auto nullable_str = array_str->elements_column(); // no null here
 
     // construct result
-    size_t str_num = nullable_str->size();
-    size_t column_size = columns[0]->size();
+    size_t str_num = 0;
+    for (size_t row = 0; row < input_num_rows(columns); ++row) {
+        size_t source = input_row(columns[0], row);
+        str_num += offsets->get_data()[source + 1] - offsets->get_data()[source];
+    }
+    size_t column_size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> keys_builder(str_num);
     ColumnBuilder<TYPE_VARCHAR> values_builder(str_num);
     auto res_null = NullColumn::create();
     auto res_offsets = UInt32Column::create();
-    res_offsets->reserve(nullable_str->size() + 1);
+    res_offsets->reserve(column_size + 1);
     res_offsets->append(0);
     res_null->resize(column_size);
 
@@ -97,19 +120,19 @@ StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, con
         return true;
     };
     ColumnViewer string_viewer = ColumnViewer<TYPE_VARCHAR>(nullable_str);
-    ColumnViewer delimiter_viewer = ColumnViewer<TYPE_VARCHAR>(
-            ColumnHelper::unpack_and_duplicate_const_column(column_size, columns[1])); // column range
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> delimiter_viewer(columns[1]); // column range
 
     for (auto i = 0; i < column_size; ++i) {
+        size_t source_row = input_row(columns[0], i);
         // either null input results into null to keep consistent with split()
-        if ((nulls != nullptr && nulls->get_data()[i]) || delimiter_viewer.is_null(i)) {
+        if ((nulls != nullptr && nulls->get_data()[source_row]) || delimiter_viewer.is_null(i)) {
             res_null->get_data()[i] = 1;
             res_offsets->append(res_offsets->get_data().back());
             continue;
         }
         res_null->get_data()[i] = 0;
         // empty array return {"":NULL}
-        if (offsets->get_data()[i] == offsets->get_data()[i + 1]) {
+        if (offsets->get_data()[source_row] == offsets->get_data()[source_row + 1]) {
             keys_builder.append("");
             values_builder.append_null();
             res_offsets->append(res_offsets->get_data().back() + 1);
@@ -121,7 +144,7 @@ StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, con
         std::stack<Slice> tmp_keys, tmp_values;
 
         // reverse order to get the last win.
-        for (ssize_t off = offsets->get_data()[i + 1] - 1; off >= offsets->get_data()[i]; --off) {
+        for (ssize_t off = offsets->get_data()[source_row + 1] - 1; off >= offsets->get_data()[source_row]; --off) {
             Slice haystack = string_viewer.value(off);
             if (haystack.empty()) { // return {"":NULL}
                 if (is_unique(tmp_slice, Slice(""))) {
@@ -186,6 +209,14 @@ StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, con
     auto map = MapColumn::create(keys_builder.build_nullable_column(), values_builder.build_nullable_column(),
                                  std::move(res_offsets));
     return NullableColumn::create(std::move(map), std::move(res_null));
+}
+
+StatusOr<ColumnPtr> StringFunctions::str_to_map_v1(FunctionContext* context, const Columns& columns) {
+    return str_to_map_v1_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::str_to_map_v1_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                            size_t) {
+    return str_to_map_v1_impl(context, columns);
 }
 
 } // namespace starrocks

@@ -24,6 +24,7 @@
 #include "column/column_viewer.h"
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 #include "runtime/current_thread.h"
 #include "util/phmap/phmap.h"
 #include "util/url_parser.h"
@@ -132,6 +133,9 @@ struct LowerUpperState {
 };
 
 class StringFunctions {
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regexp_replace_use_hyperscan_impl(StringFunctionsState*, const Inputs&);
+
 public:
     /**
    * @param: [string_value, position, optional<length>]
@@ -393,6 +397,9 @@ public:
      * @return: ArrayColumn
      */
     DEFINE_VECTORIZED_FN(split);
+    static StatusOr<ColumnPtr> split_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> split_impl(FunctionContext*, const Inputs&);
 
     static Status split_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status split_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
@@ -403,6 +410,9 @@ public:
     * @return: MapColumn map<string,string>
     */
     DEFINE_VECTORIZED_FN(str_to_map_v1);
+    static StatusOr<ColumnPtr> str_to_map_v1_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> str_to_map_v1_impl(FunctionContext*, const Inputs&);
 
     /**
     * @param: [string, delimiter, map_delimiter]
@@ -410,6 +420,9 @@ public:
     * @return: MapColumn map<string,string>
     */
     DEFINE_VECTORIZED_FN(str_to_map);
+    static StatusOr<ColumnPtr> str_to_map_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> str_to_map_impl(FunctionContext*, const Inputs&);
     static Status str_to_map_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status str_to_map_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
@@ -439,6 +452,8 @@ public:
      * @return: BinaryColumn
      */
     DEFINE_VECTORIZED_FN(regexp_extract);
+    static StatusOr<ColumnPtr> regexp_extract_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t size);
 
     /**
      * return all match sub-string
@@ -447,6 +462,9 @@ public:
      * @return: Array<BinaryColumn>
      */
     DEFINE_VECTORIZED_FN(regexp_extract_all);
+    static StatusOr<ColumnPtr> regexp_extract_all_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regexp_extract_all_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value, pattern_value, replace_value]
@@ -454,6 +472,9 @@ public:
      * @return: BinaryColumn
      */
     DEFINE_VECTORIZED_FN(regexp_replace);
+    static StatusOr<ColumnPtr> regexp_replace_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regexp_replace_impl(FunctionContext*, const Inputs&);
 
     static StatusOr<ColumnPtr> regexp_replace_use_hyperscan(StringFunctionsState* state, const Columns& columns);
     static StatusOr<ColumnPtr> regexp_replace_use_hyperscan_vec(StringFunctionsState* state, const Columns& columns);
@@ -464,6 +485,9 @@ public:
      * @return: Array<BinaryColumn>
      */
     DEFINE_VECTORIZED_FN(regexp_split);
+    static StatusOr<ColumnPtr> regexp_split_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regexp_split_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value, pattern_value]
@@ -471,6 +495,9 @@ public:
      * @return: BigIntColumn
      */
     DEFINE_VECTORIZED_FN(regexp_count);
+    static StatusOr<ColumnPtr> regexp_count_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> regexp_count_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value, pattern_value, replace_value]
@@ -557,10 +584,19 @@ public:
    * @return: BinaryColumn
    */
     DEFINE_VECTORIZED_FN(parse_url);
+    static StatusOr<ColumnPtr> parse_url_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> parse_url_impl(FunctionContext*, const Inputs&);
 
     DEFINE_VECTORIZED_FN(url_extract_parameter);
+    static StatusOr<ColumnPtr> url_extract_parameter_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> url_extract_parameter_impl(FunctionContext*, const Inputs&);
 
     DEFINE_VECTORIZED_FN(url_extract_host);
+    static StatusOr<ColumnPtr> url_extract_host_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> url_extract_host_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [BigIntColumn]
@@ -587,6 +623,7 @@ public:
      *
      */
     DEFINE_VECTORIZED_FN(sm3);
+    static StatusOr<ColumnPtr> sm3_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     /**
      * Compare two strings. Returns 0 if lhs and rhs compare equal,
@@ -624,8 +661,10 @@ public:
     DEFINE_VECTORIZED_FN(crc32);
 
     DEFINE_VECTORIZED_FN(ngram_search);
+    static StatusOr<ColumnPtr> ngram_search_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(ngram_search_case_insensitive);
+    static StatusOr<ColumnPtr> ngram_search_case_insensitive_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN_TEMPLATE(field);
     template <LogicalType Type>
@@ -694,9 +733,11 @@ private:
         UrlExtractParameterState() = default;
     };
 
-    static StatusOr<ColumnPtr> parse_url_general(FunctionContext* context, const starrocks::Columns& columns);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> parse_url_general(FunctionContext* context, const Inputs& columns);
+    template <typename Inputs>
     static StatusOr<ColumnPtr> parse_const_urlpart(UrlParser::UrlPart* url_part, FunctionContext* context,
-                                                   const starrocks::Columns& columns);
+                                                   const Inputs& columns);
 
     template <LogicalType Type, bool scale_up, bool check_overflow>
     static inline void money_format_decimal_impl(FunctionContext* context, ColumnViewer<Type> const& money_viewer,

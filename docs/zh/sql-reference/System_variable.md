@@ -634,6 +634,20 @@ FROM test;
 * **默认值**：true
 * **引入版本**：v3.3.20、v3.4.9、v3.5.8、v4.0.2
 
+### enable_conditional_two_phase_eval
+
+* **默认值**：false
+* **类型**：Boolean
+* **说明**：对 CASE、IF、IFNULL 和 COALESCE 中符合条件的高开销值表达式，仅计算实际需要该分支的行。此优化减少表达式计算，不会推迟从存储读取输入列，也不依赖全局延迟物化。高开销函数通过固定列表识别，尚未根据选择率或成本自动选择；如果大部分行都需要该分支，启用后可能更慢。符合条件的 CASE 使用此执行方式而非 CASE JIT。未选中的值分支不会执行，因此也不会产生其表达式求值错误。默认关闭。
+
+### enable_json_extract_fusion
+
+* **说明**：为使用常量路径的 VARCHAR JSON 启用快速提取。默认值为 `true`。`SET` 修改当前会话，`SET GLOBAL` 设置新会话的默认值。优化器还可以合并 `json_query(parse_json(value), path)` 和箭头表达式。CAST 保留目标类型及错误处理规则。
+
+  当 `sql_mode` 包含 `ALLOW_THROW_EXCEPTION` 时，提取会校验整个文档并报告 JSON 解析错误。未启用该模式时，快速路径读取指定值，不保证检测路径之外的无效值；提取过程中遇到的错误返回 NULL。通配符、切片和非常量路径使用完整解析器。设置为 `false` 可同时关闭优化器合并和快速提取，恢复完整文档解析。
+
+  同步 Stream Load 和 Routine Load 不会将此会话变量传递给 BE，因此这些路径仍禁用快速提取。
+
 ### enable_insert_strict
 
 * 描述：是否在使用 INSERT from FILES() 导入数据时启用严格模式。有效值：`true` 和 `false`（默认值）。启用严格模式时，系统仅导入合格的数据行，过滤掉不合格的行，并返回不合格行的详细信息。更多信息请参见 [严格模式](../loading/strict_mode.md)。在早于 v3.4.0 的版本中，当 `enable_insert_strict` 设置为 `true` 时，INSERT 作业会在出现不合格行时失败。
@@ -802,11 +816,26 @@ FROM test;
 * **数据类型**: boolean
 * **引入版本**: v3.2.0
 
+### enable_mv_percentile_strict_match
+
+* **默认值**: false
+* **数据类型**: boolean
+* **描述**: 为 `true` 时，百分位数物化视图改写会拒绝使用压缩参数低于查询要求的摘要。优化器可以使用同一物化视图或其他物化视图中的合适摘要，也可以回退到基表。为 `false` 时，较低压缩参数的候选仍可参与改写，但会优先选择满足压缩参数要求的候选。被拒绝的等价表达式会记录在 MV trace 中。
+
 ### enable_profile
 
 用于设置是否需要查看查询的 profile。默认为 `false`，即不需要查看 profile。2.5 版本之前，该变量名称为 `is_report_success`，2.5 版本之后更名为 `enable_profile`。
 
 默认情况下，只有在查询发生错误时，BE 才会发送 profile 给 FE，用于查看错误。正常结束的查询不会发送 profile。发送 profile 会产生一定的网络开销，对高并发查询场景不利。当用户希望对一个查询的 profile 进行分析时，可以将这个变量设为 `true` 后，发送查询。查询结束后，可以通过在当前连接的 FE 的 web 页面（地址：fe_host:fe_http_port/query）查看 profile。该页面会显示最近 100 条开启了 `enable_profile` 的查询的 profile。
+
+### enable_percentile_compact_intermediate (global)
+
+* **范围**: 仅 Global。使用 `SET GLOBAL enable_percentile_compact_intermediate = true` 或 `false` 设置。
+* **默认值**: false
+* **数据类型**: boolean
+* **描述**: 在 exchange 和 spill 中，为 `percentile_approx`、`percentile_approx_weighted` 及其数组形式启用紧凑的直通记录。持久化聚合状态仍使用包含完整信息的格式。
+
+  滚动升级期间请保持关闭。仅在所有 FE、BE 和 CN 节点均支持紧凑格式后启用。每条语句在开始执行时读取全局设置，包括已有连接上的新语句。正在执行的语句保留原设置。将工作节点降级到不支持紧凑格式的版本之前，必须先关闭此选项，并等待所有在启用状态下启动的语句执行完毕。
 
 ### enable_query_cache
 

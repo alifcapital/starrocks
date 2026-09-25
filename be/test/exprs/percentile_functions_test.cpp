@@ -17,6 +17,13 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <vector>
+
+#include "column/column_builder.h"
+#include "column/const_column.h"
+#include "exprs/agg/percentile_union.h"
+#include "exprs/function_context.h"
 #include "util/percentile_value.h"
 
 namespace starrocks {
@@ -40,7 +47,7 @@ TEST_F(PercentileFunctionsTest, percentileEmptyTest) {
 
     auto* percentile = ColumnHelper::get_const_value<TYPE_PERCENTILE>(column);
 
-    ASSERT_EQ(61, percentile->serialize_size());
+    ASSERT_EQ(49, percentile->serialize_size());
 }
 
 TEST_F(PercentileFunctionsTest, percentileHashTest) {
@@ -60,6 +67,61 @@ TEST_F(PercentileFunctionsTest, percentileHashTest) {
     ASSERT_EQ(3, percentile->get_object(2)->quantile(1));
 }
 
+TEST_F(PercentileFunctionsTest, percentileUnionStateLazyInitFromFirstUpdate) {
+    // Without the lazy-init fix the union state defaults to TDigest(1000) and
+    // silently downgrades digests stored at higher compression. After the fix
+    // the very first incoming digest's compression seeds the state.
+    PercentileUnionAggregateFunction agg;
+    PercentileUnionState state;
+    ASSERT_FALSE(state.compression_initialized);
+
+    PercentileValue incoming(5000.0);
+    incoming.add(1.0f);
+    agg.update_state(ctx, reinterpret_cast<AggDataPtr>(&state), &incoming);
+
+    ASSERT_TRUE(state.compression_initialized);
+    ASSERT_DOUBLE_EQ(5000.0, state.value.compression());
+
+    // Subsequent updates must not re-seed.
+    PercentileValue second(1000.0);
+    second.add(2.0f);
+    agg.update_state(ctx, reinterpret_cast<AggDataPtr>(&state), &second);
+    ASSERT_DOUBLE_EQ(5000.0, state.value.compression());
+}
+
+TEST_F(PercentileFunctionsTest, percentileHashWithCompressionPreservesValue) {
+    Columns columns;
+    auto values = DoubleColumn::create();
+    values->append(1);
+    values->append(2);
+    values->append(3);
+    columns.push_back(std::move(values));
+
+    for (float requested : {100.0f, 1000.0f, 5000.0f, 10000.0f}) {
+        auto compression_col = DoubleColumn::create();
+        compression_col->append(requested);
+        columns.resize(1);
+        columns.push_back(ConstColumn::create(std::move(compression_col), 3));
+
+        auto column = PercentileFunctions::percentile_hash_with_compression(ctx, columns).value();
+        ASSERT_TRUE(column->is_object());
+        auto percentile = ColumnHelper::cast_to<TYPE_PERCENTILE>(column);
+        for (size_t i = 0; i < percentile->size(); ++i) {
+            std::vector<uint8_t> serialized(percentile->get_object(i)->serialize_size());
+            percentile->get_object(i)->serialize(serialized.data());
+
+            // _compression is the first field the TDigest writes (right after the
+            // 1-byte PercentileValue type tag) and its width is the TDigest Value
+            // type, i.e. float -- read it at that width, not as a double.
+            float compression;
+            memcpy(&compression, serialized.data() + 1, sizeof(compression));
+            ASSERT_FLOAT_EQ(requested, compression);
+        }
+        ASSERT_EQ(1, percentile->get_object(0)->quantile(1));
+        ASSERT_EQ(3, percentile->get_object(2)->quantile(1));
+    }
+}
+
 TEST_F(PercentileFunctionsTest, percentileNullTest) {
     Columns columns;
     auto c1 = PercentileColumn::create();
@@ -76,6 +138,24 @@ TEST_F(PercentileFunctionsTest, percentileNullTest) {
     ASSERT_TRUE(column->is_nullable());
     auto result = ColumnHelper::as_column<NullableColumn>(column);
     ASSERT_TRUE(result->is_null(0));
+}
+
+TEST_F(PercentileFunctionsTest, ConstantDigestVariableQuantile) {
+    PercentileValue value;
+    for (int i = 0; i < 100; ++i) value.add(i);
+    auto digest = ColumnHelper::create_const_column<TYPE_PERCENTILE>(&value, 4);
+    ColumnBuilder<TYPE_DOUBLE> rates(4);
+    rates.append(0.0);
+    rates.append_null();
+    rates.append(0.5);
+    rates.append(1.0);
+    auto result = PercentileFunctions::percentile_approx_raw(ctx, {digest, rates.build(false)});
+    ASSERT_TRUE(result.ok()) << result.status();
+    ASSERT_FALSE(result.value()->is_constant());
+    ASSERT_EQ(4, result.value()->size());
+    EXPECT_DOUBLE_EQ(0.0, result.value()->get(0).get_double());
+    EXPECT_TRUE(result.value()->is_null(1));
+    EXPECT_DOUBLE_EQ(99.0, result.value()->get(3).get_double());
 }
 
 } // namespace starrocks

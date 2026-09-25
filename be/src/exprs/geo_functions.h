@@ -17,6 +17,7 @@
 #include "common/status.h"
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 #include "geo/geo_common.h"
 
 namespace starrocks {
@@ -30,6 +31,9 @@ public:
      * Through the given X coordinate value, y coordinate value returns the corresponding point.
      */
     DEFINE_VECTORIZED_FN(st_point);
+    static StatusOr<ColumnPtr> st_point_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_point_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value]
@@ -38,6 +42,9 @@ public:
      * Returns the corresponding X coordinate value
      */
     DEFINE_VECTORIZED_FN(st_x);
+    static StatusOr<ColumnPtr> st_x_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_x_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value]
@@ -46,6 +53,9 @@ public:
      * Returns the corresponding y coordinate value
      */
     DEFINE_VECTORIZED_FN(st_y);
+    static StatusOr<ColumnPtr> st_y_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_y_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [double_value, double_value, double_value, double_value]
@@ -54,6 +64,9 @@ public:
      * Calculate the spherical distance between two points on the earth, in meters.
      */
     DEFINE_VECTORIZED_FN(st_distance_sphere);
+    static StatusOr<ColumnPtr> st_distance_sphere_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_distance_sphere_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value]
@@ -62,6 +75,9 @@ public:
      * Transfer this Text to Well Known Text.
      */
     DEFINE_VECTORIZED_FN(st_as_wkt);
+    static StatusOr<ColumnPtr> st_as_wkt_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_as_wkt_impl(FunctionContext*, const Inputs&);
 
     // from wkt
     static Status st_from_wkt_prepare_common(FunctionContext*, FunctionContext::FunctionStateScope,
@@ -78,8 +94,8 @@ public:
 
     static Status st_from_wkt_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
-    static StatusOr<ColumnPtr> st_from_wkt_common(FunctionContext* ctx, const Columns& columns,
-                                                  GeoShapeType shape_type);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_from_wkt_common(FunctionContext* ctx, const Inputs& columns, GeoShapeType shape_type);
 
     /**
      * @param: [string_value]
@@ -88,6 +104,9 @@ public:
      * Convert a wkt (well known text) into the corresponding memory geometry
      */
     DEFINE_VECTORIZED_FN(st_from_wkt);
+    static StatusOr<ColumnPtr> st_from_wkt_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_from_wkt_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value]
@@ -96,6 +115,9 @@ public:
      * Convert a wkt (well known text) into a memory representation of line form
      */
     DEFINE_VECTORIZED_FN(st_line);
+    static StatusOr<ColumnPtr> st_line_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_line_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: [string_value]
@@ -104,6 +126,9 @@ public:
      * Convert a wkt (well known text) to the corresponding polygon memory form
      */
     DEFINE_VECTORIZED_FN(st_polygon);
+    static StatusOr<ColumnPtr> st_polygon_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_polygon_impl(FunctionContext*, const Inputs&);
 
     static Status st_circle_prepare(FunctionContext* ctx, FunctionContext::FunctionStateScope scope);
 
@@ -114,6 +139,9 @@ public:
      * Transfer this WKT to a circle on earth's surface.
      */
     DEFINE_VECTORIZED_FN(st_circle);
+    static StatusOr<ColumnPtr> st_circle_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_circle_impl(FunctionContext*, const Inputs&);
 
     static Status st_contains_close(FunctionContext* ctx, FunctionContext::FunctionStateScope scope);
 
@@ -126,6 +154,9 @@ public:
      * Judge whether shape1(columns[0]) can completely contain shape2(columns2)
      */
     DEFINE_VECTORIZED_FN(st_contains);
+    static StatusOr<ColumnPtr> st_contains_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> st_contains_impl(FunctionContext*, const Inputs&);
 };
 
 } // namespace starrocks

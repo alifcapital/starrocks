@@ -287,6 +287,7 @@ public:
                               bool has_remain);
 
     Status trans(const Columns& columns);
+    Status trans_selected(const Columns& columns, const std::vector<uint32_t>& rows);
 
     MutableColumns mutable_result();
 

@@ -86,6 +86,10 @@
 #include "exprs/jit/jit_engine.h"
 #include "exprs/jit/jit_expr.h"
 #endif
+#include "column/chunk.h"
+#include "column/column_helper.h"
+#include "exprs/column_ref.h"
+#include "exprs/expr_context.h"
 
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "EndlessLoop"
@@ -658,6 +662,18 @@ bool Expr::is_constant() const {
     return true;
 }
 
+bool Expr::contains_expensive() const {
+    if (is_expensive_node()) {
+        return true;
+    }
+    for (const Expr* child : _children) {
+        if (child != nullptr && child->contains_expensive()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 TExprNodeType::type Expr::type_without_cast(const Expr* expr) {
     if (expr->_opcode == TExprOpcode::CAST) {
         return type_without_cast(expr->_children[0]);
@@ -744,6 +760,65 @@ StatusOr<ColumnPtr> Expr::evaluate_const(ExprContext* context) {
     std::call_once(_constant_column_evaluate_once,
                    [this, context] { this->_constant_column = context->evaluate(this, nullptr); });
     return _constant_column;
+}
+
+namespace {
+// Dictionary rewrites can read encoded slots not reported by get_slot_ids(). Lambda expressions
+// also introduce local/captured slots and common expressions outside the ordinary child tree.
+// Keep the original copying path for these shapes until their physical dependencies are explicit.
+bool has_indirect_inputs(const Expr* expr) {
+    if (expr->is_dictmapping_expr() || expr->node_type() == TExprNodeType::LAMBDA_FUNCTION_EXPR) {
+        return true;
+    }
+    for (const Expr* child : expr->children()) {
+        if (has_indirect_inputs(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Copy only the branch's inputs, preserving slot IDs and routed row order. The input chunk is immutable.
+ChunkUniquePtr make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value) {
+    std::vector<SlotId> slots;
+    if (chunk->num_columns() > 1 && !has_indirect_inputs(value)) {
+        value->get_slot_ids(&slots);
+        std::sort(slots.begin(), slots.end());
+        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    }
+    // An empty Chunk cannot carry a row count. Retain the old path for slot-free expressions,
+    // and conservatively fall back if the dependency list does not describe the current input.
+    if (!slots.empty() && slots.size() < chunk->num_columns() &&
+        std::all_of(slots.begin(), slots.end(), [&](SlotId slot) { return chunk->is_slot_exist(slot); })) {
+        auto sub = std::make_unique<Chunk>();
+        for (SlotId slot : slots) {
+            const auto& source = chunk->get_column_by_slot_id(slot);
+            auto column = source->clone_empty();
+            column->reserve(idx.size());
+            column->append_selective(*source, idx.data(), 0, static_cast<uint32_t>(idx.size()));
+            sub->append_column(std::move(column), slot);
+        }
+        return sub;
+    }
+    ChunkUniquePtr sub = chunk->clone_empty(idx.size());
+    sub->append_selective(*chunk, idx.data(), 0, static_cast<uint32_t>(idx.size()));
+    return sub;
+}
+
+} // namespace
+
+StatusOr<ColumnPtr> Expr::evaluate_selected(ExprContext* context, Chunk* chunk, const std::vector<uint32_t>& rows) {
+    if (rows.empty()) {
+        return ColumnHelper::create_column(_type, is_nullable());
+    }
+    if (dynamic_cast<const ColumnRef*>(this) != nullptr || is_literal()) {
+        ASSIGN_OR_RETURN(auto source, evaluate_checked(context, chunk));
+        auto result = source->clone_empty();
+        result->append_selective(*source, rows.data(), 0, rows.size());
+        return result;
+    }
+    auto sub = make_subchunk(chunk, rows, this);
+    return evaluate_checked(context, sub.get());
 }
 
 StatusOr<ColumnPtr> Expr::evaluate_with_filter(ExprContext* context, Chunk* ptr, uint8_t* filter) {

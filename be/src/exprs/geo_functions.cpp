@@ -18,6 +18,7 @@
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
 #include "common/logging.h"
+#include "exprs/selected_column.h"
 #include "geo/geo_types.h"
 
 namespace starrocks {
@@ -30,11 +31,12 @@ struct StConstructState {
     std::string encoded_buf;
 };
 
-StatusOr<ColumnPtr> GeoFunctions::st_from_wkt_common(FunctionContext* ctx, const Columns& columns,
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_from_wkt_common(FunctionContext* ctx, const Inputs& columns,
                                                      GeoShapeType shape_type) {
-    ColumnViewer<TYPE_VARCHAR> wkt_viewer(columns[0]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> wkt_viewer(columns[0]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     auto* state = (StConstructState*)ctx->get_function_state(FunctionContext::FRAGMENT_LOCAL);
@@ -68,16 +70,42 @@ StatusOr<ColumnPtr> GeoFunctions::st_from_wkt_common(FunctionContext* ctx, const
     }
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_from_wkt(FunctionContext* context, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_from_wkt_impl(FunctionContext* context, const Inputs& columns) {
     return st_from_wkt_common(context, columns, GEO_SHAPE_ANY);
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_line(FunctionContext* context, const Columns& columns) {
+StatusOr<ColumnPtr> GeoFunctions::st_from_wkt(FunctionContext* context, const Columns& columns) {
+    return st_from_wkt_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_from_wkt_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t) {
+    return st_from_wkt_impl(context, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_line_impl(FunctionContext* context, const Inputs& columns) {
     return st_from_wkt_common(context, columns, GEO_SHAPE_LINE_STRING);
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_polygon(FunctionContext* context, const Columns& columns) {
+StatusOr<ColumnPtr> GeoFunctions::st_line(FunctionContext* context, const Columns& columns) {
+    return st_line_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_line_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_line_impl(context, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_polygon_impl(FunctionContext* context, const Inputs& columns) {
     return st_from_wkt_common(context, columns, GEO_SHAPE_POLYGON);
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_polygon(FunctionContext* context, const Columns& columns) {
+    return st_polygon_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_polygon_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                      size_t) {
+    return st_polygon_impl(context, columns);
 }
 
 Status GeoFunctions::st_from_wkt_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -122,12 +150,13 @@ Status GeoFunctions::st_circle_prepare(FunctionContext* ctx, FunctionContext::Fu
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_circle(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_DOUBLE> lng_viewer(columns[0]);
-    ColumnViewer<TYPE_DOUBLE> lat_viewer(columns[1]);
-    ColumnViewer<TYPE_DOUBLE> radius_viewer(columns[2]);
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_circle_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> lng_viewer(columns[0]);
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> lat_viewer(columns[1]);
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> radius_viewer(columns[2]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     auto* state = (StConstructState*)context->get_function_state(FunctionContext::FRAGMENT_LOCAL);
     if (state == nullptr) {
@@ -164,11 +193,19 @@ StatusOr<ColumnPtr> GeoFunctions::st_circle(FunctionContext* context, const Colu
     }
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_point(FunctionContext* context, const Columns& columns) {
-    auto x_column = ColumnViewer<TYPE_DOUBLE>(columns[0]);
-    auto y_column = ColumnViewer<TYPE_DOUBLE>(columns[1]);
+StatusOr<ColumnPtr> GeoFunctions::st_circle(FunctionContext* context, const Columns& columns) {
+    return st_circle_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_circle_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_circle_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_point_impl(FunctionContext* context, const Inputs& columns) {
+    auto x_column = FunctionColumnViewer<TYPE_DOUBLE, Inputs>(columns[0]);
+    auto y_column = FunctionColumnViewer<TYPE_DOUBLE, Inputs>(columns[1]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (x_column.is_null(row) || y_column.is_null(row)) {
@@ -190,13 +227,21 @@ StatusOr<ColumnPtr> GeoFunctions::st_point(FunctionContext* context, const Colum
         result.append(Slice(buf));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_x(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_VARCHAR> encode(columns[0]);
+StatusOr<ColumnPtr> GeoFunctions::st_point(FunctionContext* context, const Columns& columns) {
+    return st_point_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_point_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_point_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_x_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> encode(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_DOUBLE> result(size);
     for (int row = 0; row < size; ++row) {
         if (encode.is_null(row)) {
@@ -215,13 +260,21 @@ StatusOr<ColumnPtr> GeoFunctions::st_x(FunctionContext* context, const Columns& 
         result.append(point.x());
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_y(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_VARCHAR> encode(columns[0]);
+StatusOr<ColumnPtr> GeoFunctions::st_x(FunctionContext* context, const Columns& columns) {
+    return st_x_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_x_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_x_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_y_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> encode(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_DOUBLE> result(size);
     for (int row = 0; row < size; ++row) {
         if (encode.is_null(row)) {
@@ -240,16 +293,24 @@ StatusOr<ColumnPtr> GeoFunctions::st_y(FunctionContext* context, const Columns& 
         result.append(point.y());
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_distance_sphere(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_DOUBLE> x_lng(columns[0]);
-    ColumnViewer<TYPE_DOUBLE> x_lat(columns[1]);
-    ColumnViewer<TYPE_DOUBLE> y_lng(columns[2]);
-    ColumnViewer<TYPE_DOUBLE> y_lat(columns[3]);
+StatusOr<ColumnPtr> GeoFunctions::st_y(FunctionContext* context, const Columns& columns) {
+    return st_y_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_y_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_y_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_distance_sphere_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> x_lng(columns[0]);
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> x_lat(columns[1]);
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> y_lng(columns[2]);
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> y_lat(columns[3]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_DOUBLE> result(size);
     for (int row = 0; row < size; ++row) {
         if (x_lng.is_null(row) || x_lat.is_null(row) || y_lng.is_null(row) || y_lat.is_null(row)) {
@@ -271,13 +332,22 @@ StatusOr<ColumnPtr> GeoFunctions::st_distance_sphere(FunctionContext* context, c
         result.append(dist_value);
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_as_wkt(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_VARCHAR> shape_viewer(columns[0]);
+StatusOr<ColumnPtr> GeoFunctions::st_distance_sphere(FunctionContext* context, const Columns& columns) {
+    return st_distance_sphere_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_distance_sphere_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                              size_t) {
+    return st_distance_sphere_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_as_wkt_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> shape_viewer(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (shape_viewer.is_null(row)) {
@@ -296,7 +366,14 @@ StatusOr<ColumnPtr> GeoFunctions::st_as_wkt(FunctionContext* context, const Colu
         result.append(Slice(wkt.data(), wkt.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_as_wkt(FunctionContext* context, const Columns& columns) {
+    return st_as_wkt_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_as_wkt_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return st_as_wkt_impl(context, columns);
 }
 
 struct StContainsState {
@@ -347,17 +424,18 @@ Status GeoFunctions::st_contains_prepare(FunctionContext* ctx, FunctionContext::
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> GeoFunctions::st_contains(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_VARCHAR> lhs_viewer(columns[0]);
-    ColumnViewer<TYPE_VARCHAR> rhs_viewer(columns[1]);
+template <typename Inputs>
+StatusOr<ColumnPtr> GeoFunctions::st_contains_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> lhs_viewer(columns[0]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> rhs_viewer(columns[1]);
 
     const StContainsState* state =
             reinterpret_cast<StContainsState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     if (state != nullptr && state->is_null) {
-        return ColumnHelper::create_const_null_column(columns[0]->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(columns));
     }
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_BOOLEAN> result(size);
     for (int row = 0; row < size; ++row) {
         if (lhs_viewer.is_null(row) || rhs_viewer.is_null(row)) {
@@ -389,7 +467,15 @@ StatusOr<ColumnPtr> GeoFunctions::st_contains(FunctionContext* context, const Co
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> GeoFunctions::st_contains(FunctionContext* context, const Columns& columns) {
+    return st_contains_impl(context, columns);
+}
+StatusOr<ColumnPtr> GeoFunctions::st_contains_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t) {
+    return st_contains_impl(context, columns);
 }
 
 // from wkt

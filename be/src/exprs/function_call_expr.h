@@ -33,6 +33,8 @@ public:
 
     const FunctionDescriptor* get_function_desc() { return _fn_desc; }
 
+    bool is_expensive_node() const override;
+
     bool support_ngram_bloom_filter(ExprContext* context) const override;
     bool ngram_bloom_filter(ExprContext* context, const BloomFilter* bf,
                             const NgramBloomFilterReaderOptions& reader_options) const override;
@@ -53,8 +55,13 @@ protected:
     bool is_constant() const override;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override;
 
 private:
+    StatusOr<ColumnPtr> evaluate_arguments(ExprContext* context, Columns args, size_t num_rows,
+                                           bool has_input_chunk = true);
+    StatusOr<ColumnPtr> finish_result(StatusOr<ColumnPtr> result);
     const FunctionDescriptor* _get_function_by_fid(const TFunction& fn);
     const FunctionDescriptor* _get_function(const TFunction& fn, const std::vector<TypeDescriptor>& arg_types,
                                             const TypeDescriptor& result_type, std::vector<bool> arg_nullables);

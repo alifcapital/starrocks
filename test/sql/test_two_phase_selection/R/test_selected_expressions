@@ -1,0 +1,116 @@
+-- name: test_selected_expressions
+CREATE DATABASE selected_eval_${uuid0};
+-- result:
+-- !result
+USE selected_eval_${uuid0};
+-- result:
+-- !result
+SET enable_conditional_two_phase_eval=true;
+-- result:
+-- !result
+SET jit_level=0;
+-- result:
+-- !result
+CREATE TABLE t(id INT, p VARCHAR(8192), doc VARCHAR(8192), pat VARCHAR(100))
+DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1");
+-- result:
+-- !result
+INSERT INTO t VALUES (0,'abc0','{"n":0}','abc([0-9]+)'),
+(1,'abc1','{"n":1}','abc([0-9]+)'), (2,NULL,'{"n":2}','abc([0-9]+)'),
+(3,'abc3',NULL,'abc([0-9]+)'), (4,'abc4','{"n":4}','abc([0-9]+)'),
+(5,'abc5','invalid','abc([0-9]+)');
+-- result:
+-- !result
+SELECT id, CASE WHEN id%2=0 THEN regexp_extract(p,pat,1) ELSE 'skip' END FROM t ORDER BY id;
+-- result:
+0	0
+1	skip
+2	None
+3	skip
+4	4
+5	skip
+-- !result
+SELECT id, CASE WHEN id<4 THEN CAST(parse_json(doc)->'$.n' AS BIGINT) ELSE -1 END FROM t ORDER BY id;
+-- result:
+0	0
+1	1
+2	2
+3	None
+4	-1
+5	-1
+-- !result
+SELECT id, CASE WHEN id%2=0 THEN regexp_extract(lower(p),pat,1) ELSE 'skip' END FROM t ORDER BY id;
+-- result:
+0	0
+1	skip
+2	None
+3	skip
+4	4
+5	skip
+-- !result
+SELECT id, CASE WHEN id%2=0 THEN regexp_extract(p,lower(pat),1) ELSE 'skip' END FROM t ORDER BY id;
+-- result:
+0	0
+1	skip
+2	None
+3	skip
+4	4
+5	skip
+-- !result
+SELECT id, CASE WHEN id<2 THEN 'first' WHEN id<5 THEN regexp_extract(p,pat,1) ELSE 'last' END FROM t ORDER BY id;
+-- result:
+0	first
+1	first
+2	None
+3	3
+4	4
+5	last
+-- !result
+SELECT id, COALESCE(IF(id%2=0,NULL,'first'),regexp_extract(p,pat,1),'last') FROM t ORDER BY id;
+-- result:
+0	0
+1	first
+2	last
+3	first
+4	4
+5	first
+-- !result
+SELECT id, IFNULL(IF(id%2=0,NULL,'first'),CAST(parse_json(doc)->'$.n' AS CHAR)) FROM t ORDER BY id;
+-- result:
+0	0
+1	first
+2	2
+3	first
+4	4
+5	first
+-- !result
+SELECT id, CASE WHEN id%2=0 THEN CAST(regexp_extract(p,pat,1) AS BIGINT) ELSE -1 END FROM t ORDER BY id;
+-- result:
+0	0
+1	-1
+2	None
+3	-1
+4	4
+5	-1
+-- !result
+SELECT id, CASE WHEN id<5 THEN CASE WHEN id%2=0 THEN regexp_extract(p,pat,1) ELSE 'inner' END ELSE 'outer' END FROM t ORDER BY id;
+-- result:
+0	0
+1	inner
+2	None
+3	inner
+4	4
+5	outer
+-- !result
+SELECT id, length(CASE WHEN id%2=0 THEN regexp_extract(p,pat,1) ELSE repeat('x',4096) END) FROM t ORDER BY id;
+-- result:
+0	1
+1	4096
+2	None
+3	4096
+4	1
+5	4096
+-- !result
+DROP DATABASE selected_eval_${uuid0};
+-- result:
+-- !result

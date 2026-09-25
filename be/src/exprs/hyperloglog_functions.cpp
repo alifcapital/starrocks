@@ -18,6 +18,8 @@
 #include "column/column_viewer.h"
 #include "column/object_column.h"
 #include "exprs/function_context.h"
+#include "exprs/selected_column.h"
+#include "exprs/selected_functions.h"
 #include "exprs/unary_function.h"
 #include "types/hll.h"
 #include "util/phmap/phmap.h"
@@ -35,6 +37,12 @@ StatusOr<ColumnPtr> HyperloglogFunctions::hll_cardinality_from_string(FunctionCo
     return VectorizedStrictUnaryFunction<hllCardinalityFromStringImpl>::evaluate<TYPE_VARCHAR, TYPE_BIGINT>(columns[0]);
 }
 
+StatusOr<ColumnPtr> HyperloglogFunctions::hll_cardinality_from_string_selected(FunctionContext*,
+                                                                               const SelectedColumns& inputs,
+                                                                               size_t rows) {
+    return evaluate_selected_strict_unary<TYPE_VARCHAR, TYPE_BIGINT, hllCardinalityFromStringImpl>(inputs, rows);
+}
+
 // hll_cardinality
 DEFINE_UNARY_FN_WITH_IMPL(hllCardinalityImpl, hll_ptr) {
     return hll_ptr->estimate_cardinality();
@@ -44,13 +52,19 @@ StatusOr<ColumnPtr> HyperloglogFunctions::hll_cardinality(FunctionContext* conte
     return VectorizedStrictUnaryFunction<hllCardinalityImpl>::evaluate<TYPE_HLL, TYPE_BIGINT>(columns[0]);
 }
 
+StatusOr<ColumnPtr> HyperloglogFunctions::hll_cardinality_selected(FunctionContext*, const SelectedColumns& inputs,
+                                                                   size_t rows) {
+    return evaluate_selected_strict_unary<TYPE_HLL, TYPE_BIGINT, hllCardinalityImpl>(inputs, rows);
+}
+
 // hll_hash
-StatusOr<ColumnPtr> HyperloglogFunctions::hll_hash(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_VARCHAR> str_viewer(columns[0]);
+template <typename Inputs>
+StatusOr<ColumnPtr> HyperloglogFunctions::hll_hash_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> str_viewer(columns[0]);
 
     auto hll_column = HyperLogLogColumn::create();
 
-    size_t size = columns[0]->size();
+    size_t size = input_num_rows(columns);
     for (int row = 0; row < size; ++row) {
         HyperLogLog hll;
         if (!str_viewer.is_null(row)) {
@@ -62,11 +76,19 @@ StatusOr<ColumnPtr> HyperloglogFunctions::hll_hash(FunctionContext* context, con
         hll_column->append(&hll);
     }
 
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(hll_column), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(hll_column), input_num_rows(columns));
     } else {
         return hll_column;
     }
+}
+
+StatusOr<ColumnPtr> HyperloglogFunctions::hll_hash(FunctionContext* context, const Columns& columns) {
+    return hll_hash_impl(context, columns);
+}
+StatusOr<ColumnPtr> HyperloglogFunctions::hll_hash_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                            size_t) {
+    return hll_hash_impl(context, columns);
 }
 
 // hll_empty

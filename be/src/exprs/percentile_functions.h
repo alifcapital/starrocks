@@ -15,6 +15,7 @@
 #pragma once
 
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 
 namespace starrocks {
 class PercentileFunctions {
@@ -25,6 +26,19 @@ public:
      * @return TYPE_PERCENTILE
      */
     DEFINE_VECTORIZED_FN(percentile_hash);
+    static StatusOr<ColumnPtr> percentile_hash_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> percentile_hash_impl(FunctionContext*, const Inputs&);
+
+    /**
+     * @param:
+     * @paramType columns: [TYPE_DOUBLE, TYPE_DOUBLE]
+     * @return TYPE_PERCENTILE
+     */
+    DEFINE_VECTORIZED_FN(percentile_hash_with_compression);
+    static StatusOr<ColumnPtr> percentile_hash_with_compression_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> percentile_hash_with_compression_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param:
@@ -39,5 +53,6 @@ public:
      * @return TYPE_DOUBLE
      */
     DEFINE_VECTORIZED_FN(percentile_approx_raw);
+    static StatusOr<ColumnPtr> percentile_approx_raw_selected(FunctionContext*, const SelectedColumns&, size_t);
 };
 } // namespace starrocks

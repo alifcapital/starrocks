@@ -15,6 +15,8 @@
 #include "exprs/function_call_expr.h"
 
 #include <cstdint>
+#include <string_view>
+#include <unordered_set>
 
 #include "column/chunk.h"
 #include "column/column_helper.h"
@@ -23,6 +25,7 @@
 #include "exprs/agg/combinator/agg_state_utils.h"
 #include "exprs/agg/combinator/state_function.h"
 #include "exprs/builtin_functions.h"
+#include "exprs/column_ref.h"
 #include "exprs/expr_context.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/current_thread.h"
@@ -40,6 +43,31 @@ DEFINE_FAIL_POINT(expr_prepare_fragment_local_call_failed);
 DEFINE_FAIL_POINT(expr_prepare_fragment_thread_local_call_failed);
 
 VectorizedFunctionCallExpr::VectorizedFunctionCallExpr(const TExprNode& node) : Expr(node) {}
+
+namespace {
+// Lowercase canonical names of EXPENSIVE scalar functions; see case_expensive_functions.inc for the list
+// and handbook/notes/function-cost-classification.md for the rationale.
+bool is_expensive_scalar_function(const std::string& name) {
+    static const std::unordered_set<std::string_view> kExpensiveScalarFns = {
+#include "exprs/case_expensive_functions.inc"
+    };
+    return kExpensiveScalarFns.find(std::string_view(name)) != kExpensiveScalarFns.end();
+}
+bool has_selected_kernel(Expr* expr) {
+    if (auto* call = dynamic_cast<VectorizedFunctionCallExpr*>(expr)) {
+        const auto* desc = call->get_function_desc();
+        if (desc != nullptr && desc->selected_function != nullptr) return true;
+    }
+    for (auto* child : expr->children()) {
+        if (has_selected_kernel(child)) return true;
+    }
+    return false;
+}
+} // namespace
+
+bool VectorizedFunctionCallExpr::is_expensive_node() const {
+    return is_expensive_scalar_function(_fn.name.function_name);
+}
 
 const FunctionDescriptor* VectorizedFunctionCallExpr::_get_function_by_fid(const TFunction& fn) {
     // branch-3.0 is 150102~150104, branch-3.1 is 150103~150105
@@ -181,8 +209,6 @@ bool VectorizedFunctionCallExpr::is_constant() const {
 }
 
 StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_checked(starrocks::ExprContext* context, Chunk* ptr) {
-    FunctionContext* fn_ctx = context->fn_context(_fn_context_index);
-
     Columns args;
     args.reserve(_children.size());
     for (Expr* child : _children) {
@@ -190,24 +216,62 @@ StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_checked(starrocks::Expr
         args.emplace_back(column);
     }
 
-    if (_is_returning_random_value) {
-        if (ptr != nullptr) {
-            args.emplace_back(ColumnHelper::create_const_column<TYPE_INT>(ptr->num_rows(), ptr->num_rows()));
-        } else {
-            args.emplace_back(ColumnHelper::create_const_column<TYPE_INT>(1, 1));
-        }
-    }
+    return evaluate_arguments(context, std::move(args), ptr == nullptr ? 1 : ptr->num_rows(), ptr != nullptr);
+}
 
-#ifndef NDEBUG
-    if (ptr != nullptr) {
-        size_t size = ptr->num_rows();
-        // Ensure all columns have the same size
-        for (const ColumnPtr& c : args) {
-            CHECK_EQ(size, c->size());
+StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                                  const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+    if (_fn_desc->selected_function != nullptr) {
+        SelectedColumns args;
+        args.reserve(_children.size());
+        for (Expr* child : _children) {
+            if (dynamic_cast<const ColumnRef*>(child) != nullptr) {
+                ASSIGN_OR_RETURN(auto column, child->evaluate_checked(context, chunk));
+                if (column->is_view()) {
+                    auto compact = column->clone_empty();
+                    compact->append_selective(*column, rows.data(), 0, rows.size());
+                    args.push_back({std::move(compact), nullptr});
+                } else {
+                    args.push_back({std::move(column), &rows});
+                }
+            } else {
+                ASSIGN_OR_RETURN(auto column, child->evaluate_selected(context, chunk, rows));
+                args.push_back({std::move(column), nullptr});
+            }
         }
+        auto* fn_ctx = context->fn_context(_fn_context_index);
+        StatusOr<ColumnPtr> result;
+        if (_fn_desc->exception_safe) {
+            result = _fn_desc->selected_function(fn_ctx, args, rows.size());
+        } else {
+            SCOPED_SET_CATCHED(false);
+            result = _fn_desc->selected_function(fn_ctx, args, rows.size());
+        }
+        return finish_result(std::move(result));
+    }
+    // Preserve one shared compact input for trees without a selection-aware kernel.
+    if (!has_selected_kernel(this)) return Expr::evaluate_selected(context, chunk, rows);
+    Columns args;
+    args.reserve(_children.size());
+    for (Expr* child : _children) {
+        ASSIGN_OR_RETURN(auto column, child->evaluate_selected(context, chunk, rows));
+        args.emplace_back(std::move(column));
+    }
+    return evaluate_arguments(context, std::move(args), rows.size());
+}
+
+StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_arguments(ExprContext* context, Columns args, size_t num_rows,
+                                                                   bool has_input_chunk) {
+    auto* fn_ctx = context->fn_context(_fn_context_index);
+    if (_is_returning_random_value) {
+        args.emplace_back(ColumnHelper::create_const_column<TYPE_INT>(num_rows, num_rows));
+    }
+#ifndef NDEBUG
+    if (has_input_chunk) {
+        for (const auto& column : args) CHECK_EQ(num_rows, column->size());
     }
 #endif
-
     StatusOr<ColumnPtr> result;
     if (_fn_desc->exception_safe) {
         result = _fn_desc->scalar_function(fn_ctx, args);
@@ -216,16 +280,16 @@ StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_checked(starrocks::Expr
         result = _fn_desc->scalar_function(fn_ctx, args);
     }
     RETURN_IF_ERROR(result);
-    if (_fn_desc->check_overflow) {
-        RETURN_IF_ERROR(result.value()->capacity_limit_reached());
+    if (has_input_chunk && result.value()->is_constant()) {
+        result.value()->as_mutable_raw_ptr()->resize(num_rows);
     }
+    return finish_result(std::move(result));
+}
 
-    // For no args function call (pi, e)
-    if (result.value()->is_constant() && ptr != nullptr) {
-        result.value()->as_mutable_raw_ptr()->resize(ptr->num_rows());
-    }
-    auto mut_col = result.value()->as_mutable_raw_ptr();
-    RETURN_IF_ERROR(mut_col->unfold_const_children(_type));
+StatusOr<ColumnPtr> VectorizedFunctionCallExpr::finish_result(StatusOr<ColumnPtr> result) {
+    RETURN_IF_ERROR(result);
+    if (_fn_desc->check_overflow) RETURN_IF_ERROR(result.value()->capacity_limit_reached());
+    RETURN_IF_ERROR(result.value()->as_mutable_raw_ptr()->unfold_const_children(_type));
     return result;
 }
 

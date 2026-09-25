@@ -49,3 +49,6 @@ ADD_BE_BENCH(${SRC_DIR}/bench/column_ops_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/agg_simd_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/storage_simd_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/execution_simd_bench)
+ADD_BE_BENCH(${SRC_DIR}/bench/json_extract_bench)
+
+ADD_BE_BENCH(${SRC_DIR}/bench/percentile_compact_bench)

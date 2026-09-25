@@ -595,6 +595,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_HASH_JOIN_SERIALIZE_FIXED_SIZE_STRING = "enable_hash_join_serialize_fixed_size_string";
 
     public static final String ENABLE_AGG_INLINE_ACCUMULATOR = "enable_agg_inline_accumulator";
+    public static final String ENABLE_PERCENTILE_COMPACT_INTERMEDIATE = "enable_percentile_compact_intermediate";
 
     public static final String ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF =
             "enable_pipeline_level_multi_partitioned_rf";
@@ -791,6 +792,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
             "enable_materialized_view_text_match_rewrite";
     public static final String MATERIALIZED_VIEW_SUBQUERY_TEXT_MATCH_MAX_COUNT =
             "materialized_view_subquery_text_match_max_count";
+
+    // If true, MV rewrite refuses to use a percentile MV whose compression factor is smaller
+    // than the query's compression. The optimizer falls back to a base table scan and logs the
+    // skip reason via OptimizerTraceUtil.logMVRewriteFailReason. Default false keeps the
+    // historical behaviour (silently uses the MV even on compression mismatch).
+    public static final String ENABLE_MV_PERCENTILE_STRICT_MATCH = "enable_mv_percentile_strict_match";
 
     public static final String LARGE_DECIMAL_UNDERLYING_TYPE = "large_decimal_underlying_type";
 
@@ -1075,6 +1082,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_HYPERSCAN_VEC = "enable_hyperscan_vec";
 
+    public static final String ENABLE_JSON_EXTRACT_FUSION = "enable_json_extract_fusion";
+
     // whether rewrite bitmap_union(to_bitmap(x)) to bitmap_agg(x) directly.
     public static final String ENABLE_REWRITE_BITMAP_UNION_TO_BITMAP_AGG = "enable_rewrite_bitmap_union_to_bitamp_agg";
 
@@ -1179,6 +1188,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_INSERT_SELECT_EXTERNAL_AUTO_REFRESH = "enable_insert_select_external_auto_refresh";
     public static final String ENABLE_PREDICATE_COL_LATE_MATERIALIZE = "enable_predicate_col_late_materialize";
+
+    public static final String ENABLE_CONDITIONAL_TWO_PHASE_EVAL = "enable_conditional_two_phase_eval";
 
     public static final String PUSH_DOWN_HEAVY_EXPRS = "push_down_heavy_exprs";
 
@@ -1996,6 +2007,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // arena-allocated agg state.
     @VarAttr(name = ENABLE_AGG_INLINE_ACCUMULATOR)
     private boolean enableAggInlineAccumulator = true;
+    // Global-only (flag = GLOBAL): cannot be set per session, only via `SET GLOBAL`,
+    // so a user cannot opt in before the whole cluster is upgraded. Default OFF;
+    // enable only after a full rolling upgrade of all BE and CN, because the compact
+    // percentile intermediate format is wire-incompatible with old workers.
+    @VarAttr(name = ENABLE_PERCENTILE_COMPACT_INTERMEDIATE, flag = VariableMgr.GLOBAL)
+    private volatile boolean enablePercentileCompactIntermediate = false;
 
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
@@ -2229,6 +2246,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_HYPERSCAN_VEC)
     private boolean enableHyperscanVec = true;
 
+    @VarAttr(name = ENABLE_JSON_EXTRACT_FUSION)
+    private boolean enableJsonExtractFusion = true;
+
     @VarAttr(name = ENABLE_PLAN_ANALYZER, flag = VariableMgr.INVISIBLE)
     private boolean enablePlanAnalyzer = false;
 
@@ -2422,6 +2442,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_PREDICATE_COL_LATE_MATERIALIZE)
     private boolean enablePredicateColLateMaterialize = true;
+
+    @VarAttr(name = ENABLE_CONDITIONAL_TWO_PHASE_EVAL)
+    private boolean enableConditionalTwoPhaseEval = false;
 
     @VarAttr(name = PUSH_DOWN_HEAVY_EXPRS)
     private boolean pushDownHeavyExprs = true;
@@ -2815,6 +2838,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_MATERIALIZED_VIEW_TEXT_MATCH_REWRITE)
     private boolean enableMaterializedViewTextMatchRewrite = true;
+
+    @VarAttr(name = ENABLE_MV_PERCENTILE_STRICT_MATCH)
+    private boolean enableMvPercentileStrictMatch = false;
 
     @VarAttr(name = MATERIALIZED_VIEW_SUBQUERY_TEXT_MATCH_MAX_COUNT)
     private int materializedViewSubQueryTextMatchMaxCount = 4;
@@ -5100,6 +5126,16 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return isEnablePipelineEngine() && enableQueryCache;
     }
 
+    // One snapshot per statement keeps the cache key and worker options consistent.
+    public void refreshPercentileCompactIntermediate(VariableMgr variableMgr) {
+        enablePercentileCompactIntermediate =
+                variableMgr.getDefaultSessionVariable().enablePercentileCompactIntermediate;
+    }
+
+    public boolean isEnablePercentileCompactIntermediate() {
+        return enablePercentileCompactIntermediate;
+    }
+
     public long getQueryCacheEntryMaxBytes() {
         return queryCacheEntryMaxBytes;
     }
@@ -5190,6 +5226,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMaterializedViewTextMatchRewrite(boolean enable) {
         this.enableMaterializedViewTextMatchRewrite = enable;
+    }
+
+    public boolean isEnableMvPercentileStrictMatch() {
+        return enableMvPercentileStrictMatch;
+    }
+
+    public void setEnableMvPercentileStrictMatch(boolean enable) {
+        this.enableMvPercentileStrictMatch = enable;
     }
 
     public int getMaterializedViewSubQueryTextMatchMaxCount() {
@@ -6205,6 +6249,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return enablePredicateColLateMaterialize;
     }
 
+    public void setEnableConditionalTwoPhaseEval(boolean enableConditionalTwoPhaseEval) {
+        this.enableConditionalTwoPhaseEval = enableConditionalTwoPhaseEval;
+    }
+
+    public boolean isEnableConditionalTwoPhaseEval() {
+        return enableConditionalTwoPhaseEval;
+    }
+
     public void setPushDownHeavyExprs(boolean flag) {
         this.pushDownHeavyExprs = flag;
     }
@@ -6235,6 +6287,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public double getMcvRowPercentagePropagationThreshold() {
         return mcvRowPercentagePropagationThreshold;
+    }
+
+    public boolean isEnableJsonExtractFusion() {
+        return enableJsonExtractFusion;
+    }
+
+    public void setEnableJsonExtractFusion(boolean value) {
+        enableJsonExtractFusion = value;
     }
 
     // Serialize to thrift object
@@ -6328,6 +6388,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setRpc_http_min_size(rpcHttpMinSize);
         tResult.setInterleaving_group_size(interleavingGroupSize);
         tResult.setEnable_predicate_col_late_materialize(enablePredicateColLateMaterialize);
+        tResult.setEnable_conditional_two_phase_eval(enableConditionalTwoPhaseEval);
 
         TCompressionType loadCompressionType =
                 CompressionUtils.findTCompressionByName(loadTransmissionCompressionType);
@@ -6394,6 +6455,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setEnable_pipeline_level_shuffle(enablePipelineLevelShuffle);
         tResult.setExchange_hash_function_version(exchangeHashFunctionVersion);
         tResult.setEnable_hyperscan_vec(enableHyperscanVec);
+        tResult.setEnable_json_extract_fusion(enableJsonExtractFusion);
         tResult.setJit_level(jitLevel);
         tResult.setEnable_result_sink_accumulate(enableResultSinkAccumulate);
         tResult.setEnable_connector_sink_writer_scaling(enableConnectorSinkWriterScaling);
@@ -6410,6 +6472,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setEnable_hash_join_serialize_fixed_size_string(enableHashJoinSerializeFixedSizeString);
         tResult.setEnable_agg_consecutive_keys_cache(enableAggConsecutiveKeysCache);
         tResult.setEnable_agg_inline_accumulator(enableAggInlineAccumulator);
+        tResult.setEnable_percentile_compact_intermediate(enablePercentileCompactIntermediate);
 
         return tResult;
     }

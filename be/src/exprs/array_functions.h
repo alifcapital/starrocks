@@ -61,6 +61,11 @@ public:
     static StatusOr<ColumnPtr> array_distinct(FunctionContext* context, const Columns& columns) {
         return ArrayDistinct<type>::process(context, columns);
     }
+    template <LogicalType type>
+    static StatusOr<ColumnPtr> array_distinct_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t rows) {
+        return ArrayDistinct<type>::process_selected(context, columns, rows);
+    }
 
     template <LogicalType type>
     static StatusOr<ColumnPtr> array_difference(FunctionContext* context, const Columns& columns) {
@@ -89,13 +94,31 @@ public:
     }
 
     template <LogicalType type>
+    static StatusOr<ColumnPtr> array_intersect_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                        size_t rows) {
+        return ArrayIntersect<type>::process_selected(context, columns, rows);
+    }
+
+    template <LogicalType type>
     static StatusOr<ColumnPtr> array_intersect(FunctionContext* context, const Columns& columns) {
         return ArrayIntersect<type>::process(context, columns);
     }
 
     template <LogicalType type>
+    static StatusOr<ColumnPtr> array_sort_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                   size_t rows) {
+        return ArraySort<type>::process_selected(context, columns, rows);
+    }
+
+    template <LogicalType type>
     static StatusOr<ColumnPtr> array_sort(FunctionContext* context, const Columns& columns) {
         return ArraySort<type>::process(context, columns);
+    }
+
+    template <LogicalType type>
+    static StatusOr<ColumnPtr> array_sortby_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                     size_t rows) {
+        return ArraySortBy<type>::process_selected(context, columns, rows);
     }
 
     template <LogicalType type>
@@ -109,6 +132,9 @@ public:
     }
 
     static StatusOr<ColumnPtr> array_join(FunctionContext* context, const Columns& columns) {
+        return ArrayJoin::process(context, columns);
+    }
+    static StatusOr<ColumnPtr> array_join_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
         return ArrayJoin::process(context, columns);
     }
 
@@ -184,8 +210,11 @@ public:
     DEFINE_VECTORIZED_FN(array_map);
     DEFINE_VECTORIZED_FN(array_sort_lambda);
     DEFINE_VECTORIZED_FN(array_filter);
+    static StatusOr<ColumnPtr> array_filter_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(all_match);
+    static StatusOr<ColumnPtr> all_match_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(any_match);
+    static StatusOr<ColumnPtr> any_match_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(array_contains_seq);
     template <LogicalType LT>
@@ -205,10 +234,13 @@ public:
 
     // array function for nested type(Array/Map/Struct)
     DEFINE_VECTORIZED_FN(array_distinct_any_type);
+    static StatusOr<ColumnPtr> array_distinct_any_type_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(array_reverse_any_types);
     DEFINE_VECTORIZED_FN(array_intersect_any_type);
+    static StatusOr<ColumnPtr> array_intersect_any_type_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(array_sortby_multi);
+    static StatusOr<ColumnPtr> array_sortby_multi_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(null_or_empty);
 

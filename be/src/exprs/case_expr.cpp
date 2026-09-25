@@ -23,6 +23,7 @@
 #include "column/type_traits.h"
 #include "column/vectorized_fwd.h"
 #include "common/object_pool.h"
+#include "exprs/conditional_two_phase.h"
 #include "gutil/casts.h"
 #include "runtime/runtime_state.h"
 #include "simd/mulselector.h"
@@ -67,15 +68,50 @@ public:
         RETURN_IF_ERROR(Expr::open(state, context, scope));
 
         // children size check
-        if ((_has_case_expr ^ _has_else_expr) == 0) {
-            return _children.size() % 2 == 0 ? Status::OK() : Status::InvalidArgument("case when children is error!");
+        const bool size_ok =
+                ((_has_case_expr ^ _has_else_expr) == 0) ? (_children.size() % 2 == 0) : (_children.size() % 2 == 1);
+        if (!size_ok) {
+            return Status::InvalidArgument("case when children is error!");
         }
 
-        return _children.size() % 2 == 1 ? Status::OK() : Status::InvalidArgument("case when children is error!");
+        if (state->query_options().enable_conditional_two_phase_eval) {
+            _compute_two_phase_eligibility();
+        }
+        return Status::OK();
     }
 
+    static bool _is_two_phase_value(const Expr* value) { return value->contains_expensive() && !value->is_constant(); }
+
 #ifdef STARROCKS_JIT_ENABLE
+    // True iff any THEN/ELSE value-branch subtree contains an expensive call. Guards (WHEN / the simple-CASE
+    // case value) are excluded: they are always evaluated eagerly over the full chunk in both the JIT and the
+    // two-phase paths, so an expensive guard does not need to disable JIT. Structural and pre-prepare-safe
+    // (contains_expensive reads only the thrift function name), as is_compilable may run before open().
+    bool _has_expensive_value_branch() const {
+        const int n = static_cast<int>(_children.size());
+        const int else_idx = _has_else_expr ? n - 1 : -1; // ELSE, when present, is the last child
+        if (else_idx >= 0 && _is_two_phase_value(_children[else_idx])) {
+            return true;
+        }
+        // THEN children: searched CASE starts at index 1, simple CASE at index 2; both step by 2.
+        for (int i = _has_case_expr ? 2 : 1; i < n; i += 2) {
+            if (i == else_idx) {
+                break;
+            }
+            if (_is_two_phase_value(_children[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool is_compilable(RuntimeState* state) const override {
+        // A JIT-compiled CASE inlines and evaluates every branch over the full chunk, which would bypass the
+        // two-phase (filtered) evaluation of an expensive THEN/ELSE. Keep such a CASE off the JIT path so
+        // evaluate_no_case/evaluate_case can defer the expensive branch (see case_expensive_functions.inc).
+        if (state->query_options().enable_conditional_two_phase_eval && _has_expensive_value_branch()) {
+            return false;
+        }
         if (_has_case_expr) {
             return state->can_jit_expr(CompilableExprType::CASE) && IRHelper::support_jit(WhenType) &&
                    IRHelper::support_jit(ResultType);
@@ -303,6 +339,10 @@ private:
     //   If `CASE` equals `WHEN`, return `THEN`
     //   If `CASE` can't match ANY `WHEN`, return NULL
     StatusOr<ColumnPtr> evaluate_case(ExprContext* context, Chunk* chunk) {
+        if (_two_phase_eligible && chunk != nullptr) {
+            return evaluate_case_two_phase(context, chunk);
+        }
+
         ColumnPtr else_column = nullptr;
         if (!_has_else_expr) {
             else_column = ColumnHelper::create_const_null_column(chunk != nullptr ? chunk->num_rows() : 1);
@@ -457,6 +497,10 @@ private:
     //  If all `WHEN` is null/false, return NULL
     //  If `WHEN` is not null and true, return `THEN`
     StatusOr<ColumnPtr> evaluate_no_case(ExprContext* context, Chunk* chunk) {
+        if (_two_phase_eligible && chunk != nullptr) {
+            return evaluate_no_case_two_phase(context, chunk);
+        }
+
         ColumnPtr else_column = nullptr;
         if (!_has_else_expr) {
             else_column = ColumnHelper::create_const_null_column(chunk != nullptr ? chunk->num_rows() : 1);
@@ -650,9 +694,102 @@ private:
         }
     }
 
+    // Searched CASE: boolean WHEN guards, predicate-routed two-phase evaluation.
+    StatusOr<ColumnPtr> evaluate_no_case_two_phase(ExprContext* context, Chunk* chunk) {
+        const int n = static_cast<int>(_children.size());
+        const int num_branches = (n - (_has_else_expr ? 1 : 0)) / 2;
+        std::vector<Expr*> then_exprs(num_branches);
+        for (int i = 0; i < num_branches; ++i) {
+            then_exprs[i] = _children[2 * i + 1];
+        }
+        Expr* else_expr = _has_else_expr ? _children[n - 1] : nullptr;
+        auto guard_fn = [this, context, chunk](int i) -> StatusOr<ColumnPtr> {
+            return _children[2 * i]->evaluate_checked(context, chunk);
+        };
+        return two_phase_eval_predicate_routed(context, chunk, this->type(), num_branches, guard_fn, then_exprs,
+                                               _then_two_phase, else_expr, _else_two_phase,
+                                               /*enable_first_all_true_shortcut=*/true);
+    }
+
+    // Simple CASE: typed equality of the case value against each WHEN forms the guard. Reproduces eager's
+    // all-null-case-value => ELSE early-out; no first-all-true direct return (evaluate_case has none).
+    StatusOr<ColumnPtr> evaluate_case_two_phase(ExprContext* context, Chunk* chunk) {
+        ASSIGN_OR_RETURN(ColumnPtr case_column, _children[0]->evaluate_checked(context, chunk));
+        if (ColumnHelper::count_nulls(case_column) == case_column->size()) {
+            if (_has_else_expr) {
+                return _children[_children.size() - 1]->evaluate_checked(context, chunk);
+            }
+            return ColumnHelper::create_const_null_column(chunk->num_rows());
+        }
+        const int n = static_cast<int>(_children.size());
+        const int num_branches = (n - 1 - (_has_else_expr ? 1 : 0)) / 2;
+        std::vector<Expr*> then_exprs(num_branches);
+        for (int i = 0; i < num_branches; ++i) {
+            then_exprs[i] = _children[2 + 2 * i];
+        }
+        Expr* else_expr = _has_else_expr ? _children[n - 1] : nullptr;
+        const size_t num_rows = chunk->num_rows();
+        auto guard_fn = [this, context, chunk, case_column, num_rows](int i) -> StatusOr<ColumnPtr> {
+            ASSIGN_OR_RETURN(ColumnPtr when_col, _children[1 + 2 * i]->evaluate_checked(context, chunk));
+            return _build_simple_case_guard(case_column, when_col, num_rows);
+        };
+        return two_phase_eval_predicate_routed(context, chunk, this->type(), num_branches, guard_fn, then_exprs,
+                                               _then_two_phase, else_expr, _else_two_phase,
+                                               /*enable_first_all_true_shortcut=*/false);
+    }
+
+    // Per-row boolean guard for simple CASE: true iff case value and WHEN value are both non-null and equal,
+    // mirroring evaluate_case's scalar comparator. Collection when-types are kept on the eager path
+    // (see _compute_two_phase_eligibility), so the collection branch here is unreachable.
+    ColumnPtr _build_simple_case_guard(const ColumnPtr& case_column, const ColumnPtr& when_column, size_t num_rows) {
+        auto guard = RunTimeColumnType<TYPE_BOOLEAN>::create();
+        auto& data = guard->get_data();
+        data.resize(num_rows);
+        if constexpr (!lt_is_collection<WhenType>) {
+            ColumnViewer<WhenType> case_viewer(case_column);
+            ColumnViewer<WhenType> when_viewer(when_column);
+            for (size_t r = 0; r < num_rows; ++r) {
+                data[r] = (!case_viewer.is_null(r) && !when_viewer.is_null(r) &&
+                           when_viewer.value(r) == case_viewer.value(r))
+                                  ? 1
+                                  : 0;
+            }
+        }
+        return guard;
+    }
+
+    // At open(): a value-branch (THEN/ELSE) is two-phase-eligible iff its subtree contains an expensive call
+    // and is not a compile-time constant. Simple CASE with a collection when-type is excluded (eager only).
+    void _compute_two_phase_eligibility() {
+        if constexpr (lt_is_collection<WhenType>) {
+            if (_has_case_expr) {
+                return;
+            }
+        }
+        const int n = static_cast<int>(_children.size());
+        const int base = _has_case_expr ? 1 : 0;
+        const int num_branches = (n - base - (_has_else_expr ? 1 : 0)) / 2;
+        _then_two_phase.assign(num_branches, 0);
+        for (int i = 0; i < num_branches; ++i) {
+            const Expr* then_expr = _children[base + 2 * i + 1];
+            _then_two_phase[i] = _is_two_phase_value(then_expr) ? 1 : 0;
+            _two_phase_eligible |= (_then_two_phase[i] != 0);
+        }
+        if (_has_else_expr) {
+            const Expr* else_expr = _children[n - 1];
+            _else_two_phase = _is_two_phase_value(else_expr);
+            _two_phase_eligible |= _else_two_phase;
+        }
+    }
+
 private:
     const bool _has_case_expr;
     const bool _has_else_expr;
+    // Two-phase routing (filtered eval of expensive value-branches), computed at open(). See
+    // conditional_two_phase.h and handbook/notes/two-phase-case-evaluation-design.md.
+    bool _two_phase_eligible = false;
+    std::vector<uint8_t> _then_two_phase; // index-aligned with the value branches (THEN)
+    bool _else_two_phase = false;
 };
 
 #define CASE_WHEN_RESULT_TYPE(WHEN_TYPE, RESULT_TYPE)                \

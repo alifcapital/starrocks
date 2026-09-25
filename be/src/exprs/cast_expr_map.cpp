@@ -16,25 +16,38 @@
 #include "column/column_viewer.h"
 #include "column/map_column.h"
 #include "exprs/cast_expr.h"
+#include "exprs/selected_expr.h"
 #include "util/variant.h"
 
 namespace starrocks {
 
 StatusOr<ColumnPtr> CastJsonToMap::evaluate_checked(ExprContext* context, Chunk* ptr) {
-    ASSIGN_OR_RETURN(ColumnPtr src_column, _children[0]->evaluate_checked(context, ptr));
-    if (ColumnHelper::count_nulls(src_column) == src_column->size()) {
-        return ColumnHelper::create_const_null_column(src_column->size());
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, ptr));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastJsonToMap::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                     const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastJsonToMap::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& src_column = input_column(inputs[0]);
+    const size_t work_rows = src_column->is_constant() ? 1 : input_num_rows(inputs);
+    if (src_column->only_null()) {
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
-    ColumnViewer<TYPE_JSON> src_viewer(src_column);
+    FunctionColumnViewer<TYPE_JSON, Inputs> src_viewer(inputs[0]);
     NullColumn::MutablePtr null_column = NullColumn::create();
     UInt32Column::MutablePtr offsets_column = UInt32Column::create();
-    ColumnBuilder<TYPE_VARCHAR> keys_builder(src_column->size());
-    ColumnBuilder<TYPE_JSON> values_builder(src_column->size());
+    ColumnBuilder<TYPE_VARCHAR> keys_builder(work_rows);
+    ColumnBuilder<TYPE_JSON> values_builder(work_rows);
 
     // 1. Cast JsonObject to MAP<VARCHAR,JSON>
     uint32_t offset = 0;
-    for (size_t i = 0; i < src_viewer.size(); i++) {
+    for (size_t i = 0; i < work_rows; i++) {
         offsets_column->append(offset);
         if (src_viewer.is_null(i)) {
             null_column->append(1);
@@ -78,24 +91,38 @@ StatusOr<ColumnPtr> CastJsonToMap::evaluate_checked(ExprContext* context, Chunk*
     auto map_column = MapColumn::create(std::move(keys_column), std::move(values_column), std::move(offsets_column));
     map_column->remove_duplicated_keys();
     RETURN_IF_ERROR(map_column->unfold_const_children(_type));
-    return NullableColumn::create(std::move(map_column), std::move(null_column));
+    ColumnPtr result = NullableColumn::create(std::move(map_column), std::move(null_column));
+    if (src_column->is_constant()) return ConstColumn::create(std::move(result), input_num_rows(inputs));
+    return result;
 }
 
 StatusOr<ColumnPtr> CastVariantToMap::evaluate_checked(ExprContext* context, Chunk* ptr) {
-    ASSIGN_OR_RETURN(ColumnPtr src_column, _children[0]->evaluate_checked(context, ptr));
-    if (ColumnHelper::count_nulls(src_column) == src_column->size()) {
-        return ColumnHelper::create_const_null_column(src_column->size());
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, ptr));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastVariantToMap::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                        const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastVariantToMap::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& src_column = input_column(inputs[0]);
+    const size_t work_rows = src_column->is_constant() ? 1 : input_num_rows(inputs);
+    if (src_column->only_null()) {
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
-    ColumnViewer<TYPE_VARIANT> variant_viewer(src_column);
+    FunctionColumnViewer<TYPE_VARIANT, Inputs> variant_viewer(inputs[0]);
     NullColumn::MutablePtr null_column = NullColumn::create();
     UInt32Column::MutablePtr offsets_column = UInt32Column::create();
-    ColumnBuilder<TYPE_VARCHAR> keys_builder(src_column->size());
-    ColumnBuilder<TYPE_VARIANT> values_builder(src_column->size());
+    ColumnBuilder<TYPE_VARCHAR> keys_builder(work_rows);
+    ColumnBuilder<TYPE_VARIANT> values_builder(work_rows);
 
     // 1. Cast Variant(type=MAP) to MAP<VARCHAR,VARIANT>
     uint32_t offset = 0;
-    for (size_t i = 0; i < variant_viewer.size(); i++) {
+    for (size_t i = 0; i < work_rows; i++) {
         offsets_column->append(offset);
         if (variant_viewer.is_null(i)) {
             null_column->append(1);
@@ -162,7 +189,9 @@ StatusOr<ColumnPtr> CastVariantToMap::evaluate_checked(ExprContext* context, Chu
     auto map_column = MapColumn::create(std::move(keys_column), std::move(values_column), std::move(offsets_column));
     map_column->remove_duplicated_keys();
     RETURN_IF_ERROR(map_column->unfold_const_children(_type));
-    return NullableColumn::create(std::move(map_column), std::move(null_column));
+    ColumnPtr result = NullableColumn::create(std::move(map_column), std::move(null_column));
+    if (src_column->is_constant()) return ConstColumn::create(std::move(result), input_num_rows(inputs));
+    return result;
 }
 
 } // namespace starrocks

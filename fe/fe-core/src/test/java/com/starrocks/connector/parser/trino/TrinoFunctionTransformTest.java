@@ -32,7 +32,7 @@ public class TrinoFunctionTransformTest extends TrinoTestBase {
         assertPlanContains(sql, "output: any_value(1: v1)");
 
         sql = "select approx_percentile(v1, 0.99) from t0;";
-        assertPlanContains(sql, "output: percentile_approx(CAST(1: v1 AS DOUBLE), 0.99)");
+        assertPlanContains(sql, "output: percentile_approx(CAST(1: v1 AS DOUBLE), 0.99, 1000.0)");
 
         sql = "select stddev(v1) from t0;";
         assertPlanContains(sql, "output: stddev_samp(1: v1)");
@@ -341,7 +341,7 @@ public class TrinoFunctionTransformTest extends TrinoTestBase {
         assertPlanContains(sql, "parse_json('{\"a\": {\"b\": 1}}')");
 
         sql = "select json_extract(json_parse('{\"a\": {\"b\": 1}}'), '$.a.b')";
-        assertPlanContains(sql, "json_query(parse_json('{\"a\": {\"b\": 1}}'), '$.a.b')");
+        assertPlanContains(sql, "json_query_from_string('{\"a\": {\"b\": 1}}', '$.a.b')");
 
         sql = "select json_extract(JSON '{\"a\": {\"b\": 1}}', '$.a.b');";
         assertPlanContains(sql, "json_query(CAST('{\"a\": {\"b\": 1}}' AS JSON), '$.a.b')");
@@ -362,7 +362,7 @@ public class TrinoFunctionTransformTest extends TrinoTestBase {
         assertPlanContains(sql, "CAST(json_query(CAST('{\"a\": {\"b\": 1}}' AS JSON), '$.a.b') AS VARCHAR)");
 
         sql = "select json_extract_scalar(json_parse('{\"a\": {\"b\": 1}}'), '$.a.b');";
-        assertPlanContains(sql, "CAST(json_query(parse_json('{\"a\": {\"b\": 1}}'), '$.a.b') AS VARCHAR)");
+        assertPlanContains(sql, "CAST(json_query_from_string('{\"a\": {\"b\": 1}}', '$.a.b') AS VARCHAR)");
     }
 
     @Test

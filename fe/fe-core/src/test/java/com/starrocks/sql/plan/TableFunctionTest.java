@@ -413,9 +413,18 @@ public class TableFunctionTest extends PlanTestBase {
                 "ON l2.q_id = l1.id;";
 
         String plan1 = getFragmentPlan(sql);
+        // get_json_string(parse_json(value), ...) reads from a computed source (parse_json), not a stored
+        // json column, so it is no longer pushed below the join into the table-function-level project. It
+        // now stays above the join (12:Project), while the table function still outputs the required nested
+        // `value` object (slots 12/15 carried up through 4:Project).
+        Assertions.assertTrue(plan1.contains("  12:Project\n" +
+                "  |  <slot 26> : get_json_string(parse_json(CAST(12: value AS VARCHAR)), concat('$.', 15: key))\n" +
+                "  |  \n" +
+                "  11:HASH JOIN"), plan1);
         Assertions.assertTrue(plan1.contains("  4:Project\n" +
+                "  |  <slot 12> : 12: value\n" +
+                "  |  <slot 15> : 15: key\n" +
                 "  |  <slot 18> : coalesce(11: key, '0')\n" +
-                "  |  <slot 28> : get_json_string(parse_json(CAST(12: value AS VARCHAR)), concat('$.', 15: key))\n" +
                 "  |  \n" +
                 "  3:TableValueFunction"), plan1);
         ExecPlan plan = getExecPlan(sql);

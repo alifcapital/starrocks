@@ -64,11 +64,16 @@ struct Ngramstate {
 template <bool case_insensitive, bool use_utf_8, class Gram>
 class NgramFunctionImpl {
 public:
-    StatusOr<ColumnPtr> static ngram_search_impl(FunctionContext* context, const Columns& columns) {
-        RETURN_IF_COLUMNS_ONLY_NULL(columns);
-        const auto& haystack_column = columns[0];
-        const auto& needle_column = columns[1];
-        const auto& gram_num_column = columns[2];
+    template <typename Inputs>
+    StatusOr<ColumnPtr> static ngram_search_impl(FunctionContext* context, const Inputs& columns) {
+        for (const auto& input : columns) {
+            if (input_column(input)->only_null())
+                return ColumnHelper::create_const_null_column(input_num_rows(columns));
+        }
+        const auto& haystack_column = input_column(columns[0]);
+
+        const auto& needle_column = input_column(columns[1]);
+        const auto& gram_num_column = input_column(columns[2]);
 
         // Defence in depth: the FE analyzer already requires a positive integer literal here, and
         // get_const_value() casts the data column straight to an Int32Column, so anything else
@@ -89,7 +94,7 @@ public:
 
         // Non-constant needle: compute similarity per row, no index optimization.
         if (!needle_column->is_constant()) {
-            return haystack_and_needle_non_const(haystack_column, needle_column, gram_num);
+            return haystack_and_needle_non_const(columns, gram_num);
         }
 
         const Slice needle = ColumnHelper::get_const_value<TYPE_VARCHAR>(needle_column);
@@ -98,8 +103,8 @@ public:
         }
 
         // needle is too small so we can not get even single Ngram, so they are not similar at all
-        if (needle.get_size() < (size_t)gram_num) {
-            return ColumnHelper::create_const_column<TYPE_DOUBLE>(0, haystack_column->size());
+        if (needle.get_size() < gram_num) {
+            return ColumnHelper::create_const_column<TYPE_DOUBLE>(0, input_num_rows(columns));
         }
 
         auto state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
@@ -108,15 +113,15 @@ public:
             if (context->is_constant_column(0)) {
                 // already calculated in prepare and cache result in state
                 DCHECK(state->result != -1);
-                return ColumnHelper::create_const_column<TYPE_DOUBLE>(state->result, haystack_column->size());
+                return ColumnHelper::create_const_column<TYPE_DOUBLE>(state->result, input_num_rows(columns));
             } else {
                 // haystack is const column but not constant
                 float result = haystack_const_and_needle_const(
                         ColumnHelper::get_const_value<TYPE_VARCHAR>(haystack_column), *map, context, gram_num);
-                return ColumnHelper::create_const_column<TYPE_DOUBLE>(result, haystack_column->size());
+                return ColumnHelper::create_const_column<TYPE_DOUBLE>(result, input_num_rows(columns));
             }
         } else {
-            return haystack_vector_and_needle_const(haystack_column, *map, context, gram_num);
+            return haystack_vector_and_needle_const(columns[0], *map, context, gram_num);
         }
     }
 
@@ -233,8 +238,10 @@ private:
     }
 
     // Per-row ngram similarity when needle is non-constant.  No index pre-filtering applies.
-    ColumnPtr static haystack_and_needle_non_const(const ColumnPtr& haystack_column, const ColumnPtr& needle_column,
-                                                   size_t gram_num) {
+    template <typename Inputs>
+    ColumnPtr static haystack_and_needle_non_const(const Inputs& columns, size_t gram_num) {
+        const auto& haystack_column = input_column(columns[0]);
+        const auto& needle_column = input_column(columns[1]);
         ColumnPtr haystackPtr = haystack_column;
         ColumnPtr needlePtr = needle_column;
 
@@ -262,7 +269,7 @@ private:
         const BinaryColumn* needle_raw = ColumnHelper::as_raw_column<BinaryColumn>(needlePtr);
         // Use the original column for chunk_size: ConstColumn::size() returns the logical
         // chunk size (_size field), while haystack_raw->size() after unwrapping is always 1.
-        size_t chunk_size = haystack_column->size();
+        size_t chunk_size = input_num_rows(columns);
         auto res = RunTimeColumnType<TYPE_DOUBLE>::create(chunk_size);
 
         std::vector<NgramHash> row_map(MAP_SIZE, 0);
@@ -275,9 +282,9 @@ private:
         size_t needle_gram_count = 0;
 
         for (size_t i = 0; i < chunk_size; i++) {
-            const Slice& raw_needle = needle_raw->get_slice(i);
+            const Slice& raw_needle = needle_raw->get_slice(input_row(columns[1], i));
             // When haystack is constant its data column has exactly one element (index 0).
-            const Slice& raw_haystack = haystack_raw->get_slice(haystack_is_const ? 0 : i);
+            const Slice& raw_haystack = haystack_raw->get_slice(input_row(columns[0], i));
 
             // Lowercase needle and haystack at the top of every iteration for case-insensitive.
             // Normalising the needle here (rather than only inside the map-build functions) ensures
@@ -339,12 +346,46 @@ private:
             res->get_data()[i] = 1.0f - not_matched * 1.0f / std::max(needle_gram_count, (size_t)1);
         }
 
-        // Merge null masks from haystack and needle via the standard helper.
-        NullColumnPtr merged_null = FunctionHelper::union_nullable_column(haystack_column, needle_column);
-        if (merged_null != nullptr) {
-            return NullableColumn::create(std::move(res), std::move(merged_null));
+        // Preserve the dense result representation, mapping only nullable masks.
+        if (!haystack_column->is_nullable() && !needle_column->is_nullable()) return res;
+        auto merged_null = input_null_flags(columns[0], chunk_size);
+        auto needle_null = input_null_flags(columns[1], chunk_size);
+        for (size_t i = 0; i < chunk_size; ++i) merged_null->get_data()[i] |= needle_null->get_data()[i];
+        return NullableColumn::create(std::move(res), std::move(merged_null));
+    }
+
+    static ColumnPtr haystack_vector_and_needle_const(const SelectedColumn& input, std::vector<NgramHash>& map,
+                                                      FunctionContext* context, size_t gram_num) {
+        if (input.rows == nullptr) return haystack_vector_and_needle_const(input.column, map, context, gram_num);
+        SelectedColumnViewer<TYPE_VARCHAR> viewer(input);
+        std::vector<NgramHash> restore(MAX_STRING_SIZE, 0);
+        auto* state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+        size_t needle_count = state->needle_gram_count;
+        ColumnBuilder<TYPE_DOUBLE> result(input.rows->size());
+        std::string lower;
+        for (size_t row = 0; row < input.rows->size(); ++row) {
+            if (viewer.is_null(row)) {
+                result.append_null();
+                continue;
+            }
+            Slice value = viewer.value(row);
+            if (value.size > MAX_STRING_SIZE) {
+                result.append(0);
+                continue;
+            }
+            if constexpr (case_insensitive) {
+                // Match the existing vector ASCII toggle, not locale-dependent std::tolower.
+                lower.resize(value.size);
+                for (size_t i = 0; i < value.size; ++i) {
+                    unsigned char c = value.data[i];
+                    lower[i] = c ^ ((('A' <= c) & (c <= 'Z')) << 5);
+                }
+                value = Slice(lower);
+            }
+            size_t unmatched = calculateDistanceWithHaystack<true>(map, value, restore, needle_count, gram_num);
+            result.append(1.0f - unmatched * 1.0f / std::max(needle_count, size_t(1)));
         }
-        return res;
+        return result.build(false);
     }
 
     ColumnPtr static haystack_vector_and_needle_const(const ColumnPtr& haystack_column, std::vector<NgramHash>& map,
@@ -478,7 +519,17 @@ StatusOr<ColumnPtr> StringFunctions::ngram_search(FunctionContext* context, cons
     return NgramFunctionImpl<false, false, char>::ngram_search_impl(context, columns);
 }
 
+StatusOr<ColumnPtr> StringFunctions::ngram_search_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                           size_t) {
+    return NgramFunctionImpl<false, false, char>::ngram_search_impl(context, columns);
+}
+
 StatusOr<ColumnPtr> StringFunctions::ngram_search_case_insensitive(FunctionContext* context, const Columns& columns) {
+    return NgramFunctionImpl<true, false, char>::ngram_search_impl(context, columns);
+}
+
+StatusOr<ColumnPtr> StringFunctions::ngram_search_case_insensitive_selected(FunctionContext* context,
+                                                                            const SelectedColumns& columns, size_t) {
     return NgramFunctionImpl<true, false, char>::ngram_search_impl(context, columns);
 }
 

@@ -1,0 +1,94 @@
+-- name: test_selected_function_families
+
+CREATE DATABASE selected_families_${uuid0};
+
+USE selected_families_${uuid0};
+
+SET enable_conditional_two_phase_eval=true;
+
+SET jit_level=0;
+
+CREATE TABLE t(id INT, p VARCHAR(8192), doc VARCHAR(8192), dt VARCHAR(30), url VARCHAR(100), kv VARCHAR(100), a ARRAY<VARCHAR(100)>)
+DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1");
+
+INSERT INTO t VALUES
+(0,'abc0','{"n":0}','2024-03-01','https://a.example/x?k=0','a:0,b:1',['a',NULL,'a']),
+(1,'abc1','{"n":1}','2024-03-02','https://a.example/x?k=1','a:1,b:2',['a','b']),
+(2,NULL,NULL,NULL,NULL,NULL,NULL),
+(3,'abc3',NULL,'invalid','invalid','',[]),
+(4,'abc4','{"n":4}','2024-03-05','https://b.example/x?k=4','b:4,a:2',['b',NULL,'a']),
+(5,'abc5','invalid','invalid','invalid','x:5',['x']);
+
+SELECT id,
+CASE WHEN id%2=0 THEN md5(p) ELSE NULL END,
+CASE WHEN id%2=0 THEN sha2(p,256) ELSE NULL END,
+CASE WHEN id%2=0 THEN from_base64(to_base64(p)) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN md5sum(p,doc) ELSE NULL END,
+CASE WHEN id%2=0 THEN aes_decrypt(aes_encrypt(p,"secret"),"secret") ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN regexp_count(p,"[0-9]+") ELSE NULL END,
+CASE WHEN id%2=0 THEN regexp_replace(p,"[0-9]+","#") ELSE NULL END,
+CASE WHEN id%2=0 THEN p REGEXP "[0-9]+" ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN regexp_extract_all(p,"([0-9]+)",1) ELSE NULL END,
+CASE WHEN id%2=0 THEN regexp_split(p,"[0-9]+") ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN get_json_int(doc,"$.n") ELSE NULL END,
+CASE WHEN id%2=0 THEN json_string(json_array(id,p)) ELSE NULL END,
+CASE WHEN id%2=0 THEN json_string(json_remove(parse_json(doc),"$.n")) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN str_to_date(dt,"%Y-%m-%d") ELSE NULL END,
+CASE WHEN id%2=0 THEN str_to_jodatime(dt,"yyyy-MM-dd") ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN url_extract_host(url) ELSE NULL END,
+CASE WHEN id%2=0 THEN url_extract_parameter(url,"k") ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN ngram_search(p,"abc",3) ELSE NULL END,
+CASE WHEN id%2=0 THEN ngram_search_case_insensitive(p,"ABC",3) ELSE NULL END,
+CASE WHEN id%2=0 THEN tokenize("standard",p) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN bitmap_to_string(to_bitmap(id)) ELSE NULL END,
+CASE WHEN id%2=0 THEN bitmap_to_string(bitmap_hash(p)) ELSE NULL END,
+CASE WHEN id%2=0 THEN hll_cardinality(hll_hash(p)) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN bitmap_to_array(bitmap_from_string("1,2,4")) ELSE NULL END,
+CASE WHEN id%2=0 THEN bitmap_count(bitmap_and(to_bitmap(id),bitmap_from_string("1,2,4"))) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN st_x(st_point(id,10)) ELSE NULL END,
+CASE WHEN id%2=0 THEN st_astext(st_point(id,10)) ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN str_to_map(kv,",",":") ELSE NULL END,
+CASE WHEN id%2=0 THEN array_join(a,",") ELSE NULL END,
+CASE WHEN id%2=0 THEN array_join(a,",","NULL") ELSE NULL END
+FROM t ORDER BY id;
+
+SELECT id,
+CASE WHEN id%2=0 THEN array_distinct(a) ELSE NULL END,
+CASE WHEN id%2=0 THEN all_match([id%3=0,NULL,id%7=0]) ELSE NULL END,
+CASE WHEN id%2=0 THEN any_match([id%3=0,NULL,id%7=0]) ELSE NULL END
+FROM t ORDER BY id;
+
+DROP DATABASE selected_families_${uuid0};
