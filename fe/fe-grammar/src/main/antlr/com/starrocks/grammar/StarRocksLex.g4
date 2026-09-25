@@ -25,6 +25,7 @@ tokens {
 }
 
 ACCESS: 'ACCESS';
+ACCOUNT: 'ACCOUNT';
 ACTIVE: 'ACTIVE';
 ADD: 'ADD';
 ADMIN: 'ADMIN';

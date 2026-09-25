@@ -46,6 +46,7 @@ import com.starrocks.sql.ast.AlterStorageVolumeStmt;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterTaskStmt;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
@@ -820,6 +821,12 @@ public class Analyzer {
 
         @Override
         public Void visitDropUserStatement(DropUserStmt stmt, ConnectContext session) {
+            AuthenticationAnalyzer.analyze(stmt, session);
+            return null;
+        }
+
+        @Override
+        public Void visitAlterUserAccountLockStatement(AlterUserAccountLockStmt stmt, ConnectContext session) {
             AuthenticationAnalyzer.analyze(stmt, session);
             return null;
         }

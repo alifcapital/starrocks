@@ -70,6 +70,7 @@ import com.starrocks.sql.ast.AlterStorageVolumeStmt;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterTaskStmt;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
@@ -582,6 +583,16 @@ public class DDLStmtExecutor {
         public ShowResultSet visitDropUserStatement(DropUserStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
                 context.getGlobalStateMgr().getAuthenticationMgr().dropUser(stmt);
+            });
+            return null;
+        }
+
+        @Override
+        public ShowResultSet visitAlterUserAccountLockStatement(AlterUserAccountLockStmt stmt, ConnectContext context) {
+            ErrorReport.wrapWithRuntimeException(() -> {
+                UserRef user = stmt.getUser();
+                UserIdentity userIdentity = new UserIdentity(user.getUser(), user.getHost(), user.isDomain());
+                GlobalStateMgr.getCurrentState().getAuthenticationMgr().setAccountLock(userIdentity, stmt.isLock());
             });
             return null;
         }

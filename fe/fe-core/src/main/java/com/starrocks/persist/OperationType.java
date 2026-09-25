@@ -569,6 +569,9 @@ public class OperationType {
     public static final short OP_UPDATE_USER_PROP_V3 = 13061;
 
     @IgnorableOnReplayFailed
+    public static final short OP_ALTER_USER_ACCOUNT_LOCK = 13062;
+
+    @IgnorableOnReplayFailed
     public static final short OP_CREATE_STREAM_LOAD_TASK_V2 = 13070;
 
     @IgnorableOnReplayFailed

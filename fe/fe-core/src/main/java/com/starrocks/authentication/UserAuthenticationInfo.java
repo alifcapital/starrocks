@@ -41,6 +41,10 @@ public class UserAuthenticationInfo implements Writable, GsonPostProcessable {
     private String origHost;
     @SerializedName(value = "u")
     private String origUser;
+    // Read on the auth path without holding AuthenticationMgr's lock (see getBestMatchedUserIdentity),
+    // mutated in place under the write lock by set/replaySetAccountLock -> volatile for visibility.
+    @SerializedName(value = "lk")
+    private volatile boolean accountLocked = false;
 
     private boolean isAnyUser;
     private boolean isAnyHost;
@@ -104,6 +108,14 @@ public class UserAuthenticationInfo implements Writable, GsonPostProcessable {
 
     public String getAuthString() {
         return authString;
+    }
+
+    public boolean isAccountLocked() {
+        return accountLocked;
+    }
+
+    public void setAccountLocked(boolean accountLocked) {
+        this.accountLocked = accountLocked;
     }
 
     public static UserAuthenticationInfo build(UserRef user, UserAuthOption userAuthOption) {

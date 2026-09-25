@@ -105,6 +105,7 @@ import com.starrocks.sql.ast.AlterTableModifyDefaultBucketsClause;
 import com.starrocks.sql.ast.AlterTableOperationClause;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterTaskStmt;
+import com.starrocks.sql.ast.AlterUserAccountLockStmt;
 import com.starrocks.sql.ast.AlterUserStmt;
 import com.starrocks.sql.ast.AlterViewClause;
 import com.starrocks.sql.ast.AlterViewStmt;
@@ -7007,6 +7008,11 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             }
 
             return new SetDefaultRoleStmt(user, setRoleType, roles, createPos(context));
+        }
+
+        if (context.ACCOUNT() != null) {
+            boolean lock = context.LOCK() != null;
+            return new AlterUserAccountLockStmt(user, context.EXISTS() != null, lock, createPos(context));
         }
 
         if (context.authOption() != null) {

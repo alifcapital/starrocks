@@ -350,6 +350,7 @@ public class ShowResultMetaFactory implements AstVisitorExtendInterface<ShowResu
                 .addColumn(new Column("Password", TypeFactory.createVarcharType(20)))
                 .addColumn(new Column("AuthPlugin", TypeFactory.createVarcharType(100)))
                 .addColumn(new Column("UserForAuthPlugin", TypeFactory.createVarcharType(100)))
+                .addColumn(new Column("IsLocked", TypeFactory.createVarcharType(10)))
                 .build();
     }
 
