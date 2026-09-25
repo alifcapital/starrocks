@@ -252,6 +252,42 @@ class ActiveIcebergCacheTest {
     }
 
     @Test
+    void cacheInfoListsOnlyRecentlyUsedTablesAndDoesNotTouchActivity() {
+        CachingIcebergCatalog catalog = catalog(false);
+        BaseTable table = table("current");
+        tables(catalog).put(key, table);
+        assertTrue(catalog.getCachedTablesInfo().isEmpty());
+        times(catalog, "tableLatestAccessTime").put(key, 1L);
+        assertTrue(catalog.getCachedTablesInfo().isEmpty());
+        long now = System.currentTimeMillis();
+        times(catalog, "tableLatestAccessTime").put(key, now);
+        List<CachingIcebergCatalog.IcebergCachedTableInfo> info = catalog.getCachedTablesInfo();
+        assertEquals(1, info.size());
+        assertEquals("db", info.get(0).getDbName());
+        assertEquals("tbl", info.get(0).getTableName());
+        assertEquals(7L, info.get(0).getSnapshotId());
+        assertEquals(now, info.get(0).getLatestAccessTime());
+        assertEquals(now, times(catalog, "tableLatestAccessTime").get(key));
+        Mockito.verifyNoInteractions(delegate);
+    }
+
+    @Test
+    void manualRefreshReusesCatalogExecutorAndAllowsMissingTable() {
+        CachingIcebergCatalog catalog = catalog(true);
+        catalog.refreshTable("db", "tbl", new ConnectContext());
+        Mockito.verifyNoInteractions(delegate);
+        ManifestFile missing = manifest("missing");
+        BaseTable table = table("current", missing);
+        tables(catalog).put(key, table);
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(table);
+        StarRocksIcebergTableScan scan = scan(table);
+        catalog.refreshTable("db", "tbl", new ConnectContext());
+        Mockito.verify(scan).planWith(executor);
+        Mockito.verify(scan).refreshDataFileCache(List.of(missing));
+        assertFalse(executor.isShutdown());
+    }
+
+    @Test
     void inactiveTableIsNotWarmed() {
         CachingIcebergCatalog catalog = catalog(true);
         BaseTable table = table("inactive", manifest("old"));

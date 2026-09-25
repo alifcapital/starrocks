@@ -29,7 +29,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.Map;
-import java.util.concurrent.Executors;
 
 /**
  * HTTP API action to manually refresh an Iceberg table cache.
@@ -93,7 +92,7 @@ public class IcebergRefreshTableAction extends RestBaseAction {
 
         CachingIcebergCatalog cachingCatalog = (CachingIcebergCatalog) catalog;
         LOG.info("Refresh table request received for {}.{}.{}", catalogName, dbName, tableName);
-        cachingCatalog.refreshTable(dbName, tableName, new ConnectContext(), Executors.newSingleThreadExecutor());
+        cachingCatalog.refreshTable(dbName, tableName, new ConnectContext());
 
         RestBaseResult result = new RestBaseResult();
         result.message = "Refresh triggered for " + catalogName + "." + dbName + "." + tableName;

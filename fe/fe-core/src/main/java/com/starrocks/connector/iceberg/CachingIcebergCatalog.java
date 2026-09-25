@@ -392,6 +392,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return tableRefreshLockMap.computeIfAbsent(lockKey, key -> key);
     }
 
+    public void refreshTable(String dbName, String tableName, ConnectContext ctx) {
+        refreshTable(dbName, tableName, ctx, backgroundExecutor);
+    }
+
     @Override
     public void refreshTable(String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
         refreshTable(dbName, tableName, ctx, executorService, true);
@@ -543,27 +547,25 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         partitionCache.invalidate(key);
     }
 
-    /**
-     * Returns information about all cached tables.
-     */
+    /** Returns cached tables with recent client activity without extending their cache lifetime. */
     public List<IcebergCachedTableInfo> getCachedTablesInfo() {
         List<IcebergCachedTableInfo> result = Lists.newArrayList();
-        List<IcebergTableName> identifiers = Lists.newArrayList(tables.asMap().keySet());
-
-        for (IcebergTableName identifier : identifiers) {
-            IcebergTableName icebergTableName = new IcebergTableName(identifier.dbName, identifier.tableName);
-            Table table = tables.getIfPresent(identifier);
-            Long snapshotId = null;
-            if (table != null && table.currentSnapshot() != null) {
-                snapshotId = table.currentSnapshot().snapshotId();
+        long now = System.currentTimeMillis();
+        long tableTtlSec = icebergProperties.getIcebergTableCacheTtlSec();
+        for (Map.Entry<IcebergTableName, Table> entry : tables.asMap().entrySet()) {
+            IcebergTableName identifier = entry.getKey();
+            Long latestAccessTime = tableLatestAccessTime.get(identifier);
+            if (latestAccessTime == null || (now - latestAccessTime) / 1000 > tableTtlSec) {
+                continue;
             }
+            Snapshot snapshot = entry.getValue().currentSnapshot();
             result.add(new IcebergCachedTableInfo(
                     identifier.dbName,
                     identifier.tableName,
-                    snapshotId,
-                    tableLatestAccessTime.get(icebergTableName),
-                    tableLatestRefreshTime.get(icebergTableName),
-                    tableLatestSnapshotTime.get(icebergTableName)
+                    snapshot == null ? null : snapshot.snapshotId(),
+                    latestAccessTime,
+                    tableLatestRefreshTime.get(identifier),
+                    tableLatestSnapshotTime.get(identifier)
             ));
         }
         return result;

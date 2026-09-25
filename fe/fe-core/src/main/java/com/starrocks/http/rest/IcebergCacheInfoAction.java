@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * HTTP API action to retrieve information about cached Iceberg tables.
+ * HTTP API action to retrieve information about cached Iceberg tables with recent client activity.
  *
  * Usage:
  *   GET /api/iceberg/cache_info
