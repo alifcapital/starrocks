@@ -110,12 +110,9 @@ StatusOr<int128_t> decode_debezium_decimal(Slice bytes, int32_t source_scale, in
     } else {
         // Unconstrained source NUMERIC can exceed 128 bits but still fit after exact rescaling.
         // Keep arbitrary precision off the ordinary (<=16 byte) path.
-        boost::multiprecision::cpp_int wide = 0;
-        for (size_t i = 0; i < size; ++i) {
-            wide <<= 8;
-            wide += negative ? static_cast<uint8_t>(~data[i]) : data[i];
-        }
-        wide += negative;
+        boost::multiprecision::cpp_int wide;
+        boost::multiprecision::import_bits(wide, data, data + size, 8, true);
+        if (negative) wide = (boost::multiprecision::cpp_int(1) << (size * 8)) - wide;
         if (delta >= 0) {
             // A non-sign-padded >16-byte value already exceeds any DECIMAL(38,s).
             return Status::InvalidArgument("debezium_decimal: value exceeds target precision");
