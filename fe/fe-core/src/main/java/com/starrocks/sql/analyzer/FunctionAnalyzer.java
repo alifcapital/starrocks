@@ -67,10 +67,13 @@ import com.starrocks.type.DateType;
 import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.NullType;
+import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.StringType;
 import com.starrocks.type.StructField;
 import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
+import com.starrocks.type.TypeFactory;
+import com.starrocks.type.VarbinaryType;
 import com.starrocks.type.VarcharType;
 
 import java.math.BigDecimal;
@@ -1095,7 +1098,39 @@ public class FunctionAnalyzer {
         Function fn = null;
         String fnName = node.getFunctionName();
         // throw exception direct
-        if (fnName.equalsIgnoreCase("typeof") && argumentTypes.length == 1) {
+        if (fnName.equalsIgnoreCase("debezium_decimal")) {
+            if (argumentTypes.length != 3) {
+                throw new SemanticException("debezium_decimal requires (struct, precision, scale)");
+            }
+            if (!(node.getChild(1) instanceof IntLiteral) || !(node.getChild(2) instanceof IntLiteral)) {
+                throw new SemanticException("debezium_decimal precision and scale must be integer literals");
+            }
+            long precision = ((IntLiteral) node.getChild(1)).getValue();
+            long scale = ((IntLiteral) node.getChild(2)).getValue();
+            if (precision < 1 || precision > 38 || scale < 0 || scale > precision) {
+                throw new SemanticException("debezium_decimal requires 1 <= precision <= 38 and 0 <= scale <= precision");
+            }
+            if (argumentTypes[0].isNull()) {
+                argumentTypes[0] = new StructType(Lists.newArrayList(
+                        new StructField("scale", IntegerType.INT), new StructField("value", VarbinaryType.VARBINARY)));
+            }
+            if (!(argumentTypes[0] instanceof StructType)) {
+                throw new SemanticException("debezium_decimal requires STRUCT<scale INT, value VARBINARY>");
+            }
+            StructType input = (StructType) argumentTypes[0];
+            if (input.getFields().size() != 2 || input.getField("scale") == null || input.getField("value") == null ||
+                    !input.getField("scale").getName().equals("scale") ||
+                    !input.getField("value").getName().equals("value") ||
+                    !input.getField("scale").getType().equals(IntegerType.INT) ||
+                    !input.getField("value").getType().isBinaryType()) {
+                throw new SemanticException("debezium_decimal requires STRUCT<scale INT, value VARBINARY>");
+            }
+            argumentTypes[1] = IntegerType.INT;
+            argumentTypes[2] = IntegerType.INT;
+            fn = ExprUtils.getBuiltinFunction(fnName, argumentTypes, Function.CompareMode.IS_IDENTICAL).copy();
+            fn.setArgsType(argumentTypes);
+            fn.setRetType(TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL128, (int) precision, (int) scale));
+        } else if (fnName.equalsIgnoreCase("typeof") && argumentTypes.length == 1) {
             // For the typeof function, the parameter type of the function is the result of this function.
             // At this time, the parameter type has been obtained. You can directly replace the current
             // function with StringLiteral. However, since the parent node of the current node in ast

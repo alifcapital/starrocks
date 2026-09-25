@@ -1533,6 +1533,8 @@ vectorized_functions = [
     # struct functions
     [170500, 'row', True, False, 'ANY_STRUCT', ['ANY_ELEMENT', "..."], 'StructFunctions::new_struct'],
     [170501, 'named_struct', True, False, 'ANY_STRUCT', ['ANY_ELEMENT', "..."], 'StructFunctions::named_struct'],
+    [170502, 'debezium_decimal', True, False, 'DECIMAL128', ['ANY_STRUCT', 'INT', 'INT'],
+     'StructFunctions::debezium_decimal'],
 
     # user function
     [180000, 'is_role_in_session', True, False, 'BOOLEAN', ['VARCHAR'], 'nullptr'],

@@ -1,0 +1,10 @@
+-- name: test_debezium_decimal
+CREATE DATABASE test_debezium_decimal_${uuid0};
+USE test_debezium_decimal_${uuid0};
+CREATE TABLE amounts (id INT, amount STRUCT<scale INT, value VARBINARY>) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ("replication_num"="1");
+INSERT INTO amounts VALUES (1, named_struct('scale', CAST(2 AS INT), 'value', hex_decode_binary('3a4e'))), (2, named_struct('scale', CAST(1 AS INT), 'value', hex_decode_binary('80'))), (3, named_struct('scale', CAST(-2 AS INT), 'value', hex_decode_binary('7b'))), (4, NULL), (5, named_struct('scale', CAST(3 AS INT), 'value', hex_decode_binary('3034')));
+SELECT id, debezium_decimal(amount, 38, 2) FROM amounts ORDER BY id;
+SELECT SUM(debezium_decimal(amount, 38, 2)) FROM amounts;
+SELECT debezium_decimal(named_struct('scale', CAST(2 AS INT), 'value', hex_decode_binary('3a4e')), 10, 2);
+SELECT debezium_decimal(NULL, 10, 2);
+DROP DATABASE test_debezium_decimal_${uuid0};

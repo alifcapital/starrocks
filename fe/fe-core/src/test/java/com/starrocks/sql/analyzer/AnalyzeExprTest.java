@@ -45,6 +45,32 @@ public class AnalyzeExprTest {
         AnalyzeTestUtil.init();
     }
 
+    @Test
+    public void testDebeziumDecimal() {
+        String input = "named_struct('scale', cast(2 as int), 'value', hex_decode_binary('3a4e'))";
+        // Different invocations must not mutate the shared wildcard signature.
+        for (int scale : new int[] {6, 2, 0, 38}) {
+            QueryRelation relation = ((QueryStatement) analyzeSuccess(
+                    "select debezium_decimal(" + input + ", 38, " + scale + ")")).getQueryRelation();
+            Assertions.assertEquals(
+                    com.starrocks.type.TypeFactory.createDecimalV3Type(
+                            com.starrocks.type.PrimitiveType.DECIMAL128, 38, scale),
+                    ((SelectRelation) relation).getOutputExpression().get(0).getType());
+        }
+        analyzeSuccess("select debezium_decimal(NULL, 10, 2)");
+        analyzeSuccess("select debezium_decimal(named_struct('value', hex_decode_binary('ff'), 'scale', cast(0 as int)), 3, 0)");
+        analyzeFail("select debezium_decimal(" + input + ", 0, 0)");
+        analyzeFail("select debezium_decimal(" + input + ", 39, 0)");
+        analyzeFail("select debezium_decimal(" + input + ", 10, -1)");
+        analyzeFail("select debezium_decimal(" + input + ", 10, 11)");
+        analyzeFail("select debezium_decimal(" + input + ", 10, NULL)");
+        analyzeFail("select debezium_decimal(" + input + ", 10, v1) from t0");
+        analyzeFail("select debezium_decimal('abc', 10, 2)");
+        analyzeFail("select debezium_decimal(named_struct('scale', 2, 'value', 'abc'), 10, 2)");
+        analyzeFail("select debezium_decimal(named_struct('scale', cast(2 as bigint), 'value', hex_decode_binary('01')), 10, 2)");
+        analyzeFail("select debezium_decimal(" + input + ", 10)");
+    }
+
     /**
      * col->'key' should be translated to function call json_query(col, 'key')
      */
