@@ -592,6 +592,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_HASH_JOIN_LINEAR_CHAINED_OPT = "enable_hash_join_linear_chained_opt";
     public static final String ENABLE_HASH_JOIN_SERIALIZE_FIXED_SIZE_STRING = "enable_hash_join_serialize_fixed_size_string";
 
+    public static final String ENABLE_PERCENTILE_COMPACT_INTERMEDIATE = "enable_percentile_compact_intermediate";
+
     public static final String ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF =
             "enable_pipeline_level_multi_partitioned_rf";
 
@@ -787,6 +789,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
             "enable_materialized_view_text_match_rewrite";
     public static final String MATERIALIZED_VIEW_SUBQUERY_TEXT_MATCH_MAX_COUNT =
             "materialized_view_subquery_text_match_max_count";
+
+    // If true, MV rewrite refuses to use a percentile MV whose compression factor is smaller
+    // than the query's compression. The optimizer falls back to a base table scan and logs the
+    // skip reason via OptimizerTraceUtil.logMVRewriteFailReason. Default false keeps the
+    // historical behaviour (silently uses the MV even on compression mismatch).
+    public static final String ENABLE_MV_PERCENTILE_STRICT_MATCH = "enable_mv_percentile_strict_match";
 
     public static final String LARGE_DECIMAL_UNDERLYING_TYPE = "large_decimal_underlying_type";
 
@@ -1988,6 +1996,13 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_HASH_JOIN_SERIALIZE_FIXED_SIZE_STRING)
     private boolean enableHashJoinSerializeFixedSizeString = true;
 
+    // Global-only (flag = GLOBAL): cannot be set per session, only via `SET GLOBAL`,
+    // so a user cannot opt in before the whole cluster is upgraded. Default OFF;
+    // enable only after a full rolling upgrade of all BE and CN, because the compact
+    // percentile intermediate format is wire-incompatible with old workers.
+    @VarAttr(name = ENABLE_PERCENTILE_COMPACT_INTERMEDIATE, flag = VariableMgr.GLOBAL)
+    private volatile boolean enablePercentileCompactIntermediate = false;
+
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
 
@@ -2812,6 +2827,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_MATERIALIZED_VIEW_TEXT_MATCH_REWRITE)
     private boolean enableMaterializedViewTextMatchRewrite = true;
+
+    @VarAttr(name = ENABLE_MV_PERCENTILE_STRICT_MATCH)
+    private boolean enableMvPercentileStrictMatch = false;
 
     @VarAttr(name = MATERIALIZED_VIEW_SUBQUERY_TEXT_MATCH_MAX_COUNT)
     private int materializedViewSubQueryTextMatchMaxCount = 4;
@@ -5097,6 +5115,16 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return isEnablePipelineEngine() && enableQueryCache;
     }
 
+    // One snapshot per statement keeps the cache key and worker options consistent.
+    public void refreshPercentileCompactIntermediate(VariableMgr variableMgr) {
+        enablePercentileCompactIntermediate =
+                variableMgr.getDefaultSessionVariable().enablePercentileCompactIntermediate;
+    }
+
+    public boolean isEnablePercentileCompactIntermediate() {
+        return enablePercentileCompactIntermediate;
+    }
+
     public long getQueryCacheEntryMaxBytes() {
         return queryCacheEntryMaxBytes;
     }
@@ -5187,6 +5215,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMaterializedViewTextMatchRewrite(boolean enable) {
         this.enableMaterializedViewTextMatchRewrite = enable;
+    }
+
+    public boolean isEnableMvPercentileStrictMatch() {
+        return enableMvPercentileStrictMatch;
+    }
+
+    public void setEnableMvPercentileStrictMatch(boolean enable) {
+        this.enableMvPercentileStrictMatch = enable;
     }
 
     public int getMaterializedViewSubQueryTextMatchMaxCount() {
@@ -6423,6 +6459,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setEnable_hash_join_range_direct_mapping_opt(enableHashJoinRangeDirectMappingOpt);
         tResult.setEnable_hash_join_linear_chained_opt(enableHashJoinLinearChainedOpt);
         tResult.setEnable_hash_join_serialize_fixed_size_string(enableHashJoinSerializeFixedSizeString);
+        tResult.setEnable_percentile_compact_intermediate(enablePercentileCompactIntermediate);
 
         return tResult;
     }

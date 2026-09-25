@@ -23,6 +23,7 @@
 #include "column/fixed_length_column.h"
 #include "column/json_column.h"
 #include "column/nullable_column.h"
+#include "column/object_column.h"
 #include "column/variant_column.h"
 #include "common/config.h"
 #include "common/statusor.h"
@@ -34,6 +35,7 @@
 #include "util/failpoint/fail_point.h"
 #include "util/hash_util.hpp"
 #include "util/json.h"
+#include "util/percentile_value.h"
 #include "util/variant.h"
 
 namespace starrocks::serde {
@@ -50,6 +52,27 @@ static BinaryColumn::MutablePtr make_unrepresentable_binary_column() {
     offsets.emplace_back(0);
     offsets.emplace_back(max_capacity_limit);
     return BinaryColumn::create(std::move(resource), std::move(offsets));
+}
+
+TEST(ColumnArraySerdeTest, RejectCorruptPercentile) {
+    auto source = PercentileColumn::create();
+    PercentileValue value;
+    value.add(42);
+    source->append(&value);
+    std::vector<uint8_t> buffer(ColumnArraySerde::max_serialized_size(*source));
+    ASSERT_TRUE(ColumnArraySerde::serialize(*source, buffer.data()).ok());
+    auto decoded = PercentileColumn::create();
+    ASSERT_TRUE(ColumnArraySerde::deserialize(buffer.data(), buffer.data() + buffer.size(), decoded.get()).ok());
+    EXPECT_EQ(42, decoded->get_object(0)->quantile(0.5));
+    for (size_t length : {size_t(4), size_t(12), buffer.size() - 1}) {
+        decoded->reset_column();
+        EXPECT_FALSE(ColumnArraySerde::deserialize(buffer.data(), buffer.data() + length, decoded.get()).ok());
+    }
+    // The object column header is a count followed by the first object's length.
+    buffer[sizeof(uint32_t) + sizeof(uint64_t)] = 0xff;
+    decoded->reset_column();
+    EXPECT_FALSE(ColumnArraySerde::deserialize(buffer.data(), buffer.data() + buffer.size(), decoded.get()).ok());
+    EXPECT_EQ(0, decoded->size());
 }
 
 // NOLINTNEXTLINE

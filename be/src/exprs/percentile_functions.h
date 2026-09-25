@@ -32,6 +32,16 @@ public:
 
     /**
      * @param:
+     * @paramType columns: [TYPE_DOUBLE, TYPE_DOUBLE]
+     * @return TYPE_PERCENTILE
+     */
+    DEFINE_VECTORIZED_FN(percentile_hash_with_compression);
+    static StatusOr<ColumnPtr> percentile_hash_with_compression_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> percentile_hash_with_compression_impl(FunctionContext*, const Inputs&);
+
+    /**
+     * @param:
      * @paramType columns: []
      * @return TYPE_PERCENTILE
      */

@@ -15,6 +15,7 @@
 #include "exprs/percentile_functions.h"
 
 #include <optional>
+#include <cmath>
 
 #include "column/column_builder.h"
 #include "column/column_helper.h"
@@ -54,6 +55,42 @@ StatusOr<ColumnPtr> PercentileFunctions::percentile_hash(FunctionContext* contex
 StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_selected(FunctionContext* context,
                                                                   const SelectedColumns& columns, size_t) {
     return percentile_hash_impl(context, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_with_compression_impl(FunctionContext* context,
+                                                                          const Inputs& columns) {
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> value_viewer(columns[0]);
+    // FE supplies a finite constant: NULL uses the default, and out-of-range
+    // integer values are clamped to the nearest bound.
+    double compression = ColumnHelper::get_const_value<TYPE_DOUBLE>(input_column(columns[1]));
+    DCHECK(std::isfinite(compression));
+    // Mirror PercentileCompression.MIN/MAX on the FE side; FunctionAnalyzer
+    // clamps integer values to this range before reaching BE.
+    DCHECK_GE(compression, 100.0);
+    DCHECK_LE(compression, 10000.0);
+
+    auto percentile_column = PercentileColumn::create();
+    size_t size = input_num_rows(columns);
+    for (int row = 0; row < size; ++row) {
+        PercentileValue value(compression);
+        if (!value_viewer.is_null(row)) {
+            value.add(value_viewer.value(row));
+        }
+        percentile_column->append(&value);
+    }
+
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(percentile_column), size);
+    }
+    return percentile_column;
+}
+
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_with_compression(FunctionContext* context, const Columns& columns) {
+    return percentile_hash_with_compression_impl(context, columns);
+}
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_with_compression_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return percentile_hash_with_compression_impl(context, columns);
 }
 
 StatusOr<ColumnPtr> PercentileFunctions::percentile_empty(FunctionContext* context, const Columns& columns) {

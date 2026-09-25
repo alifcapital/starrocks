@@ -397,6 +397,12 @@ struct TQueryOptions {
   // and json_query_from_string. Default true; set false to fall back to the legacy
   // parse_json+JsonPath::extract pipeline.
   228: optional bool enable_json_extract_fusion = true;
+
+  // When true, percentile_approx* aggregation uses the compact intermediate
+  // serialization format for transient exchange/spill state. Global-only on FE
+  // and enabled only after a full cluster upgrade; see
+  // SessionVariable.ENABLE_PERCENTILE_COMPACT_INTERMEDIATE.
+  227: optional bool enable_percentile_compact_intermediate = false;
 }
 
 // A scan range plus the parameters needed to execute that scan.

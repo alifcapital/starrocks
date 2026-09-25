@@ -947,6 +947,12 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
 * **Data type**: boolean
 * **Introduced in**: v3.2.0
 
+### enable_mv_percentile_strict_match
+
+* **Default**: false
+* **Data type**: boolean
+* **Description**: When `true`, percentile materialized-view rewrites reject stored digests whose compression is lower than the query requests. The optimizer can use a suitable digest from the same or another materialized view, or fall back to the base table. When `false`, lower-compression candidates remain eligible, but candidates with sufficient compression are preferred. Rejected equivalents are recorded in the MV trace.
+
 ### enable_profile
 
 * **Description**: Specifies whether to send the profile of a query for analysis. The default value is `false`, which means no profile is required.
@@ -956,6 +962,15 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
   If you need to analyze the profile of a query, you can set this variable to `true`. After the query is completed, the profile can be viewed on the web page of the currently connected FE (address: `fe_host:fe_http_port/query`). This page displays the profiles of the latest 100 queries with `enable_profile` turned on.
 
 * **Default**: false
+
+### enable_percentile_compact_intermediate (global)
+
+* **Scope**: Global only. Set with `SET GLOBAL enable_percentile_compact_intermediate = true` or `false`.
+* **Default**: false
+* **Data type**: boolean
+* **Description**: Enables compact pass-through records for `percentile_approx` and `percentile_approx_weighted`, including their array variants, in exchange and spill. Persisted aggregate states continue to use the self-contained format.
+
+  Keep this option disabled during a rolling upgrade. Enable it only after all FE, BE, and CN nodes support the compact format. Each statement reads the global setting when execution begins, including statements on existing connections. Already running statements keep their original setting. Before downgrading workers that cannot read compact records, disable the option and wait for all statements started with it enabled to finish.
 
 ### enable_query_cache
 
