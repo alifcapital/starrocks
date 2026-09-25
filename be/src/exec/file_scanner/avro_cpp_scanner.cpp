@@ -56,7 +56,9 @@ Status AvroCppScanner::open() {
         if (rng.num_of_columns_from_file != first_range.num_of_columns_from_file) {
             return Status::InvalidArgument("Column count from file of range mismatch");
         }
-        if (rng.num_of_columns_from_file + rng.columns_from_path.size() != _src_slot_descriptors.size()) {
+        int path_column_count = (rng.__isset.include_file_path_column && rng.include_file_path_column) ? 1 : 0;
+        if (rng.num_of_columns_from_file + rng.columns_from_path.size() + path_column_count !=
+            _src_slot_descriptors.size()) {
             return Status::InvalidArgument("Slot descriptor and column count mismatch");
         }
     }
@@ -109,16 +111,21 @@ StatusOr<ChunkPtr> AvroCppScanner::get_next() {
     ChunkPtr src_chunk;
     RETURN_IF_ERROR(create_src_chunk(&src_chunk));
 
+    int64_t rows_read = 0;
     while (true) {
-        RETURN_IF_ERROR(next_avro_chunk(src_chunk));
-        if (!src_chunk->is_empty()) {
+        RETURN_IF_ERROR(next_avro_chunk(src_chunk, &rows_read));
+        if (rows_read > 0) {
             materialize_src_chunk_adaptive_nullable_column(src_chunk);
             break;
         }
     }
 
-    fill_columns_from_path(src_chunk, _num_of_columns_from_file, _scan_range.ranges[_next_range - 1].columns_from_path,
-                           src_chunk->num_rows());
+    const auto& range = _scan_range.ranges[_next_range - 1];
+    fill_columns_from_path(src_chunk, _num_of_columns_from_file, range.columns_from_path, rows_read);
+    if (range.__isset.include_file_path_column && range.include_file_path_column) {
+        int path_column_slot = _num_of_columns_from_file + range.columns_from_path.size();
+        fill_file_path_column(src_chunk, path_column_slot, range.path, rows_read);
+    }
 
     return materialize(src_chunk, src_chunk);
 }
@@ -140,11 +147,12 @@ Status AvroCppScanner::create_src_chunk(ChunkPtr* chunk) {
     return Status::OK();
 }
 
-Status AvroCppScanner::next_avro_chunk(ChunkPtr& chunk) {
+Status AvroCppScanner::next_avro_chunk(ChunkPtr& chunk, int64_t* rows_read) {
     RETURN_IF_ERROR(open_next_reader());
 
     SCOPED_RAW_TIMER(&_counter->read_batch_ns);
-    auto st = _cur_file_reader->read_chunk(chunk, _max_chunk_size);
+    *rows_read = 0;
+    auto st = _cur_file_reader->read_chunk(chunk, _max_chunk_size, rows_read);
     if (st.is_end_of_file()) {
         _cur_file_eof = true;
     } else if (!st.is_time_out()) {
