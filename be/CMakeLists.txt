@@ -117,6 +117,12 @@ option(WITH_TENANN "Build with TENANN" OFF)
 
 option(WITH_RELATIVE_SRC_PATH "Build source file with relative path" ON)
 
+# PGO/LTO options
+option(WITH_LTO "Build with ThinLTO (requires Clang/LLD)" OFF)
+option(WITH_BOLT "Build with BOLT support (adds --emit-relocs)" OFF)
+set(PGO_MODE "OFF" CACHE STRING "PGO: OFF, GENERATE, USE")
+set(PGO_PROFILE_DIR "" CACHE PATH "Absolute directory for PGO data")
+
 if (${WITH_TENANN} STREQUAL "ON")
     add_definitions(-DWITH_TENANN)
 endif()
@@ -178,6 +184,39 @@ set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} $ENV{STARROCKS_CXX_COMMON_FLAGS}")
 # -no-pie: Disable Position Independent Executables (PIE) as certain libraries cannot be linked against PIE executables.
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} $ENV{STARROCKS_CXX_LINKER_FLAGS}")
+
+# LTO/BOLT configuration
+if (WITH_LTO)
+    message(STATUS "LTO enabled for ${CMAKE_CXX_COMPILER_ID}")
+    if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            message(FATAL_ERROR "LTO supports GCC or Clang")
+        endif()
+        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
+    else()
+        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto=thin")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto=thin")
+        get_filename_component(_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        find_program(_llvm_ar llvm-ar HINTS "${_llvm_bin}")
+        find_program(_llvm_ranlib llvm-ranlib HINTS "${_llvm_bin}")
+        if (NOT _llvm_ar OR NOT _llvm_ranlib)
+            message(FATAL_ERROR "ThinLTO requires llvm-ar and llvm-ranlib")
+        endif()
+        set(CMAKE_AR "${_llvm_ar}")
+        set(CMAKE_RANLIB "${_llvm_ranlib}")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=thin -fuse-ld=lld")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/lto-cache")
+    endif()
+endif()
+
+if (WITH_BOLT)
+    message(STATUS "BOLT support enabled (adding --emit-relocs)")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--emit-relocs")
+endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules/PGO.cmake)
 
 # compiler flags that are common across debug/release builds
 #  -Wall: Enable all warnings.
@@ -664,6 +703,17 @@ set (TEST_LINK_LIBS ${STARROCKS_LINK_LIBS}
 set(BUILD_SHARED_LIBS OFF)
 
 set (STARROCKS_LINKER "$ENV{STARROCKS_LINKER}")
+if (WITH_LTO)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(_lto_linker "lld")
+    else()
+        set(_lto_linker "bfd")
+    endif()
+    if (NOT STARROCKS_LINKER STREQUAL "" AND NOT STARROCKS_LINKER STREQUAL _lto_linker)
+        message(FATAL_ERROR "LTO workflow requires STARROCKS_LINKER=${_lto_linker}")
+    endif()
+    set(STARROCKS_LINKER "${_lto_linker}")
+endif()
 include(cmake_modules/FindGlibcVersion.cmake)
 
 if (GLIBC_VERSION VERSION_LESS "2.29" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 14.0.0)
