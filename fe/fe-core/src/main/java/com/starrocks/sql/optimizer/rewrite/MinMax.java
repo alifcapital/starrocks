@@ -121,6 +121,14 @@ public class MinMax {
         }
     }
 
+    public boolean isAll() {
+        return !range.hasLowerBound() && !range.hasUpperBound();
+    }
+
+    public boolean encloses(MinMax other) {
+        return range.encloses(other.range);
+    }
+
     public Optional<ConstantOperator> getMin() {
         return Optional.ofNullable(range.hasLowerBound() ? range.lowerEndpoint() : null);
     }

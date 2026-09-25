@@ -193,6 +193,62 @@ ALTER USER 'jack' SET PROPERTIES ('session.query_timeout' = '600');
 * **数据类型**: boolean
 * **引入版本**: v3.3.0, v3.4.0, v3.5.0
 
+### enable_string_date_join_pruning
+
+* **默认值**：false
+* **类型**：Boolean
+* **描述**：当用户保证参与推导的每个字符串列均使用一种规范、定长的日期格式时，允许通过 VARCHAR 到 DATE/DATETIME 的 CAST 推导 JOIN 过滤条件。支持 `YYYYMMDD`、`YYYYMMDDHHMMSS`、`YYYY-MM-DD`、`YYYY-MM-DD HH:mm:ss` 和 `YYYY-MM-DDTHH:mm:ss`；年份必须为四位，其他分量必须补零。过滤范围的两个边界必须使用同一种受支持的格式，且能够解析为有效日期。需要启用 `enable_monotonic_predicate_move_around`。
+
+该变量表示用户对数据格式的保证，不会检查存储的行，也不会改变 CAST 的解析规则。对于混合格式、两位年份、时区后缀、小数秒或不规范的日期字符串，不要启用此变量。违反上述保证可能导致推导出的过滤条件丢弃本应匹配的行。例如，旧格式字符串 `2012072` 在字符串顺序上位于 `20120701` 和 `20120731` 之间，但 CAST 会将其解释为 2020 年 12 月的日期。
+
+仅对参与的日期字符串列满足上述要求的查询启用此变量：
+
+```sql
+SET enable_string_date_join_pruning = true;
+```
+
+### enable_string_date_predicate_pushdown
+
+* **默认值**：false
+* **数据类型**：Boolean
+* **描述**：根据 `string_date_predicate_format` 声明的存储格式，为 `CAST(column AS DATE/DATETIME)` 上的比较添加 VARCHAR 扫描范围。必须指定受支持的非空格式。适用于普通 WHERE 和通过 JOIN 传递的谓词，不要求表已分区，也不要求开启 `enable_string_date_join_pruning`。
+
+原始日期比较会保留。存储引擎支持时，字符串范围可用于裁剪分区、文件或数据块。对于受支持的日期函数，`enable_monotonic_predicate_rewrite` 先生成 CAST 上的范围，然后此选项生成原始字符串列上的范围。CAST 为 DATE 时，即使字符串包含时间，日期相等条件也覆盖整天。仅处理 AND 中的正向过滤条件，不替换 SELECT 表达式、OR 或 IS NULL 中的谓词。
+
+启用此选项表示用户保证：**所有参与优化的 VARCHAR 日期列的全部非 NULL 值均为有效日期，并采用指定格式**。它不会检查数据，也不会修改 CAST 的解析行为。参与列使用不同格式时不要启用。格式不符、短年份、未补零字段、多余空白或无效日期可能导致错误裁剪。建议针对会话或查询设置，不要对无关数据集作全局保证。
+
+```sql
+SET string_date_predicate_format = '%Y%m%d';
+SET enable_string_date_predicate_pushdown = true;
+
+SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
+-- Additional scan bounds: date_string >= '20240101' AND date_string < '20250101'
+```
+
+### string_date_predicate_format
+
+* **默认值**：空字符串（不进行字符串日期谓词下推）
+* **数据类型**：String
+* **描述**：声明 `enable_string_date_predicate_pushdown` 使用的日期存储格式。空字符串禁用推导。仅接受以下区分大小写的格式，不支持的值会在 SET 时报错。
+
+| 格式 | 示例 |
+|---|---|
+| `%Y%m%d` | `20240305` |
+| `%Y-%m-%d` | `2024-03-05` |
+| `%Y%m%d%H%i%s` | `20240305123045` |
+| `%Y-%m-%d %H:%i:%s` | `2024-03-05 12:30:45` |
+| `%Y-%m-%dT%H:%i:%s` | `2024-03-05T12:30:45` |
+| `%Y-%m-%d %H:%i:%s.%f` | `2024-03-05 12:30:45.123456` |
+| `%Y-%m-%dT%H:%i:%s.%f` | `2024-03-05T12:30:45.123456` |
+| `%Y-%m-%dT%H:%i:%sZ` | `2024-03-05T12:30:45Z` |
+| `%Y-%m-%dT%H:%i:%s.%fZ` | `2024-03-05T12:30:45.123456Z` |
+
+字段必须补零，年份必须为四位，`%f` 必须恰好为六位小数。不支持可变精度以及字符串中的数字时区偏移或时区名称。两种 `Z` 格式要求 FE JVM 系统时区为固定 UTC，否则不推导边界。这使 FE 常量折叠与 BE 解析一致，不改变解析器；会话时区可以不同。日或月位于年份之前的格式不能按字典序表示日期范围，因此不接受。
+
+这些格式的普通 DATE/DATETIME CAST 不转换时区，会话时区不会移动字符串范围。含 `unix_timestamp` 或 `from_unixtime` 的表达式仍使用原有时区和夏令时检查，无法证明范围安全时不进行推导。`convert_tz` 的来源和目标时区均为常量时，可以推导输入边界，同时保留原始过滤条件。支持数字偏移和 `UTC`、`Asia/Dushanbe` 等命名时区。任一时区在比较边界前后 72 小时内有时区切换、当地时间有歧义或边界越界时，不推导；其他情况下使用比较日期对应的时区偏移。指定格式不会指定或改变时区。
+
+此设置独立于 `enable_string_date_join_pruning`，后者控制从字符串源经过 JOIN 的正向范围传递。同时启用两个选项并指定格式后，正向传递也会按该格式检查边界，包括固定六位小数。未启用新选项时，原有的五种 JOIN 格式约束保持不变。
+
 ### auto_increment_increment
 
 * 描述：用于兼容 MySQL 客户端。无实际作用。

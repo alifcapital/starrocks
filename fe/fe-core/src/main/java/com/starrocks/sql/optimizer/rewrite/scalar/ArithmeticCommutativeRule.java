@@ -32,20 +32,14 @@ import static com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil.fin
 
 public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule {
     // Don't support DIVIDE, because DIVIDE will use double type, Double is not efficient and will lose precision
+    // Numeric arithmetic only. Date shifts invert through InvertMonotonicPredicateRule and
+    // the monotonic registry: day-and-finer shifts are fixed durations and invert exactly,
+    // month/quarter/year shifts clamp day-of-month (months_add('2024-01-31', 1) =
+    // '2024-02-29') and have no exact inverse at all.
     private static final Map<String, String> LEFT_COMMUTATIVE_MAP = ImmutableMap.<String, String>builder()
             .put(FunctionSet.ADD, FunctionSet.SUBTRACT)
             .put(FunctionSet.SUBTRACT, FunctionSet.ADD)
             .put(FunctionSet.DIVIDE, FunctionSet.MULTIPLY)
-            .put(FunctionSet.YEARS_ADD, FunctionSet.YEARS_SUB)
-            .put(FunctionSet.YEARS_SUB, FunctionSet.YEARS_ADD)
-            .put(FunctionSet.MONTHS_ADD, FunctionSet.MONTHS_SUB)
-            .put(FunctionSet.MONTHS_SUB, FunctionSet.MONTHS_ADD)
-            .put(FunctionSet.DAYS_ADD, FunctionSet.DAYS_SUB)
-            .put(FunctionSet.DAYS_SUB, FunctionSet.DAYS_ADD)
-            .put(FunctionSet.ADDDATE, FunctionSet.SUBDATE)
-            .put(FunctionSet.SUBDATE, FunctionSet.ADDDATE)
-            .put(FunctionSet.DATE_ADD, FunctionSet.DATE_SUB)
-            .put(FunctionSet.DATE_SUB, FunctionSet.DATE_ADD)
             .build();
 
     private static final Map<String, String> RIGHT_COMMUTATIVE_MAP = ImmutableMap.<String, String>builder()

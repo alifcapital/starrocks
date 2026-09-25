@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.operator.pattern.MultiOpPattern;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.sql.optimizer.rewrite.TimeDriftConstraint;
@@ -85,6 +86,7 @@ public class PushDownPredicateScanRule extends TransformationRule {
 
         predicates = scalarOperatorRewriter.rewrite(predicates,
                 ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
+        predicates = MonotonicFilterDerivation.addScanBounds(predicates);
         predicates = Utils.transTrue2Null(predicates);
 
         predicates = TimeDriftConstraint.tryAddDerivedPredicates(predicates, logicalScanOperator.getTable(),

@@ -357,6 +357,25 @@ public class IcebergExprVisitorTest {
     }
 
     @Test
+    public void testParsedStringDatePredicatesRequireExplicitRawBounds() {
+        var context = new ScalarOperatorToIcebergExpr.IcebergContext(SCHEMA.asStruct());
+        var converter = new ScalarOperatorToIcebergExpr();
+        for (var type : List.of(DateType.DATE, DateType.DATETIME)) {
+            CastOperator cast = new CastOperator(type, K6);
+            ConstantOperator value = ConstantOperator.createDatetime(LocalDateTime.of(2024, 3, 1, 0, 0), type);
+            for (BinaryType comparison : List.of(BinaryType.EQ, BinaryType.NE,
+                    BinaryType.LT, BinaryType.LE, BinaryType.GT, BinaryType.GE)) {
+                var predicate = new BinaryPredicateOperator(comparison, cast, value);
+                Assertions.assertEquals(Expression.Operation.TRUE, converter.convert(List.of(predicate), context).op());
+                Assertions.assertNull(converter.convertStrict(List.of(predicate), context));
+            }
+            // A malformed non-NULL string can have a NULL date value.
+            var nullCheck = new IsNullPredicateOperator(false, cast);
+            Assertions.assertEquals(Expression.Operation.TRUE, converter.convert(List.of(nullCheck), context).op());
+        }
+    }
+
+    @Test
     public void testToIcebergCastExpression() {
         ScalarOperatorToIcebergExpr.IcebergContext context = new ScalarOperatorToIcebergExpr.IcebergContext(SCHEMA.asStruct());
         ScalarOperatorToIcebergExpr converter = new ScalarOperatorToIcebergExpr();
@@ -369,6 +388,7 @@ public class IcebergExprVisitorTest {
         CastOperator cast = new CastOperator(DateType.DATE, K6);
         convertedExpr = converter.convert(Lists.newArrayList(
                 new BinaryPredicateOperator(BinaryType.EQ, cast, value)), context);
+        // Both 20221111 and 2022-11-11 parse to this date; raw string equality would lose the compact form.
         Assertions.assertEquals(Expression.Operation.TRUE, convertedExpr.op());
 
         // The same applies even when the literal can be rendered in the source type.

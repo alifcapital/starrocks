@@ -52,6 +52,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.CompressionUtils;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.connector.ConnectorSinkShuffleMode;
 import com.starrocks.connector.ConnectorSinkSortScope;
@@ -1099,6 +1100,16 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_REWRITE_BITMAP_UNION_TO_BITMAP_AGG = "enable_rewrite_bitmap_union_to_bitamp_agg";
 
     public static final String ENABLE_PREDICATE_MOVE_AROUND = "enable_predicate_move_around";
+
+    public static final String ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND = "enable_monotonic_predicate_move_around";
+
+    public static final String ENABLE_STRING_DATE_JOIN_PRUNING = "enable_string_date_join_pruning";
+
+    public static final String ENABLE_STRING_DATE_PREDICATE_PUSHDOWN = "enable_string_date_predicate_pushdown";
+
+    public static final String STRING_DATE_PREDICATE_FORMAT = "string_date_predicate_format";
+
+    public static final String ENABLE_MONOTONIC_PREDICATE_REWRITE = "enable_monotonic_predicate_rewrite";
 
     public static final String JIT_LEVEL = "jit_level";
 
@@ -3283,6 +3294,30 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_PREDICATE_MOVE_AROUND)
     private boolean enablePredicateMoveAround = true;
+
+    // in predicate move-around, additionally derive predicates through single-column monotonic
+    // expressions in join equalities by mapping the column domain through the expression
+    @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND)
+    private boolean enableMonotonicPredicateMoveAround = true;
+
+    // Explicit data contract for VARCHAR -> date range derivation: each source column uses
+    // one canonical, fixed-width date format. Does not change CAST parsing or validate rows.
+    @VarAttr(name = ENABLE_STRING_DATE_JOIN_PRUNING)
+    private boolean enableStringDateJoinPruning = false;
+
+    // A nonempty format declares the encoding of every VARCHAR date input used by this optimization.
+    @VarAttr(name = ENABLE_STRING_DATE_PREDICATE_PUSHDOWN)
+    private boolean enableStringDatePredicatePushdown = false;
+
+    @VarAttr(name = STRING_DATE_PREDICATE_FORMAT)
+    private String stringDatePredicateFormat = "";
+
+    // rewrite f(col) cmp constant into the equivalent predicate on col when f has an exact
+    // preimage (date_trunc periods, fixed-duration shifts). Kill switch only: toggling it
+    // changes predicate canonization, and FE-wide cached MV plans canonized under a
+    // different setting stop matching (rewrite misses, not wrong results).
+    @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_REWRITE)
+    private boolean enableMonotonicPredicateRewrite = true;
 
     @VarAttr(name = CONNECTOR_REMOTE_FILE_ASYNC_QUEUE_SIZE, flag = VariableMgr.INVISIBLE)
     private int connectorRemoteFileAsyncQueueSize = 1000;
@@ -5967,6 +6002,49 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnablePredicateMoveAround(boolean enablePredicateMoveAround) {
         this.enablePredicateMoveAround = enablePredicateMoveAround;
+    }
+
+    public boolean isEnableMonotonicPredicateMoveAround() {
+        return enableMonotonicPredicateMoveAround;
+    }
+
+    public void setEnableMonotonicPredicateMoveAround(boolean enableMonotonicPredicateMoveAround) {
+        this.enableMonotonicPredicateMoveAround = enableMonotonicPredicateMoveAround;
+    }
+
+    public boolean isEnableStringDateJoinPruning() {
+        return enableStringDateJoinPruning;
+    }
+
+    public void setEnableStringDateJoinPruning(boolean enableStringDateJoinPruning) {
+        this.enableStringDateJoinPruning = enableStringDateJoinPruning;
+    }
+
+    public boolean isEnableStringDatePredicatePushdown() {
+        return enableStringDatePredicatePushdown;
+    }
+
+    public void setEnableStringDatePredicatePushdown(boolean enabled) {
+        enableStringDatePredicatePushdown = enabled;
+    }
+
+    public String getStringDatePredicateFormat() {
+        return stringDatePredicateFormat;
+    }
+
+    public void setStringDatePredicateFormat(String format) {
+        if (format == null || (!format.isEmpty() && StringDateFormat.fromFormat(format) == null)) {
+            throw new IllegalArgumentException("Unsupported string_date_predicate_format: " + format);
+        }
+        stringDatePredicateFormat = format;
+    }
+
+    public boolean isEnableMonotonicPredicateRewrite() {
+        return enableMonotonicPredicateRewrite;
+    }
+
+    public void setEnableMonotonicPredicateRewrite(boolean enableMonotonicPredicateRewrite) {
+        this.enableMonotonicPredicateRewrite = enableMonotonicPredicateRewrite;
     }
 
     public boolean isEnableConstantExecuteInFE() {

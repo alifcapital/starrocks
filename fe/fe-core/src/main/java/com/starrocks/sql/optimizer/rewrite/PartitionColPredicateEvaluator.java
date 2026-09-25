@@ -34,6 +34,7 @@ import com.starrocks.sql.ast.expression.NullLiteral;
 import com.starrocks.sql.optimizer.operator.ColumnFilterConverter;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -52,6 +53,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BiPredicate;
 import java.util.stream.Collectors;
 
 public class PartitionColPredicateEvaluator {
@@ -115,43 +117,68 @@ public class PartitionColPredicateEvaluator {
 
         @Override
         public BitSet visitCall(CallOperator call, Void context) {
-            if (!exprToCandidateRanges.containsKey(call)) {
-                List<Range<PartitionKey>> mappingRanges = Lists.newArrayList();
-                PrimitiveType returnType = call.getType().getPrimitiveType();
-                for (Range<PartitionKey> range : candidateRanges) {
-                    Range<PartitionKey> newRange;
-                    if (!range.hasUpperBound() || range.upperEndpoint().getKeys().get(0) instanceof MaxLiteral) {
-                        newRange = createFullScopeRange(returnType);
-                    } else {
-                        PartitionKey lowerKey = new PartitionKey();
-                        PartitionKey upperKey = new PartitionKey();
-                        LiteralExpr lowerBound = range.hasLowerBound() ? range.lowerEndpoint().getKeys().get(0)
-                                : createInfinity(partitionColumn.getType(), false);
-                        LiteralExpr upperBound = range.upperEndpoint().getKeys().get(0);
-                        Optional<LiteralExpr> mappingLowerBound = mapRangeBoundValue(call, lowerBound);
-                        Optional<LiteralExpr> mappingUpperBound = mapRangeBoundValue(call, upperBound);
-                        if (mappingLowerBound.isPresent() && mappingUpperBound.isPresent()) {
-                            LiteralExpr newLowerBound = mappingLowerBound.get();
-                            LiteralExpr newUpperBound = mappingUpperBound.get();
-                            // switch bound value
-                            if (newLowerBound.compareTo(newUpperBound) > 0) {
-                                LiteralExpr tmp = newLowerBound;
-                                newLowerBound = newUpperBound;
-                                newUpperBound = tmp;
-                            }
-                            lowerKey.pushColumn(newLowerBound, returnType);
-                            upperKey.pushColumn(newUpperBound, returnType);
-                            newRange = Range.range(lowerKey, BoundType.CLOSED, upperKey, BoundType.CLOSED);
-                        } else {
-                            newRange = createFullScopeRange(call.getType().getPrimitiveType());
-                        }
-                    }
-                    mappingRanges.add(newRange);
-                }
+            mapCandidateRanges(call, null);
+            return null;
+        }
 
-                exprToCandidateRanges.put(call, mappingRanges);
+        @Override
+        public BitSet visitCastOperator(CastOperator cast, Void context) {
+            // cast(int as varchar) keeps order only between strings of the same length:
+            // '999' > '1001'. Inside a partition whose two bound images have the same length
+            // all values have that length too, so string order matches numeric order there
+            // and the mapped range is usable. A partition with bound images of different
+            // lengths (or a negative bound) gets a full-scope range and is never pruned.
+            if (PartitionColPredicateExtractor.isIntToStringCast(cast)) {
+                mapCandidateRanges(cast, PartitionColPredicateEvaluator::sameLengthNonNegative);
+            } else {
+                mapCandidateRanges(cast, null);
             }
             return null;
+        }
+
+        // maps every candidate partition's [lower, upper] through the expression; boundsCheck,
+        // when set, may reject the mapped pair, and the partition falls back to a full-scope
+        // range (kept, never pruned)
+        private void mapCandidateRanges(CallOperator call, BiPredicate<LiteralExpr, LiteralExpr> boundsCheck) {
+            if (exprToCandidateRanges.containsKey(call)) {
+                return;
+            }
+            List<Range<PartitionKey>> mappingRanges = Lists.newArrayList();
+            PrimitiveType returnType = call.getType().getPrimitiveType();
+            for (Range<PartitionKey> range : candidateRanges) {
+                Range<PartitionKey> newRange;
+                if (!range.hasUpperBound() || range.upperEndpoint().getKeys().get(0) instanceof MaxLiteral) {
+                    newRange = createFullScopeRange(returnType);
+                } else {
+                    PartitionKey lowerKey = new PartitionKey();
+                    PartitionKey upperKey = new PartitionKey();
+                    LiteralExpr lowerBound = range.hasLowerBound() ? range.lowerEndpoint().getKeys().get(0)
+                            : createInfinity(partitionColumn.getType(), false);
+                    LiteralExpr upperBound = range.upperEndpoint().getKeys().get(0);
+                    Optional<LiteralExpr> mappingLowerBound = mapRangeBoundValue(call, lowerBound);
+                    Optional<LiteralExpr> mappingUpperBound = mapRangeBoundValue(call, upperBound);
+                    if (mappingLowerBound.isPresent() && mappingUpperBound.isPresent()
+                            && (boundsCheck == null
+                                || boundsCheck.test(mappingLowerBound.get(), mappingUpperBound.get()))) {
+                        LiteralExpr newLowerBound = mappingLowerBound.get();
+                        LiteralExpr newUpperBound = mappingUpperBound.get();
+                        // switch bound value
+                        if (newLowerBound.compareTo(newUpperBound) > 0) {
+                            LiteralExpr tmp = newLowerBound;
+                            newLowerBound = newUpperBound;
+                            newUpperBound = tmp;
+                        }
+                        lowerKey.pushColumn(newLowerBound, returnType);
+                        upperKey.pushColumn(newUpperBound, returnType);
+                        newRange = Range.range(lowerKey, BoundType.CLOSED, upperKey, BoundType.CLOSED);
+                    } else {
+                        newRange = createFullScopeRange(call.getType().getPrimitiveType());
+                    }
+                }
+                mappingRanges.add(newRange);
+            }
+
+            exprToCandidateRanges.put(call, mappingRanges);
         }
 
         @Override
@@ -408,6 +435,13 @@ public class PartitionColPredicateEvaluator {
             upperKey.pushColumn(MaxLiteral.MAX_VALUE, type);
             return Range.lessThan(upperKey);
         }
+    }
+
+    private static boolean sameLengthNonNegative(LiteralExpr lower, LiteralExpr upper) {
+        String lowerStr = lower.getStringValue();
+        String upperStr = upper.getStringValue();
+        return lowerStr.length() == upperStr.length()
+                && !lowerStr.startsWith("-") && !upperStr.startsWith("-");
     }
 
     private class ColumnRefReplacer extends BaseScalarOperatorShuttle {

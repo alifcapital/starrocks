@@ -221,6 +221,62 @@ If you want to activate the roles assigned to you in a session, use the [SET ROL
 * **Data Type**: String
 * **Introduced in**: v4.1
 
+### enable_string_date_join_pruning
+
+* **Default**: false
+* **Data Type**: Boolean
+* **Description**: Allows join predicate derivation through a VARCHAR-to-DATE/DATETIME cast when the user guarantees that each participating string column uses one canonical, fixed-width format. Supported formats are `YYYYMMDD`, `YYYYMMDDHHMMSS`, `YYYY-MM-DD`, `YYYY-MM-DD HH:mm:ss`, and `YYYY-MM-DDTHH:mm:ss`, with four-digit years and zero-padded components. The two filter bounds must use the same supported format and parse as valid dates. Requires `enable_monotonic_predicate_move_around`.
+
+This setting is a data-format assertion, not validation: it neither checks stored rows nor changes CAST parsing. Do not enable it for columns mixing formats, short years, timezone suffixes, fractional seconds, or malformed date strings. Violating the assertion can cause derived filters to discard matching rows. For example, the legacy string `2012072` lies between `20120701` and `20120731`, but CAST interprets it as a date in December 2020.
+
+Enable it only for queries whose participating date-string columns satisfy this contract:
+
+```sql
+SET enable_string_date_join_pruning = true;
+```
+
+### enable_string_date_predicate_pushdown
+
+* **Default**: false
+* **Data Type**: Boolean
+* **Description**: Adds VARCHAR scan bounds for comparisons over `CAST(column AS DATE/DATETIME)`, using the encoding declared by `string_date_predicate_format`. A nonempty supported format is required. This works in ordinary WHERE clauses and for predicates delivered through a JOIN; it does not require a partitioned table or `enable_string_date_join_pruning`.
+
+The original date comparison remains. Raw string bounds can prune partitions, files, or data blocks where the storage engine supports it. For supported date functions, `enable_monotonic_predicate_rewrite` first derives bounds on the CAST, then this setting allows bounds on the string column. CAST to DATE covers the entire day even when strings contain a time. Only positive AND conjuncts are processed; predicates in SELECT expressions, OR, or IS NULL are not replaced.
+
+Enabling this option asserts that **all non-NULL values of every participating VARCHAR date column use the configured format and are valid calendar values**. It does not validate rows or change CAST parsing. Do not enable it for queries mixing date encodings across participating columns. A wrong format, short year, unpadded field, extra whitespace, or malformed input can cause matching rows to be pruned. Prefer session or query-level settings over a global assertion on unrelated datasets.
+
+```sql
+SET string_date_predicate_format = '%Y%m%d';
+SET enable_string_date_predicate_pushdown = true;
+
+SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
+-- Additional scan bounds: date_string >= '20240101' AND date_string < '20250101'
+```
+
+### string_date_predicate_format
+
+* **Default**: empty string (no string-date predicate pushdown)
+* **Data Type**: String
+* **Description**: Declares the stored date encoding for `enable_string_date_predicate_pushdown`. The empty string disables derivation. Only the following case-sensitive formats are accepted; unsupported values produce a SET error.
+
+| Format | Example |
+|---|---|
+| `%Y%m%d` | `20240305` |
+| `%Y-%m-%d` | `2024-03-05` |
+| `%Y%m%d%H%i%s` | `20240305123045` |
+| `%Y-%m-%d %H:%i:%s` | `2024-03-05 12:30:45` |
+| `%Y-%m-%dT%H:%i:%s` | `2024-03-05T12:30:45` |
+| `%Y-%m-%d %H:%i:%s.%f` | `2024-03-05 12:30:45.123456` |
+| `%Y-%m-%dT%H:%i:%s.%f` | `2024-03-05T12:30:45.123456` |
+| `%Y-%m-%dT%H:%i:%sZ` | `2024-03-05T12:30:45Z` |
+| `%Y-%m-%dT%H:%i:%s.%fZ` | `2024-03-05T12:30:45.123456Z` |
+
+All fields must be zero-padded, years must have four digits, and `%f` requires exactly six fractional digits. Variable precision, numeric offsets, and zone names inside stored strings are not supported. The two `Z` formats require the FE JVM system timezone to be fixed UTC; otherwise no bounds are derived for them. This keeps FE constant folding consistent with BE parsing without changing either parser. The session timezone can differ. Formats ordered by day or month before year cannot produce calendar ranges by lexical comparison and are rejected.
+
+Plain DATE/DATETIME casts do not apply a timezone conversion to these encodings. Session timezone therefore does not shift their string bounds. Expressions involving `unix_timestamp` or `from_unixtime` use the existing timezone and DST checks; the optimizer declines derivation where those checks cannot prove a safe range. `convert_tz` with constant source and destination zones can derive input bounds while retaining the original filter. Both numeric offsets and named zones are supported, for example `UTC` and `Asia/Dushanbe`. Boundaries within 72 hours of a transition in either zone are conservatively declined, as are ambiguous local times and unrepresentable bounds. Away from transitions, named zones use the offset for the comparison date, including seasonal offsets. Declaring an input format never declares or changes its timezone.
+
+This setting is independent of `enable_string_date_join_pruning`, which controls forward range transfer from a string source through a JOIN. When both options are enabled with an explicit format, that transfer also checks endpoints against the declared encoding, including fixed microseconds. Without the new option, the original five-format JOIN contract remains unchanged.
+
 ### auto_increment_increment
 
 Used for MySQL client compatibility. No practical usage.

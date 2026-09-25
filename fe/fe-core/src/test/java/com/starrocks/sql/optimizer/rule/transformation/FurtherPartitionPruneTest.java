@@ -213,16 +213,24 @@ class FurtherPartitionPruneTest extends PlanTestBase {
     @MethodSource("exprPrunePartitionSqls")
     @Order(8)
     void testDisableExprPrunePartition(String sql) throws Exception {
-        connectContext.getSessionVariable().setEnableExprPrunePartition(false);
-        String plan = getFragmentPlan(sql);
-        Pattern pattern = Pattern.compile("partitions=.*");
-        Matcher matcher = pattern.matcher(plan);
+        try {
+            // the monotonic inversion prunes several of these through the bare column with
+            // no expression pruning at all; both switches off isolate the baseline
+            connectContext.getSessionVariable().setEnableExprPrunePartition(false);
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
+            String plan = getFragmentPlan(sql);
+            Pattern pattern = Pattern.compile("partitions=.*");
+            Matcher matcher = pattern.matcher(plan);
 
-        while (matcher.find()) {
-            String matchedLine = matcher.group();
-            System.out.println(matchedLine);
-            String[] values = matchedLine.split("=")[1].split("/");
-            Assertions.assertTrue(Integer.valueOf(values[0]) == Integer.valueOf(values[1]), matchedLine);
+            while (matcher.find()) {
+                String matchedLine = matcher.group();
+                System.out.println(matchedLine);
+                String[] values = matchedLine.split("=")[1].split("/");
+                Assertions.assertTrue(Integer.valueOf(values[0]) == Integer.valueOf(values[1]), matchedLine);
+            }
+        } finally {
+            connectContext.getSessionVariable().setEnableExprPrunePartition(true);
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
         }
     }
 
@@ -449,7 +457,6 @@ class FurtherPartitionPruneTest extends PlanTestBase {
         sqlList.add("select * from less_than_tbl where k1 < str_to_date('20200801', '%Y%m%d')");
         sqlList.add("select * from less_than_tbl where k1 < '2020-08-01' and k1 is not null");
         sqlList.add("select * from less_than_tbl where k1 < '2020-08-01' and k1 is null");
-        sqlList.add("select * from ptest where date_trunc('year', d2) = '2020-01-01'");
         sqlList.add("select * from less_than_tbl where date_trunc('year', k1) < '2020-08-01'");
         sqlList.add("select * from less_than_tbl where datediff('2020-08-01', k1) = 1");
         sqlList.add("select * from less_than_tbl where date_format(k1, '%m月%Y年') = '06月-2020年'");
@@ -469,6 +476,9 @@ class FurtherPartitionPruneTest extends PlanTestBase {
                 "and cast(d2 as date) < '2020-04-01'");
         sqlList.add("select * from ptest where d2 < cast('20200101' as date)");
         sqlList.add("select * from ptest where d2 < str_to_date('20200401', '%Y%m%d')");
+        // the monotonic inversion turns this into year-period bounds on the bare d2, the
+        // selected partitions sit fully inside them and the predicate disappears
+        sqlList.add("select * from ptest where date_trunc('year', d2) = '2020-01-01'");
         return sqlList.stream().map(e -> Arguments.of(e));
     }
 
@@ -478,16 +488,18 @@ class FurtherPartitionPruneTest extends PlanTestBase {
                 "partitions=1/4"));
         arguments.add(Arguments.of("select * from less_than_tbl where last_day(k1) is null",
                 "partitions=1/4"));
+        // the exact last_day inverse turns the equality into April bounds on the bare
+        // column: one partition instead of the two the boundary-mapping evaluator kept
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(cast(d2 as datetime)) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(cast(d2 as date)) = '2020-04-30'",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = cast('2020-04-30' as date)",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = cast('2020-04-30' as datetime)",
-                "partitions=2/4"));
+                "partitions=1/4"));
         arguments.add(Arguments.of("select * from ptest where last_day(d2) = date_trunc('day', d2)",
                 "partitions=4/4"));
         return arguments.stream();
@@ -496,6 +508,64 @@ class FurtherPartitionPruneTest extends PlanTestBase {
     @MethodSource("partitionPruneWithLastDay")
     @Order(6)
     void canPrunePredicateSqls2(String sql, String expect) throws Exception {
+        String plan = getFragmentPlan(sql);
+        PlanTestBase.assertContains(plan, expect);
+    }
+
+    private static Stream<Arguments> castExprPruneSqls() {
+        List<Arguments> arguments = Lists.newArrayList();
+        // date -> datetime keeps order on the whole domain, the mapped ranges are always usable
+        arguments.add(Arguments.of("select * from ptest where cast(d2 as datetime) < '2020-01-01 00:00:00'",
+                "partitions=1/4"));
+        arguments.add(Arguments.of("select * from ptest where cast(d2 as datetime) >= '2020-04-01 00:00:00'",
+                "partitions=2/4"));
+        // cast(int as varchar) keeps order only between strings of the same length. Partitions
+        // p2 [100,200), p3 [200,300), p4 [300,400) map to same-length string ranges and can be
+        // pruned; p1 [0,100) maps to '0'..'100' of different lengths and is always kept.
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) >= '100'"
+                + " and cast(k1 as varchar) < '200'", "partitions=2/4"));
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '250'", "partitions=2/4"));
+        // p3 [200,300) maps to the closed string range ['200','300'], and '300' sits on its
+        // upper edge, so p3 is kept too, like every partition whose mapped bounds touch the
+        // range
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) >= '300'", "partitions=3/4"));
+        // a predicate that only matches p1 keeps p1 (its range is full-scope, never pruned)
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as varchar) = '50'", "partitions=1/4"));
+        // int -> double is not on the whitelist and must not prune
+        arguments.add(Arguments.of("select * from tbl_int where cast(k1 as double) > 250.5", "partitions=4/4"));
+        return arguments.stream();
+    }
+
+    @ParameterizedTest(name = "sql_{index}: {0}.")
+    @MethodSource("castExprPruneSqls")
+    @Order(10)
+    void testCastExprPrune(String sql, String expect) throws Exception {
+        String plan = getFragmentPlan(sql);
+        PlanTestBase.assertContains(plan, expect);
+    }
+
+    private static Stream<Arguments> nonMonotonicExprNoPruneSqls() {
+        List<Arguments> arguments = Lists.newArrayList();
+        // month()/day()/dayofyear()/dayofweek() wrap around inside a partition's span, so mapping a
+        // partition's two boundary values through them says nothing about the values inside: ptest's
+        // p202001 [1000-01-01, 2020-01-01) maps to month [1, 1] yet contains rows of every month.
+        // These predicates must not prune any partition.
+        arguments.add(Arguments.of("select * from ptest where month(d2) = 5", "partitions=4/4"));
+        arguments.add(Arguments.of("select * from ptest where day(d2) = 15", "partitions=4/4"));
+        arguments.add(Arguments.of("select * from ptest where dayofyear(d2) = 135", "partitions=4/4"));
+        arguments.add(Arguments.of("select * from ptest where month(d2) = 5 or month(d2) = 6", "partitions=4/4"));
+        arguments.add(Arguments.of("select * from less_than_tbl where dayofweek(k1) = 3", "partitions=4/4"));
+        // a monotonic predicate in the same conjunction still prunes; the non-monotonic one only
+        // stops contributing
+        arguments.add(Arguments.of("select * from ptest where month(d2) = 5 and d2 < '2020-01-01'",
+                "partitions=1/4"));
+        return arguments.stream();
+    }
+
+    @ParameterizedTest(name = "sql_{index}: {0}.")
+    @MethodSource("nonMonotonicExprNoPruneSqls")
+    @Order(9)
+    void testNonMonotonicExprNoPrune(String sql, String expect) throws Exception {
         String plan = getFragmentPlan(sql);
         PlanTestBase.assertContains(plan, expect);
     }

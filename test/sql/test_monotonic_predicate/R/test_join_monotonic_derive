@@ -1,0 +1,96 @@
+-- name: test_join_monotonic_derive
+create database db_${uuid0};
+-- result:
+-- !result
+use db_${uuid0};
+-- result:
+-- !result
+create table fact_month (id bigint not null, dmonth date not null, v bigint null)
+duplicate key(id, dmonth)
+partition by range(dmonth) (
+ partition p202401 values [('2024-01-01'), ('2024-02-01')),
+ partition p202402 values [('2024-02-01'), ('2024-03-01')),
+ partition p202403 values [('2024-03-01'), ('2024-04-01')),
+ partition p202404 values [('2024-04-01'), ('2024-05-01')),
+ partition p202405 values [('2024-05-01'), ('2024-06-01')),
+ partition p202406 values [('2024-06-01'), ('2024-07-01')))
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into fact_month values (1,'2024-01-01',1),(3,'2024-03-01',1),(4,'2024-03-01',2),(5,'2024-04-01',1),(6,'2024-05-01',1);
+-- result:
+-- !result
+create table event_dates (id bigint not null, datadate date not null)
+duplicate key(id, datadate)
+distributed by hash(id) buckets 3
+properties ("replication_num" = "1");
+-- result:
+-- !result
+insert into event_dates values (1,'2024-02-15'),(3,'2024-03-10'),(4,'2024-03-20'),(5,'2024-04-05'),(6,'2024-05-15');
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate between '2024-03-05' and '2024-04-10' order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate between '2024-03-05' and '2024-04-10' order by f.id;
+-- result:
+3	2024-03-01
+4	2024-03-01
+5	2024-04-01
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+function: assert_explain_contains("select f.id from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate between '2024-03-05' and '2024-04-10'", 'partitions=2/6')
+-- result:
+None
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', months_add(e.datadate, 1)) where e.datadate between '2024-03-05' and '2024-04-10' order by f.id;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', months_add(e.datadate, 1)) where e.datadate between '2024-03-05' and '2024-04-10' order by f.id;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate = '2024-03-10' order by f.id;
+-- result:
+3	2024-03-01
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select f.id, f.dmonth from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate = '2024-03-10' order by f.id;
+-- result:
+3	2024-03-01
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+function: assert_explain_contains("select f.id from fact_month f join event_dates e on f.id = e.id and f.dmonth = date_trunc('month', e.datadate) where e.datadate = '2024-03-10'", 'partitions=1/6')
+-- result:
+None
+-- !result
+drop database db_${uuid0};
+-- result:
+-- !result

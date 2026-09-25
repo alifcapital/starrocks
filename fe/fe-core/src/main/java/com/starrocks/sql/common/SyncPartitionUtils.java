@@ -74,6 +74,7 @@ import static com.starrocks.sql.common.TimeUnitUtils.HOUR;
 import static com.starrocks.sql.common.TimeUnitUtils.MINUTE;
 import static com.starrocks.sql.common.TimeUnitUtils.MONTH;
 import static com.starrocks.sql.common.TimeUnitUtils.QUARTER;
+import static com.starrocks.sql.common.TimeUnitUtils.SECOND;
 import static com.starrocks.sql.common.TimeUnitUtils.YEAR;
 
 /**
@@ -529,6 +530,9 @@ public class SyncPartitionUtils {
     public static LocalDateTime nextUpperDateTime(LocalDateTime upperDateTime, String granularity) {
         LocalDateTime truncUpperDateTime;
         switch (granularity) {
+            case SECOND:
+                truncUpperDateTime = upperDateTime.plusSeconds(1).withNano(0);
+                break;
             case MINUTE:
                 truncUpperDateTime = upperDateTime.plusMinutes(1).withNano(0).withSecond(0);
                 break;
@@ -567,6 +571,9 @@ public class SyncPartitionUtils {
     public static LocalDateTime getLowerDateTime(LocalDateTime lowerDateTime, String granularity) {
         LocalDateTime truncLowerDateTime;
         switch (granularity) {
+            case SECOND:
+                truncLowerDateTime = lowerDateTime.withNano(0);
+                break;
             case MINUTE:
                 truncLowerDateTime = lowerDateTime.withNano(0).withSecond(0);
                 break;
