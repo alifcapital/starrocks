@@ -34,6 +34,7 @@
 #include "exprs/lambda_function.h"
 #include "runtime/user_function_cache.h"
 #include "simd/simd.h"
+#include "exprs/selected_collection.h"
 #include "storage/chunk_helper.h"
 
 namespace starrocks {
@@ -444,6 +445,144 @@ StatusOr<ColumnPtr> ArrayMapExpr::evaluate_checked(ExprContext* context, Chunk* 
     } else {
         return evaluate_lambda_expr<false, false>(context, chunk, input_elements, result_null_column);
     }
+}
+
+StatusOr<ColumnPtr> ArrayMapExpr::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                    const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    SelectedColumns arguments;
+    std::vector<const ArrayColumn*> arrays;
+    for (size_t i = 1; i < _children.size(); ++i) {
+        ASSIGN_OR_RETURN(auto argument, selected_expression_argument(_children[i], context, chunk, rows));
+        if (argument.column->only_null()) return ColumnHelper::create_const_null_column(rows.size());
+        arrays.push_back(down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(argument.column.get())));
+        arguments.emplace_back(std::move(argument));
+    }
+    auto nulls = NullColumn::create(rows.size(), 0);
+    auto offsets = UInt32Column::create();
+    offsets->append(0);
+    std::vector<std::vector<uint32_t>> element_rows(arguments.size());
+    for (size_t row = 0; row < rows.size(); ++row) {
+        bool null = false;
+        for (const auto& arg : arguments) null |= arg.column->is_null(input_row(arg, row));
+        nulls->get_data()[row] = null;
+        if (!null) {
+            size_t first = input_row(arguments[0], row);
+            size_t count = arrays[0]->offsets().get_data()[first + 1] - arrays[0]->offsets().get_data()[first];
+            for (size_t arg = 0; arg < arguments.size(); ++arg) {
+                size_t src = input_row(arguments[arg], row);
+                const auto& source_offsets = arrays[arg]->offsets().get_data();
+                if (source_offsets[src + 1] - source_offsets[src] != count)
+                    return Status::InternalError("Input array element's size is not equal in array_map().");
+                for (uint32_t i = source_offsets[src]; i < source_offsets[src + 1]; ++i) element_rows[arg].push_back(i);
+            }
+        }
+        offsets->append(element_rows[0].size());
+    }
+    const size_t count = offsets->get_data().back();
+    if (count == 0) {
+        auto elements = ColumnHelper::create_column(type().children[0], true);
+        return NullableColumn::create(ArrayColumn::create(std::move(elements), std::move(offsets)), std::move(nulls));
+    }
+    auto* lambda = down_cast<LambdaFunction*>(_children[0]);
+    std::vector<SlotId> argument_ids;
+    lambda->get_lambda_arguments_ids(&argument_ids);
+    std::vector<SlotId> captured_ids;
+    lambda->get_captured_slot_ids(&captured_ids);
+    MutableColumnPtr result_elements;
+    if (arguments.size() == 1 && captured_ids.empty() && _outer_common_exprs.empty() &&
+        lambda->get_common_sub_expr_ids().empty() && !lambda->is_lambda_expr_independent()) {
+        // A single coordinate space: pass original element storage into the same selected evaluator.
+        Chunk elements;
+        elements.append_column(arrays[0]->elements_column(), argument_ids[0]);
+        for (size_t begin = 0; begin < count; begin += DEFAULT_CHUNK_SIZE) {
+            size_t end = std::min(count, begin + DEFAULT_CHUNK_SIZE);
+            std::vector<uint32_t> selected(element_rows[0].begin() + begin, element_rows[0].begin() + end);
+            ASSIGN_OR_RETURN(auto values, lambda->get_lambda_expr()->evaluate_selected(context, &elements, selected));
+            values = ColumnHelper::align_return_type(std::move(values), type().children[0], end - begin, true);
+            if (result_elements == nullptr)
+                result_elements = std::move(*values).mutate();
+            else
+                result_elements->append(*values);
+        }
+    } else {
+        // Gather only captured parent slots. Array payload is addressed directly above, not copied
+        // into a temporary parent chunk before being flattened again.
+        Chunk parents;
+        for (SlotId slot : _initial_required_slots) {
+            ColumnPtr source = chunk->get_column_by_slot_id(slot);
+            if (_outer_common_exprs.empty() && !lambda->is_lambda_expr_independent() && !source->is_constant() &&
+                source->is_array()) {
+                source = ArrayViewColumn::from_array_column(source);
+            }
+            auto selected = source->clone_empty();
+            selected->append_selective(*source, rows.data(), 0, rows.size());
+            parents.append_column(std::move(selected), slot);
+        }
+        for (const auto& [slot, expression] : _outer_common_exprs) {
+            ASSIGN_OR_RETURN(auto value, context->evaluate(expression, parents.has_columns() ? &parents : nullptr));
+            if (value->is_constant()) value->as_mutable_raw_ptr()->resize(rows.size());
+            parents.append_column(std::move(value), slot);
+        }
+        for (SlotId slot : captured_ids) {
+            if (parents.is_slot_exist(slot)) continue;
+            ColumnPtr source = chunk->get_column_by_slot_id(slot);
+            if (_outer_common_exprs.empty() && !lambda->is_lambda_expr_independent() && !source->is_constant() &&
+                source->is_array()) {
+                source = ArrayViewColumn::from_array_column(source);
+            }
+            auto selected = source->clone_empty();
+            selected->append_selective(*source, rows.data(), 0, rows.size());
+            parents.append_column(std::move(selected), slot);
+        }
+        if (lambda->is_lambda_expr_independent()) {
+            const bool has_parents = parents.has_columns();
+            ASSIGN_OR_RETURN(auto value, context->evaluate(lambda, has_parents ? &parents : nullptr));
+            if (!has_parents) {
+                // An empty chunk means zero rows. Evaluate a constant lambda without a chunk,
+                // just as the ordinary path does, then expand its single result to parent rows.
+                if (value->has_null())
+                    value = ColumnHelper::create_const_null_column(rows.size());
+                else
+                    value = ConstColumn::create(ColumnHelper::get_data_column(value.get()), rows.size());
+            }
+            value = ColumnHelper::align_return_type(std::move(value), type().children[0], rows.size(), true);
+            ASSIGN_OR_RETURN(result_elements, value->as_mutable_raw_ptr()->replicate(offsets->get_data()));
+        } else {
+            auto elements = std::make_shared<Chunk>();
+            for (size_t arg = 0; arg < arguments.size(); ++arg) {
+                auto selected = arrays[arg]->elements_column()->clone_empty();
+                selected->append_selective(arrays[arg]->elements(), element_rows[arg]);
+                elements->append_column(std::move(selected), argument_ids[arg]);
+            }
+            for (SlotId slot : captured_ids) {
+                ColumnPtr captured = parents.get_column_by_slot_id(slot);
+                if (!captured->is_constant() && captured->is_array())
+                    captured = ArrayViewColumn::from_array_column(captured);
+                ASSIGN_OR_RETURN(auto repeated, captured->as_mutable_raw_ptr()->replicate(offsets->get_data()));
+                RETURN_IF_ERROR(repeated->capacity_limit_reached());
+                elements->append_column(std::move(repeated), slot);
+            }
+            ChunkAccumulator accumulator(DEFAULT_CHUNK_SIZE);
+            RETURN_IF_ERROR(accumulator.push(std::move(elements)));
+            accumulator.finalize();
+            while (auto input = accumulator.pull()) {
+                // Preserve the ordinary evaluator's bounded materialization for captured arrays.
+                for (auto& column : input->columns()) {
+                    if (column->is_array_view()) column = ArrayViewColumn::to_array_column(column);
+                }
+                ASSIGN_OR_RETURN(auto values, context->evaluate(lambda, input.get()));
+                values =
+                        ColumnHelper::align_return_type(std::move(values), type().children[0], input->num_rows(), true);
+                if (result_elements == nullptr)
+                    result_elements = std::move(*values).mutate();
+                else
+                    result_elements->append(*values);
+            }
+        }
+    }
+    return NullableColumn::create(ArrayColumn::create(std::move(result_elements), std::move(offsets)),
+                                  std::move(nulls));
 }
 
 std::string ArrayMapExpr::debug_string() const {

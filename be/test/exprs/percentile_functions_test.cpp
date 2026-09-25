@@ -78,4 +78,22 @@ TEST_F(PercentileFunctionsTest, percentileNullTest) {
     ASSERT_TRUE(result->is_null(0));
 }
 
+TEST_F(PercentileFunctionsTest, ConstantDigestVariableQuantile) {
+    PercentileValue value;
+    for (int i = 0; i < 100; ++i) value.add(i);
+    auto digest = ColumnHelper::create_const_column<TYPE_PERCENTILE>(&value, 4);
+    ColumnBuilder<TYPE_DOUBLE> rates(4);
+    rates.append(0.0);
+    rates.append_null();
+    rates.append(0.5);
+    rates.append(1.0);
+    auto result = PercentileFunctions::percentile_approx_raw(ctx, {digest, rates.build(false)});
+    ASSERT_TRUE(result.ok()) << result.status();
+    ASSERT_FALSE(result.value()->is_constant());
+    ASSERT_EQ(4, result.value()->size());
+    EXPECT_DOUBLE_EQ(0.0, result.value()->get(0).get_double());
+    EXPECT_TRUE(result.value()->is_null(1));
+    EXPECT_DOUBLE_EQ(99.0, result.value()->get(3).get_double());
+}
+
 } // namespace starrocks

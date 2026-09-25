@@ -19,6 +19,7 @@
 #include "exprs/builtin_functions.h"
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 #include "runtime/datetime_value.h"
 #include "types/logical_type.h"
 namespace starrocks {
@@ -390,6 +391,9 @@ public:
      */
 
     DEFINE_VECTORIZED_FN(to_tera_date);
+    static StatusOr<ColumnPtr> to_tera_date_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> to_tera_date_impl(FunctionContext*, const Inputs&);
     static Status to_tera_date_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status to_tera_date_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
@@ -401,6 +405,9 @@ public:
      */
 
     DEFINE_VECTORIZED_FN(to_tera_timestamp);
+    static StatusOr<ColumnPtr> to_tera_timestamp_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> to_tera_timestamp_impl(FunctionContext*, const Inputs&);
     static Status to_tera_timestamp_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status to_tera_timestamp_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
@@ -607,12 +614,13 @@ public:
     // try to transfer content to date format based on "%Y-%m-%d" or "%Y-%m-%d %H:%i:%s",
     // if successful, return result TimestampValue
     // else take a uncommon approach to process this content.
-    template <bool isYYYYMMDD>
-    static StatusOr<ColumnPtr> str_to_date_from_date_format(FunctionContext* context, const starrocks::Columns& columns,
+    template <bool isYYYYMMDD, typename Inputs>
+    static StatusOr<ColumnPtr> str_to_date_from_date_format(FunctionContext* context, const Inputs& columns,
                                                             const char* str_format);
 
     // Try to process string content, based on uncommon string format
-    static StatusOr<ColumnPtr> str_to_date_uncommon(FunctionContext* context, const starrocks::Columns& columns);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> str_to_date_uncommon(FunctionContext* context, const Inputs& columns);
 
     /**
      *
@@ -622,6 +630,9 @@ public:
      * @return  TimestampColumn
      */
     DEFINE_VECTORIZED_FN(str_to_date);
+    static StatusOr<ColumnPtr> str_to_date_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> str_to_date_impl(FunctionContext*, const Inputs&);
 
     /**
      *
@@ -629,11 +640,17 @@ public:
      *
      */
     DEFINE_VECTORIZED_FN(str2date);
+    static StatusOr<ColumnPtr> str2date_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> str2date_impl(FunctionContext*, const Inputs&);
 
     /**
      * Joda Time parse
      */
     DEFINE_VECTORIZED_FN(parse_jodatime);
+    static StatusOr<ColumnPtr> parse_jodatime_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> parse_jodatime_impl(FunctionContext*, const Inputs&);
     static Status parse_joda_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
     static Status parse_joda_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 

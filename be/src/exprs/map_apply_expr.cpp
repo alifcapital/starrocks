@@ -26,6 +26,7 @@
 #include "exprs/function_helper.h"
 #include "exprs/lambda_function.h"
 #include "exprs/map_expr.h"
+#include "exprs/selected_collection.h"
 #include "glog/logging.h"
 #include "runtime/user_function_cache.h"
 #include "storage/chunk_helper.h"
@@ -167,6 +168,101 @@ StatusOr<ColumnPtr> MapApplyExpr::evaluate_checked(ExprContext* context, Chunk* 
         return NullableColumn::create(std::move(res_map), std::move(input_null_map));
     }
     return res_map;
+}
+
+StatusOr<ColumnPtr> MapApplyExpr::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                    const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    SelectedColumns arguments;
+    std::vector<const MapColumn*> maps;
+    for (size_t i = 1; i < _children.size(); ++i) {
+        ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[i], context, chunk, rows));
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows.size());
+        maps.push_back(down_cast<const MapColumn*>(ColumnHelper::get_data_column(input.column.get())));
+        arguments.emplace_back(std::move(input));
+    }
+    auto nulls = NullColumn::create(rows.size(), 0);
+    auto offsets = UInt32Column::create();
+    offsets->append(0);
+    std::vector<std::vector<uint32_t>> entries(arguments.size());
+    for (size_t row = 0; row < rows.size(); ++row) {
+        bool null = false;
+        for (const auto& input : arguments) null |= input.column->is_null(input_row(input, row));
+        nulls->get_data()[row] = null;
+        if (!null) {
+            size_t first = input_row(arguments[0], row);
+            size_t count = maps[0]->offsets().get_data()[first + 1] - maps[0]->offsets().get_data()[first];
+            for (size_t arg = 0; arg < arguments.size(); ++arg) {
+                size_t src = input_row(arguments[arg], row);
+                const auto& source_offsets = maps[arg]->offsets().get_data();
+                if (count != source_offsets[src + 1] - source_offsets[src])
+                    return Status::InternalError("Input map element's size are not equal in map_apply().");
+                for (uint32_t i = source_offsets[src]; i < source_offsets[src + 1]; ++i) entries[arg].push_back(i);
+            }
+        }
+        offsets->append(entries[0].size());
+    }
+    size_t count = offsets->get_data().back();
+    if (count == 0) {
+        auto empty = ColumnHelper::create_column(type(), false);
+        empty->append_default(rows.size());
+        return NullableColumn::create(std::move(empty), std::move(nulls));
+    }
+    auto* lambda = down_cast<LambdaFunction*>(_children[0]);
+    std::vector<SlotId> captured;
+    lambda->get_captured_slot_ids(&captured);
+    MutableColumnPtr values;
+    if (maps.size() == 1 && captured.empty() && lambda->get_common_sub_expr_ids().empty()) {
+        Chunk input;
+        input.append_column(maps[0]->keys_column(), _arguments_ids[0]);
+        input.append_column(maps[0]->values_column(), _arguments_ids[1]);
+        for (size_t begin = 0; begin < count; begin += DEFAULT_CHUNK_SIZE) {
+            size_t end = std::min(count, begin + DEFAULT_CHUNK_SIZE);
+            std::vector<uint32_t> selected(entries[0].begin() + begin, entries[0].begin() + end);
+            ASSIGN_OR_RETURN(auto output, lambda->get_lambda_expr()->evaluate_selected(context, &input, selected));
+            output = ColumnHelper::align_return_type(std::move(output), type(), end - begin, false);
+            if (values == nullptr)
+                values = std::move(*output).mutate();
+            else
+                values->append(*output);
+        }
+    } else {
+        auto input = std::make_shared<Chunk>();
+        for (size_t arg = 0; arg < arguments.size(); ++arg) {
+            auto keys = maps[arg]->keys_column()->clone_empty();
+            auto vals = maps[arg]->values_column()->clone_empty();
+            keys->append_selective(maps[arg]->keys(), entries[arg]);
+            vals->append_selective(maps[arg]->values(), entries[arg]);
+            input->append_column(std::move(keys), _arguments_ids[arg * 2]);
+            input->append_column(std::move(vals), _arguments_ids[arg * 2 + 1]);
+        }
+        for (SlotId slot : captured) {
+            const auto& source = chunk->get_column_by_slot_id(slot);
+            auto repeated = source->clone_empty();
+            for (size_t row = 0; row < rows.size(); ++row)
+                repeated->append_value_multiple_times(*source, rows[row],
+                                                      offsets->get_data()[row + 1] - offsets->get_data()[row]);
+            input->append_column(std::move(repeated), slot);
+        }
+        ChunkAccumulator accumulator(DEFAULT_CHUNK_SIZE);
+        RETURN_IF_ERROR(accumulator.push(std::move(input)));
+        accumulator.finalize();
+        while (auto part = accumulator.pull()) {
+            ASSIGN_OR_RETURN(auto output, context->evaluate(lambda, part.get()));
+            output = ColumnHelper::align_return_type(std::move(output), type(), part->num_rows(), false);
+            if (values == nullptr)
+                values = std::move(*output).mutate();
+            else
+                values->append(*output);
+        }
+    }
+    auto* mapped = down_cast<MapColumn*>(values.get());
+    if (mapped->keys().size() != count)
+        return Status::InternalError("map_apply lambda must return one key/value pair per input entry");
+    // The lambda output already owns the final keys/values; only regroup its offsets.
+    mapped->offsets_column() = std::move(offsets);
+    if (_maybe_duplicated_keys) mapped->remove_duplicated_keys();
+    return NullableColumn::create(std::move(values), std::move(nulls));
 }
 
 } // namespace starrocks

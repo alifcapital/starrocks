@@ -32,6 +32,7 @@
 #include "util/phmap/phmap.h"
 #include "util/phmap/phmap_fwd_decl.h"
 #include "util/raw_container.h"
+#include "exprs/selected_collection.h"
 
 namespace starrocks {
 
@@ -1115,12 +1116,27 @@ StatusOr<ColumnPtr> ArrayFunctions::array_sort_lambda([[maybe_unused]] FunctionC
     return nullptr;
 }
 
+StatusOr<ColumnPtr> ArrayFunctions::array_filter_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                          size_t rows) {
+    return filter_selected_collection<ArrayColumn>(columns, rows);
+}
+
 StatusOr<ColumnPtr> ArrayFunctions::array_filter(FunctionContext* context, const Columns& columns) {
     return ArrayFilter::process(context, columns);
 }
 
+StatusOr<ColumnPtr> ArrayFunctions::all_match_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t) {
+    return ArrayMatch<false>::process(context, columns);
+}
+
 StatusOr<ColumnPtr> ArrayFunctions::all_match(FunctionContext* context, const Columns& columns) {
     return ArrayMatch<false>::process(context, columns);
+}
+
+StatusOr<ColumnPtr> ArrayFunctions::any_match_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                       size_t) {
+    return ArrayMatch<true>::process(context, columns);
 }
 
 StatusOr<ColumnPtr> ArrayFunctions::any_match(FunctionContext* context, const Columns& columns) {
@@ -1354,6 +1370,32 @@ static inline std::tuple<NullColumn::Ptr, const Column*, const UInt32Column*> un
     return {std::move(array_null), elements, offsets};
 }
 
+StatusOr<ColumnPtr> ArrayFunctions::array_distinct_any_type_selected(FunctionContext*, const SelectedColumns& columns,
+                                                                     size_t rows) {
+    const auto& input = columns[0];
+    if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+    const auto* source = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get()));
+    const auto& elements = source->elements();
+    const auto& offsets = source->offsets().get_data();
+    auto result = ArrayColumn::static_pointer_cast(source->clone_empty());
+    auto nulls = input_null_flags(input, rows);
+    phmap::flat_hash_set<uint32_t, CollectionElementHash, CollectionElementEqual> seen(
+            0, CollectionElementHash{&elements}, CollectionElementEqual{&elements});
+    std::vector<uint32_t> selected;
+    for (size_t row = 0; row < rows; ++row) {
+        if (!nulls->get_data()[row]) {
+            size_t src = input_row(input, row);
+            seen.clear();
+            for (uint32_t i = offsets[src]; i < offsets[src + 1]; ++i) {
+                if (seen.insert(i).second) selected.push_back(i);
+            }
+        }
+        result->offsets_column_raw_ptr()->append(selected.size());
+    }
+    result->elements_column_raw_ptr()->append_selective(elements, selected);
+    return NullableColumn::create(std::move(result), std::move(nulls));
+}
+
 StatusOr<ColumnPtr> ArrayFunctions::array_distinct_any_type(FunctionContext* ctx, const Columns& columns) {
     DCHECK_EQ(1, columns.size());
     RETURN_IF_COLUMNS_ONLY_NULL(columns);
@@ -1473,38 +1515,32 @@ inline static void nestloop_intersect(uint8_t* hits, const Column* base, size_t 
     }
 }
 
-StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type(FunctionContext* ctx, const Columns& columns) {
+template <typename Inputs>
+static StatusOr<ColumnPtr> array_intersect_any_type_impl(FunctionContext* ctx, const Inputs& columns) {
     DCHECK_LE(1, columns.size());
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
-
-    size_t rows = columns[0]->size();
-    size_t usage = columns[0]->memory_usage();
-    ColumnPtr base_col = columns[0];
-    int base_idx = 0;
-
-    NullColumn::MutablePtr nulls = NullColumn::create(rows, 0);
-    // find minimum column
-    for (size_t i = 0; i < columns.size(); i++) {
-        if (columns[i]->memory_usage() < usage) {
-            base_col = columns[i];
+    size_t rows = input_num_rows(columns);
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(rows);
+    }
+    size_t usage = input_column(columns[0])->memory_usage();
+    size_t base_idx = 0;
+    auto nulls = NullColumn::create(rows, 0);
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (input_column(columns[i])->memory_usage() < usage) {
             base_idx = i;
-            usage = columns[i]->memory_usage();
+            usage = input_column(columns[i])->memory_usage();
         }
-
-        // Inline union_produce_nullable_column logic for MutablePtr
-        if (columns[i]->has_null()) {
-            const auto* null_col =
-                    down_cast<const NullableColumn*>(columns[i].get())->null_column()->immutable_data().data();
-            auto* result = nulls->get_data().data();
-            for (size_t j = 0; j < rows; ++j) {
-                result[j] = result[j] | null_col[j];
-            }
-        }
+        for (size_t row = 0; row < rows; ++row)
+            nulls->get_data()[row] |= input_column(columns[i])->is_null(input_row(columns[i], row));
     }
 
     // do distinct first
-    auto distinct_col = array_distinct_any_type(ctx, {base_col});
-    DCHECK(distinct_col.ok());
+    StatusOr<ColumnPtr> distinct_col;
+    if constexpr (std::is_same_v<Inputs, Columns>)
+        distinct_col = ArrayFunctions::array_distinct_any_type(ctx, {columns[base_idx]});
+    else
+        distinct_col = ArrayFunctions::array_distinct_any_type_selected(ctx, {columns[base_idx]}, rows);
+    RETURN_IF_ERROR(distinct_col);
 
     auto* dis_array_col_raw = ColumnHelper::get_data_column(distinct_col.value()->as_mutable_raw_ptr());
     auto* dis_array_col = down_cast<ArrayColumn*>(const_cast<Column*>(dis_array_col_raw));
@@ -1524,8 +1560,10 @@ StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type(FunctionContext* ct
             continue;
         }
 
-        auto [_2, cmp_elements, cmp_offsets] = unpack_array_column(columns[col_idx]);
-        auto* cmp_offsets_ptr = cmp_offsets->immutable_data().data();
+        const auto* cmp_array =
+                down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input_column(columns[col_idx]).get()));
+        const auto& cmp_elements = cmp_array->elements_column();
+        const auto* cmp_offsets_ptr = cmp_array->offsets().get_data().data();
 
         for (size_t row_idx = 0; row_idx < rows; row_idx++) {
             if (nulls_ptr[row_idx] == 1) {
@@ -1535,8 +1573,9 @@ StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type(FunctionContext* ct
             size_t base_start = base_offsets_ptr[row_idx];
             size_t base_end = base_offsets_ptr[row_idx + 1];
 
-            size_t cmp_start = cmp_offsets_ptr[row_idx];
-            size_t cmp_end = cmp_offsets_ptr[row_idx + 1];
+            size_t cmp_row = input_row(columns[col_idx], row_idx);
+            size_t cmp_start = cmp_offsets_ptr[cmp_row];
+            size_t cmp_end = cmp_offsets_ptr[cmp_row + 1];
 
             nestloop_intersect(hits, base_elements, base_start, base_end, cmp_elements, cmp_start, cmp_end);
         }
@@ -1558,6 +1597,14 @@ StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type(FunctionContext* ct
     }
 
     return NullableColumn::create(ArrayColumn::create(base_elements, std::move(result_offsets)), std::move(nulls));
+}
+
+StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type(FunctionContext* context, const Columns& columns) {
+    return array_intersect_any_type_impl(context, columns);
+}
+StatusOr<ColumnPtr> ArrayFunctions::array_intersect_any_type_selected(FunctionContext* context,
+                                                                      const SelectedColumns& columns, size_t) {
+    return array_intersect_any_type_impl(context, columns);
 }
 
 static Status sort_multi_array_column(FunctionContext* ctx, const Column* src_column, const NullColumn* src_null_column,
@@ -1628,6 +1675,59 @@ static Status sort_multi_array_column(FunctionContext* ctx, const Column* src_co
     dest_elements_column->append_selective(*src_elements_column, key_sort_index);
 
     return Status::OK();
+}
+
+StatusOr<ColumnPtr> ArrayFunctions::array_sortby_multi_selected(FunctionContext* context,
+                                                                const SelectedColumns& columns, size_t rows) {
+    const auto& input = columns[0];
+    if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+    const auto* source = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get()));
+    auto nulls = input_null_flags(input, rows);
+    auto result_offsets = UInt32Column::create();
+    result_offsets->append(0);
+    std::vector<uint32_t> element_rows;
+    for (size_t row = 0; row < rows; ++row) {
+        size_t src = input_row(input, row);
+        if (!nulls->get_data()[row]) {
+            for (uint32_t i = source->offsets().get_data()[src]; i < source->offsets().get_data()[src + 1]; ++i)
+                element_rows.push_back(i);
+        }
+        result_offsets->append(element_rows.size());
+    }
+    std::vector<const Column*> keys;
+    std::vector<std::span<const uint32_t>> key_offsets;
+    std::vector<std::vector<uint32_t>> key_rows;
+    for (size_t arg = 1; arg < columns.size(); ++arg) {
+        const auto& key = columns[arg];
+        if (key.column->only_null()) continue;
+        const auto* array = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(key.column.get()));
+        keys.push_back(array->elements_column().get());
+        key_offsets.emplace_back(array->offsets().immutable_data());
+        auto& indices = key_rows.emplace_back(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            size_t index = input_row(key, row);
+            if (nulls->get_data()[row] || key.column->is_null(index))
+                indices[row] = UINT32_MAX;
+            else {
+                if (array->offsets().get_data()[index + 1] - array->offsets().get_data()[index] !=
+                    result_offsets->get_data()[row + 1] - result_offsets->get_data()[row])
+                    return Status::InvalidArgument("Input arrays' size are not equal in array_sortby.");
+                indices[row] = index;
+            }
+        }
+    }
+    std::vector<std::span<const uint32_t>> row_spans;
+    for (const auto& indices : key_rows) row_spans.emplace_back(indices);
+    SmallPermutation permutation;
+    RETURN_IF_ERROR(sort_and_tie_columns(context->state()->cancelled_ref(), keys,
+                                         SortDescs::asc_null_first(keys.size()), permutation,
+                                         result_offsets->immutable_data(), key_offsets, nullptr, row_spans));
+    std::vector<uint32_t> selected(permutation.size());
+    for (size_t i = 0; i < permutation.size(); ++i) selected[i] = element_rows[permutation[i].index_in_chunk];
+    auto elements = source->elements_column()->clone_empty();
+    elements->append_selective(source->elements(), selected);
+    return NullableColumn::create(ArrayColumn::create(std::move(elements), std::move(result_offsets)),
+                                  std::move(nulls));
 }
 
 StatusOr<ColumnPtr> ArrayFunctions::array_sortby_multi(FunctionContext* ctx, const Columns& columns) {

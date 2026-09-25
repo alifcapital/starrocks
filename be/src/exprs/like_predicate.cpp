@@ -17,6 +17,7 @@
 #include <memory>
 
 #include "exprs/binary_function.h"
+#include "exprs/selected_functions.h"
 #include "glog/logging.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/Volnitsky.h"
@@ -238,15 +239,15 @@ StatusOr<ColumnPtr> LikePredicate::regex_fn_with_long_constant_pattern(FunctionC
     return match_fn_with_long_constant_pattern<false>(context, columns);
 }
 
-template <bool full_match>
+template <bool full_match, typename Inputs>
 StatusOr<ColumnPtr> LikePredicate::match_fn_with_long_constant_pattern(FunctionContext* context,
-                                                                       const Columns& columns) {
+                                                                       const Inputs& columns) {
     auto state = reinterpret_cast<LikePredicateState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
 
     const auto& value_column = VECTORIZED_FN_ARGS(0);
-    auto [all_const, num_rows] = ColumnHelper::num_packed_rows(columns);
+    auto [all_const, num_rows] = input_num_packed_rows(columns);
 
-    ColumnViewer<TYPE_VARCHAR> value_viewer(value_column);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> value_viewer(value_column);
     ColumnBuilder<TYPE_BOOLEAN> result(num_rows);
 
     for (int row = 0; row < num_rows; ++row) {
@@ -392,6 +393,43 @@ StatusOr<ColumnPtr> LikePredicate::constant_substring_fn(FunctionContext* contex
 }
 
 // regex_match
+StatusOr<ColumnPtr> LikePredicate::regex_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                  size_t rows) {
+    for (const auto& input : columns) {
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+    }
+    auto* state = reinterpret_cast<LikePredicateState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
+    auto* target = state->function.target<decltype(&regex_fn)>();
+    if (target == nullptr) return state->function(context, materialize_selected_inputs(columns));
+    auto function = *target;
+    if (function == &regex_fn) return regex_match_partial_impl(context, columns);
+    if (function == &regex_fn_with_long_constant_pattern)
+        return match_fn_with_long_constant_pattern<false>(context, columns);
+    SelectedColumns args{columns[0], {state->_search_string_column, nullptr}};
+    if (function == &constant_equals_fn)
+        return evaluate_selected_strict_binary<TYPE_VARCHAR, TYPE_VARCHAR, TYPE_BOOLEAN, ConstantEqualsImpl>(args,
+                                                                                                             rows);
+    if (function == &constant_starts_with_fn)
+        return evaluate_selected_strict_binary<TYPE_VARCHAR, TYPE_VARCHAR, TYPE_BOOLEAN, ConstantStartsImpl>(args,
+                                                                                                             rows);
+    if (function == &constant_ends_with_fn)
+        return evaluate_selected_strict_binary<TYPE_VARCHAR, TYPE_VARCHAR, TYPE_BOOLEAN, ConstantEndsImpl>(args, rows);
+    DCHECK(function == &constant_substring_fn);
+    Slice needle = ColumnHelper::get_const_value<TYPE_VARCHAR>(state->_search_string_column);
+    auto searcher = LibcASCIICaseSensitiveStringSearcher(needle.data, needle.size);
+    SelectedColumnViewer<TYPE_VARCHAR> value(columns[0]);
+    ColumnBuilder<TYPE_BOOLEAN> result(rows);
+    for (size_t row = 0; row < rows; ++row) {
+        if (value.is_null(row))
+            result.append_null();
+        else {
+            Slice text = value.value(row);
+            result.append(needle.empty() || searcher.search(text.data, text.size) != nullptr);
+        }
+    }
+    return result.build(columns[0].column->is_constant());
+}
+
 StatusOr<ColumnPtr> LikePredicate::regex_match(FunctionContext* context, const starrocks::Columns& columns,
                                                bool is_like_pattern) {
     RETURN_IF_COLUMNS_ONLY_NULL(columns);
@@ -403,9 +441,9 @@ StatusOr<ColumnPtr> LikePredicate::regex_match(FunctionContext* context, const s
     }
 }
 
+template <typename Viewer>
 StatusOr<ColumnPtr> LikePredicate::_predicate_const_regex(FunctionContext* context, ColumnBuilder<TYPE_BOOLEAN>* result,
-                                                          const ColumnViewer<TYPE_VARCHAR>& value_viewer,
-                                                          const ColumnPtr& value_column) {
+                                                          const Viewer& value_viewer, const ColumnPtr& value_column) {
     auto state = reinterpret_cast<LikePredicateState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
 
     hs_scratch_t* scratch = nullptr;
@@ -589,25 +627,26 @@ StatusOr<ColumnPtr> LikePredicate::regex_match_full(FunctionContext* context, co
     return result.build(all_const);
 }
 
-StatusOr<ColumnPtr> LikePredicate::regex_match_partial(FunctionContext* context, const starrocks::Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> LikePredicate::regex_match_partial_impl(FunctionContext* context, const Inputs& columns) {
     const auto& value_column = VECTORIZED_FN_ARGS(0);
     const auto& pattern_column = VECTORIZED_FN_ARGS(1);
-    auto [all_const, num_rows] = ColumnHelper::num_packed_rows(columns);
+    auto [all_const, num_rows] = input_num_packed_rows(columns);
 
-    ColumnViewer<TYPE_VARCHAR> value_viewer(value_column);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> value_viewer(value_column);
     ColumnBuilder<TYPE_BOOLEAN> result(num_rows);
 
     // pattern is constant value, use context's regex
     if (context->is_constant_column(1)) {
-        if (!pattern_column->only_null()) {
-            return _predicate_const_regex(context, &result, value_viewer, value_column);
+        if (!input_column(pattern_column)->only_null()) {
+            return _predicate_const_regex(context, &result, value_viewer, input_column(value_column));
         } else {
             // because pattern_column is constant, so if it is nullable means it is only_null.
-            return ColumnHelper::create_const_null_column(value_column->size());
+            return ColumnHelper::create_const_null_column(input_num_rows(columns));
         }
     }
 
-    ColumnViewer<TYPE_VARCHAR> pattern_viewer(pattern_column);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> pattern_viewer(pattern_column);
 
     RE2::Options opts;
     opts.set_never_nl(false);
@@ -635,6 +674,10 @@ StatusOr<ColumnPtr> LikePredicate::regex_match_partial(FunctionContext* context,
     }
 
     return result.build(all_const);
+}
+
+StatusOr<ColumnPtr> LikePredicate::regex_match_partial(FunctionContext* context, const Columns& columns) {
+    return regex_match_partial_impl(context, columns);
 }
 
 template <bool fullMatch>

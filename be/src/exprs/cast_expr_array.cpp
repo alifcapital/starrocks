@@ -19,6 +19,7 @@
 #include "column/json_column.h"
 #include "exprs/cast_expr.h"
 #include "exprs/expr_context.h"
+#include "exprs/selected_expr.h"
 #include "gutil/casts.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/strip.h"
@@ -148,13 +149,30 @@ StatusOr<ColumnPtr> CastStringToArray::evaluate_checked(ExprContext* context, Ch
             return ConstColumn::create(std::move(*(input->data_column())).clone(), rows);
         }
     }
-    ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, input_chunk));
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, input_chunk));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastStringToArray::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                         const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    if (_constant_res != nullptr && _constant_res->is_constant()) {
+        auto result = _constant_res->clone();
+        result->resize(rows.size());
+        return result;
+    }
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastStringToArray::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& column = input_column(inputs[0]);
+    const size_t work_rows = column->is_constant() ? 1 : input_num_rows(inputs);
     if (column->only_null()) {
-        return ColumnHelper::create_const_null_column(column->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
     LogicalType element_type = _cast_elements_expr->type().type;
-    ColumnViewer<TYPE_VARCHAR> src(column);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> src(inputs[0]);
     UInt32Column::MutablePtr offsets = UInt32Column::create();
     NullColumn::MutablePtr null_column = NullColumn::create();
 
@@ -163,8 +181,8 @@ StatusOr<ColumnPtr> CastStringToArray::evaluate_checked(ExprContext* context, Ch
     // 1. Split string with ',' delimiter
     uint32_t offset = 0;
     bool has_null = false;
-    ColumnBuilder<TYPE_VARCHAR> slice_builder(src.size());
-    for (size_t i = 0; i < src.size(); i++) {
+    ColumnBuilder<TYPE_VARCHAR> slice_builder(work_rows);
+    for (size_t i = 0; i < work_rows; i++) {
         offsets->append(offset);
         if (src.is_null(i)) {
             has_null = true;
@@ -228,7 +246,7 @@ StatusOr<ColumnPtr> CastStringToArray::evaluate_checked(ExprContext* context, Ch
 
     // Wrap constant column if source column is constant.
     if (column->is_constant()) {
-        res = ConstColumn::create(std::move(res), column->size());
+        res = ConstColumn::create(std::move(res), input_num_rows(inputs));
     }
     return res;
 }
@@ -254,20 +272,32 @@ Slice CastStringToArray::_unquote(Slice slice) const {
 }
 
 StatusOr<ColumnPtr> CastJsonToArray::evaluate_checked(ExprContext* context, Chunk* input_chunk) {
-    ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, input_chunk));
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, input_chunk));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastJsonToArray::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                       const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastJsonToArray::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& column = input_column(inputs[0]);
+    const size_t work_rows = column->is_constant() ? 1 : input_num_rows(inputs);
     if (column->only_null()) {
-        return ColumnHelper::create_const_null_column(column->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
     LogicalType element_type = _cast_elements_expr->type().type;
-    ColumnViewer<TYPE_JSON> src(column);
+    FunctionColumnViewer<TYPE_JSON, Inputs> src(inputs[0]);
     UInt32Column::MutablePtr offsets = UInt32Column::create();
     NullColumn::MutablePtr null_column = NullColumn::create();
 
     // 1. Cast JsonArray to ARRAY<JSON>
     uint32_t offset = 0;
-    ColumnBuilder<TYPE_JSON> json_column_builder(src.size());
-    for (size_t i = 0; i < src.size(); i++) {
+    ColumnBuilder<TYPE_JSON> json_column_builder(work_rows);
+    for (size_t i = 0; i < work_rows; i++) {
         offsets->append(offset);
         if (src.is_null(i)) {
             null_column->append(1);
@@ -307,28 +337,40 @@ StatusOr<ColumnPtr> CastJsonToArray::evaluate_checked(ExprContext* context, Chun
 
     // Wrap constant column if source column is constant.
     if (column->is_constant()) {
-        res = ConstColumn::create(std::move(res), column->size());
+        res = ConstColumn::create(std::move(res), input_num_rows(inputs));
     }
     return res;
 }
 
 StatusOr<ColumnPtr> CastVariantToArray::evaluate_checked(ExprContext* context, Chunk* input_chunk) {
-    ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, input_chunk));
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, input_chunk));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastVariantToArray::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                          const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastVariantToArray::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& column = input_column(inputs[0]);
+    const size_t work_rows = column->is_constant() ? 1 : input_num_rows(inputs);
     if (column->only_null()) {
-        return ColumnHelper::create_const_null_column(column->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
     DCHECK(_cast_elements_expr != nullptr);
     const LogicalType element_type = _cast_elements_expr->type().type;
-    const ColumnViewer<TYPE_VARIANT> src(column);
+    const FunctionColumnViewer<TYPE_VARIANT, Inputs> src(inputs[0]);
     UInt32Column::MutablePtr offsets = UInt32Column::create();
     NullColumn::MutablePtr null_column = NullColumn::create();
 
     // 1. Cast a variant(type=ARRAY) to ARRAY<VARIANT>
     // If the variant is not array type, set null
     uint32_t offset = 0;
-    ColumnBuilder<TYPE_VARIANT> variant_column_builder(src.size());
-    for (size_t i = 0; i < src.size(); i++) {
+    ColumnBuilder<TYPE_VARIANT> variant_column_builder(work_rows);
+    for (size_t i = 0; i < work_rows; i++) {
         offsets->append(offset);
         if (src.is_null(i)) {
             null_column->append(1);
@@ -374,7 +416,7 @@ StatusOr<ColumnPtr> CastVariantToArray::evaluate_checked(ExprContext* context, C
         res = NullableColumn::create(std::move(res), std::move(null_column));
     }
     if (column->is_constant()) {
-        res = ConstColumn::create(std::move(res), column->size());
+        res = ConstColumn::create(std::move(res), input_num_rows(inputs));
     }
 
     return res;

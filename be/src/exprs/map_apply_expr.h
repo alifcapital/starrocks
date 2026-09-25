@@ -37,6 +37,8 @@ public:
     Expr* clone(ObjectPool* pool) const override { return pool->add(new MapApplyExpr(*this)); }
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
+    bool is_expensive_node() const override { return true; }
 
 private:
     bool _maybe_duplicated_keys;

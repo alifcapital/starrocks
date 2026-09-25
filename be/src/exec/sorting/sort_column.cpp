@@ -36,18 +36,21 @@ namespace starrocks {
 
 class Ranges {
 public:
-    Ranges(std::span<const uint32_t> source_offsets, std::span<const uint32_t> key_offsets)
-            : _source_offsets(source_offsets), _key_offsets(key_offsets) {
-        DCHECK_EQ(_source_offsets.size(), _key_offsets.size());
+    Ranges(std::span<const uint32_t> source_offsets, std::span<const uint32_t> key_offsets,
+           std::span<const uint32_t> key_rows = {})
+            : _source_offsets(source_offsets), _key_offsets(key_offsets), _key_rows(key_rows) {
+        DCHECK(_key_rows.empty() ? _source_offsets.size() == _key_offsets.size()
+                                 : _source_offsets.size() == _key_rows.size() + 1);
     }
 
     bool next() {
-        while (_next_index + 1 < _key_offsets.size()) {
+        while (_next_index + 1 < _source_offsets.size()) {
             const size_t i = _next_index++;
             if (_source_offsets[i] == _source_offsets[i + 1]) {
                 continue;
             }
-            if (_key_offsets[i] == _key_offsets[i + 1]) {
+            const uint32_t key_row = _key_rows.empty() ? i : _key_rows[i];
+            if (key_row == UINT32_MAX || _key_offsets[key_row] == _key_offsets[key_row + 1]) {
                 continue;
             }
             return true;
@@ -62,6 +65,7 @@ public:
 private:
     const std::span<const uint32_t> _source_offsets;
     const std::span<const uint32_t> _key_offsets;
+    const std::span<const uint32_t> _key_rows;
     size_t _next_index = 0;
 };
 
@@ -577,8 +581,8 @@ Status sort_and_tie_columns(const std::atomic<bool>& cancel, const Columns& colu
 Status sort_and_tie_columns(const std::atomic<bool>& cancel, const std::vector<const Column*>& columns,
                             const SortDescs& sort_desc, SmallPermutation& perm,
                             const std::span<const uint32_t> src_offsets,
-                            const std::vector<std::span<const uint32_t>>& offsets_per_key,
-                            const SortDescs* sort_descs) {
+                            const std::vector<std::span<const uint32_t>>& offsets_per_key, const SortDescs* sort_descs,
+                            const std::vector<std::span<const uint32_t>>& key_rows) {
     if (src_offsets.empty()) {
         return Status::OK();
     }
@@ -598,6 +602,29 @@ Status sort_and_tie_columns(const std::atomic<bool>& cancel, const std::vector<c
     // The range of the i-th part is [offsets[i], offsets[i+1]), and the offsets of the src column and the key column
     // may be different. See the comment of the declaration of this function for more details.
     // Therefore, adjust values of permutation by the offsets of this column before sorting this column.
+    if (!key_rows.empty()) {
+        DCHECK_EQ(num_keys, key_rows.size());
+        std::vector<uint32_t> previous(src_offsets.begin(), src_offsets.end() - 1);
+        for (size_t key = 0; key < num_keys; ++key) {
+            for (size_t row = 0; row < num_ranges; ++row) {
+                uint32_t source_row = key_rows[key][row];
+                if (source_row == UINT32_MAX) continue;
+                uint32_t start = offsets_per_key[key][source_row];
+                uint32_t delta = start - previous[row];
+                for (uint32_t i = src_offsets[row]; i < src_offsets[row + 1]; ++i) perm[i].index_in_chunk += delta;
+                previous[row] = start;
+            }
+            RETURN_IF_ERROR(sort_and_tie_column(cancel, columns[key], sort_desc.get_column_desc(key), perm, tie,
+                                                Ranges(src_offsets, offsets_per_key[key], key_rows[key]),
+                                                key + 1 != num_keys, sort_descs));
+        }
+        for (size_t row = 0; row < num_ranges; ++row) {
+            uint32_t delta = src_offsets[row] - previous[row];
+            for (uint32_t i = src_offsets[row]; i < src_offsets[row + 1]; ++i) perm[i].index_in_chunk += delta;
+        }
+        return Status::OK();
+    }
+
     const uint32_t* prev_offsets = src_offsets.data();
     auto shift_perm = [&src_offsets, &perm, &prev_offsets, num_ranges](const uint32_t* new_offsets) {
         if (prev_offsets == new_offsets) {

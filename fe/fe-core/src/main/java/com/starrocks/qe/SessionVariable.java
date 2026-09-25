@@ -1176,6 +1176,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_INSERT_SELECT_EXTERNAL_AUTO_REFRESH = "enable_insert_select_external_auto_refresh";
     public static final String ENABLE_PREDICATE_COL_LATE_MATERIALIZE = "enable_predicate_col_late_materialize";
 
+    public static final String ENABLE_CONDITIONAL_TWO_PHASE_EVAL = "enable_conditional_two_phase_eval";
+
     public static final String PUSH_DOWN_HEAVY_EXPRS = "push_down_heavy_exprs";
 
     public static final String TOPN_PUSH_DOWN_AGG_MODE = "topn_push_down_agg_mode";
@@ -2409,6 +2411,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_PREDICATE_COL_LATE_MATERIALIZE)
     private boolean enablePredicateColLateMaterialize = true;
+
+    @VarAttr(name = ENABLE_CONDITIONAL_TWO_PHASE_EVAL)
+    private boolean enableConditionalTwoPhaseEval = false;
 
     @VarAttr(name = PUSH_DOWN_HEAVY_EXPRS)
     private boolean pushDownHeavyExprs = true;
@@ -6192,6 +6197,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return enablePredicateColLateMaterialize;
     }
 
+    public void setEnableConditionalTwoPhaseEval(boolean enableConditionalTwoPhaseEval) {
+        this.enableConditionalTwoPhaseEval = enableConditionalTwoPhaseEval;
+    }
+
+    public boolean isEnableConditionalTwoPhaseEval() {
+        return enableConditionalTwoPhaseEval;
+    }
+
     public void setPushDownHeavyExprs(boolean flag) {
         this.pushDownHeavyExprs = flag;
     }
@@ -6315,6 +6328,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setRpc_http_min_size(rpcHttpMinSize);
         tResult.setInterleaving_group_size(interleavingGroupSize);
         tResult.setEnable_predicate_col_late_materialize(enablePredicateColLateMaterialize);
+        tResult.setEnable_conditional_two_phase_eval(enableConditionalTwoPhaseEval);
 
         TCompressionType loadCompressionType =
                 CompressionUtils.findTCompressionByName(loadTransmissionCompressionType);

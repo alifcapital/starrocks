@@ -22,6 +22,7 @@
 #include "column/column_viewer.h"
 #include "common/status.h"
 #include "exprs/base64.h"
+#include "exprs/selected_column.h"
 #include "types/logical_type_infra.h"
 #include "util/aes_util.h"
 #include "util/md5.h"
@@ -32,15 +33,15 @@ namespace starrocks {
 // Macro to check if essential columns (data, key, mode) are only_null
 // Returns the first only_null column if any, otherwise continues execution
 // Usage: CHECK_AES_ESSENTIAL_COLUMNS_NULL(columns)
-#define CHECK_AES_ESSENTIAL_COLUMNS_NULL(cols)                                                            \
-    do {                                                                                                  \
-        if ((cols)[0]->only_null() || (cols)[1]->only_null() || (cols)[3]->only_null()) {                 \
-            return (cols)[0]->only_null() ? (cols)[0] : ((cols)[1]->only_null() ? (cols)[1] : (cols)[3]); \
-        }                                                                                                 \
-    } while (0)
+template <typename Inputs>
+static bool aes_essential_only_null(const Inputs& columns) {
+    return input_column(columns[0])->only_null() || input_column(columns[1])->only_null() ||
+           input_column(columns[3])->only_null();
+}
 
 // Helper class to extract and cache AES parameters from columns
 // This eliminates code duplication between encrypt and decrypt functions
+template <typename Inputs>
 class AesParameterExtractor {
 public:
     // Structure to hold extracted parameters for a specific row
@@ -58,18 +59,18 @@ public:
     };
 
     // Constructor: initialize column viewers and cache constant parameters
-    explicit AesParameterExtractor(const Columns& columns)
+    explicit AesParameterExtractor(const Inputs& columns)
             : src_viewer_(columns[0]),
               key_viewer_(columns[1]),
               iv_viewer_(columns[2]),
               mode_viewer_(columns[3]),
-              mode_is_const_(columns[3]->is_constant()),
-              key_is_const_(columns[1]->is_constant()),
-              iv_is_const_(columns[2]->is_constant()) {
+              mode_is_const_(input_column(columns[3])->is_constant()),
+              key_is_const_(input_column(columns[1])->is_constant()),
+              iv_is_const_(input_column(columns[2])->is_constant()) {
         // Check if 5th parameter (AAD for GCM mode) exists
         if (columns.size() >= 5) {
             aad_viewer_.emplace(columns[4]);
-            aad_is_const_ = columns[4]->is_constant();
+            aad_is_const_ = input_column(columns[4])->is_constant();
         }
 
         // Cache constant mode
@@ -191,14 +192,14 @@ public:
     }
 
     // Get source data viewer (for accessing source data in main loop)
-    const ColumnViewer<TYPE_VARCHAR>& src_viewer() const { return src_viewer_; }
+    const FunctionColumnViewer<TYPE_VARCHAR, Inputs>& src_viewer() const { return src_viewer_; }
 
 private:
-    ColumnViewer<TYPE_VARCHAR> src_viewer_;
-    ColumnViewer<TYPE_VARCHAR> key_viewer_;
-    ColumnViewer<TYPE_VARCHAR> iv_viewer_;
-    ColumnViewer<TYPE_VARCHAR> mode_viewer_;
-    std::optional<ColumnViewer<TYPE_VARCHAR>> aad_viewer_;
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> src_viewer_;
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> key_viewer_;
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> iv_viewer_;
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> mode_viewer_;
+    std::optional<FunctionColumnViewer<TYPE_VARCHAR, Inputs>> aad_viewer_;
 
     // Constant column flags
     bool mode_is_const_;
@@ -224,18 +225,18 @@ private:
 
 // Helper function to handle 2-parameter AES encryption: aes_encrypt(data, key)
 // Uses default ECB mode with NULL IV for backward compatibility
-static StatusOr<ColumnPtr> aes_encrypt_2params(FunctionContext* ctx, const Columns& columns) {
+template <typename Inputs>
+static StatusOr<ColumnPtr> aes_encrypt_2params(FunctionContext* ctx, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 2);
 
-    // Check if data or key columns are only_null
-    if (columns[0]->only_null() || columns[1]->only_null()) {
-        return columns[0]->only_null() ? columns[0] : columns[1];
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
     }
 
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto key_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto key_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
 
-    const int size = columns[0]->size();
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     // Reuse buffer across all rows
@@ -274,23 +275,23 @@ static StatusOr<ColumnPtr> aes_encrypt_2params(FunctionContext* ctx, const Colum
         result.append(Slice(reinterpret_cast<char*>(encrypt_buf.data()), len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
 // Helper function to handle 2-parameter AES decryption: aes_decrypt(data, key)
 // Uses default ECB mode with NULL IV for backward compatibility
-static StatusOr<ColumnPtr> aes_decrypt_2params(FunctionContext* ctx, const Columns& columns) {
+template <typename Inputs>
+static StatusOr<ColumnPtr> aes_decrypt_2params(FunctionContext* ctx, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 2);
 
-    // Check if data or key columns are only_null
-    if (columns[0]->only_null() || columns[1]->only_null()) {
-        return columns[0]->only_null() ? columns[0] : columns[1];
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
     }
 
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto key_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto key_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
 
-    const int size = columns[0]->size();
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     // Reuse buffer across all rows
@@ -335,7 +336,7 @@ static StatusOr<ColumnPtr> aes_decrypt_2params(FunctionContext* ctx, const Colum
         result.append(Slice(reinterpret_cast<char*>(decrypt_buf.data()), len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
 // 2/4/5-parameter version: aes_encrypt(data, key, [iv, mode, [aad]])
@@ -343,7 +344,8 @@ static StatusOr<ColumnPtr> aes_decrypt_2params(FunctionContext* ctx, const Colum
 // - 2-parameter version uses default ECB mode with NULL IV (for backward compatibility)
 // - iv can be NULL for ECB mode
 // - aad is optional and only used for GCM mode
-StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode(FunctionContext* ctx, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode_impl(FunctionContext* ctx, const Inputs& columns) {
     // Handle 2-parameter version: aes_encrypt(data, key)
     // Use default mode (AES_128_ECB) and NULL IV
     if (columns.size() == 2) {
@@ -352,12 +354,12 @@ StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode(FunctionContext* 
 
     // Check only essential columns (data, key, mode) for only_null
     // IV and AAD are checked later based on the encryption mode
-    CHECK_AES_ESSENTIAL_COLUMNS_NULL(columns);
+    if (aes_essential_only_null(columns)) return ColumnHelper::create_const_null_column(input_num_rows(columns));
 
     // Use parameter extractor to handle all parameter extraction and caching
-    AesParameterExtractor extractor(columns);
+    AesParameterExtractor<Inputs> extractor(columns);
 
-    const int size = columns[0]->size();
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     // Reuse buffer across all rows to reduce memory allocation overhead
@@ -409,7 +411,15 @@ StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode(FunctionContext* 
         result.append(Slice(reinterpret_cast<char*>(encrypt_buf.data()), len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode(FunctionContext* ctx, const Columns& columns) {
+    return aes_encrypt_with_mode_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode_selected(FunctionContext* ctx,
+                                                                        const SelectedColumns& columns, size_t) {
+    return aes_encrypt_with_mode_impl(ctx, columns);
 }
 
 // 2/4/5-parameter version: aes_decrypt(data, key, [iv, mode, [aad]])
@@ -417,7 +427,8 @@ StatusOr<ColumnPtr> EncryptionFunctions::aes_encrypt_with_mode(FunctionContext* 
 // - 2-parameter version uses default ECB mode with NULL IV (for backward compatibility)
 // - iv can be NULL for ECB mode
 // - aad is optional and only used for GCM mode
-StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode(FunctionContext* ctx, const Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode_impl(FunctionContext* ctx, const Inputs& columns) {
     // Handle 2-parameter version: aes_decrypt(data, key)
     // Use default mode (AES_128_ECB) and NULL IV
     if (columns.size() == 2) {
@@ -426,12 +437,12 @@ StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode(FunctionContext* 
 
     // Check only essential columns (data, key, mode) for only_null
     // IV and AAD are checked later based on the encryption mode
-    CHECK_AES_ESSENTIAL_COLUMNS_NULL(columns);
+    if (aes_essential_only_null(columns)) return ColumnHelper::create_const_null_column(input_num_rows(columns));
 
     // Use parameter extractor to handle all parameter extraction and caching
-    AesParameterExtractor extractor(columns);
+    AesParameterExtractor<Inputs> extractor(columns);
 
-    const int size = columns[0]->size();
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     // Reuse buffer across all rows to reduce memory allocation overhead
@@ -474,12 +485,21 @@ StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode(FunctionContext* 
         result.append(Slice(reinterpret_cast<char*>(decrypt_buf.data()), len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::from_base64(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    const int size = columns[0]->size();
+StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode(FunctionContext* ctx, const Columns& columns) {
+    return aes_decrypt_with_mode_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::aes_decrypt_with_mode_selected(FunctionContext* ctx,
+                                                                        const SelectedColumns& columns, size_t) {
+    return aes_decrypt_with_mode_impl(ctx, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::from_base64_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (src_viewer.is_null(row)) {
@@ -506,13 +526,22 @@ StatusOr<ColumnPtr> EncryptionFunctions::from_base64(FunctionContext* ctx, const
         result.append(Slice(p.get(), len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::to_base64(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::from_base64(FunctionContext* ctx, const Columns& columns) {
+    return from_base64_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::from_base64_selected(FunctionContext* ctx, const SelectedColumns& columns,
+                                                              size_t) {
+    return from_base64_impl(ctx, columns);
+}
 
-    const int size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::to_base64_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    const int size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     std::vector<char> encoded_buf;
     for (int row = 0; row < size; ++row) {
@@ -542,17 +571,26 @@ StatusOr<ColumnPtr> EncryptionFunctions::to_base64(FunctionContext* ctx, const C
         result.append(Slice(encoded_buf.data(), encoded_len));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::md5sum(FunctionContext* ctx, const Columns& columns) {
-    std::vector<ColumnViewer<TYPE_VARCHAR>> list;
+StatusOr<ColumnPtr> EncryptionFunctions::to_base64(FunctionContext* ctx, const Columns& columns) {
+    return to_base64_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::to_base64_selected(FunctionContext* ctx, const SelectedColumns& columns,
+                                                            size_t) {
+    return to_base64_impl(ctx, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum_impl(FunctionContext* ctx, const Inputs& columns) {
+    std::vector<FunctionColumnViewer<TYPE_VARCHAR, Inputs>> list;
     list.reserve(columns.size());
-    for (const ColumnPtr& col : columns) {
+    for (const auto& col : columns) {
         list.emplace_back(col);
     }
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         Md5Digest digest;
@@ -568,16 +606,24 @@ StatusOr<ColumnPtr> EncryptionFunctions::md5sum(FunctionContext* ctx, const Colu
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::md5sum_numeric(FunctionContext* ctx, const Columns& columns) {
-    std::vector<ColumnViewer<TYPE_VARCHAR>> list;
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum(FunctionContext* ctx, const Columns& columns) {
+    return md5sum_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return md5sum_impl(ctx, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum_numeric_impl(FunctionContext* ctx, const Inputs& columns) {
+    std::vector<FunctionColumnViewer<TYPE_VARCHAR, Inputs>> list;
     list.reserve(columns.size());
-    for (const ColumnPtr& col : columns) {
+    for (const auto& col : columns) {
         list.emplace_back(col);
     }
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_LARGEINT> result(size);
     for (int row = 0; row < size; row++) {
         Md5Digest digest;
@@ -595,13 +641,22 @@ StatusOr<ColumnPtr> EncryptionFunctions::md5sum_numeric(FunctionContext* ctx, co
         DCHECK_EQ(parse_res, StringParser::PARSE_SUCCESS);
         result.append(int_val);
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::md5(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum_numeric(FunctionContext* ctx, const Columns& columns) {
+    return md5sum_numeric_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::md5sum_numeric_selected(FunctionContext* ctx, const SelectedColumns& columns,
+                                                                 size_t) {
+    return md5sum_numeric_impl(ctx, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::md5_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         if (src_viewer.is_null(row)) {
@@ -617,7 +672,14 @@ StatusOr<ColumnPtr> EncryptionFunctions::md5(FunctionContext* ctx, const Columns
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> EncryptionFunctions::md5(FunctionContext* ctx, const Columns& columns) {
+    return md5_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::md5_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return md5_impl(ctx, columns);
 }
 
 Status EncryptionFunctions::sha2_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -633,33 +695,50 @@ Status EncryptionFunctions::sha2_prepare(FunctionContext* context, FunctionConte
     auto hash_length = ColumnHelper::get_const_value<TYPE_INT>(column);
 
     ScalarFunction function;
+    SelectedScalarFunction selected_function;
     if (hash_length == 224) {
         function = &EncryptionFunctions::sha224;
+        selected_function = &EncryptionFunctions::sha224_selected;
     } else if (hash_length == 256 || hash_length == 0) {
         function = &EncryptionFunctions::sha256;
+        selected_function = &EncryptionFunctions::sha256_selected;
     } else if (hash_length == 384) {
         function = &EncryptionFunctions::sha384;
+        selected_function = &EncryptionFunctions::sha384_selected;
     } else if (hash_length == 512) {
         function = &EncryptionFunctions::sha512;
+        selected_function = &EncryptionFunctions::sha512_selected;
     } else {
         function = EncryptionFunctions::invalid_sha;
+        selected_function = &EncryptionFunctions::invalid_sha_selected;
     }
 
     auto fc = new EncryptionFunctions::SHA2Ctx();
     fc->function = function;
+    fc->selected_function = selected_function;
     context->set_function_state(scope, fc);
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::invalid_sha(FunctionContext* ctx, const Columns& columns) {
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::invalid_sha_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto size = input_num_rows(columns);
     return ColumnHelper::create_const_null_column(size);
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::sha224(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::invalid_sha(FunctionContext* ctx, const Columns& columns) {
+    return invalid_sha_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::invalid_sha_selected(FunctionContext* ctx, const SelectedColumns& columns,
+                                                              size_t) {
+    return invalid_sha_impl(ctx, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::sha224_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         if (src_viewer.is_null(row)) {
@@ -675,13 +754,21 @@ StatusOr<ColumnPtr> EncryptionFunctions::sha224(FunctionContext* ctx, const Colu
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::sha256(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::sha224(FunctionContext* ctx, const Columns& columns) {
+    return sha224_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::sha224_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return sha224_impl(ctx, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::sha256_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         if (src_viewer.is_null(row)) {
@@ -697,13 +784,21 @@ StatusOr<ColumnPtr> EncryptionFunctions::sha256(FunctionContext* ctx, const Colu
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::sha384(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::sha256(FunctionContext* ctx, const Columns& columns) {
+    return sha256_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::sha256_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return sha256_impl(ctx, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::sha384_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         if (src_viewer.is_null(row)) {
@@ -719,13 +814,21 @@ StatusOr<ColumnPtr> EncryptionFunctions::sha384(FunctionContext* ctx, const Colu
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::sha512(FunctionContext* ctx, const Columns& columns) {
-    auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> EncryptionFunctions::sha384(FunctionContext* ctx, const Columns& columns) {
+    return sha384_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::sha384_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return sha384_impl(ctx, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::sha512_impl(FunctionContext* ctx, const Inputs& columns) {
+    auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; row++) {
         if (src_viewer.is_null(row)) {
@@ -741,15 +844,23 @@ StatusOr<ColumnPtr> EncryptionFunctions::sha512(FunctionContext* ctx, const Colu
         result.append(Slice(digest.hex().c_str(), digest.hex().size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> EncryptionFunctions::sha2(FunctionContext* ctx, const Columns& columns) {
-    if (!ctx->is_notnull_constant_column(1)) {
-        auto src_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-        auto length_viewer = ColumnViewer<TYPE_INT>(columns[1]);
+StatusOr<ColumnPtr> EncryptionFunctions::sha512(FunctionContext* ctx, const Columns& columns) {
+    return sha512_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::sha512_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return sha512_impl(ctx, columns);
+}
 
-        auto size = columns[0]->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> EncryptionFunctions::sha2_impl(FunctionContext* ctx, const Inputs& columns) {
+    if (!ctx->is_notnull_constant_column(1)) {
+        auto src_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+        auto length_viewer = FunctionColumnViewer<TYPE_INT, Inputs>(columns[1]);
+
+        auto size = input_num_rows(columns);
         ColumnBuilder<TYPE_VARCHAR> result(size);
 
         for (int row = 0; row < size; row++) {
@@ -786,11 +897,22 @@ StatusOr<ColumnPtr> EncryptionFunctions::sha2(FunctionContext* ctx, const Column
             }
         }
 
-        return result.build(ColumnHelper::is_all_const(columns));
+        return result.build(input_columns_are_constant(columns));
     }
 
     auto ctc = reinterpret_cast<SHA2Ctx*>(ctx->get_function_state(FunctionContext::FRAGMENT_LOCAL));
-    return ctc->function(ctx, columns);
+    if constexpr (std::is_same_v<Inputs, Columns>) {
+        return ctc->function(ctx, columns);
+    } else {
+        return ctc->selected_function(ctx, columns, input_num_rows(columns));
+    }
+}
+
+StatusOr<ColumnPtr> EncryptionFunctions::sha2(FunctionContext* ctx, const Columns& columns) {
+    return sha2_impl(ctx, columns);
+}
+StatusOr<ColumnPtr> EncryptionFunctions::sha2_selected(FunctionContext* ctx, const SelectedColumns& columns, size_t) {
+    return sha2_impl(ctx, columns);
 }
 
 Status EncryptionFunctions::sha2_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -856,13 +978,13 @@ struct EncodeColumnToDigest {
             } else if constexpr (sizeof(CppType) == 2) {
                 marker_type = RowFingerprintValueType::Int16;
             } else if constexpr (sizeof(CppType) == 4) {
-                marker_type = (LT == TYPE_FLOAT)
-                                      ? RowFingerprintValueType::Float
-                                      : lt_is_date<LT> ? RowFingerprintValueType::Date : RowFingerprintValueType::Int32;
+                marker_type = (LT == TYPE_FLOAT) ? RowFingerprintValueType::Float
+                              : lt_is_date<LT>   ? RowFingerprintValueType::Date
+                                                 : RowFingerprintValueType::Int32;
             } else if constexpr (sizeof(CppType) == 8) {
-                marker_type = (LT == TYPE_DOUBLE) ? RowFingerprintValueType::Double
-                                                  : lt_is_datetime<LT> ? RowFingerprintValueType::DateTime
-                                                                       : RowFingerprintValueType::Int64;
+                marker_type = (LT == TYPE_DOUBLE)  ? RowFingerprintValueType::Double
+                              : lt_is_datetime<LT> ? RowFingerprintValueType::DateTime
+                                                   : RowFingerprintValueType::Int64;
             } else if constexpr (sizeof(CppType) == 16) {
                 marker_type = lt_is_decimal<LT> ? RowFingerprintValueType::Decimal : RowFingerprintValueType::Int128;
             } else {

@@ -211,6 +211,10 @@ public:
 
     // TODO: check error in expression and return error Status, instead of return null column
     virtual StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) = 0;
+    // Return compact values in row-ID order. Unselected rows must not be evaluated.
+    // Row IDs address the original chunk and remain valid for the duration of the call.
+    virtual StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                  const std::vector<uint32_t>& rows);
     virtual StatusOr<ColumnPtr> evaluate_with_filter(ExprContext* context, Chunk* ptr, uint8_t* filter);
 
     // TODO:(murphy) remove this unchecked evaluate
@@ -252,6 +256,15 @@ public:
     // comparison expr, logical expr, branch expr, div and mod.
     virtual JitScore compute_jit_score(RuntimeState* state) const;
 #endif
+
+    // Cost classification for two-phase conditional evaluation (CASE/IF/IFNULL/COALESCE; see case_expr.cpp).
+    // A node is "expensive" when its per-row cost justifies lazy (filtered) evaluation of the branch that
+    // contains it. Structural and safe to call before prepare()/open() (uses only the thrift function name),
+    // so it can also gate JIT in is_compilable(). Default: not expensive.
+    virtual bool is_expensive_node() const { return false; }
+
+    // True iff this subtree (this node or any descendant) contains an expensive node.
+    bool contains_expensive() const;
 
     // Return true if this expr or any of its children support ngram bloom filter, otherwise return flase
     virtual bool support_ngram_bloom_filter(ExprContext* context) const;

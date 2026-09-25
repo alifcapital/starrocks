@@ -63,7 +63,8 @@ Status sort_and_tie_columns(const std::atomic<bool>& cancel, const std::vector<c
                             const SortDescs& sort_desc, SmallPermutation& perm,
                             const std::span<const uint32_t> src_offsets,
                             const std::vector<std::span<const uint32_t>>& offsets_per_key,
-                            const SortDescs* sort_descs = nullptr);
+                            const SortDescs* sort_descs = nullptr,
+                            const std::vector<std::span<const uint32_t>>& key_rows = {});
 
 // Sort multiple columns, and stable
 Status stable_sort_and_tie_columns(const std::atomic<bool>& cancel, const Columns& columns, const SortDescs& sort_desc,

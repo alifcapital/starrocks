@@ -1502,6 +1502,24 @@ void HyperJsonTransformer::init_compaction_task(const std::vector<std::string>& 
     }
 }
 
+Status HyperJsonTransformer::trans_selected(const Columns& columns, const std::vector<uint32_t>& rows) {
+    // Only materialize fields consumed by this extraction plan, never unrelated JSON fields.
+    Columns selected(columns.size());
+    auto gather = [&](size_t index) {
+        if (selected[index] != nullptr) return;
+        auto value = columns[index]->clone_empty();
+        value->append_selective(*columns[index], rows);
+        selected[index] = std::move(value);
+    };
+    for (const auto& task : _merge_tasks)
+        for (int index : task.src_index) gather(index);
+    for (const auto& task : _flat_tasks)
+        if (!task.dst_index.empty()) gather(task.src_index);
+    // trans uses column zero only for batch cardinality when it is not a source field.
+    if (selected[0] == nullptr) selected[0] = UInt8Column::create(rows.size(), 0);
+    return trans(selected);
+}
+
 Status HyperJsonTransformer::trans(const Columns& columns) {
     DCHECK(_dst_remain ? _dst_columns.size() == _dst_paths.size() + 1 : _dst_columns.size() == _dst_paths.size());
     for (auto& col : _dst_columns) {

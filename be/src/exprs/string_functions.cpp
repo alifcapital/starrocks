@@ -16,6 +16,9 @@
 
 #include "column/bytes.h"
 #include "util/defer_op.h"
+#include "exprs/selected_column.h"
+#include "exprs/selected_functions.h"
+#include "function_context.h"
 
 #ifdef __x86_64__
 #include <immintrin.h>
@@ -2777,6 +2780,10 @@ StatusOr<ColumnPtr> StringFunctions::sm3(FunctionContext* context, const starroc
     return VectorizedStringStrictUnaryFunction<sm3Impl>::evaluate<TYPE_VARCHAR, TYPE_VARCHAR>(columns[0]);
 }
 
+StatusOr<ColumnPtr> StringFunctions::sm3_selected(FunctionContext*, const SelectedColumns& inputs, size_t rows) {
+    return evaluate_selected_strict_unary<TYPE_VARCHAR, TYPE_VARCHAR, sm3Impl>(inputs, rows);
+}
+
 // ascii
 DEFINE_UNARY_FN_WITH_IMPL(asciiImpl, str) {
     return str.size == 0 ? 0 : static_cast<uint8_t>(str.data[0]);
@@ -3283,7 +3290,8 @@ int StringFunctions::index_of(const char* source, int source_count, const char* 
 Status StringFunctions::hs_compile_and_alloc_scratch(const std::string& pattern, StringFunctionsState* state,
                                                      FunctionContext* context, const Slice& slice) {
     if (hs_compile(pattern.c_str(), HS_FLAG_ALLOWEMPTY | HS_FLAG_DOTALL | HS_FLAG_UTF8 | HS_FLAG_SOM_LEFTMOST,
-                   HS_MODE_BLOCK, nullptr, &state->database, &state->compile_err) != HS_SUCCESS) {
+                   (state->use_hyperscan_vec ? HS_MODE_VECTORED : HS_MODE_BLOCK), nullptr, &state->database,
+                   &state->compile_err) != HS_SUCCESS) {
         std::stringstream error;
         error << "Invalid regex expression: " << slice << ": " << state->compile_err->message;
         context->set_error(error.str().c_str());
@@ -3398,12 +3406,12 @@ Status StringFunctions::regexp_close(FunctionContext* context, FunctionContext::
     return Status::OK();
 }
 
-static ColumnPtr regexp_extract_general(FunctionContext* context, re2::RE2::Options* options, const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto ptn_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    auto field_viewer = ColumnViewer<TYPE_BIGINT>(columns[2]);
-
-    auto size = columns[0]->size();
+template <template <LogicalType> class Viewer, typename Inputs>
+static ColumnPtr regexp_extract_general(FunctionContext* context, re2::RE2::Options* options, const Inputs& columns,
+                                        size_t size, bool constant) {
+    auto content_viewer = Viewer<TYPE_VARCHAR>(columns[0]);
+    auto ptn_viewer = Viewer<TYPE_VARCHAR>(columns[1]);
+    auto field_viewer = Viewer<TYPE_BIGINT>(columns[2]);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (content_viewer.is_null(row) || ptn_viewer.is_null(row) || field_viewer.is_null(row)) {
@@ -3444,14 +3452,13 @@ static ColumnPtr regexp_extract_general(FunctionContext* context, re2::RE2::Opti
         result.append(Slice(match.data(), match.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(constant);
 }
 
-static ColumnPtr regexp_extract_const(re2::RE2* const_re, const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto field_viewer = ColumnViewer<TYPE_BIGINT>(columns[2]);
-
-    auto size = columns[0]->size();
+template <template <LogicalType> class Viewer, typename Inputs>
+static ColumnPtr regexp_extract_const(re2::RE2* const_re, const Inputs& columns, size_t size, bool constant) {
+    auto content_viewer = Viewer<TYPE_VARCHAR>(columns[0]);
+    auto field_viewer = Viewer<TYPE_BIGINT>(columns[2]);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (content_viewer.is_null(row) || field_viewer.is_null(row)) {
@@ -3484,7 +3491,7 @@ static ColumnPtr regexp_extract_const(re2::RE2* const_re, const Columns& columns
         result.append(Slice(match.data(), match.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(constant);
 }
 
 StatusOr<ColumnPtr> StringFunctions::regexp_extract(FunctionContext* context, const Columns& columns) {
@@ -3493,11 +3500,26 @@ StatusOr<ColumnPtr> StringFunctions::regexp_extract(FunctionContext* context, co
 
     if (state->const_pattern) {
         re2::RE2* const_re = state->get_or_prepare_regex();
-        return regexp_extract_const(const_re, columns);
+        return regexp_extract_const<ColumnViewer>(const_re, columns, columns[0]->size(),
+                                                  ColumnHelper::is_all_const(columns));
     }
 
     re2::RE2::Options* options = state->options.get();
-    return regexp_extract_general(context, options, columns);
+    return regexp_extract_general<ColumnViewer>(context, options, columns, columns[0]->size(),
+                                                ColumnHelper::is_all_const(columns));
+}
+
+StatusOr<ColumnPtr> StringFunctions::regexp_extract_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                             size_t size) {
+    for (const auto& input : columns) {
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(size);
+    }
+    auto* state = reinterpret_cast<StringFunctionsState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
+    const bool constant = selected_columns_are_constant(columns);
+    if (state->const_pattern) {
+        return regexp_extract_const<SelectedColumnViewer>(state->get_or_prepare_regex(), columns, size, constant);
+    }
+    return regexp_extract_general<SelectedColumnViewer>(context, state->options.get(), columns, size, constant);
 }
 
 // Helper function to extract whole match (group 0) using RE2::Match
@@ -3551,13 +3573,14 @@ static void extract_regex_matches(const Slice& str_value, const re2::RE2& regex,
     extract_group_matches(str_sp, regex, group, str_col, index, matches.get(), max_matches);
 }
 
+template <typename Inputs>
 static ColumnPtr regexp_extract_all_general(FunctionContext* context, re2::RE2::Options* options,
-                                            const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto ptn_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    auto group_viewer = ColumnViewer<TYPE_BIGINT>(columns[2]);
+                                            const Inputs& columns) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto ptn_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
+    auto group_viewer = FunctionColumnViewer<TYPE_BIGINT, Inputs>(columns[2]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
@@ -3603,11 +3626,12 @@ static ColumnPtr regexp_extract_all_general(FunctionContext* context, re2::RE2::
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
-static ColumnPtr regexp_extract_all_const_pattern(re2::RE2* const_re, const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto group_viewer = ColumnViewer<TYPE_BIGINT>(columns[2]);
+template <typename Inputs>
+static ColumnPtr regexp_extract_all_const_pattern(re2::RE2* const_re, const Inputs& columns) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto group_viewer = FunctionColumnViewer<TYPE_BIGINT, Inputs>(columns[2]);
 
-    auto size = ColumnHelper::is_all_const(columns) ? 1 : columns[0]->size();
+    auto size = input_columns_are_constant(columns) ? 1 : input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
@@ -3641,28 +3665,34 @@ static ColumnPtr regexp_extract_all_const_pattern(re2::RE2* const_re, const Colu
 
     auto array = ArrayColumn::create(NullableColumn::create(std::move(str_col), NullColumn::create(str_col->size(), 0)),
                                      std::move(offset_col));
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(array), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(array), input_num_rows(columns));
     }
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
-static ColumnPtr regexp_extract_all_const(re2::RE2* const_re, const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto group = ColumnHelper::get_const_value<TYPE_BIGINT>(columns[2]);
+template <typename Inputs>
+static ColumnPtr regexp_extract_all_const(re2::RE2* const_re, const Inputs& columns) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto group = ColumnHelper::get_const_value<TYPE_BIGINT>(input_column(columns[2]));
 
-    auto size = ColumnHelper::is_all_const(columns) ? 1 : columns[0]->size();
+    auto size = input_columns_are_constant(columns) ? 1 : input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
     offset_col->append(0);
 
     NullColumn::MutablePtr nl_col;
-    if (columns[0]->is_nullable()) {
-        auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
-        nl_col = NullColumn::static_pointer_cast(std::move(*x).mutate());
-    } else {
+    if constexpr (std::is_same_v<Inputs, SelectedColumns>) {
         nl_col = NullColumn::create(size, 0);
+        for (size_t row = 0; row < size; ++row) nl_col->get_data()[row] = content_viewer.is_null(row);
+    } else {
+        if (columns[0]->is_nullable()) {
+            auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
+            nl_col = NullColumn::static_pointer_cast(std::move(*x).mutate());
+        } else {
+            nl_col = NullColumn::create(size, 0);
+        }
     }
 
     uint64_t index = 0;
@@ -3672,8 +3702,8 @@ static ColumnPtr regexp_extract_all_const(re2::RE2* const_re, const Columns& col
         auto array = ArrayColumn::create(NullableColumn::create(std::move(str_col), NullColumn::create(0, 0)),
                                          std::move(offset_col));
 
-        if (ColumnHelper::is_all_const(columns)) {
-            return ConstColumn::create(std::move(array), columns[0]->size());
+        if (input_columns_are_constant(columns)) {
+            return ConstColumn::create(std::move(array), input_num_rows(columns));
         }
         return NullableColumn::create(std::move(array), std::move(nl_col));
     }
@@ -3694,19 +3724,22 @@ static ColumnPtr regexp_extract_all_const(re2::RE2* const_re, const Columns& col
     auto array = ArrayColumn::create(NullableColumn::create(std::move(str_col), NullColumn::create(str_col->size(), 0)),
                                      std::move(offset_col));
 
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(array), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(array), input_num_rows(columns));
     }
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
-StatusOr<ColumnPtr> StringFunctions::regexp_extract_all(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::regexp_extract_all_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
     auto state = reinterpret_cast<StringFunctionsState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
 
     if (state->const_pattern) {
         re2::RE2* const_re = state->get_or_prepare_regex();
-        if (columns[2]->is_constant()) {
+        if (input_column(columns[2])->is_constant()) {
             return regexp_extract_all_const(const_re, columns);
         } else {
             return regexp_extract_all_const_pattern(const_re, columns);
@@ -3717,12 +3750,21 @@ StatusOr<ColumnPtr> StringFunctions::regexp_extract_all(FunctionContext* context
     return regexp_extract_all_general(context, options, columns);
 }
 
-static ColumnPtr regexp_replace_general(FunctionContext* context, re2::RE2::Options* options, const Columns& columns) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto ptn_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    auto rpl_viewer = ColumnViewer<TYPE_VARCHAR>(columns[2]);
+StatusOr<ColumnPtr> StringFunctions::regexp_extract_all(FunctionContext* context, const Columns& columns) {
+    return regexp_extract_all_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::regexp_extract_all_selected(FunctionContext* context,
+                                                                 const SelectedColumns& columns, size_t) {
+    return regexp_extract_all_impl(context, columns);
+}
 
-    auto size = columns[0]->size();
+template <typename Inputs>
+static ColumnPtr regexp_replace_general(FunctionContext* context, re2::RE2::Options* options, const Inputs& columns) {
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto ptn_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
+    auto rpl_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[2]);
+
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (str_viewer.is_null(row) || ptn_viewer.is_null(row) || rpl_viewer.is_null(row)) {
@@ -3746,15 +3788,15 @@ static ColumnPtr regexp_replace_general(FunctionContext* context, re2::RE2::Opti
         result.append(Slice(result_str.data(), result_str.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-template <bool global_mode>
-static ColumnPtr regexp_replace_const_pattern_and_rpl(re2::RE2* const_re, const Columns& columns,
+template <bool global_mode, typename Inputs>
+static ColumnPtr regexp_replace_const_pattern_and_rpl(re2::RE2* const_re, const Inputs& columns,
                                                       const std::string& rpl) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
     re2::StringPiece rpl_str = re2::StringPiece(rpl);
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     std::string result_str;
     for (int row = 0; row < size; ++row) {
@@ -3786,15 +3828,15 @@ static ColumnPtr regexp_replace_const_pattern_and_rpl(re2::RE2* const_re, const 
         result.append(Slice(result_str.data(), result_str.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-template <bool global_mode>
-static ColumnPtr regexp_replace_const(re2::RE2* const_re, const Columns& columns) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto rpl_viewer = ColumnViewer<TYPE_VARCHAR>(columns[2]);
+template <bool global_mode, typename Inputs>
+static ColumnPtr regexp_replace_const(re2::RE2* const_re, const Inputs& columns) {
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto rpl_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[2]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     std::string result_str;
     for (int row = 0; row < size; ++row) {
@@ -3828,11 +3870,20 @@ static ColumnPtr regexp_replace_const(re2::RE2* const_re, const Columns& columns
         result.append(Slice(result_str.data(), result_str.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+// Fixed literal databases support scattered buffers; this also handles their per-row path.
+static hs_error_t scan_regex(StringFunctionsState* state, const char* data, unsigned int size, hs_scratch_t* scratch,
+                             match_event_handler callback, void* context) {
+    if (state->use_hyperscan_vec)
+        return hs_scan_vector(state->database, &data, &size, 1, 0, scratch, callback, context);
+    return hs_scan(state->database, data, size, 0, scratch, callback, context);
 }
 
 static StatusOr<ColumnPtr> hyperscan_vec_evaluate(const BinaryColumn* src, StringFunctionsState* state,
-                                                  const std::string& rpl_value) {
+                                                  const std::string& rpl_value,
+                                                  const std::vector<uint32_t>* rows = nullptr) {
     hs_scratch_t* scratch = nullptr;
     hs_error_t status;
     if ((status = hs_clone_scratch(state->scratch, &scratch) != HS_SUCCESS)) {
@@ -3851,56 +3902,76 @@ static StatusOr<ColumnPtr> hyperscan_vec_evaluate(const BinaryColumn* src, Strin
     MatchInfoChain match_info_chain;
     match_info_chain.info_chain.reserve(src->size());
 
-    auto src_bytes = src->get_immutable_bytes();
-    auto src_value_size = src_bytes.size();
-    const char* data = (src_value_size) ? reinterpret_cast<const char*>(src_bytes.data())
-                                        : &StringFunctions::_DUMMY_STRING_FOR_EMPTY_PATTERN;
-
-    auto st = hs_scan(
-            // Use &_DUMMY_STRING_FOR_EMPTY_PATTERN instead of nullptr to avoid crash.
-            state->database, data, src_value_size, 0, scratch,
-            [](unsigned int id, unsigned long long from, unsigned long long to, unsigned int flags, void* ctx) -> int {
-                auto* value = (MatchInfoChain*)ctx;
-                if (value->info_chain.empty()) {
-                    value->info_chain.emplace_back(MatchInfo{.from = from, .to = to});
-                } else if (value->info_chain.back().from == from) {
-                    value->info_chain.back().to = to;
-                } else if (value->info_chain.back().to <= from) {
-                    value->info_chain.emplace_back(MatchInfo{.from = from, .to = to});
+    const size_t num_rows = rows == nullptr ? src->size() : rows->size();
+    std::vector<const char*> buffers;
+    std::vector<unsigned int> lengths;
+    std::vector<uint64_t> offsets{0};
+    if (rows == nullptr) {
+        auto bytes = src->get_immutable_bytes();
+        buffers.push_back(bytes.empty() ? &StringFunctions::_DUMMY_STRING_FOR_EMPTY_PATTERN
+                                        : reinterpret_cast<const char*>(bytes.data()));
+        lengths.push_back(bytes.size());
+    } else {
+        buffers.reserve(num_rows);
+        lengths.reserve(num_rows);
+        offsets.reserve(num_rows + 1);
+        for (uint32_t row : *rows) {
+            auto slice = src->get_slice(row);
+            buffers.push_back(slice.size ? slice.data : &StringFunctions::_DUMMY_STRING_FOR_EMPTY_PATTERN);
+            lengths.push_back(slice.size);
+            offsets.push_back(offsets.back() + slice.size);
+        }
+    }
+    auto source_offset = [&](size_t row) -> uint64_t {
+        return rows == nullptr ? src->get_offset()[row] : offsets[row];
+    };
+    const size_t src_value_size = source_offset(num_rows);
+    struct RowMatches {
+        MatchInfoChain* matches;
+        const BinaryColumn* source;
+        const std::vector<uint64_t>* selected_offsets;
+        size_t rows;
+        size_t row = 0;
+        uint64_t offset(size_t i) const {
+            return selected_offsets == nullptr ? source->get_offset()[i] : (*selected_offsets)[i];
+        }
+    } scan_context{&match_info_chain, src, rows == nullptr ? nullptr : &offsets, num_rows};
+    // Reject cross-row matches before overlap suppression: an invalid match across a row
+    // boundary must not hide a valid overlapping match wholly inside the next row.
+    auto st = hs_scan_vector(
+            state->database, buffers.data(), lengths.data(), buffers.size(), 0, scratch,
+            [](unsigned int, unsigned long long from, unsigned long long to, unsigned int, void* ctx) -> int {
+                auto* scan = static_cast<RowMatches*>(ctx);
+                while (scan->row < scan->rows && scan->offset(scan->row + 1) <= from) ++scan->row;
+                if (scan->row == scan->rows || scan->offset(scan->row + 1) < to) return 0;
+                auto& matches = scan->matches->info_chain;
+                if (matches.empty() || matches.back().to <= from) {
+                    matches.emplace_back(MatchInfo{.from = from, .to = to});
+                } else if (matches.back().from == from) {
+                    matches.back().to = to;
                 }
                 return 0;
             },
-            &match_info_chain);
-    DCHECK(st == HS_SUCCESS || st == HS_SCAN_TERMINATED) << " status: " << st;
-
-    // filter those match that cross rows
-    const auto num_rows = src->size();
-    const auto& src_offsets = src->get_offset();
-    size_t row_index = 0;
-
-    MatchInfoChain match_info_chain_in_one_row;
-    for (const auto& info : match_info_chain.info_chain) {
-        while (row_index < num_rows && src_offsets[row_index + 1] <= info.from) {
-            row_index++;
-        }
-        if (row_index < num_rows && src_offsets[row_index + 1] >= info.to) {
-            match_info_chain_in_one_row.info_chain.emplace_back(info);
-        }
-    }
+            &scan_context);
+    if (st != HS_SUCCESS && st != HS_SCAN_TERMINATED)
+        return Status::InternalError(fmt::format("Hyperscan scan failed: {}", st));
 
     // no match in row
-    if (match_info_chain_in_one_row.info_chain.empty()) {
-        return (std::move(*src)).mutate();
+    if (match_info_chain.info_chain.empty()) {
+        if (rows == nullptr) return (std::move(*src)).mutate();
+        auto result = src->clone_empty();
+        result->append_selective(*src, *rows);
+        return result;
     }
 
     auto data_count = [&]() {
         size_t res = 0;
         size_t last_to = 0;
-        for (const auto& info : match_info_chain_in_one_row.info_chain) {
+        for (const auto& info : match_info_chain.info_chain) {
             res += info.from - last_to;
             last_to = info.to;
         }
-        res += match_info_chain_in_one_row.info_chain.size() * rpl_value.size();
+        res += match_info_chain.info_chain.size() * rpl_value.size();
         res += src_value_size - last_to;
         return res;
     };
@@ -3915,20 +3986,22 @@ static StatusOr<ColumnPtr> hyperscan_vec_evaluate(const BinaryColumn* src, Strin
     // copy data row by row with replacements applied
     char* cursor = reinterpret_cast<char*>(dst_bytes.data());
     size_t match_index = 0;
-    size_t match_size = match_info_chain_in_one_row.info_chain.size();
+    size_t match_size = match_info_chain.info_chain.size();
     dst_offsets[0] = 0;
 
     for (size_t i = 0; i < num_rows; i++) {
-        size_t row_start = src_offsets[i];
-        size_t row_end = src_offsets[i + 1];
+        auto row_value = src->get_slice(rows == nullptr ? i : (*rows)[i]);
+        const char* row_data = row_value.empty() ? &StringFunctions::_DUMMY_STRING_FOR_EMPTY_PATTERN : row_value.data;
+        size_t row_start = source_offset(i);
+        size_t row_end = source_offset(i + 1);
         size_t last_to = row_start;
 
         // Process all matches in this row
-        while (match_index < match_size && match_info_chain_in_one_row.info_chain[match_index].from >= row_start &&
-               match_info_chain_in_one_row.info_chain[match_index].to <= row_end) {
-            const auto& info = match_info_chain_in_one_row.info_chain[match_index];
+        while (match_index < match_size && match_info_chain.info_chain[match_index].from >= row_start &&
+               match_info_chain.info_chain[match_index].to <= row_end) {
+            const auto& info = match_info_chain.info_chain[match_index];
             // Copy data before the match
-            strings::memcpy_inlined(cursor, data + last_to, info.from - last_to);
+            strings::memcpy_inlined(cursor, row_data + last_to - row_start, info.from - last_to);
             cursor += info.from - last_to;
             // Copy replacement
             strings::memcpy_inlined(cursor, rpl_value.data(), rpl_value.size());
@@ -3937,7 +4010,7 @@ static StatusOr<ColumnPtr> hyperscan_vec_evaluate(const BinaryColumn* src, Strin
             match_index++;
         }
         // Copy remaining data in this row
-        strings::memcpy_inlined(cursor, data + last_to, row_end - last_to);
+        strings::memcpy_inlined(cursor, row_data + last_to - row_start, row_end - last_to);
         cursor += row_end - last_to;
 
         // Calculate offset for this row
@@ -3973,9 +4046,11 @@ StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan_vec(StringFunc
     return res;
 }
 
-StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan(StringFunctionsState* state, const Columns& columns) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto rpl_viewer = ColumnViewer<TYPE_VARCHAR>(columns[2]);
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan_impl(StringFunctionsState* state,
+                                                                       const Inputs& columns) {
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto rpl_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[2]);
 
     hs_scratch_t* scratch = nullptr;
     hs_error_t status;
@@ -3991,7 +4066,7 @@ StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan(StringFunction
         }
     });
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
 
     MatchInfoChain match_info_chain;
@@ -4010,9 +4085,8 @@ StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan(StringFunction
         const char* data =
                 (value_size) ? str_viewer.value(row).data : &StringFunctions::_DUMMY_STRING_FOR_EMPTY_PATTERN;
 
-        auto st = hs_scan(
-                // Use &_DUMMY_STRING_FOR_EMPTY_PATTERN instead of nullptr to avoid crash.
-                state->database, data, value_size, 0, scratch,
+        auto st = scan_regex(
+                state, data, value_size, scratch,
                 [](unsigned int id, unsigned long long from, unsigned long long to, unsigned int flags,
                    void* ctx) -> int {
                     auto* value = (MatchInfoChain*)ctx;
@@ -4043,18 +4117,45 @@ StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan(StringFunction
         result.append(Slice(result_str.data(), result_str.size()));
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> StringFunctions::regexp_replace(FunctionContext* context, const Columns& columns) {
+StatusOr<ColumnPtr> StringFunctions::regexp_replace_use_hyperscan(StringFunctionsState* state, const Columns& columns) {
+    return regexp_replace_use_hyperscan_impl(state, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::regexp_replace_impl(FunctionContext* context, const Inputs& columns) {
     auto state = reinterpret_cast<StringFunctionsState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
 
     if (state->const_pattern) {
         if (state->use_hyperscan) {
-            if (columns[2]->is_constant() && context->state()->enable_hyperscan_vec() && state->use_hyperscan_vec) {
-                return regexp_replace_use_hyperscan_vec(state, columns);
+            if (input_column(columns[2])->is_constant() && context->state()->enable_hyperscan_vec() &&
+                state->use_hyperscan_vec) {
+                if constexpr (std::is_same_v<Inputs, Columns>) {
+                    return regexp_replace_use_hyperscan_vec(state, columns);
+                } else {
+                    {
+                        if (input_num_rows(columns) == 0) return BinaryColumn::create();
+                        for (const auto& input : columns)
+                            if (input.column->only_null())
+                                return ColumnHelper::create_const_null_column(input_num_rows(columns));
+                        const auto& input = columns[0];
+                        const auto* binary = ColumnHelper::get_binary_column(input.column.get());
+                        auto replacement = SelectedColumnViewer<TYPE_VARCHAR>(columns[2]).value(0).to_string();
+                        // Constants have one physical string; repeat only the final result.
+                        const auto* selected = input.column->is_constant() ? nullptr : input.rows;
+                        ASSIGN_OR_RETURN(auto result, hyperscan_vec_evaluate(binary, state, replacement, selected));
+                        if (input.column->is_constant())
+                            return ConstColumn::create(std::move(result), input_num_rows(columns));
+                        if (input.column->is_nullable())
+                            return NullableColumn::create(std::move(result),
+                                                          input_null_flags(input, input_num_rows(columns)));
+                        return result;
+                    }
+                }
             } else {
-                return regexp_replace_use_hyperscan(state, columns);
+                return regexp_replace_use_hyperscan_impl(state, columns);
             }
         } else {
             re2::RE2* const_re = state->get_or_prepare_regex();
@@ -4078,21 +4179,35 @@ StatusOr<ColumnPtr> StringFunctions::regexp_replace(FunctionContext* context, co
     return regexp_replace_general(context, options, columns);
 }
 
-static StatusOr<ColumnPtr> regexp_split_const(re2::RE2* const_re, const Columns& columns, int32_t max_split = -1) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+StatusOr<ColumnPtr> StringFunctions::regexp_replace(FunctionContext* context, const Columns& columns) {
+    return regexp_replace_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::regexp_replace_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                             size_t) {
+    return regexp_replace_impl(context, columns);
+}
 
-    auto size = ColumnHelper::is_all_const(columns) ? 1 : columns[0]->size();
+template <typename Inputs>
+static StatusOr<ColumnPtr> regexp_split_const(re2::RE2* const_re, const Inputs& columns, int32_t max_split = -1) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+
+    auto size = input_columns_are_constant(columns) ? 1 : input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
     offset_col->append(0);
 
     NullColumn::MutablePtr nl_col;
-    if (columns[0]->is_nullable()) {
-        auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
-        nl_col = NullColumn::static_pointer_cast((std::move(*x)).mutate());
-    } else {
+    if constexpr (std::is_same_v<Inputs, SelectedColumns>) {
         nl_col = NullColumn::create(size, 0);
+        for (size_t row = 0; row < size; ++row) nl_col->get_data()[row] = content_viewer.is_null(row);
+    } else {
+        if (columns[0]->is_nullable()) {
+            auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
+            nl_col = NullColumn::static_pointer_cast((std::move(*x)).mutate());
+        } else {
+            nl_col = NullColumn::create(size, 0);
+        }
     }
 
     const char* token_begin = nullptr;
@@ -4123,34 +4238,41 @@ static StatusOr<ColumnPtr> regexp_split_const(re2::RE2* const_re, const Columns&
     auto array = ArrayColumn::create(NullableColumn::create(std::move(str_col), NullColumn::create(str_col->size(), 0)),
                                      std::move(offset_col));
 
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(array), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(array), input_num_rows(columns));
     }
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
-static StatusOr<ColumnPtr> regexp_split_const_pattern(re2::RE2* const_re, const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    ColumnPtr max_split_column;
+template <typename Inputs>
+static StatusOr<ColumnPtr> regexp_split_const_pattern(re2::RE2* const_re, const Inputs& columns) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    typename Inputs::value_type max_split_column;
     if (columns.size() > 2) {
         max_split_column = columns[2];
     } else {
-        max_split_column = ColumnHelper::create_const_column<TYPE_INT>(-1, columns[0]->size());
+        max_split_column =
+                compact_input<Inputs>(ColumnHelper::create_const_column<TYPE_INT>(-1, input_num_rows(columns)));
     }
-    ColumnViewer<TYPE_INT> max_split_viewer(max_split_column);
+    FunctionColumnViewer<TYPE_INT, Inputs> max_split_viewer(max_split_column);
 
-    auto size = ColumnHelper::is_all_const(columns) ? 1 : columns[0]->size();
+    auto size = input_columns_are_constant(columns) ? 1 : input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
     offset_col->append(0);
 
     NullColumn::MutablePtr nl_col;
-    if (columns[0]->is_nullable()) {
-        auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
-        nl_col = NullColumn::static_pointer_cast(std::move(*x).mutate());
-    } else {
+    if constexpr (std::is_same_v<Inputs, SelectedColumns>) {
         nl_col = NullColumn::create(size, 0);
+        for (size_t row = 0; row < size; ++row) nl_col->get_data()[row] = content_viewer.is_null(row);
+    } else {
+        if (columns[0]->is_nullable()) {
+            auto x = down_cast<const NullableColumn*>(columns[0].get())->null_column();
+            nl_col = NullColumn::static_pointer_cast(std::move(*x).mutate());
+        } else {
+            nl_col = NullColumn::create(size, 0);
+        }
     }
 
     const char* token_begin = nullptr;
@@ -4183,24 +4305,26 @@ static StatusOr<ColumnPtr> regexp_split_const_pattern(re2::RE2* const_re, const 
     auto array = ArrayColumn::create(NullableColumn::create(std::move(str_col), NullColumn::create(str_col->size(), 0)),
                                      std::move(offset_col));
 
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(array), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(array), input_num_rows(columns));
     }
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
+template <typename Inputs>
 static StatusOr<ColumnPtr> regexp_split_general(FunctionContext* context, re2::RE2::Options* options,
-                                                const Columns& columns) {
-    auto content_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto ptn_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    ColumnPtr max_split_column;
+                                                const Inputs& columns) {
+    auto content_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto ptn_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
+    typename Inputs::value_type max_split_column;
     if (columns.size() > 2) {
         max_split_column = columns[2];
     } else {
-        max_split_column = ColumnHelper::create_const_column<TYPE_INT>(-1, columns[0]->size());
+        max_split_column =
+                compact_input<Inputs>(ColumnHelper::create_const_column<TYPE_INT>(-1, input_num_rows(columns)));
     }
-    ColumnViewer<TYPE_INT> max_split_viewer(max_split_column);
-    auto size = columns[0]->size();
+    FunctionColumnViewer<TYPE_INT, Inputs> max_split_viewer(max_split_column);
+    auto size = input_num_rows(columns);
 
     auto str_col = BinaryColumn::create();
     auto offset_col = UInt32Column::create();
@@ -4253,8 +4377,11 @@ static StatusOr<ColumnPtr> regexp_split_general(FunctionContext* context, re2::R
     return NullableColumn::create(std::move(array), std::move(nl_col));
 }
 
-StatusOr<ColumnPtr> StringFunctions::regexp_split(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::regexp_split_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
     auto state = reinterpret_cast<StringFunctionsState*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
     if (state->const_pattern) {
         re2::RE2* const_re = nullptr;
@@ -4262,8 +4389,9 @@ StatusOr<ColumnPtr> StringFunctions::regexp_split(FunctionContext* context, cons
             const_re = state->regex.get();
         }
         if (columns.size() > 2) {
-            if (columns[2]->is_constant()) {
-                return regexp_split_const(const_re, columns, ColumnHelper::get_const_value<TYPE_INT>(columns[2]));
+            if (input_column(columns[2])->is_constant()) {
+                return regexp_split_const(const_re, columns,
+                                          ColumnHelper::get_const_value<TYPE_INT>(input_column(columns[2])));
             } else {
                 return regexp_split_const_pattern(const_re, columns);
             }
@@ -4274,6 +4402,14 @@ StatusOr<ColumnPtr> StringFunctions::regexp_split(FunctionContext* context, cons
 
     re2::RE2::Options* options = state->options.get();
     return regexp_split_general(context, options, columns);
+}
+
+StatusOr<ColumnPtr> StringFunctions::regexp_split(FunctionContext* context, const Columns& columns) {
+    return regexp_split_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::regexp_split_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                           size_t) {
+    return regexp_split_impl(context, columns);
 }
 
 Status StringFunctions::regexp_count_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -4310,8 +4446,9 @@ Status StringFunctions::regexp_count_prepare(FunctionContext* context, FunctionC
     return Status::OK();
 }
 
-static ColumnPtr regexp_count_const_pattern(re2::RE2* const_re, const Columns& columns) {
-    auto size = columns[0]->size();
+template <typename Inputs>
+static ColumnPtr regexp_count_const_pattern(re2::RE2* const_re, const Inputs& columns) {
+    auto size = input_num_rows(columns);
 
     // return NULL if patern empty
     if (const_re->pattern().empty()) {
@@ -4319,7 +4456,7 @@ static ColumnPtr regexp_count_const_pattern(re2::RE2* const_re, const Columns& c
     }
 
     ColumnBuilder<TYPE_BIGINT> result(size);
-    ColumnViewer<TYPE_VARCHAR> str_viewer(columns[0]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> str_viewer(columns[0]);
 
     for (int row = 0; row < size; ++row) {
         if (str_viewer.is_null(row)) {
@@ -4348,15 +4485,16 @@ static ColumnPtr regexp_count_const_pattern(re2::RE2* const_re, const Columns& c
         result.append(count);
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-static ColumnPtr regexp_count_general(FunctionContext* context, re2::RE2::Options* options, const Columns& columns) {
-    auto size = columns[0]->size();
+template <typename Inputs>
+static ColumnPtr regexp_count_general(FunctionContext* context, re2::RE2::Options* options, const Inputs& columns) {
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_BIGINT> result(size);
 
-    ColumnViewer<TYPE_VARCHAR> str_viewer(columns[0]);
-    ColumnViewer<TYPE_VARCHAR> pattern_viewer(columns[1]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> str_viewer(columns[0]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> pattern_viewer(columns[1]);
 
     bool all_patterns_empty = true;
     for (int row = 0; row < size; ++row) {
@@ -4414,11 +4552,14 @@ static ColumnPtr regexp_count_general(FunctionContext* context, re2::RE2::Option
         result.append(count);
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> StringFunctions::regexp_count(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::regexp_count_impl(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
 
     auto* state = reinterpret_cast<StringFunctionsState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
 
@@ -4431,6 +4572,14 @@ StatusOr<ColumnPtr> StringFunctions::regexp_count(FunctionContext* context, cons
         options.set_log_errors(false);
         return regexp_count_general(context, &options, columns);
     }
+}
+
+StatusOr<ColumnPtr> StringFunctions::regexp_count(FunctionContext* context, const Columns& columns) {
+    return regexp_count_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::regexp_count_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                           size_t) {
+    return regexp_count_impl(context, columns);
 }
 
 struct ReplaceState {
@@ -4672,11 +4821,12 @@ Status StringFunctions::parse_url_close(FunctionContext* context, FunctionContex
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> StringFunctions::parse_url_general(FunctionContext* context, const starrocks::Columns& columns) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto part_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::parse_url_general(FunctionContext* context, const Inputs& columns) {
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto part_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (str_viewer.is_null(row) || part_viewer.is_null(row)) {
@@ -4711,14 +4861,15 @@ StatusOr<ColumnPtr> StringFunctions::parse_url_general(FunctionContext* context,
         result.append(value);
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
+template <typename Inputs>
 StatusOr<ColumnPtr> StringFunctions::parse_const_urlpart(UrlParser::UrlPart* url_part, FunctionContext* context,
-                                                         const starrocks::Columns& columns) {
-    auto str_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+                                                         const Inputs& columns) {
+    auto str_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
 
-    auto size = columns[0]->size();
+    auto size = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(size);
     for (int row = 0; row < size; ++row) {
         if (str_viewer.is_null(row)) {
@@ -4744,10 +4895,11 @@ StatusOr<ColumnPtr> StringFunctions::parse_const_urlpart(UrlParser::UrlPart* url
         result.append(value);
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> StringFunctions::parse_url(FunctionContext* context, const starrocks::Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::parse_url_impl(FunctionContext* context, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 2);
     auto* state = reinterpret_cast<ParseUrlState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
 
@@ -4759,10 +4911,27 @@ StatusOr<ColumnPtr> StringFunctions::parse_url(FunctionContext* context, const s
     return parse_url_general(context, columns);
 }
 
-StatusOr<ColumnPtr> StringFunctions::url_extract_host(FunctionContext* context, const starrocks::Columns& columns) {
+StatusOr<ColumnPtr> StringFunctions::parse_url(FunctionContext* context, const Columns& columns) {
+    return parse_url_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::parse_url_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                        size_t) {
+    return parse_url_impl(context, columns);
+}
+
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::url_extract_host_impl(FunctionContext* context, const Inputs& columns) {
     UrlParser::UrlPart url_part_enum = UrlParser::HOST;
     UrlParser::UrlPart* url_part = &url_part_enum;
     return parse_const_urlpart(url_part, context, columns);
+}
+
+StatusOr<ColumnPtr> StringFunctions::url_extract_host(FunctionContext* context, const Columns& columns) {
+    return url_extract_host_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::url_extract_host_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                               size_t) {
+    return url_extract_host_impl(context, columns);
 }
 
 static bool seek_param_key_in_query_params(const Slice& query_params, const Slice& param_key,
@@ -4804,10 +4973,10 @@ static bool seek_param_key_in_url(const Slice& url, const Slice& param_key, std:
     return seek_param_key_in_query_params(query_params, param_key, param_value);
 }
 
-static StatusOr<ColumnPtr> url_extract_parameter_const_param_key(const starrocks::Columns& columns,
-                                                                 const std::string& param_key) {
-    auto url_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto num_rows = columns[0]->size();
+template <typename Inputs>
+static StatusOr<ColumnPtr> url_extract_parameter_const_param_key(const Inputs& columns, const std::string& param_key) {
+    auto url_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto num_rows = input_num_rows(columns);
     Slice param_key_str(param_key);
     ColumnBuilder<TYPE_VARCHAR> result(num_rows);
     std::string param_value;
@@ -4824,13 +4993,14 @@ static StatusOr<ColumnPtr> url_extract_parameter_const_param_key(const starrocks
             result.append(param_value);
         }
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-static StatusOr<ColumnPtr> url_extract_parameter_general(const starrocks::Columns& columns) {
-    auto url_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
-    auto param_key_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    auto num_rows = columns[0]->size();
+template <typename Inputs>
+static StatusOr<ColumnPtr> url_extract_parameter_general(const Inputs& columns) {
+    auto url_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[0]);
+    auto param_key_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
+    auto num_rows = input_num_rows(columns);
     ColumnBuilder<TYPE_VARCHAR> result(num_rows);
     std::string param_value;
     for (auto i = 0; i < num_rows; ++i) {
@@ -4853,13 +5023,14 @@ static StatusOr<ColumnPtr> url_extract_parameter_general(const starrocks::Column
             result.append(param_value);
         }
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-static StatusOr<ColumnPtr> url_extract_parameter_const_query_params(const starrocks::Columns& columns,
+template <typename Inputs>
+static StatusOr<ColumnPtr> url_extract_parameter_const_query_params(const Inputs& columns,
                                                                     const std::string& query_params) {
-    auto param_key_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
-    auto num_rows = columns[1]->size();
+    auto param_key_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
+    auto num_rows = input_num_rows(columns);
     Slice query_params_str(query_params);
     ColumnBuilder<TYPE_VARCHAR> result(num_rows);
     std::string param_value;
@@ -4882,7 +5053,7 @@ static StatusOr<ColumnPtr> url_extract_parameter_const_query_params(const starro
             result.append(param_value);
         }
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
 Status StringFunctions::url_extract_parameter_prepare(starrocks::FunctionContext* context,
@@ -4951,13 +5122,15 @@ Status StringFunctions::url_extract_parameter_close(starrocks::FunctionContext* 
     }
     return Status::OK();
 }
-StatusOr<ColumnPtr> StringFunctions::url_extract_parameter(starrocks::FunctionContext* context,
-                                                           const starrocks::Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> StringFunctions::url_extract_parameter_impl(FunctionContext* context, const Inputs& columns) {
     DCHECK_EQ(columns.size(), 2);
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
     auto* state =
             reinterpret_cast<UrlExtractParameterState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
-    auto num_rows = columns[0]->size();
+    auto num_rows = input_num_rows(columns);
     if (state->opt_const_result.has_value()) {
         if (state->result_is_null) {
             return ColumnHelper::create_const_null_column(num_rows);
@@ -4971,6 +5144,14 @@ StatusOr<ColumnPtr> StringFunctions::url_extract_parameter(starrocks::FunctionCo
     } else {
         return url_extract_parameter_general(columns);
     }
+}
+
+StatusOr<ColumnPtr> StringFunctions::url_extract_parameter(FunctionContext* context, const Columns& columns) {
+    return url_extract_parameter_impl(context, columns);
+}
+StatusOr<ColumnPtr> StringFunctions::url_extract_parameter_selected(FunctionContext* context,
+                                                                    const SelectedColumns& columns, size_t) {
+    return url_extract_parameter_impl(context, columns);
 }
 // crc32
 DEFINE_UNARY_FN_WITH_IMPL(crc32Impl, str) {

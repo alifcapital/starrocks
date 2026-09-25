@@ -24,6 +24,9 @@ public:
     static Status tokenize_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
     DEFINE_VECTORIZED_FN(tokenize);
+    static StatusOr<ColumnPtr> tokenize_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> tokenize_impl(FunctionContext*, const Inputs&);
 };
 
 } // namespace starrocks

@@ -17,6 +17,7 @@
 #include "column/array_column.h"
 #include "column/map_column.h"
 #include "common/logging.h"
+#include "exprs/selected_collection.h"
 
 namespace starrocks {
 
@@ -228,6 +229,11 @@ StatusOr<ColumnPtr> MapFunctions::map_entries(FunctionContext* context, const Co
 
 // by design map_filter(map, bool_array), if bool_array is null, return an empty map. We do not return null, as
 // it will change the null property of return results which keeps the same with the first argument map.
+StatusOr<ColumnPtr> MapFunctions::map_filter_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                      size_t rows) {
+    return filter_selected_collection<MapColumn>(columns, rows);
+}
+
 StatusOr<ColumnPtr> MapFunctions::map_filter(FunctionContext* context, const Columns& columns) {
     DCHECK_EQ(2, columns.size());
     if (columns[0]->only_null()) {
@@ -322,6 +328,48 @@ void MapFunctions::_filter_map_items(const MapColumn* src_column, const ColumnPt
     }
     dest_column->keys_column_raw_ptr()->append_selective(src_column->keys(), indexes);
     dest_column->values_column_raw_ptr()->append_selective(src_column->values(), indexes);
+}
+
+StatusOr<ColumnPtr> MapFunctions::distinct_map_keys_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                             size_t rows) {
+    const auto& input = columns[0];
+    if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+    const auto* source = down_cast<const MapColumn*>(ColumnHelper::get_data_column(input.column.get()));
+    const auto& keys = source->keys();
+    const auto& offsets = source->offsets().get_data();
+    auto result_offsets = UInt32Column::create();
+    result_offsets->append(0);
+    auto nulls = input_null_flags(input, rows);
+    phmap::flat_hash_set<uint32_t, CollectionElementHash, CollectionElementEqual> seen(0, CollectionElementHash{&keys},
+                                                                                       CollectionElementEqual{&keys});
+    std::vector<uint32_t> selected;
+    for (size_t row = 0; row < rows; ++row) {
+        if (!nulls->get_data()[row]) {
+            size_t src = input_row(input, row);
+            size_t first = selected.size();
+            seen.clear();
+            // Last duplicate wins, retaining the original order of surviving keys.
+            for (uint32_t i = offsets[src + 1]; i > offsets[src];) {
+                --i;
+                if (seen.insert(i).second) selected.push_back(i);
+            }
+            std::reverse(selected.begin() + first, selected.end());
+        }
+        result_offsets->append(selected.size());
+    }
+    auto result_keys = keys.clone_empty();
+    result_keys->append_selective(keys, selected);
+    ColumnPtr result_values;
+    if (source->values_column()->is_map()) {
+        ASSIGN_OR_RETURN(result_values,
+                         distinct_map_keys_selected(context, {{source->values_column(), &selected}}, selected.size()));
+    } else {
+        auto values = source->values_column()->clone_empty();
+        values->append_selective(source->values(), selected);
+        result_values = std::move(values);
+    }
+    auto result = MapColumn::create(std::move(result_keys), std::move(result_values), std::move(result_offsets));
+    return NullableColumn::create(std::move(result), std::move(nulls));
 }
 
 StatusOr<ColumnPtr> MapFunctions::distinct_map_keys(FunctionContext* context, const Columns& columns) {

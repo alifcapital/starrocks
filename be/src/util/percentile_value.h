@@ -63,6 +63,7 @@ public:
     }
 
     Value quantile(Value q) { return _tdigest.quantile(q); }
+    Value quantile_readonly(Value q) const { return _tdigest.quantile_readonly(q); }
 
 private:
     enum PercentileDataType { TDIGEST = 0 };

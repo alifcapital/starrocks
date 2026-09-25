@@ -16,6 +16,7 @@
 
 #include "column/column.h"
 #include "common/statusor.h"
+#include "exprs/selected_column.h"
 #include "function_helper.h"
 #include "types/logical_type.h"
 
@@ -29,6 +30,7 @@ public:
      * @return: VariantColumn
      */
     DEFINE_VECTORIZED_FN(variant_query);
+    static StatusOr<ColumnPtr> variant_query_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     /**
      *
@@ -37,13 +39,20 @@ public:
      * @return : ResultTypeColumn
      */
     DEFINE_VECTORIZED_FN(get_variant_bool);
+    static StatusOr<ColumnPtr> get_variant_bool_selected(FunctionContext*, const SelectedColumns&, size_t);
     // return bigint to unify all integer types
     DEFINE_VECTORIZED_FN(get_variant_int);
+    static StatusOr<ColumnPtr> get_variant_int_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(get_variant_double);
+    static StatusOr<ColumnPtr> get_variant_double_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(get_variant_string);
+    static StatusOr<ColumnPtr> get_variant_string_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(get_variant_date);
+    static StatusOr<ColumnPtr> get_variant_date_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(get_variant_datetime);
+    static StatusOr<ColumnPtr> get_variant_datetime_selected(FunctionContext*, const SelectedColumns&, size_t);
     DEFINE_VECTORIZED_FN(get_variant_time);
+    static StatusOr<ColumnPtr> get_variant_time_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     /**
      * @param: [variant, path]
@@ -51,6 +60,9 @@ public:
      * @return: BinaryColumn
      */
     DEFINE_VECTORIZED_FN(variant_typeof);
+    static StatusOr<ColumnPtr> variant_typeof_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> variant_typeof_impl(FunctionContext*, const Inputs&);
 
     // Preload the variant segments if necessary.
     // This function is called once per query execution
@@ -63,8 +75,8 @@ public:
     static Status variant_segments_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
 private:
-    template <LogicalType ResultType>
-    static StatusOr<ColumnPtr> _do_variant_query(FunctionContext* context, const Columns& vector);
+    template <LogicalType ResultType, typename Inputs>
+    static StatusOr<ColumnPtr> _do_variant_query(FunctionContext* context, const Inputs& vector);
 };
 
 } // namespace starrocks

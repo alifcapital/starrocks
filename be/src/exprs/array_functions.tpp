@@ -13,6 +13,7 @@
 // limitations under the License.
 #include <chrono>
 #include <memory>
+#include <numeric>
 
 #include "column/array_column.h"
 #include "column/column_builder.h"
@@ -25,6 +26,7 @@
 #include "exprs/arithmetic_operation.h"
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 #include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
 #include "types/logical_type.h"
@@ -43,6 +45,25 @@ public:
         RETURN_IF_COLUMNS_ONLY_NULL(columns);
 
         return _array_distinct<phmap::flat_hash_set<CppType, PhmapDefaultHashFunc<LT, PhmapSeed1>>>(columns);
+    }
+
+    static ColumnPtr process_selected(FunctionContext*, const SelectedColumns& columns, size_t rows) {
+        const auto& input = columns[0];
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+        const auto* src = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get()));
+        auto result = ArrayColumn::static_pointer_cast(src->clone_empty());
+        auto nulls = input_null_flags(input, rows);
+        using HashSet = phmap::flat_hash_set<CppType, PhmapDefaultHashFunc<LT, PhmapSeed1>>;
+        HashSet set;
+        for (size_t row = 0; row < rows; ++row) {
+            if (nulls->get_data()[row])
+                result->append_default();
+            else {
+                _array_distinct_item<HashSet>(*src, input_row(input, row), &set, result.get());
+                set.clear();
+            }
+        }
+        return NullableColumn::create(std::move(result), std::move(nulls));
     }
 
 private:
@@ -553,6 +574,36 @@ public:
                                                      CppTypeWithOverlapTimesEqual>>(columns);
     }
 
+    static ColumnPtr process_selected(FunctionContext*, const SelectedColumns& columns, size_t rows) {
+        if (columns.size() == 1) return materialize_selected_inputs(columns)[0];
+        for (const auto& input : columns) {
+            if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+        }
+        std::vector<const ArrayColumn*> sources;
+        for (const auto& input : columns)
+            sources.push_back(down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get())));
+        auto result = ArrayColumn::static_pointer_cast(sources[0]->clone_empty());
+        auto nulls = NullColumn::create(rows, 0);
+        using HashSet = phmap::flat_hash_set<CppTypeWithOverlapTimes, CppTypeWithOverlapTimesHash<LT>,
+                                             CppTypeWithOverlapTimesEqual>;
+        HashSet set;
+        std::vector<size_t> indices(columns.size());
+        for (size_t row = 0; row < rows; ++row) {
+            bool null = false;
+            for (size_t arg = 0; arg < columns.size(); ++arg) {
+                indices[arg] = input_row(columns[arg], row);
+                null |= columns[arg].column->is_null(indices[arg]);
+            }
+            nulls->get_data()[row] = null;
+            if (null)
+                result->append_default();
+            else
+                _array_intersect_item<HashSet>(sources, 0, &set, result.get(), &indices);
+            set.clear();
+        }
+        return NullableColumn::create(std::move(result), std::move(nulls));
+    }
+
 private:
     template <typename HashSet>
     static ColumnPtr _array_intersect(const Columns& original_columns) {
@@ -616,11 +667,11 @@ private:
 
     template <typename HashSet>
     static void _array_intersect_item(const std::vector<const ArrayColumn*>& columns, size_t index, HashSet* hash_set,
-                                      ArrayColumn* dest_column) {
+                                      ArrayColumn* dest_column, const std::vector<size_t>* indices = nullptr) {
         bool has_null = false;
 
         {
-            Datum v = columns[0]->get(index);
+            Datum v = columns[0]->get(indices == nullptr ? index : (*indices)[0]);
             const auto& items = v.get<DatumArray>();
             for (const auto& item : items) {
                 if (item.is_null()) {
@@ -632,7 +683,7 @@ private:
         }
 
         for (int i = 1; i < columns.size(); ++i) {
-            Datum v = columns[i]->get(index);
+            Datum v = columns[i]->get(indices == nullptr ? index : (*indices)[i]);
             const auto& items = v.get<DatumArray>();
             bool local_has_null = false;
             for (const auto& item : items) {
@@ -710,6 +761,32 @@ public:
             _sort_array_column(dest_column.get(), &sort_index, *src_column);
         }
         return dest_column;
+    }
+
+    static ColumnPtr process_selected(FunctionContext*, const SelectedColumns& columns, size_t rows) {
+        const auto& input = columns[0];
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+        const auto* source = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get()));
+        auto result = ArrayColumn::static_pointer_cast(source->clone_empty());
+        auto nulls = input_null_flags(input, rows);
+        const auto& offsets = source->offsets().get_data();
+        const auto& elements = source->elements();
+        const Column* data = ColumnHelper::get_data_column(&elements);
+        std::vector<uint32_t> order;
+        for (size_t row = 0; row < rows; ++row) {
+            if (!nulls->get_data()[row]) {
+                size_t src = input_row(input, row);
+                order.resize(offsets[src + 1] - offsets[src]);
+                std::iota(order.begin(), order.end(), offsets[src]);
+                auto begin =
+                        std::partition(order.begin(), order.end(), [&](uint32_t i) { return elements.is_null(i); });
+                size_t null_count = begin - order.begin();
+                _sort_column(&order, down_cast<const ColumnType&>(*data), null_count, order.size() - null_count);
+                result->elements_column_raw_ptr()->append_selective(elements, order);
+            }
+            result->offsets_column_raw_ptr()->append(result->elements_column()->size());
+        }
+        return NullableColumn::create(std::move(result), std::move(nulls));
     }
 
 protected:
@@ -921,94 +998,45 @@ private:
 
 class ArrayJoin {
 public:
-    static ColumnPtr process(FunctionContext* ctx, const Columns& columns) {
-        // TODO: optimize the performance of const sep or const null replace str
+    template <typename Inputs>
+    static ColumnPtr process(FunctionContext* ctx, const Inputs& columns) {
         DCHECK_GE(columns.size(), 2);
-        size_t chunk_size = columns[0]->size();
-
-        RETURN_IF_COLUMNS_ONLY_NULL(columns);
-
-        ColumnPtr src_column = ColumnHelper::unpack_and_duplicate_const_column(chunk_size, columns[0]);
-        if (columns.size() <= 2) {
-            return _join_column_ignore_null(src_column, columns[1], chunk_size);
-        } else {
-            return _join_column_replace_null(src_column, columns[1], columns[2], chunk_size);
+        size_t rows = input_num_rows(columns);
+        for (const auto& input : columns) {
+            if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(rows);
         }
-    }
-
-private:
-    static ColumnPtr _join_column_replace_null(const ColumnPtr& src_column, const ColumnPtr& sep_column,
-                                               const ColumnPtr& null_replace_column, size_t chunk_size) {
-        NullableBinaryColumnBuilder res;
-        // byte_size may be smaller or larger than actual used size
-        // byte_size is only one reserve size
-        size_t byte_size = ColumnHelper::get_data_column(src_column.get())->byte_size() +
-                           ColumnHelper::get_data_column(sep_column.get())->byte_size(0) * src_column->size() +
-                           ColumnHelper::get_data_column(null_replace_column.get())->byte_size(0) *
-                                   ColumnHelper::count_nulls(src_column);
-        res.resize(chunk_size, byte_size);
-
-        for (size_t i = 0; i < chunk_size; i++) {
-            if (src_column->is_null(i) || sep_column->is_null(i) || null_replace_column->is_null(i)) {
-                res.set_null(i);
+        const auto& source = input_column(columns[0]);
+        const auto* array = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(source.get()));
+        const auto& offsets = array->offsets().get_data();
+        ColumnViewer<TYPE_VARCHAR> elements(array->elements_column());
+        FunctionColumnViewer<TYPE_VARCHAR, Inputs> separator(columns[1]);
+        NullableBinaryColumnBuilder result;
+        result.resize(rows, 0);
+        for (size_t row = 0; row < rows; ++row) {
+            size_t src = input_row(columns[0], row);
+            bool replace_null = columns.size() == 3;
+            if (source->is_null(src) || separator.is_null(row) ||
+                (replace_null && input_column(columns[2])->is_null(input_row(columns[2], row)))) {
+                result.set_null(row);
                 continue;
             }
-            auto tmp_datum = src_column->get(i);
-            const auto& datum_array = tmp_datum.get_array();
-            bool append = false;
-            Slice sep_slice = sep_column->get(i).get_slice();
-            Slice null_slice = null_replace_column->get(i).get_slice();
-            for (const auto& datum : datum_array) {
-                if (append) {
-                    res.append_partial(sep_slice);
-                }
-                if (datum.is_null()) {
-                    res.append_partial(null_slice);
-                } else {
-                    Slice value_slice = datum.get_slice();
-                    res.append_partial(value_slice);
-                }
-                append = true;
+            Slice sep = separator.value(row);
+            Slice replacement;
+            if (replace_null) {
+                FunctionColumnViewer<TYPE_VARCHAR, Inputs> replace(columns[2]);
+                replacement = replace.value(row);
             }
-            res.append_complete(i);
+            bool appended = false;
+            for (size_t item = offsets[src]; item < offsets[src + 1]; ++item) {
+                bool null = elements.is_null(item);
+                if (null && !replace_null) continue;
+                if (appended) result.append_partial(sep);
+                result.append_partial(null ? replacement : elements.value(item));
+                appended = true;
+            }
+            result.append_complete(row);
         }
-        return res.build_nullable_column();
-    }
-
-    static ColumnPtr _join_column_ignore_null(const ColumnPtr& src_column, const ColumnPtr& sep_column,
-                                              size_t chunk_size) {
-        NullableBinaryColumnBuilder res;
-        // bytes_size may be smaller or larger then actual used size
-        // byte_size is only one reserve size
-        size_t byte_size = ColumnHelper::get_data_column(src_column.get())->byte_size() +
-                           ColumnHelper::get_data_column(sep_column.get())->byte_size(0) * src_column->size();
-        res.resize(chunk_size, byte_size);
-
-        for (size_t i = 0; i < chunk_size; i++) {
-            if (src_column->is_null(i) || sep_column->is_null(i)) {
-                res.set_null(i);
-                continue;
-            }
-
-            auto tmp_datum = src_column->get(i);
-            const auto& datum_array = tmp_datum.get_array();
-            bool append = false;
-            Slice sep_slice = sep_column->get(i).get_slice();
-            for (const auto& datum : datum_array) {
-                if (datum.is_null()) {
-                    continue;
-                }
-                if (append) {
-                    res.append_partial(sep_slice);
-                }
-                Slice value_slice = datum.get_slice();
-                res.append_partial(value_slice);
-                append = true;
-            }
-            res.append_complete(i);
-        }
-
-        return res.build_nullable_column();
+        return result.build_nullable_column();
     }
 };
 
@@ -1019,18 +1047,22 @@ private:
 template <bool isAny>
 class ArrayMatch {
 public:
-    static ColumnPtr process([[maybe_unused]] FunctionContext* ctx, const Columns& columns) {
+    template <typename Inputs>
+    static ColumnPtr process([[maybe_unused]] FunctionContext* ctx, const Inputs& columns) {
         return _array_match(columns);
     }
 
 private:
-    static ColumnPtr _array_match(const Columns& columns) {
+    template <typename Inputs>
+    static ColumnPtr _array_match(const Inputs& columns) {
         DCHECK(columns.size() == 1);
-        RETURN_IF_COLUMNS_ONLY_NULL(columns);
-        bool is_const = columns[0]->is_constant();
+        if (input_column(columns[0])->only_null())
+            return ColumnHelper::create_const_null_column(input_num_rows(columns));
+        bool is_const = input_column(columns[0])->is_constant();
 
-        size_t chunk_size = columns[0]->size();
-        ColumnPtr bool_column = is_const ? FunctionHelper::get_data_column_of_const(columns[0]) : columns[0];
+        size_t chunk_size = input_num_rows(columns);
+        ColumnPtr bool_column = is_const ? FunctionHelper::get_data_column_of_const(input_column(columns[0]))
+                                         : input_column(columns[0]);
 
         size_t dest_num_rows = is_const ? 1 : chunk_size;
         auto dest_null_column = NullColumn::create(dest_num_rows, 0);
@@ -1052,10 +1084,11 @@ private:
         ColumnViewer<TYPE_BOOLEAN> bool_elements(bool_array->elements_column());
 
         for (size_t i = 0; i < dest_num_rows; ++i) {
-            if (array_null_map == nullptr || !array_null_map->get_data()[i]) { // array_null_map[i] is not null
+            size_t src = input_row(columns[0], i);
+            if (array_null_map == nullptr || !array_null_map->get_data()[src]) { // array_null_map[i] is not null
                 bool has_null = false;
                 bool res = !isAny;
-                for (auto id = offsets[i]; id < offsets[i + 1]; ++id) {
+                for (auto id = offsets[src]; id < offsets[src + 1]; ++id) {
                     if (bool_elements.is_null(id)) {
                         has_null = true;
                     } else {
@@ -1290,6 +1323,48 @@ public:
             _sort_array_column(dest_column.get(), *src_column, key_column, nullptr);
         }
         return dest_column;
+    }
+
+    static ColumnPtr process_selected(FunctionContext*, const SelectedColumns& columns, size_t rows) {
+        const auto& input = columns[0];
+        const auto& key = columns[1];
+        if (input.column->only_null()) return ColumnHelper::create_const_null_column(rows);
+        const auto* source = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(input.column.get()));
+        const auto* keys = key.column->only_null()
+                                   ? nullptr
+                                   : down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(key.column.get()));
+        auto result = ArrayColumn::static_pointer_cast(source->clone_empty());
+        auto nulls = input_null_flags(input, rows);
+        const auto& offsets = source->offsets().get_data();
+        std::vector<uint32_t> order;
+        for (size_t row = 0; row < rows; ++row) {
+            size_t src = input_row(input, row);
+            size_t key_row = input_row(key, row);
+            if (!nulls->get_data()[row]) {
+                size_t count = offsets[src + 1] - offsets[src];
+                if (keys == nullptr || key.column->is_null(key_row)) {
+                    result->elements_column_raw_ptr()->append(source->elements(), offsets[src], count);
+                } else {
+                    const auto& key_offsets = keys->offsets().get_data();
+                    size_t first = key_offsets[key_row];
+                    if (count != key_offsets[key_row + 1] - first)
+                        throw std::runtime_error("Input arrays' size are not equal in array_sortby.");
+                    order.resize(count);
+                    std::iota(order.begin(), order.end(), first);
+                    const auto& elements = keys->elements();
+                    auto begin =
+                            std::partition(order.begin(), order.end(), [&](uint32_t i) { return elements.is_null(i); });
+                    size_t null_count = begin - order.begin();
+                    const auto* data = ColumnHelper::get_data_column(&elements);
+                    ArraySort<LT>::_sort_column(&order, down_cast<const ColumnType&>(*data), null_count,
+                                                count - null_count);
+                    for (auto& index : order) index = offsets[src] + (index - first);
+                    result->elements_column_raw_ptr()->append_selective(source->elements(), order);
+                }
+            }
+            result->offsets_column_raw_ptr()->append(result->elements_column()->size());
+        }
+        return NullableColumn::create(std::move(result), std::move(nulls));
     }
 
 private:

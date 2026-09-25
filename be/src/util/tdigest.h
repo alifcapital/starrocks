@@ -160,6 +160,13 @@ public:
     Value cdfProcessed(Value x) const;
     // this returns a quantile on the t-digest
     Value quantile(Value q);
+    // Reading an already compressed digest needs no copy. Dirty digests require a private
+    // working copy because processing changes centroid order and cumulative weights.
+    Value quantile_readonly(Value q) const {
+        if (_unprocessed.empty() && _processed.size() <= _max_processed) return quantileProcessed(q);
+        TDigest working(*this);
+        return working.quantile(q);
+    }
     // this returns a quantile on the currently processed values without changing the t-digest
     // the value will not represent the unprocessed values
     Value quantileProcessed(Value q) const;

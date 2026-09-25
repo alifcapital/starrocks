@@ -60,6 +60,7 @@ set(EXPR_FILES
   dictmapping_expr.cpp
   compound_predicate.cpp
   condition_expr.cpp
+    conditional_two_phase.cpp
   encryption_functions.cpp
   es_functions.cpp
   find_in_set.cpp

@@ -68,6 +68,7 @@ public:
     ~CastStringToArray() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* input_chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override {
         auto cloned = std::unique_ptr<CastStringToArray>(new CastStringToArray(*this));
@@ -80,6 +81,8 @@ public:
     Status open(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override;
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // Invoked only by clone.
     CastStringToArray(const CastStringToArray& rhs)
             : Expr(rhs),
@@ -104,6 +107,7 @@ public:
     ~CastJsonToArray() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* input_chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override {
         auto cloned = std::unique_ptr<CastJsonToArray>(new CastJsonToArray(*this));
@@ -114,6 +118,8 @@ public:
     }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // Invoked only by clone.
     CastJsonToArray(const CastJsonToArray& rhs) : Expr(rhs), _cast_to_type_desc(rhs._cast_to_type_desc) {}
 
@@ -140,6 +146,7 @@ public:
     ~CastJsonToStruct() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* input_chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
     Expr* clone(ObjectPool* pool) const override {
         auto cloned = std::unique_ptr<CastJsonToStruct>(new CastJsonToStruct(*this));
         cloned->_field_casts.reserve(_field_casts.size());
@@ -152,6 +159,8 @@ public:
     }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // Invoked only by clone.
     CastJsonToStruct(const CastJsonToStruct& rhs) : Expr(rhs), _json_paths(rhs._json_paths) {}
 
@@ -170,10 +179,13 @@ public:
     ~CastJsonToMap() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override { return pool->add(new CastJsonToMap(*this)); }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // nullptr if MAP key is not TYPE_VARCHAR
     Expr* _key_cast_expr;
     // nullptr if MAP value is not TYPE_JSON
@@ -214,6 +226,7 @@ public:
     ~CastVariantToArray() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* input_chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override {
         auto cloned = std::unique_ptr<CastVariantToArray>(new CastVariantToArray(*this));
@@ -224,6 +237,8 @@ public:
     }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // Invoked only by clone.
     CastVariantToArray(const CastVariantToArray& rhs) : Expr(rhs), _expected_type_desc(rhs._expected_type_desc) {}
 
@@ -242,10 +257,13 @@ public:
     ~CastVariantToMap() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override { return pool->add(new CastVariantToMap(*this)); }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // If MAP key is TYPE_VARIANT means no need to cast, the expr is nullptr
     Expr* _key_cast_expr;
     // If MAP value is TYPE_VARIANT means no need to cast, the expr is nullptr
@@ -274,6 +292,7 @@ public:
     ~CastVariantToStruct() override = default;
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* input_chunk) override;
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext*, Chunk*, const std::vector<uint32_t>&) override;
 
     Expr* clone(ObjectPool* pool) const override {
         auto cloned = std::unique_ptr<CastVariantToStruct>(new CastVariantToStruct(*this));
@@ -287,6 +306,8 @@ public:
     }
 
 private:
+    template <typename Inputs>
+    StatusOr<ColumnPtr> evaluate_impl(ExprContext*, const Inputs&);
     // Invoked only by clone.
     CastVariantToStruct(const CastVariantToStruct& rhs) : Expr(rhs), _variant_paths(rhs._variant_paths) {}
 
@@ -431,7 +452,9 @@ struct CastToString {
     }
 };
 
+struct SelectedColumn;
 StatusOr<ColumnPtr> cast_nested_to_json(const ColumnPtr& column, bool allow_throw_exception);
+StatusOr<ColumnPtr> cast_nested_to_json_selected(const SelectedColumn&, size_t, bool allow_throw_exception);
 
 StatusOr<std::string> cast_type_to_json_str(const ColumnPtr& column, int idx, bool unindexed_struct = false);
 

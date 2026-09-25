@@ -16,6 +16,7 @@
 
 #include "column/map_column.h"
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 
 namespace starrocks {
 
@@ -30,10 +31,12 @@ public:
     DEFINE_VECTORIZED_FN(map_values);
 
     DEFINE_VECTORIZED_FN(map_filter);
+    static StatusOr<ColumnPtr> map_filter_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(map_entries);
 
     DEFINE_VECTORIZED_FN(distinct_map_keys);
+    static StatusOr<ColumnPtr> distinct_map_keys_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     DEFINE_VECTORIZED_FN(map_concat);
 

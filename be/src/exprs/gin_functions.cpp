@@ -21,6 +21,7 @@
 
 #include "column/array_column.h"
 #include "column/column_viewer.h"
+#include "exprs/selected_column.h"
 #include "column/datum.h"
 
 namespace starrocks {
@@ -68,7 +69,8 @@ Status GinFunctions::tokenize_close(FunctionContext* context, FunctionContext::F
     return Status::OK();
 }
 
-StatusOr<ColumnPtr> GinFunctions::tokenize(FunctionContext* context, const starrocks::Columns& columns) {
+template <typename Inputs>
+StatusOr<ColumnPtr> GinFunctions::tokenize_impl(FunctionContext* context, const Inputs& columns) {
     auto* analyzer =
             reinterpret_cast<lucene::analysis::Analyzer*>(context->get_function_state(FunctionContext::THREAD_LOCAL));
 
@@ -76,7 +78,7 @@ StatusOr<ColumnPtr> GinFunctions::tokenize(FunctionContext* context, const starr
         return Status::InvalidArgument("Tokenize function only call by tokenize('<index_type>', str_column)");
     }
 
-    ColumnViewer<TYPE_VARCHAR> value_viewer(columns[1]);
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> value_viewer(columns[1]);
     size_t num_rows = value_viewer.size();
 
     // Array Offset
@@ -116,6 +118,13 @@ StatusOr<ColumnPtr> GinFunctions::tokenize(FunctionContext* context, const starr
     auto result_array = ArrayColumn::create(NullableColumn::create(array_binary_column, NullColumn::create(offset, 0)),
                                             array_offsets);
     return NullableColumn::create(result_array, null_array);
+}
+
+StatusOr<ColumnPtr> GinFunctions::tokenize(FunctionContext* context, const Columns& columns) {
+    return tokenize_impl(context, columns);
+}
+StatusOr<ColumnPtr> GinFunctions::tokenize_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return tokenize_impl(context, columns);
 }
 
 } // namespace starrocks

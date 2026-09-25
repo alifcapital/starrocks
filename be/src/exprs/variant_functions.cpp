@@ -17,6 +17,7 @@
 #include "column/column_builder.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
+#include "exprs/selected_column.h"
 #include "runtime/runtime_state.h"
 #include "util/variant_converter.h"
 #include "variant_path_parser.h"
@@ -105,17 +106,19 @@ Status VariantFunctions::variant_segments_close(FunctionContext* context, Functi
     return Status::OK();
 }
 
-template <LogicalType ResultType>
-StatusOr<ColumnPtr> VariantFunctions::_do_variant_query(FunctionContext* context, const Columns& columns) {
-    RETURN_IF_COLUMNS_ONLY_NULL(columns);
+template <LogicalType ResultType, typename Inputs>
+StatusOr<ColumnPtr> VariantFunctions::_do_variant_query(FunctionContext* context, const Inputs& columns) {
+    for (const auto& input : columns) {
+        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
+    }
     if (columns.size() != 2) {
         return Status::InvalidArgument("Variant query functions requires 2 arguments");
     }
 
-    size_t num_rows = columns[0]->size();
+    size_t num_rows = input_num_rows(columns);
 
-    auto variant_viewer = ColumnViewer<TYPE_VARIANT>(columns[0]);
-    auto json_path_viewer = ColumnViewer<TYPE_VARCHAR>(columns[1]);
+    auto variant_viewer = FunctionColumnViewer<TYPE_VARIANT, Inputs>(columns[0]);
+    auto json_path_viewer = FunctionColumnViewer<TYPE_VARCHAR, Inputs>(columns[1]);
 
     ColumnBuilder<ResultType> result(num_rows);
     VariantPath stored_path;
@@ -158,13 +161,14 @@ StatusOr<ColumnPtr> VariantFunctions::_do_variant_query(FunctionContext* context
         }
     }
 
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> VariantFunctions::variant_typeof(FunctionContext* context, const Columns& columns) {
-    const auto& variant_column = columns[0];
-    auto variant_viewer = ColumnViewer<TYPE_VARIANT>(variant_column);
-    size_t num_rows = variant_column->size();
+template <typename Inputs>
+StatusOr<ColumnPtr> VariantFunctions::variant_typeof_impl(FunctionContext* context, const Inputs& columns) {
+    const auto& variant_column = input_column(columns[0]);
+    auto variant_viewer = FunctionColumnViewer<TYPE_VARIANT, Inputs>(columns[0]);
+    size_t num_rows = input_num_rows(columns);
 
     ColumnBuilder<TYPE_VARCHAR> result(num_rows);
     for (size_t row = 0; row < num_rows; ++row) {
@@ -179,7 +183,38 @@ StatusOr<ColumnPtr> VariantFunctions::variant_typeof(FunctionContext* context, c
         }
         result.append(VariantUtil::variant_type_to_string(variant->get_value().type()));
     }
-    return result.build(ColumnHelper::is_all_const(columns));
+    return result.build(input_columns_are_constant(columns));
+}
+
+StatusOr<ColumnPtr> VariantFunctions::variant_query_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_VARIANT>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_string_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_VARCHAR>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_int_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_BIGINT>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_bool_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_BOOLEAN>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_double_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_DOUBLE>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_date_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_DATE>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_datetime_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_DATETIME>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::get_variant_time_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return _do_variant_query<TYPE_TIME>(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::variant_typeof(FunctionContext* context, const Columns& columns) {
+    return variant_typeof_impl(context, columns);
+}
+StatusOr<ColumnPtr> VariantFunctions::variant_typeof_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
+    return variant_typeof_impl(context, columns);
 }
 
 } // namespace starrocks

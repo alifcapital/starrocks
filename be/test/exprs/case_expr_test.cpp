@@ -119,6 +119,38 @@ public:
     RuntimeState runtime_state;
 };
 
+#ifdef STARROCKS_JIT_ENABLE
+TEST_F(VectorizedCaseExprTest, two_phase_disabled_preserves_case_jit) {
+    class ExpensiveExpr final : public Expr {
+    public:
+        ExpensiveExpr() : Expr(TypeDescriptor(TYPE_INT), true) {}
+        bool is_expensive_node() const override { return true; }
+        bool is_constant() const override { return constant; }
+        bool constant = false;
+        Expr* clone(ObjectPool* pool) const override { return pool->add(new ExpensiveExpr(*this)); }
+        StatusOr<ColumnPtr> evaluate_checked(ExprContext*, Chunk*) override {
+            return Status::InternalError("JIT eligibility must not evaluate children");
+        }
+    };
+    expr_node.case_expr.has_case_expr = false;
+    expr_node.case_expr.has_else_expr = false;
+    std::unique_ptr<Expr> expr(VectorizedCaseExprFactory::from_thrift(expr_node, TYPE_BOOLEAN, TYPE_INT));
+    ExpensiveExpr child;
+    expr->add_child(&child);
+    expr->add_child(&child);
+    for (bool enabled : {false, true}) {
+        TQueryOptions options;
+        options.__set_enable_conditional_two_phase_eval(enabled);
+        RuntimeState state(TUniqueId(), options, TQueryGlobals(), nullptr);
+        state.set_jit_level(1);
+        child.constant = false;
+        EXPECT_EQ(!enabled, expr->is_compilable(&state));
+        child.constant = true;
+        EXPECT_TRUE(expr->is_compilable(&state));
+    }
+}
+#endif
+
 TEST_F(VectorizedCaseExprTest, whenArrayMapCase) {
     expr_node.case_expr.has_case_expr = true;
     expr_node.case_expr.has_else_expr = false;

@@ -14,21 +14,25 @@
 
 #include "exprs/percentile_functions.h"
 
+#include <optional>
+
 #include "column/column_builder.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/percentile_cont.h"
+#include "exprs/selected_column.h"
 #include "types/logical_type.h"
 #include "util/percentile_value.h"
 
 namespace starrocks {
 
-StatusOr<ColumnPtr> PercentileFunctions::percentile_hash(FunctionContext* context, const Columns& columns) {
-    ColumnViewer<TYPE_DOUBLE> viewer(columns[0]);
+template <typename Inputs>
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_impl(FunctionContext* context, const Inputs& columns) {
+    FunctionColumnViewer<TYPE_DOUBLE, Inputs> viewer(columns[0]);
 
     auto percentile_column = PercentileColumn::create();
-    size_t size = columns[0]->size();
+    size_t size = input_num_rows(columns);
     for (int row = 0; row < size; ++row) {
         PercentileValue value;
         if (!viewer.is_null(row)) {
@@ -37,11 +41,19 @@ StatusOr<ColumnPtr> PercentileFunctions::percentile_hash(FunctionContext* contex
         percentile_column->append(&value);
     }
 
-    if (ColumnHelper::is_all_const(columns)) {
-        return ConstColumn::create(std::move(percentile_column), columns[0]->size());
+    if (input_columns_are_constant(columns)) {
+        return ConstColumn::create(std::move(percentile_column), input_num_rows(columns));
     } else {
         return percentile_column;
     }
+}
+
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash(FunctionContext* context, const Columns& columns) {
+    return percentile_hash_impl(context, columns);
+}
+StatusOr<ColumnPtr> PercentileFunctions::percentile_hash_selected(FunctionContext* context,
+                                                                  const SelectedColumns& columns, size_t) {
+    return percentile_hash_impl(context, columns);
 }
 
 StatusOr<ColumnPtr> PercentileFunctions::percentile_empty(FunctionContext* context, const Columns& columns) {
@@ -62,7 +74,31 @@ StatusOr<ColumnPtr> PercentileFunctions::percentile_approx_raw(FunctionContext* 
             builder.append(result);
         }
     }
-    return builder.build(columns[0]->is_constant());
+    return builder.build(ColumnHelper::is_all_const(columns));
+}
+
+StatusOr<ColumnPtr> PercentileFunctions::percentile_approx_raw_selected(FunctionContext*,
+                                                                        const SelectedColumns& columns, size_t rows) {
+    SelectedColumnViewer<TYPE_PERCENTILE> values(columns[0]);
+    SelectedColumnViewer<TYPE_DOUBLE> rates(columns[1]);
+    const bool constant = selected_columns_are_constant(columns);
+    const size_t work_rows = constant ? std::min(rows, size_t{1}) : rows;
+    ColumnBuilder<TYPE_DOUBLE> result(work_rows);
+    std::optional<PercentileValue> constant_value;
+    for (size_t row = 0; row < work_rows; ++row) {
+        if (values.is_null(row) || rates.is_null(row)) {
+            result.append_null();
+        } else if (!constant && columns[0].column->is_constant()) {
+            // Different quantiles share one private digest; process pending centroids only once.
+            if (!constant_value) constant_value.emplace(*values.value(row));
+            result.append(constant_value->quantile(rates.value(row)));
+        } else {
+            result.append(values.value(row)->quantile_readonly(rates.value(row)));
+        }
+    }
+    auto output = result.build(constant);
+    if (constant) output->as_mutable_raw_ptr()->resize(rows);
+    return output;
 }
 
 struct LCPercentileExtracter {

@@ -19,6 +19,7 @@
 #include "column/json_column.h"
 #include "exprs/cast_expr.h"
 #include "exprs/expr_context.h"
+#include "exprs/selected_expr.h"
 #include "gutil/casts.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/strip.h"
@@ -38,12 +39,24 @@ namespace starrocks {
     null_column->append(1);
 
 StatusOr<ColumnPtr> CastJsonToStruct::evaluate_checked(ExprContext* context, Chunk* input_chunk) {
-    ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, input_chunk));
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, input_chunk));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastJsonToStruct::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                        const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastJsonToStruct::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& column = input_column(inputs[0]);
+    const size_t work_rows = column->is_constant() ? 1 : input_num_rows(inputs);
     if (column->only_null()) {
-        return ColumnHelper::create_const_null_column(column->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
-    ColumnViewer<TYPE_JSON> src(column);
+    FunctionColumnViewer<TYPE_JSON, Inputs> src(inputs[0]);
     NullColumn::MutablePtr null_column = NullColumn::create();
 
     // 1. Cast Json to json columns.
@@ -51,10 +64,10 @@ StatusOr<ColumnPtr> CastJsonToStruct::evaluate_checked(ExprContext* context, Chu
     DCHECK_EQ(field_size, _type.field_names.size());
     vector<ColumnBuilder<TYPE_JSON>> json_columns;
     for (size_t i = 0; i < field_size; i++) {
-        ColumnBuilder<TYPE_JSON> json_column_builder(src.size());
+        ColumnBuilder<TYPE_JSON> json_column_builder(work_rows);
         json_columns.emplace_back(json_column_builder);
     }
-    for (size_t i = 0; i < src.size(); i++) {
+    for (size_t i = 0; i < work_rows; i++) {
         if (src.is_null(i)) {
             APPEND_NULL(json_columns, null_column);
             continue;
@@ -125,18 +138,30 @@ StatusOr<ColumnPtr> CastJsonToStruct::evaluate_checked(ExprContext* context, Chu
 
     // Wrap constant column if source column is constant.
     if (column->is_constant()) {
-        res = ConstColumn::create(std::move(res), column->size());
+        res = ConstColumn::create(std::move(res), input_num_rows(inputs));
     }
     return std::move(res);
 }
 
 StatusOr<ColumnPtr> CastVariantToStruct::evaluate_checked(ExprContext* context, Chunk* input_chunk) {
-    ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, input_chunk));
+    ASSIGN_OR_RETURN(auto column, _children[0]->evaluate_checked(context, input_chunk));
+    return evaluate_impl(context, Columns{std::move(column)});
+}
+StatusOr<ColumnPtr> CastVariantToStruct::evaluate_selected(ExprContext* context, Chunk* chunk,
+                                                           const std::vector<uint32_t>& rows) {
+    if (rows.empty()) return ColumnHelper::create_column(type(), true);
+    ASSIGN_OR_RETURN(auto input, selected_expression_argument(_children[0], context, chunk, rows));
+    return evaluate_impl(context, SelectedColumns{std::move(input)});
+}
+template <typename Inputs>
+StatusOr<ColumnPtr> CastVariantToStruct::evaluate_impl(ExprContext* context, const Inputs& inputs) {
+    const auto& column = input_column(inputs[0]);
+    const size_t work_rows = column->is_constant() ? 1 : input_num_rows(inputs);
     if (column->only_null()) {
-        return ColumnHelper::create_const_null_column(column->size());
+        return ColumnHelper::create_const_null_column(input_num_rows(inputs));
     }
 
-    ColumnViewer<TYPE_VARIANT> viewer(column);
+    FunctionColumnViewer<TYPE_VARIANT, Inputs> viewer(inputs[0]);
     NullColumn::MutablePtr null_column = NullColumn::create();
 
     // 1. Cast struct fields to variant columns.
@@ -144,11 +169,11 @@ StatusOr<ColumnPtr> CastVariantToStruct::evaluate_checked(ExprContext* context, 
     DCHECK_EQ(field_size, _type.field_names.size());
     vector<ColumnBuilder<TYPE_VARIANT>> variant_columns;
     for (size_t i = 0; i < field_size; i++) {
-        ColumnBuilder<TYPE_VARIANT> variant_column_builder(viewer.size());
+        ColumnBuilder<TYPE_VARIANT> variant_column_builder(work_rows);
         variant_columns.emplace_back(variant_column_builder);
     }
 
-    for (size_t row = 0; row < viewer.size(); row++) {
+    for (size_t row = 0; row < work_rows; row++) {
         if (viewer.is_null(row)) {
             APPEND_NULL(variant_columns, null_column);
             continue;
@@ -202,7 +227,7 @@ StatusOr<ColumnPtr> CastVariantToStruct::evaluate_checked(ExprContext* context, 
         res = NullableColumn::create(std::move(res), std::move(null_column));
     }
     if (column->is_constant()) {
-        res = ConstColumn::create(std::move(res), column->size());
+        res = ConstColumn::create(std::move(res), input_num_rows(inputs));
     }
 
     return res;

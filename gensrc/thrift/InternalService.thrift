@@ -389,6 +389,9 @@ struct TQueryOptions {
   215: optional string http_request_host_allowlist_regexp = "";
   216: optional bool http_request_allow_private_in_allowlist = false;
   217: optional bool enable_cache_udaf = false;
+  // Evaluate an expensive value-branch of CASE/IF/IFNULL/COALESCE only on the rows that route to it
+  // (two-phase conditional evaluation). Off by default until fuzz/perf gates pass.
+  219: optional bool enable_conditional_two_phase_eval = false;
 }
 
 // A scan range plus the parameters needed to execute that scan.

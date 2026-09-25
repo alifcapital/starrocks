@@ -133,6 +133,7 @@ def add_function(fn_data):
         exit(1)
     function_set.add(fn_data[0])
 
+    entry["selected"] = "&" + fn_data[-1]["selected"] if isinstance(fn_data[-1], dict) and "selected" in fn_data[-1] else "nullptr"
     entry["id"] = fn_data[0]
     entry["name"] = fn_data[1]
     entry["exception_safe"] = str(fn_data[2]).lower()
@@ -276,7 +277,7 @@ def generate_cpp(path):
         if "prepare" in fnm:
             modules_contents[target] = modules_contents[
                 target
-            ] + '\tBuiltinFunctions::emplace_builtin_function(static_cast<uint64_t>(%d), "%s", %d, %s, %s, %s, %s, %s, "%s", std::vector<const char*>{%s});\n' % (
+            ] + '\tBuiltinFunctions::emplace_builtin_function(static_cast<uint64_t>(%d), "%s", %d, %s, %s, %s, %s, %s, "%s", std::vector<const char*>{%s}, %s);\n' % (
                 fnm["id"],
                 fnm["name"],
                 fnm["args_nums"],
@@ -287,11 +288,12 @@ def generate_cpp(path):
                 fnm["check_overflow"],
                 fnm['ret'], 
                 ", ".join(['"%s"' % arg for arg in fnm['args']]),
+                fnm["selected"],
             )
         else:
             modules_contents[target] = modules_contents[
                 target
-            ] + '\tBuiltinFunctions::emplace_builtin_function(static_cast<uint64_t>(%d), "%s", %d, %s, %s, %s, "%s", std::vector<const char*>{%s});\n' % (
+            ] + '\tBuiltinFunctions::emplace_builtin_function(static_cast<uint64_t>(%d), "%s", %d, %s, %s, %s, "%s", std::vector<const char*>{%s}, %s);\n' % (
                 fnm["id"],
                 fnm["name"],
                 fnm["args_nums"],
@@ -300,6 +302,7 @@ def generate_cpp(path):
                 fnm["check_overflow"],
                 fnm['ret'], 
                 ", ".join(['"%s"' % arg for arg in fnm['args']]),
+                fnm["selected"],
             )
 
     for module in modules:

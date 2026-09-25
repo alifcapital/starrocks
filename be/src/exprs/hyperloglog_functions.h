@@ -15,6 +15,7 @@
 #pragma once
 
 #include "exprs/function_helper.h"
+#include "exprs/selected_column.h"
 
 namespace starrocks {
 
@@ -26,6 +27,7 @@ public:
      * @return: BigIntColumn
      */
     DEFINE_VECTORIZED_FN(hll_cardinality_from_string);
+    static StatusOr<ColumnPtr> hll_cardinality_from_string_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     /**
      * @param: [hyperloglog string]
@@ -33,6 +35,7 @@ public:
      * @return: BigIntColumn
      */
     DEFINE_VECTORIZED_FN(hll_cardinality);
+    static StatusOr<ColumnPtr> hll_cardinality_selected(FunctionContext*, const SelectedColumns&, size_t);
 
     /**
      * @param: [hyperloglog string]
@@ -40,6 +43,9 @@ public:
      * @return: HllColumn
      */
     DEFINE_VECTORIZED_FN(hll_hash);
+    static StatusOr<ColumnPtr> hll_hash_selected(FunctionContext*, const SelectedColumns&, size_t);
+    template <typename Inputs>
+    static StatusOr<ColumnPtr> hll_hash_impl(FunctionContext*, const Inputs&);
 
     /**
      * @param: []
