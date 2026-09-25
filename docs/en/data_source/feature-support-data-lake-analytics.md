@@ -273,7 +273,7 @@ On a cache miss, a query loads table metadata from the catalog. Cache hits use t
 
 With `enable_background_refresh_connector_metadata` enabled, the background worker visits cached tables at the interval set by `background_refresh_metadata_interval_millis` (default: 10 minutes). Tables without a recorded client query within `iceberg_table_cache_ttl_sec` (default: one hour) are invalidated. Currently, activity is recorded for MySQL `COM_QUERY` requests.
 
-For active tables, a check is skipped only while both the known snapshot and the last cache refresh are within `iceberg_meta_cache_ttl_sec` (default: five minutes). Otherwise the catalog is checked; changed metadata triggers a cache refresh and manifest warming. A check without changes does not update the last-refresh timestamp. Tables are processed sequentially, so the worker interval is not a strict freshness guarantee.
+For active tables, metadata checks are spaced by `iceberg_meta_cache_ttl_sec` (default: five minutes), measured from the last successful refresh, including checks that find no changes. Snapshot age does not affect this interval. Explicit table refresh bypasses the interval. Background passes still warm missing manifests and remove inactive tables. Tables are processed sequentially, so detection of a missed notification is rounded to a subsequent background pass, not a strict freshness guarantee.
 
 Metadata checks and cache warming are separate. Every active-table pass restores missing or incomplete data manifests of the current snapshot, including old manifests still referenced by that snapshot. Warming also runs when metadata is unchanged or its freshness check is skipped. Complete cached manifests are not reread.
 

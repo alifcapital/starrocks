@@ -273,7 +273,7 @@ StarRocks はクエリ中に以下のメタデータをキャッシュします:
 
 `enable_background_refresh_connector_metadata` が有効な場合、バックグラウンド処理は `background_refresh_metadata_interval_millis`（デフォルト 10 分）に従ってキャッシュされたテーブルを確認します。`iceberg_table_cache_ttl_sec`（デフォルト 1 時間）以内にクライアントクエリが記録されていないテーブルは無効化されます。現在、活動の記録対象は MySQL の `COM_QUERY` リクエストです。
 
-アクティブなテーブルでは、既知の snapshot と最後のキャッシュ更新がともに `iceberg_meta_cache_ttl_sec`（デフォルト 5 分）以内の場合のみチェックを省略します。それ以外はカタログを確認し、変更があればキャッシュ更新と manifest の事前読み込みを行います。変更がないチェックでは最終更新時刻を更新しません。テーブルは順番に処理されるため、バックグラウンド間隔は厳密な鮮度保証ではありません。
+For active tables, metadata checks are spaced by `iceberg_meta_cache_ttl_sec` (default: five minutes), measured from the last successful refresh, including checks that find no changes. Snapshot age does not affect this interval. Explicit table refresh bypasses the interval. Background passes still warm missing manifests and remove inactive tables. Tables are processed sequentially, so detection of a missed notification is rounded to a subsequent background pass, not a strict freshness guarantee.
 
 メタデータの確認とキャッシュの事前読み込みは独立しています。アクティブなテーブルの巡回ごとに、現在の snapshot が参照する古い manifest を含め、不足または不完全なデータ manifest を読み込みます。メタデータに変更がない場合や鮮度チェックを省略した場合も実行します。完全なキャッシュエントリは再読み込みしません。
 

@@ -452,6 +452,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 // table so the cache stops serving the old (expiring) vended FileIO token.
                 tables.put(icebergTableName, updateTable);
                 warmCurrentSnapshot(updateTable, dbName, tableName, executorService);
+                tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
         }
     }
@@ -520,12 +521,11 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                     continue;
                 }
 
-                Long latestSnapshotTime = tableLatestSnapshotTime.get(identifier);
                 Long latestRefreshTime = tableLatestRefreshTime.get(identifier);
-                // Keep the existing metadata freshness policy, but replenish evicted manifests
-                // on every active-table pass, even while the known snapshot is still fresh.
-                boolean metadataFresh = latestSnapshotTime != null && (now - latestSnapshotTime) / 1000 <= metaTtlSec &&
-                        latestRefreshTime != null && (now - latestRefreshTime) / 1000 <= metaTtlSec;
+                // An unchanged metadata check starts a new interval too. Snapshot age does not
+                // determine freshness; replenish evicted manifests even between metadata checks.
+                boolean metadataFresh = latestRefreshTime != null &&
+                        (now - latestRefreshTime) / 1000 < metaTtlSec;
                 refreshTable(identifier.dbName, identifier.tableName, new ConnectContext(),
                         backgroundExecutor, !metadataFresh);
             } catch (Exception e) {

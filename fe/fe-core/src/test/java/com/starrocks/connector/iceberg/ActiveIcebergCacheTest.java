@@ -202,7 +202,7 @@ class ActiveIcebergCacheTest {
         catalog.refreshCatalog();
         catalog.refreshCatalog();
         Mockito.verify(scan, Mockito.times(1)).refreshDataFileCache(List.of(missing));
-        Mockito.verify(delegate, Mockito.times(2)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        Mockito.verify(delegate, Mockito.never()).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
         // Eviction after a successful warm must be repaired on the next pass too.
         files(catalog).invalidate(missing.path());
         catalog.refreshCatalog();
@@ -226,6 +226,29 @@ class ActiveIcebergCacheTest {
         Mockito.verify(delegate, Mockito.never()).getTable(Mockito.any(), Mockito.anyString(), Mockito.anyString());
         assertEquals(now, times(catalog, "tableLatestRefreshTime").get(key));
         assertEquals(now, times(catalog, "tableLatestAccessTime").get(key));
+    }
+
+    @Test
+    void unchangedCheckDefersNextCheckButExplicitRefreshBypassesInterval() {
+        CachingIcebergCatalog catalog = catalog(false);
+        BaseTable table = table("unchanged");
+        tables(catalog).put(key, table);
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(table);
+        times(catalog, "tableLatestAccessTime").put(key, System.currentTimeMillis());
+        times(catalog, "tableLatestSnapshotTime").put(key, 1L);
+        times(catalog, "tableLatestRefreshTime").put(key, 1L);
+        long before = System.currentTimeMillis();
+        catalog.refreshCatalog();
+        long checkedAt = times(catalog, "tableLatestRefreshTime").get(key);
+        assertTrue(checkedAt >= before);
+        catalog.refreshCatalog();
+        Mockito.verify(delegate, Mockito.times(1)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        assertEquals(checkedAt, times(catalog, "tableLatestRefreshTime").get(key));
+        catalog.refreshTable("db", "tbl", new ConnectContext(), executor);
+        Mockito.verify(delegate, Mockito.times(2)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        times(catalog, "tableLatestRefreshTime").put(key, System.currentTimeMillis() - 301_000L);
+        catalog.refreshCatalog();
+        Mockito.verify(delegate, Mockito.times(3)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
     }
 
     @Test

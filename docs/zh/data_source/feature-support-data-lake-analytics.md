@@ -271,7 +271,7 @@ StarRocks 在查询期间将缓存以下元数据：
 
 启用 `enable_background_refresh_connector_metadata` 后，后台任务按 `background_refresh_metadata_interval_millis`（默认 10 分钟）遍历缓存表。如果在 `iceberg_table_cache_ttl_sec`（默认 1 小时）内没有记录到客户端查询，则清除该表缓存。当前仅记录 MySQL `COM_QUERY` 请求的活动。
 
-对于活跃表，仅当已知 snapshot 和上次缓存刷新均未超过 `iceberg_meta_cache_ttl_sec`（默认 5 分钟）时跳过检查。否则检查 catalog；元数据变化时刷新缓存并预热 manifest。未发现变化的检查不会更新上次刷新时间。表按顺序处理，因此后台间隔不是严格的新鲜度保证。
+For active tables, metadata checks are spaced by `iceberg_meta_cache_ttl_sec` (default: five minutes), measured from the last successful refresh, including checks that find no changes. Snapshot age does not affect this interval. Explicit table refresh bypasses the interval. Background passes still warm missing manifests and remove inactive tables. Tables are processed sequentially, so detection of a missed notification is rounded to a subsequent background pass, not a strict freshness guarantee.
 
 元数据检查与缓存预热相互独立。每次遍历活跃表时，都会恢复当前 snapshot 中缺失或不完整的数据 manifest，包括仍被引用的旧 manifest。即使元数据没有变化或跳过了新鲜度检查，也会执行预热。完整的缓存 manifest 不会被重新读取。
 
@@ -297,7 +297,7 @@ Iceberg Catalog 支持 HMS、Glue 和 Tabular 作为其元数据服务。大多�
   - **优点**：查询性能最佳
   - **缺点**：延迟引起的数据不一致
 - **数据导入（产生新文件）立即可见，或者分区增减立即可见，不依赖手动 Refresh**
-  - **设置**：通过将 Catalog 属性 `iceberg_meta_cache_ttl_sec` 设置为 `0`，使 StarRocks 每次查询都去获取新的 snapshot。
+For active tables, metadata checks are spaced by `iceberg_meta_cache_ttl_sec` (default: five minutes), measured from the last successful refresh, including checks that find no changes. Snapshot age does not affect this interval. Explicit table refresh bypasses the interval. Background passes still warm missing manifests and remove inactive tables. Tables are processed sequentially, so detection of a missed notification is rounded to a subsequent background pass, not a strict freshness guarantee.
   - **优点**：文件和分区变更无延迟可见
   - **缺点**：由于每次查询必须查找新的 snapshot，导致性能较低。
 
