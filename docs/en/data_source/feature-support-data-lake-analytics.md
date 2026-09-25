@@ -241,7 +241,6 @@ StarRocks will cache the following metadata during queries:
   - Influence: detecting data changes (If a data changes occurs, the snapshot ID will change.)
   - Catalog properties: 
     - `enable_iceberg_metadata_cache`: Controls whether to enable the Iceberg metadata cache. Default value: `true`.
-    - `iceberg_table_cache_refresh_interval_sec`: Controls the time interval at which the cached metadata is considered fresh. Default value: `60`. Unit: Seconds.
 
 - **Metadata cache**
   - Content:
@@ -270,19 +269,11 @@ The following FE configuration item controls the asynchronous metadata update po
 
 ### Metadata cache behavior
 
-This section uses the default behavior to explain the metadata behavior during metadata updates and queries.
+On a cache miss, a query loads table metadata from the catalog. Cache hits use the cached table; they do not trigger a time-based asynchronous reload.
 
-By default, when a table is queried, StarRocks caches the metadata of the table, and keeps it active for the next 24 hours. During the 24 hours, the system will ensure that the cache is refreshed at least every 10 minutes (note that 10 minutes is the estimated time for a metadata refresh round. If there are excessive external tables that are pending metadata refresh, the overall metadata refresh interval may be longer than 10 minutes). If a table has not been accessed for more than 24 hours, StarRocks discards the associated metadata. In other words, any query you make within 24 hours will, at worst, use metadata from 10 minutes ago.
+With `enable_background_refresh_connector_metadata` enabled, the background worker visits cached tables at the interval set by `background_refresh_metadata_interval_millis` (default: 10 minutes). Tables without a recorded client query within `iceberg_table_cache_ttl_sec` (default: one hour) are invalidated. Currently, activity is recorded for MySQL `COM_QUERY` requests.
 
-![Metadata Behavior](../_assets/iceberg_metadata_behavior.png)
-
-In details:
-
-1. Suppose the first query involves the table `A`. StarRocks caches its latest snapshot and metadata. The cache is synchronously populated while the query is executed.
-2. If a second query is submitted within 60 seconds after the cache is populated, and hits the table `A`, StarRocks uses the metadata cache directly, and at this point StarRocks considers all cached metadata to be fresh (`iceberg_table_cache_refresh_interval_sec` controls the time window in which StarRocks considers metadata to be fresh).
-3. If a third query is submitted after 90 seconds, and hits the table `A`, StarRocks will still use the metadata cache directly to complete the query. However, since it has been more than 60 seconds since the last metadata refresh, StarRocks will consider the metadata to be expired. So StarRocks will start an asynchronous refresh for the expired metadata. The asynchronous refresh will not affect the result of the current query because the query will still use the outdated metadata.
-4. Because the table `A` has been queried, it is estimated that the metadata will be refreshed every 10 minutes (controlled by `background_refresh_metadata_interval_millis`) for the next 24 hours (controlled by `background_refresh_metadata_time_secs_since_last_access_secs`). The actual interval between rounds of the metadata refresh also depends on the overall pending refresh tasks within the system.
-5. If table `A` is not involved in any query within 24 hours, StarRocks will remove its metadata cache after 24 hours.
+For active tables, a check is skipped only while both the known snapshot and the last cache refresh are within `iceberg_meta_cache_ttl_sec` (default: five minutes). Otherwise the catalog is checked; changed metadata triggers a cache refresh and manifest warming. A check without changes does not update the last-refresh timestamp. Tables are processed sequentially, so the worker interval is not a strict freshness guarantee.
 
 ### Best practices
 

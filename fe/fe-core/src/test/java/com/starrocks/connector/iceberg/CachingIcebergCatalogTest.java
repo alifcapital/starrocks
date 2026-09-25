@@ -687,7 +687,6 @@ public class CachingIcebergCatalogTest {
         };
 
         Map<String, String> config = new HashMap<>();
-        config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_REFRESH_INVERVAL_SEC, "5");
         config.put(IcebergCatalogProperties.ICEBERG_META_CACHE_TTL, "30");
         config.put(IcebergCatalogProperties.ICEBERG_CATALOG_TYPE, "hive");
         config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO, "1");
@@ -815,7 +814,6 @@ public class CachingIcebergCatalogTest {
         };
 
         Map<String, String> config = new HashMap<>();
-        config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_REFRESH_INVERVAL_SEC, "2");
         config.put(IcebergCatalogProperties.ICEBERG_META_CACHE_TTL, "6");
         config.put(IcebergCatalogProperties.ICEBERG_CATALOG_TYPE, "hive");
         config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO, "1");
@@ -911,8 +909,6 @@ public class CachingIcebergCatalogTest {
                 result = true;
                 props.getIcebergMetaCacheTtlSec();
                 result = 60L;
-                props.getIcebergTableCacheRefreshIntervalSec();
-                result = 1L;
                 props.getIcebergTableCacheMemoryUsageRatio();
                 result = 1;
                 props.getIcebergDataFileCacheMemoryUsageRatio();
