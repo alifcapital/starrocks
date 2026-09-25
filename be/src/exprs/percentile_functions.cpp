@@ -92,7 +92,7 @@ StatusOr<ColumnPtr> PercentileFunctions::percentile_approx_raw(FunctionContext* 
             builder.append(result);
         }
     }
-    return builder.build(columns[0]->is_constant());
+    return builder.build(ColumnHelper::is_all_const(columns));
 }
 
 struct LCPercentileExtracter {
