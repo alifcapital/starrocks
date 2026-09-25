@@ -99,7 +99,7 @@ PARALLEL_TEST(DebeziumDecimalTest, ConstantAndEmpty) {
 
 PARALLEL_TEST(DebeziumDecimalTest, NullableParentAndChildren) {
     auto input = decimal_struct({"01", "", "", ""}, {0, 0, 0, 0});
-    auto* structure = down_cast<StructColumn*>(input.get());
+    auto* structure = down_cast<const StructColumn*>(input.get());
     auto fields = structure->fields();
     auto scale_nulls = NullColumn::create();
     auto value_nulls = NullColumn::create();
@@ -122,7 +122,7 @@ PARALLEL_TEST(DebeziumDecimalTest, NullableParentAndChildren) {
 
 PARALLEL_TEST(DebeziumDecimalTest, ReorderedFields) {
     auto input = decimal_struct({"3a4e"}, {2});
-    auto fields = down_cast<StructColumn*>(input.get())->fields();
+    auto fields = down_cast<const StructColumn*>(input.get())->fields();
     input = StructColumn::create(Columns{fields[1], fields[0]}, {"value", "scale"});
     auto result = decode(input);
     ASSERT_TRUE(result.ok()) << result.status();
