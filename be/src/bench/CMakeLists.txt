@@ -52,3 +52,4 @@ ADD_BE_BENCH(${SRC_DIR}/bench/execution_simd_bench)
 ADD_BE_BENCH(${SRC_DIR}/bench/json_extract_bench)
 
 ADD_BE_BENCH(${SRC_DIR}/bench/percentile_compact_bench)
+ADD_BE_BENCH(${SRC_DIR}/bench/hll_merge_bench)

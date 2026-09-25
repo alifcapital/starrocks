@@ -286,6 +286,45 @@ void HyperLogLog::merge(const HyperLogLog& other) {
     }
 }
 
+void HyperLogLog::merge(const Slice& src) {
+    if (src.data == nullptr || src.size == 0) {
+        return;
+    }
+    const auto type = static_cast<HllDataType>(*reinterpret_cast<const uint8_t*>(src.data));
+    // EXPLICIT hash order and SPARSE duplicate-index handling come from deserialize().
+    // Let it validate these inputs once, including the SPARSE index bounds.
+    if (type != HLL_DATA_FULL) {
+        merge(HyperLogLog(src));
+        return;
+    }
+    if (src.size != 1 + HLL_REGISTERS_COUNT) {
+        return;
+    }
+
+    // FULL slice layout is [type:1][register:1 * HLL_REGISTERS_COUNT]. Mirror the
+    // merge(const HyperLogLog&) switch operation-for-operation, sourcing the other
+    // registers from the slice payload instead of a deserialized temporary.
+    const uint8_t* other_registers = reinterpret_cast<const uint8_t*>(src.data) + 1;
+    switch (_type) {
+    case HLL_DATA_EMPTY:
+        _type = HLL_DATA_FULL;
+        if (UNLIKELY(!MemChunkAllocator::allocate(HLL_REGISTERS_COUNT, &_registers))) {
+            throw std::bad_alloc();
+        }
+        memcpy(_registers.data, other_registers, HLL_REGISTERS_COUNT);
+        break;
+    case HLL_DATA_EXPLICIT:
+        _convert_explicit_to_register();
+        merge_registers_impl(_registers.data, other_registers);
+        _type = HLL_DATA_FULL;
+        break;
+    case HLL_DATA_SPARSE:
+    case HLL_DATA_FULL:
+        merge_registers_impl(_registers.data, other_registers);
+        break;
+    }
+}
+
 size_t HyperLogLog::max_serialized_size() const {
     switch (_type) {
     case HLL_DATA_EMPTY:
