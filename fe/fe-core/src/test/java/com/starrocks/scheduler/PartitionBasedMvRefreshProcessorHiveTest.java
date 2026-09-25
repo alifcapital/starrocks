@@ -813,11 +813,11 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "TABLE: part_tbl1\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.part_tbl1\n" +
                     "     PARTITION PREDICATES: 4: par_date IS NOT NULL, 4: par_date >= '2020-01-01', " +
                     "4: par_date < '2020-01-05'\n" +
                     "     partitions=4/4");
-            PlanTestBase.assertContains(plan, "TABLE: part_tbl2\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.part_tbl2\n" +
                     "     PARTITION PREDICATES: 8: par_date IS NOT NULL, 8: par_date >= '2020-01-01', 8: par_date < " +
                     "'2020-01-05' \n" +
                     "     partitions=4/4");
@@ -855,11 +855,11 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "     TABLE: part_tbl1\n" +
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.part_tbl1\n" +
                     "     PARTITION PREDICATES: 4: par_date IS NOT NULL, 4: par_date >= '2020-01-05', 4: par_date < " +
                     "'2020-01-06'\n" +
                     "     partitions=1/5");
-            PlanTestBase.assertContains(plan, "     TABLE: part_tbl2\n" +
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.part_tbl2\n" +
                     "     PARTITION PREDICATES: 8: par_date IS NOT NULL, 8: par_date >= '2020-01-05', 8: par_date < " +
                     "'2020-01-06'\n" +
                     "     partitions=1/5");
@@ -930,11 +930,11 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "TABLE: t1_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t1_par\n" +
                     "     PARTITION PREDICATES: 10: par_date >= '2020-01-01', " +
                     "10: par_date < '2020-01-05'\n" +
                     "     partitions=6/6");
-            PlanTestBase.assertContains(plan, "TABLE: t2_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t2_par\n" +
                     "     PARTITION PREDICATES: 4: par_col IS NOT NULL\n" +
                     "     partitions=6/6");
         }
@@ -952,12 +952,12 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "TABLE: t1_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t1_par\n" +
                     "     PARTITION PREDICATES: 10: par_date >= '2020-01-05', " +
                     "10: par_date < '2020-01-06'\n" +
                     "     partitions=1/7");
             // TODO: multi-column partitions cannot prune partitions.
-            PlanTestBase.assertContains(plan, "TABLE: t2_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t2_par\n" +
                     "     PARTITION PREDICATES: 4: par_col IS NOT NULL\n" +
                     "     partitions=6/6");
         }
@@ -976,12 +976,12 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
             // TODO: non-ref base table's update will refresh all the materialized views' partitions.
-            PlanTestBase.assertContains(plan, "TABLE: t1_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t1_par\n" +
                     "     PARTITION PREDICATES: 10: par_date >= '2020-01-01', 10: par_date < " +
                     "'2020-01-06'\n" +
                     "     partitions=7/7");
             // TODO: multi-column partitions cannot prune partitions.
-            PlanTestBase.assertContains(plan, "TABLE: t2_par\n" +
+            PlanTestBase.assertContains(plan, "TABLE: partitioned_db.t2_par\n" +
                     "     PARTITION PREDICATES: 4: par_col IS NOT NULL\n" +
                     "     partitions=7/7");
         }
@@ -1256,7 +1256,7 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "     TABLE: t1_par\n");
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.t1_par\n");
             PlanTestBase.assertContains(plan, "     partitions=6/6");
         }
 
@@ -1272,7 +1272,7 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "     TABLE: t1_par\n" +
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.t1_par\n" +
                     "     PARTITION PREDICATES: 5: par_date = '2020-01-05', 4: par_col = 4\n" +
                     "     partitions=1/7");
         }
@@ -1321,7 +1321,7 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "     TABLE: t1_par\n");
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.t1_par\n");
             PlanTestBase.assertContains(plan, "     partitions=6/6");
         }
 
@@ -1335,7 +1335,7 @@ public class PartitionBasedMvRefreshProcessorHiveTest extends MVTestBase {
             MvTaskRunContext mvContext = processor.getMvContext();
             ExecPlan execPlan = mvContext.getExecPlan();
             String plan = execPlan.getExplainString(TExplainLevel.NORMAL);
-            PlanTestBase.assertContains(plan, "     TABLE: t1_par\n" +
+            PlanTestBase.assertContains(plan, "     TABLE: partitioned_db.t1_par\n" +
                     "     PARTITION PREDICATES: 4: par_col = 4, 5: par_date = '2020-01-05'\n" +
                     "     partitions=1/7");
         }
