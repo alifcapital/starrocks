@@ -814,7 +814,6 @@ v3.3.3 以降、StarRocks は [定期的なメタデータリフレッシュ戦�
 | refresh_iceberg_manifest_min_length           | 2 * 1024 * 1024       | Data File Cache のリフレッシュをトリガーする最小の Manifest ファイル長。 |
 | iceberg_data_file_cache_memory_usage_ratio    | 0.1                   | Data File Manifest キャッシュの最大メモリ使用率。v3.5.6 以降でサポートされています。 |
 | iceberg_delete_file_cache_memory_usage_ratio  | 0.1                   | Delete File Manifest キャッシュの最大メモリ使用率。v3.5.6 以降でサポートされています。 |
-| iceberg_table_cache_refresh_interval_sec      | 60                    | Iceberg テーブルキャッシュの非同期更新がトリガーされる間隔（秒単位）。v3.5.7 以降でサポートされています。 |
 
 v3.4 以降、StarRocks は、以下のパラメーターを設定することで、Iceberg メタデータを読み取ることで Iceberg テーブルの統計情報を取得できます。これにより、Iceberg テーブルの統計情報の収集を積極的にトリガーする必要はありません。
 

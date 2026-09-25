@@ -36,7 +36,7 @@ public class IcebergCatalogProperties {
     public static final String ENABLE_ICEBERG_METADATA_CACHE = "enable_iceberg_metadata_cache";
     public static final String ENABLE_ICEBERG_TABLE_CACHE = "enable_iceberg_table_cache";
     public static final String ICEBERG_META_CACHE_TTL = "iceberg_meta_cache_ttl_sec"; // implicit for user
-    public static final String ICEBERG_TABLE_CACHE_REFRESH_INVERVAL_SEC = "iceberg_table_cache_refresh_interval_sec";
+    public static final String ICEBERG_TABLE_CACHE_TTL = "iceberg_table_cache_ttl_sec";
     public static final String ICEBERG_JOB_PLANNING_THREAD_NUM = "iceberg_job_planning_thread_num";
     public static final String BACKGROUND_ICEBERG_JOB_PLANNING_THREAD_NUM = "background_iceberg_job_planning_thread_num";
     public static final String ICEBERG_MANIFEST_CACHE_WITH_COLUMN_STATISTICS = "iceberg_manifest_cache_with_column_statistics";
@@ -59,6 +59,7 @@ public class IcebergCatalogProperties {
     private boolean enableIcebergMetadataCache;
     private boolean enableIcebergTableCache;
     private long icebergMetaCacheTtlSec;
+    private long icebergTableCacheTtlSec;
     private int icebergJobPlanningThreadNum;
     private int backgroundIcebergJobPlanningThreadNum;
     private boolean icebergManifestCacheWithColumnStatistics;
@@ -70,7 +71,6 @@ public class IcebergCatalogProperties {
     private double icebergDeleteFileCacheMemoryUsageRatio;
     private double icebergTableCacheMemoryUsageRatio;
     private double icebergPartitionCacheMemoryUsageRatio;
-    private long icebergTableCacheRefreshIntervalSec;
 
     public IcebergCatalogProperties(Map<String, String> catalogProperties) {
         this.properties = catalogProperties;
@@ -100,11 +100,10 @@ public class IcebergCatalogProperties {
         this.enableIcebergMetadataCache = PropertyUtil.propertyAsBoolean(properties, ENABLE_ICEBERG_METADATA_CACHE, true);
         this.enableIcebergTableCache = PropertyUtil.propertyAsBoolean(properties, ENABLE_ICEBERG_TABLE_CACHE, true);
 
-        // one day default, for all meta including tables.
-        this.icebergMetaCacheTtlSec = PropertyUtil.propertyAsLong(properties, ICEBERG_META_CACHE_TTL, 24L * 60 * 60); 
-        // one min default, used for refreshAfterWrite, the same as other lakes.
-        this.icebergTableCacheRefreshIntervalSec = PropertyUtil.propertyAsLong(
-                    properties, ICEBERG_TABLE_CACHE_REFRESH_INVERVAL_SEC, 60L);
+        // 5 min default — threshold of metadata staleness in refreshCatalog/refreshTable.
+        this.icebergMetaCacheTtlSec = PropertyUtil.propertyAsLong(properties, ICEBERG_META_CACHE_TTL, 5L * 60);
+        // 1 hour default — TTL of in-memory caches (tables/databases/partition/data/delete file).
+        this.icebergTableCacheTtlSec = PropertyUtil.propertyAsLong(properties, ICEBERG_TABLE_CACHE_TTL, 60L * 60);
         this.icebergDataFileCacheMemoryUsageRatio = PropertyUtil.propertyAsDouble(
                     properties, ICEBERG_DATA_FILE_CACHE_MEMORY_SIZE_RATIO, 0.1);
         this.icebergDeleteFileCacheMemoryUsageRatio = PropertyUtil.propertyAsDouble(
@@ -152,8 +151,8 @@ public class IcebergCatalogProperties {
         return icebergMetaCacheTtlSec;
     }
 
-    public long getIcebergTableCacheRefreshIntervalSec() {
-        return icebergTableCacheRefreshIntervalSec;
+    public long getIcebergTableCacheTtlSec() {
+        return icebergTableCacheTtlSec;
     }
 
     public int getIcebergJobPlanningThreadNum() {

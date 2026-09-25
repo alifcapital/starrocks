@@ -241,7 +241,6 @@ StarRocks はクエリ中に以下のメタデータをキャッシュします:
   - 影響: データ変更の検出（データ変更が発生すると、スナップショット ID が変わります。）
   - カタログプロパティ: 
     - `enable_iceberg_metadata_cache`: Iceberg メタデータキャッシュを有効にするかどうかを制御します。デフォルト値: `true`。
-    - `iceberg_table_cache_refresh_interval_sec`: キャッシュされたメタデータが新鮮と見なされる時間間隔を制御します。デフォルト値: `60`。単位: 秒。
 
 - **メタデータキャッシュ**
   - 内容:
@@ -270,19 +269,13 @@ StarRocks はクエリ中に以下のメタデータをキャッシュします:
 
 ### メタデータキャッシュの動作
 
-このセクションでは、メタデータの更新とクエリ中のメタデータの動作をデフォルトの動作を使用して説明します。
+キャッシュミス時、クエリはカタログからテーブルメタデータを読み込みます。キャッシュヒット時はキャッシュを使用し、経過時間による非同期再読み込みは開始しません。
 
-デフォルトでは、テーブルがクエリされると、StarRocks はテーブルのメタデータをキャッシュし、次の24時間アクティブに保ちます。この24時間の間に、システムは少なくとも10分ごとにキャッシュがリフレッシュされることを保証します（10分はメタデータリフレッシュラウンドの推定時間です。保留中のメタデータリフレッシュが多すぎる場合、全体のメタデータリフレッシュ間隔は10分以上になる可能性があります）。テーブルが24時間以上アクセスされていない場合、StarRocks は関連するメタデータを破棄します。言い換えれば、24時間以内に行われたクエリは、最悪の場合、10分前のメタデータを使用します。
+`enable_background_refresh_connector_metadata` が有効な場合、バックグラウンド処理は `background_refresh_metadata_interval_millis`（デフォルト 10 分）に従ってキャッシュされたテーブルを確認します。`iceberg_table_cache_ttl_sec`（デフォルト 1 時間）以内にクライアントクエリが記録されていないテーブルは無効化されます。現在、活動の記録対象は MySQL の `COM_QUERY` リクエストです。
 
-![Metadata Behavior](../_assets/iceberg_metadata_behavior.png)
+For active tables, metadata checks are spaced by `iceberg_meta_cache_ttl_sec` (default: five minutes), measured from the last successful refresh, including checks that find no changes. Snapshot age does not affect this interval. Explicit table refresh bypasses the interval. Background passes still warm missing manifests and remove inactive tables. Tables are processed sequentially, so detection of a missed notification is rounded to a subsequent background pass, not a strict freshness guarantee.
 
-詳細:
-
-1. 最初のクエリがテーブル `A` を含むと仮定します。StarRocks はその最新のスナップショットとメタデータをキャッシュします。キャッシュはクエリが実行される間に同期的に生成されます。
-2. キャッシュが生成されてから60秒以内に2番目のクエリが提出され、テーブル `A` にヒットした場合、StarRocks はメタデータキャッシュを直接使用し、この時点で StarRocks はすべてのキャッシュされたメタデータを新鮮と見なします（`iceberg_table_cache_refresh_interval_sec` は StarRocks がメタデータを新鮮と見なす時間枠を制御します）。
-3. 90秒後に3番目のクエリが提出され、テーブル `A` にヒットした場合、StarRocks は依然としてメタデータキャッシュを直接使用してクエリを完了します。しかし、最後のメタデータリフレッシュから60秒以上経過しているため、StarRocks はメタデータを期限切れと見なします。したがって、StarRocks は期限切れのメタデータの非同期リフレッシュを開始します。非同期リフレッシュは現在のクエリの結果には影響しません。クエリは依然として古いメタデータを使用します。
-4. テーブル `A` がクエリされたため、次の24時間（`background_refresh_metadata_time_secs_since_last_access_secs` によって制御されます）、メタデータは10分ごと（`background_refresh_metadata_interval_millis` によって制御されます）にリフレッシュされると推定されます。メタデータリフレッシュのラウンド間の実際の間隔は、システム内の全体の保留中のリフレッシュタスクにも依存します。
-5. テーブル `A` が24時間以内にクエリに関与していない場合、StarRocks は24時間後にそのメタデータキャッシュを削除します。
+メタデータの確認とキャッシュの事前読み込みは独立しています。アクティブなテーブルの巡回ごとに、現在の snapshot が参照する古い manifest を含め、不足または不完全なデータ manifest を読み込みます。メタデータに変更がない場合や鮮度チェックを省略した場合も実行します。完全なキャッシュエントリは再読み込みしません。
 
 ### ベストプラクティス
 
