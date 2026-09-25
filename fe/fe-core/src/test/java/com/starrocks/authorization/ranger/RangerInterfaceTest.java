@@ -887,7 +887,8 @@ public class RangerInterfaceTest {
         // Empty mapping — simulates the case where the scan table was expanded from a
         // view/MV and was therefore never recorded by TableNameCollector.
         Map<Table, TableName> emptyTableObjToTableName = new HashMap<>();
-        Map<TableName, Map<String, java.util.EnumSet<com.starrocks.authorization.ColumnAccessKind>>> scanColumns = new HashMap<>();
+        Map<TableName, Map<String, java.util.EnumSet<com.starrocks.authorization.ColumnAccessKind>>> scanColumns =
+                new HashMap<>();
 
         ColumnPrivilege.ColumnAccessCollector collector =
                 new ColumnPrivilege.ColumnAccessCollector(emptyTableObjToTableName, scanColumns);
