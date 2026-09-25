@@ -373,7 +373,7 @@ StatusOr<ColumnPtr> JsonFunctions::get_native_json_string_selected(FunctionConte
 
 template <typename Viewer>
 static StatusOr<ColumnPtr> parse_json_impl(FunctionContext* context, const Viewer& viewer, size_t num_rows, bool constant) {
-    if (constant && !viewer.is_null(0) && num_rows > 0) {
+    if (constant && num_rows > 0 && !viewer.is_null(0)) {
         auto json = JsonValue::parse(viewer.value(0));
         if (!json.ok()) {
             if (context != nullptr && context->allow_throw_exception()) {
@@ -1165,7 +1165,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_query_impl(FunctionContext* context, con
     return _json_query_impl<TYPE_JSON>(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_query(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_query(FunctionContext* context, const Columns& columns) {
     return json_query_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_query_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1473,7 +1473,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_exists_impl(FunctionContext* context, co
     return _full_json_exists(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_exists(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_exists(FunctionContext* context, const Columns& columns) {
     return json_exists_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_exists_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1582,7 +1582,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_contains_impl(FunctionContext* context, 
     return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_contains(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_contains(FunctionContext* context, const Columns& columns) {
     return json_contains_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_contains_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1590,7 +1590,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_contains_selected(FunctionContext* conte
     return json_contains_impl(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_array_empty(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_array_empty(FunctionContext* context, const Columns& columns) {
     RETURN_IF(columns.size() != 0, Status::InvalidArgument("json_array_empty requires none parameter"));
     ColumnBuilder<TYPE_JSON> result(1);
     JsonValue json(vpack::Slice::emptyArraySlice());
@@ -1631,7 +1631,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_array_impl(FunctionContext* context, con
     return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_array(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_array(FunctionContext* context, const Columns& columns) {
     return json_array_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_array_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1639,7 +1639,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_array_selected(FunctionContext* context,
     return json_array_impl(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_object_empty(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_object_empty(FunctionContext* context, const Columns& columns) {
     RETURN_IF(0 != columns.size(), Status::InvalidArgument("json_object_empty requires 0 arguments"));
     ColumnBuilder<TYPE_JSON> result(1);
     JsonValue json(vpack::Slice::emptyObjectSlice());
@@ -1707,7 +1707,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_object_impl(FunctionContext* context, co
     return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_object(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_object(FunctionContext* context, const Columns& columns) {
     return json_object_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_object_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1728,7 +1728,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_length_impl(FunctionContext* context, co
     return _full_json_length(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_length(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_length(FunctionContext* context, const Columns& columns) {
     return json_length_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_length_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -1856,7 +1856,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_keys_impl(FunctionContext* context, cons
     return _full_json_keys_with_path(context, columns);
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_keys(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_keys(FunctionContext* context, const Columns& columns) {
     return json_keys_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_keys_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -2117,7 +2117,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_remove_impl(FunctionContext* context, co
     return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_remove(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_remove(FunctionContext* context, const Columns& columns) {
     return json_remove_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_remove_selected(FunctionContext* context, const SelectedColumns& columns,
@@ -2253,10 +2253,8 @@ StatusOr<ColumnPtr> JsonFunctions::to_json_selected(FunctionContext* context, co
     return cast_nested_to_json_selected(columns[0], rows, context->allow_throw_exception());
 }
 
-StatusOr<ColumnPtr> JsonFunctions::to_json(FunctionContext* context, const Inputs& columns) {
-    for (const auto& input : columns) {
-        if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
-    }
+StatusOr<ColumnPtr> JsonFunctions::to_json(FunctionContext* context, const Columns& columns) {
+    RETURN_IF_COLUMNS_ONLY_NULL(columns);
     return cast_nested_to_json(columns[0], context->allow_throw_exception());
 }
 
@@ -2620,7 +2618,7 @@ StatusOr<ColumnPtr> JsonFunctions::json_set_impl(FunctionContext* context, const
     return result.build(input_columns_are_constant(columns));
 }
 
-StatusOr<ColumnPtr> JsonFunctions::json_set(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_set(FunctionContext* context, const Columns& columns) {
     return json_set_impl(context, columns);
 }
 StatusOr<ColumnPtr> JsonFunctions::json_set_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {

@@ -133,8 +133,7 @@ public class SubfieldExpressionCollector extends ScalarOperatorVisitor<Void, Voi
         // expensive computation below the scan and out of any guarding CASE/IF/COALESCE, forcing it to run
         // for every row. Skip such calls (still descend into children). Mirrors the column rooting in
         // SubfieldAccessPathNormalizer, which already produces no access path for a computed source.
-        boolean isPathFunction = PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(call.getFnName())
-                || PruneSubfieldRule.SUPPORT_VARIANT_FUNCTIONS.contains(call.getFnName());
+        boolean isPathFunction = PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(call.getFnName());
         if (isPathFunction && !isColumnRootedSource(call.getChild(0))) {
             return visit(call, context);
         }
@@ -153,8 +152,7 @@ public class SubfieldExpressionCollector extends ScalarOperatorVisitor<Void, Voi
                 || current instanceof CallOperator) {
             if (current instanceof CallOperator) {
                 String fnName = ((CallOperator) current).getFnName();
-                if (!PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(fnName)
-                        && !PruneSubfieldRule.SUPPORT_VARIANT_FUNCTIONS.contains(fnName)) {
+                if (!PruneSubfieldRule.SUPPORT_JSON_FUNCTIONS.contains(fnName)) {
                     return false;
                 }
             }

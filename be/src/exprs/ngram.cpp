@@ -346,13 +346,13 @@ private:
             res->get_data()[i] = 1.0f - not_matched * 1.0f / std::max(needle_gram_count, (size_t)1);
         }
 
-        // Merge null masks from haystack and needle via the standard helper.
+        // Preserve the dense result representation, mapping only nullable masks.
+        if (!haystack_column->is_nullable() && !needle_column->is_nullable()) return res;
         auto merged_null = input_null_flags(columns[0], chunk_size);
         auto needle_null = input_null_flags(columns[1], chunk_size);
         for (size_t i = 0; i < chunk_size; ++i) merged_null->get_data()[i] |= needle_null->get_data()[i];
-        if (merged_null != nullptr) {
-            return NullableColumn::create(std::move(res), std::move(merged_null));
-        }
+        return NullableColumn::create(std::move(res), std::move(merged_null));
+    }
 
     static ColumnPtr haystack_vector_and_needle_const(const SelectedColumn& input, std::vector<NgramHash>& map,
                                                       FunctionContext* context, size_t gram_num) {

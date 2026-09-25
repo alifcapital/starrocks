@@ -740,6 +740,12 @@ Default value: `true`, which means global RF is enabled. If this feature is disa
 * **Default**: true
 * **Introduced in**: v3.3.20, v3.4.9, v3.5.8, v4.0.2
 
+### enable_conditional_two_phase_eval
+
+* **Default**: false
+* **Type**: Boolean
+* **Description**: Evaluates eligible expensive value expressions in CASE, IF, IFNULL, and COALESCE only for the rows that need them. This saves expression computation but does not defer reading their input columns from storage. Requires no global late materialization. Expensive expressions are classified by a fixed function list, not a selectivity or cost estimate; enabling it may slow queries where most rows need the expensive branch. A qualifying CASE uses this evaluation path instead of CASE JIT. Functions in unselected value branches are not evaluated and therefore do not raise their evaluation errors. Disabled by default.
+
 ### enable_json_extract_fusion
 
 * **Description**: Enables fast extraction from VARCHAR JSON for constant paths. Default: `true`. `SET` changes the current session; `SET GLOBAL` sets the default for new sessions. The optimizer can also fuse `json_query(parse_json(value), path)` and arrow expressions. Casts retain their target type and error handling.

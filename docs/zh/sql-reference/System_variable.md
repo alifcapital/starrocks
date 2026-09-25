@@ -627,6 +627,12 @@ FROM test;
 * **默认值**：true
 * **引入版本**：v3.3.20、v3.4.9、v3.5.8、v4.0.2
 
+### enable_conditional_two_phase_eval
+
+* **默认值**：false
+* **类型**：Boolean
+* **说明**：对 CASE、IF、IFNULL 和 COALESCE 中符合条件的高开销值表达式，仅计算实际需要该分支的行。此优化减少表达式计算，不会推迟从存储读取输入列，也不依赖全局延迟物化。高开销函数通过固定列表识别，尚未根据选择率或成本自动选择；如果大部分行都需要该分支，启用后可能更慢。符合条件的 CASE 使用此执行方式而非 CASE JIT。未选中的值分支不会执行，因此也不会产生其表达式求值错误。默认关闭。
+
 ### enable_json_extract_fusion
 
 * **说明**：为使用常量路径的 VARCHAR JSON 启用快速提取。默认值为 `true`。`SET` 修改当前会话，`SET GLOBAL` 设置新会话的默认值。优化器还可以合并 `json_query(parse_json(value), path)` 和箭头表达式。CAST 保留目标类型及错误处理规则。

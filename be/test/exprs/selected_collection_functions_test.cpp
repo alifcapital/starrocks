@@ -310,4 +310,68 @@ TEST_F(SelectedCollectionFunctionsTest, HyperscanCrossRowMatchCannotHideValidMat
     ASSERT_TRUE(StringFunctions::regexp_close(ctx.get(), FunctionContext::THREAD_LOCAL).ok());
 }
 
+
+TEST_F(SelectedCollectionFunctionsTest, FusedJsonAndMultiFieldSelection) {
+    // Row 2 is deliberately malformed and is never selected by compare(). Strict mode
+    // must validate selected documents without touching this unrelated row.
+    for (bool strict : {false, true}) {
+        TQueryOptions options;
+        options.__set_enable_json_extract_fusion(true);
+        options.__set_allow_throw_exception(strict);
+        RuntimeState runtime(TUniqueId(), options, TQueryGlobals(), nullptr);
+        std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+        ctx->set_runtime_state(&runtime);
+        Columns inputs{strings({R"({"a":1,"b":true})", nullptr, "invalid", "{}", R"({"a":5,"b":false})"}),
+                       ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("$.a"), 5)};
+        ctx->set_constant_columns(inputs);
+        ASSERT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        ASSERT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::THREAD_LOCAL).ok());
+        compare(ctx.get(), JsonFunctions::json_query_from_string, JsonFunctions::json_query_from_string_selected, inputs);
+        ASSERT_TRUE(JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::THREAD_LOCAL).ok());
+        ASSERT_TRUE(JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        inputs.emplace_back(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("$.b"), 5));
+        ctx->set_constant_columns(inputs);
+        ASSERT_TRUE(JsonFunctions::json_query_many_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        compare(ctx.get(), JsonFunctions::json_query_many_from_string,
+                JsonFunctions::json_query_many_from_string_selected, inputs);
+        ASSERT_TRUE(JsonFunctions::json_query_many_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+    }
+}
+
+TEST_F(SelectedCollectionFunctionsTest, PercentileCompressionSelected) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    ColumnBuilder<TYPE_DOUBLE> values(5);
+    values.append(10); values.append_null(); values.append(100); values.append(30); values.append(50);
+    auto column = values.build(false);
+    for (double compression : {100.0, 1000.0, 2000.0, 10000.0}) {
+        Columns inputs{column, ColumnHelper::create_const_column<TYPE_DOUBLE>(compression, 5)};
+        compare(ctx.get(), PercentileFunctions::percentile_hash_with_compression,
+                PercentileFunctions::percentile_hash_with_compression_selected, inputs);
+        std::vector<uint32_t> rows{4, 1, 0, 4};
+        auto actual = PercentileFunctions::percentile_hash_with_compression_selected(
+                ctx.get(), {{inputs[0], &rows}, {inputs[1], &rows}}, rows.size());
+        ASSERT_TRUE(actual.ok()) << actual.status();
+        ColumnViewer<TYPE_PERCENTILE> digest(actual.value());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            PercentileValue expected(compression);
+            if (rows[i] != 1) expected.add(rows[i] == 0 ? 10 : 50);
+            std::vector<uint8_t> want(expected.serialize_size());
+            std::vector<uint8_t> got(digest.value(i)->serialize_size());
+            expected.serialize(want.data());
+            digest.value(i)->serialize(got.data());
+            EXPECT_EQ(want, got);
+        }
+    }
+}
+
+TEST_F(SelectedCollectionFunctionsTest, NgramVaryingNeedlesSelected) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    Columns inputs{strings({"alpha", "BETA", nullptr, "gamma", "ALPHA"}),
+                   strings({"al", "be", "mm", nullptr, "AL"}),
+                   ColumnHelper::create_const_column<TYPE_INT>(2, 5)};
+    compare(ctx.get(), StringFunctions::ngram_search, StringFunctions::ngram_search_selected, inputs);
+    compare(ctx.get(), StringFunctions::ngram_search_case_insensitive,
+            StringFunctions::ngram_search_case_insensitive_selected, inputs);
+}
+
 } // namespace starrocks
