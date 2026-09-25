@@ -18,17 +18,17 @@
 #include <optional>
 #include <thread>
 
-#include "testutil/assert.h"
 #include "exec/pipeline/fragment_context.h"
-#include "exec/pipeline/query_context.h"
-#include "exec/spill/executor.h"
-#include "exec/pipeline/pipeline_driver.h"
-#include "exec/pipeline/schedule/event_scheduler.h"
 #include "exec/pipeline/operator.h"
+#include "exec/pipeline/pipeline_driver.h"
 #include "exec/pipeline/pipeline_driver_queue.h"
+#include "exec/pipeline/query_context.h"
+#include "exec/pipeline/schedule/event_scheduler.h"
+#include "exec/spill/executor.h"
 #include "runtime/current_thread.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
 
 namespace starrocks::pipeline {
 namespace {
@@ -119,8 +119,8 @@ protected:
         _state->set_fragment_ctx(&_fragment_ctx);
         _source = std::make_shared<MemoryCallbackOperator>(&_factory, 0);
         _sink = std::make_shared<MemoryCallbackOperator>(&_factory, 1);
-        _driver = std::make_unique<PipelineDriver>(Operators{_source, _sink}, _query_ctx.get(),
-                                                   &_fragment_ctx, nullptr, -1);
+        _driver = std::make_unique<PipelineDriver>(Operators{_source, _sink}, _query_ctx.get(), &_fragment_ctx, nullptr,
+                                                   -1);
         // These tests exercise scheduler callbacks without preparing a query plan.
         _driver->_runtime_state = _state.get();
         _driver->prepare_profile();
