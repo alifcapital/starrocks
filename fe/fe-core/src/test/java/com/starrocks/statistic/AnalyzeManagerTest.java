@@ -20,14 +20,19 @@ import com.google.common.collect.Maps;
 import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.plan.PlanTestBase;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.Optional;
 
 public class AnalyzeManagerTest extends PlanTestBase {
     @Test
@@ -42,6 +47,14 @@ public class AnalyzeManagerTest extends PlanTestBase {
 
     @Test
     public void testClearStatisticFromExternalDroppedTable() {
+        // A successful empty catalog listing proves the tables are gone.
+        ConnectorMetadata emptyDatabase = new ConnectorMetadata() {};
+        new MockUp<MetadataMgr>() {
+            @Mock
+            public Optional<ConnectorMetadata> getOptionalMetadata(String catalogName) {
+                return Optional.of(emptyDatabase);
+            }
+        };
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().addExternalBasicStatsMeta(new ExternalBasicStatsMeta(
                 "catalogName", "dbName", "tableName", Lists.newArrayList(), StatsConstants.AnalyzeType.FULL,
                 LocalDateTime.MIN, Maps.newHashMap()));

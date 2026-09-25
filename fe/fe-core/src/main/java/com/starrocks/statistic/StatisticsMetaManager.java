@@ -59,6 +59,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static com.starrocks.catalog.InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME;
@@ -78,6 +79,9 @@ import static com.starrocks.type.JsonType.JSON;
 
 public class StatisticsMetaManager extends FrontendDaemon {
     private static final Logger LOG = LogManager.getLogger(StatisticsMetaManager.class);
+
+    // Wait a full cleanup interval after startup instead of immediately scanning analyze history.
+    private long lastAnalyzeStatusCleanupNanos = System.nanoTime();
 
     public StatisticsMetaManager() {
         super("statistics-meta-manager", Config.statistic_manager_sleep_time_sec * 1000L);
@@ -596,9 +600,12 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(SPM_BASELINE_TABLE_NAME);
         refreshStatisticsTable(QUERY_HISTORY_TABLE_NAME);
 
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
+        long now = System.nanoTime();
+        if (TimeUnit.NANOSECONDS.toSeconds(now - lastAnalyzeStatusCleanupNanos)
+                >= Config.clear_stale_stats_interval_sec) {
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
+            lastAnalyzeStatusCleanupNanos = System.nanoTime();
+        }
         GlobalStateMgr.getCurrentState().getQueryHistoryMgr().clearExpiredQueryHistory();
 
         RepoCreator.getInstance().run();
