@@ -4637,4 +4637,118 @@ PARALLEL_TEST(VecStringFunctionsTest, initcapTest) {
     ASSERT_NE(std::string(error_result.status().message()).find("Invalid UTF-8 sequence"), std::string::npos);
 }
 
+PARALLEL_TEST(VecStringFunctionsTest, NameFunctionsNullAndConstant) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    auto names = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    names->append_datum(Datum(Slice("Раҷабов")));
+    names->append_nulls(1);
+    names->append_datum(Datum(Slice("ҚОДИРОВ")));
+    auto normalized = StringFunctions::norm_tj(ctx.get(), {names}).value();
+    ColumnViewer<TYPE_VARCHAR> normalized_view(normalized);
+    EXPECT_EQ("ражабов", normalized_view.value(0).to_string());
+    EXPECT_TRUE(normalized_view.is_null(1));
+    EXPECT_EQ("кодиров", normalized_view.value(2).to_string());
+
+    auto other = ColumnHelper::create_const_column<TYPE_VARCHAR>("Раҷабов", names->size());
+    for (auto function : {StringFunctions::levenshtein_ratio, StringFunctions::levenshtein_tj_ratio}) {
+        auto result = function(ctx.get(), {names, other}).value();
+        ColumnViewer<TYPE_DOUBLE> view(result);
+        EXPECT_DOUBLE_EQ(1.0, view.value(0));
+        EXPECT_TRUE(view.is_null(1));
+    }
+    auto ordinary = StringFunctions::levenshtein_distance(ctx.get(), {names, other}).value();
+    EXPECT_TRUE(ColumnViewer<TYPE_INT>(ordinary).is_null(1));
+    auto weighted = StringFunctions::levenshtein_tj_distance(ctx.get(), {names, other}).value();
+    EXPECT_TRUE(ColumnViewer<TYPE_DOUBLE>(weighted).is_null(1));
+
+    for (const char* text : {"ддж", "ДҶ", "Ә", "É"}) {
+        auto input = ColumnHelper::create_const_column<TYPE_VARCHAR>(text, 1);
+        auto once = StringFunctions::norm_tj(ctx.get(), {input}).value();
+        auto twice = StringFunctions::norm_tj(ctx.get(), {once}).value();
+        EXPECT_EQ(ColumnViewer<TYPE_VARCHAR>(once).value(0).to_string(),
+                  ColumnViewer<TYPE_VARCHAR>(twice).value(0).to_string());
+    }
+    auto extended = ColumnHelper::create_const_column<TYPE_VARCHAR>("ӘÉ", 1);
+    auto extended_lower = StringFunctions::norm_tj(ctx.get(), {extended}).value();
+    EXPECT_EQ("әé", ColumnViewer<TYPE_VARCHAR>(extended_lower).value(0).to_string());
+
+    auto literal = ColumnHelper::create_const_column<TYPE_VARCHAR>("ҚОДИРОВ", 3);
+    auto folded = StringFunctions::norm_tj(ctx.get(), {literal}).value();
+    EXPECT_TRUE(folded->is_constant());
+    EXPECT_EQ(3, folded->size());
+    EXPECT_EQ("кодиров", ColumnViewer<TYPE_VARCHAR>(folded).value(2).to_string());
+    auto latin = ColumnHelper::create_const_column<TYPE_VARCHAR>("Rajabov", 3);
+    auto cyrillic = StringFunctions::lat_to_cyr(ctx.get(), {latin}).value();
+    EXPECT_TRUE(cyrillic->is_constant());
+    auto stem = StringFunctions::norm_tj(ctx.get(), {cyrillic}).value();
+    EXPECT_EQ("ражабов", ColumnViewer<TYPE_VARCHAR>(stem).value(2).to_string());
+}
+
+PARALLEL_TEST(VecStringFunctionsTest, TajikTransliterationRules) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    const std::vector<std::pair<std::string, std::string>> cases = {
+            {"Yusupov", "Юсупов"},
+            {"Yakubov", "Якубов"},
+            {"YOROV", "ЁРОВ"},
+            {"Bakhtiyor", "Бахтиёр"},
+            {"YEROVA", "ЕРОВА"},
+            {"Golubtsov", "Голубцов"},
+            {"Davlatshoh", "Давлатшох"},
+            {"DAVLATSHOH", "ДАВЛАТШОХ"},
+            {"Xasan", "Хасан"},
+            {"Alexandr", "Александр"},
+            {"Maxumova", "Максумова"},
+            {"Мyнавара", "Мунавара"},
+            {"cадыков", "садыков"},
+            {"Pустам", "Рустам"},
+            {"Hур", "Нур"},
+            {"hур", "хур"},
+            // Pure Latin is phonetic even when the following token is Cyrillic.
+            {"Codi Юсуф", "Коди Юсуф"},
+            {"Yusuf Юсуф", "Юсуф Юсуф"},
+            {"O'g'li", "Угли"},
+            {"", ""}};
+    auto input = BinaryColumn::create();
+    for (const auto& [source, expected] : cases) input->append(source);
+    auto output = StringFunctions::lat_to_cyr(ctx.get(), {input}).value();
+    ColumnViewer<TYPE_VARCHAR> view(output);
+    for (size_t i = 0; i < cases.size(); ++i) {
+        EXPECT_EQ(cases[i].second, view.value(i).to_string()) << cases[i].first;
+        auto literal = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(cases[i].first), 2);
+        auto constant = StringFunctions::lat_to_cyr(ctx.get(), {literal}).value();
+        EXPECT_EQ(cases[i].second, ColumnViewer<TYPE_VARCHAR>(constant).value(1).to_string());
+    }
+}
+
+PARALLEL_TEST(VecStringFunctionsTest, NameFunctionsScoresAndInvalidUtf8) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    auto a = ColumnHelper::create_const_column<TYPE_VARCHAR>("дом", 1);
+    auto b = ColumnHelper::create_const_column<TYPE_VARCHAR>("том", 1);
+    auto distance = StringFunctions::levenshtein_distance(ctx.get(), {a, b}).value();
+    EXPECT_EQ(2, ColumnViewer<TYPE_INT>(distance).value(0));
+    auto ratio = StringFunctions::levenshtein_ratio(ctx.get(), {a, b}).value();
+    EXPECT_DOUBLE_EQ(1.0 - 2.0 / 6.0, ColumnViewer<TYPE_DOUBLE>(ratio).value(0));
+
+    a = ColumnHelper::create_const_column<TYPE_VARCHAR>("салим", 1);
+    b = ColumnHelper::create_const_column<TYPE_VARCHAR>("салем", 1);
+    auto weighted = StringFunctions::levenshtein_tj_ratio(ctx.get(), {a, b}).value();
+    EXPECT_DOUBLE_EQ(0.9, ColumnViewer<TYPE_DOUBLE>(weighted).value(0));
+
+    auto empty = ColumnHelper::create_const_column<TYPE_VARCHAR>("", 1);
+    for (auto function : {StringFunctions::levenshtein_ratio, StringFunctions::levenshtein_tj_ratio}) {
+        auto same_empty = function(ctx.get(), {empty, empty}).value();
+        EXPECT_DOUBLE_EQ(1.0, ColumnViewer<TYPE_DOUBLE>(same_empty).value(0));
+        auto one_empty = function(ctx.get(), {empty, a}).value();
+        EXPECT_DOUBLE_EQ(0.0, ColumnViewer<TYPE_DOUBLE>(one_empty).value(0));
+    }
+    // Truncated sequence and an overlong encoding, including the empty-string shortcut.
+    for (std::string invalid : {std::string("\xD0", 1), std::string("\xC0\xAF", 2)}) {
+        auto bad = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(invalid), 1);
+        EXPECT_FALSE(StringFunctions::levenshtein_distance(ctx.get(), {a, bad}).ok());
+        EXPECT_FALSE(StringFunctions::levenshtein_ratio(ctx.get(), {empty, bad}).ok());
+        EXPECT_FALSE(StringFunctions::levenshtein_tj_distance(ctx.get(), {a, bad}).ok());
+        EXPECT_FALSE(StringFunctions::levenshtein_tj_ratio(ctx.get(), {empty, bad}).ok());
+    }
+}
+
 } // namespace starrocks

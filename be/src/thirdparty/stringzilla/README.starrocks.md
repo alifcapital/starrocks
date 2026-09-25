@@ -13,5 +13,12 @@ INITCAP uses simple mappings over runs of Unicode letters and decimal digits,
 with the first character uppercase and the rest lowercase. Invalid UTF-8 is rejected
 with the sequence offset. It does not use folding or full titlecase mappings.
 
-Other legacy headers in this directory and ../stringzillas are not used by case
-conversion; they are retained for the separate string similarity branches.
+The StringZillas CPU similarity headers and their StringZilla dependencies are
+also copied from the same pinned commit for the name-similarity functions.
+ForkUnion's required header is pinned to the upstream submodule revision
+7f52520ea00a6bf8e7a1f46348dad345ba361096; its license is ../LICENSE.forkunion.
+The SQL integration uses the serial executor, not a ForkUnion thread pool.
+Similarity backends follow the compiled ISA: AVX-512, AVX2 or scalar. UTF-8
+inputs are validated before the similarity engine's unchecked decoding.
+Tajik weighted distance keeps its separate character-dependent cost model.
+Remaining legacy headers are not used by these paths.

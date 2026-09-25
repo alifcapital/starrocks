@@ -1,12 +1,18 @@
 /**
- *  @brief  Shared definitions for the StringZillas C++ library.
- *  @file   types.hpp
+ *  @brief Shared definitions for the StringZillas C++ library.
+ *  @file include/stringzillas/types.hpp
  *  @author Ash Vardanian
  */
 #ifndef STRINGZILLAS_TYPES_HPP_
 #define STRINGZILLAS_TYPES_HPP_
 
-#include <thread> // `std::thread::hardware_concurrency`
+#include <thread>   // `std::thread::hardware_concurrency`
+#include <atomic>   // `std::atomic`, `std::memory_order`
+#include <concepts> // `std::convertible_to`, `std::same_as`
+#include <cstdlib>  // `std::malloc`, `std::free`
+#include <memory>   // `std::addressof`
+
+#include <forkunion.h> // `fu_pool_t`, `fu_topology_t`, capability-dispatched parallel loops
 
 #include "stringzilla/types.hpp"
 
@@ -28,9 +34,42 @@ struct dummy_mutex_t {
     constexpr void unlock() noexcept {}
 };
 
+/** @brief Minimal test-and-set spin lock guarding the executors' rare cross-thread merges; `lock_guard`-compatible. */
+class spin_mutex_t {
+    std::atomic<bool> locked_ {false};
+
+  public:
+    void lock() noexcept {
+        while (locked_.exchange(true, std::memory_order_acquire)) {}
+    }
+    void unlock() noexcept { locked_.store(false, std::memory_order_release); }
+};
+
 /**
- *  @brief  Simple RAII lock guard analog to `std::lock_guard` for C++11 compatibility.
- *          Automatically locks the mutex on construction and unlocks on destruction.
+ *  @brief A `status_t` shared by parallel workers: keeps the @b first failure and lets the others bail out early.
+ *
+ *  Relaxed throughout, as the pool's join already establishes happens-before between the workers and the caller.
+ *  Assigning @b success_k is a no-op, so the success path never writes to the shared line.
+ */
+struct atomic_status_t {
+    std::atomic<status_t> status_ {status_t::success_k};
+
+    atomic_status_t() = default;
+    atomic_status_t(atomic_status_t const &) = delete;
+    atomic_status_t &operator=(atomic_status_t const &) = delete;
+
+    operator status_t() const noexcept { return status_.load(std::memory_order_relaxed); }
+    atomic_status_t &operator=(status_t status) noexcept {
+        if (status == status_t::success_k) return *this; // ? The flag starts here; never write it back.
+        status_t expected = status_t::success_k;
+        status_.compare_exchange_strong(expected, status, std::memory_order_relaxed, std::memory_order_relaxed);
+        return *this;
+    }
+};
+
+/**
+ *  @brief Simple RAII lock guard analog to `std::lock_guard` for C++11 compatibility.
+ *      Automatically locks the mutex on construction and unlocks on destruction.
  */
 template <typename mutex_type_>
 class lock_guard {
@@ -54,22 +93,23 @@ struct dummy_prong_t {
 };
 
 /**
- *  @brief  C++17-compatible equivalent of std::remove_cvref (which was added in C++20).
- *          Removes const, volatile, and reference qualifiers from a type.
+ *  @brief C++17-compatible equivalent of std::remove_cvref (which was added in C++20).
+ *      Removes const, volatile, and reference qualifiers from a type.
  */
 template <typename type_>
 using remove_cvref = typename std::remove_cv<typename std::remove_reference<type_>::type>::type;
 
 struct dummy_executor_t {
     using prong_t = dummy_prong_t;
+    using mutex_t = dummy_mutex_t;
 
     constexpr size_t threads_count() const noexcept { return 1; }
-    constexpr dummy_mutex_t make_mutex() const noexcept { return {}; }
+    constexpr mutex_t make_mutex() const noexcept { return {}; }
 
     /**
-     *  @brief  Calls the @p function for each index from 0 to @p (n) in such
-     *          a way that consecutive elements are likely to be processed by
-     *          the same thread.
+     *  @brief Calls the @p function for each index from 0 to @p (n) in such
+     *      a way that consecutive elements are likely to be processed by
+     *      the same thread.
      */
     template <typename function_type_>
     inline void for_n(size_t n, function_type_ &&function) const noexcept {
@@ -77,10 +117,10 @@ struct dummy_executor_t {
     }
 
     /**
-     *  @brief  Calls the @p function on each thread propagating a 2 indices
-     *          to the function. The first index is the start of the range
-     *          and the second index is the exclusive end of the range to be
-     *          handled by a particular thread.
+     *  @brief Calls the @p function on each thread propagating a 2 indices
+     *      to the function. The first index is the start of the range
+     *      and the second index is the exclusive end of the range to be
+     *      handled by a particular thread.
      */
     template <typename function_type_>
     inline void for_slices(size_t n, function_type_ &&function) const noexcept {
@@ -88,9 +128,9 @@ struct dummy_executor_t {
     }
 
     /**
-     *  @brief  Calls the @p function for each index from 0 to @p (n) expecting
-     *          that individual invocations can have drastically different duration,
-     *          so each thread eagerly processes the next index in the range.
+     *  @brief Calls the @p function for each index from 0 to @p (n) expecting
+     *      that individual invocations can have drastically different duration,
+     *      so each thread eagerly processes the next index in the range.
      */
     template <typename function_type_>
     inline void for_n_dynamic(size_t n, function_type_ &&function) const noexcept {
@@ -98,7 +138,7 @@ struct dummy_executor_t {
     }
 
     /**
-     *  @brief  Executes a function in parallel on the current and all worker threads.
+     *  @brief Executes a function in parallel on the current and all worker threads.
      *  @param[in] function The callback, receiving the thread index as an argument.
      */
     template <typename function_type_>
@@ -107,21 +147,133 @@ struct dummy_executor_t {
     }
 };
 
+/**
+ *  @brief Adapts a ForkUnion pool, consumed through its C API, to the `executor_like` shape the engines
+ *      are templated on. The compiled ForkUnion runtime performs the capability dispatch (NUMA-aware
+ *      placement, colocated scheduling, huge pages) behind the opaque `fu_pool_t` handle, so consumer
+ *      translation units never instantiate its C++ core.
+ */
+class forkunion_executor_t {
+    fu_topology_t topology_ = nullptr;
+    fu_pool_t pool_ = nullptr;
+
+  public:
+    using prong_t = dummy_prong_t;
+    using mutex_t = spin_mutex_t;
+
+    forkunion_executor_t() noexcept = default;
+    forkunion_executor_t(forkunion_executor_t const &) = delete;
+    forkunion_executor_t &operator=(forkunion_executor_t const &) = delete;
+    forkunion_executor_t(forkunion_executor_t &&) = delete;
+    forkunion_executor_t &operator=(forkunion_executor_t &&) = delete;
+
+    ~forkunion_executor_t() noexcept {
+        if (pool_) fu_pool_delete(pool_);
+        if (topology_) fu_topology_delete(topology_);
+    }
+
+    /** @brief Logical cores the process may actually use (affinity mask, cgroup cpuset), per the ForkUnion topology. */
+    static size_t allowed_cores_count() noexcept {
+        fu_topology_t topology = fu_topology_new();
+        if (!topology) return 0;
+        size_t const count = fu_logical_cores_count(topology);
+        fu_topology_delete(topology);
+        return count;
+    }
+
+    /** @brief Spawns @p threads workers (the caller included) over the detected machine topology. */
+    status_t try_spawn(size_t threads) noexcept {
+        topology_ = fu_topology_new();
+        pool_ = fu_pool_new("stringzillas", fu_capabilities_all_k);
+        if (!topology_ || !pool_) return status_t::bad_alloc_k;
+        if (!fu_pool_spawn(topology_, pool_, threads, fu_caller_inclusive_k)) return status_t::bad_alloc_k;
+        return status_t::success_k;
+    }
+
+    size_t threads_count() const noexcept { return fu_pool_threads_count(pool_); }
+    mutex_t make_mutex() const noexcept { return {}; }
+
+    /**
+     *  @brief Calls the @p function for each index from 0 to @p (n) in such
+     *      a way that consecutive elements are likely to be processed by
+     *      the same thread.
+     */
+    template <typename function_type_>
+    void for_n(size_t n, function_type_ &&function) const noexcept {
+        using function_t = typename std::remove_reference<function_type_>::type;
+        fu_pool_for_n(
+            pool_, n,
+            [](fu_lambda_context_t context, size_t task, size_t thread, size_t) noexcept {
+                (*reinterpret_cast<function_t *>(context))(prong_t {task, thread});
+            },
+            const_cast<function_t *>(std::addressof(function)));
+    }
+
+    /**
+     *  @brief Calls the @p function for each index from 0 to @p (n) expecting
+     *      that individual invocations can have drastically different duration,
+     *      so each thread eagerly steals the next index in the range.
+     */
+    template <typename function_type_>
+    void for_n_dynamic(size_t n, function_type_ &&function) const noexcept {
+        using function_t = typename std::remove_reference<function_type_>::type;
+        fu_pool_for_n_dynamic(
+            pool_, n,
+            [](fu_lambda_context_t context, size_t task, size_t thread, size_t) noexcept {
+                (*reinterpret_cast<function_t *>(context))(prong_t {task, thread});
+            },
+            const_cast<function_t *>(std::addressof(function)));
+    }
+
+    /**
+     *  @brief Calls the @p function on each thread propagating 2 indices to the
+     *      function: the inclusive start and the exclusive end of the sub-range
+     *      handled by that thread.
+     */
+    template <typename function_type_>
+    void for_slices(size_t n, function_type_ &&function) const noexcept {
+        using function_t = typename std::remove_reference<function_type_>::type;
+        fu_pool_for_slices(
+            pool_, n,
+            [](fu_lambda_context_t context, size_t first, size_t count, size_t, size_t) noexcept {
+                (*reinterpret_cast<function_t *>(context))(first, first + count);
+            },
+            const_cast<function_t *>(std::addressof(function)));
+    }
+
+    /**
+     *  @brief Executes a function in parallel on the current and all worker threads.
+     *  @param[in] function The callback, receiving the thread index as an argument.
+     */
+    template <typename function_type_>
+    void for_threads(function_type_ &&function) const noexcept {
+        using function_t = typename std::remove_reference<function_type_>::type;
+        fu_pool_for_threads(
+            pool_,
+            [](fu_lambda_context_t context, size_t thread, size_t) noexcept {
+                (*reinterpret_cast<function_t *>(context))(thread);
+            },
+            const_cast<function_t *>(std::addressof(function)));
+    }
+};
+
 #if SZ_HAS_CONCEPTS_
 
 template <typename executor_type_>
-concept executor_like = requires(executor_type_ executor) {
+concept executor_like = requires(std::remove_reference_t<executor_type_> &executor) {
     { executor.threads_count() } -> std::convertible_to<size_t>;
-    typename executor_type_::prong_t;
-    executor.for_n(0u, [](typename executor_type_::prong_t) {});
-    executor.for_slices(0u, [](typename executor_type_::prong_t, size_t) {});
-    executor.for_n_dynamic(0u, [](typename executor_type_::prong_t) {});
-    executor.for_threads([](size_t) {});
+    typename std::remove_reference_t<executor_type_>::prong_t;
 };
 
 template <typename results_type_>
 concept indexed_results_like = requires(results_type_ results, size_t i) {
     { results[i] };
+};
+
+template <typename results_type_>
+concept strided_results_like = requires(results_type_ results) {
+    { results.data };
+    { results.row_stride };
 };
 
 #endif
@@ -144,6 +296,78 @@ struct indexed_results_type<value_type_ *&> {
 };
 
 /**
+ *  @brief Row-major, query-major strided view of an output distance/score matrix.
+ *
+ *  The cross-product similarity engines score `rows` queries against `columns` candidates and write cell
+ *  `(query_index, candidate_index)` to `data[query_index * row_stride + candidate_index]`, with
+ *  `row_stride >= columns` elements between consecutive query rows (so callers can embed the matrix in a wider
+ *  allocation). For symmetric self-similarity `rows == columns` and both triangles are filled.
+ */
+template <typename value_type_>
+struct strided_rows {
+    using value_type = value_type_;
+    value_type_ *data = nullptr;
+    size_t rows = 0;
+    size_t columns = 0;
+    size_t row_stride = 0;
+
+    constexpr value_type_ *row(size_t query_index) const noexcept { return data + query_index * row_stride; }
+};
+
+/**
+ *  @brief How a cross-product similarity call pairs its two input sets.
+ *
+ *  @b all_pairs_k scores every query against every candidate (a full `queries × candidates` matrix).
+ *  @b symmetric_k scores one set against itself: only the lower triangle (incl. the diagonal) is computed and
+ *  then mirrored into the upper triangle, halving the work for self-similarity matrices.
+ */
+enum class cross_similarities_t {
+    all_pairs_k,
+    symmetric_k,
+};
+
+/**
+ *  @brief Column-major (transposed) view of a block of candidate strings scored against one shared query.
+ *
+ *  The inter-sequence (`sz_packing_candidates_across_lanes_k`) kernels place one candidate per SIMD lane and
+ *  advance the Dynamic Programming matrix row-by-row, so they need character @p position across all lanes
+ *  contiguously. We therefore store the block @b transposed: the character at @p position of lane
+ *  @p lane_index lives at `transposed[position * lane_capacity + lane_index]`. A block holds up to
+ *  @p lane_capacity candidates (64 for 8-bit cells, 32 for 16-bit); @p lanes_count counts the live lanes, the
+ *  rest being a masked tail. @p lengths gives each lane's candidate length so the walker can latch that lane's
+ *  result at its own final column, and @p longest_candidate bounds the row count of the walk.
+ */
+template <typename char_type_>
+struct candidate_lanes_block {
+    char_type_ const *transposed = nullptr;
+    size_t lane_capacity = 0;        // ? SIMD width: 64 (u8), 32 (u16); also the transpose stride.
+    size_t lanes_count = 0;          // ? Live candidates in this block, `<= lane_capacity` (tail underfills).
+    size_t const *lengths = nullptr; // ? Per-lane candidate length, indexed by `lane_index`.
+    size_t longest_candidate = 0;    // ? Max length across live lanes; the number of DP rows to walk.
+
+    constexpr char_type_ const *position(size_t position_index) const noexcept {
+        return transposed + position_index * lane_capacity;
+    }
+    constexpr char_type_ character_of_lane(size_t lane_index, size_t position_index) const noexcept {
+        return transposed[position_index * lane_capacity + lane_index];
+    }
+};
+
+/**
+ *  @brief A batch of independent `(shorter, longer)` string pairs for one inter-sequence bit-parallel Myers launch -
+ *      one pair per SIMD lane. The kernels score every lane's pair in lockstep; `positions[lane_index]` maps a lane
+ *      to its destination slot in the caller's results writer. The active lane count is `shorters.size()`.
+ */
+template <typename char_type_>
+struct lane_pairs_view {
+    span<span<char_type_ const> const> shorters;
+    span<span<char_type_ const> const> longers;
+    span<size_t const> positions;
+
+    constexpr size_t lanes_count() const noexcept { return shorters.size(); }
+};
+
+/**
  *  @brief An example of an executor that uses OpenMP for parallel execution.
  *  @note Fork Union is preferred over this for library builds, but this is useful for users already leveraging OpenMP.
  */
@@ -151,9 +375,9 @@ struct openmp_executor_t {
     using prong_t = std::size_t;
 
     /**
-     *  @brief  Calls the @p function for each index from 0 to @p (n) in such
-     *          a way that consecutive elements are likely to be processed by
-     *          the same thread.
+     *  @brief Calls the @p function for each index from 0 to @p (n) in such
+     *      a way that consecutive elements are likely to be processed by
+     *      the same thread.
      */
     template <typename function_type_>
     inline void for_n(size_t n, function_type_ &&function) const noexcept {
@@ -162,10 +386,10 @@ struct openmp_executor_t {
     }
 
     /**
-     *  @brief  Calls the @p function on each thread propagating a 2 indices
-     *          to the function. The first index is the start of the range
-     *          and the second index is the exclusive end of the range to be
-     *          handled by a particular thread.
+     *  @brief Calls the @p function on each thread propagating a 2 indices
+     *      to the function. The first index is the start of the range
+     *      and the second index is the exclusive end of the range to be
+     *      handled by a particular thread.
      */
     template <typename function_type_>
     inline void for_slices(size_t n, function_type_ &&function) const noexcept {
@@ -183,9 +407,9 @@ struct openmp_executor_t {
     }
 
     /**
-     *  @brief  Calls the @p function for each index from 0 to @p (n) expecting
-     *          that individual invocations can have drastically different duration,
-     *          so each thread eagerly processes the next index in the range.
+     *  @brief Calls the @p function for each index from 0 to @p (n) expecting
+     *      that individual invocations can have drastically different duration,
+     *      so each thread eagerly processes the next index in the range.
      */
     template <typename function_type_>
     inline void for_n_dynamic(size_t n, function_type_ &&function) const noexcept {
@@ -194,7 +418,7 @@ struct openmp_executor_t {
     }
 
     /**
-     *  @brief  Executes a function in parallel on the current and all worker threads.
+     *  @brief Executes a function in parallel on the current and all worker threads.
      *  @param[in] function The callback, receiving the thread index as an argument.
      */
     template <typename function_type_>
@@ -235,8 +459,8 @@ static_assert(!continuous_like<int>);
 #endif
 
 /**
- *  @brief  A function that takes a range of elements and a @p callback function and groups the elements
- *          that @p equality function considers equal. Analogous to `std::ranges::group_by`.
+ *  @brief A function that takes a range of elements and a @p callback function and groups the elements
+ *      that @p equality function considers equal. Analogous to `std::ranges::group_by`.
  *  @return The number of groups formed.
  */
 template <typename begin_iterator_type_, typename end_iterator_type_, typename equality_type_,
@@ -261,8 +485,8 @@ size_t group_by(begin_iterator_type_ const begin, end_iterator_type_ const end, 
 }
 
 /**
- *  @brief  Safer alternative to `std::vector`, that avoids exceptions, copy constructors,
- *          and provides alternative `try_push_back` and `try_reserve` for faulty memory allocations.
+ *  @brief Safer alternative to `std::vector`, that avoids exceptions, copy constructors,
+ *      and provides alternative `try_push_back` and `try_reserve` for faulty memory allocations.
  */
 template <typename value_type_, typename allocator_type_>
 class safe_vector {
@@ -283,6 +507,29 @@ class safe_vector {
     size_type size_;
     size_type capacity_;
     allocator_type alloc_;
+
+    /**
+     *  @brief Whether the host may dereference what @ref allocator_type hands out, which growing requires.
+     *
+     *  Growth moves live elements on the host, so an allocator over memory the host cannot touch opts out with
+     *  `static constexpr bool host_accessible_k = false` and gets a build error here instead of a segmentation fault
+     *  (see `device_alloc` in `stringzillas/types.cuh`). Allocators that say nothing - `std::allocator` included -
+     *  are assumed reachable, so nothing else needs changing.
+     *
+     *  @note Detected by overload resolution rather than a `requires` expression: this header must compile at
+     *        C++17, where concepts are unavailable.
+     */
+    template <typename probed_type_>
+    static constexpr bool allocator_host_accessible_(decltype(probed_type_::host_accessible_k) *) noexcept {
+        return probed_type_::host_accessible_k;
+    }
+    template <typename probed_type_>
+    static constexpr bool allocator_host_accessible_(...) noexcept {
+        return true;
+    }
+    static constexpr bool allocator_reachable_from_host_() noexcept {
+        return allocator_host_accessible_<allocator_type>(nullptr);
+    }
 
   public:
     safe_vector() noexcept : data_(nullptr), size_(0), capacity_(0), alloc_() {}
@@ -358,6 +605,8 @@ class safe_vector {
     }
 
     status_t try_reserve(size_type new_cap) noexcept {
+        static_assert(allocator_reachable_from_host_(),
+                      "Growing host-moves live elements, so device-only storage must use `try_resize_uninitialized`");
         if (new_cap <= capacity_) return status_t::success_k;
         value_type *new_data = (value_type *)alloc_.allocate(new_cap);
         if (!new_data) return status_t::bad_alloc_k;
@@ -383,6 +632,26 @@ class safe_vector {
                 for (size_type i = new_size; i < size_; ++i) data_[i].~value_type();
         }
 
+        size_ = new_size;
+        return status_t::success_k;
+    }
+
+    /**
+     *  @brief Resizes WITHOUT constructing, destroying, or moving any element - the caller guarantees to overwrite
+     *         every live element before reading it. On growth it allocates fresh storage and discards the old
+     *         contents (no element move), so it is safe even when the storage lives in @b device memory the host
+     *         cannot dereference (e.g. a `device_alloc`-backed task array). Requires a trivially-destructible type.
+     */
+    status_t try_resize_uninitialized(size_type new_size) noexcept {
+        static_assert(std::is_trivially_destructible<value_type>::value,
+                      "try_resize_uninitialized requires a trivially-destructible value type");
+        if (new_size > capacity_) {
+            value_type *new_data = (value_type *)alloc_.allocate(new_size);
+            if (!new_data) return status_t::bad_alloc_k;
+            if (data_) alloc_.deallocate((allocated_type *)data_, capacity_);
+            data_ = new_data;
+            capacity_ = new_size;
+        }
         size_ = new_size;
         return status_t::success_k;
     }
@@ -423,14 +692,32 @@ class safe_vector {
     value_type const *begin() const noexcept { return data_; }
     value_type *end() noexcept { return data_ + size_; }
     value_type const *end() const noexcept { return data_ + size_; }
-    value_type &operator[](size_type i) noexcept { return data_[i]; }
-    value_type const &operator[](size_type i) const noexcept { return data_[i]; }
+    value_type &operator[](size_type i) noexcept {
+        sz_assert_(i < size_);
+        return data_[i];
+    }
+    value_type const &operator[](size_type i) const noexcept {
+        sz_assert_(i < size_);
+        return data_[i];
+    }
     value_type *data() noexcept { return data_; }
     value_type const *data() const noexcept { return data_; }
-    value_type &front() noexcept { return data_[0]; }
-    value_type const &front() const noexcept { return data_[0]; }
-    value_type &back() noexcept { return data_[size_ - 1]; }
-    value_type const &back() const noexcept { return data_[size_ - 1]; }
+    value_type &front() noexcept {
+        sz_assert_(size_ != 0);
+        return data_[0];
+    }
+    value_type const &front() const noexcept {
+        sz_assert_(size_ != 0);
+        return data_[0];
+    }
+    value_type &back() noexcept {
+        sz_assert_(size_ != 0);
+        return data_[size_ - 1];
+    }
+    value_type const &back() const noexcept {
+        sz_assert_(size_ != 0);
+        return data_[size_ - 1];
+    }
     size_type size() const noexcept { return size_; }
     size_type capacity() const noexcept { return capacity_; }
     operator span<value_type>() noexcept { return {data_, size_}; }

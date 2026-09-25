@@ -666,6 +666,54 @@ public:
     DEFINE_VECTORIZED_FN(ngram_search_case_insensitive);
     static StatusOr<ColumnPtr> ngram_search_case_insensitive_selected(FunctionContext*, const SelectedColumns&, size_t);
 
+    /**
+     * Compute Levenshtein edit distance between two UTF-8 strings.
+     * Uses fuzzywuzzy-style costs: match=0, mismatch=2, gap=1 (Indel distance)
+     *
+     * @param: [string_value, string_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: IntColumn
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_distance);
+
+    /**
+     * @functionName: levenshtein_ratio
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (0.0 to 1.0 similarity ratio)
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_ratio);
+
+    /**
+     * Weighted Levenshtein for Tajik/Cyrillic names. Vowels are cheap to swap,
+     * ж↔ч (Ҷ↔Ч confusion) gets a soft cost. Codepoint-level.
+     *
+     * @param: [string_value, string_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (weighted edit distance)
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_tj_distance);
+
+    /**
+     * @functionName: levenshtein_tj_ratio
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn (similarity in [0, 1])
+     */
+    DEFINE_VECTORIZED_FN(levenshtein_tj_ratio);
+
+    /**
+     * @functionName: norm_tj
+     * @paramType: [BinaryColumn]
+     * @return: BinaryColumn (normalized Tajik text: lowercase + transliteration)
+     */
+    DEFINE_VECTORIZED_FN(norm_tj);
+
+    /**
+     * @functionName: lat_to_cyr
+     * @paramType: [BinaryColumn]
+     * @return: BinaryColumn (Latin-to-Cyrillic transliteration for Tajik/Uzbek/English-spelled names)
+     */
+    DEFINE_VECTORIZED_FN(lat_to_cyr);
+
     DEFINE_VECTORIZED_FN_TEMPLATE(field);
     template <LogicalType Type>
     static Status field_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);

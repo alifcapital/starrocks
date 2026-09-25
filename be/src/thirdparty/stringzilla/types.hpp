@@ -1,6 +1,6 @@
 /**
- *  @brief  Shared definitions for the StringZilla C++ library.
- *  @file   types.hpp
+ *  @brief Shared definitions for the StringZilla C++ library.
+ *  @file include/stringzilla/types.hpp
  *  @author Ash Vardanian
  *
  *  The goal for this header is to provide absolutely-minimal set of types and forward-declarations for
@@ -20,11 +20,11 @@
 #ifndef STRINGZILLA_TYPES_HPP_
 #define STRINGZILLA_TYPES_HPP_
 
-#include "types.h"
+#include "stringzilla/types.h"
 
 /**
- *  @brief  When set to 1, the library will include the C++ STL headers and implement
- *          automatic conversion from and to `std::string_view` and `std::basic_string<any_allocator>`.
+ *  @brief When set to 1, the library will include the C++ STL headers and implement
+ *      automatic conversion from and to `std::string_view` and `std::basic_string<any_allocator>`.
  */
 #ifndef SZ_AVOID_STL
 #define SZ_AVOID_STL (0) // true or false
@@ -32,41 +32,48 @@
 
 /*  We need to detect the version of the C++ language we are compiled with.
  *  This will affect recent features like `operator<=>` and tests against STL.
+ *  MSVC pins `__cplusplus` at 199711L unless `/Zc:__cplusplus` is passed, so prefer
+ *  `_MSVC_LANG` there - it always reports the real standard.
  */
-#if __cplusplus >= 202101L
+#if defined(_MSVC_LANG)
+#define SZ_CPP_LANG_ _MSVC_LANG
+#else
+#define SZ_CPP_LANG_ __cplusplus
+#endif
+#if SZ_CPP_LANG_ >= 202101L
 #define SZ_IS_CPP23_ 1
 #else
 #define SZ_IS_CPP23_ 0
 #endif
-#if __cplusplus >= 202002L
+#if SZ_CPP_LANG_ >= 202002L
 #define SZ_IS_CPP20_ 1
 #else
 #define SZ_IS_CPP20_ 0
 #endif
-#if __cplusplus >= 201703L
+#if SZ_CPP_LANG_ >= 201703L
 #define SZ_IS_CPP17_ 1
 #else
 #define SZ_IS_CPP17_ 0
 #endif
-#if __cplusplus >= 201402L
+#if SZ_CPP_LANG_ >= 201402L
 #define SZ_IS_CPP14_ 1
 #else
 #define SZ_IS_CPP14_ 0
 #endif
-#if __cplusplus >= 201103L
+#if SZ_CPP_LANG_ >= 201103L
 #define SZ_IS_CPP11_ 1
 #else
 #define SZ_IS_CPP11_ 0
 #endif
-#if __cplusplus >= 199711L
+#if SZ_CPP_LANG_ >= 199711L
 #define SZ_IS_CPP98_ 1
 #else
 #define SZ_IS_CPP98_ 0
 #endif
 
 /**
- *  @brief  Expands to `constexpr` in C++20 and later, and to nothing in older C++ versions.
- *          Useful for STL conversion operators, as several `std::string` members are `constexpr` in C++20.
+ *  @brief Expands to `constexpr` in C++20 and later, and to nothing in older C++ versions.
+ *      Useful for STL conversion operators, as several `std::string` members are `constexpr` in C++20.
  *
  *  The `constexpr` keyword has different applicability scope in different C++ versions.
  *  - C++11: Introduced `constexpr`, but no loops or multiple `return` statements were allowed.
@@ -102,12 +109,25 @@
 #endif
 
 /**
- *  MSVC and NVCC have a hard time with concepts.
+ *  `noipa` disables interprocedural optimization across the function boundary - strictly stronger than
+ *  `noinline`, which only forbids inlining. It is the durable guard against GCC's `-O3` miscompile of a
+ *  by-value return that gets folded into a same-TU caller (observed: a `status_t` engine return read back as
+ *  garbage when the callee is folded into a large benchmark TU). clang has no such miscompile and no `noipa`
+ *  attribute, and nvcc rejects it on device code, so both fall back to `noinline`.
  */
-#if defined(__NVCC__)
-#define SZ_HAS_CONCEPTS_ 0
-#elif defined(__cpp_concepts)
-#define SZ_HAS_CONCEPTS_ 0 // TODO: Fix concepts compilation with GCC
+#if defined(__GNUC__) && !defined(__clang__) && !defined(__CUDACC__)
+#define SZ_NOIPA __attribute__((noipa))
+#else
+#define SZ_NOIPA SZ_NOINLINE
+#endif
+
+/**
+ *  C++20 concepts: enabled when both the language standard and the compiler
+ *  feature-test macro confirm support.  NVCC defers to the host compiler,
+ *  so the __cpp_concepts check covers MSVC, GCC, and Clang under nvcc alike.
+ */
+#if __cplusplus > 201703L && defined(__cpp_concepts) && __cpp_concepts >= 201907L
+#define SZ_HAS_CONCEPTS_ 1
 #else
 #define SZ_HAS_CONCEPTS_ 0
 #endif
@@ -115,6 +135,7 @@
 #if !SZ_AVOID_STL
 #include <initializer_list> // `std::initializer_list` is only ~100 LOC
 #include <iterator>         // `std::random_access_iterator_tag` pulls 20K LOC
+#include <limits>           // `std::numeric_limits`
 #include <memory>           // `std::allocator_traits` for allocator rebinding
 #include <type_traits>      // `is_same_type`, `std::enable_if`, etc.
 #endif
@@ -122,16 +143,41 @@
 namespace ashvardanian {
 namespace stringzilla {
 
+/**
+ *  @brief Forces the compiler to materialize @p value rather than fold or elide it across an optimization
+ *         boundary - the read-side companion to `SZ_NOIPA`. Mirrors Google Benchmark's `DoNotOptimize`; use
+ *         it on a status/result just before returning it from a `SZ_NOIPA` public entry point so the value
+ *         survives a same-TU caller's interprocedural rewrite.
+ *
+ *  @sa sz_keep_alive_ in `types.h`, the C-callable sibling that pins stores to a buffer rather than a value.
+ *      Reach for that one from the C headers, which cannot instantiate a template.
+ */
+template <typename value_type_>
+SZ_INLINE void sz_do_not_optimize(value_type_ &value) noexcept {
+#if defined(__clang__)
+    asm volatile("" : "+r,m"(value) : : "memory");
+#elif defined(__GNUC__)
+    asm volatile("" : "+m,r"(value) : : "memory");
+#else
+    volatile value_type_ sink = value;
+    sz_unused_(sink);
+#endif
+}
+
 using i8_t = sz_i8_t;
 using u8_t = sz_u8_t;
+using i16_t = sz_i16_t;
 using u16_t = sz_u16_t;
 using i32_t = sz_i32_t;
 using u32_t = sz_u32_t;
 using u64_t = sz_u64_t;
 using i64_t = sz_i64_t;
+
+using byte_t = sz_byte_t;
+using rune_t = sz_rune_t;
+
 using size_t = sz_size_t;
 using ssize_t = sz_ssize_t;
-using byte_t = sz_byte_t;
 
 using f32_t = float;
 using f64_t = double;
@@ -139,12 +185,19 @@ using f64_t = double;
 using ptr_t = sz_ptr_t;
 using cptr_t = sz_cptr_t;
 using error_cost_t = sz_error_cost_t;
+using error_cost_magnitude_t = sz_error_cost_magnitude_t;
 
 using bool_t = sz_bool_t;
 using ordering_t = sz_ordering_t;
 using rune_length_t = sz_rune_length_t;
-using rune_t = sz_rune_t;
 using sorted_idx_t = sz_sorted_idx_t;
+
+using u16_vec_t = sz_u16_vec_t;
+using u32_vec_t = sz_u32_vec_t;
+using u64_vec_t = sz_u64_vec_t;
+using u128_vec_t = sz_u128_vec_t;
+using u256_vec_t = sz_u256_vec_t;
+using u512_vec_t = sz_u512_vec_t;
 
 /** @sa sz_status_t */
 enum class status_t : int {
@@ -160,14 +213,20 @@ enum class status_t : int {
     unknown_k = sz_status_unknown_k,
 };
 
+template <typename value_type_, typename status_type_>
+struct expected {
+    value_type_ value;
+    status_type_ status;
+};
+
 /**
  *  @brief A trivial function object for uniform character substitution costs in Levenshtein-like similarity algorithms.
- *  @sa error_costs_256x256_t, error_costs_26x26ascii_t
+ *  @sa error_costs_32x32_t
  */
 struct error_costs_unary_t {
     constexpr error_cost_t operator()(char a, char b) const noexcept { return a == b ? 0 : 1; }
     constexpr error_cost_t operator()(sz_rune_t a, sz_rune_t b) const noexcept { return a == b ? 0 : 1; }
-    constexpr sz_size_t magnitude() const noexcept { return 1; }
+    constexpr error_cost_magnitude_t magnitude() const noexcept { return 1; }
 };
 
 template <typename value_type_, sz_size_t extent_ = SZ_SIZE_MAX>
@@ -263,7 +322,15 @@ struct span<value_type_, SZ_SIZE_MAX> {
         return span(data_ + offset, count);
     }
 
-    /// @brief  Lexicographic equality comparison for STL compatibility.
+    /** @brief Returns the i-th equal slice when this span is divided into n parts. Last part absorbs remainder. */
+    sz_constexpr_if_cpp14 span part_i_of_n(size_type i, size_type n) const noexcept {
+        size_type const slice = size_ / n;
+        size_type const offset = i * slice;
+        size_type const count = (i + 1 == n) ? size_ - offset : slice;
+        return span(data_ + offset, count);
+    }
+
+    /** @brief Lexicographic equality comparison for STL compatibility. */
     sz_constexpr_if_cpp14 bool operator==(span const &other) const noexcept {
         if (size_ != other.size_) return false;
         for (size_type i = 0; i < size_; ++i)
@@ -271,10 +338,10 @@ struct span<value_type_, SZ_SIZE_MAX> {
         return true;
     }
 
-    /// @brief  Lexicographic inequality comparison for STL compatibility.
+    /** @brief Lexicographic inequality comparison for STL compatibility. */
     sz_constexpr_if_cpp14 bool operator!=(span const &other) const noexcept { return !(*this == other); }
 
-    /// @brief  Lexicographic less-than comparison for STL compatibility.
+    /** @brief Lexicographic less-than comparison for STL compatibility. */
     sz_constexpr_if_cpp14 bool operator<(span const &other) const noexcept {
         size_type const min_size = size_ < other.size_ ? size_ : other.size_;
         for (size_type i = 0; i < min_size; ++i) {
@@ -340,8 +407,8 @@ struct dummy_alloc {
 using dummy_alloc_t = dummy_alloc<char>;
 
 /**
- *  @brief  Random access iterator for any immutable container with indexed element lookup support.
- *  @note   Designed for `arrow_strings_tape` and `arrow_strings_view` compatibility with STL algorithms and ranges.
+ *  @brief Random access iterator for any immutable container with indexed element lookup support.
+ *  @note Designed for `arrow_strings_tape` and `arrow_strings_view` compatibility with STL algorithms and ranges.
  */
 template <typename container_type_>
 struct indexed_container_iterator {
@@ -453,21 +520,41 @@ struct indexed_container_iterator {
     }
 };
 
+/** @brief  Length convention for @ref arrow_strings_view element spans. */
+enum class arrow_termination_t {
+    /** Matches @ref arrow_strings_tape : a trailing @c '\0' is excluded, so elements read as C-strings. */
+    nul_terminated_k,
+    /** Raw Apache Arrow / cuDF / Parquet: the full @c [offsets[i],offsets[i+1]) span, no terminator. */
+    packed_k,
+};
+
 /**
- *  @brief  Apache @b Arrow-compatible tape data-structure to store a sequence of variable length strings.
- *          Doesn't own the memory, but provides a view to the strings stored in a contiguous memory block.
- *  @sa     arrow_strings_tape
+ *  @brief Apache @b Arrow-compatible view over back-to-back variable-length byte spans in one buffer,
+ *      delimited by a @c count+1 offsets array. Doesn't own the memory.
+ *  @tparam char_type_ Buffer element type: @c char , @c std::byte , or a wider unit.
+ *  @tparam offset_type_ Offset type into @p buffer_ , typically @c int32_t or @c int64_t .
+ *  @tparam termination_ Length convention, see @ref arrow_termination_t . Default @c nul_terminated_k
+ *      (matching @ref arrow_strings_tape ) excludes the trailing NUL, so element @c i spans
+ *      @c offsets[i] to @c offsets[i+1]-1 and reads as a C-string; @c packed_k spans the full
+ *      @c offsets[i] to @c offsets[i+1] . A device-resident cuDF string / list<uint8> column is thus
+ *      @c arrow_strings_view<std::byte,int64_t,arrow_termination_t::packed_k> .
+ *  @sa arrow_strings_tape
  */
-template <typename char_type_, typename offset_type_>
+template <typename char_type_, typename offset_type_,
+          arrow_termination_t termination_ = arrow_termination_t::nul_terminated_k>
 struct arrow_strings_view {
     using char_t = char_type_;
     using offset_t = offset_type_;
-    using self_t = arrow_strings_view<char_t, offset_t>;
+    using self_t = arrow_strings_view<char_t, offset_t, termination_>;
 
     using value_t = span<char_t const>;
     using value_type = value_t; // ? For STL compatibility
     using iterator_t = indexed_container_iterator<self_t>;
     using iterator = iterator_t; // ? For STL compatibility
+
+    /** @brief Bytes excluded from every element's length — one for the NULL terminator, zero for the
+     *      terminator-free Apache Arrow / cuDF convention. */
+    static constexpr size_t terminator_width_k = termination_ == arrow_termination_t::nul_terminated_k ? 1u : 0u;
 
     span<char_t const> buffer_;
     span<offset_t const> offsets_;
@@ -476,9 +563,9 @@ struct arrow_strings_view {
     constexpr arrow_strings_view(span<char_t const> buf, span<offset_t const> offs) noexcept
         : buffer_(buf), offsets_(offs) {}
 
-    constexpr size_t size() const noexcept { return offsets_.size() - 1; }
+    constexpr size_t size() const noexcept { return offsets_.size() != 0 ? offsets_.size() - 1 : 0; }
     constexpr value_t operator[](size_t i) const noexcept {
-        return {&buffer_[offsets_[i]], offsets_[i + 1] - offsets_[i] - 1};
+        return {&buffer_[offsets_[i]], static_cast<size_t>(offsets_[i + 1] - offsets_[i]) - terminator_width_k};
     }
 
     constexpr iterator_t begin() const noexcept { return iterator_t(*this, 0); }
@@ -487,10 +574,15 @@ struct arrow_strings_view {
     constexpr iterator_t cend() const noexcept { return end(); }
 };
 
+/** @brief The terminator-free Apache Arrow / cuDF / Parquet flavor of @ref arrow_strings_view : element
+ *      @c i is the full @c [offsets[i],offsets[i+1]) span, no NULL excluded. */
+template <typename char_type_, typename offset_type_>
+using arrow_packed_view = arrow_strings_view<char_type_, offset_type_, arrow_termination_t::packed_k>;
+
 /**
- *  @brief  Apache @b Arrow-compatible tape data-structure to store a sequence of variable length strings.
- *          Each string is appended to a contiguous memory block, delimited by the NULL character.
- *          Provides @b ~O(1) access to each string by storing the offsets of each string in a separate array.
+ *  @brief Apache @b Arrow-compatible tape data-structure to store a sequence of variable length strings.
+ *      Each string is appended to a contiguous memory block, delimited by the NULL character.
+ *      Provides @b ~O(1) access to each string by storing the offsets of each string in a separate array.
  */
 template <typename char_type_, typename offset_type_, typename allocator_type_>
 struct arrow_strings_tape {
@@ -508,6 +600,9 @@ struct arrow_strings_tape {
     using char_alloc_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<char_t>;
     using offset_alloc_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<offset_t>;
 
+    /** @brief Largest byte offset the tape can address, past which an `offset_t` would wrap around. */
+    static constexpr size_t max_offset_k = static_cast<size_t>((std::numeric_limits<offset_t>::max)());
+
   private:
     span<char_t> buffer_;
     span<offset_t> offsets_;
@@ -518,10 +613,23 @@ struct arrow_strings_tape {
   public:
     constexpr arrow_strings_tape() = default;
 
-    arrow_strings_tape(arrow_strings_tape &&) = delete;
     arrow_strings_tape(arrow_strings_tape const &) = delete;
-    arrow_strings_tape &operator=(arrow_strings_tape &&) = delete;
     arrow_strings_tape &operator=(arrow_strings_tape const &) = delete;
+
+    sz_constexpr_if_cpp20 arrow_strings_tape(arrow_strings_tape &&other) noexcept
+        : buffer_(other.buffer_), offsets_(other.offsets_), char_alloc_(std::move(other.char_alloc_)),
+          offset_alloc_(std::move(other.offset_alloc_)), count_(other.count_) {
+        other.buffer_ = {}, other.offsets_ = {}, other.count_ = 0;
+    }
+
+    sz_constexpr_if_cpp20 arrow_strings_tape &operator=(arrow_strings_tape &&other) noexcept {
+        reset();
+        buffer_ = other.buffer_, offsets_ = other.offsets_;
+        char_alloc_ = std::move(other.char_alloc_), offset_alloc_ = std::move(other.offset_alloc_);
+        count_ = other.count_;
+        other.buffer_ = {}, other.offsets_ = {}, other.count_ = 0;
+        return *this;
+    }
 
     constexpr arrow_strings_tape(span<char_t> buffer, span<offset_t> offsets, allocator_t alloc)
         : buffer_(buffer), offsets_(offsets), char_alloc_(alloc), offset_alloc_(alloc) {}
@@ -541,18 +649,22 @@ struct arrow_strings_tape {
 
     template <typename strings_iterator_type_>
     status_t try_assign(strings_iterator_type_ first, strings_iterator_type_ last) noexcept {
-        // Deallocate previous memory if allocated
-        if (buffer_.data_ && buffer_.size_)
-            char_alloc_.deallocate(const_cast<char_t *>(buffer_.data_), buffer_.size_), buffer_ = {};
+        // The range is walked twice - once to measure, once to copy - so single-pass "input"
+        // iterators, like `std::istream_iterator`, would compile but silently copy nothing.
+        static_assert(
+            std::is_base_of<std::forward_iterator_tag,
+                            typename std::iterator_traits<strings_iterator_type_>::iterator_category>::value,
+            "arrow_strings_tape::try_assign needs multi-pass (forward) iterators");
 
-        if (offsets_.data_ && offsets_.size_)
-            offset_alloc_.deallocate(const_cast<offset_t *>(offsets_.data_), offsets_.size_), offsets_ = {};
+        reset(); // ? Drops the old contents, so every failure below leaves an empty tape rather than a stale one
 
         // Estimate required memory: total characters + one extra per string for the NULL.
         size_t count = 0;
         size_t combined_length = 0;
         for (auto it = first; it != last; ++it, ++count) combined_length += it->length();
         combined_length += count; // ? NULL-terminate every string
+
+        if (combined_length > max_offset_k) return status_t::overflow_risk_k;
 
         // Allocate exactly the required memory
         buffer_ = {char_alloc_.allocate(combined_length), combined_length};
@@ -587,6 +699,8 @@ struct arrow_strings_tape {
         size_t const required = string_length + 1; // Space needed for the new string and its NULL
         size_t current_used = count_ > 0 ? offsets_.data_[count_] : 0;
 
+        if (required > max_offset_k - current_used) return status_t::overflow_risk_k;
+
         // Reallocate the buffer if needed (oversubscribe in powers of two).
         if (current_used + required > buffer_.size_) {
             size_t new_capacity = sz_size_bit_ceil(current_used + required);
@@ -603,9 +717,10 @@ struct arrow_strings_tape {
             buffer_.size_ = new_capacity;
         }
 
-        // Reallocate the offsets array if needed.
-        if (count_ + 1 >= offsets_.size_) { // need one extra slot for the new offset
-            size_t new_offsets_capacity = sz_size_bit_ceil(count_ + 1);
+        // Reallocate the offsets array if needed. Appending writes both `offsets_[count_]` (the new string's start)
+        // and `offsets_[count_ + 1]` (its end), so the array must hold `count_ + 2` entries before we touch it.
+        if (count_ + 2 > offsets_.size_) {
+            size_t new_offsets_capacity = sz_size_bit_ceil(count_ + 2);
             offset_t *new_offsets = offset_alloc_.allocate(new_offsets_capacity);
             if (!new_offsets) return status_t::bad_alloc_k;
             if (offsets_.data_) {
@@ -642,7 +757,7 @@ struct arrow_strings_tape {
 };
 
 /**
- *  @brief  Similar to `thrust::constant_iterator`, always returning the same value.
+ *  @brief Similar to `thrust::constant_iterator`, always returning the same value.
  */
 template <typename value_type_>
 struct constant_iterator {
@@ -812,7 +927,7 @@ struct gpu_specs_t {
 
     /**
      *  @brief Looks up hardware specs for a given compute capability (major, minor).
-     *  @param[in] sm The compute capability code obtained from `pack_sm_code(major, minor)`.
+     *  @param sm The compute capability code obtained from `pack_sm_code(major, minor)`.
      *  @sa Used to populate the `cuda_cores` property.
      */
     inline static size_t cores_per_multiprocessor(size_t sm) noexcept {
@@ -872,7 +987,7 @@ struct gpu_specs_t {
 
 /**
  *  @brief Divides the @p x by @p divisor and rounds up to the nearest integer.
- *  @note  This is equivalent to `ceil(x / divisor)`, but avoids floating-point arithmetic.
+ *  @note This is equivalent to `ceil(x / divisor)`, but avoids floating-point arithmetic.
  */
 template <typename scalar_type_>
 sz_constexpr_if_cpp14 scalar_type_ divide_round_up(scalar_type_ x, scalar_type_ divisor) {
@@ -887,6 +1002,50 @@ template <typename scalar_type_>
 sz_constexpr_if_cpp14 scalar_type_ round_up_to_multiple(scalar_type_ x, scalar_type_ divisor) {
     sz_assert_(divisor > 0 && "Divisor must be positive");
     return divide_round_up(x, divisor) * divisor;
+}
+
+/**
+ *  @brief The number of significant bits in @p x, or zero when @p x is zero.
+ *
+ *  Widens to `u64_t` first, so one body serves every unsigned width - shifting a 32-bit value by 32 would be
+ *  undefined even on a branch that never runs.
+ *  @note Unrolled rather than delegating to `sz_u64_clz`, which is an intrinsic wrapper and not `constexpr`.
+ */
+template <typename scalar_type_>
+sz_constexpr_if_cpp14 int bit_width(scalar_type_ x) noexcept {
+    static_assert(std::is_unsigned<scalar_type_>::value, "Value type must be unsigned integer");
+    u64_t wide = (u64_t)x;
+    int width = 0;
+    if (wide >> 32) { width += 32, wide >>= 32; }
+    if (wide >> 16) { width += 16, wide >>= 16; }
+    if (wide >> 8) { width += 8, wide >>= 8; }
+    if (wide >> 4) { width += 4, wide >>= 4; }
+    if (wide >> 2) { width += 2, wide >>= 2; }
+    if (wide >> 1) { width += 1, wide >>= 1; }
+    return width + (int)(wide != 0);
+}
+
+/**
+ *  @brief Exact `floor(sqrt(x))` over integers, without floating-point arithmetic and without a loop.
+ *
+ *  Seeds a power of two at or above the root, then runs five Newton steps: each doubles the count of correct bits,
+ *  and a 64-bit input has a 32-bit root, so 1 → 2 → 4 → 8 → 16 → 32 covers every width. Newton converges
+ *  from above, so one clamp lands on the floor. `constexpr` keeps it callable from CUDA device code, unlike
+ *  `std::sqrt`.
+ */
+template <typename scalar_type_>
+sz_constexpr_if_cpp14 scalar_type_ integer_square_root(scalar_type_ x) noexcept {
+    static_assert(std::is_unsigned<scalar_type_>::value, "Value type must be unsigned integer");
+    static_assert(sizeof(scalar_type_) <= sizeof(u64_t), "Newton ladder is sized for at most 64-bit inputs");
+    if (x <= 1) return x;
+    u64_t const wide = (u64_t)x;
+    u64_t guess = (u64_t)1 << ((bit_width(wide) + 1) / 2);
+    guess = (guess + wide / guess) / 2;
+    guess = (guess + wide / guess) / 2;
+    guess = (guess + wide / guess) / 2;
+    guess = (guess + wide / guess) / 2;
+    guess = (guess + wide / guess) / 2;
+    return (scalar_type_)(guess > wide / guess ? guess - 1 : guess);
 }
 
 /**
@@ -911,8 +1070,8 @@ sz_constexpr_if_cpp14 void trivial_swap(value_type_ &x, value_type_ &y) noexcept
 }
 
 /**
- *  @brief  Helper structure for dividing a range of data into three parts: head, body, and tail,
- *          generally used to minimize misaligned (split) stores and operate on aligned pages.
+ *  @brief Helper structure for dividing a range of data into three parts: head, body, and tail,
+ *      generally used to minimize misaligned (split) stores and operate on aligned pages.
  */
 struct head_body_tail_t {
     size_t head = 0;
