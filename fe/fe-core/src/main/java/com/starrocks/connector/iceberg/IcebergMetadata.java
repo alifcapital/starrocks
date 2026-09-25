@@ -110,6 +110,7 @@ import com.starrocks.type.VarcharType;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.BaseFileScanTask;
 import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.ConvertEqualityDeleteRewriteFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DataOperations;
@@ -119,6 +120,7 @@ import org.apache.iceberg.FileContent;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileMetadata;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.HistoryEntry;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.IsolationLevel;
@@ -142,6 +144,7 @@ import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.StarRocksIcebergTableScan;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -1617,7 +1620,8 @@ public class IcebergMetadata implements ConnectorMetadata {
             // Bounded-cost statistics scan (design 2.4): do not populate the shared remoteFileInfoSources
             // cache (its key ignores the scan caps). Build a throwaway MOR trigger over the budget-limited
             // baseSource and return the queue for the requested MOR params, without caching.
-            IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(baseSource, tableFullMORParams);
+            IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(baseSource, tableFullMORParams,
+                    icebergTable.getNativeTable().specs());
             return new QueueIcebergRemoteFileInfoSource(trigger, trigger.getQueue(param.getMORParams()));
         } else {
             // build remote file info source for table with equality delete files.
@@ -1625,7 +1629,8 @@ public class IcebergMetadata implements ConnectorMetadata {
                     dbName, tableName, params, tableFullMORParams.getMORId(), param.getMORParams());
 
             if (!remoteFileInfoSources.containsKey(remoteFileInfoSourceKey)) {
-                IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(baseSource, tableFullMORParams);
+                IcebergRemoteSourceTrigger trigger = new IcebergRemoteSourceTrigger(baseSource, tableFullMORParams,
+                        icebergTable.getNativeTable().specs());
                 // The tableFullMORParams we recorded are mainly used here. Scheduling of multiple
                 // split scan nodes from one table scan node is one by one. And in the IcebergRemoteSourceTrigger,
                 // multiple queues need to be filled according to different iceberg mor params when executing iceberg planing.
@@ -2634,6 +2639,11 @@ public class IcebergMetadata implements ConnectorMetadata {
     @Override
     public void finishSink(String dbName, String tableName, List<TSinkCommitInfo> commitInfos, String branch, Object extra,
                            ConnectContext context) {
+        if (commitInfos.isEmpty() && extra instanceof IcebergSinkExtra sinkExtra
+                && sinkExtra.isConvertEqualityDeletes() && sinkExtra.getEqualityDeleteFilesToRemove().isEmpty()) {
+            return;
+        }
+
         // Normalize db name and table name to lower case for commit queue key
         // because some catalogs are case-insensitive (e.g., Hive, Glue)
         //
@@ -2677,7 +2687,10 @@ public class IcebergMetadata implements ConnectorMetadata {
             boolean isDeleteOperation = dataFiles.stream().anyMatch(dataFile ->
                     dataFile.isSetFile_content() &&
                             (dataFile.getFile_content() == TIcebergFileContent.POSITION_DELETES));
-            if (isDeleteOperation) {
+            if (extra instanceof IcebergSinkExtra sinkExtra && sinkExtra.isConvertEqualityDeletes()) {
+                commitConvertEqualityDeleteOperation(nativeTbl, dataFiles, branch,
+                        dbName, tableName, extra, context);
+            } else if (isDeleteOperation) {
                 commitDeleteOperation(transaction, nativeTbl, dataFiles, branch, dbName, tableName, extra, context);
             } else {
                 commitDataOperation(transaction, nativeTbl, dataFiles, branch, isOverwrite, isRewrite, extra,
@@ -2740,6 +2753,104 @@ public class IcebergMetadata implements ConnectorMetadata {
         tables.remove(TableIdentifier.of(dbName, tableName));
         icebergCatalog.invalidateTableCache(dbName, tableName);
         icebergCatalog.invalidatePartitionCache(dbName, tableName);
+    }
+
+    private org.apache.iceberg.DeleteFile buildPositionDeleteFile(
+            TIcebergDataFile dataFile, PartitionSpec partitionSpec, org.apache.iceberg.Table nativeTbl) {
+        FileMetadata.Builder builder = FileMetadata.deleteFileBuilder(partitionSpec)
+                .ofPositionDeletes()
+                .withPath(dataFile.path)
+                .withFormat(FileFormat.PARQUET)
+                .withFileSizeInBytes(dataFile.file_size_in_bytes)
+                .withRecordCount(dataFile.record_count)
+                .withPartition(partitionSpec.isPartitioned() ?
+                        IcebergPartitionData.partitionDataFromPath(
+                                getIcebergRelativePartitionPath(
+                                        IcebergUtil.tableDataLocation(nativeTbl),
+                                        dataFile.partition_path),
+                                dataFile.isSetPartition_null_fingerprint() ?
+                                        dataFile.getPartition_null_fingerprint() :
+                                        "0".repeat(partitionSpec.fields().size()),
+                                partitionSpec) : null)
+                .withMetrics(dataFile.isSetColumn_stats() ?
+                        IcebergApiConverter.buildDataFileMetrics(dataFile, nativeTbl) : null);
+
+        if (dataFile.isSetReferenced_data_file()) {
+            builder.withReferencedDataFile(dataFile.getReferenced_data_file());
+        }
+        return builder.build();
+    }
+
+    // equality-delete -> position-delete conversion commit: a single RewriteFiles that atomically adds
+    // the materialized position deletes and removes the converted equality-delete files. Uses
+    // ConvertEqualityDeleteRewriteFiles so the "referenced data files still exist" check runs inside the
+    // commit's optimistic-retry validation (a plain pre-commit check would race a concurrent rewrite).
+    private void commitConvertEqualityDeleteOperation(org.apache.iceberg.Table nativeTbl,
+                                                      List<TIcebergDataFile> dataFiles, String branch,
+                                                      String dbName, String tableName, Object extra,
+                                                      ConnectContext context) {
+        Set<org.apache.iceberg.DeleteFile> eqDeleteFilesToRemove =
+                ((IcebergSinkExtra) extra).getEqualityDeleteFilesToRemove();
+
+        Long baseSnapshotId = ((IcebergSinkExtra) extra).getBaseSnapshotId();
+        if (baseSnapshotId == null) {
+            Snapshot currentSnapshot = nativeTbl.currentSnapshot();
+            if (currentSnapshot != null) {
+                baseSnapshotId = currentSnapshot.snapshotId();
+            }
+        }
+        // Data files our new position deletes reference; the custom RewriteFiles validates they are
+        // still live against each retry's table state. New position/equality deletes added concurrently
+        // are intentionally ignored: conversion only appends position deletes, so concurrent deletes are
+        // additive and never invalidate ours -- only the disappearance of a referenced data file would
+        // leave our position deletes pointing at a file no longer in the table. RewriteFiles also fails
+        // the commit if a concurrent op removed an equality-delete file we remove (failMissingDeletePaths).
+        Set<String> referencedDataFiles = dataFiles.stream()
+                .filter(TIcebergDataFile::isSetReferenced_data_file)
+                .map(TIcebergDataFile::getReferenced_data_file)
+                .collect(Collectors.toSet());
+
+        TableOperations ops = ((HasTableOperations) nativeTbl).operations();
+        RewriteFiles rewrite = new ConvertEqualityDeleteRewriteFiles(
+                nativeTbl.name(), ops, referencedDataFiles, baseSnapshotId);
+        if (branch != null) {
+            rewrite.toBranch(branch);
+        }
+
+        // Stamp the new position deletes with the highest sequence number among the removed equality
+        // deletes. Per-file seq is row-safe for position deletes: each output pos-delete references an
+        // exact (data_file, pos), so raising its seq never widens what it deletes (unlike eq->eq
+        // rewrites, where a higher seq expands key-match scope). MergingSnapshotProducer.add sets the
+        // sequence number per added file.
+        long maxSeq = eqDeleteFilesToRemove.stream()
+                .mapToLong(org.apache.iceberg.DeleteFile::dataSequenceNumber)
+                .max().orElse(0L);
+
+        PartitionSpec partitionSpec = nativeTbl.spec();
+        for (TIcebergDataFile dataFile : dataFiles) {
+            rewrite.addFile(buildPositionDeleteFile(dataFile, partitionSpec, nativeTbl), maxSeq);
+        }
+        for (org.apache.iceberg.DeleteFile eqDeleteFile : eqDeleteFilesToRemove) {
+            rewrite.deleteFile(eqDeleteFile);
+        }
+
+        // Record the position-delete output for the procedure's result set; the equality-delete side is
+        // read back from the removal set the sink already carries.
+        long positionDeleteRows = dataFiles.stream()
+                .mapToLong(f -> f.isSetRecord_count() ? f.getRecord_count() : 0L)
+                .sum();
+        ((IcebergSinkExtra) extra).setConvertOutput(dataFiles.size(), positionDeleteRows);
+
+        if (context != null) {
+            updateCommitInfo(rewrite, context);
+        }
+
+        commitWithCleanup(rewrite::commit,
+                () -> invalidateCacheAfterCommit(dbName, tableName), dataFiles, dbName, tableName);
+
+        // Refresh peer FEs so they don't keep planning from a cached snapshot that still has the
+        // removed equality-delete files, matching the other Iceberg commit paths.
+        asyncRefreshOthersFeMetadataCache(dbName, tableName);
     }
 
     private void commitDeleteOperation(Transaction transaction, org.apache.iceberg.Table nativeTbl,
@@ -3097,10 +3208,21 @@ public class IcebergMetadata implements ConnectorMetadata {
         // so conflict detection covers the window between scan and commit, not a fresher
         // snapshot re-read at commit time.
         private Long baseSnapshotId;
+        // Routing discriminator for the equality-delete -> position-delete conversion procedure: when
+        // set, finishSink takes the convert commit branch (RewriteFiles: add the materialized
+        // position deletes, remove these equality-delete files). An explicit flag rather than
+        // overloading appliedDeleteFiles, which the rewrite path already populates for other reasons.
+        private boolean convertEqualityDeletes;
+        private final Set<DeleteFile> equalityDeleteFilesToRemove;
+        // Output of the convert commit, recorded for the procedure's result set: how many position-delete
+        // files were added and how many delete rows they hold. Set by commitConvertEqualityDeleteOperation.
+        private long addedPositionDeleteFiles;
+        private long positionDeleteRows;
 
         public IcebergSinkExtra() {
             this.scannedDataFiles = new HashSet<>();
             this.appliedDeleteFiles = new HashSet<>();
+            this.equalityDeleteFilesToRemove = new HashSet<>();
         }
 
         public void addScannedDataFiles(Set<DataFile> o) {
@@ -3133,6 +3255,35 @@ public class IcebergMetadata implements ConnectorMetadata {
 
         public Long getBaseSnapshotId() {
             return baseSnapshotId;
+        }
+
+        public void setConvertEqualityDeletes(boolean convertEqualityDeletes) {
+            this.convertEqualityDeletes = convertEqualityDeletes;
+        }
+
+        public boolean isConvertEqualityDeletes() {
+            return convertEqualityDeletes;
+        }
+
+        public void addEqualityDeleteFilesToRemove(Set<DeleteFile> o) {
+            equalityDeleteFilesToRemove.addAll(o);
+        }
+
+        public Set<DeleteFile> getEqualityDeleteFilesToRemove() {
+            return equalityDeleteFilesToRemove;
+        }
+
+        public void setConvertOutput(long addedPositionDeleteFiles, long positionDeleteRows) {
+            this.addedPositionDeleteFiles = addedPositionDeleteFiles;
+            this.positionDeleteRows = positionDeleteRows;
+        }
+
+        public long getAddedPositionDeleteFiles() {
+            return addedPositionDeleteFiles;
+        }
+
+        public long getPositionDeleteRows() {
+            return positionDeleteRows;
         }
     }
 

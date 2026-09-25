@@ -3264,7 +3264,7 @@ public class StmtExecutor {
                         // is guaranteed to have rewritten all of them. Keeping them is harmless: the files written
                         // by the rewrite get a higher sequence number, so the deletes no longer apply to them.
                         if (wholeTableRewrite) {
-                            extra.addAppliedDeleteFiles(((IcebergScanNode) scan).getEqualAppliedDeleteFiles());
+                            extra.addAppliedDeleteFiles(((IcebergScanNode) scan).getAppliedEqualDeleteFiles());
                         }
                     }
                 }
@@ -3291,6 +3291,24 @@ public class StmtExecutor {
                 .filter(deleteFile -> deleteFile.referencedDataFile() != null
                         && rewrittenLocations.contains(deleteFile.referencedDataFile()))
                 .collect(Collectors.toSet());
+    }
+
+    // The equality-delete files the plan's scan nodes actually applied. Read after execution (ranges
+    // assigned) so the convert commit removes exactly the equality deletes that were scanned.
+    private Set<org.apache.iceberg.DeleteFile> collectAppliedEqualDeleteFiles(ExecPlan execPlan) {
+        Set<org.apache.iceberg.DeleteFile> removalSet = new HashSet<>();
+        for (PlanFragment fragment : execPlan.getFragments()) {
+            for (ScanNode scan : fragment.collectScanNodes().values()) {
+                // getSourceRange() can be null when the scan produced no ranges (e.g. equality deletes
+                // that apply to no live data file); skip those rather than dereferencing a null source.
+                if (scan instanceof IcebergScanNode icebergScan
+                        && scan.getPlanNodeName().equals("IcebergScanNode")
+                        && icebergScan.getSourceRange() != null) {
+                    removalSet.addAll(icebergScan.getAppliedEqualDeleteFiles());
+                }
+            }
+        }
+        return removalSet;
     }
 
     /**
@@ -3615,6 +3633,11 @@ public class StmtExecutor {
                 if (dataSink instanceof IcebergDeleteSink deleteSink) {
                     // This is a DELETE operation, use IcebergDeleteSink
                     IcebergMetadata.IcebergSinkExtra extra = deleteSink.getSinkExtraInfo();
+                    if (extra != null && extra.isConvertEqualityDeletes()) {
+                        // Read back the equality-delete files the scan layer actually applied, now that
+                        // ranges are assigned, so the convert commit removes exactly what was scanned.
+                        extra.addEqualityDeleteFilesToRemove(collectAppliedEqualDeleteFiles(execPlan));
+                    }
                     context.getGlobalStateMgr().getMetadataMgr().finishSink(
                             catalogName, dbName, tableName, commitInfos, null, extra, context);
                 } else if (dataSink instanceof IcebergTableSink) {
