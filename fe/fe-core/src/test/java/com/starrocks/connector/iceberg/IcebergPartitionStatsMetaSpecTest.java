@@ -80,7 +80,7 @@ public class IcebergPartitionStatsMetaSpecTest extends TableTestBase {
         };
         IcebergHiveCatalog catalog = new IcebergHiveCatalog(CATALOG_NAME, new Configuration(), DEFAULT_CONFIG);
         return new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT, catalog,
-                Executors.newSingleThreadExecutor(), Executors.newSingleThreadExecutor(), DEFAULT_CATALOG_PROPERTIES);
+                Executors.newSingleThreadExecutor(), DEFAULT_CATALOG_PROPERTIES);
     }
 
     private static void attachStatsFile(org.apache.iceberg.Table table, long snapshotId) {

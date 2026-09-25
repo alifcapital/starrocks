@@ -38,6 +38,8 @@ import com.starrocks.sql.analyzer.AnalyzeTestUtil;
 import com.starrocks.sql.ast.CreateTableLikeStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.OptimizerFactory;
+import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
@@ -608,7 +610,8 @@ public class MetadataMgrTest {
         try {
             FeConstants.runningUnitTest = false;
             for (int scenario = 0; scenario < 6; scenario++) {
-                OptimizerContext session = new OptimizerContext(UtFrameUtils.createDefaultCtx());
+                OptimizerContext session = OptimizerFactory.mockContext(
+                        UtFrameUtils.createDefaultCtx(), new ColumnRefFactory());
                 internalResult[0] = scenario == 1 ? full : partial;
                 connectorResult[0] = scenario == 2 ? null : connector;
                 blocked[0] = scenario == 3;
