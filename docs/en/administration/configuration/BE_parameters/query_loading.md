@@ -1126,3 +1126,30 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Is mutable: No
 - Description: Minimum number of threads for the streaming load IO thread pool ("stream_load_io") created during ExecEnv initialization. The pool is built with `set_max_threads(INT32_MAX)` and `set_max_queue_size(INT32_MAX)` so it is effectively unbounded to avoid deadlocks for concurrent streaming loads. A value of 0 lets the pool start with no threads and grow on demand; setting a positive value reserves that many threads at startup. This pool is used when `enable_streaming_load_thread_pool` is true and its idle timeout is controlled by `streaming_load_thread_pool_idle_time_ms`. Overall concurrency is still constrained by `fragment_pool_thread_num_max` and `webserver_num_workers`; changing this value is rarely necessary and may increase resource usage if set too high.
 - Introduced in: v3.2.0
+
+### enable_spill_agg_events
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Enables the pipeline event scheduler for the spilling aggregation operators instead of poll-spinning.
+- Introduced in: -
+
+### enable_spill_join_events
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Enables the pipeline event scheduler for the spilling hash-join build and probe operators instead of poll-spinning.
+- Introduced in: -
+
+### enable_spill_sort_events
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Enables the pipeline event scheduler for the spilling sort operators instead of poll-spinning.
+- Introduced in: -

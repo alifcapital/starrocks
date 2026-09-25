@@ -1127,3 +1127,30 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 変更可能: いいえ
 - 説明: ExecEnv初期化中に作成されるストリーミングロードIOスレッドプール（"stream_load_io"）の最小スレッド数。このプールは`set_max_threads(INT32_MAX)`と`set_max_queue_size(INT32_MAX)`で構築されるため、同時ストリーミングロードでのデッドロックを避けるために実質的に無制限です。値が0の場合、プールはスレッドなしで開始し、オンデマンドで増加します。正の値を設定すると、起動時にその数のスレッドが予約されます。このプールは`enable_streaming_load_thread_pool`がtrueの場合に使用され、そのアイドルタイムアウトは`streaming_load_thread_pool_idle_time_ms`によって制御されます。全体的な並行性は依然として`fragment_pool_thread_num_max`と`webserver_num_workers`によって制約されます。この値を変更する必要があることはめったになく、高すぎるとリソース使用量が増加する可能性があります。
 - 導入バージョン: v3.2.0
+
+### enable_spill_agg_events
+
+- デフォルト: false
+- タイプ: ブール
+- 単位: -
+- 変更可能: はい
+- 説明: スピルする集約オペレーターを、ポーリングスピンの代わりにパイプラインイベントスケジューラーで駆動します。
+- 導入バージョン: -
+
+### enable_spill_join_events
+
+- デフォルト: false
+- タイプ: ブール
+- 単位: -
+- 変更可能: はい
+- 説明: スピルするハッシュ結合の build/probe オペレーターを、ポーリングスピンの代わりにパイプラインイベントスケジューラーで駆動します。
+- 導入バージョン: -
+
+### enable_spill_sort_events
+
+- デフォルト: false
+- タイプ: ブール
+- 単位: -
+- 変更可能: はい
+- 説明: スピルするソートオペレーターを、ポーリングスピンの代わりにパイプラインイベントスケジューラーで駆動します。
+- 導入バージョン: -

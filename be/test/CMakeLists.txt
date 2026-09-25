@@ -328,6 +328,23 @@ set(EXEC_FILES
         ./io/fd_input_stream_test.cpp
         ./io/seekable_input_stream_test.cpp
         ./io/shared_buffered_input_stream_test.cpp
+        ./exec/pipeline/block_reason_agg_test.cpp
+        ./exec/pipeline/block_reason_join_test.cpp
+        ./exec/pipeline/block_reason_test.cpp
+        ./exec/pipeline/intermediate_block_driver_test.cpp
+        ./exec/pipeline/intermediate_block_event_test.cpp
+        ./exec/pipeline/spill_process_channel_test.cpp
+        ./exec/pipeline/spillable_agg_event_test.cpp
+        ./exec/pipeline/spillable_agg_observer_wakeup_test.cpp
+        ./exec/pipeline/spillable_agg_source_lockstep_test.cpp
+        ./exec/pipeline/spillable_hash_join_build_event_test.cpp
+        ./exec/pipeline/spillable_hash_join_probe_event_test.cpp
+        ./exec/pipeline/spillable_probe_cancel_test.cpp
+        ./exec/pipeline/spillable_sort_observer_wakeup_test.cpp
+        ./exec/pipeline/spillable_sort_source_lockstep_test.cpp
+        ./exec/query_cache/cache_wrapper_forwarding_test.cpp
+        ./io/spill_observable_test.cpp
+        ./util/spill_metrics_test.cpp
         ./io/spill_test.cpp
         ./io/spill_block_manager_test.cpp
         ./runtime/agg_state_desc_test.cpp

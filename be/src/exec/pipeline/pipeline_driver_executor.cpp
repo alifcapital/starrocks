@@ -237,6 +237,7 @@ void GlobalDriverExecutor::_worker_thread() {
             }
             case INPUT_EMPTY:
             case OUTPUT_FULL:
+            case INTERMEDIATE_BLOCK:
             case PENDING_FINISH:
             case EPOCH_PENDING_FINISH:
             case PRECONDITION_BLOCK: {

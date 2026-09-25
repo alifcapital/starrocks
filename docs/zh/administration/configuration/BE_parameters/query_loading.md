@@ -1119,3 +1119,30 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 是否动态：否
 - 描述：Routine Load Kafka 操作的默认超时时长（未显式指定时使用）。
 - 引入版本：-
+
+### enable_spill_agg_events
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：为发生落盘的聚合算子启用 pipeline 事件调度器，替代轮询自旋（poll-spinning）。
+- 引入版本：-
+
+### enable_spill_join_events
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：为发生落盘的哈希连接 build/probe 算子启用 pipeline 事件调度器，替代轮询自旋（poll-spinning）。
+- 引入版本：-
+
+### enable_spill_sort_events
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：为发生落盘的排序算子启用 pipeline 事件调度器，替代轮询自旋（poll-spinning）。
+- 引入版本：-

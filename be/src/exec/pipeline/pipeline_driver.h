@@ -16,6 +16,7 @@
 
 #include <gutil/bits.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -108,6 +109,8 @@ enum DriverState : uint32_t {
         return "EPOCH_FINISH";
     case LOCAL_WAITING:
         return "LOCAL_WAITING";
+    case INTERMEDIATE_BLOCK:
+        return "INTERMEDIATE_BLOCK";
     }
     DCHECK(false);
     return "UNKNOWN_STATE";
@@ -350,7 +353,15 @@ public:
                _state == DriverState::INTERNAL_ERROR;
     }
     bool pending_finish() { return _state == DriverState::PENDING_FINISH; }
-    bool is_still_pending_finish() { return source_operator()->pending_finish() || sink_operator()->pending_finish(); }
+    // Aggregate pending_finish over the whole operator chain, not just the source/sink edges. An interior
+    // operator that owns in-flight IO (e.g. a spilled probe waiting on build-side load or restore tasks)
+    // must keep the driver alive until its tasks drain. Operator::pending_finish() defaults to false, so
+    // for chains whose only pending_finish overrides are on the edges this checks exactly those edges; it
+    // only adds coverage for interior operators.
+    bool is_still_pending_finish() {
+        return std::any_of(_operators.begin(), _operators.end(),
+                           [](const OperatorPtr& op) { return op->pending_finish(); });
+    }
     // return false if all the dependencies are ready, otherwise return true.
     bool dependencies_block();
 
@@ -458,9 +469,25 @@ public:
             return false;
         }
 
+        // A notified interior operator may have output even while the source is
+        // empty (e.g. a completed probe restore). Do not discard that wakeup:
+        // another source notification is not guaranteed. Keep sink backpressure
+        // and preconditions above this check, and preserve the edges-only path
+        // for chains without wakeable interiors.
+        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
+            return true;
+        }
+
         // INPUT_EMPTY
         if (!source_operator()->has_output() && !source_operator()->is_finished()) {
             set_driver_state(DriverState::INPUT_EMPTY);
+            return false;
+        }
+
+        // INTERMEDIATE_BLOCK: both edges are open but an interior pair may still be blocked. Only walk
+        // the interior pairs (O(pairs)) for a driver that was parked in INTERMEDIATE_BLOCK; for all other
+        // states the edges-only checks above are sufficient and this O(pairs) cost is not paid.
+        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
             return false;
         }
 
@@ -470,6 +497,8 @@ public:
     // used in event scheduler
     // check driver is ready for schedule
     // similar to is_not_blocked but without check short_circuit.
+    bool has_wakeable_intermediates() const { return _has_wakeable_intermediates; }
+
     bool check_is_ready() {
         // If the sink operator is finished, the rest operators of this driver needn't be executed anymore.
         if (sink_operator()->is_finished()) {
@@ -498,9 +527,25 @@ public:
             return false;
         }
 
+        // A notified interior operator may have output even while the source is
+        // empty (e.g. a completed probe restore). Do not discard that wakeup:
+        // another source notification is not guaranteed. Keep sink backpressure
+        // and preconditions above this check, and preserve the edges-only path
+        // for chains without wakeable interiors.
+        if (_has_wakeable_intermediates && !_has_intermediate_block()) {
+            return true;
+        }
+
         // INPUT_EMPTY
         if (!source_operator()->has_output() && !source_operator()->is_finished()) {
             set_driver_state(DriverState::INPUT_EMPTY);
+            return false;
+        }
+
+        // INTERMEDIATE_BLOCK: edges are open but an interior pair may still be blocked. Without this an
+        // INTERMEDIATE_BLOCK driver would pass the edges-only gate on every notify, be scheduled, re-block
+        // in process(), and spin through try_schedule. Walk interior pairs (O(pairs)) only for such a driver.
+        if (_state == DriverState::INTERMEDIATE_BLOCK && _has_intermediate_block()) {
             return false;
         }
 
@@ -566,6 +611,15 @@ public:
     void assign_observer();
     bool is_operator_cancelled() const { return _is_operator_cancelled; }
 
+    // BlockReason park-time check: when a wakeable operator is parked, check that the reason it names is
+    // covered by its declared wakeups. An uncovered reason is a gap in the wakeup table that would leave the
+    // driver asleep with nobody to wake it. In debug this fails a DCHECK with a dump (driver string +
+    // operator name + reason); in release it increments spill_parked_with_uncovered_reason_total and emits a
+    // rate-limited WARN (fail-soft: degrade instead of abort). It is called from both park points: the edge
+    // park in EventScheduler::add_blocked_driver (source/sink with covered_wakeups() != 0) and the
+    // INTERMEDIATE_BLOCK classification in process() (interior operators).
+    void verify_block_reason_covered();
+
     bool local_prepare_is_done() const { return _local_prepare_is_done; }
 
 protected:
@@ -597,6 +651,32 @@ protected:
     void _adjust_memory_usage(RuntimeState* state, MemTracker* tracker, OperatorPtr& op, const ChunkPtr& chunk);
     void _try_to_release_buffer(RuntimeState* state, OperatorPtr& op);
 
+    // Returns true when no interior progress is possible: no adjacent pair can move a chunk and no finish
+    // can be propagated. This is the release condition for a driver parked in INTERMEDIATE_BLOCK, and it
+    // must mirror what process() could do on the next quantum: process() moves a chunk for the first pair
+    // with curr.has_output() && next.need_input(), and advances _first_unfinished past finished operators. A
+    // streaming spilled probe can legitimately have nothing to output while it can still accept input
+    // (need_input() == true, upstream pair open), so the release condition must test whether a pair can
+    // work, not per-operator output -- a per-operator "this operator has no output" test would keep such a
+    // probe parked forever. O(pairs), and only consulted for drivers parked in INTERMEDIATE_BLOCK, so the
+    // common edges-only schedule path stays O(1).
+    bool _has_intermediate_block() const {
+        const size_t num_operators = _operators.size();
+        for (size_t i = _first_unfinished; i + 1 < num_operators; ++i) {
+            const auto& curr_op = _operators[i];
+            const auto& next_op = _operators[i + 1];
+            if (curr_op->is_finished()) {
+                // Finish propagation is progress: process() will mark the pair finishing and
+                // advance _first_unfinished.
+                return false;
+            }
+            if (curr_op->has_output() && next_op->need_input()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Update metrics when the driver yields.
     void _update_driver_acct(size_t total_chunks_moved, size_t total_rows_moved, size_t time_spent);
     void _update_statistics(RuntimeState* state, size_t total_chunks_moved, size_t total_rows_moved, size_t time_spent);
@@ -626,6 +706,11 @@ protected:
     int64_t _global_rf_wait_timeout_ns = -1;
 
     size_t _first_unfinished{0};
+    // Set in prepare() after the operators are built: true iff at least one interior operator (index
+    // [1, n-2]) declares supports_intermediate_wakeup(). It gates the INTERMEDIATE_BLOCK classification in
+    // process(): an interior block is only parked when some interior operator promises a wakeup; otherwise
+    // the driver stays READY (and keeps polling), so it never sleeps with nobody to wake it.
+    bool _has_wakeable_intermediates = false;
     QueryContext* _query_ctx;
     FragmentContext* _fragment_ctx;
     Pipeline* _pipeline;
@@ -679,6 +764,7 @@ protected:
     RuntimeProfile::Counter* _block_by_precondition_counter = nullptr;
     RuntimeProfile::Counter* _block_by_output_full_counter = nullptr;
     RuntimeProfile::Counter* _block_by_input_empty_counter = nullptr;
+    RuntimeProfile::Counter* _block_by_intermediate_counter = nullptr;
 
     RuntimeProfile::Counter* _pending_timer = nullptr;
     RuntimeProfile::Counter* _precondition_block_timer = nullptr;
