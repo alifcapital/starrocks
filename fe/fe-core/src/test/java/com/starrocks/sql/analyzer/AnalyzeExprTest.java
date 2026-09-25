@@ -47,7 +47,7 @@ public class AnalyzeExprTest {
 
     @Test
     public void testDebeziumDecimal() {
-        String input = "named_struct('scale', cast(2 as int), 'value', unhex('3a4e'))";
+        String input = "named_struct('scale', cast(2 as int), 'value', hex_decode_binary('3a4e'))";
         // Different invocations must not mutate the shared wildcard signature.
         for (int scale : new int[] {6, 2, 0, 38}) {
             QueryRelation relation = ((QueryStatement) analyzeSuccess(
@@ -58,7 +58,7 @@ public class AnalyzeExprTest {
                     ((SelectRelation) relation).getOutputExpression().get(0).getType());
         }
         analyzeSuccess("select debezium_decimal(NULL, 10, 2)");
-        analyzeSuccess("select debezium_decimal(named_struct('value', unhex('ff'), 'scale', cast(0 as int)), 3, 0)");
+        analyzeSuccess("select debezium_decimal(named_struct('value', hex_decode_binary('ff'), 'scale', cast(0 as int)), 3, 0)");
         analyzeFail("select debezium_decimal(" + input + ", 0, 0)");
         analyzeFail("select debezium_decimal(" + input + ", 39, 0)");
         analyzeFail("select debezium_decimal(" + input + ", 10, -1)");
@@ -67,7 +67,7 @@ public class AnalyzeExprTest {
         analyzeFail("select debezium_decimal(" + input + ", 10, v1) from t0");
         analyzeFail("select debezium_decimal('abc', 10, 2)");
         analyzeFail("select debezium_decimal(named_struct('scale', 2, 'value', 'abc'), 10, 2)");
-        analyzeFail("select debezium_decimal(named_struct('scale', cast(2 as bigint), 'value', unhex('01')), 10, 2)");
+        analyzeFail("select debezium_decimal(named_struct('scale', cast(2 as bigint), 'value', hex_decode_binary('01')), 10, 2)");
         analyzeFail("select debezium_decimal(" + input + ", 10)");
     }
 

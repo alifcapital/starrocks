@@ -17,7 +17,7 @@ The source `value` is a signed, big-endian two's-complement integer. Its numeric
 A NULL input or NULL member returns NULL. Empty binary input is invalid (zero is encoded as `00`). Overflow and loss of nonzero fractional digits raise an error regardless of `sql_mode`; trailing zero fractional digits can be removed exactly. Wide source integers are accepted when exact rescaling fits the target type.
 
 ```SQL
-SELECT debezium_decimal(named_struct('scale', CAST(2 AS INT), 'value', unhex('3A4E')), 10, 2);
+SELECT debezium_decimal(named_struct('scale', CAST(2 AS INT), 'value', hex_decode_binary('3A4E')), 10, 2);
 -- 149.26
 
 SELECT debezium_decimal(amount, 38, 6) AS amount
