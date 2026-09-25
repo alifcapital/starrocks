@@ -1,4 +1,4 @@
--- name: selected conditional expression evaluation
+-- name: test_selected_expressions
 CREATE DATABASE selected_eval_${uuid0};
 -- result:
 -- !result

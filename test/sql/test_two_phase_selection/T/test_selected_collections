@@ -1,4 +1,4 @@
--- name: selected collections and complex casts
+-- name: test_selected_collections
 
 CREATE DATABASE selected_collections_${uuid0};
 

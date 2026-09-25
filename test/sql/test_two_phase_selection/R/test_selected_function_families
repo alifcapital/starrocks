@@ -1,4 +1,4 @@
--- name: selected function families
+-- name: test_selected_function_families
 CREATE DATABASE selected_families_${uuid0};
 -- result:
 -- !result
