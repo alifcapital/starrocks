@@ -20,6 +20,7 @@
 #include "column/struct_column.h"
 #include "column/type_traits.h"
 #include "exec/sorting/sorting.h"
+#include "exprs/agg/agg_state_memory.h"
 #include "exprs/agg/aggregate.h"
 #include "exprs/function_context.h"
 #include "runtime/mem_pool.h"
@@ -30,7 +31,7 @@
 namespace starrocks {
 
 template <LogicalType PT, bool is_distinct, typename MyHashSet = std::set<int>>
-struct ArrayUnionAggAggregateState {
+struct ArrayUnionAggAggregateState : public AggStateMemoryAccount {
     using ColumnType = RunTimeColumnType<PT>;
     using CppType = RunTimeCppType<PT>;
     using KeyType = typename SliceHashSet::key_type;
@@ -99,6 +100,20 @@ struct ArrayUnionAggAggregateState {
         return &data_column;
     }
 
+    // Off-pool heap charged into the operator's agg-state memory so it shows in
+    // Aggregator::memory_usage(): the value column, plus (distinct mode) the dedup hash set,
+    // approximated from its slot count (phmap exposes no exact byte count). For string keys the
+    // key bytes live in the operator mem pool (counted there); only the set's slots/control
+    // bytes are added here, so there is no double counting. Distinct mode materializes the set
+    // into the value column lazily at output; that retained buffer is counted too.
+    int64_t mem_usage() const {
+        int64_t usage = data_column.memory_usage();
+        if constexpr (is_distinct) {
+            usage += static_cast<int64_t>(set.capacity()) * (sizeof(typename MyHashSet::value_type) + 1);
+        }
+        return usage;
+    }
+
     ColumnType data_column; // Aggregated elements for array_agg
     size_t null_count = 0;
     MyHashSet set;
@@ -106,13 +121,14 @@ struct ArrayUnionAggAggregateState {
 
 template <LogicalType LT, bool is_distinct, typename MyHashSet = std::set<int>>
 class ArrayUnionAggAggregateFunction final
-        : public AggregateFunctionBatchHelper<ArrayUnionAggAggregateState<LT, is_distinct, MyHashSet>,
-                                              ArrayUnionAggAggregateFunction<LT, is_distinct, MyHashSet>> {
+        : public MemoryTrackedAggregateFunctionBatchHelper<ArrayUnionAggAggregateState<LT, is_distinct, MyHashSet>,
+                                                           ArrayUnionAggAggregateFunction<LT, is_distinct, MyHashSet>> {
 public:
     using InputColumnType = RunTimeColumnType<LT>;
 
     void update_state(FunctionContext* ctx, const ArrayColumn* input_column, AggDataPtr __restrict state,
                       size_t row_num) const {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // Array element is nullable, so we need to extract the data from nullable column first
         auto offset_size = input_column->get_element_offset_size(row_num);
         auto& array_element = down_cast<const NullableColumn&>(input_column->elements());
@@ -135,26 +151,31 @@ public:
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const auto* input_column = down_cast<const ArrayColumn*>(columns[0]);
         update_state(ctx, input_column, state, row_num);
     }
 
     void process_null(FunctionContext* ctx, AggDataPtr __restrict state) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         this->data(state).append_null();
     }
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         const auto* input_column = down_cast<const ArrayColumn*>(column);
         update_state(ctx, input_column, state, row_num);
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(const_cast<AggDataPtr>(state));
         auto* column = down_cast<ArrayColumn*>(to);
         column->append_array_element(*(state_impl.get_data_column()), state_impl.null_count);
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         return serialize_to_column(ctx, state, to);
     }
 

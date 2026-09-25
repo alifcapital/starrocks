@@ -22,6 +22,7 @@
 #include "column/hash_set.h"
 #include "column/map_column.h"
 #include "column/type_traits.h"
+#include "exprs/agg/agg_state_memory.h"
 #include "exprs/agg/aggregate.h"
 #include "exprs/function_context.h"
 #include "gutil/casts.h"
@@ -31,7 +32,7 @@
 namespace starrocks {
 
 template <LogicalType KT, typename MyHashMap = std::map<int, size_t>>
-struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState {
+struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState, public AggStateMemoryAccount {
     using KeyColumnType = RunTimeColumnType<KT>;
     using KeyType = typename SliceHashSet::key_type;
 
@@ -65,21 +66,37 @@ struct MapAggAggregateFunctionState : public AggregateFunctionEmptyState {
             }
         }
     }
+
+    // Off-pool heap charged into the operator's agg-state memory so it shows in
+    // Aggregator::memory_usage(): the value column plus an approximate size of the
+    // open-addressing hash map (slots + one control byte each; phmap exposes no exact byte
+    // count). String keys live in the operator mem pool (already counted there), so they are
+    // excluded to avoid double counting.
+    int64_t mem_usage() const {
+        int64_t usage = static_cast<int64_t>(hash_map.capacity()) * (sizeof(typename MyHashMap::value_type) + 1);
+        if (value_column != nullptr) {
+            usage += value_column->memory_usage();
+        }
+        return usage;
+    }
 };
 
 template <LogicalType KT, typename MyHashMap = std::map<int, size_t>>
-class MapAggAggregateFunction final : public AggregateFunctionBatchHelper<MapAggAggregateFunctionState<KT, MyHashMap>,
-                                                                          MapAggAggregateFunction<KT, MyHashMap>> {
+class MapAggAggregateFunction final
+        : public MemoryTrackedAggregateFunctionBatchHelper<MapAggAggregateFunctionState<KT, MyHashMap>,
+                                                           MapAggAggregateFunction<KT, MyHashMap>> {
 public:
     using KeyColumnType = RunTimeColumnType<KT>;
 
     void create(FunctionContext* ctx, AggDataPtr __restrict ptr) const override {
         auto* state = new (ptr) MapAggAggregateFunctionState<KT, MyHashMap>;
+        ScopedAggStateMemoryUsage memory_usage(ctx, *state);
         state->value_column = ctx->create_column(*ctx->get_arg_type(1), true);
     }
 
     void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
                 size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         // Key could not be null.
         if ((columns[0]->is_nullable() && columns[0]->is_null(row_num)) || columns[0]->only_null()) {
             return;
@@ -89,6 +106,7 @@ public:
     }
 
     void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto map_column = down_cast<const MapColumn*>(ColumnHelper::get_data_column(column));
         auto& offsets = map_column->offsets().immutable_data();
         if (offsets[row_num + 1] > offsets[row_num]) {
@@ -100,6 +118,7 @@ public:
     }
 
     void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         auto& state_impl = this->data(state);
         auto* map_column = down_cast<MapColumn*>(ColumnHelper::get_data_column(to));
 
@@ -131,6 +150,7 @@ public:
     }
 
     void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
+        ScopedAggStateMemoryUsage memory_usage(ctx, this->data(state));
         serialize_to_column(ctx, state, to);
     }
 

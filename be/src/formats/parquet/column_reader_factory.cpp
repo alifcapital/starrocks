@@ -198,7 +198,8 @@ StatusOr<ColumnReaderPtr> ColumnReaderFactory::create_variant_column_reader(cons
 }
 
 StatusOr<ColumnReaderPtr> ColumnReaderFactory::create(ColumnReaderPtr ori_reader, const GlobalDictMap* dict,
-                                                      SlotId slot_id, int64_t num_rows) {
+                                                      SlotId slot_id, int64_t num_rows,
+                                                      GlobalDictReaderKind* out_kind) {
     FAIL_POINT_TRIGGER_EXECUTE(parquet_reader_returns_global_dict_not_match_status, {
         return Status::GlobalDictNotMatch(
                 fmt::format("SlotId: {}, Not dict encoded and not low rows on global dict column. ", slot_id));
@@ -208,7 +209,7 @@ StatusOr<ColumnReaderPtr> ColumnReaderFactory::create(ColumnReaderPtr ori_reader
         ASSIGN_OR_RETURN(ColumnReaderPtr child_reader,
                          ColumnReaderFactory::create(
                                  std::move((down_cast<ListColumnReader*>(ori_reader.get()))->get_element_reader()),
-                                 dict, slot_id, num_rows));
+                                 dict, slot_id, num_rows, out_kind));
         return std::make_unique<ListColumnReader>(ori_reader->get_column_parquet_field(), std::move(child_reader));
     } else {
         RawColumnReader* raw_reader = dynamic_cast<RawColumnReader*>(ori_reader.get());
@@ -216,8 +217,10 @@ StatusOr<ColumnReaderPtr> ColumnReaderFactory::create(ColumnReaderPtr ori_reader
             return Status::InternalError("Error on reader transform for low cardinality reader");
         }
         if (raw_reader->column_all_pages_dict_encoded()) {
+            if (out_kind != nullptr) *out_kind = GlobalDictReaderKind::kDictCode;
             return std::make_unique<LowCardColumnReader>(*raw_reader, dict, slot_id);
         } else if (num_rows <= dict->size()) {
+            if (out_kind != nullptr) *out_kind = GlobalDictReaderKind::kLowRowsEncode;
             return std::make_unique<LowRowsColumnReader>(*raw_reader, dict, slot_id);
         } else {
             return Status::GlobalDictNotMatch(

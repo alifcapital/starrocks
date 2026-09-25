@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include "column/fixed_length_column.h"
 #include "common/config.h"
 #include "exec/aggregator.h"
 #include "exec/pipeline/aggregate/aggregate_distinct_streaming_sink_operator.h"
@@ -66,6 +67,53 @@ TEST_F(LimitedMemAggStateTest, budget_is_always_positive) {
     const int64_t usages[] = {0, 1, 24, 256, kCap - 1, kCap, kCap + 1, kCap * 10};
     for (int64_t usage : usages) {
         EXPECT_GT(LimitedMemAggState::clamp_budget(usage, kCap), 0u) << "usage=" << usage;
+    }
+}
+
+TEST(InlineAggResetTest, PackedCountsSurviveRepeatedReset) {
+    RuntimeState state;
+    state.set_chunk_size(4096);
+    RuntimeProfile profile("inline-reset");
+    AggStatistics statistics(&profile);
+    auto params = std::make_shared<AggregatorParams>();
+    Aggregator aggregator(params);
+    aggregator._state = &state;
+    aggregator._agg_stat = &statistics;
+    aggregator._mem_pool = std::make_unique<MemPool>();
+    aggregator._limited_buffer =
+            std::make_unique<LimitedPipelineChunkBuffer<AggStatistics>>(&statistics, 1, 1024 * 1024, 8);
+    aggregator._group_by_types = {{TypeDescriptor(TYPE_BIGINT), false}};
+    aggregator._group_by_expr_ctxs = {nullptr}; // Only key metadata is needed by reset/build.
+    aggregator._ranges.resize(1);
+    aggregator._aggr_phase = AggrPhase1;
+    aggregator._inline_agg = true;
+    aggregator._inline_pack = true;
+    aggregator._inline_pack_n = 2;
+    aggregator._inline_pack_fused = true;
+    aggregator._is_merge_funcs = {false, false};
+    aggregator._hash_map_variant.init(&state, AggHashMapVariant::Type::phase1_int64_pack, &statistics);
+    auto keys = Int64Column::create();
+    keys->append(1);
+    keys->append(1);
+    keys->append(2);
+    keys->append(3);
+    aggregator._group_by_columns = {keys};
+    for (int pass = 0; pass < 3; ++pass) {
+        ASSERT_TRUE(aggregator.reset_state(&state, {}, nullptr).ok());
+        ASSERT_TRUE(aggregator._hash_map_variant.is_inline_pack());
+        aggregator.build_hash_map(4);
+        EXPECT_EQ(3, aggregator.size());
+        aggregator._hash_map_variant.visit([](auto& map) {
+            using Map = std::remove_reference_t<decltype(*map)>;
+            if constexpr (agg_inline_pack<Map> && std::is_same_v<typename Map::KeyType, int64_t>) {
+                for (int64_t key : {1, 2, 3}) {
+                    auto it = map->hash_map.find(key);
+                    ASSERT_NE(it, map->hash_map.end());
+                    EXPECT_EQ(key == 1 ? 2 : 1, it->second.f[0]);
+                    EXPECT_EQ(key == 1 ? 2 : 1, it->second.f[1]);
+                }
+            }
+        });
     }
 }
 

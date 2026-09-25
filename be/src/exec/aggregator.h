@@ -41,6 +41,7 @@
 #include "runtime/memory/counting_allocator.h"
 #include "runtime/runtime_state.h"
 #include "runtime/types.h"
+#include "util/phmap/phmap.h"
 
 namespace starrocks {
 class RuntimeFilter;
@@ -252,6 +253,10 @@ struct AggregatorParams {
 
     bool has_nullable_key;
 
+    // FE NDV estimate of the group-by key, safe to reserve from per the FE gate. -1
+    // means absent/unsafe; the BE only reserves the hash table when this is > 0.
+    int64_t estimated_cardinality = -1;
+
     void init();
 };
 using AggregatorParamsPtr = std::shared_ptr<AggregatorParams>;
@@ -271,6 +276,24 @@ public:
     virtual Status open(RuntimeState* state);
     Status prepare(RuntimeState* state, RuntimeProfile* runtime_profile);
     void close(RuntimeState* state) override;
+
+    // Local degree of parallelism of the agg pipeline, set idempotently from the
+    // operator factory's create(dop, seq). Used as the reserve divisor: on a single
+    // BE it is the exact number of drivers sharing the keyspace after local-shuffle.
+    void set_degree_of_parallelism(int32_t dop) {
+        if (_degree_of_parallelism <= 0) {
+            _degree_of_parallelism = dop;
+        } else {
+            DCHECK_EQ(_degree_of_parallelism, dop);
+        }
+    }
+
+    // Reserve the hash map's initial capacity once from the FE NDV estimate, capped by
+    // config::agg_hashtable_reserve_max_bytes. Triggered from the hash-blocking sink
+    // after open(); a no-op for streaming, distinct (set), or unsafe variants.
+    // Returns a MemoryLimitExceeded status if the (best-effort) reserve hit the
+    // mem limit; the caller treats that as non-fatal and falls back to growth.
+    Status reserve_hash_table_from_estimate();
 
     const MemPool* mem_pool() const { return _mem_pool.get(); }
     bool is_none_group_by_exprs() { return _group_by_expr_ctxs.empty(); }
@@ -328,6 +351,25 @@ public:
     RuntimeProfile::Counter* rows_returned_counter() { return _agg_stat->rows_returned_counter; }
     RuntimeProfile::Counter* hash_table_size() { return _agg_stat->hash_table_size; }
     RuntimeProfile::Counter* pass_through_row_count() { return _agg_stat->pass_through_row_count; }
+    RuntimeProfile::Counter* consecutive_keys_cache_hits() { return _agg_stat->consecutive_keys_cache_hits; }
+    RuntimeProfile::Counter* consecutive_keys_cache_misses() { return _agg_stat->consecutive_keys_cache_misses; }
+
+    // Snapshot hash-map runtime stats into RuntimeProfile counters. Call from
+    // sink/source operators that already publish HashTableSize at chunk and
+    // finalize boundaries. Hides the variant-specific getters from operators.
+    void update_hash_map_profile_counters() {
+        COUNTER_SET(hash_table_size(), (int64_t)_hash_map_variant.size());
+        COUNTER_SET(consecutive_keys_cache_hits(), (int64_t)_hash_map_variant.consecutive_keys_cache_hits());
+        COUNTER_SET(consecutive_keys_cache_misses(), (int64_t)_hash_map_variant.consecutive_keys_cache_misses());
+    }
+
+    // Same shape for the distinct/set side; called from
+    // aggregate_distinct_* sink/source operators.
+    void update_hash_set_profile_counters() {
+        COUNTER_SET(hash_table_size(), (int64_t)_hash_set_variant.size());
+        COUNTER_SET(consecutive_keys_cache_hits(), (int64_t)_hash_set_variant.consecutive_keys_cache_hits());
+        COUNTER_SET(consecutive_keys_cache_misses(), (int64_t)_hash_set_variant.consecutive_keys_cache_misses());
+    }
 
     void sink_complete() { _is_sink_complete.store(true, std::memory_order_release); }
 
@@ -442,6 +484,90 @@ protected:
     std::unique_ptr<CountingAllocatorWithHook> _allocator;
 
     HashTableKeyAllocator _state_allocator;
+    // When true, the single qualifying aggregate runs the inline fast path: the hash-map
+    // slot holds its accumulator directly (no arena state, no key dup). Set in open() for a
+    // supported op over a supported fixed-size key (numeric, or a multi-column
+    // serialized/compressed key).
+    bool _inline_agg = false;
+    // Which op policy drives the inline path (resolved in open() from the function name).
+    // kCountStar: plain count -- constant +1 deltas, fused into the build on update chunks
+    // (the only fused op: its delta needs no input column).
+    // kCountCol: count_nullable -- the delta of a row is !null[i] of the input column, so
+    // update chunks go through the deferred fold in compute (where the input column lives).
+    // kSumInt / kSumDouble: plain sum with a BIGINT / DOUBLE accumulator -- the delta is the
+    // input value itself (widened for narrow ints), deferred fold like kCountCol; the
+    // nullable wrapper never reaches here (gate by resolved name), so there is no null mask
+    // and no NULL partials. Merge chunks fold the intermediate partials with the same typed
+    // += for every op.
+    // kMin / kMax: plain min/max -- the slot holds the value type T itself, the delta is the
+    // input value (zero-copy), identity is the type's limit; like the other per-row-delta ops
+    // the update fold is deferred to compute. _inline_minmax_lt carries the concrete T.
+    enum class InlineOpKind : uint8_t { kCountStar, kCountCol, kSumInt, kSumDouble, kMin, kMax };
+    InlineOpKind _inline_op = InlineOpKind::kCountStar;
+    LogicalType _inline_minmax_lt = TYPE_UNKNOWN;
+    // Multi-aggregate pack: 2..4 additive int64 aggregates (count(*) / count(col) /
+    // sum(int->BIGINT)) share one 32-byte map cell; field k of the cell is aggregate k.
+    // The single-op fields above are not used while _inline_pack is set.
+    bool _inline_pack = false;
+    uint8_t _inline_pack_n = 0;
+    InlineOpKind _inline_pack_ops[4] = {};
+    // A pack is build-fused only when EVERY field is count(*): that is the only delta
+    // needing no input column. Any other member defers the whole pack's fold to compute.
+    bool _inline_pack_fused = false;
+    bool _inline_op_is_fused() const {
+        return _inline_pack ? _inline_pack_fused : _inline_op == InlineOpKind::kCountStar;
+    }
+    template <typename HTBuildOp>
+    void _inline_pack_dispatch_build(size_t chunk_size, Filter* not_founds, size_t limit, bool fused);
+    // Materialize the chunk's per-row pack deltas (AoS) into the delta scratch: on an update
+    // chunk field k's delta comes from aggregate k's input column, on a merge chunk from its
+    // intermediate partial column.
+    StatusOr<const InlinePackDelta*> _compute_pack_deltas(Chunk* chunk, size_t chunk_size, bool is_merge);
+    // Per-chunk materialized deltas for the per-row-delta ops (8B per row; doubles reuse the
+    // same bytes). Lives until the end of the compute call that filled it.
+    Buffer<int64_t> _inline_delta_scratch;
+    const int64_t* _compute_count_col_deltas(size_t chunk_size);
+    template <typename DeltaT, typename ColumnT>
+    const DeltaT* _compute_sum_deltas(size_t chunk_size);
+    template <typename Op, typename PartialColumnT>
+    Status _inline_fold_merge_chunk(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    template <typename Op, typename DeltaColumnT>
+    Status _inline_fold_sum_update_chunk(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    Status _inline_sum_int_update(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    Status _inline_sum_double_update(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    Status _inline_minmax_update(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    Status _inline_minmax_merge(Chunk* chunk, size_t chunk_size, const Filter* selection);
+    template <typename HTBuildOp>
+    void _inline_dispatch_build(size_t chunk_size, Filter* not_founds, size_t limit, bool fused_count);
+    // Sorted streaming aggregation (including spill restore) still uses ordinary aggregate-function
+    // states; it never stores the count in a hash-map value slot. Subclasses can turn this off before open().
+    bool _allow_inline_agg = true;
+    // Whether the CURRENT chunk carries merge/intermediate input (partial counts to fold with
+    // slot += partial) rather than raw update rows (+1 each). Decided per chunk -- exactly like
+    // the general path's update-vs-merge dispatch in compute_batch_agg_states -- because
+    // _use_intermediate_as_input() can flip after open(): a PRE_CACHE aggregator starts on raw
+    // rows and is refilled with intermediate chunks on a query-cache hit
+    // (begin_pending_reset_state). Evaluated ONCE per chunk by the build entry and captured in
+    // _inline_chunk; compute uses the captured value, never re-evaluates.
+    bool _inline_agg_merge_chunk() { return _is_merge_funcs[0] || _use_intermediate_as_input(); }
+    // Per-chunk protocol between the build entry and the matching compute call. Every build
+    // entry overwrites the whole struct for the current chunk; compute consumes it (fold ->
+    // kConsumed). The pairing is guaranteed by the operators: every compute_*(chunk) is
+    // preceded by a build entry for the SAME chunk, and the only path that skips compute is
+    // "stream the whole chunk" after a classify build, whose kFoldSelection state is legally
+    // overwritten by the next build. Carries no pointers/iterators/views.
+    struct InlineChunkState {
+        enum Fold : uint8_t {
+            kConsumed,      // nothing pending (initial; after compute consumed the chunk)
+            kCommitted,     // build counted in place; compute is a no-op fold
+            kFoldAll,       // build created/skipped; compute folds every row
+            kFoldSelection, // build classified; compute folds/commits kept rows (selection==0)
+        };
+        Fold fold = kConsumed;
+        bool is_merge = false; // captured _inline_agg_merge_chunk() of the current chunk
+    };
+    InlineChunkState _inline_chunk;
+    Status _inline_pack_compute(Chunk* chunk, size_t chunk_size, const Filter* selection, InlineChunkState chunk_state);
     // The open phase still relies on the TFunction object for some initialization operations
     std::vector<TFunction> _fns;
 
@@ -539,6 +665,14 @@ protected:
     bool _is_prepared = false;
     int64_t _agg_state_mem_usage = 0;
 
+    // Local DOP of the agg pipeline (reserve divisor); 0 until set by the factory.
+    int32_t _degree_of_parallelism = 0;
+    // Guards the initial-capacity reserve so it runs at most once over the
+    // aggregator's life.
+    bool _initial_reserve_applied = false;
+    // Last observed hash-map capacity, to count rehashes (HashTableGrowCount).
+    size_t _prev_hash_map_capacity = 0;
+
     // aggregate combinator functions since they are not persisted in agg hash map
     std::vector<const AggregateFunction*> _combinator_function;
 
@@ -566,6 +700,10 @@ protected:
     bool _reached_limit() { return _limit != -1 && _num_rows_returned >= _limit; }
 
     void _build_hash_map_with_shared_limit(size_t chunk_size, std::atomic<int64_t>& shared_limit_countdown);
+
+    // Count hash-map capacity growths (rehashes) into HashTableGrowCount. Idempotent:
+    // capacity is monotonic, so a repeat call with no growth adds nothing.
+    void _update_hash_table_grow_count();
 
     bool _use_intermediate_as_input() {
         if (is_pending_reset_state()) {
@@ -611,7 +749,7 @@ protected:
 
     // Choose different agg hash map/set by different group by column's count, type, nullable
     template <typename HashVariantType>
-    void _init_agg_hash_variant(HashVariantType& hash_variant);
+    void _init_agg_hash_variant(HashVariantType& hash_variant, bool want_pack = false);
     // get spec hash table/set type
     template <typename HashVariantType>
     typename HashVariantType::Type _get_hash_table_type();
@@ -640,7 +778,7 @@ protected:
 
     int64_t get_two_level_threahold() {
         if (config::two_level_memory_threshold < 0) {
-            return agg::two_level_memory_threshold;
+            return agg::two_level_memory_threshold();
         }
         return config::two_level_memory_threshold;
     }

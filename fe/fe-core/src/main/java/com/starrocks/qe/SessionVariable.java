@@ -588,9 +588,13 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_JOIN_RUNTIME_FILTER_PUSH_DOWN = "enable_join_runtime_filter_push_down";
     public static final String ENABLE_JOIN_RUNTIME_BITSET_FILTER = "enable_join_runtime_bitset_filter";
 
+    public static final String ENABLE_AGG_CONSECUTIVE_KEYS_CACHE = "enable_agg_consecutive_keys_cache";
+
     public static final String ENABLE_HASH_JOIN_RANGE_DIRECT_MAPPING_OPT = "enable_hash_join_range_direct_mapping_opt";
     public static final String ENABLE_HASH_JOIN_LINEAR_CHAINED_OPT = "enable_hash_join_linear_chained_opt";
     public static final String ENABLE_HASH_JOIN_SERIALIZE_FIXED_SIZE_STRING = "enable_hash_join_serialize_fixed_size_string";
+
+    public static final String ENABLE_AGG_INLINE_ACCUMULATOR = "enable_agg_inline_accumulator";
 
     public static final String ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF =
             "enable_pipeline_level_multi_partitioned_rf";
@@ -1975,6 +1979,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = ENABLE_JOIN_RUNTIME_BITSET_FILTER, flag = VariableMgr.INVISIBLE)
     private boolean enableJoinRuntimeBitsetFilter = true;
 
+    @VarAttr(name = ENABLE_AGG_CONSECUTIVE_KEYS_CACHE)
+    private boolean enableAggConsecutiveKeysCache = true;
+
     @VarAttr(name = ENABLE_HASH_JOIN_RANGE_DIRECT_MAPPING_OPT)
     private boolean enableHashJoinRangeDirectMappingOpt = true;
 
@@ -1983,6 +1990,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_HASH_JOIN_SERIALIZE_FIXED_SIZE_STRING)
     private boolean enableHashJoinSerializeFixedSizeString = true;
+
+    // Inline a qualifying aggregate's accumulator (count/sum/min/max) into the
+    // group-by hash-map value slot for fixed-size keys, instead of a pointer to an
+    // arena-allocated agg state.
+    @VarAttr(name = ENABLE_AGG_INLINE_ACCUMULATOR)
+    private boolean enableAggInlineAccumulator = true;
 
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
@@ -6395,6 +6408,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setEnable_hash_join_range_direct_mapping_opt(enableHashJoinRangeDirectMappingOpt);
         tResult.setEnable_hash_join_linear_chained_opt(enableHashJoinLinearChainedOpt);
         tResult.setEnable_hash_join_serialize_fixed_size_string(enableHashJoinSerializeFixedSizeString);
+        tResult.setEnable_agg_consecutive_keys_cache(enableAggConsecutiveKeysCache);
+        tResult.setEnable_agg_inline_accumulator(enableAggInlineAccumulator);
 
         return tResult;
     }
