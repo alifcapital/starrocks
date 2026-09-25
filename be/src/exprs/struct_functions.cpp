@@ -19,7 +19,6 @@
 #define BOOST_CSTDFLOAT_NO_LIBQUADMATH_SUPPORT
 #include <boost/multiprecision/cpp_int.hpp>
 
-#include "column/column_builder.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
 #include "column/struct_column.h"
@@ -84,13 +83,21 @@ StatusOr<int128_t> decode_debezium_decimal(Slice bytes, int32_t source_scale, in
     const UInt128 limit = kDecimalPowers[precision];
     UInt128 magnitude = 0;
     if (size <= 16) {
-        for (size_t i = 0; i < size; ++i) {
-            magnitude = (magnitude << 8) | (negative ? static_cast<uint8_t>(~data[i]) : data[i]);
+        if (size <= 8) {
+            uint64_t small = 0;
+            for (size_t i = 0; i < size; ++i) {
+                small = (small << 8) | (negative ? static_cast<uint8_t>(~data[i]) : data[i]);
+            }
+            magnitude = static_cast<UInt128>(small) + negative;
+        } else {
+            for (size_t i = 0; i < size; ++i) {
+                magnitude = (magnitude << 8) | (negative ? static_cast<uint8_t>(~data[i]) : data[i]);
+            }
+            magnitude += negative;
         }
-        magnitude += negative;
         if (magnitude == 0) return int128_t{0};
         if (delta > 0) {
-            if (delta >= precision || magnitude > (limit - 1) / kDecimalPowers[delta]) {
+            if (delta >= precision || magnitude >= kDecimalPowers[precision - delta]) {
                 return Status::InvalidArgument("debezium_decimal: value exceeds target precision");
             }
             magnitude *= kDecimalPowers[delta];
@@ -147,19 +154,29 @@ StatusOr<ColumnPtr> StructFunctions::debezium_decimal(FunctionContext* context, 
     ColumnViewer<TYPE_VARBINARY> value_view(values);
     const bool constant = input->is_constant();
     const size_t count = constant && input->size() != 0 ? 1 : input->size();
-    ColumnBuilder<TYPE_DECIMAL128> result(count, type.precision, type.scale);
+    auto data_column = Decimal128Column::create(type.precision, type.scale);
+    auto null_column = NullColumn::create();
+    auto& data = data_column->get_data();
+    auto& nulls = null_column->get_data();
+    data.resize(count);
+    nulls.resize(count, 0);
+    const bool input_has_null = input->has_null();
+    bool has_null = false;
     for (size_t row = 0; row < count; ++row) {
-        if (input->is_null(row) || scale_view.is_null(row) || value_view.is_null(row)) {
-            result.append_null();
+        if ((input_has_null && input->is_null(row)) || scale_view.is_null(row) || value_view.is_null(row)) {
+            nulls[row] = 1;
+            has_null = true;
         } else {
-            ASSIGN_OR_RETURN(auto value, decode_debezium_decimal(value_view.value(row), scale_view.value(row),
-                                                                 type.precision, type.scale));
-            result.append(value);
+            ASSIGN_OR_RETURN(data[row], decode_debezium_decimal(value_view.value(row), scale_view.value(row),
+                                                                type.precision, type.scale));
         }
     }
-    auto output = result.build(constant);
-    if (constant) output->resize(input->size());
-    return output;
+    if (constant) {
+        if (has_null) return ColumnHelper::create_const_null_column(input->size());
+        return ConstColumn::create(std::move(data_column), input->size());
+    }
+    if (has_null) return NullableColumn::create(std::move(data_column), std::move(null_column));
+    return data_column;
 }
 
 } // namespace starrocks
