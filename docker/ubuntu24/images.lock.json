@@ -1,0 +1,30 @@
+{
+  "upstream": {
+    "tag": "starrocks/dev-env-ubuntu:4.1-latest",
+    "image": "starrocks/dev-env-ubuntu@sha256:41effd8c1cabf853a4a1e062aba0303028d5a1da96966ff6cca32038f473dc05",
+    "platforms": [
+      {
+        "architecture": "amd64",
+        "os": "linux"
+      },
+      {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    ]
+  },
+  "toolchain": {
+    "tag": "starrocks/toolchains-ubuntu:main-20260707",
+    "image": "starrocks/toolchains-ubuntu@sha256:97a8da6b5d469da4d4b7c199bbf2ab13a06cf29e5d174f0efb6a78ca78b281fc",
+    "platforms": [
+      {
+        "architecture": "amd64",
+        "os": "linux"
+      },
+      {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    ]
+  }
+}

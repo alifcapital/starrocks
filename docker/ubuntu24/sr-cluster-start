@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+ulimit -n 524288
+SR=$HOME/starrocks/output
+ip=$(hostname -I | awk '{print $1}')
+cp "$HOME/cluster-conf/fe.conf" "$SR/fe/conf/fe.conf"
+cp "$HOME/cluster-conf/cn.conf" "$SR/be/conf/cn.conf"
+mkdir -p "$SR/fe/meta" "$SR/be/storage"
+mysql_cmd=(mysql -h127.0.0.1 -P9030 -uroot --connect-timeout=5)
+bash "$SR/fe/bin/start_fe.sh" --daemon
+for ((i=0; i<90; i++)); do
+    if "${mysql_cmd[@]}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+    sleep 2
+done
+"${mysql_cmd[@]}" -e 'SELECT 1' >/dev/null
+nodes=$("${mysql_cmd[@]}" -e 'SHOW COMPUTE NODES\G')
+if ! grep -Fq "IP: $ip" <<<"$nodes"; then
+    "${mysql_cmd[@]}" -e "ALTER SYSTEM ADD COMPUTE NODE '$ip:9050'"
+fi
+bash "$SR/be/bin/start_cn.sh" --daemon
+for ((i=0; i<60; i++)); do
+    nodes=$("${mysql_cmd[@]}" -e 'SHOW COMPUTE NODES\G')
+    ports=$(ss -tln)
+    if grep -q 'Alive: true' <<<"$nodes" && grep -q ':9060 ' <<<"$ports" && grep -q ':9070 ' <<<"$ports" &&
+        [[ $("${mysql_cmd[@]}" --batch --skip-column-names -e \
+            'SELECT SUM(generate_series) FROM TABLE(generate_series(1,3))' 2>/dev/null) == 6 ]]; then
+        echo 'CLUSTER UP: FE/CN query ready; BE 9060 and Starlet 9070 listening'
+        exit 0
+    fi
+    sleep 5
+done
+echo 'CN failed to become ready; inspect output/be/log' >&2
+exit 1

@@ -102,14 +102,20 @@ if [[ "${MACHINE_TYPE}" == "aarch64" ]]; then
     jvm_arch="aarch64"
 fi
 
+# min jdk version required for jni features
+MIN_JDK_VERSION=17
+# recommended jdk version; versions in [MIN_JDK_VERSION, RECOMMENDED_JDK_VERSION) are deprecated
+RECOMMENDED_JDK_VERSION=21
 if [ "$JAVA_HOME" = "" ]; then
     echo "[WARNING] JAVA_HOME env not set. Functions or features that requires jni will not work at all."
     export LD_LIBRARY_PATH=$STARROCKS_HOME/lib:$LD_LIBRARY_PATH
 else
     export LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$JAVA_HOME/lib:$LD_LIBRARY_PATH
     java_version=$(jdk_version)
-    if [[ $java_version -lt 17 ]]; then
-        echo "[WARNING] jdk versions lower than 17 are not supported"
+    if [[ $java_version -lt $MIN_JDK_VERSION ]]; then
+        echo "[ERROR] JDK $java_version is not supported, please use JDK version $RECOMMENDED_JDK_VERSION or higher"
+    elif [[ $java_version -lt $RECOMMENDED_JDK_VERSION ]]; then
+        echo "[WARNING] JDK $java_version is deprecated and support will be removed in a future release, please upgrade to JDK version $RECOMMENDED_JDK_VERSION or higher"
     fi
 fi
 
@@ -138,6 +144,18 @@ fi
 
 # Appending the option to avoid "process heaper" stack overflow exceptions.
 final_java_opt="$final_java_opt -Djdk.lang.processReaperUseDefaultStackSize=true"
+
+# JDK 18+ (JEP 411) rejects System.setSecurityManager unless the JVM is started with
+# -Djava.security.manager=allow, which UDFClassLoader needs when java.security.policy is
+# set. JDK 24+ (JEP 486) rejects every value other than 'disallow' and the JVM will not
+# start at all, so only [18,24) gets the flag. Whatever JAVA_OPTS already sets wins,
+# including a deliberate -Djava.security.manager=disallow.
+if [[ "${java_version:-0}" -ge 18 && "${java_version:-0}" -lt 24 ]]; then
+    if [[ "$final_java_opt" != *"-Djava.security.manager="* ]]; then
+        final_java_opt="$final_java_opt -Djava.security.manager=allow"
+    fi
+fi
+
 export LIBHDFS_OPTS=$final_java_opt
 # Prevent JVM from handling any internally or externally generated signals.
 # Otherwise, JVM will overwrite the signal handlers for SIGINT and SIGTERM.
