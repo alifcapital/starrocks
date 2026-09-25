@@ -45,7 +45,7 @@ void PipelineObserver::_do_update(int event) {
         // Fast-path checks and trace logging can allocate, free buffers or submit spill I/O.
         // Restore the previous tracker before publishing the driver: an executor may immediately
         // finish its fragment and destroy the runtime state and its memory counters.
-        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(driver->runtime_state()->instance_mem_tracker());
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(driver->fragment_ctx()->runtime_state()->instance_mem_tracker());
         auto sink = driver->sink_operator();
         auto source = driver->source_operator();
 

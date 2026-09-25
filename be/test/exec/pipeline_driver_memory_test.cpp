@@ -117,6 +117,7 @@ protected:
         _state->init_mem_trackers(_query_tracker);
         _state->set_query_ctx(_query_ctx.get());
         _state->set_fragment_ctx(&_fragment_ctx);
+        _fragment_ctx.set_runtime_state(std::shared_ptr<RuntimeState>(_state));
         _source = std::make_shared<MemoryCallbackOperator>(&_factory, 0);
         _sink = std::make_shared<MemoryCallbackOperator>(&_factory, 1);
         _driver = std::make_unique<PipelineDriver>(Operators{_source, _sink}, _query_ctx.get(), &_fragment_ctx, nullptr,
