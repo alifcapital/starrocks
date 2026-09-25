@@ -23,6 +23,8 @@ public:
     DEFINE_VECTORIZED_FN(new_struct);
 
     DEFINE_VECTORIZED_FN(named_struct);
+
+    DEFINE_VECTORIZED_FN(debezium_decimal);
 };
 
 } // namespace starrocks
