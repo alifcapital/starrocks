@@ -123,8 +123,8 @@ Usage: $0 <options>
                         disable Java checkstyle checks during build (default: $DISABLE_JAVA_CHECK_STYLE)
      --with-lto         build Backend with ThinLTO (requires Clang/LLD)
      --with-bolt        build Backend with BOLT support (adds --emit-relocs for post-link optimization)
-     --with-autofdo <profile>
-                        build Backend with AutoFDO profile (.afdo file)
+     --pgo-generate <directory> | --pgo-use <directory>
+                        build Backend with instrumentation or collected PGO data
      -h,--help          Show this help message
   Eg.
     $0                                           build all
@@ -189,7 +189,8 @@ OPTS=$(${GETOPT_BIN} \
   -l 'disable-java-check-style' \
   -l 'with-lto' \
   -l 'with-bolt' \
-  -l 'with-autofdo:' \
+  -l 'pgo-generate:' \
+  -l 'pgo-use:' \
   -- "$@")
 
 if [ $? != 0 ] ; then
@@ -220,7 +221,8 @@ BUILD_BE_MODULE=all
 # PGO/LTO options
 WITH_LTO=OFF
 WITH_BOLT=OFF
-AUTOFDO_PROFILE=""
+PGO_MODE=OFF
+PGO_PROFILE_DIR=""
 
 # Default to OFF, turn it ON if current shell is non-interactive
 WITH_MAVEN_BATCH_MODE=OFF
@@ -340,7 +342,12 @@ else
             --disable-java-check-style) DISABLE_JAVA_CHECK_STYLE=ON; shift ;;
             --with-lto) WITH_LTO=ON; shift ;;
             --with-bolt) WITH_BOLT=ON; shift ;;
-            --with-autofdo) AUTOFDO_PROFILE=$2; shift 2 ;;
+            --pgo-generate|--pgo-use)
+                if [ "$PGO_MODE" != OFF ]; then
+                    echo "Select only one PGO mode" >&2; exit 1
+                fi
+                if [ "$1" = --pgo-generate ]; then PGO_MODE=GENERATE; else PGO_MODE=USE; fi
+                PGO_PROFILE_DIR=$2; shift 2 ;;
             --) shift ;  break ;;
             *) echo "Internal error" ; exit 1 ;;
         esac
@@ -402,7 +409,8 @@ echo "Get params:
     BUILD_BE_MODULE             -- $BUILD_BE_MODULE
     WITH_LTO                    -- $WITH_LTO
     WITH_BOLT                   -- $WITH_BOLT
-    AUTOFDO_PROFILE             -- $AUTOFDO_PROFILE
+    PGO_MODE                    -- $PGO_MODE
+    PGO_PROFILE_DIR             -- $PGO_PROFILE_DIR
 "
 
 check_tool()
@@ -501,6 +509,11 @@ if [ ${BUILD_BE} -eq 1 ] || [ ${BUILD_FORMAT_LIB} -eq 1 ] ; then
     else
         CXX_COMPILER_LAUNCHER=${CCACHE}
     fi
+    # Profile contents are compiler inputs; avoid reusing cached objects from an older profile.
+    if [ "$PGO_MODE" != OFF ]; then
+        export CCACHE_DISABLE=1
+        CXX_COMPILER_LAUNCHER=""
+    fi
     if [ "${WITH_CLANG_TIDY}" == "ON" ];then
         # this option cannot work with clang-14
         WITH_COMPRESS=OFF
@@ -532,7 +545,8 @@ if [ ${BUILD_BE} -eq 1 ] || [ ${BUILD_FORMAT_LIB} -eq 1 ] ; then
                   -DWITH_RELATIVE_SRC_PATH=${WITH_RELATIVE_SRC_PATH}    \
                   -DWITH_LTO=${WITH_LTO}                                \
                   -DWITH_BOLT=${WITH_BOLT}                              \
-                  -DAUTOFDO_PROFILE=${AUTOFDO_PROFILE}                  \
+                  -DPGO_MODE=${PGO_MODE}                              \
+                  "-DPGO_PROFILE_DIR=${PGO_PROFILE_DIR}"                \
                   ..
 
     if [ "${BUILD_BE_MODULE}" != "all" ] ; then
