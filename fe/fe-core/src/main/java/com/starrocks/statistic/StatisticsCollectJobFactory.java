@@ -47,6 +47,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -65,6 +66,9 @@ public class StatisticsCollectJobFactory {
      * @return jobs order by priority
      */
     public static List<StatisticsCollectJob> buildStatisticsCollectJob(NativeAnalyzeJob nativeAnalyzeJob) {
+        if (!Config.enable_statistic_auto_collect_staggered_schedule) {
+            nativeAnalyzeJob.getCollectSchedule().deactivate();
+        }
         List<StatisticsCollectJob> statsJobs = Lists.newArrayList();
         if (StatsConstants.DEFAULT_ALL_ID == nativeAnalyzeJob.getDbId()) {
             // all database
@@ -104,6 +108,7 @@ public class StatisticsCollectJobFactory {
 
         // Put higher priority jobs at the front
         statsJobs.sort(new StatisticsCollectJob.ComparatorWithPriority());
+        persistSchedule(nativeAnalyzeJob);
         return statsJobs;
     }
 
@@ -161,6 +166,9 @@ public class StatisticsCollectJobFactory {
     }
 
     public static List<StatisticsCollectJob> buildExternalStatisticsCollectJob(ExternalAnalyzeJob externalAnalyzeJob) {
+        if (!Config.enable_statistic_auto_collect_staggered_schedule) {
+            externalAnalyzeJob.getCollectSchedule().deactivate();
+        }
         ConnectContext context = new ConnectContext();
 
         List<StatisticsCollectJob> statsJobs = Lists.newArrayList();
@@ -222,6 +230,7 @@ public class StatisticsCollectJobFactory {
         }
 
         statsJobs.sort(new StatisticsCollectJob.ComparatorWithPriority());
+        persistSchedule(externalAnalyzeJob);
         return statsJobs;
     }
 
@@ -315,6 +324,18 @@ public class StatisticsCollectJobFactory {
         if (table == null) {
             return;
         }
+        List<String> columns = CollectionUtils.isEmpty(columnNames) ? StatisticUtils.getCollectibleColumns(table) : columnNames;
+        long interval = staggered(job) ? externalInterval(table, job.getProperties(), columns) : 0;
+        withSchedule(allTableJobMap, job, db, table, interval,
+                scheduled -> createExternalAnalyzeJobImpl(allTableJobMap, job, db, table, columnNames, scheduled));
+    }
+
+    private static void createExternalAnalyzeJobImpl(List<StatisticsCollectJob> allTableJobMap, ExternalAnalyzeJob job,
+                                                     Database db, Table table, List<String> columnNames,
+                                                     boolean scheduled) {
+        if (table == null) {
+            return;
+        }
 
         String regex = job.getProperties().getOrDefault(StatsConstants.STATISTIC_EXCLUDE_PATTERN, null);
         if (StringUtils.isNotBlank(regex)) {
@@ -378,6 +399,9 @@ public class StatisticsCollectJobFactory {
             long timeInterval = job.getProperties().get(STATISTIC_AUTO_COLLECT_INTERVAL) != null ?
                     Long.parseLong(job.getProperties().get(STATISTIC_AUTO_COLLECT_INTERVAL)) :
                     defaultInterval;
+            if (scheduled) {
+                timeInterval = 0;
+            }
 
             needCollectStatsColumns = needCollectStatsColumns(basicStatsMeta, table, columnNames,
                     StatisticUtils.getTableLastUpdateTime(table), timeInterval);
@@ -447,14 +471,20 @@ public class StatisticsCollectJobFactory {
                                   Database db, Table table, List<String> columnNames, List<Type> columnTypes) {
         // catch exceptions because it may fail to query the predicate_columns
         try {
-            createJobImpl(allTableJobMap, job, db, table, columnNames, columnTypes);
+            if (table == null || !table.isNativeTableOrMaterializedView()) {
+                return;
+            }
+            long interval = staggered(job) ? nativeInterval(table, job) : 0;
+            withSchedule(allTableJobMap, job, db, table, interval,
+                    scheduled -> createJobImpl(allTableJobMap, job, db, table, columnNames, columnTypes, scheduled));
         } catch (Throwable e) {
             LOG.warn("create statistics job failed db={} table={} columns={}", db, table, columnNames, e);
         }
     }
 
     private static void createJobImpl(List<StatisticsCollectJob> allTableJobMap, NativeAnalyzeJob job,
-                                      Database db, Table table, List<String> columnNames, List<Type> columnTypes) {
+                                      Database db, Table table, List<String> columnNames, List<Type> columnTypes,
+                                      boolean scheduled) {
         if (table == null || !table.isNativeTableOrMaterializedView()) {
             return;
         }
@@ -594,7 +624,7 @@ public class StatisticsCollectJobFactory {
 
             long timeInterval = PropertyUtil.propertyAsLong(jobProperties, STATISTIC_AUTO_COLLECT_INTERVAL, defaultInterval);
 
-            if (!needRecollectPredicateColumnsOnUnpartitioned &&
+            if (!scheduled && !needRecollectPredicateColumnsOnUnpartitioned &&
                     !isInitJob && statsUpdateTime.plusSeconds(timeInterval).isAfter(LocalDateTime.now())) {
                 LOG.debug("statistics job doesn't work on the interval table: {}, " +
                                 "last collect time: {}, interval: {}, table size: {}MB",
@@ -643,6 +673,72 @@ public class StatisticsCollectJobFactory {
         } else {
             throw new StarRocksPlannerException("Unknown analyze type " + analyzeType, ErrorType.INTERNAL_ERROR);
         }
+    }
+
+    private static boolean staggered(AnalyzeJob job) {
+        return Config.enable_statistic_auto_collect_staggered_schedule
+                && job.getScheduleType() == StatsConstants.ScheduleType.SCHEDULE;
+    }
+
+    private static void persistSchedule(AnalyzeJob job) {
+        if (job.getCollectSchedule().takeDirty()) {
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithLog(job);
+        }
+    }
+
+    private static void withSchedule(List<StatisticsCollectJob> jobs, AnalyzeJob job, Database db, Table table,
+                                     long interval, Consumer<Boolean> build) {
+        if (!staggered(job) || interval <= 0) {
+            if (Config.enable_statistic_auto_collect_staggered_schedule && !StatisticAutoCollector.checkoutAnalyzeTime()) {
+                return;
+            }
+            build.accept(false);
+            return;
+        }
+        String key = job.getId() + ":" + db.getFullName() + ":" + table.getUUID();
+        AutoStatisticsSchedule.Attempt attempt = job.getCollectSchedule().due(key, interval,
+                AutoStatisticsSchedule.now(), AutoStatisticsSchedule.Window.current());
+        if (attempt == null) {
+            return;
+        }
+        int first = jobs.size();
+        build.accept(true);
+        if (jobs.size() == first) {
+            // A healthy/unchanged table still consumes its slot, otherwise a bulk update
+            // would make all idle tables immediately eligible together.
+            attempt.complete(AutoStatisticsSchedule.now());
+        } else {
+            for (int i = first; i < jobs.size(); i++) {
+                jobs.get(i).setCollectScheduleAttempt(attempt);
+            }
+        }
+    }
+
+    private static long externalInterval(Table table, Map<String, String> properties, List<String> columns) {
+        if (properties.containsKey(STATISTIC_AUTO_COLLECT_INTERVAL)) {
+            return Long.parseLong(properties.get(STATISTIC_AUTO_COLLECT_INTERVAL));
+        }
+        long rows = GlobalStateMgr.getCurrentState().getStatisticStorage()
+                .getConnectorTableStatisticsSync(table, columns).stream()
+                .filter(stats -> !stats.isUnknown()).mapToLong(ConnectorTableColumnStats::getRowCount)
+                .findFirst().orElse(Config.statistic_auto_collect_small_table_rows - 1);
+        return rows < Config.statistic_auto_collect_small_table_rows
+                ? Config.statistic_auto_collect_small_table_interval : Config.statistic_auto_collect_large_table_interval;
+    }
+
+    private static long nativeInterval(Table table, NativeAnalyzeJob job) {
+        if (job.getProperties().containsKey(STATISTIC_AUTO_COLLECT_INTERVAL)) {
+            return Long.parseLong(job.getProperties().get(STATISTIC_AUTO_COLLECT_INTERVAL));
+        }
+        if (job.getAnalyzeType() == StatsConstants.AnalyzeType.HISTOGRAM) {
+            return Config.statistic_auto_collect_histogram_interval;
+        }
+        BasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getTableBasicStatsMeta(table.getId());
+        long bytes = table.getPartitions().stream()
+                .filter(p -> meta == null || !StatisticUtils.isPartitionStatsHealthy(table, p, meta))
+                .mapToLong(Partition::getDataSize).sum();
+        return bytes > Config.statistic_auto_collect_small_table_size
+                ? Config.statistic_auto_collect_large_table_interval : Config.statistic_auto_collect_small_table_interval;
     }
 
     private static void createSampleStatsJob(List<StatisticsCollectJob> allTableJobMap, NativeAnalyzeJob job,

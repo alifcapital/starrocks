@@ -63,6 +63,9 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
     @SerializedName("workTime")
     private LocalDateTime workTime;
 
+    @SerializedName("collectSchedule")
+    private AutoStatisticsSchedule collectSchedule = new AutoStatisticsSchedule();
+
     @SerializedName("reason")
     private String reason;
 
@@ -179,6 +182,14 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
     }
 
     @Override
+    public synchronized AutoStatisticsSchedule getCollectSchedule() {
+        if (collectSchedule == null) {
+            collectSchedule = new AutoStatisticsSchedule();
+        }
+        return collectSchedule;
+    }
+
+    @Override
     public List<StatisticsCollectJob> instantiateJobs() {
         return StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(this);
     }
@@ -186,6 +197,9 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
     @Override
     public void run(ConnectContext statsConnectContext, StatisticExecutor statisticExecutor,
                     List<StatisticsCollectJob> jobs) {
+        if (jobs.isEmpty()) {
+            return;
+        }
         setStatus(StatsConstants.ScheduleStatus.RUNNING);
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateAnalyzeJobWithoutLog(this);
 
@@ -210,6 +224,7 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
                 hasFailedCollectJob = true;
                 break;
             }
+            statsJob.completeCollectSchedule();
         }
 
         if (!hasFailedCollectJob) {

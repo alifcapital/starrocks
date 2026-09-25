@@ -33,7 +33,9 @@ import org.apache.logging.log4j.Logger;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,6 +45,8 @@ public class StatisticAutoCollector extends FrontendDaemon {
     private static final Logger LOG = LogManager.getLogger(StatisticAutoCollector.class);
 
     private static final StatisticExecutor STATISTIC_EXECUTOR = new StatisticExecutor();
+    private String initializedScheduleSettings;
+    private Map<Long, Map<String, String>> initializedJobProperties = Map.of();
     public static final String DEFAULT_JOB_FLAG = "default_job_flag";
 
     public StatisticAutoCollector() {
@@ -57,10 +61,29 @@ public class StatisticAutoCollector extends FrontendDaemon {
         }
 
         if (!Config.enable_statistic_collect || FeConstants.runningUnitTest) {
+            initializedScheduleSettings = null;
             return;
         }
 
-        if (!checkoutAnalyzeTime()) {
+        if (!Config.enable_statistic_auto_collect_staggered_schedule) {
+            initializedScheduleSettings = null;
+        }
+        // Seed existing jobs on the first pass after enablement, even during the day.
+        // Waiting until the next night could move an early-night first slot into week two.
+        String scheduleSettings = null;
+        Map<Long, Map<String, String>> jobProperties = Map.of();
+        if (Config.enable_statistic_auto_collect_staggered_schedule) {
+            scheduleSettings = AutoStatisticsSchedule.Window.current().signature() + ":"
+                    + Config.statistic_auto_collect_small_table_interval + ":"
+                    + Config.statistic_auto_collect_large_table_interval + ":"
+                    + Config.statistic_auto_collect_histogram_interval + ":"
+                    + Config.statistic_auto_collect_small_table_rows + ":"
+                    + Config.statistic_auto_collect_small_table_size + ":" + Config.enable_auto_collect_statistics;
+            jobProperties = scheduleJobProperties();
+        }
+        boolean initializeSchedule = Config.enable_statistic_auto_collect_staggered_schedule
+                && (!scheduleSettings.equals(initializedScheduleSettings) || !jobProperties.equals(initializedJobProperties));
+        if (!checkoutAnalyzeTime() && !initializeSchedule) {
             return;
         }
 
@@ -73,6 +96,21 @@ public class StatisticAutoCollector extends FrontendDaemon {
         prepareDefaultJob();
 
         runJobs();
+        initializedScheduleSettings = scheduleSettings;
+        initializedJobProperties = jobProperties;
+    }
+
+    // These are existing FE metadata objects, not connector lookups. Detect new jobs and
+    // changed job intervals during the day without repeatedly enumerating external tables.
+    Map<Long, Map<String, String>> scheduleJobProperties() {
+        List<AnalyzeJob> jobs = new ArrayList<>();
+        jobs.addAll(GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAllNativeAnalyzeJobList());
+        jobs.addAll(GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAllExternalAnalyzeJobList());
+        Map<Long, Map<String, String>> result = new HashMap<>();
+        for (AnalyzeJob job : jobs) {
+            result.put(job.getId(), Map.copyOf(job.getProperties()));
+        }
+        return result;
     }
 
     @VisibleForTesting

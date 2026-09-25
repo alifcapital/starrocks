@@ -68,6 +68,9 @@ public class NativeAnalyzeJob implements AnalyzeJob, Writable {
     @SerializedName("workTime")
     private LocalDateTime workTime;
 
+    @SerializedName("collectSchedule")
+    private AutoStatisticsSchedule collectSchedule = new AutoStatisticsSchedule();
+
     @SerializedName("reason")
     private String reason;
 
@@ -211,6 +214,14 @@ public class NativeAnalyzeJob implements AnalyzeJob, Writable {
     }
 
     @Override
+    public synchronized AutoStatisticsSchedule getCollectSchedule() {
+        if (collectSchedule == null) {
+            collectSchedule = new AutoStatisticsSchedule();
+        }
+        return collectSchedule;
+    }
+
+    @Override
     public List<StatisticsCollectJob> instantiateJobs() {
         return StatisticsCollectJobFactory.buildStatisticsCollectJob(this);
     }
@@ -244,6 +255,7 @@ public class NativeAnalyzeJob implements AnalyzeJob, Writable {
                 hasFailedCollectJob = true;
                 break;
             }
+            statsJob.completeCollectSchedule();
         }
 
         if (!hasFailedCollectJob) {

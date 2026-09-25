@@ -771,3 +771,17 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 #### 生产部署建议
 
 生产集群应将 `enable_execute_script_on_frontend = false`。基于采样的 Tablet 预分裂没有任何 SQL 入口依赖 FE 端脚本执行——生产路径通过连接器 + 规划器直接采样。把 `enable_execute_script_on_frontend = true` 留在打开状态只会扩大 FE 攻击面，并不带来任何预分裂功能；生产集群的安全默认值是关闭。
+
+## 自动统计信息收集调度
+
+### enable_statistic_auto_collect_staggered_schedule
+
+- 类型：Boolean
+- 默认值：`false`
+- 是否支持动态修改：是，无需重启。
+
+启用后，按表将自动统计信息收集分散到正值收集周期内允许的每日时间窗口中。支持已有和新建的内部、外部及数据库级任务。不影响手动 `ANALYZE`；周期非正时保留原有调度方式。
+
+修改周期或每日窗口后，下次调度检查会重新分配未来时间，即使当前处于白天。正在执行的收集不会中断。重新分配以当前时间为起点，可能延长距上次收集的间隔；反复修改配置也可能再次推迟收集。
+
+详细行为参见 [CBO 统计信息收集](../../../using_starrocks/Cost_based_optimizer.md)。

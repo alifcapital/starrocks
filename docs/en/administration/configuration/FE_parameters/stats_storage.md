@@ -771,3 +771,17 @@ The multi-partition path extends Sample-Based Tablet Pre-Split to loads that tar
 #### Production deployment guidance
 
 Set `enable_execute_script_on_frontend = false` in production. Sample-Based Tablet Pre-Split exposes no SQL surface that depends on FE-side script execution; the production code paths sample through the connector + planner directly. Leaving `enable_execute_script_on_frontend = true` widens the FE attack surface without enabling any pre-split functionality, so the safe default for production clusters is to keep it off.
+
+## Automatic statistics scheduling
+
+### enable_statistic_auto_collect_staggered_schedule
+
+- Type: Boolean
+- Default: `false`
+- Mutable: Yes; no restart required
+
+When `true`, distribute automatic statistics collection by table across the positive collection interval and allowed daily window. This covers existing and new native/external jobs, including database-wide jobs. Manual `ANALYZE` is unaffected. A non-positive interval retains legacy scheduling.
+
+Changes to the interval or daily window recalculate future slots on the next scheduler pass, including during the daytime. Running collections are not interrupted. Recalculation starts from the current time: it can extend the gap since the previous collection, and repeated configuration changes can postpone collection again.
+
+See [automatic collection scheduling](../../../using_starrocks/Cost_based_optimizer.md#spread-automatic-collection-across-the-interval) for first-run, restart, and nightly-window behavior.
