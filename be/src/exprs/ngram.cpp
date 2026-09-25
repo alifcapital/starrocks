@@ -419,11 +419,13 @@ private:
                                                       FunctionContext* context, size_t gram_num) {
         if (input.rows == nullptr) return haystack_vector_and_needle_const(input.column, map, context, gram_num);
         SelectedColumnViewer<TYPE_VARCHAR> viewer(input);
-        std::vector<NgramHash> restore(MAX_STRING_SIZE, 0);
+        std::vector<NgramHash> restore;
+        restore.reserve(MAX_STRING_SIZE);
         auto* state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
         size_t needle_count = state->needle_gram_count;
         ColumnBuilder<TYPE_DOUBLE> result(input.rows->size());
         std::string lower;
+        std::vector<size_t> positions;
         for (size_t row = 0; row < input.rows->size(); ++row) {
             if (viewer.is_null(row)) {
                 result.append_null();
@@ -434,16 +436,8 @@ private:
                 result.append(0);
                 continue;
             }
-            if constexpr (case_insensitive) {
-                // Match the existing vector ASCII toggle, not locale-dependent std::tolower.
-                lower.resize(value.size);
-                for (size_t i = 0; i < value.size; ++i) {
-                    unsigned char c = value.data[i];
-                    lower[i] = c ^ ((('A' <= c) & (c <= 'Z')) << 5);
-                }
-                value = Slice(lower);
-            }
-            size_t unmatched = calculateDistanceWithHaystack<true>(map, value, restore, needle_count, gram_num);
+            size_t unmatched = calculateDistanceWithHaystack<true>(
+                    map, value, restore, lower, positions, needle_count, gram_num);
             result.append(1.0f - unmatched * 1.0f / std::max(needle_count, size_t(1)));
         }
         return result.build(false);
