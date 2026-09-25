@@ -166,6 +166,15 @@ public class IcebergScanNode extends ScanNode {
         scanRangeSource = new IcebergConnectorScanRangeSource(icebergTable,
                 remoteFileInfoSource, morParams, desc, bucketProperties, partitionIdGenerator, true,
                 scanOptimizeOption.getCanUseMinMaxOpt());
+        applyTopnReorderToScanRangeSource();
+    }
+
+    // When IcebergTopNScanPruneRule marked this scan, make the scan-range source ship per-file
+    // min/max for the reorder slot (so BE can order morsels and skip files by it), and pass the slot.
+    private void applyTopnReorderToScanRangeSource() {
+        if (scanRangeSource != null && scanOptimizeOption.getTopnReorderKey() != null) {
+            scanRangeSource.setTopnReorderSlotId(scanOptimizeOption.getTopnReorderKey().getId());
+        }
     }
 
     public void setupScanRangeLocations(boolean enableIncrementalScanRanges) throws StarRocksException {
@@ -210,7 +219,9 @@ public class IcebergScanNode extends ScanNode {
                         .setParams(morParams)
                         .setTableVersionRange(tvrVersionRange)
                         .setPredicate(icebergJobPlanningPredicate)
-                        .setEnableColumnStats(scanOptimizeOption.getCanUseMinMaxOpt())
+                        // TopN reorder/skip uses per-file min/max bounds, like the min/max opt.
+                        .setEnableColumnStats(scanOptimizeOption.getCanUseMinMaxOpt()
+                                || scanOptimizeOption.getTopnReorderKey() != null)
                         .setUsedForDelete(usedForDelete)
                         .setFieldNames(requiredColumnNames)
                         .setScanBytesCap(scanBytesCap)
@@ -241,6 +252,7 @@ public class IcebergScanNode extends ScanNode {
         scanRangeSource = new IcebergConnectorScanRangeSource(icebergTable,
                 remoteFileInfoSource, morParams, desc, bucketProperties, partitionIdGenerator, false,
                 scanOptimizeOption.getCanUseMinMaxOpt(), usedForDelete);
+        applyTopnReorderToScanRangeSource();
     }
 
     private void setupCloudCredential() {

@@ -28,6 +28,8 @@ class ScanNode;
 namespace pipeline {
 
 struct ConnectorScanOperatorIOTasksMemLimiter;
+class FooterPrefetchState;
+struct FooterPrefetchItem;
 
 struct ConnectorScanOperatorMemShareArbitrator {
     static constexpr double kChunkBufferMemRatio = 0.5;
@@ -81,12 +83,23 @@ public:
         return _active_inputs_empty.compare_exchange_strong(val, false);
     }
 
+    // Footer prefetch: built by the provider/scan node, installed here after factory
+    // creation. Shared with every operator instance; cancelled in do_close().
+    void set_footer_prefetch_state(std::shared_ptr<FooterPrefetchState> state) {
+        _footer_prefetch_state = std::move(state);
+    }
+    const std::shared_ptr<FooterPrefetchState>& footer_prefetch_state() const { return _footer_prefetch_state; }
+    // Tail-append incrementally-delivered scan ranges to the sidecar (no-op if prefetch is not
+    // installed). Resolves new items through the data source provider.
+    void append_footer_prefetch_ranges(RuntimeState* state, const std::vector<TScanRangeParams>& scan_ranges);
+
 private:
     // TODO: refactor the OlapScanContext, move them into the context
     BalancedChunkBuffer _chunk_buffer;
     ActiveInputSet _active_inputs;
     std::atomic_int _num_active_inputs{};
     std::atomic_bool _active_inputs_empty{};
+    std::shared_ptr<FooterPrefetchState> _footer_prefetch_state;
 
 public:
     ConnectorScanOperatorIOTasksMemLimiter* _io_tasks_mem_limiter = nullptr;
@@ -105,6 +118,8 @@ public:
     void do_close(RuntimeState* state) override;
     ChunkSourcePtr create_chunk_source(MorselPtr morsel, int32_t chunk_source_index) override;
 
+    void try_submit_metadata_prefetch(RuntimeState* state) override;
+
     connector::ConnectorType connector_type();
 
     void attach_chunk_source(int32_t source_index) override;
@@ -116,6 +131,11 @@ public:
     }
 
     int available_pickup_morsel_count() override;
+    // The adaptive governor's current data-io-task target (expected_io_tasks), read without the side
+    // effects of available_pickup_morsel_count(). Footer warm uses the cap - target slots the
+    // governor holds back from data (capped further by connector_footer_prefetch_max_inflight).
+    // Returns the cap when adaptive io-tasks are off (no spare).
+    int current_io_task_target() const;
     void begin_driver_process() override;
     void end_driver_process(PipelineDriver* driver) override;
     bool is_running_all_io_tasks() const override;
@@ -134,6 +154,8 @@ public:
     int64_t get_scan_table_id() const override;
 
 private:
+    bool _submit_footer_prefetch_task(RuntimeState* state, const std::shared_ptr<FooterPrefetchState>& fp,
+                                      const FooterPrefetchItem& item);
     int64_t _adjust_scan_mem_limit(int64_t old_chunk_source_mem_bytes, int64_t new_chunk_source_mem_bytes);
     mutable ConnectorScanOperatorAdaptiveProcessor* _adaptive_processor;
     bool _enable_adaptive_io_tasks = true;

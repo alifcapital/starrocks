@@ -18,6 +18,7 @@
 #include "connector/es_connector.h"
 #include "connector/file_connector.h"
 #include "connector/hive_connector.h"
+#include "exec/pipeline/scan/priority_morsel_queue.h"
 #ifndef __APPLE__
 #include "connector/iceberg_connector.h"
 #endif
@@ -143,6 +144,17 @@ StatusOr<pipeline::MorselQueuePtr> DataSourceProvider::convert_scan_range_to_mor
             return down_cast<pipeline::ScanMorsel*>(l.get())->owner_id() <
                    down_cast<pipeline::ScanMorsel*>(r.get())->owner_id();
         });
+    }
+
+    if (topn_reorder_slot_id() >= 0 && !output_chunk_by_bucket() && !partition_order_hint().has_value()) {
+        auto queue = std::make_unique<pipeline::PriorityMorselQueue>(std::move(morsels), has_more_morsel,
+                                                                     topn_reorder_slot_id(), topn_reorder_desc(),
+                                                                     topn_reorder_nulls_first());
+        if (scan_parallelism > 0) {
+            queue->set_max_degree_of_parallelism(scan_parallelism);
+        }
+        pipeline::MorselQueuePtr result = std::move(queue);
+        return result;
     }
 
     auto morsel_queue = std::make_unique<pipeline::DynamicMorselQueue>(std::move(morsels), has_more_morsel);

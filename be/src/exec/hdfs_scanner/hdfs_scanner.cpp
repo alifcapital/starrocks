@@ -29,9 +29,11 @@
 #include "storage/rowset/default_value_column_iterator.h"
 #include "storage/runtime_range_pruner.hpp"
 #include "storage/types.h"
+#include "storage/zone_map_detail.h"
 #include "types/timestamp_value.h"
 #include "util/compression/compression_utils.h"
 #include "util/compression/stream_decompressor.h"
+#include "util/starrocks_metrics.h"
 namespace starrocks {
 
 static const std::string kCountOptColumnName = "___count___";
@@ -309,6 +311,16 @@ Status HdfsScanner::open(RuntimeState* runtime_state) {
     if (_scanner_ctx->can_use_count_optimization() || _scanner_ctx->can_use_min_max_optimization()) {
         return Status::OK();
     }
+    // TopN scan-range skip: the pruner is built above but the footer is not read yet, so drop the
+    // whole file here if its min/max on the reorder slot cannot beat the current runtime filter.
+    {
+        ASSIGN_OR_RETURN(const bool topn_skip, _scanner_ctx->should_skip_scan_range_by_topn_min_max());
+        if (topn_skip) {
+            _scanner_ctx->no_more_chunks = true;
+            _app_stats.topn_min_max_filtered_scan_ranges += 1;
+            return Status::OK();
+        }
+    }
     RETURN_IF_ERROR(do_open(runtime_state));
     VLOG_FILE << "open file success: " << _scanner_ctx->file_path << ", scan range = ["
               << _scanner_ctx->scan_range->offset << ","
@@ -340,7 +352,8 @@ void HdfsScanner::close() noexcept {
 
 StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_file(
         std::shared_ptr<io::SharedBufferedInputStream>& shared_buffered_input_stream,
-        std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options) {
+        std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options,
+        std::shared_ptr<io::CacheInputStream>* populate_input_stream) {
     ASSIGN_OR_RETURN(std::unique_ptr<RandomAccessFile> raw_file, options.fs->new_random_access_file(options.file_path))
     int64_t file_size = options.file_size;
     if (file_size < 0) {
@@ -360,12 +373,29 @@ StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_fi
     shared_buffered_input_stream->set_coalesce_options(shared_options);
     input_stream = shared_buffered_input_stream;
 
-    // input_stream = CacheInputStream(input_stream)
+    // input_stream = io::CacheInputStream(input_stream)
     const DataCacheOptions& datacache_options = options.datacache_options;
     if (datacache_options.enable_datacache) {
         if (datacache_options.enable_cache_select) {
             cache_input_stream = std::make_shared<io::CacheSelectInputStream>(
                     shared_buffered_input_stream, filename, file_size, datacache_options.modification_time);
+            // CacheSelectInputStream only writes explicit IO ranges. Use io::CacheInputStream for
+            // reader-owned reads through _file so CACHE SELECT can populate those blocks too.
+            auto populate_stream = std::make_shared<io::CacheInputStream>(
+                    shared_buffered_input_stream, filename, file_size, datacache_options.modification_time);
+            populate_stream->set_enable_populate_cache(datacache_options.enable_populate_datacache);
+            populate_stream->set_enable_async_populate_mode(datacache_options.enable_datacache_async_populate_mode);
+            populate_stream->set_enable_cache_io_adaptor(datacache_options.enable_datacache_io_adaptor);
+            populate_stream->set_enable_block_buffer(config::datacache_block_buffer_enable);
+            populate_stream->set_priority(datacache_options.datacache_priority);
+            populate_stream->set_ttl_seconds(datacache_options.datacache_ttl_seconds);
+            input_stream = populate_stream;
+            // CacheSelectInputStream (cache_input_stream) only accounts the explicit IO-range
+            // writes; populate_stream serves the reader-owned reads. Hand it back so its cache
+            // stats are folded into the scan's DataCache counters (see update_counter()).
+            if (populate_input_stream != nullptr) {
+                *populate_input_stream = populate_stream;
+            }
         } else {
             cache_input_stream = std::make_shared<io::CacheInputStream>(shared_buffered_input_stream, filename,
                                                                         file_size, datacache_options.modification_time);
@@ -394,7 +424,7 @@ StatusOr<std::unique_ptr<RandomAccessFile>> HdfsScanner::create_random_access_fi
     // NOTE: make sure `CountedInputStream` is last applied, so io time can be accurately timed.
     input_stream = std::make_shared<CountedSeekableInputStream>(input_stream, options.app_stats);
 
-    // so wrap function is f(x) = (CountedInputStream (CacheInputStream (DecompressInputStream (CountedInputStream x))))
+    // so wrap function is f(x) = (CountedInputStream (io::CacheInputStream (DecompressInputStream (CountedInputStream x))))
     auto file = std::make_unique<RandomAccessFile>(input_stream, filename);
     file->set_size(file_size);
     return file;
@@ -409,7 +439,8 @@ Status HdfsScanner::open_random_access_file() {
                             .datacache_options = _scanner_ctx->datacache_options,
                             .compression_type = _compression_type};
 
-    ASSIGN_OR_RETURN(_file, create_random_access_file(_shared_buffered_input_stream, _cache_input_stream, options));
+    ASSIGN_OR_RETURN(_file, create_random_access_file(_shared_buffered_input_stream, _cache_input_stream, options,
+                                                      &_cache_select_populate_stream));
     if (_cache_input_stream) {
         _cache_input_stream->set_peer_cache_node(_scanner_ctx->scan_range->candidate_node);
     }
@@ -536,11 +567,30 @@ void HdfsScanner::update_counter() {
     COUNTER_UPDATE(profile->column_read_timer, _app_stats.column_read_ns);
     COUNTER_UPDATE(profile->column_convert_timer, _app_stats.column_convert_ns);
 
+    // TopN scan-range skip: data files dropped pre-footer by the reorder min/max vs RF.
+    if (_app_stats.topn_min_max_filtered_scan_ranges > 0) {
+        auto* topn_skip_counter = ADD_COUNTER(profile->runtime_profile, "TopnMinMaxFilteredScanRanges", TUnit::UNIT);
+        COUNTER_UPDATE(topn_skip_counter, _app_stats.topn_min_max_filtered_scan_ranges);
+    }
+
     DataCacheHitRateCounter::instance()->update_page_cache_stat(_app_stats.page_cache_read_counter,
                                                                 _app_stats.page_read_counter);
 
+    // Per-scan parquet footer hit/miss → BE-global counters. footer_cache_read_count is hits
+    // (page-cache lookup returned cached FileMetaData); footer_cache_write_count is misses that
+    // resulted in a parse + populate; footer_cache_write_fail_count is a miss that failed to
+    // populate. Both write counters contribute to the miss aggregate.
+    StarRocksMetrics::instance()->parquet_footer_cache_hit_count.increment(_app_stats.footer_cache_read_count);
+    StarRocksMetrics::instance()->parquet_footer_cache_miss_count.increment(_app_stats.footer_cache_write_count +
+                                                                            _app_stats.footer_cache_write_fail_count);
+
     if (_scanner_ctx->datacache_options.enable_datacache && _cache_input_stream) {
-        const io::CacheInputStream::Stats& stats = _cache_input_stream->stats();
+        // CACHE SELECT routes reader-owned reads through a separate populate stream; fold its
+        // cache stats in so footer/init reads it warms are reflected in the DataCache counters.
+        io::CacheInputStream::Stats stats = _cache_input_stream->stats();
+        if (_cache_select_populate_stream) {
+            stats += _cache_select_populate_stream->stats();
+        }
         COUNTER_UPDATE(profile->datacache_read_counter, stats.read_block_cache_count);
         COUNTER_UPDATE(profile->datacache_read_bytes, stats.read_block_cache_bytes);
         COUNTER_UPDATE(profile->datacache_read_mem_bytes, stats.read_mem_cache_bytes);
@@ -807,6 +857,150 @@ MutableColumnPtr HdfsScannerContext::create_min_max_value_column(SlotDescriptor*
         }
     }
     return col;
+}
+
+bool HdfsScannerContext::decode_min_max_endpoint(const TypeDescriptor& type, const TExprMinMaxValue& value,
+                                                 Datum* min_out, Datum* max_out) {
+    // An absent endpoint is not a zero bound. Incomplete or inconsistent metadata
+    // must leave the file to the normal reader.
+    const auto expected_type = type.type == TYPE_BOOLEAN ? TExprNodeType::BOOL_LITERAL : TExprNodeType::INT_LITERAL;
+    if (value.type != expected_type || !value.__isset.min_int_value || !value.__isset.max_int_value ||
+        value.min_int_value > value.max_int_value) {
+        return false;
+    }
+    switch (type.type) {
+#define DECODE_INT_ENDPOINT(T)                                    \
+    case T:                                                       \
+        *min_out = Datum((RunTimeCppType<T>)value.min_int_value); \
+        *max_out = Datum((RunTimeCppType<T>)value.max_int_value); \
+        return true;
+        DECODE_INT_ENDPOINT(TYPE_BOOLEAN)
+        DECODE_INT_ENDPOINT(TYPE_TINYINT)
+        DECODE_INT_ENDPOINT(TYPE_SMALLINT)
+        DECODE_INT_ENDPOINT(TYPE_INT)
+        DECODE_INT_ENDPOINT(TYPE_BIGINT)
+#undef DECODE_INT_ENDPOINT
+    case TYPE_DATE:
+        *min_out = Datum(DateValue::from_days_since_unix_epoch(value.min_int_value));
+        *max_out = Datum(DateValue::from_days_since_unix_epoch(value.max_int_value));
+        return true;
+    case TYPE_DATETIME: {
+        // Same micros->TimestampValue decode as create_min_max_value_column.
+        auto to_ts = [](int64_t micros) {
+            constexpr int64_t kMicrosPerSecond = 1000000L;
+            TimestampValue ts;
+            int64_t seconds = micros / kMicrosPerSecond;
+            int64_t microseconds = micros % kMicrosPerSecond;
+            if (microseconds < 0) {
+                microseconds += kMicrosPerSecond;
+                --seconds;
+            }
+            ts.from_unix_second(seconds, microseconds);
+            return ts;
+        };
+        *min_out = Datum(to_ts(value.min_int_value));
+        *max_out = Datum(to_ts(value.max_int_value));
+        return true;
+    }
+    default:
+        // float/double (NaN, not eligible), time, decimal/string (absent from min_max_values).
+        return false;
+    }
+}
+
+StatusOr<bool> HdfsScannerContext::should_skip_scan_range_by_topn_min_max() {
+    const int32_t slot_id = options.topn_reorder_slot_id;
+    if (slot_id < 0 || predicates.runtime_filter_scan_range_pruner == nullptr || scan_range == nullptr) {
+        return false;
+    }
+    if (!scan_range->__isset.min_max_values) {
+        return false;
+    }
+    auto it = scan_range->min_max_values.find(slot_id);
+    if (it == scan_range->min_max_values.end()) {
+        return false;
+    }
+    const TExprMinMaxValue& value = it->second;
+
+    const SlotDescriptor* reorder_slot = nullptr;
+    if (tuple_desc != nullptr) {
+        for (SlotDescriptor* s : tuple_desc->slots()) {
+            if (s->id() == slot_id) {
+                reorder_slot = s;
+                break;
+            }
+        }
+    }
+    if (reorder_slot == nullptr) {
+        return false;
+    }
+
+    // NULL handling. An all-null file has no numeric bound, so never skip it. With NULLS FIRST a
+    // file that has any null may hold top-k rows, so never skip it either.
+    if (value.all_null) {
+        return false;
+    }
+    if (value.has_null && options.topn_reorder_nulls_first) {
+        return false;
+    }
+
+    Datum file_min;
+    Datum file_max;
+    if (!decode_min_max_endpoint(reorder_slot->type(), value, &file_min, &file_max)) {
+        return false; // type without a comparable bound -> no skip
+    }
+    ZoneMapDetail detail(file_min, file_max, value.has_null);
+
+    bool skip = false;
+
+    // (a) An RF that already arrived when the scanner context was built is folded into the predicate
+    //     tree as a min/max range on the sort column, not into the pruner. Use only the root-level
+    //     (immediate) predicates: they form a true AND, so testing the file's zone map against each of
+    //     them is safe. The full map also flattens leaves out of OR nodes (a < 5 OR a > 1000 becomes
+    //     [a < 5, a > 1000]); AND-testing those would drop a file that matches through one arm, which
+    //     is a wrong result. OR predicates are left to the footer skip, which keeps their structure.
+    //     For ConnectorPredicateParser the predicate cid equals the slot id.
+    {
+        const auto& cid_to_preds = predicates.predicate_tree.get_immediate_column_predicate_map();
+        if (auto it_preds = cid_to_preds.find(slot_id); it_preds != cid_to_preds.end()) {
+            for (const auto* pred : it_preds->second) {
+                if (!pred->zone_map_filter(detail)) {
+                    skip = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // (b) An RF that arrives later sits in the pruner. Probe a throwaway copy, not the scanner's own
+    //     pruner: update_range_if_arrived changes its arrived/version state, and the Parquet footer
+    //     path copies that pruner for its own row-group skip. Mutating the original here would mark
+    //     this RF version as consumed and suppress that skip.
+    if (!skip) {
+        RuntimeScanRangePruner probe = *predicates.runtime_filter_scan_range_pruner;
+        Status st = probe.update_range_if_arrived(
+                global_dictmaps,
+                [&](int cid, const std::vector<const ColumnPredicate*>& preds) -> Status {
+                    if (cid != slot_id) {
+                        return Status::OK();
+                    }
+                    // AND zone-map test, same as PredicateFilterEvaluatorUtils::zonemap_satisfy but
+                    // without the parquet GroupReader visitor.
+                    for (const auto* pred : preds) {
+                        if (!pred->zone_map_filter(detail)) {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    return Status::OK();
+                },
+                /*force=*/true, /*raw_read_rows=*/0);
+        if (st.is_end_of_file()) {
+            return true; // RF is always-false -> drop the whole file
+        }
+        RETURN_IF_ERROR(st);
+    }
+    return skip;
 }
 
 Status HdfsScannerContext::evaluate_on_conjunct_ctxs_by_slot(ChunkPtr* chunk, Filter* filter) {

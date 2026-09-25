@@ -229,6 +229,10 @@ It's similar to OLAP_SCAN operator but used for scan external tables like Iceber
 | SubmitTaskTime | Time taken to submit tasks. | 
 | PeakIOTasks | Peak number of IO tasks. | 
 | PeakScanTaskQueueSize | Peak size of the IO task queue. | 
+| MorselQueueType | Type of the morsel queue: `priority_morsel_queue` when Iceberg TopN scan pruning is active for this scan, otherwise `dynamic_morsel_queue`. |
+| TopnReorderEligibleMorsels | Scan tasks (morsels) ordered by a usable min/max bound on the sort column. |
+| TopnReorderNoBoundMorsels | Scan tasks without a numeric priority, including tasks prioritized by NULLS FIRST. |
+| TopnMinMaxFilteredScanRanges | Scan ranges skipped before reading their footer because their min/max cannot pass the filter. |
 
 ### Exchange Operator
 

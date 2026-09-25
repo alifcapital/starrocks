@@ -175,7 +175,7 @@ StatusOr<pipeline::MorselQueueFactoryPtr> ScanNode::convert_scan_range_to_morsel
         // for cloud, if enable_shared_scan, then always use SharedMorselQueueFactory
         // else it will consider the morsel numbers and io_parallelism to choose individual or shared morsel queue factory
         if (!always_shared_scan() && !enable_shared_scan && scan_dop > 1 && is_fixed_or_dynamic_morsel_queue &&
-            morsel_queue->num_original_morsels() <= io_parallelism) {
+            morsel_queue->can_uniform_distribute() && morsel_queue->num_original_morsels() <= io_parallelism) {
             bool enable_random_append_split_morsel = morsel_queue->has_more_from_split();
             DCHECK(!enable_random_append_split_morsel || morsel_queue_type == pipeline::MorselQueue::Type::DYNAMIC);
             ASSIGN_OR_RETURN(auto morsel_queue_map, uniform_distribute_morsels(std::move(morsel_queue), scan_dop));

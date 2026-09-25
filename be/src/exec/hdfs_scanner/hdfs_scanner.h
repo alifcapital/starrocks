@@ -109,6 +109,7 @@ struct HdfsScannerStats {
     int64_t page_index_ns = 0;
     int64_t total_row_groups = 0;
     int64_t filtered_row_groups = 0;
+    int64_t topn_min_max_filtered_scan_ranges = 0;
 
     // late materialize round-by-round
     int64_t group_min_round_cost = 0;
@@ -225,6 +226,12 @@ struct HdfsScannerOptions {
     bool enable_dynamic_prune_scan_range = true;
     bool use_partition_column_value_only = false;
     int64_t connector_max_split_size = 0;
+    // TopN scan reorder/skip (ORDER BY <col> [ASC|DESC] LIMIT k): slot id of the leading sort key
+    // used to reorder morsels and skip files by their min/max (-1 = off), plus its sort direction
+    // and null ordering. Filled by HiveDataSource from the provider.
+    int32_t topn_reorder_slot_id = -1;
+    bool topn_reorder_desc = false;
+    bool topn_reorder_nulls_first = false;
 };
 
 // All conjunct contexts and slot metadata derived from the scan plan node,
@@ -457,6 +464,17 @@ struct HdfsScannerContext {
     void append_or_update_count_column_to_chunk(ChunkPtr* chunk, size_t output_rows, int64_t value);
     MutableColumnPtr create_min_max_value_column(SlotDescriptor* slot, const TExprMinMaxValue& value, size_t row_count);
 
+    // Decode the raw Iceberg endpoints in |value| (date=days, timestamp=micros, int=raw) into the
+    // slot's internal Datum form. Returns false for types without a comparable bound (float/time/
+    // other), writing nothing. Decodes identically to create_min_max_value_column (the agg build).
+    static bool decode_min_max_endpoint(const TypeDescriptor& type, const TExprMinMaxValue& value, Datum* min_out,
+                                        Datum* max_out);
+
+    // TopN scan-range skip: true when this file's min/max on the reorder slot cannot beat the
+    // current TopN runtime filter, so the whole range is dropped before its footer is read. Uses a
+    // throwaway copy of the runtime-filter pruner; never mutates the scanner's own.
+    StatusOr<bool> should_skip_scan_range_by_topn_min_max();
+
     void append_or_update_extended_column_to_chunk(ChunkPtr* chunk, size_t row_count);
     void append_or_update_column_to_chunk(ChunkPtr* chunk, size_t row_count, const std::vector<ColumnInfo>& columns,
                                           const Columns& values);
@@ -520,7 +538,8 @@ public:
 
     static StatusOr<std::unique_ptr<RandomAccessFile>> create_random_access_file(
             std::shared_ptr<io::SharedBufferedInputStream>& shared_buffered_input_stream,
-            std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options);
+            std::shared_ptr<io::CacheInputStream>& cache_input_stream, const OpenFileOptions& options,
+            std::shared_ptr<io::CacheInputStream>* populate_input_stream = nullptr);
 
 protected:
     Status open_random_access_file();
@@ -545,6 +564,10 @@ protected:
     // by default it's no compression.
     CompressionTypePB _compression_type = CompressionTypePB::NO_COMPRESSION;
     std::shared_ptr<io::CacheInputStream> _cache_input_stream = nullptr;
+    // CACHE SELECT only: reader-owned reads are routed through this populate stream so they
+    // warm the cache too (cache_input_stream is a CacheSelectInputStream that writes only the
+    // explicit IO ranges). Held so its cache stats are folded into the scan's DataCache counters.
+    std::shared_ptr<io::CacheInputStream> _cache_select_populate_stream = nullptr;
     std::shared_ptr<io::SharedBufferedInputStream> _shared_buffered_input_stream = nullptr;
     int64_t _total_running_time = 0;
 

@@ -14,10 +14,12 @@
 
 #pragma once
 
+#include <mutex>
 #include <unordered_map>
 
 #include "column/vectorized_fwd.h"
 #include "connector/connector.h"
+#include "connector/footer_prefetch_task.h"
 #include "connector/hive_chunk_sink.h"
 #include "exec/connector_scan_node.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
@@ -45,11 +47,28 @@ public:
     friend class HiveDataSource;
     HiveDataSourceProvider(ConnectorScanNode* scan_node, const TPlanNode& plan_node);
     HiveDataSourceProvider(ConnectorScanNode* scan_node, const THdfsScanNode& hdfs_scan_node);
+    int32_t topn_reorder_slot_id() const override {
+        return _hdfs_scan_node.__isset.topn_reorder_slot_id ? _hdfs_scan_node.topn_reorder_slot_id : -1;
+    }
+    bool topn_reorder_desc() const override {
+        return _hdfs_scan_node.__isset.topn_reorder_desc && _hdfs_scan_node.topn_reorder_desc;
+    }
+    bool topn_reorder_nulls_first() const override {
+        return _hdfs_scan_node.__isset.topn_reorder_nulls_first && _hdfs_scan_node.topn_reorder_nulls_first;
+    }
+
     DataSourcePtr create_data_source(const TScanRange& scan_range) override;
     const TupleDescriptor* tuple_descriptor(RuntimeState* state) const override;
 
     void prepare_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override;
     void default_data_source_mem_bytes(int64_t* min_value, int64_t* max_value) override;
+
+    // Build the footer-prefetch sidecar for these (Parquet) scan ranges: resolve each root file's
+    // native path the same way the real scan does, share one FileSystem and datacache policy. Empty
+    // if no cache can hold a warmed footer. Reusable for incremental batches (tail-append into
+    // FooterPrefetchState).
+    FooterPrefetchPlan build_footer_prefetch_items(RuntimeState* state,
+                                                   const std::vector<TScanRangeParams>& scan_ranges);
 
     friend class HiveDataSource;
 
@@ -58,6 +77,15 @@ protected:
     const THdfsScanNode _hdfs_scan_node;
     int64_t _max_file_length = 0;
     mutable std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
+    // Shared footer-prefetch open context (one FileSystem per scan), built once and reused
+    // across the initial and incremental build_footer_prefetch_items calls.
+    std::shared_ptr<pipeline::FooterOpenContext> _footer_open_ctx;
+    // Guards the lazy init of _footer_open_ctx / its FileSystem in build_footer_prefetch_items:
+    // that builder can run on the prepare thread (decompose / initial feed) and concurrently on
+    // brpc handler threads (incremental scan-range delivery), so the shared context must not be
+    // initialized without synchronization. Called at most a handful of times per scan (never per
+    // row), so a plain mutex is free.
+    std::mutex _footer_open_ctx_mutex;
 };
 
 class HiveDataSource final : public DataSource {

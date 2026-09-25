@@ -1317,6 +1317,13 @@ struct THdfsScanNode {
 
     // describe distribution of local exchange
     25: optional list<Partitions.TBucketProperty> bucket_properties;
+
+    // TopN scan reorder/skip (ORDER BY <col> [ASC|DESC] LIMIT k). The leading sort-key slot. Its
+    // min/max per file (carried in THdfsScanRange.min_max_values) is used to order morsels (best
+    // first) and to skip whole files against the TopN runtime filter.
+    30: optional Types.TSlotId topn_reorder_slot_id
+    31: optional bool topn_reorder_desc
+    32: optional bool topn_reorder_nulls_first
 }
 
 struct TProjectNode {

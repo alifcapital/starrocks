@@ -1,4 +1,7 @@
 set(EXEC_FILES
+        ./connector/footer_prefetch_task_test.cpp
+        ./exec/pipeline/scan/footer_prefetch_state_test.cpp
+        ./exec/pipeline/scan/warm_slot_reservation_test.cpp
         ./exec/aggregator_limited_mem_state_test.cpp
         ./agent/agent_task_test.cpp
         ./agent/heartbeat_server_test.cpp
@@ -98,6 +101,7 @@ set(EXEC_FILES
         ./exec/pipeline/exec_group_test.cpp
         ./exec/pipeline/fragment_executor_test.cpp
         ./exec/pipeline/scan/physical_split_morsel_queue_test.cpp
+        ./exec/pipeline/scan/priority_morsel_queue_test.cpp
         ./exec/query_spill_manager_test.cpp
         ./exec/query_cache/query_cache_test.cpp
         ./exec/query_cache/transform_operator.cpp

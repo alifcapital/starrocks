@@ -53,7 +53,7 @@ FileReader::FileReader(int chunk_size, RandomAccessFile* file, size_t file_size,
 
 FileReader::~FileReader() = default;
 
-Status FileReader::init(HdfsScannerContext* ctx) {
+Status FileReader::init(HdfsScannerContext* ctx, InitMode mode) {
     _scanner_ctx = ctx;
     if (ctx->options.use_file_metacache) {
         _cache = DataCache::GetInstance()->page_cache();
@@ -83,7 +83,7 @@ Status FileReader::init(HdfsScannerContext* ctx) {
         _runtime_filter_scan_range_pruner =
                 std::make_shared<RuntimeScanRangePruner>(*_scanner_ctx->predicates.runtime_filter_scan_range_pruner);
     }
-    RETURN_IF_ERROR(_init_group_readers());
+    RETURN_IF_ERROR(_init_group_readers(mode));
     return Status::OK();
 }
 
@@ -269,7 +269,7 @@ Status FileReader::_collect_row_group_io(std::shared_ptr<GroupReader>& group_rea
     return Status::OK();
 }
 
-Status FileReader::_init_group_readers() {
+Status FileReader::_init_group_readers(InitMode mode) {
     const HdfsScannerContext& fd_scanner_ctx = *_scanner_ctx;
 
     // _group_reader_param is used by all group readers.
@@ -333,8 +333,12 @@ Status FileReader::_init_group_readers() {
     _row_group_size = _row_group_readers.size();
 
     if (!_row_group_readers.empty()) {
-        // prepare first row group
-        RETURN_IF_ERROR(_row_group_readers[_cur_row_group_idx]->prepare());
+        if (mode == InitMode::CACHE_SELECT) {
+            // Cache warming needs the selected byte ranges, without data decoders or output chunks.
+            _row_group_readers[_cur_row_group_idx]->select_page_ranges();
+        } else {
+            RETURN_IF_ERROR(_row_group_readers[_cur_row_group_idx]->prepare());
+        }
     }
 
     return Status::OK();

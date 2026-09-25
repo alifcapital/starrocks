@@ -93,16 +93,20 @@ Status GroupReader::init() {
     return Status::OK();
 }
 
-Status GroupReader::prepare() {
-    RETURN_IF_ERROR(_prepare_column_readers());
-    // we need deal with page index first, so that it can work on collect_io_range,
-    // and pageindex's io has been collected in FileReader
-
+void GroupReader::select_page_ranges() {
     if (_range.span_size() != get_row_group_metadata()->num_rows) {
         for (const auto& pair : _column_readers) {
             pair.second->select_offset_index(_range, _row_group_first_row);
         }
     }
+}
+
+Status GroupReader::prepare() {
+    RETURN_IF_ERROR(_prepare_column_readers());
+    // we need deal with page index first, so that it can work on collect_io_range,
+    // and pageindex's io has been collected in FileReader
+
+    select_page_ranges();
 
     // if coalesce read enabled, we have to
     // 1. allocate shared buffered input stream and
