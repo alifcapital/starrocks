@@ -19,6 +19,8 @@
 #include "exprs/function_helper.h"
 #include "exprs/string_functions.h"
 #include "gutil/strings/fastmem.h"
+#include "util/utf8.h"
+
 namespace starrocks {
 static constexpr size_t MAX_STRING_SIZE = 1 << 15;
 // uint16[2^16] can almost fit into L2
@@ -61,7 +63,7 @@ struct Ngramstate {
     }
 };
 
-template <bool case_insensitive, bool use_utf_8, class Gram>
+template <bool case_insensitive>
 class NgramFunctionImpl {
 public:
     template <typename Inputs>
@@ -102,12 +104,15 @@ public:
             return Status::NotSupported("ngram function's second parameter is larger than 2^15");
         }
 
-        // needle is too small so we can not get even single Ngram, so they are not similar at all
-        if (needle.get_size() < gram_num) {
+        auto state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+
+        // needle_gram_count was computed in prepare after the case-insensitive
+        // and UTF-8-aware tolower; zero means the needle yields no full n-gram
+        // (e.g. too few characters), so similarity is 0.
+        if (state->needle_gram_count == 0) {
             return ColumnHelper::create_const_column<TYPE_DOUBLE>(0, input_num_rows(columns));
         }
 
-        auto state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
         std::vector<NgramHash>* map = state->get_or_create_driver_hashmap();
         if (haystack_column->is_constant()) {
             if (context->is_constant_column(0)) {
@@ -147,7 +152,8 @@ public:
         const Slice needle = ColumnHelper::get_const_value<TYPE_VARCHAR>(needle_column);
 
         auto const& gram_num_column = context->get_constant_column(2);
-        size_t gram_num = ColumnHelper::get_const_value<TYPE_INT>(gram_num_column);
+        int gram_num = ColumnHelper::get_const_value<TYPE_INT>(gram_num_column);
+        if (gram_num <= 0) return Status::OK();
 
         if (needle.get_size() > MAX_STRING_SIZE) {
             return Status::OK();
@@ -165,59 +171,112 @@ public:
     }
 
 private:
+    // Get UTF-8 character positions for a string
+    static void get_utf8_positions(const char* data, size_t len, std::vector<size_t>& positions) {
+        positions.clear();
+        for (size_t i = 0; i < len;) {
+            positions.push_back(i);
+            i += UTF8_BYTE_LENGTH_TABLE[static_cast<uint8_t>(data[i])];
+        }
+    }
+
+    // Hash one n-gram spanning nbytes bytes at data into the 16-bit ngram-map index.
+    static NgramHash ngram_hash(const char* data, size_t nbytes) {
+        return crc_hash_32(data, nbytes, CRC_HASH_SEEDS::CRC_HASH_SEED1) & 0xffffu;
+    }
+
+    // Full Unicode lowercase uses the same mapping as SQL LOWER.
+    static void tolower_utf8(const Slice& str, std::string& buf) { utf8_tolower(str.get_data(), str.get_size(), buf); }
+
     // for every gram of needle, we calculate its' hash value and store its' frequency in map, and return the number of gram in needle
     size_t static calculateMapWithNeedle(std::vector<NgramHash>& map, const Slice& needle, size_t gram_num) {
-        size_t needle_length = needle.get_size();
-        NgramHash cur_hash;
-        size_t i;
-        Slice cur_needle(needle.get_data(), needle_length);
-        const char* cur_char_ptr;
+        Slice cur_needle(needle.get_data(), needle.get_size());
         std::string buf;
         if constexpr (case_insensitive) {
-            tolower(needle, buf);
+            tolower_utf8(needle, buf);
+
             cur_needle = Slice(buf.c_str(), buf.size());
         }
-        cur_char_ptr = cur_needle.get_data();
 
-        for (i = 0; i + gram_num <= needle_length; i++) {
-            cur_hash = getAsciiHash(cur_char_ptr + i, gram_num);
-            map[cur_hash]++;
+        const char* data = cur_needle.get_data();
+        size_t len = cur_needle.get_size();
+
+        // UTF-8 mode: iterate by characters
+        std::vector<size_t> positions;
+        get_utf8_positions(data, len, positions);
+
+        size_t num_chars = positions.size();
+        if (num_chars < gram_num) {
+            return 0;
         }
 
-        return i;
+        size_t gram_count = 0;
+        for (size_t i = 0; i + gram_num <= num_chars; i++) {
+            size_t start = positions[i];
+            size_t end = (i + gram_num < num_chars) ? positions[i + gram_num] : len;
+            size_t ngram_bytes = end - start;
+
+            NgramHash cur_hash = ngram_hash(data + start, ngram_bytes);
+            map[cur_hash]++;
+            gram_count++;
+        }
+        return gram_count;
     }
 
     // Like calculateMapWithNeedle but also populates recover_info with each gram's hash (resized to gram count).
     // Caller must guarantee needle.get_size() >= gram_num and that needle is already lowercased
     // for case-insensitive variants (lowercasing is the caller's responsibility).
+    // In UTF-8 mode grams span whole characters, so a needle of fewer than gram_num characters yields no gram.
     size_t static calculateMapWithNeedleAndRecoverInfo(std::vector<NgramHash>& map, const Slice& needle,
                                                        size_t gram_num, std::vector<NgramHash>& recover_info) {
-        size_t needle_length = needle.get_size();
-        const char* cur_char_ptr = needle.get_data();
+        const char* data = needle.get_data();
+        size_t len = needle.get_size();
 
-        size_t gram_count = needle_length - gram_num + 1;
+        // UTF-8 mode: iterate by characters
+        std::vector<size_t> positions;
+        get_utf8_positions(data, len, positions);
+
+        size_t num_chars = positions.size();
+        if (num_chars < gram_num) {
+            recover_info.resize(0);
+            return 0;
+        }
+
+        size_t gram_count = num_chars - gram_num + 1;
         recover_info.resize(gram_count);
         for (size_t i = 0; i < gram_count; i++) {
-            NgramHash h = getAsciiHash(cur_char_ptr + i, gram_num);
-            map[h]++;
-            recover_info[i] = h;
+            size_t start = positions[i];
+            size_t end = (i + gram_num < num_chars) ? positions[i + gram_num] : len;
+            NgramHash cur_hash = ngram_hash(data + start, end - start);
+            map[cur_hash]++;
+            recover_info[i] = cur_hash;
         }
         return gram_count;
     }
 
     // Distance calculation that leaves map modified (matched entries are decremented).
     // Caller must invoke recoverNeedleNgramMap or clearNeedleNgramMap before the next use of map.
+    // In UTF-8 mode haystack grams span whole characters, matching the needle grams built above.
     size_t static calculateDistanceWithHaystackWithoutRecoverMap(std::vector<NgramHash>& map, const Slice& haystack,
                                                                  size_t needle_gram_count, size_t gram_num) {
-        size_t haystack_length = haystack.get_size();
-        const char* ptr = haystack.get_data();
-        for (size_t i = 0; i + gram_num <= haystack_length; i++) {
-            NgramHash cur_hash = getAsciiHash(ptr + i, gram_num);
+        const char* data = haystack.get_data();
+        size_t len = haystack.get_size();
+
+        // UTF-8 mode: iterate by characters
+        std::vector<size_t> positions;
+        get_utf8_positions(data, len, positions);
+
+        size_t num_chars = positions.size();
+        for (size_t i = 0; i + gram_num <= num_chars; i++) {
+            size_t start = positions[i];
+            size_t end = (i + gram_num < num_chars) ? positions[i + gram_num] : len;
+            NgramHash cur_hash = ngram_hash(data + start, end - start);
             if (map[cur_hash] > 0) {
                 needle_gram_count--;
                 map[cur_hash]--;
             }
         }
+
         return needle_gram_count;
     }
 
@@ -274,6 +333,7 @@ private:
 
         std::vector<NgramHash> row_map(MAP_SIZE, 0);
         std::vector<NgramHash> recover_info;
+        std::string needle_lc_buf, haystack_lc_buf;
         recover_info.reserve(MAX_STRING_SIZE);
 
         Slice prev_needle;
@@ -292,11 +352,12 @@ private:
             // treated as the same needle and the row_map is reused instead of rebuilt.
             Slice cur_needle_slice = raw_needle;
             Slice cur_haystack_slice = raw_haystack;
-            std::string needle_lc_buf, haystack_lc_buf;
+
             if constexpr (case_insensitive) {
-                tolower(raw_needle, needle_lc_buf);
+                tolower_utf8(raw_needle, needle_lc_buf);
+                tolower_utf8(raw_haystack, haystack_lc_buf);
+
                 cur_needle_slice = Slice(needle_lc_buf.c_str(), needle_lc_buf.size());
-                tolower(raw_haystack, haystack_lc_buf);
                 cur_haystack_slice = Slice(haystack_lc_buf.c_str(), haystack_lc_buf.size());
             }
 
@@ -314,7 +375,7 @@ private:
                 // Needle changed: clear old entries (handles both dirty and clean map states)
                 // and build fresh for the new needle.
                 clearNeedleNgramMap(row_map, recover_info);
-                if (cur_needle_slice.get_size() >= gram_num && cur_needle_slice.get_size() <= MAX_STRING_SIZE) {
+                if (cur_needle_slice.get_size() >= gram_num && raw_needle.get_size() <= MAX_STRING_SIZE) {
                     needle_gram_count =
                             calculateMapWithNeedleAndRecoverInfo(row_map, cur_needle_slice, gram_num, recover_info);
                 } else {
@@ -332,7 +393,7 @@ private:
                 }
             }
 
-            if (cur_haystack_slice.get_size() > MAX_STRING_SIZE || needle_gram_count == 0) {
+            if (raw_haystack.get_size() > MAX_STRING_SIZE || needle_gram_count == 0) {
                 res->get_data()[i] = 0;
                 continue;
             }
@@ -390,22 +451,22 @@ private:
 
     ColumnPtr static haystack_vector_and_needle_const(const ColumnPtr& haystack_column, std::vector<NgramHash>& map,
                                                       FunctionContext* context, size_t gram_num) {
-        std::vector<NgramHash> map_restore_helper(MAX_STRING_SIZE, 0);
+        std::vector<NgramHash> map_restore_helper;
+        map_restore_helper.reserve(MAX_STRING_SIZE);
+        // Hoisted per-row scratch for UTF-8 path: lowered haystack and character offsets.
+        // Default-constructed strings/vectors don't allocate, and clear() preserves capacity,
+        // so the ASCII path pays nothing and the UTF-8 path amortizes after the first row.
+        std::string lower_buf;
+        std::vector<size_t> positions;
 
         NullColumnPtr res_null = nullptr;
         ColumnPtr haystackPtr = nullptr;
-        // used in case_insensitive
-        StatusOr<ColumnPtr> lower;
         if (haystack_column->is_nullable()) {
             auto haystack_nullable = ColumnHelper::as_column<NullableColumn>(haystack_column);
             res_null = NullColumn::static_pointer_cast(Column::mutate(haystack_nullable->null_column()));
             haystackPtr = haystack_nullable->data_column();
         } else {
             haystackPtr = haystack_column;
-        }
-        if constexpr (case_insensitive) {
-            // @TODO if ngram supports utf8 in the future, we should use antoher implementation.
-            haystackPtr = StringCaseToggleFunction<false>::evaluate<TYPE_VARCHAR, TYPE_VARCHAR>(haystackPtr);
         }
 
         const BinaryColumn* haystack = ColumnHelper::as_raw_column<BinaryColumn>(haystackPtr);
@@ -425,7 +486,7 @@ private:
             }
 
             size_t needle_not_overlap_with_haystack = calculateDistanceWithHaystack<true>(
-                    map, cur_haystack_str, map_restore_helper, needle_gram_count, gram_num);
+                    map, cur_haystack_str, map_restore_helper, lower_buf, positions, needle_gram_count, gram_num);
             DCHECK(needle_not_overlap_with_haystack <= needle_gram_count);
 
             // now get the result
@@ -444,6 +505,8 @@ private:
     float static haystack_const_and_needle_const(const Slice& haystack, std::vector<NgramHash>& map,
                                                  FunctionContext* context, size_t gram_num) {
         std::vector<NgramHash> map_restore_helper{};
+        std::string lower_buf;
+        std::vector<size_t> positions;
         // if haystack is too large, we can say they are not similar at all
         if (haystack.get_size() > MAX_STRING_SIZE) {
             return 0;
@@ -451,95 +514,96 @@ private:
 
         Slice cur_haystack(haystack.get_data(), haystack.get_size());
 
-        std::string buf;
-        if constexpr (case_insensitive) {
-            tolower(haystack, buf);
-            cur_haystack = Slice(buf.c_str(), buf.size());
-        }
-
         auto state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
 
         // needle_gram_count may be zero because needle is empty or N is too large for needle
         size_t needle_gram_count = state->needle_gram_count;
-        size_t needle_not_overlap_with_haystack = calculateDistanceWithHaystack<false>(
-                map, cur_haystack, map_restore_helper, needle_gram_count, gram_num);
+        size_t needle_not_overlap_with_haystack = calculateDistanceWithHaystack<true>(
+                map, cur_haystack, map_restore_helper, lower_buf, positions, needle_gram_count, gram_num);
         float result = 1.0f - (needle_not_overlap_with_haystack)*1.0f / std::max(needle_gram_count, (size_t)1);
         DCHECK(needle_not_overlap_with_haystack <= needle_gram_count);
         return result;
     }
 
-    // traverse haystack‘s every gram, find whether this gram is in needle or not using gram's hash
+    // traverse haystack's every gram, find whether this gram is in needle or not using gram's hash
     // 16bit hash value may cause hash collision, but because we just calculate the similarity of two string
     // so don't need to be so accurate.
+    // lower_buf and positions are caller-owned scratch buffers reused across rows; only the UTF-8 path
+    // touches them. clear() on entry preserves capacity for the next row.
     template <bool need_recovery_map>
     size_t static calculateDistanceWithHaystack(std::vector<NgramHash>& map, const Slice& haystack,
                                                 [[maybe_unused]] std::vector<NgramHash>& map_restore_helper,
+                                                [[maybe_unused]] std::string& lower_buf,
+                                                [[maybe_unused]] std::vector<size_t>& positions,
                                                 size_t needle_gram_count, size_t gram_num) {
-        size_t haystack_length = haystack.get_size();
-        NgramHash cur_hash;
-        size_t i;
-        const char* ptr = haystack.get_data();
+        // For UTF-8 case-insensitive mode in vector processing, we need to convert here
+        Slice cur_haystack = haystack;
+        if constexpr (case_insensitive) {
+            lower_buf.clear();
+            tolower_utf8(haystack, lower_buf);
+            cur_haystack = Slice(lower_buf.c_str(), lower_buf.size());
+        }
 
-        for (i = 0; i + gram_num <= haystack_length; i++) {
-            cur_hash = getAsciiHash(ptr + i, gram_num);
-            // if this gram is in needle
+        const char* data = cur_haystack.get_data();
+        size_t len = cur_haystack.get_size();
+
+        // UTF-8 mode: iterate by characters
+        get_utf8_positions(data, len, positions);
+
+        size_t num_chars = positions.size();
+        if (num_chars < gram_num) {
+            return needle_gram_count;
+        }
+        for (size_t i = 0; i + gram_num <= num_chars; i++) {
+            size_t start = positions[i];
+            size_t end = (i + gram_num < num_chars) ? positions[i + gram_num] : len;
+            size_t ngram_bytes = end - start;
+
+            NgramHash cur_hash = ngram_hash(data + start, ngram_bytes);
+
             if (map[cur_hash] > 0) {
                 needle_gram_count--;
                 map[cur_hash]--;
                 if constexpr (need_recovery_map) {
-                    map_restore_helper[i] = cur_hash;
+                    map_restore_helper.push_back(cur_hash);
                 }
             }
         }
 
         if constexpr (need_recovery_map) {
-            for (int j = 0; j < i; j++) {
-                if (map_restore_helper[j]) {
-                    map[map_restore_helper[j]]++;
-                    // reset map_restore_helper
-                    map_restore_helper[j] = 0;
-                }
-            }
+            for (auto hash : map_restore_helper) map[hash]++;
+            map_restore_helper.clear();
         }
 
         return needle_gram_count;
     }
-
-    void inline static tolower(const Slice& str, std::string& buf) {
-        buf.assign(str.get_data(), str.get_size());
-        std::transform(buf.begin(), buf.end(), buf.begin(), [](unsigned char c) { return std::tolower(c); });
-    }
-
-    static NgramHash getAsciiHash(const Gram* ch, size_t gram_num) {
-        return crc_hash_32(ch, gram_num, CRC_HASH_SEEDS::CRC_HASH_SEED1) & (0xffffu);
-    }
 };
 
 StatusOr<ColumnPtr> StringFunctions::ngram_search(FunctionContext* context, const Columns& columns) {
-    return NgramFunctionImpl<false, false, char>::ngram_search_impl(context, columns);
+    return NgramFunctionImpl<false>::ngram_search_impl(context, columns);
 }
 
 StatusOr<ColumnPtr> StringFunctions::ngram_search_selected(FunctionContext* context, const SelectedColumns& columns,
                                                            size_t) {
-    return NgramFunctionImpl<false, false, char>::ngram_search_impl(context, columns);
+    return NgramFunctionImpl<false>::ngram_search_impl(context, columns);
 }
 
 StatusOr<ColumnPtr> StringFunctions::ngram_search_case_insensitive(FunctionContext* context, const Columns& columns) {
-    return NgramFunctionImpl<true, false, char>::ngram_search_impl(context, columns);
+    return NgramFunctionImpl<true>::ngram_search_impl(context, columns);
 }
 
 StatusOr<ColumnPtr> StringFunctions::ngram_search_case_insensitive_selected(FunctionContext* context,
                                                                             const SelectedColumns& columns, size_t) {
-    return NgramFunctionImpl<true, false, char>::ngram_search_impl(context, columns);
+    return NgramFunctionImpl<true>::ngram_search_impl(context, columns);
 }
 
 Status StringFunctions::ngram_search_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
-    return NgramFunctionImpl<false, false, char>::ngram_search_prepare_impl(context, scope);
+    return NgramFunctionImpl<false>::ngram_search_prepare_impl(context, scope);
 }
 
 Status StringFunctions::ngram_search_case_insensitive_prepare(FunctionContext* context,
                                                               FunctionContext::FunctionStateScope scope) {
-    return NgramFunctionImpl<true, false, char>::ngram_search_prepare_impl(context, scope);
+    return NgramFunctionImpl<true>::ngram_search_prepare_impl(context, scope);
 }
 
 Status StringFunctions::ngram_search_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
@@ -547,7 +611,7 @@ Status StringFunctions::ngram_search_close(FunctionContext* context, FunctionCon
         auto* state = reinterpret_cast<Ngramstate*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
         if (state != nullptr) {
             delete state;
-            state = nullptr;
+            context->set_function_state(scope, nullptr);
         }
     }
     return Status::OK();

@@ -317,15 +317,17 @@ bool VectorizedFunctionCallExpr::ngram_bloom_filter(ExprContext* context, const 
         const auto& needle_column = fn_ctx->get_constant_column(1);
         std::string needle = ColumnHelper::get_const_value<TYPE_VARCHAR>(needle_column).to_string();
 
-        // for case_insensitive, we need to convert needle to lower case
-        if (!reader_options.index_case_sensitive) {
-            std::transform(needle.begin(), needle.end(), needle.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-        }
-
         if (!simdjson::validate_utf8(needle.data(), needle.size())) {
-            index_useful = false;
-        } else if (_fn_desc->name == "LIKE") {
+            ngram_state->initialized = true;
+            ngram_state->index_useful = false;
+            return true;
+        }
+        if (!reader_options.index_case_sensitive) {
+            std::string folded_needle;
+            utf8_casefold(needle.data(), needle.size(), folded_needle);
+            needle = std::move(folded_needle);
+        }
+        if (_fn_desc->name == "LIKE") {
             index_useful = split_like_string_to_ngram(needle, reader_options, ngram_set);
         } else {
             index_useful = split_normal_string_to_ngram(needle, fn_ctx, reader_options, ngram_set, _fn_desc->name);

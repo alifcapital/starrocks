@@ -345,6 +345,18 @@ protected:
         return parent;
     }
 
+    std::unique_ptr<BloomFilter> make_bf_with_cyrillic_lowered_trigrams() {
+        std::unique_ptr<BloomFilter> bf;
+        EXPECT_OK(BloomFilter::create(BLOCK_BLOOM_FILTER, &bf));
+        EXPECT_OK(bf->init(16, 0.05, HashStrategyPB::HASH_MURMUR3_X64_64));
+        // Lowercase Cyrillic character trigrams of "привет" (each char is 2 bytes).
+        bf->add_bytes("при", 6);
+        bf->add_bytes("рив", 6);
+        bf->add_bytes("иве", 6);
+        bf->add_bytes("вет", 6);
+        return bf;
+    }
+
     RuntimeState _runtime_state;
 };
 
@@ -383,6 +395,152 @@ TEST_F(NgramBloomFilterPushdownTest, ZeroGramNumDisablesIndex) {
     EXPECT_TRUE(expr.ngram_bloom_filter(&expr_context, bf.get(), opts));
 
     Expr::close(expr_ctxs, &_runtime_state);
+}
+
+TEST_F(NgramBloomFilterPushdownTest, MatchUtf8CaseInsensitiveLowersNeedle) {
+    TExprNode varchar_node = make_typed_node(TPrimitiveType::VARCHAR);
+    TExprNode int_node = make_typed_node(TPrimitiveType::INT);
+    TExprNode parent_node = build_ngram_call_node();
+
+    VectorizedFunctionCallExpr expr(parent_node);
+    MockColumnExpr haystack(varchar_node, BinaryColumn::create());
+    MockConstVectorizedExpr<TYPE_VARCHAR> needle(varchar_node, "ПРИВЕТ");
+    MockConstVectorizedExpr<TYPE_INT> gram_num(int_node, 3);
+    expr.add_child(&haystack);
+    expr.add_child(&needle);
+    expr.add_child(&gram_num);
+
+    ExprContext exprContext(&expr);
+    std::vector<ExprContext*> expr_ctxs = {&exprContext};
+    ASSERT_OK(Expr::prepare(expr_ctxs, &_runtime_state));
+    ASSERT_OK(Expr::open(expr_ctxs, &_runtime_state));
+
+    auto bf = make_bf_with_cyrillic_lowered_trigrams();
+    NgramBloomFilterReaderOptions opts;
+    opts.index_gram_num = 3;
+    opts.index_case_sensitive = false;
+
+    // Needle "ПРИВЕТ" lowered via utf8_tolower to "привет"; all 4 trigrams hit
+    // the bloom filter, so the helper must report the page as a candidate.
+    EXPECT_TRUE(expr.ngram_bloom_filter(&exprContext, bf.get(), opts));
+
+    Expr::close(expr_ctxs, &_runtime_state);
+}
+
+TEST_F(NgramBloomFilterPushdownTest, MissUtf8CaseInsensitiveFiltersPage) {
+    TExprNode varchar_node = make_typed_node(TPrimitiveType::VARCHAR);
+    TExprNode int_node = make_typed_node(TPrimitiveType::INT);
+    TExprNode parent_node = build_ngram_call_node();
+
+    VectorizedFunctionCallExpr expr(parent_node);
+    MockColumnExpr haystack(varchar_node, BinaryColumn::create());
+    MockConstVectorizedExpr<TYPE_VARCHAR> needle(varchar_node, "ПОКА");
+    MockConstVectorizedExpr<TYPE_INT> gram_num(int_node, 3);
+    expr.add_child(&haystack);
+    expr.add_child(&needle);
+    expr.add_child(&gram_num);
+
+    ExprContext exprContext(&expr);
+    std::vector<ExprContext*> expr_ctxs = {&exprContext};
+    ASSERT_OK(Expr::prepare(expr_ctxs, &_runtime_state));
+    ASSERT_OK(Expr::open(expr_ctxs, &_runtime_state));
+
+    auto bf = make_bf_with_cyrillic_lowered_trigrams();
+    NgramBloomFilterReaderOptions opts;
+    opts.index_gram_num = 3;
+    opts.index_case_sensitive = false;
+
+    // Needle "ПОКА" lowered to "пока" produces trigrams "пок", "ока" — neither
+    // present in the bloom filter that was populated for "привет".
+    EXPECT_FALSE(expr.ngram_bloom_filter(&exprContext, bf.get(), opts));
+
+    Expr::close(expr_ctxs, &_runtime_state);
+}
+
+TEST_F(NgramBloomFilterPushdownTest, InvalidUtf8NeedleDisablesIndex) {
+    TExprNode varchar_node = make_typed_node(TPrimitiveType::VARCHAR);
+    TExprNode int_node = make_typed_node(TPrimitiveType::INT);
+    TExprNode parent_node = build_ngram_call_node();
+
+    VectorizedFunctionCallExpr expr(parent_node);
+    MockColumnExpr haystack(varchar_node, BinaryColumn::create());
+    // 0xC0 0xC1 are illegal lead bytes in UTF-8.
+    MockConstVectorizedExpr<TYPE_VARCHAR> needle(varchar_node, std::string("\xC0\xC1\xFE", 3));
+    MockConstVectorizedExpr<TYPE_INT> gram_num(int_node, 3);
+    expr.add_child(&haystack);
+    expr.add_child(&needle);
+    expr.add_child(&gram_num);
+
+    ExprContext exprContext(&expr);
+    std::vector<ExprContext*> expr_ctxs = {&exprContext};
+    ASSERT_OK(Expr::prepare(expr_ctxs, &_runtime_state));
+    ASSERT_OK(Expr::open(expr_ctxs, &_runtime_state));
+
+    auto bf = make_bf_with_cyrillic_lowered_trigrams();
+    NgramBloomFilterReaderOptions opts;
+    opts.index_gram_num = 3;
+    opts.index_case_sensitive = false;
+
+    // Invalid UTF-8 needle: helper short-circuits with index_useful=false and
+    // returns true so the page is not filtered out by the bloom filter.
+    EXPECT_TRUE(expr.ngram_bloom_filter(&exprContext, bf.get(), opts));
+
+    Expr::close(expr_ctxs, &_runtime_state);
+}
+
+TEST_F(NgramBloomFilterPushdownTest, FoldedIndexCandidatesPreserveSqlSemantics) {
+    struct Probe {
+        const char* function;
+        int fid;
+        const char* needle;
+        std::vector<std::string> stored_grams;
+        bool expected;
+    };
+    const std::vector<Probe> probes = {
+            {"LIKE", 60010, "%ΟΣ%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%ΣΑ%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%Ος%", {"οσ", "σα"}, true},
+            {"LIKE", 60010, "%ΟΣ%", {"ab", "bc"}, false},
+            {"LIKE", 60010, "%Straße%", {"st", "tr", "ra", "as", "ss", "se"}, true},
+            {"LIKE", 60010, "%ﬃ%", {"ff", "fi"}, true},
+            {"ngram_search", 30440, "ΟΣ", {"οσ", "σα"}, true},
+            {"ngram_search_case_insensitive", 30441, "ος", {"οσ", "σα"}, true},
+            {"ngram_search_case_insensitive", 30441, "aß", {"as", "ss"}, true},
+    };
+    for (const auto& probe : probes) {
+        SCOPED_TRACE(std::string(probe.function) + ": " + probe.needle);
+        const bool is_like = std::string(probe.function) == "LIKE";
+        TExprNode parent = build_ngram_call_node();
+        parent.fn.name.__set_function_name(probe.function);
+        parent.fn.__set_fid(probe.fid);
+        if (is_like) {
+            parent.num_children = 2;
+            parent.type = gen_type_desc(TPrimitiveType::BOOLEAN);
+            parent.fn.__set_ret_type(parent.type);
+            parent.fn.arg_types.resize(2);
+        }
+        VectorizedFunctionCallExpr expr(parent);
+        auto varchar_node = make_typed_node(TPrimitiveType::VARCHAR);
+        MockColumnExpr haystack(varchar_node, BinaryColumn::create());
+        MockConstVectorizedExpr<TYPE_VARCHAR> needle(varchar_node, probe.needle);
+        MockConstVectorizedExpr<TYPE_INT> gram_num(make_typed_node(TPrimitiveType::INT), 2);
+        expr.add_child(&haystack);
+        expr.add_child(&needle);
+        if (!is_like) expr.add_child(&gram_num);
+        ExprContext context(&expr);
+        std::vector<ExprContext*> contexts = {&context};
+        ASSERT_OK(Expr::prepare(contexts, &_runtime_state));
+        ASSERT_OK(Expr::open(contexts, &_runtime_state));
+        std::unique_ptr<BloomFilter> bf;
+        ASSERT_OK(BloomFilter::create(BLOCK_BLOOM_FILTER, &bf));
+        ASSERT_OK(bf->init(16, 0.0001, HashStrategyPB::HASH_MURMUR3_X64_64));
+        for (const auto& gram : probe.stored_grams) {
+            bf->add_bytes(gram.data(), gram.size());
+        }
+        NgramBloomFilterReaderOptions options{2, false};
+        EXPECT_EQ(probe.expected, expr.ngram_bloom_filter(&context, bf.get(), options));
+        Expr::close(contexts, &_runtime_state);
+    }
 }
 
 } // namespace starrocks

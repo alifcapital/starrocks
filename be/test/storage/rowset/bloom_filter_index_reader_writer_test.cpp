@@ -301,4 +301,208 @@ TEST_F(BloomFilterIndexReaderWriterTest, test_decimal) {
     delete[] val;
 }
 
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_insensitive) {
+    BloomFilterOptions bf_options;
+    bf_options.use_ngram = true;
+    bf_options.gram_num = 3;
+    bf_options.case_sensitive = false;
+
+    TypeInfoPtr type_info = get_type_info(TYPE_VARCHAR);
+    const std::string file_name = "bloom_filter_ngram_utf8";
+    const std::string fname = kTestDir + "/" + file_name;
+    ColumnIndexMetaPB meta;
+
+    std::string s1 = "ПРИВЕТ";
+    Slice slices[] = {Slice(s1)};
+
+    {
+        ASSIGN_OR_ABORT(auto wfile, _fs->new_writable_file(fname));
+        std::unique_ptr<BloomFilterIndexWriter> writer;
+        ASSERT_OK(BloomFilterIndexWriter::create(bf_options, type_info, &writer));
+        writer->add_values(slices, 1);
+        ASSERT_OK(writer->flush());
+        ASSERT_OK(writer->finish(wfile.get(), &meta));
+        ASSERT_TRUE(wfile->close().ok());
+    }
+
+    std::unique_ptr<RandomAccessFile> rfile;
+    BloomFilterIndexReader* reader = nullptr;
+    std::unique_ptr<BloomFilterIndexIterator> iter;
+    get_bloom_filter_reader_iter(file_name, meta, &rfile, &reader, &iter);
+
+    std::unique_ptr<BloomFilter> bf;
+    ASSERT_OK(iter->read_bloom_filter(0, &bf));
+
+    // "ПРИВЕТ" -> Unicode lowered "привет" -> character trigrams
+    EXPECT_TRUE(bf->test_bytes("при", 6));
+    EXPECT_TRUE(bf->test_bytes("рив", 6));
+    EXPECT_TRUE(bf->test_bytes("иве", 6));
+    EXPECT_TRUE(bf->test_bytes("вет", 6));
+    // uppercase Cyrillic trigrams must not appear: lowering happens in the writer
+    EXPECT_FALSE(bf->test_bytes("ПРИ", 6));
+    EXPECT_FALSE(bf->test_bytes("РИВ", 6));
+
+    delete reader;
+}
+
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_ascii_case_insensitive) {
+    BloomFilterOptions bf_options;
+    bf_options.use_ngram = true;
+    bf_options.gram_num = 3;
+    bf_options.case_sensitive = false;
+
+    TypeInfoPtr type_info = get_type_info(TYPE_VARCHAR);
+    const std::string file_name = "bloom_filter_ngram_ascii";
+    const std::string fname = kTestDir + "/" + file_name;
+    ColumnIndexMetaPB meta;
+
+    std::string s1 = "HELLO";
+    Slice slices[] = {Slice(s1)};
+
+    {
+        ASSIGN_OR_ABORT(auto wfile, _fs->new_writable_file(fname));
+        std::unique_ptr<BloomFilterIndexWriter> writer;
+        ASSERT_OK(BloomFilterIndexWriter::create(bf_options, type_info, &writer));
+        writer->add_values(slices, 1);
+        ASSERT_OK(writer->flush());
+        ASSERT_OK(writer->finish(wfile.get(), &meta));
+        ASSERT_TRUE(wfile->close().ok());
+    }
+
+    std::unique_ptr<RandomAccessFile> rfile;
+    BloomFilterIndexReader* reader = nullptr;
+    std::unique_ptr<BloomFilterIndexIterator> iter;
+    get_bloom_filter_reader_iter(file_name, meta, &rfile, &reader, &iter);
+
+    std::unique_ptr<BloomFilter> bf;
+    ASSERT_OK(iter->read_bloom_filter(0, &bf));
+
+    // ASCII folding maps "HELLO" to "hello"; trigrams are 3 bytes each.
+    EXPECT_TRUE(bf->test_bytes("hel", 3));
+    EXPECT_TRUE(bf->test_bytes("ell", 3));
+    EXPECT_TRUE(bf->test_bytes("llo", 3));
+    EXPECT_FALSE(bf->test_bytes("HEL", 3));
+    EXPECT_FALSE(bf->test_bytes("LLO", 3));
+
+    delete reader;
+}
+
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_sensitive_preserves_case) {
+    BloomFilterOptions bf_options;
+    bf_options.use_ngram = true;
+    bf_options.gram_num = 3;
+    bf_options.case_sensitive = true;
+
+    TypeInfoPtr type_info = get_type_info(TYPE_VARCHAR);
+    const std::string file_name = "bloom_filter_ngram_utf8_sensitive";
+    const std::string fname = kTestDir + "/" + file_name;
+    ColumnIndexMetaPB meta;
+
+    std::string s1 = "ПРИВЕТ";
+    Slice slices[] = {Slice(s1)};
+
+    {
+        ASSIGN_OR_ABORT(auto wfile, _fs->new_writable_file(fname));
+        std::unique_ptr<BloomFilterIndexWriter> writer;
+        ASSERT_OK(BloomFilterIndexWriter::create(bf_options, type_info, &writer));
+        writer->add_values(slices, 1);
+        ASSERT_OK(writer->flush());
+        ASSERT_OK(writer->finish(wfile.get(), &meta));
+        ASSERT_TRUE(wfile->close().ok());
+    }
+
+    std::unique_ptr<RandomAccessFile> rfile;
+    BloomFilterIndexReader* reader = nullptr;
+    std::unique_ptr<BloomFilterIndexIterator> iter;
+    get_bloom_filter_reader_iter(file_name, meta, &rfile, &reader, &iter);
+
+    std::unique_ptr<BloomFilter> bf;
+    ASSERT_OK(iter->read_bloom_filter(0, &bf));
+
+    // case_sensitive: trigrams are stored as written, no lowering branch is exercised.
+    EXPECT_TRUE(bf->test_bytes("ПРИ", 6));
+    EXPECT_TRUE(bf->test_bytes("РИВ", 6));
+    EXPECT_FALSE(bf->test_bytes("при", 6));
+
+    delete reader;
+}
+
+// Folding Aİ produces three codepoints: a, i, and U+0307. Both two-character grams must be stored.
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_utf8_case_insensitive_length_changing_fold) {
+    BloomFilterOptions bf_options;
+    bf_options.use_ngram = true;
+    bf_options.gram_num = 2;
+    bf_options.case_sensitive = false;
+
+    TypeInfoPtr type_info = get_type_info(TYPE_VARCHAR);
+    const std::string file_name = "bloom_filter_ngram_utf8_fold_order";
+    const std::string fname = kTestDir + "/" + file_name;
+    ColumnIndexMetaPB meta;
+
+    std::string s1 = "Aİ";
+    Slice slices[] = {Slice(s1)};
+
+    {
+        ASSIGN_OR_ABORT(auto wfile, _fs->new_writable_file(fname));
+        std::unique_ptr<BloomFilterIndexWriter> writer;
+        ASSERT_OK(BloomFilterIndexWriter::create(bf_options, type_info, &writer));
+        writer->add_values(slices, 1);
+        ASSERT_OK(writer->flush());
+        ASSERT_OK(writer->finish(wfile.get(), &meta));
+        ASSERT_TRUE(wfile->close().ok());
+    }
+
+    std::unique_ptr<RandomAccessFile> rfile;
+    BloomFilterIndexReader* reader = nullptr;
+    std::unique_ptr<BloomFilterIndexIterator> iter;
+    get_bloom_filter_reader_iter(file_name, meta, &rfile, &reader, &iter);
+
+    std::unique_ptr<BloomFilter> bf;
+    ASSERT_OK(iter->read_bloom_filter(0, &bf));
+
+    // utf8_casefold("Aİ") == 'a' 'i' U+0307 (bytes 61 69 cc 87, three characters). These are the
+    // 2-char ngrams the reader probes; the writer must store exactly them.
+    EXPECT_TRUE(bf->test_bytes("\x61\x69", 2));     // "ai"
+    EXPECT_TRUE(bf->test_bytes("\x69\xcc\x87", 3)); // "i" + U+0307
+    // A three-character sequence is not a two-character index gram.
+    EXPECT_FALSE(bf->test_bytes("\x61\x69\xcc\x87", 4));
+
+    delete reader;
+}
+
+TEST_F(BloomFilterIndexReaderWriterTest, test_ngram_unicode_folded_keys) {
+    for (bool case_sensitive : {false, true}) {
+        BloomFilterOptions options;
+        options.use_ngram = true;
+        options.gram_num = 2;
+        options.case_sensitive = case_sensitive;
+        const std::string file_name = case_sensitive ? "ngram_original_keys" : "ngram_folded_keys";
+        ColumnIndexMetaPB meta;
+        std::string text = "ΟΣΑ Straße ﬃ Aİ";
+        Slice value(text);
+        {
+            ASSIGN_OR_ABORT(auto file, _fs->new_writable_file(kTestDir + "/" + file_name));
+            std::unique_ptr<BloomFilterIndexWriter> writer;
+            ASSERT_OK(BloomFilterIndexWriter::create(options, get_type_info(TYPE_VARCHAR), &writer));
+            writer->add_values(&value, 1);
+            ASSERT_OK(writer->flush());
+            ASSERT_OK(writer->finish(file.get(), &meta));
+            ASSERT_OK(file->close());
+        }
+        std::unique_ptr<RandomAccessFile> file;
+        BloomFilterIndexReader* reader = nullptr;
+        std::unique_ptr<BloomFilterIndexIterator> iter;
+        get_bloom_filter_reader_iter(file_name, meta, &file, &reader, &iter);
+        std::unique_ptr<BloomFilter> bf;
+        ASSERT_OK(iter->read_bloom_filter(0, &bf));
+        const std::vector<std::string> expected =
+                case_sensitive ? std::vector<std::string>{"ΟΣ", "ΣΑ", "aß", "ße", " ﬃ", "Aİ"}
+                               : std::vector<std::string>{"οσ", "σα", "as", "ss", "se", "ff", "fi", "ai", "i̇"};
+        for (const auto& gram : expected) {
+            EXPECT_TRUE(bf->test_bytes(gram.data(), gram.size())) << gram;
+        }
+        delete reader;
+    }
+}
+
 } // namespace starrocks

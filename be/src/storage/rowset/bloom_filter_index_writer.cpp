@@ -211,26 +211,27 @@ public:
         size_t gram_num = this->_bf_options.gram_num;
         const auto* cur_slice = reinterpret_cast<const Slice*>(values);
         for (int i = 0; i < count; ++i) {
-            std::vector<size_t> index;
-            size_t slice_gram_num = get_utf8_index(*cur_slice, &index);
+            // Fold before splitting: mappings such as sharp S -> ss change the number of characters.
+            // Context-free folding keeps index keys consistent between a value and its substrings.
+            Slice value = *cur_slice;
+            std::string folded_buf;
+            if (!this->_bf_options.case_sensitive) {
+                utf8_casefold(value.get_data(), value.get_size(), folded_buf);
+                value = Slice(folded_buf.data(), folded_buf.size());
+            }
 
-            size_t j;
-            for (j = 0; j + gram_num <= slice_gram_num; j++) {
+            std::vector<size_t> index;
+            size_t slice_gram_num = get_utf8_index(value, &index);
+
+            for (size_t j = 0; j + gram_num <= slice_gram_num; j++) {
                 // find next ngram
-                size_t cur_ngram_length = j + gram_num < slice_gram_num ? index[j + gram_num] - index[j]
-                                                                        : cur_slice->get_size() - index[j];
-                Slice cur_ngram = Slice(cur_slice->data + index[j], cur_ngram_length);
+                size_t cur_ngram_length =
+                        j + gram_num < slice_gram_num ? index[j + gram_num] - index[j] : value.get_size() - index[j];
+                Slice cur_ngram = Slice(value.get_data() + index[j], cur_ngram_length);
 
                 // add this ngram into set
                 if (_values.find(unaligned_load<CppType>(&cur_ngram)) == _values.end()) {
-                    if (this->_bf_options.case_sensitive) {
-                        _values.insert(get_value<field_type>(&cur_ngram, this->_typeinfo, &this->_pool));
-                    } else {
-                        // todo::exist two copy of ngram, need to optimize
-                        std::string lower_ngram;
-                        Slice lower_ngram_slice = cur_ngram.tolower(lower_ngram);
-                        _values.insert(get_value<field_type>(&lower_ngram_slice, this->_typeinfo, &this->_pool));
-                    }
+                    _values.insert(get_value<field_type>(&cur_ngram, this->_typeinfo, &this->_pool));
                 }
             }
             // move to next row

@@ -535,9 +535,6 @@ set(STARROCKS_DEPENDENCIES
     avrocpp
     serdes
     fiu
-    icuuc
-    icui18n
-    icudata
     ${WL_END_GROUP}
 )
 

@@ -226,6 +226,7 @@ set(EXEC_FILES
         ./exprs/string_fn_sm3_test.cpp
         ./exprs/string_fn_space_test.cpp
         ./exprs/string_fn_substr_test.cpp
+        ./exprs/ngram_search_test.cpp
         ./exprs/string_fn_test.cpp
         ./exprs/string_fn_trim_test.cpp
         ./exprs/string_fn_money_format_decimal_test.cpp

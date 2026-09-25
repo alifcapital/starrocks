@@ -1580,6 +1580,25 @@ public class ScalarOperatorFunctionsTest {
     }
 
     @Test
+    public void testUnicode17LowerUpper() {
+        String[][] cases = {
+                {"Größe ßẞ", "größe ßß", "GRÖSSE SSẞ"},
+                {"İIıi", "i̇iıi", "İIII"},
+                {"ΟΣ", "ος", "ΟΣ"},
+                {"ΟΣ́Α", "οσ́α", "ΟΣ́Α"},
+                {"ΟΣ́", "ος́", "ΟΣ́"},
+                {"ﬃΐև", "ﬃΐև", "FFIΪ́ԵՒ"},
+                {"Ᲊᲊ", "ᲊᲊ", "ᲉᲉ"},
+                {"", "", ""}
+        };
+        for (String[] c : cases) {
+            ConstantOperator value = ConstantOperator.createVarchar(c[0]);
+            assertEquals(c[1], ScalarOperatorFunctions.lower(value).getVarchar());
+            assertEquals(c[2], ScalarOperatorFunctions.upper(value).getVarchar());
+        }
+    }
+
+    @Test
     public void testLowerUpper() {
         assertEquals("aaa", ScalarOperatorFunctions.lower(
                 new ConstantOperator("AAA", VarcharType.VARCHAR)

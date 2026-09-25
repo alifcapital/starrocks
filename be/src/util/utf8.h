@@ -21,6 +21,7 @@
 
 #include "simdutf.h"
 #include "util/slice.h"
+#include "util/utf8_case.h"
 
 namespace starrocks {
 
