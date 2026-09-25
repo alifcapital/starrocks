@@ -17,6 +17,7 @@ set(EXECUTABLE_OUTPUT_PATH "${BUILD_DIR}/src/simd")
 
 set(SIMD_FILES
     expand.cpp
+    rle_simd.cpp
 )
 
 ADD_BE_LIB(Simd

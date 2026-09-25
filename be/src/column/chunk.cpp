@@ -363,7 +363,7 @@ void Chunk::rolling_append_selective(Chunk& src, const uint32_t* indexes, uint32
 }
 
 size_t Chunk::filter(const Buffer<uint8_t>& selection, bool force) {
-    if (!force && SIMD::count_zero(selection) == 0) {
+    if (!force && SIMD::all_ones(selection)) {
         return num_rows();
     }
     for (auto& column : _columns) {
@@ -901,7 +901,7 @@ void MutableChunk::rolling_append_selective(Chunk& src, const uint32_t* indexes,
 }
 
 size_t MutableChunk::filter(const Buffer<uint8_t>& selection, bool force) {
-    if (!force && SIMD::count_zero(selection) == 0) {
+    if (!force && SIMD::all_ones(selection)) {
         return num_rows();
     }
     for (auto& column : _columns) {

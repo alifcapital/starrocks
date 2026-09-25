@@ -383,6 +383,8 @@ set(EXEC_FILES
         ./types/variant_value_test.cpp
         ./simd/batch_run_counter_test.cpp
         ./simd/simd_test.cpp
+        ./simd/rle_simd_test.cpp
+        ./simd/string_length_filter_test.cpp
         ./simd/simd_selector_test.cpp
         ./simd/simd_mulselector_test.cpp
         ./simd/simd_expand_test.cpp
