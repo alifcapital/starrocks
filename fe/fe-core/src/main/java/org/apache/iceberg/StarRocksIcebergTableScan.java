@@ -655,7 +655,8 @@ public class StarRocksIcebergTableScan
         return existingFilesCount + addedFilesCount;
     }
 
-    static boolean isCompleteCachedFiles(ManifestFile manifest, Set<?> files) {
+    // Shared with background cache warming: an in-progress empty entry is not necessarily a cache hit.
+    public static boolean isCompleteCachedFiles(ManifestFile manifest, Set<?> files) {
         if (files == null) {
             return false;
         }

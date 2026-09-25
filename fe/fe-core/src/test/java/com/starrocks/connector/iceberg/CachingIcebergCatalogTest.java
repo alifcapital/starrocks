@@ -14,8 +14,7 @@
 
 package com.starrocks.connector.iceberg;
 
-import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.google.common.collect.Lists;
+import com.github.benmanes.caffeine.cache.Cache;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.common.MetaNotFoundException;
@@ -63,7 +62,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static com.starrocks.connector.iceberg.IcebergCatalogProperties.HIVE_METASTORE_URIS;
 import static com.starrocks.connector.iceberg.IcebergCatalogProperties.ICEBERG_CATALOG_TYPE;
@@ -113,7 +111,7 @@ public class CachingIcebergCatalogTest {
     }
 
     @Test
-    public void testListPartitionNames(@Mocked IcebergCatalog icebergCatalog) {
+    public void testListPartitionNames(@Mocked IcebergCatalog icebergCatalog) throws Exception {
         PartitionSpec spec = Mockito.mock(PartitionSpec.class);
         Mockito.when(spec.isUnpartitioned()).thenReturn(false);
         Table nativeTable = createBaseTableWithManifests(1, 0, spec);
@@ -124,8 +122,9 @@ public class CachingIcebergCatalogTest {
                 minTimes = 0;
             }
         };
+        ExecutorService partitionExecutor = Executors.newSingleThreadExecutor();
         CachingIcebergCatalog cachingIcebergCatalog = new CachingIcebergCatalog(CATALOG_NAME, icebergCatalog,
-                DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
+                DEFAULT_CATALOG_PROPERTIES, partitionExecutor);
         IcebergTable table =
                 IcebergTable.builder().setSrTableName("test_sr")
                 .setCatalogDBName("db").setCatalogTableName("test").setNativeTable(nativeTable).build();
@@ -138,6 +137,7 @@ public class CachingIcebergCatalogTest {
             requestContext.setQueryMVRewrite(true);
             List<String> res = cachingIcebergCatalog.listPartitionNames(table, requestContext, null);
             Assertions.assertNull(res);
+            partitionExecutor.submit(() -> { }).get(5, TimeUnit.SECONDS);
         }
         {
             ConnectorMetadataRequestContext requestContext = new ConnectorMetadataRequestContext();
@@ -147,6 +147,7 @@ public class CachingIcebergCatalogTest {
             List<String> res = cachingIcebergCatalog.listPartitionNames(table, requestContext, null);
             Assertions.assertEquals(res.size(), 0);
         }
+        partitionExecutor.shutdownNow();
     }
 
     @Test
@@ -379,7 +380,7 @@ public class CachingIcebergCatalogTest {
                 result = true;
                 props.isEnableIcebergTableCache(); 
                 result = true;
-                props.getIcebergMetaCacheTtlSec(); 
+                props.getIcebergTableCacheTtlSec();
                 result = 24L * 60 * 60;
                 props.getIcebergDataFileCacheMemoryUsageRatio(); 
                 result = 0.0;
@@ -427,7 +428,7 @@ public class CachingIcebergCatalogTest {
                 result = true;
                 props.isEnableIcebergTableCache(); 
                 result = false;
-                props.getIcebergMetaCacheTtlSec(); 
+                props.getIcebergTableCacheTtlSec();
                 result = 60;
                 props.getIcebergDataFileCacheMemoryUsageRatio(); 
                 result = 0.0;
@@ -517,42 +518,6 @@ public class CachingIcebergCatalogTest {
     }
 
     @Test
-    public void testReloadReturnsFreshTableWhenMetadataUnchanged(@Mocked IcebergCatalog delegate) throws Exception {
-        ConnectContext ctx = new ConnectContext();
-        Table oldTable = createBaseTableWithManifests(1, 1);
-        Table freshTable = createBaseTableWithManifests(1, 1);
-        // Identical metadata location on both: the removed short-circuit would have returned oldValue here,
-        // so this asserts the fresh (renewed-credential) table is installed regardless of metadata equality.
-        String sharedLocation = "s3://bucket/metadata/v1.metadata.json";
-        Mockito.when(((BaseTable) oldTable).operations().current().metadataFileLocation()).thenReturn(sharedLocation);
-        Mockito.when(((BaseTable) freshTable).operations().current().metadataFileLocation()).thenReturn(sharedLocation);
-
-        AtomicInteger calls = new AtomicInteger();
-        new Expectations() {
-            {
-                delegate.getTable((ConnectContext) any, "db1", "t1");
-                result = new Delegate<Table>() {
-                    Table get(ConnectContext c, String db, String tbl) {
-                        return calls.getAndIncrement() == 0 ? oldTable : freshTable;
-                    }
-                };
-            }
-        };
-
-        ExecutorService refreshExecutor = Executors.newSingleThreadExecutor();
-        CachingIcebergCatalog catalog = new CachingIcebergCatalog(CATALOG_NAME, delegate,
-                DEFAULT_CATALOG_PROPERTIES, refreshExecutor);
-        LoadingCache<IcebergTableName, Table> tableCache = Deencapsulation.getField(catalog, "tables");
-        IcebergTableName key = new IcebergTableName("db1", "t1");
-
-        Assertions.assertSame(oldTable, catalog.getTable(ctx, "db1", "t1"));
-        tableCache.refresh(key);
-        // refresh dispatches reload() onto refreshExecutor; this FIFO barrier returns once it has run.
-        refreshExecutor.submit(() -> { }).get();
-        Assertions.assertSame(freshTable, tableCache.getIfPresent(key));
-    }
-
-    @Test
     public void testRefreshTableRenewsCredentialsWhenMetadataUnchanged(@Mocked IcebergCatalog delegate) {
         ConnectContext ctx = new ConnectContext();
         Table cachedTable = createBaseTableWithManifests(1, 1);
@@ -578,7 +543,7 @@ public class CachingIcebergCatalogTest {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         CachingIcebergCatalog catalog = new CachingIcebergCatalog(CATALOG_NAME, delegate,
                 DEFAULT_CATALOG_PROPERTIES, executor);
-        LoadingCache<IcebergTableName, Table> tableCache = Deencapsulation.getField(catalog, "tables");
+        Cache<IcebergTableName, Table> tableCache = Deencapsulation.getField(catalog, "tables");
         IcebergTableName key = new IcebergTableName("db1", "t1");
 
         Assertions.assertSame(cachedTable, catalog.getTable(ctx, "db1", "t1"));
@@ -589,21 +554,21 @@ public class CachingIcebergCatalogTest {
     @Test
     public void testRestTableCacheTtlIsCapped(@Mocked IcebergRESTCatalog restCatalog,
                                               @Mocked IcebergCatalog hiveCatalog) {
-        // REST catalog: the table cache hard-expiry is capped regardless of the (default 24h) meta cache
+        // REST catalog: the table cache hard-expiry is capped regardless of the table cache
         // TTL, so an idle vended-credential entry cannot outlive its token.
         CachingIcebergCatalog restCaching = new CachingIcebergCatalog(CATALOG_NAME, restCatalog,
                 DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
-        LoadingCache<IcebergTableName, Table> restCache = Deencapsulation.getField(restCaching, "tables");
+        Cache<IcebergTableName, Table> restCache = Deencapsulation.getField(restCaching, "tables");
         long restTtl = restCache.policy().expireAfterWrite().get().getExpiresAfter(TimeUnit.SECONDS);
         Assertions.assertTrue(restTtl <= 3000, "REST table cache TTL must be capped, was " + restTtl);
 
-        // Non-REST catalog: TTL stays at the configured meta cache TTL (no credential to protect).
+        // Non-REST catalog: TTL stays at the configured table cache TTL (no credential to protect).
         CachingIcebergCatalog hiveCaching = new CachingIcebergCatalog(CATALOG_NAME, hiveCatalog,
                 DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
-        LoadingCache<IcebergTableName, Table> hiveCache = Deencapsulation.getField(hiveCaching, "tables");
-        long hiveTtl = hiveCache.policy().expireAfterWrite().get().getExpiresAfter(TimeUnit.SECONDS);
-        Assertions.assertEquals(DEFAULT_CATALOG_PROPERTIES.getIcebergMetaCacheTtlSec(), hiveTtl,
-                "non-REST table cache TTL must equal the configured meta cache TTL");
+        Cache<IcebergTableName, Table> hiveCache = Deencapsulation.getField(hiveCaching, "tables");
+        long hiveTtl = hiveCache.policy().expireAfterAccess().get().getExpiresAfter(TimeUnit.SECONDS);
+        Assertions.assertEquals(DEFAULT_CATALOG_PROPERTIES.getIcebergTableCacheTtlSec(), hiveTtl,
+                "non-REST table cache TTL must equal the configured table cache TTL");
     }
 
     @Test
@@ -626,342 +591,6 @@ public class CachingIcebergCatalogTest {
 
         // Verify that getCatalogProperties was called on the delegate
         Mockito.verify(delegate).getCatalogProperties();
-    }
-
-    @Test
-    public void testCacheFreshnessBug(@Mocked IcebergCatalog delegate, @Mocked PartitionSpec spec) {
-        //this test will fail on 3.5.9
-        System.out.println("===========Starting testCacheFreshnessBug==========");
-        String dbName = "db";
-        String tblName = "test_table";
-        ConnectContext ctx = new ConnectContext();
-        new Expectations() {
-            {
-                delegate.getPartitions((IcebergTable) any, anyLong, null);
-                result = new HashMap<String, Partition>();
-
-                delegate.getTable((ConnectContext) any, anyString, anyString);
-                result = new Delegate<Table>() {
-                    AtomicLong counter = new AtomicLong();
-
-                    Table getTable(ConnectContext ctx, String db, String tbl) throws StarRocksConnectorException {
-                        if (Thread.currentThread().getName().equals("main")) {
-                            System.out.println("[loader] start Loading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        } else {
-                            System.out.println("[async reloader] start ReLoading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        }
-
-                        long n = counter.incrementAndGet();
-                        Snapshot snapshot = Mockito.mock(Snapshot.class);
-                        Mockito.when(snapshot.snapshotId()).thenReturn(n);
-                        Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(Lists.newArrayList());
-
-                        TableMetadata meta = Mockito.mock(TableMetadata.class);
-                        Mockito.when(meta.metadataFileLocation()).thenReturn("hdfs://path/to/table_" + n);
-                        Mockito.when(meta.spec()).thenReturn(spec);
-                        Mockito.when(meta.currentSnapshot()).thenReturn(snapshot);
-
-                        TableOperations ops = Mockito.mock(TableOperations.class);
-                        Mockito.when(ops.current()).thenReturn(meta);
-
-                        try {
-                            Thread.sleep(100);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-
-                        if (Thread.currentThread().getName().equals("main")) {
-                            System.out.println("[loader] finish Loading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        } else {
-                            System.out.println("[async reloader] finish ReLoading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        }
-
-                        return new BaseTable(ops, db + "." + tbl);
-                    }
-                };
-            }
-        };
-
-        Map<String, String> config = new HashMap<>();
-        config.put(IcebergCatalogProperties.ICEBERG_META_CACHE_TTL, "30");
-        config.put(IcebergCatalogProperties.ICEBERG_CATALOG_TYPE, "hive");
-        config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO, "1");
-        IcebergCatalogProperties icebergProperties = new IcebergCatalogProperties(config);
-        ExecutorService exectorCatalog = Executors.newSingleThreadExecutor();
-        ExecutorService exector = Executors.newSingleThreadExecutor();
-        
-
-        CachingIcebergCatalog catalog = new CachingIcebergCatalog("test_catalog", delegate, icebergProperties, exectorCatalog);
-        //Guava cache will cause bug here, now we try the caffeine
-        LoadingCache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
-        Table tmp1 = delegate.getTable(ctx, dbName, tblName);
-        Table tmp2 = delegate.getTable(ctx, dbName, tblName);
-        Table tmp3 = delegate.getTable(ctx, dbName, tblName);
-        
-        System.out.println("===== cache test =====");
-        catalog.getTable(ctx, dbName, tblName);
-        catalog.refreshTable(dbName, tblName, ctx, null);
-        System.out.printf("[main] put key val: %s -> %d %n", "snap key", ((BaseTable) tmp1).currentSnapshot().snapshotId());
-        catalog.refreshTable(dbName, tblName, ctx, null);
-        System.out.printf("[main] put key val: %s -> %d %n", "snap key", ((BaseTable) tmp2).currentSnapshot().snapshotId());
-
-        try {
-            Thread.sleep(6000);
-        } catch (InterruptedException ie) {
-        }
-
-        System.out.println("[main] first get key val begin");
-        Table t1 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("[main] begin put key val begin snap 3");
-        // try to mock the concurrency in async load and put here, usually between refresh table and get table.
-        // here may be break the cache
-        tables.put(new IcebergTableName(dbName, tblName, 3L), tmp3);
-        System.out.println("[main] finish put key val begin snap 3");
-        System.out.println("[main] first get key val res:" + ((BaseTable) t1).currentSnapshot().snapshotId());
-        try {
-            Thread.sleep(10100);
-        } catch (InterruptedException ie) {
-        }
-        tables.invalidate(new IcebergTableName(dbName, tblName));
-        tables.invalidate(new IcebergTableName(dbName, tblName));
-        tables.invalidate(new IcebergTableName(dbName, tblName));
-        tables.invalidate(new IcebergTableName(dbName, tblName));
-        Table t2 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t2).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        try {
-            Thread.sleep(1100);
-        } catch (InterruptedException ie) {
-        }
-        
-        Table t3 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t3).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        catalog.refreshTable(dbName, tblName, ctx, null);
-
-        Table t4 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t4).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        Assertions.assertTrue(t4.currentSnapshot().snapshotId() > t3.currentSnapshot().snapshotId());   
-        Assertions.assertNotNull(tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-    }
-
-    @Test
-    public void testCacheFreshnessRandom(@Mocked IcebergCatalog delegate, @Mocked PartitionSpec spec) {
-        System.out.println("===========Starting testCacheFreshnessRandom==========");
-        String dbName = "db";
-        String tblName = "test_table";
-        ConnectContext ctx = new ConnectContext();
-        new Expectations() {
-            {
-                delegate.getPartitions((IcebergTable) any, anyLong, null);
-                result = new HashMap<String, Partition>();
-
-                delegate.getTable((ConnectContext) any, anyString, anyString);
-                result = new Delegate<Table>() {
-                    AtomicLong counter = new AtomicLong();
-
-                    Table getTable(ConnectContext ctx, String db, String tbl) throws StarRocksConnectorException {
-                        if (Thread.currentThread().getName().equals("main")) {
-                            System.out.println("[loader] start Loading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        } else {
-                            System.out.println("[async reloader] start ReLoading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        }
-
-                        long n = counter.incrementAndGet();
-                        Snapshot snapshot = Mockito.mock(Snapshot.class);
-                        Mockito.when(snapshot.snapshotId()).thenReturn(n);
-                        Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(Lists.newArrayList());
-
-                        TableMetadata meta = Mockito.mock(TableMetadata.class);
-                        Mockito.when(meta.metadataFileLocation()).thenReturn("hdfs://path/to/table_" + n);
-                        Mockito.when(meta.spec()).thenReturn(spec);
-                        Mockito.when(meta.currentSnapshot()).thenReturn(snapshot);
-
-                        TableOperations ops = Mockito.mock(TableOperations.class);
-                        Mockito.when(ops.current()).thenReturn(meta);
-
-                        try {
-                            Thread.sleep(100);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-
-                        if (Thread.currentThread().getName().equals("main")) {
-                            System.out.println("[loader] finish Loading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        } else {
-                            System.out.println("[async reloader] finish ReLoading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        }
-
-                        return new BaseTable(ops, db + "." + tbl);
-                    }
-                };
-            }
-        };
-
-        Map<String, String> config = new HashMap<>();
-        config.put(IcebergCatalogProperties.ICEBERG_META_CACHE_TTL, "6");
-        config.put(IcebergCatalogProperties.ICEBERG_CATALOG_TYPE, "hive");
-        config.put(IcebergCatalogProperties.ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO, "1");
-        IcebergCatalogProperties icebergProperties = new IcebergCatalogProperties(config);
-        ExecutorService exectorCatalog = Executors.newSingleThreadExecutor();
-        ExecutorService exector = Executors.newSingleThreadExecutor();
-        
-
-        CachingIcebergCatalog catalog = new CachingIcebergCatalog("test_catalog", delegate, icebergProperties, exectorCatalog);
-
-        LoadingCache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
-        Table tmp1 = delegate.getTable(ctx, dbName, tblName);
-        Table tmp2 = delegate.getTable(ctx, dbName, tblName);
-        Table tmp3 = delegate.getTable(ctx, dbName, tblName);
-        
-        System.out.println("===== cache test =====");
-        catalog.getTable(ctx, dbName, tblName);
-        catalog.refreshTable(dbName, tblName, ctx, null);
-        System.out.printf("[main] put key val: %s -> %d %n", "snap key", ((BaseTable) tmp1).currentSnapshot().snapshotId());
-        catalog.refreshTable(dbName, tblName, ctx, null);
-        System.out.printf("[main] put key val: %s -> %d %n", "snap key", ((BaseTable) tmp2).currentSnapshot().snapshotId());
-
-        try {
-            Thread.sleep(2100);
-        } catch (InterruptedException ie) {
-        }
-
-        System.out.println("[main] first get key val begin");
-        Table t1 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("[main] begin put key val begin snap 3");
-        catalog.refreshTable(dbName, dbName, ctx, null);
-        tables.invalidateAll();
-        System.out.println("[main] finish put key val and invalidate all snap 3");
-        System.out.println("[main] first get key val res:" + ((BaseTable) t1).currentSnapshot().snapshotId());
-
-        try {
-            Thread.sleep(2100);
-        } catch (InterruptedException ie) {
-        }
-        System.out.println("[main] begin put key val begin snap 4, 5");
-        catalog.refreshTable(dbName, dbName, ctx, null);
-        catalog.getTable(ctx, dbName, tblName);
-        catalog.refreshTable(dbName, dbName, ctx, exector);
-        System.out.println("[main] begin put key val begin snap 4, 5");
-        try {
-            Thread.sleep(6100);
-        } catch (InterruptedException ie) {
-        }
-        tables.invalidateAll();
-        Table t2 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t2).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        try {
-            Thread.sleep(1100);
-        } catch (InterruptedException ie) {
-        }
-        
-        Table t3 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t3).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        catalog.refreshTable(dbName, tblName, ctx, null);
-
-        Table t4 = catalog.getTable(ctx, dbName, tblName);
-        System.out.println("Table SnapshotId:" + String.valueOf(((BaseTable) t4).currentSnapshot().snapshotId()) +
-                " should found in cache if present:" + 
-                tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-
-        Assertions.assertTrue(t4.currentSnapshot().snapshotId() > t3.currentSnapshot().snapshotId());   
-        Assertions.assertNotNull(tables.getIfPresent(new IcebergTableName(dbName, tblName)));
-    }
-
-    @Test
-    public void testReloadIsAsync(@Mocked IcebergCatalog delegate,
-                                  @Mocked IcebergCatalogProperties props,
-                                  @Mocked ConnectContext ctx) throws Exception {
-        System.out.println("===== test reload async =====");
-        Table nativeTable1 = createBaseTableWithManifests(1, 1);
-        Table nativeTable2 = createBaseTableWithManifests(2, 2);
-        Mockito.when(((BaseTable) nativeTable1).operations().current().metadataFileLocation()).thenReturn("loc1");
-        Mockito.when(((BaseTable) nativeTable2).operations().current().metadataFileLocation()).thenReturn("loc2");
-
-        AtomicLong callCount = new AtomicLong(0);
-
-        new Expectations() {
-            {
-                props.isEnableIcebergMetadataCache();
-                result = true;
-                props.isEnableIcebergTableCache();
-                result = true;
-                props.getIcebergMetaCacheTtlSec();
-                result = 60L;
-                props.getIcebergTableCacheMemoryUsageRatio();
-                result = 1;
-                props.getIcebergDataFileCacheMemoryUsageRatio();
-                result = 0.0;
-                props.getIcebergDeleteFileCacheMemoryUsageRatio();
-                result = 0.0;
-
-                delegate.getTable((ConnectContext) any, "db1", "t1");
-                result = new Delegate<Table>() {
-                    Table capture(ConnectContext c, String db, String tbl) throws Exception {
-                        if (Thread.currentThread().getName().equals("main")) {
-                            System.out.println("[loader] start Loading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        } else {
-                            System.out.println("[async reloader] start ReLoading iceberg table " + 
-                                    db + "." + tbl + " " + Thread.currentThread().getName());     
-                        }
-                        long idx = callCount.incrementAndGet();
-                        if (idx == 1) {
-                            return nativeTable1;
-                        }
-                        return nativeTable2;
-                    }
-                };
-            }
-        };
-
-        ExecutorService es = Executors.newSingleThreadExecutor();
-        try {
-            CachingIcebergCatalog catalog =
-                    new CachingIcebergCatalog("iceberg0", delegate, props, es);
-            IcebergTableName key = new IcebergTableName("db1", "t1");
-
-            Table cached = catalog.getTable(ctx, "db1", "t1");
-            Assertions.assertSame(nativeTable1, cached);
-
-            LoadingCache<IcebergTableName, Table> tableCache = Deencapsulation.getField(catalog, "tables");
-
-            Table t1 = tableCache.get(key);
-            Assertions.assertTrue(callCount.get() == 1);
-            Thread.sleep(1100);
-            Table t2 = tableCache.get(key);
-            Assertions.assertSame(t1, nativeTable1, "table should be same yet");
-            Assertions.assertSame(t1, cached, "table should be same yet");
-            Assertions.assertSame(t1, t2, "table should be same yet");
-            Thread.sleep(300);
-            Assertions.assertTrue(callCount.get() == 2, "all count:" + String.valueOf(callCount.get()));
-            Table t3 = tableCache.get(key);
-            Assertions.assertSame(t3, nativeTable2, "table should be new after reload");
-        } finally {
-            es.shutdownNow();
-            System.out.println("===== test reload async end =====");
-        }
     }
 
     /**
@@ -1007,7 +636,7 @@ public class CachingIcebergCatalogTest {
         Mockito.when(initSnap.snapshotId()).thenReturn(0L);
         Mockito.when(initSnap.dataManifests(Mockito.any())).thenReturn(List.of());
         BaseTable initTable = new BaseTable(initOps, "db.tbl");
-        LoadingCache<IcebergTableName, Table> tables1 = Deencapsulation.getField(catalog, "tables");
+        Cache<IcebergTableName, Table> tables1 = Deencapsulation.getField(catalog, "tables");
         tables1.put(new IcebergTableName("db", "tbl"), initTable);
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -1080,7 +709,7 @@ public class CachingIcebergCatalogTest {
         CachingIcebergCatalog catalog = new CachingIcebergCatalog(
                 CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
 
-        LoadingCache<IcebergTableName, Table> tables2 = Deencapsulation.getField(catalog, "tables");
+        Cache<IcebergTableName, Table> tables2 = Deencapsulation.getField(catalog, "tables");
         // Pre-populate cache for both tables so refreshTable enters the update branch.
         for (String tbl : List.of("tbl1", "tbl2")) {
             TableOperations initOps = Mockito.mock(TableOperations.class);
@@ -1140,7 +769,7 @@ public class CachingIcebergCatalogTest {
             {
                 props.isEnableIcebergMetadataCache();
                 result = true;
-                props.getIcebergMetaCacheTtlSec();
+                props.getIcebergTableCacheTtlSec();
                 result = 60L;
                 props.isEnableIcebergTableCache();
                 result = true;

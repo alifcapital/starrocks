@@ -273,6 +273,8 @@ StarRocks 在查询期间将缓存以下元数据：
 
 对于活跃表，仅当已知 snapshot 和上次缓存刷新均未超过 `iceberg_meta_cache_ttl_sec`（默认 5 分钟）时跳过检查。否则检查 catalog；元数据变化时刷新缓存并预热 manifest。未发现变化的检查不会更新上次刷新时间。表按顺序处理，因此后台间隔不是严格的新鲜度保证。
 
+元数据检查与缓存预热相互独立。每次遍历活跃表时，都会恢复当前 snapshot 中缺失或不完整的数据 manifest，包括仍被引用的旧 manifest。即使元数据没有变化或跳过了新鲜度检查，也会执行预热。完整的缓存 manifest 不会被重新读取。
+
 ### 最佳实践
 
 Iceberg Catalog 支持 HMS、Glue 和 Tabular 作为其元数据服务。大多数情况下推荐使用默认配置。

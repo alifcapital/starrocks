@@ -275,6 +275,8 @@ With `enable_background_refresh_connector_metadata` enabled, the background work
 
 For active tables, a check is skipped only while both the known snapshot and the last cache refresh are within `iceberg_meta_cache_ttl_sec` (default: five minutes). Otherwise the catalog is checked; changed metadata triggers a cache refresh and manifest warming. A check without changes does not update the last-refresh timestamp. Tables are processed sequentially, so the worker interval is not a strict freshness guarantee.
 
+Metadata checks and cache warming are separate. Every active-table pass restores missing or incomplete data manifests of the current snapshot, including old manifests still referenced by that snapshot. Warming also runs when metadata is unchanged or its freshness check is skipped. Complete cached manifests are not reread.
+
 ### Best practices
 
 Iceberg Catalog supports HMS, Glue, and Tabular as its metastore. The default configuration is recommended in most cases.

@@ -108,11 +108,18 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 NEVER_CACHE,
                 enableCache ? DEFAULT_CACHE_NUM : NEVER_CACHE).build();
         long tableCacheTtlSec = icebergProperties.getIcebergTableCacheTtlSec();
+        Caffeine<Object, Object> tableCacheBuilder = Caffeine.newBuilder();
         if (delegate instanceof IcebergRESTCatalog) {
-            tableCacheTtlSec = Math.min(tableCacheTtlSec, REST_TABLE_CACHE_MAX_TTL_SEC);
+            // A read must not extend the lifetime of credentials embedded in a cached REST Table.
+            long credentialTtl = tableCacheTtlSec < 0 ? REST_TABLE_CACHE_MAX_TTL_SEC
+                    : Math.min(tableCacheTtlSec, REST_TABLE_CACHE_MAX_TTL_SEC);
+            tableCacheBuilder.expireAfterWrite(credentialTtl, SECONDS);
+        } else if (tableCacheTtlSec >= 0) {
+            // Extend liveness without writing back a Table read before a concurrent refresh.
+            // User activity is tracked separately, so background reads cannot keep a cold table active.
+            tableCacheBuilder.expireAfterAccess(tableCacheTtlSec, SECONDS);
         }
-        this.tables = newCacheBuilder(
-                tableCacheTtlSec, NEVER_CACHE)
+        this.tables = tableCacheBuilder
                 .executor(executorService)
                 .maximumWeight(tableCacheSize)
                 .weigher((Weigher<IcebergTableName, Table>) this::weighTableEntry)
@@ -259,8 +266,6 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable != null) {
-            // re-put resets expireAfterWrite for an actively used table
-            tables.put(icebergTableName, cachedTable);
             return cachedTable;
         }
 
@@ -269,11 +274,19 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
 
         try {
-            Table icebergTable = delegate.getTable(connectContext, dbName, tableName);
-            if (icebergTable != null) {
-                tables.put(icebergTableName, icebergTable);
+            // Serialize a cache-miss load with refresh. A slow old load must not overwrite
+            // a newer table published by refresh while that load was in flight.
+            synchronized (tableRefreshLock(dbName, tableName)) {
+                Table current = tables.getIfPresent(icebergTableName);
+                if (current != null) {
+                    return current;
+                }
+                Table icebergTable = delegate.getTable(connectContext, dbName, tableName);
+                if (icebergTable != null) {
+                    tables.put(icebergTableName, icebergTable);
+                }
+                return icebergTable;
             }
-            return icebergTable;
         } catch (NoSuchTableException e) {
             throw e;
         } catch (Exception e) {
@@ -374,23 +387,35 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         delegate.deleteUncommittedDataFiles(fileLocations);
     }
 
+    private String tableRefreshLock(String dbName, String tableName) {
+        String lockKey = dbName.toLowerCase(Locale.ROOT) + "." + tableName.toLowerCase(Locale.ROOT);
+        return tableRefreshLockMap.computeIfAbsent(lockKey, key -> key);
+    }
+
     @Override
     public void refreshTable(String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
-        String lockKey = dbName.toLowerCase(Locale.ROOT) + "." + tableName.toLowerCase(Locale.ROOT);
-        tableRefreshLockMap.putIfAbsent(lockKey, lockKey);
-        String lock = tableRefreshLockMap.get(lockKey);
-        synchronized (lock) {
-            refreshTableUnderLock(dbName, tableName, ctx, executorService);
+        refreshTable(dbName, tableName, ctx, executorService, true);
+    }
+
+    private void refreshTable(String dbName, String tableName, ConnectContext ctx,
+                              ExecutorService executorService, boolean checkMetadata) {
+        synchronized (tableRefreshLock(dbName, tableName)) {
+            refreshTableUnderLock(dbName, tableName, ctx, executorService, checkMetadata);
         }
     }
 
-    private void refreshTableUnderLock(String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
+    private void refreshTableUnderLock(String dbName, String tableName, ConnectContext ctx,
+                                       ExecutorService executorService, boolean checkMetadata) {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable == null) {
             partitionCache.invalidate(icebergTableName);
         } else {
             BaseTable currentTable = (BaseTable) cachedTable;
+            if (!checkMetadata) {
+                warmCurrentSnapshot(currentTable, dbName, tableName, executorService);
+                return;
+            }
             BaseTable updateTable = (BaseTable) delegate.getTable(ctx, dbName, tableName);
             if (updateTable == null) {
                 invalidateCache(icebergTableName);
@@ -426,6 +451,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 // Metadata unchanged keeps the partition/file caches valid; still swap in the reloaded
                 // table so the cache stops serving the old (expiring) vended FileIO token.
                 tables.put(icebergTableName, updateTable);
+                warmCurrentSnapshot(updateTable, dbName, tableName, executorService);
             }
         }
     }
@@ -433,49 +459,50 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private void refreshTable(BaseTable currentTable, BaseTable updatedTable,
                               String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
         IcebergTableName keyWithoutSnap = new IcebergTableName(dbName, tableName);
-        long baseSnapshotId = currentTable.currentSnapshot().snapshotId();
-        long updatedSnapshotId = updatedTable.currentSnapshot().snapshotId();
-        long updatedSnapshotTime = updatedTable.currentSnapshot().timestampMillis();
-        IcebergTableName baseIcebergTableName = new IcebergTableName(dbName, tableName, baseSnapshotId);
-        IcebergTableName updatedIcebergTableName = new IcebergTableName(dbName, tableName, updatedSnapshotId);
-        long latestRefreshTime = tableLatestRefreshTime.computeIfAbsent(keyWithoutSnap, ignore -> -1L);
+        Snapshot previous = currentTable.currentSnapshot();
+        Snapshot updated = updatedTable.currentSnapshot();
 
-        // update tables before refresh partition cache
-        // so when refreshing partition cache, `getTables` can return the latest one.
-        // another way to fix is to call `delegate.getTables` when refreshing partition cache.
+        // Publish new metadata before loading partitions; the loader reads this table from the cache.
         tables.put(keyWithoutSnap, updatedTable);
+        if (previous != null) {
+            partitionCache.invalidate(new IcebergTableName(dbName, tableName, previous.snapshotId()));
+        }
+        warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
+        tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
+        if (updated != null) {
+            tableLatestSnapshotTime.put(keyWithoutSnap, updated.timestampMillis());
+        } else {
+            tableLatestSnapshotTime.remove(keyWithoutSnap);
+        }
+    }
 
-        partitionCache.invalidate(baseIcebergTableName);
-        partitionCache.get(updatedIcebergTableName);
-
-        TableMetadata updatedTableMetadata = updatedTable.operations().current();
-        // Drop length/hasAddedFiles filters that were upstream's defaults: they silently
-        // skipped small/short-lived manifests we'd rather cache. Keep the per-manifest
-        // dataFileCache miss filter — refreshDataFileCache resets each passed manifest to
-        // an empty set and re-reads it from object storage, so passing already-cached
-        // manifests would cause redundant IO.
-        List<ManifestFile> manifestFiles = updatedTable.currentSnapshot().dataManifests(updatedTable.io()).stream()
-                .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()) != null)
-                .filter(f -> updatedTableMetadata.snapshot(f.snapshotId()).timestampMillis() > latestRefreshTime)
-                .filter(f -> dataFileCache.getIfPresent(f.path()) == null)
-                .collect(Collectors.toList());
-
-        if (manifestFiles.isEmpty()) {
-            tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
-            tableLatestSnapshotTime.put(keyWithoutSnap, updatedSnapshotTime);
+    private void warmCurrentSnapshot(BaseTable table, String dbName, String tableName,
+                                     ExecutorService executorService) {
+        Snapshot snapshot = table.currentSnapshot();
+        if (snapshot == null || !icebergProperties.isEnableIcebergMetadataCache()) {
             return;
         }
-
+        // A stable table can lose partition/manifest entries to TTL or memory pressure too.
+        partitionCache.get(new IcebergTableName(dbName, tableName, snapshot.snapshotId()));
+        if (dataFileCache == null || icebergProperties.getIcebergDataFileCacheMemoryUsageRatio() <= 0) {
+            return;
+        }
+        // Manifest files are immutable and can be referenced by many newer snapshots.
+        // Warm missing/incomplete entries regardless of the manifest's creation timestamp.
+        List<ManifestFile> manifestFiles = snapshot.dataManifests(table.io()).stream()
+                .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
+                        f, dataFileCache.getIfPresent(f.path())))
+                .collect(Collectors.toList());
+        if (manifestFiles.isEmpty()) {
+            return;
+        }
         StarRocksIcebergTableScanContext scanContext = new StarRocksIcebergTableScanContext(
                 catalogName, dbName, tableName, PlanMode.LOCAL);
-        StarRocksIcebergTableScan tableScan = (StarRocksIcebergTableScan) getTableScan(updatedTable, scanContext)
+        StarRocksIcebergTableScan tableScan = (StarRocksIcebergTableScan) getTableScan(table, scanContext)
                 .planWith(executorService)
-                .useSnapshot(updatedSnapshotId);
+                .useSnapshot(snapshot.snapshotId());
         tableScan.refreshDataFileCache(manifestFiles);
-
-        tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
-        tableLatestSnapshotTime.put(keyWithoutSnap, updatedSnapshotTime);
-        LOG.info("Refreshed {} iceberg manifests on the table [{}.{}]", manifestFiles.size(), dbName, tableName);
+        LOG.info("Warmed {} iceberg manifests on the table [{}.{}]", manifestFiles.size(), dbName, tableName);
     }
 
     // dispatched every background_refresh_metadata_interval_millis
@@ -495,13 +522,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
                 Long latestSnapshotTime = tableLatestSnapshotTime.get(identifier);
                 Long latestRefreshTime = tableLatestRefreshTime.get(identifier);
-                // skip refresh while both the observed snapshot and the last refresh are fresher than meta TTL
-                if (latestSnapshotTime != null && (now - latestSnapshotTime) / 1000 <= metaTtlSec &&
-                        latestRefreshTime != null && (now - latestRefreshTime) / 1000 <= metaTtlSec) {
-                    continue;
-                }
-
-                refreshTable(identifier.dbName, identifier.tableName, new ConnectContext(), backgroundExecutor);
+                // Keep the existing metadata freshness policy, but replenish evicted manifests
+                // on every active-table pass, even while the known snapshot is still fresh.
+                boolean metadataFresh = latestSnapshotTime != null && (now - latestSnapshotTime) / 1000 <= metaTtlSec &&
+                        latestRefreshTime != null && (now - latestRefreshTime) / 1000 <= metaTtlSec;
+                refreshTable(identifier.dbName, identifier.tableName, new ConnectContext(),
+                        backgroundExecutor, !metadataFresh);
             } catch (Exception e) {
                 LOG.warn("refresh {}.{} metadata cache failed, msg : ", identifier.dbName,
                         identifier.tableName, e);
