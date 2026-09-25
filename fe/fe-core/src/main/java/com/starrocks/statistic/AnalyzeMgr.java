@@ -29,6 +29,7 @@ import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.io.Writable;
+import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.load.loadv2.LoadJobFinalOperation;
 import com.starrocks.load.loadv2.ManualLoadTxnCommitAttachment;
 import com.starrocks.load.routineload.RLTaskTxnCommitAttachment;
@@ -53,9 +54,11 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -622,22 +625,36 @@ public class AnalyzeMgr implements Writable {
     }
 
     public void clearStatisticFromExternalDroppedTable() {
+        Map<Pair<String, String>, List<StatsMetaKey>> tablesByDatabase = new HashMap<>();
+        for (StatsMetaKey key : externalBasicStatsMetaMap.keySet()) {
+            tablesByDatabase.computeIfAbsent(Pair.create(key.getCatalogName(), key.getDbName()),
+                    ignored -> new ArrayList<>()).add(key);
+        }
         List<StatsMetaKey> droppedTables = new ArrayList<>();
-        for (Map.Entry<StatsMetaKey, ExternalBasicStatsMeta> entry : externalBasicStatsMetaMap.entrySet()) {
-            StatsMetaKey tableKey = entry.getKey();
+        ConnectContext context = new ConnectContext();
+        for (Map.Entry<Pair<String, String>, List<StatsMetaKey>> entry : tablesByDatabase.entrySet()) {
+            String catalogName = entry.getKey().first;
+            String dbName = entry.getKey().second;
             try {
-                boolean exists = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                        .tableExists(new ConnectContext(), tableKey.getCatalogName(), tableKey.getDbName(),
-                                tableKey.getTableName());
-                if (!exists) {
-                    LOG.warn("Table {}.{}.{} not exists, clear it's statistics", tableKey.getCatalogName(),
-                            tableKey.getDbName(), tableKey.getTableName());
-                    droppedTables.add(tableKey);
+                Optional<ConnectorMetadata> metadata = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                        .getOptionalMetadata(catalogName);
+                if (metadata.isEmpty()) {
+                    LOG.warn("Cannot resolve catalog {}, keep statistics for database {}", catalogName, dbName);
+                    continue;
+                }
+                // Materialize the complete listing before removing anything. For Iceberg Glue this
+                // reads catalog pages, not each table's metadata.json or manifests.
+                Set<String> tableNames = new HashSet<>(metadata.get().listTableNames(context, dbName));
+                for (StatsMetaKey key : entry.getValue()) {
+                    if (!tableNames.contains(key.getTableName())) {
+                        LOG.info("Table {}.{}.{} not listed, clear its statistics",
+                                catalogName, dbName, key.getTableName());
+                        droppedTables.add(key);
+                    }
                 }
             } catch (Exception e) {
-                LOG.warn("Table {}.{}.{} throw exception, clear it's statistics", tableKey.getCatalogName(),
-                        tableKey.getDbName(), tableKey.getTableName(), e);
-                droppedTables.add(tableKey);
+                // A failed or partial listing is not evidence that any table was dropped.
+                LOG.warn("Failed to list tables in {}.{}, keep statistics for this database", catalogName, dbName, e);
             }
         }
 

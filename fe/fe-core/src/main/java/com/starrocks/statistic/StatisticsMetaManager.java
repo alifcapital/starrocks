@@ -600,8 +600,6 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(SPM_BASELINE_TABLE_NAME);
         refreshStatisticsTable(QUERY_HISTORY_TABLE_NAME);
 
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
         long now = System.nanoTime();
         if (TimeUnit.NANOSECONDS.toSeconds(now - lastAnalyzeStatusCleanupNanos)
                 >= Config.clear_stale_stats_interval_sec) {

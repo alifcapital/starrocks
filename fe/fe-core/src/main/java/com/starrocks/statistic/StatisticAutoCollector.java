@@ -70,6 +70,9 @@ public class StatisticAutoCollector extends FrontendDaemon {
             return;
         }
 
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
+
         prepareDefaultJob();
 
         runJobs();
