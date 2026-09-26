@@ -173,6 +173,7 @@ import com.starrocks.sql.ast.AddComputeNodeBlackListStmt;
 import com.starrocks.sql.ast.AddSqlBlackListStmt;
 import com.starrocks.sql.ast.AddSqlDigestBlackListStmt;
 import com.starrocks.sql.ast.AdminSetConfigStmt;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.AnalyzeTypeDesc;
@@ -2333,7 +2334,7 @@ public class StmtExecutor {
                                 StatsConstants.AnalyzeType.FULL,
                                 StatsConstants.ScheduleType.ONCE, analyzeStmt.getProperties(),
                                 analyzeTypeDesc.getStatsTypes(),
-                                List.of(analyzeStmt.getColumnNames())),
+                                ((AnalyzeMcvDesc) analyzeTypeDesc).getColumnGroups()),
                         analyzeStatus,
                         false, false /* resetWarehouse */);
             } else {

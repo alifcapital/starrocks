@@ -831,6 +831,7 @@ The fixed `cache` label identifies the independently sized caches:
 | `cache` | Contents | Limit |
 | --- | --- | --- |
 | `external_basic` | TABLE summaries and partition statistics, HLL blocks and directories | `external_statistics_cache_max_bytes` |
+| `external_mcv` | Prepared MCV objects | `statistic_mcv_cache_max_bytes` |
 
 Counters describe cache lookups, including prefetch, rather than user queries. A hit means the entry exists: an asynchronous load may still be in progress, and a cached successful empty result is also a hit. The counters do not measure whether statistics were ready before a query's deadline. Direct maintenance of partition block directories and quiet dictionary-eligibility probes do not count as lookups. Counters reset when the FE/cache is recreated.
 

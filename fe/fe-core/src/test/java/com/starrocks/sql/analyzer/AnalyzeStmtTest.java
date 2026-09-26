@@ -24,6 +24,7 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.common.AlreadyExistsException;
+import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.qe.ConnectContext;
@@ -74,7 +75,7 @@ import com.starrocks.statistic.StatisticsCollectJob;
 import com.starrocks.statistic.StatisticsMetaManager;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.columns.ColumnUsage;
-import com.starrocks.statistic.columns.ExternalColumnUsage;
+import com.starrocks.statistic.columns.ExternalColumnGroupUsage;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.statistic.columns.PredicateColumnsStorage;
 import com.starrocks.utframe.StarRocksAssert;
@@ -222,10 +223,8 @@ public class AnalyzeStmtTest {
     public void testAnalyzeExternalPredicateColumns() {
         new MockUp<PredicateColumnsMgr>() {
             @Mock
-            public List<ExternalColumnUsage> queryExternalPredicateColumns(Table table) {
-                return List.of(new ExternalColumnUsage("table-hash", table.getCatalogName(),
-                        table.getCatalogDBName(), table.getCatalogTableName(), "c_name",
-                        ColumnUsage.UseCase.PREDICATE));
+            public List<String> queryExternalPredicateColumns(Table table) {
+                return List.of("c_name");
             }
         };
 
@@ -240,7 +239,7 @@ public class AnalyzeStmtTest {
     public void testAnalyzeExternalPredicateColumnsWithoutUsage() {
         new MockUp<PredicateColumnsMgr>() {
             @Mock
-            public List<ExternalColumnUsage> queryExternalPredicateColumns(Table table) {
+            public List<String> queryExternalPredicateColumns(Table table) {
                 return List.of();
             }
         };
@@ -1110,6 +1109,63 @@ public class AnalyzeStmtTest {
         stmt = (AnalyzeStmt) analyzeSuccess("analyze full table hive0.tpch.customer mcv (C_NAME, C_PHONE)");
         Assertions.assertFalse(stmt.isSample());
         Assertions.assertEquals(2, stmt.getColumnNames().size());
+    }
+
+    @Test
+    public void testMcvPredicateGroupsKeepOverlapsAndSingletons() {
+        new MockUp<PredicateColumnsMgr>() {
+            @Mock
+            public List<ExternalColumnGroupUsage> queryExternalPredicateColumnGroups(Table table) {
+                return List.of(
+                        usage(List.of("c_name", "c_phone"), ColumnUsage.UseCase.PREDICATE),
+                        usage(List.of("C_PHONE", "C_NAME"), ColumnUsage.UseCase.JOIN),
+                        usage(List.of("c_phone", "c_address"), ColumnUsage.UseCase.PREDICATE),
+                        usage(List.of("c_name", "c_phone", "c_address"), ColumnUsage.UseCase.GROUP_BY),
+                        usage(List.of("c_name"), ColumnUsage.UseCase.PREDICATE),
+                        usage(List.of("c_custkey", "removed_column"), ColumnUsage.UseCase.PREDICATE));
+            }
+        };
+        AnalyzeStmt stmt = (AnalyzeStmt) analyzeSuccess("analyze full table hive0.tpch.customer mcv predicate columns "
+                + "properties ('mcv_bucket_num'='8')");
+        Assertions.assertTrue(stmt.isUsePredicateColumns());
+        Assertions.assertFalse(stmt.isSample());
+        Assertions.assertEquals(List.of("c_address", "c_name", "c_phone"), stmt.getColumnNames());
+        Assertions.assertEquals(List.of(List.of("c_name", "c_phone"), List.of("c_address", "c_phone"),
+                List.of("c_address", "c_name", "c_phone"), List.of("c_name")),
+                ((AnalyzeMcvDesc) stmt.getAnalyzeTypeDesc()).getColumnGroups());
+        // A wide observed group is skipped whole, and a union of smaller groups may exceed the width limit.
+        int previous = Config.statistics_max_multi_column_combined_num;
+        try {
+            Config.statistics_max_multi_column_combined_num = 2;
+            stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv predicate columns");
+            Assertions.assertEquals(3, stmt.getColumnNames().size());
+            Assertions.assertEquals(3, ((AnalyzeMcvDesc) stmt.getAnalyzeTypeDesc()).getColumnGroups().size());
+        } finally {
+            Config.statistics_max_multi_column_combined_num = previous;
+        }
+        analyzeFail("analyze sample table hive0.tpch.customer mcv predicate columns",
+                "MCV statistics are collected by a full scan");
+        analyzeFail("analyze table db.tbl mcv predicate columns",
+                "MCV statistics are collected on external tables only");
+        analyzeFail("analyze table hive0.tpch.customer mcv predicate columns with async mode",
+                "not support async analyze on MCV analyze statement");
+    }
+
+    @Test
+    public void testMcvPredicateGroupsWithoutEligibleHistory() {
+        new MockUp<PredicateColumnsMgr>() {
+            @Mock
+            public List<ExternalColumnGroupUsage> queryExternalPredicateColumnGroups(Table table) {
+                return List.of(usage(List.of("c_name", "removed_column"), ColumnUsage.UseCase.PREDICATE));
+            }
+        };
+        analyzeFail("analyze table hive0.tpch.customer mcv predicate columns",
+                "No eligible predicate column groups found for MCV");
+    }
+
+    private static ExternalColumnGroupUsage usage(List<String> columns, ColumnUsage.UseCase useCase) {
+        return new ExternalColumnGroupUsage("uuid", "hive0", "tpch", "customer", columns, useCase,
+                LocalDateTime.now());
     }
 
     @Test

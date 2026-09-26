@@ -71,8 +71,9 @@ import static com.starrocks.statistic.StatsConstants.STATISTICS_DB_NAME;
 
 /**
  * Collects the MCV statistics of a column set of an external table: the number of distinct value
- * tuples and the most common tuples with exact row counts. Every column group takes two scans of its
- * columns and bounded sketch/counting state, independent of the number of distinct tuples:
+ * tuples and the most common tuples with exact row counts. A bounded batch of groups shares two scans
+ * and one aggregate operator per scan.
+ * Each group has separate sketch/counting state, independent of the number of distinct tuples:
  *
  * 1. count(*), a frequent-items sketch over the tuple key and an HLL sketch over the tuple key;
  *    the sketch names the candidate most common tuples. An ordered singleton also collects KLL bounds.
@@ -130,18 +131,23 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
         LOG.info("Collecting external MCV statistics from {}", source);
         long finished = 0;
         long total = Math.max(1, columnGroups.size());
-        for (List<String> columnGroup : columnGroups) {
+        int batchSize = Math.max(1, Config.statistic_mcv_max_groups_per_scan);
+        for (int start = 0; start < columnGroups.size(); start += batchSize) {
             checkCancelled(analyzeStatus);
-            GroupStatistics statistics = source == null
-                    ? new GroupStatistics(0, 0, List.of(), List.of(),
-                            java.util.Collections.nCopies(columnGroup.size(), 0L))
-                    : collectGroup(context, analyzeStatus, columnGroup, source);
-            bufferRow(columnGroup, statistics);
-            finished++;
+            List<List<String>> batch = columnGroups.subList(start, Math.min(columnGroups.size(), start + batchSize));
+            List<GroupStatistics> results = source == null
+                    ? batch.stream().map(ExternalMcvStatisticsCollectJob::emptyGroup).toList()
+                    : collectBatch(context, analyzeStatus, batch, source);
+            for (int i = 0; i < batch.size(); i++) {
+                bufferRow(batch.get(i), results.get(i));
+            }
+            checkCancelled(analyzeStatus);
+            calculateAndSetRemainingTimeout(context, analyzeStatus);
+            flushInsertStatisticsData(context);
+            finished += batch.size();
             analyzeStatus.setProgress(finished * 100 / total);
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
         }
-        flushInsertStatisticsData(context);
     }
 
     static class GroupStatistics {
@@ -179,36 +185,85 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
         }
     }
 
-    private GroupStatistics collectGroup(ConnectContext context, AnalyzeStatus analyzeStatus,
-                                         List<String> columnGroup, String source) throws Exception {
-        String from = buildFromClause(columnGroup, source);
-        boolean ordered = columnGroup.size() == 1 && supportsBuckets(table.getColumn(columnGroup.get(0)).getType());
-        List<List<String>> rows = execute(context, analyzeStatus, buildSketchSQL(from, ordered));
-        if (rows.isEmpty() || rows.get(0).size() < 3) {
-            throw new DdlException("MCV statistics query returned no row for " + columnGroup);
-        }
-        List<String> row = rows.get(0);
-        long rowCount = parseLong(row.get(0));
-        long ndv = parseLong(row.get(2));
-        List<String> candidates = parseFrequentItems(row.get(1));
-        if (rowCount == 0) {
-            return new GroupStatistics(0, 0, List.of(), List.of(),
-                    java.util.Collections.nCopies(columnGroup.size(), 0L));
-        }
-        List<String> bounds = ordered ? parseBounds(row.get(3)) : List.of();
+    private static GroupStatistics emptyGroup(List<String> group) {
+        return new GroupStatistics(0, 0, List.of(), List.of(), java.util.Collections.nCopies(group.size(), 0L));
+    }
 
-        int width = columnGroup.size();
-        rows = execute(context, analyzeStatus, buildExactCountSQL(from, candidates, width, ordered, bounds));
-        if (rows.isEmpty() || rows.get(0).size() < 2 + 2 * width) {
-            throw new DdlException("MCV count query returned no row for " + columnGroup);
+    private boolean ordered(List<String> group) {
+        return group.size() == 1 && supportsBuckets(table.getColumn(group.get(0)).getType());
+    }
+
+    // All aggregates consume one input stream. No CTE consumers/multicast buffers and no row multiplication.
+    String buildBatchFromClause(List<List<String>> groups, String source) {
+        List<String> projections = new ArrayList<>();
+        for (int i = 0; i < groups.size(); i++) {
+            List<String> group = groups.get(i);
+            String prefix = "g" + i + "_";
+            projections.add(buildProjection(table, group, prefix));
+            if (ordered(group)) {
+                projections.add(StatisticUtils.quoting(table, group.get(0)) + " AS " + prefix + "x");
+            }
         }
-        if (rows.get(0).get(0) == null) {
-            // The aggregate saw no row: the table lost its rows between the two scans.
-            return new GroupStatistics(0, 0, List.of(), List.of(), java.util.Collections.nCopies(width, 0L));
+        return " FROM (SELECT " + String.join(", ", projections) + " FROM " + source + ") t";
+    }
+
+    List<GroupStatistics> collectBatch(ConnectContext context, AnalyzeStatus status,
+                                      List<List<String>> groups, String source) throws Exception {
+        String from = buildBatchFromClause(groups, source);
+        List<String> sketches = new ArrayList<>();
+        for (int i = 0; i < groups.size(); i++) {
+            sketches.add(buildSketchExpressions("g" + i + "_", ordered(groups.get(i))));
         }
-        GroupStatistics counts = parseExactCounts(rows.get(0), width, ndv);
-        List<List<String>> buckets = ordered ? parseBuckets(rows.get(0).get(2 + 2 * width)) : List.of();
-        return new GroupStatistics(counts.rowCount, counts.ndv, counts.mcv, buckets, counts.nullCounts);
+        List<String> sketchRow = singleRow(execute(context, status,
+                "SELECT " + String.join(", ", sketches) + from), "sketch");
+        List<Long> ndvs = new ArrayList<>();
+        List<String> counts = new ArrayList<>();
+        int offset = 0;
+        for (int i = 0; i < groups.size(); i++) {
+            List<String> group = groups.get(i);
+            boolean ordered = ordered(group);
+            int length = ordered ? 4 : 3;
+            if (sketchRow.size() < offset + length) {
+                throw new DdlException("Incomplete MCV sketch result for " + group);
+            }
+            if (parseLong(sketchRow.get(offset)) == 0) {
+                // Every group describes the same captured source, so an empty input empties the whole batch.
+                return groups.stream().map(ExternalMcvStatisticsCollectJob::emptyGroup).toList();
+            }
+            ndvs.add(parseLong(sketchRow.get(offset + 2)));
+            counts.add(buildExactCountExpressions("g" + i + "_", parseFrequentItems(sketchRow.get(offset + 1)),
+                    group.size(), ordered, ordered ? parseBounds(sketchRow.get(offset + 3)) : List.of()));
+            offset += length;
+        }
+        List<String> countRow = singleRow(execute(context, status,
+                "SELECT " + String.join(", ", counts) + from), "count");
+        List<GroupStatistics> result = new ArrayList<>();
+        offset = 0;
+        for (int i = 0; i < groups.size(); i++) {
+            List<String> group = groups.get(i);
+            int width = group.size();
+            int length = 2 + 2 * width + (ordered(group) ? 1 : 0);
+            if (countRow.size() < offset + length) {
+                throw new DdlException("Incomplete MCV count result for " + group);
+            }
+            List<String> row = countRow.subList(offset, offset + length);
+            if (row.get(0) == null) {
+                result.add(emptyGroup(group));
+            } else {
+                GroupStatistics parsed = parseExactCounts(row, width, ndvs.get(i));
+                result.add(new GroupStatistics(parsed.rowCount, parsed.ndv, parsed.mcv,
+                        ordered(group) ? parseBuckets(row.get(2 + 2 * width)) : List.of(), parsed.nullCounts));
+            }
+            offset += length;
+        }
+        return result;
+    }
+
+    private static List<String> singleRow(List<List<String>> rows, String phase) throws DdlException {
+        if (rows.size() != 1) {
+            throw new DdlException("MCV " + phase + " query must return one aggregate row");
+        }
+        return rows.get(0);
     }
 
     // null denotes an Iceberg table with no snapshot yet: collect the captured empty state without
@@ -230,10 +285,15 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
 
     // k: the tuple key; v0, v1, ...: the text of each column value as the key holds it.
     static String buildProjection(Table table, List<String> columnGroup) {
-        StringBuilder projection = new StringBuilder(StatsTupleKeyCodec.buildKeyExpr(table, columnGroup)).append(" AS k");
+        return buildProjection(table, columnGroup, "");
+    }
+
+    private static String buildProjection(Table table, List<String> columnGroup, String prefix) {
+        StringBuilder projection = new StringBuilder(StatsTupleKeyCodec.buildKeyExpr(table, columnGroup))
+                .append(" AS ").append(prefix).append("k");
         for (int i = 0; i < columnGroup.size(); i++) {
             projection.append(", ").append(StatsTupleKeyCodec.buildComponentExpr(table, columnGroup.get(i)))
-                    .append(" AS v").append(i);
+                    .append(" AS ").append(prefix).append("v").append(i);
         }
         return projection.toString();
     }
@@ -243,10 +303,14 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     }
 
     String buildSketchSQL(String from, boolean ordered) {
-        return "SELECT count(*), ds_frequent_items(k, " + mcvSize() + ", "
-                + Config.statistic_mcv_sketch_lg_map_size + "), ds_hll_count_distinct(k, " + NDV_SKETCH_LG_K + ")"
-                + (ordered ? ", ds_kll_quantiles(x, " + bucketNum() + ")" : "")
-                + from;
+        return "SELECT " + buildSketchExpressions("", ordered) + from;
+    }
+
+    private String buildSketchExpressions(String prefix, boolean ordered) {
+        return "count(*), ds_frequent_items(" + prefix + "k, " + mcvSize() + ", "
+                + Config.statistic_mcv_sketch_lg_map_size + "), ds_hll_count_distinct(" + prefix + "k, "
+                + NDV_SKETCH_LG_K + ")"
+                + (ordered ? ", ds_kll_quantiles(" + prefix + "x, " + bucketNum() + ")" : "");
     }
 
     /**
@@ -258,6 +322,11 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     }
 
     String buildExactCountSQL(String from, List<String> candidates, int width, boolean ordered, List<String> bounds) {
+        return "SELECT " + buildExactCountExpressions("", candidates, width, ordered, bounds) + from;
+    }
+
+    private String buildExactCountExpressions(String prefix, List<String> candidates, int width,
+                                             boolean ordered, List<String> bounds) {
         List<Set<String>> components = new ArrayList<>(width);
         for (int i = 0; i < width; i++) {
             components.add(new LinkedHashSet<>());
@@ -270,19 +339,20 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
                 }
             }
         }
-        StringBuilder sql = new StringBuilder("SELECT histogram_by_bounds(k, '")
+        StringBuilder sql = new StringBuilder("histogram_by_bounds(").append(prefix).append("k, '")
                 .append(SqlUtils.escapeSqlString(toJsonArray(candidates))).append("', '[]'), count(*)");
         for (int i = 0; i < width; i++) {
-            sql.append(", histogram_by_bounds(v").append(i).append(", '")
-                    .append(SqlUtils.escapeSqlString(toJsonArray(components.get(i)))).append("', '[]'), count(v")
+            sql.append(", histogram_by_bounds(").append(prefix).append("v").append(i).append(", '")
+                    .append(SqlUtils.escapeSqlString(toJsonArray(components.get(i)))).append("', '[]'), count(")
+                    .append(prefix).append("v")
                     .append(i).append(")");
         }
         if (ordered) {
-            sql.append(", histogram_by_bounds(x, '")
+            sql.append(", histogram_by_bounds(").append(prefix).append("x, '")
                     .append(SqlUtils.escapeSqlString(toJsonArray(components.get(0)))).append("', '")
                     .append(SqlUtils.escapeSqlString(toJsonArray(bounds))).append("')");
         }
-        return sql.append(from).toString();
+        return sql.toString();
     }
 
     private static String toJsonArray(Collection<String> values) {
@@ -348,7 +418,7 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
         return buckets;
     }
 
-    private List<List<String>> execute(ConnectContext context, AnalyzeStatus analyzeStatus, String sql)
+    List<List<String>> execute(ConnectContext context, AnalyzeStatus analyzeStatus, String sql)
             throws DdlException {
         checkCancelled(analyzeStatus);
         calculateAndSetRemainingTimeout(context, analyzeStatus);

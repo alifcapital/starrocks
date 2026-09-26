@@ -2892,6 +2892,10 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "Default number of residual buckets for a single-column ANALYZE MCV")
     public static int statistic_mcv_bucket_num = 64;
 
+    @ConfField(mutable = true, comment = "Maximum MCV column groups sharing a scan and aggregate state. " +
+            "Batches run sequentially; set to 1 to collect each group separately.")
+    public static int statistic_mcv_max_groups_per_scan = 4;
+
     /**
      * log2 of the hash map size of the frequent-items sketch (ds_frequent_items) that finds the most
      * common values during statistics collection. The sketch keeps at most 2^N entries per fragment and

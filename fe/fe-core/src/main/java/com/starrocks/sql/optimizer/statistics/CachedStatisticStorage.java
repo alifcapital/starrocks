@@ -90,7 +90,8 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     private final ExternalMcvStatsCacheLoader externalMcvLoader = new ExternalMcvStatsCacheLoader();
     // Keyed by table UUID.
     AsyncLoadingCache<String, Optional<ExternalMcvStatistics>> externalMcvStats =
-            createAsyncLoadingCache(externalMcvLoader);
+            createExternalMcvStatisticsCache(Config.statistic_mcv_cache_max_bytes,
+                    statsCacheRefresherExecutor, externalMcvLoader);
 
     private final Executor externalPartitionStatsExecutor =
             com.starrocks.common.ThreadPoolManager.newDaemonFixedThreadPoolWithAbortPolicy(
@@ -1319,7 +1320,9 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
 
     @Override
     public Map<String, StatisticsCacheMetrics> getCacheMetrics() {
-        return Map.of("external_basic", StatisticsCacheMetrics.snapshot(externalStatisticsCache.synchronous()));
+        return Map.of("external_basic", StatisticsCacheMetrics.snapshot(
+                        externalStatisticsCache.synchronous()),
+                "external_mcv", StatisticsCacheMetrics.snapshot(externalMcvStats.synchronous()));
     }
 
     @Override
@@ -1343,6 +1346,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 .put("HistogramStats", histogramCache.synchronous().estimatedSize())
                 .put("ConnectorHistogramStats", connectorHistogramCache.synchronous().estimatedSize())
                 .put("MultiColumnCombinedStats", multiColumnStats.synchronous().estimatedSize())
+                .put("ExternalMcvStats", externalMcvStats.synchronous().estimatedSize())
                 .put("ExternalColumnStats", externalStatisticsCache.synchronous().estimatedSize())
                 .build();
     }
@@ -1356,6 +1360,28 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             }
             updateCache.accept(result);
         });
+    }
+
+    static AsyncLoadingCache<String, Optional<ExternalMcvStatistics>> createExternalMcvStatisticsCache(
+            long maximumBytes, Executor executor, AsyncCacheLoader<String, Optional<ExternalMcvStatistics>> loader) {
+        if (maximumBytes <= 0) {
+            throw new IllegalArgumentException("MCV statistics cache byte limit must be positive");
+        }
+        Caffeine<String, Optional<ExternalMcvStatistics>> builder = Caffeine.newBuilder()
+                .expireAfterWrite(Config.statistic_update_interval_sec * 2, TimeUnit.SECONDS)
+                .maximumWeight(maximumBytes)
+                .recordStats()
+                .weigher((String key, Optional<ExternalMcvStatistics> value) -> externalMcvCacheWeight(key, value))
+                .executor(executor);
+        if (Config.enable_statistic_cache_refresh_after_write) {
+            builder.refreshAfterWrite(Config.statistic_update_interval_sec, TimeUnit.SECONDS);
+        }
+        return builder.buildAsync(loader);
+    }
+
+    static int externalMcvCacheWeight(String key, Optional<ExternalMcvStatistics> value) {
+        long bytes = 192L + 2L * key.length() + value.map(ExternalMcvStatistics::retainedBytes).orElse(0L);
+        return (int) Math.min(Integer.MAX_VALUE, bytes);
     }
 
     private <K, V> AsyncLoadingCache<K, V> createAsyncLoadingCache(AsyncCacheLoader<K, V> cacheLoader) {

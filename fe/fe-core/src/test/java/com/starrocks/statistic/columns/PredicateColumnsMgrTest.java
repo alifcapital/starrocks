@@ -21,8 +21,13 @@ import com.starrocks.catalog.TableName;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.scheduler.history.TableKeeper;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.sql.plan.PlanTestBase;
+import com.starrocks.statistic.ExternalAnalyzeJob;
+import com.starrocks.statistic.StatisticsCollectJobFactory;
 import com.starrocks.statistic.StatisticsMetaManager;
+import com.starrocks.statistic.StatsConstants;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -30,13 +35,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 class PredicateColumnsMgrTest extends PlanTestBase {
 
     @BeforeAll
     public static void beforeClass() throws Exception {
         PlanTestBase.beforeClass();
+        ConnectorPlanTestBase.mockHiveCatalog(connectContext);
         StatisticsMetaManager statistic = new StatisticsMetaManager();
         statistic.createStatisticsTablesForTest();
         TableKeeper keeper = ExternalPredicateColumnsStorage.createKeeper();
@@ -69,10 +79,48 @@ class PredicateColumnsMgrTest extends PlanTestBase {
 
         mgr.recordColumnUsageForTest(table, column, ColumnUsage.UseCase.PREDICATE);
 
-        List<ExternalColumnUsage> result = mgr.queryExternalPredicateColumns(table);
+        List<String> result = mgr.queryExternalPredicateColumns(table);
         Assertions.assertEquals(1, result.size());
-        Assertions.assertEquals("c1", result.get(0).getColumnName());
-        Assertions.assertEquals("iceberg_catalog", result.get(0).getCatalogName());
+        Assertions.assertEquals("c1", result.get(0));
+        Assertions.assertEquals("iceberg_catalog", mgr.queryExternalPredicateColumnGroups(table).get(0).catalogName());
+    }
+
+    @Test
+    public void testRealPlansKeepPredicateSetsAndBasicColumnUnion() throws Exception {
+        PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
+        getFragmentPlan("select c_custkey from hive0.tpch.customer where c_nationkey = 1 and c_acctbal > 100");
+        Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                .getTable(connectContext, "hive0", "tpch", "customer");
+        Assertions.assertEquals(List.of("c_acctbal", "c_nationkey"), mgr.queryExternalPredicateColumns(table));
+        Assertions.assertEquals(Set.of(List.of("c_acctbal", "c_nationkey")),
+                mgr.queryExternalPredicateColumnGroups(table).stream()
+                        .filter(group -> group.useCase() == ColumnUsage.UseCase.PREDICATE)
+                        .map(ExternalColumnGroupUsage::columns).collect(Collectors.toSet()));
+        getFragmentPlan("select c_custkey from hive0.tpch.customer where c_mktsegment = 'AUTOMOBILE'");
+        Assertions.assertEquals(Set.of(List.of("c_acctbal", "c_nationkey"), List.of("c_mktsegment")),
+                mgr.queryExternalPredicateColumnGroups(table).stream()
+                        .filter(group -> group.useCase() == ColumnUsage.UseCase.PREDICATE)
+                        .map(ExternalColumnGroupUsage::columns).collect(Collectors.toSet()));
+        Assertions.assertEquals(List.of("c_acctbal", "c_mktsegment", "c_nationkey"),
+                mgr.queryExternalPredicateColumns(table));
+        int threshold = Config.statistic_auto_collect_predicate_columns_threshold;
+        try {
+            Config.statistic_auto_collect_predicate_columns_threshold = 1;
+            var automaticJob = new ExternalAnalyzeJob("hive0", "tpch", "customer", null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, new HashMap<>(),
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            var jobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(automaticJob);
+            Assertions.assertEquals(1, jobs.size());
+            Assertions.assertEquals(Set.of("c_acctbal", "c_mktsegment", "c_nationkey"),
+                    Set.copyOf(jobs.get(0).getColumnNames()));
+            var explicitJob = new ExternalAnalyzeJob("hive0", "tpch", "customer", List.of("c_custkey"), null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, new HashMap<>(),
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            var explicitJobs = StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(explicitJob);
+            Assertions.assertEquals(List.of("c_custkey"), explicitJobs.get(0).getColumnNames());
+        } finally {
+            Config.statistic_auto_collect_predicate_columns_threshold = threshold;
+        }
     }
 
     @Test
@@ -116,9 +164,9 @@ class PredicateColumnsMgrTest extends PlanTestBase {
 
         PredicateColumnsMgr.getInstance().recordColumnUsageForTest(table, column, ColumnUsage.UseCase.PREDICATE);
 
-        List<ExternalColumnUsage> result = PredicateColumnsMgr.getInstance().queryExternalPredicateColumns(table);
+        List<String> result = PredicateColumnsMgr.getInstance().queryExternalPredicateColumns(table);
         Assertions.assertEquals(1, result.size());
-        Assertions.assertEquals("列".repeat(50), result.get(0).getColumnName());
+        Assertions.assertEquals("列".repeat(50), result.get(0));
     }
 
     @Test
@@ -135,7 +183,7 @@ class PredicateColumnsMgrTest extends PlanTestBase {
     }
 
     @Test
-    public void testVacuumExternalSkipsWhenTtlDisabled() {
+    public void testQueryRetainsHistoryWhenTtlDisabled() {
         IcebergTable table = mockExternalTable("iceberg_catalog.db1.t5.uuid-5", "iceberg_catalog", "db1", "t5");
         Column column = new Column("c1", IntegerType.INT);
         PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
@@ -145,7 +193,6 @@ class PredicateColumnsMgrTest extends PlanTestBase {
         long beforeValue = Config.statistic_external_predicate_columns_ttl_hours;
         Config.statistic_external_predicate_columns_ttl_hours = -1;
         try {
-            mgr.vacuumExternal();
             Assertions.assertEquals(1, mgr.queryExternalPredicateColumns(table).size());
         } finally {
             Config.statistic_external_predicate_columns_ttl_hours = beforeValue;

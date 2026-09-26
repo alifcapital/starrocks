@@ -117,7 +117,8 @@ PROPERTIES(
 ### Collect MCV statistics for external tables
 
 ```sql
-ANALYZE [FULL] TABLE catalog.db.table MCV (column [, column ...])
+ANALYZE [FULL] TABLE catalog.db.table MCV
+    { (column [, column ...]) | PREDICATE COLUMNS }
 [PROPERTIES ("mcv_size" = "100", "mcv_bucket_num" = "64")];
 
 SHOW MCV STATS META;
@@ -125,15 +126,44 @@ DROP MCV STATS catalog.db.table;
 DROP MCV STATS catalog.db.table (column [, column ...]);
 ```
 
-MCV statistics describe the frequency distribution of one column or a column group. Collection scans the selected columns twice: sketches identify frequent candidates and, for a numeric or date/time singleton, residual bucket boundaries; a second pass counts the candidates, NULLs, and buckets. Counts are exact for the counting pass; distinct counts and candidate boundaries are estimated by sketches. Memory depends on the configured sketch, candidate, and bucket sizes rather than the number of distinct input tuples.
+MCV statistics describe the frequency distribution of one column or a column group. Collection scans the selected columns twice: sketches identify frequent candidates and, for a numeric, date/time, or string singleton, residual bucket boundaries; a second pass counts the candidates, NULLs, and buckets. Counts are exact for the counting pass; distinct counts and candidate boundaries are estimated by sketches. Memory depends on the configured sketch, candidate, and bucket sizes rather than the number of distinct input tuples.
 
 - `mcv_size`: maximum number of frequent tuples to retain. Default: FE configuration `statistic_mcv_size` (100).
-- `mcv_bucket_num`: target number of residual buckets for a single column. Default: `statistic_mcv_bucket_num` (64). Boundaries can collapse, so fewer buckets may be produced. Numeric and date/time columns have ordered buckets; string and Boolean columns use residual mass and distinct count without ordered buckets.
-- Both properties accept positive integers. `mcv_bucket_num` cannot be specified for a multi-column group. Histogram properties do not apply to MCV collection.
+- `mcv_bucket_num`: target number of residual buckets for a single column. Default: `statistic_mcv_bucket_num` (64). Boundaries can collapse, so fewer buckets may be produced. Numeric, date/time, and string columns have ordered buckets. String buckets use string ordering; Boolean columns use residual mass and distinct count without ordered buckets.
+- `mcv_size` accepts positive integers; `mcv_bucket_num` accepts integers from 1 to 10,000. `mcv_bucket_num` requires at least one single-column group and applies only to those groups. Histogram properties do not apply to MCV collection.
 
 Only synchronous, full collection on supported external tables is available. Specify one or more top-level scalar columns. MCV statistics have their own storage and lifecycle; collecting a legacy histogram is not required. `DROP MCV STATS` without a column list removes all collected MCV groups of the table. With a column list, it removes only that exact group, regardless of column order; other MCV groups and basic statistics are preserved.
 
-A single-column record supplies frequent values, residual buckets, distinct count, and NULL frequency to the optimizer. Multi-column records also supply joint frequencies and component counts for correlated predicates. The optimizer evaluates known frequent tuples and estimates the remaining population separately. Collection does not pin a shared external snapshot across its two scans.
+A single-column record supplies frequent values, residual buckets, distinct count, and NULL frequency to the optimizer. Multi-column records also supply joint frequencies and component counts for correlated predicates. The optimizer evaluates known frequent tuples and estimates the remaining population separately. For Iceberg, all groups and both passes use one captured snapshot. Other connectors use their normal read semantics.
+
+#### Select groups from predicate usage
+
+```sql
+ANALYZE FULL TABLE iceberg.landing_mobi_tj.transactions MCV PREDICATE COLUMNS;
+```
+
+This command collects each distinct eligible column set in the recent predicate-usage history. Recording
+requires `enable_predicate_columns_collection` and `enable_external_predicate_columns_collection`.
+The history includes filters, JOIN keys, GROUP BY/window partition keys, and DISTINCT arguments. It is
+bounded usage history, not an exhaustive query log. It does not infer groups from the union of all columns.
+
+For example, observations of `(status, provider_id)`, `(provider_id, extra_info)`,
+`(status, provider_id, extra_info)`, and `(status)` produce four separate distributions. Repeated observations,
+different column order, and different usage reasons do not duplicate collection. A superset does not replace
+a subset: the retained frequent triples and residual population need not preserve the frequent pairs.
+Singleton statistics are collected only when a singleton was observed independently.
+
+A group is skipped as a whole if it references a deleted or unsupported column, or exceeds
+`statistics_max_multi_column_combined_num`. If no eligible group remains, the command returns an error;
+it does not fall back to collecting all columns. The command does not delete previously collected groups.
+Use `SHOW MCV STATS META` to inspect collected sets.
+
+Groups share two scans in sequential batches of up to `statistic_mcv_max_groups_per_scan` (default: 4).
+Each scan uses one aggregate operator with independent state for each group. This saves repeated input
+reading; per-group sketching/counting CPU and memory remain. Memory also depends on value lengths and
+execution parallelism. Set the limit to 1 for separate scans. Completed batches are written before the next
+batch starts, so cancellation or failure can leave some distributions refreshed. Re-running the command
+refreshes every selected group.
 
 ## References
 

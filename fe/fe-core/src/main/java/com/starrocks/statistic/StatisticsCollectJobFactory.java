@@ -31,7 +31,6 @@ import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.statistic.columns.ColumnUsage;
-import com.starrocks.statistic.columns.ExternalColumnUsage;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.type.Type;
 import org.apache.commons.collections4.CollectionUtils;
@@ -44,6 +43,7 @@ import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -376,12 +376,10 @@ public class StatisticsCollectJobFactory {
         if (Config.enable_external_predicate_columns_collection && !userSpecifiedColumns
                 && Config.statistic_auto_collect_predicate_columns_threshold > 0
                 && columnNames.size() > Config.statistic_auto_collect_predicate_columns_threshold) {
-            List<ExternalColumnUsage> predicateColumns =
+            List<String> predicateColumns =
                     PredicateColumnsMgr.getInstance().queryExternalPredicateColumns(table);
             if (CollectionUtils.isNotEmpty(predicateColumns)) {
-                Set<String> predicateColumnNames = predicateColumns.stream()
-                        .map(ExternalColumnUsage::getColumnName)
-                        .collect(Collectors.toSet());
+                Set<String> predicateColumnNames = new HashSet<>(predicateColumns);
                 List<String> filtered =
                         columnNames.stream().filter(predicateColumnNames::contains).collect(Collectors.toList());
                 if (!filtered.isEmpty()) {

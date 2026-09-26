@@ -3164,7 +3164,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             List<QualifiedName> names = mcvColumnSetContext.qualifiedName().stream()
                     .map(this::getQualifiedName).collect(toList());
             columns = getAnalyzeColumns(names);
-        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext) {
+        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext
+                || context instanceof com.starrocks.sql.parser.StarRocksParser.McvPredicateColumnsContext) {
             usePredicateColumns = true;
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.RegularColumnsContext) {
             com.starrocks.sql.parser.StarRocksParser.RegularColumnsContext regularColumnsContext =
@@ -3199,7 +3200,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             // we use sample strategy to collect multi-column combined statistics as default.
             isSample = context.FULL() == null;
             analyzeTypeDesc = new AnalyzeMultiColumnDesc(statisticsTypes);
-        } else if (context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) {
+        } else if (context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext
+                || context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvPredicateColumnsContext) {
             analyzeTypeDesc = new AnalyzeMcvDesc();
         }
 

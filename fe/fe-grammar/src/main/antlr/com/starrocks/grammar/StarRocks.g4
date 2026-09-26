@@ -1468,6 +1468,7 @@ analyzeColumnClause
     | PREDICATE COLUMNS                                         #predicateColumns
     | MULTIPLE COLUMNS '(' qualifiedName  (',' qualifiedName)* ')' #multiColumnSet
     | MCV '(' qualifiedName  (',' qualifiedName)* ')'              #mcvColumnSet
+    | MCV PREDICATE COLUMNS                                      #mcvPredicateColumns
     ;
 
 dropStatsStatement

@@ -23,6 +23,16 @@ import java.util.List;
  * with their exact row counts, and the number of distinct tuples.
  */
 public class AnalyzeMcvDesc extends AnalyzeTypeDesc {
+    private List<List<String>> columnGroups = List.of();
+
+    public List<List<String>> getColumnGroups() {
+        return columnGroups;
+    }
+
+    public void setColumnGroups(List<List<String>> groups) {
+        columnGroups = groups.stream().map(List::copyOf).toList();
+    }
+
     public AnalyzeMcvDesc() {
         super(NodePosition.ZERO);
     }

@@ -134,6 +134,31 @@ public class ExternalMcvStatistics {
             return nullCounts;
         }
 
+        private long retainedBytes() {
+            long bytes = 192 + 32L + 8L * columnNames.size() + 32L + 32L * nullCounts.size()
+                    + 32L + 8L * mcv.size() + 32L + 8L * buckets.size();
+            for (String name : columnNames) {
+                bytes += stringBytes(name);
+            }
+            for (MultiColumnCombinedStats.McvEntry entry : mcv) {
+                bytes += 48 + 64L + 8L * entry.getValues().size()
+                        + 32L + 32L * entry.getComponentCounts().size();
+                for (String value : entry.getValues()) {
+                    bytes += stringBytes(value);
+                }
+            }
+            for (StoredBucket bucket : buckets) {
+                bytes += 64 + stringBytes(bucket.lower) + stringBytes(bucket.upper);
+            }
+            if (columnNames.size() == 1) {
+                // Map nodes/boxed counts refer to the strings already counted above. Reserve
+                // the prepared histogram even for dump replay, which builds it lazily: Caffeine
+                // does not reweigh a value when that memoized view is populated or replaced.
+                bytes += 128 + 96L * singleColumnMcv.size() + 128L + 96L * Math.max(1, buckets.size());
+            }
+            return bytes;
+        }
+
         /** The single-column planner view of the same MCV record, never a legacy-table lookup. */
         public Optional<ColumnStatistic> columnStatistic(Type type, ColumnStatistic basic) {
             if (columnNames.size() != 1 || rowCount <= 0) {
@@ -222,13 +247,26 @@ public class ExternalMcvStatistics {
     }
 
     private final List<Group> groups;
+    private final long retainedBytes;
 
     private ExternalMcvStatistics() {
         this.groups = Collections.emptyList();
+        this.retainedBytes = 64;
     }
 
     public ExternalMcvStatistics(List<Group> groups) {
         this.groups = List.copyOf(groups);
+        this.retainedBytes = 64 + 8L * groups.size() + groups.stream().mapToLong(Group::retainedBytes).sum();
+    }
+
+    /** Conservative retained-heap estimate, computed once rather than traversed by the planner. */
+    public long retainedBytes() {
+        return retainedBytes;
+    }
+
+    private static long stringBytes(String value) {
+        // Allow UTF-16 storage, object/array headers and alignment, including with compact strings disabled.
+        return value == null ? 0 : 48L + ((2L * value.length() + 7) & ~7L);
     }
 
     public List<Group> getGroups() {

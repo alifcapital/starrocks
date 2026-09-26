@@ -53,7 +53,7 @@ import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.columns.ColumnUsage;
-import com.starrocks.statistic.columns.ExternalColumnUsage;
+import com.starrocks.statistic.columns.ExternalColumnGroupUsage;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
@@ -173,7 +173,7 @@ public class AnalyzeStmtAnalyzer {
             }
 
             if (analyzeTypeDesc instanceof AnalyzeMcvDesc) {
-                if (columns.isEmpty()) {
+                if (columns.isEmpty() && !statement.isUsePredicateColumns()) {
                     throw new SemanticException("MCV statistics need at least one column");
                 }
                 if (columns.size() > Config.statistics_max_multi_column_combined_num) {
@@ -230,13 +230,14 @@ public class AnalyzeStmtAnalyzer {
 
             // ANALYZE TABLE xxx
             // ANALYZE TABLE xxx ALL COLUMNS
-            if (statement.isAllColumns() && CollectionUtils.isEmpty(columns)) {
+            if (statement.isAllColumns() && CollectionUtils.isEmpty(columns)
+                    && !(analyzeTypeDesc instanceof AnalyzeMcvDesc)) {
                 List<String> collectibleColumns = StatisticUtils.getCollectibleColumns(analyzeTable);
                 statement.setColumnNames(collectibleColumns);
             }
 
             // ANALYZE TABLE xxx PREDICATE COLUMNS
-            if (statement.isUsePredicateColumns()) {
+            if (statement.isUsePredicateColumns() && !(analyzeTypeDesc instanceof AnalyzeMcvDesc)) {
                 // check if the table type is supported
                 if (!analyzeTable.isNativeTableOrMaterializedView() && !analyzeTable.isAnalyzableExternalTable()) {
                     throw new SemanticException("Only analyzable table can support ANALYZE PREDICATE COLUMNS");
@@ -256,9 +257,9 @@ public class AnalyzeStmtAnalyzer {
                         }
                     }
                 } else {
-                    for (ExternalColumnUsage col : ListUtils.emptyIfNull(
+                    for (String col : ListUtils.emptyIfNull(
                             PredicateColumnsMgr.getInstance().queryExternalPredicateColumns(analyzeTable))) {
-                        Column realColumn = analyzeTable.getColumn(col.getColumnName());
+                        Column realColumn = analyzeTable.getColumn(col);
                         if (realColumn != null) {
                             targetColumns.add(realColumn.getName());
                         }
@@ -270,6 +271,28 @@ public class AnalyzeStmtAnalyzer {
                 }
 
                 statement.setColumnNames(targetColumns);
+            }
+
+            if (analyzeTypeDesc instanceof AnalyzeMcvDesc mcv) {
+                if (statement.isUsePredicateColumns()) {
+                    List<List<String>> groups = PredicateColumnsMgr.getInstance()
+                            .queryExternalPredicateColumnGroups(analyzeTable).stream()
+                            .map(ExternalColumnGroupUsage::columns)
+                            // Skip the entire stale/unsupported group, never manufacture a smaller set.
+                            .filter(group -> group.size() <= Config.statistics_max_multi_column_combined_num)
+                            .filter(group -> group.stream().allMatch(name -> isMcvColumn(analyzeTable.getColumn(name))))
+                            .map(group -> group.stream().map(name -> analyzeTable.getColumn(name).getName())
+                                    .distinct().sorted().toList())
+                            .distinct().toList();
+                    if (groups.isEmpty()) {
+                        throw new SemanticException("No eligible predicate column groups found for MCV on table '%s'",
+                                analyzeTable.getName());
+                    }
+                    mcv.setColumnGroups(groups);
+                    statement.setColumnNames(groups.stream().flatMap(List::stream).distinct().sorted().toList());
+                } else {
+                    mcv.setColumnGroups(List.of(statement.getColumnNames()));
+                }
             }
 
             analyzeProperties(statement.getProperties(), analyzeTable);
@@ -458,6 +481,14 @@ public class AnalyzeStmtAnalyzer {
             }
         }
 
+        private static boolean isMcvColumn(Column column) {
+            if (column == null) {
+                return false;
+            }
+            com.starrocks.type.Type type = column.getType();
+            return type.canStatistic() && !type.isComplexType() && !type.isJsonType() && !type.isOnlyMetricType();
+        }
+
         private void validateMcvProperties(AnalyzeStmt statement, Table table) {
             boolean mcv = statement.getAnalyzeTypeDesc() instanceof AnalyzeMcvDesc;
             for (String key : List.of(StatsConstants.MCV_SIZE, StatsConstants.MCV_BUCKET_NUM)) {
@@ -498,7 +529,8 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException("Can't collect MCV statistics on column type %s", type.toSql());
                 }
             }
-            if (statement.getColumnNames().size() != 1
+            if (((AnalyzeMcvDesc) statement.getAnalyzeTypeDesc()).getColumnGroups().stream()
+                    .noneMatch(group -> group.size() == 1)
                     && statement.getProperties().containsKey(StatsConstants.MCV_BUCKET_NUM)) {
                 throw new SemanticException("mcv_bucket_num applies to single-column MCV statistics only");
             }
