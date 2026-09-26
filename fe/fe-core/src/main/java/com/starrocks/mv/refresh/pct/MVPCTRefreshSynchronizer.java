@@ -186,7 +186,7 @@ public final class MVPCTRefreshSynchronizer {
             }
 
             if (!processor.isPinnedMode()) {
-                MVRefreshSchemaChecker.checkExternalBaseSchemaCompat(processor.getMv());
+                MVRefreshSchemaChecker.checkBaseSchemaCompat(processor.getMv());
                 if (!processor.getMv().isActive()) {
                     throw new DmlException(String.format(
                             "Materialized view: %s/%d is not active due to %s.",
