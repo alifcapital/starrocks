@@ -14,7 +14,9 @@
 
 package com.starrocks.connector.iceberg;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.datacache.DataCacheSelectExecutor;
 import com.starrocks.qe.ConnectContext;
@@ -42,12 +44,15 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class IcebergMetadataRefreshFooterPrefetcherTest {
+    private boolean previousMultiWarehouse;
     private ConnectContext caller;
     private ExecutorService executor;
     private final Deque<Runnable> queue = new ArrayDeque<>();
 
     @BeforeEach
     public void setUp() {
+        previousMultiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         caller = UtFrameUtils.createDefaultCtx();
         caller.getSessionVariable().setEnableIcebergMetadataRefreshFooterPrefetch(true);
         caller.getSessionVariable().setWarehouseName("footer_test_wh");
@@ -60,6 +65,7 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
 
     @AfterEach
     public void tearDown() {
+        Config.enable_multi_warehouse = previousMultiWarehouse;
         ConnectContext.remove();
     }
 
@@ -171,7 +177,7 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
         BaseTable oldTable = tableWithSnapshot("old-metadata", 1);
         BaseTable updatedTable = tableWithSnapshot("new-metadata", 2);
         Mockito.when(delegate.getTable(caller, "db", "table")).thenReturn(updatedTable);
-        LoadingCache<CachingIcebergCatalog.IcebergTableName, Table> tables =
+        Cache<CachingIcebergCatalog.IcebergTableName, Table> tables =
                 Deencapsulation.getField(catalog, "tables");
         tables.put(new CachingIcebergCatalog.IcebergTableName("db", "table"), oldTable);
         LoadingCache<CachingIcebergCatalog.IcebergTableName, Map<String, Partition>> partitions =
