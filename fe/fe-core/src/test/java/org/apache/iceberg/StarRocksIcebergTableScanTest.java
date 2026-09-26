@@ -25,6 +25,53 @@ import java.util.Set;
 
 public class StarRocksIcebergTableScanTest {
     @Test
+    public void testWarmDeleteManifestKeepsBothKindsAndSequenceNumbers(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        Schema schema = new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get()));
+        PartitionSpec spec = PartitionSpec.unpartitioned();
+        org.apache.iceberg.io.FileIO io = Mockito.mock(org.apache.iceberg.io.FileIO.class, Mockito.CALLS_REAL_METHODS);
+        Mockito.when(io.newInputFile(Mockito.anyString())).thenAnswer(
+                invocation -> Files.localInput(new java.io.File((String) invocation.getArgument(0))));
+        Mockito.when(io.newInputFile(Mockito.anyString(), Mockito.anyLong())).thenAnswer(
+                invocation -> Files.localInput(new java.io.File((String) invocation.getArgument(0))));
+        ManifestWriter<DeleteFile> writer = ManifestFiles.writeDeleteManifest(
+                2, spec, Files.localOutput(dir.resolve("delete.avro").toFile()), 42L);
+        try (writer) {
+            writer.add(FileMetadata.deleteFileBuilder(spec).ofEqualityDeletes(1)
+                    .withPath("eq.parquet").withFormat(FileFormat.PARQUET).withRecordCount(2)
+                    .withFileSizeInBytes(100).build(), 7L);
+            writer.add(FileMetadata.deleteFileBuilder(spec).ofPositionDeletes()
+                    .withPath("pos.parquet").withFormat(FileFormat.PARQUET).withRecordCount(1)
+                    .withFileSizeInBytes(100).build(), 8L);
+        }
+        ManifestFile manifest = writer.toManifestFile();
+        Table table = Mockito.mock(Table.class);
+        Mockito.when(table.io()).thenReturn(io);
+        Mockito.when(table.schema()).thenReturn(schema);
+        Mockito.when(table.specs()).thenReturn(java.util.Map.of(spec.specId(), spec));
+        Cache<String, Set<DeleteFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+        com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext context =
+                new com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext(
+                        "catalog", "db", "tbl", com.starrocks.connector.PlanMode.LOCAL);
+        context.setDeleteFileCache(cache);
+        context.setMetaFileCacheMap(new java.util.concurrent.ConcurrentHashMap<>());
+        StarRocksIcebergTableScan scan = new StarRocksIcebergTableScan(table, schema, TableScanContext.empty(), context);
+        scan.refreshDeleteFileCache(java.util.List.of(manifest));
+        Set<DeleteFile> files = StarRocksIcebergTableScan.getCompleteCachedFiles(cache, manifest);
+        Assertions.assertNotNull(files);
+        Assertions.assertEquals(2, files.size());
+        Assertions.assertTrue(files.stream().anyMatch(f -> f.content() == FileContent.EQUALITY_DELETES &&
+                f.equalityFieldIds().equals(java.util.List.of(1)) && f.dataSequenceNumber() == 7L));
+        Assertions.assertTrue(files.stream().anyMatch(f -> f.content() == FileContent.POSITION_DELETES &&
+                f.dataSequenceNumber() == 8L));
+        // A failed refill must not replace a valid entry with a placeholder or partial set.
+        java.nio.file.Files.delete(dir.resolve("delete.avro"));
+        Assertions.assertThrows(RuntimeException.class, () -> scan.refreshDeleteFileCache(java.util.List.of(manifest)));
+        Assertions.assertSame(files, cache.getIfPresent(manifest.path()));
+        io.close();
+    }
+
+    @Test
     public void testGetCompleteCachedFilesReturnsMatchingCacheEntry() {
         ManifestFile manifest = mockManifestFile("matching-manifest", 1, 1);
 

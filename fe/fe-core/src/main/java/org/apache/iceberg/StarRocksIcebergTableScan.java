@@ -23,6 +23,7 @@ import com.starrocks.connector.PlanMode;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.AsyncIterable;
 import com.starrocks.connector.iceberg.CachingIcebergCatalog.IcebergTableName;
+import com.starrocks.connector.iceberg.DeleteFileWrapper;
 import com.starrocks.connector.iceberg.IcebergApiConverter;
 import com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext;
 import com.starrocks.connector.iceberg.cost.IcebergMetricsReporter;
@@ -45,6 +46,7 @@ import org.apache.iceberg.metrics.MetricsReporter;
 import org.apache.iceberg.metrics.ScanMetricsUtil;
 import org.apache.iceberg.util.SerializationUtil;
 import org.apache.iceberg.util.TableScanUtil;
+import org.apache.iceberg.util.Tasks;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -453,6 +455,32 @@ public class StarRocksIcebergTableScan
             LOG.error("Failed to refresh data file cache", e);
             throw new StarRocksConnectorException("Failed to refresh manifest cache", e);
         }
+    }
+
+    public void refreshDeleteFileCache(List<ManifestFile> manifestFiles) {
+        if (deleteFileCache == null || manifestFiles.isEmpty()) {
+            return;
+        }
+        Tasks.foreach(manifestFiles)
+                .stopOnFailure()
+                .throwFailureWhenFinished()
+                .executeWith(planExecutor())
+                .run(manifest -> {
+                    // Publish only a fully read manifest. Do not expose an empty/partial placeholder
+                    // or build a query-specific delete index just to warm metadata.
+                    Set<DeleteFile> files = new HashSet<>();
+                    try (ManifestReader<DeleteFile> reader =
+                                 ManifestFiles.readDeleteManifest(manifest, io(), scanSpecsById)) {
+                        for (ManifestEntry<DeleteFile> entry : reader.liveEntries()) {
+                            files.add(DeleteFileWrapper.wrap(entry.file().copy()));
+                        }
+                    } catch (IOException e) {
+                        throw new StarRocksConnectorException("Failed to warm delete manifest " + manifest.path(), e);
+                    }
+                    metaFileCacheMap.computeIfAbsent(icebergTableName,
+                            t -> ConcurrentHashMap.newKeySet()).add(manifest.path());
+                    deleteFileCache.put(manifest.path(), files);
+                });
     }
 
     public Set<DeleteFile> getDeleteFiles(FileContent fileContent) {

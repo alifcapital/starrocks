@@ -505,16 +505,21 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
         // A stable table can lose partition/manifest entries to TTL or memory pressure too.
         partitionCache.get(new IcebergTableName(dbName, tableName, snapshot.snapshotId()));
-        if (dataFileCache == null || icebergProperties.getIcebergDataFileCacheMemoryUsageRatio() <= 0) {
-            return;
-        }
-        // Manifest files are immutable and can be referenced by many newer snapshots.
-        // Warm missing/incomplete entries regardless of the manifest's creation timestamp.
-        List<ManifestFile> manifestFiles = snapshot.dataManifests(table.io()).stream()
-                .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
-                        f, dataFileCache.getIfPresent(f.path())))
-                .collect(Collectors.toList());
-        if (manifestFiles.isEmpty()) {
+        // Each cache has its own budget: disabling data caching must not disable delete warmup.
+        // Manifest files are immutable; refill missing/incomplete entries even on stable snapshots.
+        List<ManifestFile> manifestFiles = dataFileCache != null &&
+                icebergProperties.getIcebergDataFileCacheMemoryUsageRatio() > 0
+                ? snapshot.dataManifests(table.io()).stream()
+                        .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
+                                f, dataFileCache.getIfPresent(f.path())))
+                        .collect(Collectors.toList()) : Collections.emptyList();
+        List<ManifestFile> deleteManifests = deleteFileCache != null &&
+                icebergProperties.getIcebergDeleteFileCacheMemoryUsageRatio() > 0
+                ? snapshot.deleteManifests(table.io()).stream()
+                        .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
+                                f, deleteFileCache.getIfPresent(f.path())))
+                        .collect(Collectors.toList()) : Collections.emptyList();
+        if (manifestFiles.isEmpty() && deleteManifests.isEmpty()) {
             return;
         }
         StarRocksIcebergTableScanContext scanContext = new StarRocksIcebergTableScanContext(
@@ -522,8 +527,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         StarRocksIcebergTableScan tableScan = (StarRocksIcebergTableScan) getTableScan(table, scanContext)
                 .planWith(executorService)
                 .useSnapshot(snapshot.snapshotId());
-        tableScan.refreshDataFileCache(manifestFiles);
-        LOG.info("Warmed {} iceberg manifests on the table [{}.{}]", manifestFiles.size(), dbName, tableName);
+        if (!manifestFiles.isEmpty()) {
+            tableScan.refreshDataFileCache(manifestFiles);
+        }
+        tableScan.refreshDeleteFileCache(deleteManifests);
+        LOG.info("Warmed {} data and {} delete iceberg manifests on the table [{}.{}]",
+                manifestFiles.size(), deleteManifests.size(), dbName, tableName);
     }
 
     // dispatched every background_refresh_metadata_interval_millis

@@ -84,6 +84,56 @@ public class CachingIcebergCatalogTest {
     }
 
     @Test
+    public void testWarmDeletesIndependentlyAndRefillEvictedEntries() {
+        for (String dataBudget : List.of("0", "0.1")) {
+            Map<String, String> properties = new HashMap<>(DEFAULT_CONFIG);
+            properties.put("iceberg_data_file_cache_memory_usage_ratio", dataBudget);
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                CachingIcebergCatalog catalog = Mockito.spy(new CachingIcebergCatalog(CATALOG_NAME,
+                        Mockito.mock(IcebergCatalog.class), new IcebergCatalogProperties(properties), executor));
+                BaseTable table = Mockito.mock(BaseTable.class);
+                Snapshot snapshot = Mockito.mock(Snapshot.class);
+                Mockito.when(table.currentSnapshot()).thenReturn(snapshot);
+                Mockito.when(snapshot.snapshotId()).thenReturn(42L);
+                ManifestFile manifest = Mockito.mock(ManifestFile.class);
+                Mockito.when(manifest.path()).thenReturn("deletes.avro");
+                Mockito.when(manifest.addedFilesCount()).thenReturn(2);
+                Mockito.when(manifest.existingFilesCount()).thenReturn(0);
+                Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(List.of());
+                Mockito.when(snapshot.deleteManifests(Mockito.any())).thenReturn(List.of(manifest));
+                com.github.benmanes.caffeine.cache.LoadingCache<IcebergTableName, Map<String, Partition>> partitions =
+                        Deencapsulation.getField(catalog, "partitionCache");
+                partitions.put(new IcebergTableName("db", "tbl", 42L), Map.of());
+                Cache<String, java.util.Set<org.apache.iceberg.DeleteFile>> deletes =
+                        Deencapsulation.getField(catalog, "deleteFileCache");
+                org.apache.iceberg.StarRocksIcebergTableScan scan =
+                        Mockito.mock(org.apache.iceberg.StarRocksIcebergTableScan.class, Mockito.RETURNS_SELF);
+                Mockito.doReturn(scan).when(scan).planWith(executor);
+                Mockito.doReturn(scan).when(scan).useSnapshot(42L);
+                Mockito.doReturn(scan).when(catalog).getTableScan(Mockito.eq(table), Mockito.any());
+                java.util.Set<org.apache.iceberg.DeleteFile> complete = java.util.Set.of(
+                        Mockito.mock(org.apache.iceberg.DeleteFile.class), Mockito.mock(org.apache.iceberg.DeleteFile.class));
+                Mockito.doAnswer(invocation -> {
+                    deletes.put(manifest.path(), complete);
+                    return null;
+                }).when(scan).refreshDeleteFileCache(List.of(manifest));
+                Deencapsulation.invoke(catalog, "warmCurrentSnapshot", table, "db", "tbl", executor);
+                Deencapsulation.invoke(catalog, "warmCurrentSnapshot", table, "db", "tbl", executor);
+                Mockito.verify(scan).refreshDeleteFileCache(List.of(manifest));
+                deletes.invalidate(manifest.path());
+                Deencapsulation.invoke(catalog, "warmCurrentSnapshot", table, "db", "tbl", executor);
+                deletes.put(manifest.path(), java.util.Set.of(complete.iterator().next()));
+                Deencapsulation.invoke(catalog, "warmCurrentSnapshot", table, "db", "tbl", executor);
+                Mockito.verify(scan, Mockito.times(3)).refreshDeleteFileCache(List.of(manifest));
+                Mockito.verify(scan, Mockito.never()).refreshDataFileCache(Mockito.any());
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
     public void testNormalCreateAndDropDBTable(@Mocked IcebergCatalog icebergCatalog)
             throws MetaNotFoundException {
         new Expectations() {
