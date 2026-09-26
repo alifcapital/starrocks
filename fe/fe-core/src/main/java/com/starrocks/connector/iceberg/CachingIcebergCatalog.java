@@ -335,7 +335,11 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                         .setCatalogTableName(key.tableName)
                         .setNativeTable(nativeTable).build();
         Map<String, Partition> partitions =
-                delegate.getPartitions(icebergTable, key.snapshotId, null);
+                delegate.getPartitions(icebergTable, key.snapshotId, null, () -> {
+                    StarRocksIcebergTableScanContext scanContext = new StarRocksIcebergTableScanContext(
+                            catalogName, key.dbName, key.tableName, PlanMode.LOCAL, ConnectContext.get());
+                    return getTableScan(nativeTable, scanContext).newPartitionScan();
+                });
         if (partitions.size() > PARTITION_LOAD_LOG_THRESHOLD) {
             // -1 is used by callers as "use current snapshot" (see IcebergCatalog#getPartitions);
             // resolve it here so the summary and logged snapshot id reflect the snapshot actually scanned.

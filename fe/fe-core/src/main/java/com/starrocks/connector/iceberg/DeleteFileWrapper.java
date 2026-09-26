@@ -28,9 +28,15 @@ import java.util.Set;
 // checking hashcode and equals for manifest cache
 public class DeleteFileWrapper implements DeleteFile {
     private final DeleteFile deleteFile;
+    private final Long entrySnapshotId;
 
     public DeleteFileWrapper(DeleteFile deleteFile) {
+        this(deleteFile, null);
+    }
+
+    private DeleteFileWrapper(DeleteFile deleteFile, Long entrySnapshotId) {
         this.deleteFile = deleteFile;
+        this.entrySnapshotId = entrySnapshotId;
     }
 
     public static DeleteFileWrapper wrap(DeleteFile deleteFile) {
@@ -39,6 +45,14 @@ public class DeleteFileWrapper implements DeleteFile {
 
     public DeleteFile getDataFile() {
         return deleteFile;
+    }
+
+    public static DeleteFileWrapper wrap(DeleteFile file, Long entrySnapshotId) {
+        return new DeleteFileWrapper(file, entrySnapshotId);
+    }
+
+    public Long entrySnapshotId() {
+        return entrySnapshotId;
     }
 
     @Override

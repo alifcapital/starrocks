@@ -300,11 +300,17 @@ public interface IcebergCatalog extends MemoryTrackable {
 
     // --------------- partition APIs ---------------
     default Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
+        return getPartitions(icebergTable, snapshotId, executorService, null);
+    }
+
+    default Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId,
+                                                ExecutorService executorService,
+                                                java.util.function.Supplier<TableScan> partitionScanFactory) {
         Table nativeTable = icebergTable.getNativeTable();
         Map<String, Partition> partitionMap = Maps.newHashMap();
         PartitionsTable partitionsTable = (PartitionsTable) MetadataTableUtils.
                 createMetadataTableInstance(nativeTable, MetadataTableType.PARTITIONS);
-        TableScan tableScan = partitionsTable.newScan();
+        TableScan tableScan = partitionScanFactory == null ? partitionsTable.newScan() : partitionScanFactory.get();
         if (snapshotId != -1) {
             tableScan = tableScan.useSnapshot(snapshotId);
         }

@@ -307,7 +307,7 @@ public class ManifestReader<F extends ContentFile<F>> extends CloseableGroup
                                     dataFile.copyWithStats(requestedColumnIds) :
                                     dataFile.copyWithoutStats();
                             tmpDataFiles.add(DataFileWrapper.wrap(copiedDataFile,
-                                    dataFileCacheWithMetrics && requestedColumnIds == null));
+                                    dataFileCacheWithMetrics && requestedColumnIds == null, entry.snapshotId()));
                         }
                         return entry;
                     });
@@ -317,7 +317,7 @@ public class ManifestReader<F extends ContentFile<F>> extends CloseableGroup
             entries = CloseableIterable.transform(entries,
                     entry -> {
                         if (entry.isLive()) {
-                            tmpDeleteFiles.add(DeleteFileWrapper.wrap((DeleteFile) entry.file().copy()));
+                            tmpDeleteFiles.add(DeleteFileWrapper.wrap((DeleteFile) entry.file().copy(), entry.snapshotId()));
                         }
                         return entry;
                     });
@@ -353,22 +353,20 @@ public class ManifestReader<F extends ContentFile<F>> extends CloseableGroup
 
             @Override
             public void close() throws IOException {
-                try {
-                    if (fullyConsumed.get()) {
-                        if (!tmpDataFiles.isEmpty()) {
-                            // Concurrent ordinary readers must not downgrade a completed full-statistics fill.
-                            // compute also recalculates the cache weight after an upgrade.
-                            dataFileCache.asMap().compute(file.location(), (key, previous) ->
-                                    previous != null && previous.size() == tmpDataFiles.size() &&
-                                            DataFileWrapper.hasFullColumnStats(previous)
-                                            ? previous : tmpDataFiles);
-                        }
-                        if (!tmpDeleteFiles.isEmpty()) {
-                            deleteFileCache.put(file.location(), tmpDeleteFiles); // to recalculate the weight
-                        }
+                // A failed read/close must not publish a supposedly complete manifest.
+                transformedEntries.close();
+                if (fullyConsumed.get()) {
+                    if (!tmpDataFiles.isEmpty()) {
+                        // Concurrent ordinary readers must not downgrade a completed full-statistics fill.
+                        // compute also recalculates the cache weight after an upgrade.
+                        dataFileCache.asMap().compute(file.location(), (key, previous) ->
+                                previous != null && previous.size() == tmpDataFiles.size() &&
+                                        DataFileWrapper.hasFullColumnStats(previous)
+                                        ? previous : tmpDataFiles);
                     }
-                } finally {
-                    transformedEntries.close();
+                    if (!tmpDeleteFiles.isEmpty()) {
+                        deleteFileCache.put(file.location(), tmpDeleteFiles); // to recalculate the weight
+                    }
                 }
             }
         };
