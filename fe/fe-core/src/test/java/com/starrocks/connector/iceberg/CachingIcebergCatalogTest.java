@@ -130,9 +130,47 @@ public class CachingIcebergCatalogTest {
     }
 
     @Test
+    public void testUnchangedGlueRefreshKeepsWarmSnapshot() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.GLUE_CATALOG);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+            BaseTable unchanged = mockRefreshCandidate(1L, "old.json");
+            // A schema/property change can replace metadata without changing the snapshot ID.
+            BaseTable changedMetadata = mockRefreshCandidate(1L, "new.json");
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, oldTable);
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                    .thenReturn(unchanged, changedMetadata);
+            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any()))
+                    .thenAnswer(inv -> {
+                        Assertions.assertSame(oldTable, ((IcebergTable) inv.getArgument(0)).getNativeTable());
+                        return Map.of();
+                    });
+            catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
+            Assertions.assertSame(oldTable, tables.getIfPresent(key));
+            Mockito.verify(oldTable.currentSnapshot()).dataManifests(Mockito.any());
+            Mockito.verify(unchanged.currentSnapshot(), Mockito.never()).dataManifests(Mockito.any());
+            Mockito.verify(unchanged.currentSnapshot(), Mockito.never()).deleteManifests(Mockito.any());
+            Map<IcebergTableName, Long> refreshed = Deencapsulation.getField(catalog, "tableLatestRefreshTime");
+            Assertions.assertNotNull(refreshed.get(key));
+            catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
+            Assertions.assertSame(changedMetadata, tables.getIfPresent(key));
+            Mockito.verify(changedMetadata.currentSnapshot()).dataManifests(Mockito.any());
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
     public void testRefreshPublishesOnlyAfterWarmup() throws Exception {
         for (boolean sameMetadata : List.of(false, true)) {
             IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+            Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.REST_CATALOG);
             ExecutorService workers = Executors.newFixedThreadPool(2);
             CountDownLatch warming = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
