@@ -36,6 +36,8 @@ import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.LocalDateTime;
@@ -48,10 +50,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class StatisticsCalcUtils {
+    private static final Logger LOG = LogManager.getLogger(StatisticsCalcUtils.class);
 
     private StatisticsCalcUtils() {
 
@@ -85,16 +89,142 @@ public class StatisticsCalcUtils {
             }
             builder.addColumnStatistic(requiredColumnRefs.get(i), columnStatistic);
             if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
+                // Dump the histogram-merged statistic (not the base columnStatisticList entry), so the
+                // histogram is captured in the query dump and can be replayed. See QueryDumpSerializer.
                 optimizerContext.getDumpInfo()
-                        .addTableStatistics(table, requiredColumnRefs.get(i).getName(), columnStatisticList.get(i));
+                        .addTableStatistics(table, requiredColumnRefs.get(i).getName(), columnStatistic);
             }
         }
         return builder;
     }
 
+    /**
+     * Attaches the MCV statistics collected for an external table (see
+     * ExternalMcvStatisticsCollectJob) to the scan statistics. Column groups are matched to the
+     * scan's columns by name; a group with a column the scan does not read is left out.
+     */
+    public static Statistics withExternalMcvStats(Table table, Statistics statistics,
+                                                          Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        return withExternalMcvStats(table, statistics, colRefToColumnMetaMap, null);
+    }
+
+    public static Statistics withExternalMcvStats(Table table, Statistics statistics,
+                                                          Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                                          OptimizerContext optimizerContext) {
+        if (statistics == null || statistics.isPartitionRestricted() || table == null || !table.isAnalyzableExternalTable()
+                || !MultiColumnMcvEstimator.isEnabled()) {
+            return statistics;
+        }
+        ExternalMcvStatistics cached;
+        try {
+            cached = GlobalStateMgr.getCurrentState().getStatisticStorage().getExternalMcvStatistics(table);
+        } catch (Exception e) {
+            LOG.warn("Failed to get external MCV statistics of table {}", table.getName(), e);
+            return statistics;
+        }
+        if (cached == null || cached.isEmpty()) {
+            return statistics;
+        }
+        Statistics attached = attachExternalMcvStats(statistics, cached, colRefToColumnMetaMap);
+        if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
+            for (ExternalMcvStatistics.Group group : cached.getGroups()) {
+                optimizerContext.getDumpInfo().addExternalMcvStatistics(table, group);
+            }
+            // Capture the final scan view, including a row count supplied by MCV itself. Capturing
+            // only the connector's earlier placeholder would replay a different cardinality.
+            optimizerContext.getDumpInfo().addExternalTableRowCount(table, (long) attached.getOutputRowCount());
+            attached.getColumnStatistics().forEach((column, value) ->
+                    optimizerContext.getDumpInfo().addTableStatistics(table, column.getName(), value));
+        }
+        return attached;
+    }
+
+    /**
+     * Attaches every column group the scan reads at least one column of, keyed by the columns it reads.
+     * A group with unread columns keeps them as null placeholders in the component order: its MCV list
+     * still answers predicates on the read columns, while its combined NDV describes the whole group
+     * only (see MultiColumnCombinedStats#isComplete()), so such a group needs an MCV list to be of use.
+     * When two groups read the same columns, the complete one wins, then the one whose MCV list covers
+     * more rows.
+     */
+    static Statistics attachExternalMcvStats(Statistics statistics, ExternalMcvStatistics cached,
+                                                     Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        Map<String, ColumnRefOperator> columnNameToRefMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        colRefToColumnMetaMap.keySet().forEach(ref -> columnNameToRefMap.putIfAbsent(ref.getName(), ref));
+
+        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> attached = new HashMap<>();
+        Statistics.Builder builder = Statistics.buildFrom(statistics);
+        // A distribution includes its own table row count. Do not require a separate basic ANALYZE
+        // to replace the connector's unknown-row-count placeholder. Preserve estimates supplied by
+        // metadata (including partition pruning) or basic statistics. As with independently collected
+        // basic column statistics, use the largest collected count when groups differ.
+        boolean useCollectedRowCount = statistics.getStatsSource() == Statistics.StatsSource.NONE;
+        if (useCollectedRowCount) {
+            builder.setOutputRowCount(cached.getGroups().stream()
+                    .mapToLong(ExternalMcvStatistics.Group::getRowCount).max().orElse(0))
+                    .setStatsSource(Statistics.StatsSource.ANALYZE);
+        }
+        for (ExternalMcvStatistics.Group group : cached.getGroups()) {
+            List<ColumnRefOperator> refs = new ArrayList<>(group.getColumnNames().size());
+            Set<ColumnRefOperator> read = new HashSet<>();
+            boolean duplicate = false;
+            for (String columnName : group.getColumnNames()) {
+                ColumnRefOperator ref = columnNameToRefMap.get(columnName);
+                refs.add(ref);
+                if (ref != null && !read.add(ref)) {
+                    duplicate = true;
+                }
+            }
+            if (duplicate || read.isEmpty()
+                    || (read.size() < refs.size() && group.getMcv().isEmpty() && group.getRowCount() == 0)) {
+                continue;
+            }
+            MultiColumnCombinedStats stats =
+                    new MultiColumnCombinedStats(group.getNdv(), group.getRowCount(), refs, group.getMcv(),
+                            group.getNullCounts());
+            attached.merge(read, stats, StatisticsCalcUtils::preferMultiColumnStats);
+            if (refs.size() == 1) {
+                ColumnRefOperator column = refs.get(0);
+                ColumnStatistic basic = statistics.getColumnStatistics().getOrDefault(column, ColumnStatistic.unknown());
+                group.columnStatistic(column.getType(), basic)
+                        .ifPresent(single -> builder.addColumnStatistic(column, single));
+            }
+        }
+        if (attached.isEmpty() && !useCollectedRowCount) {
+            return statistics;
+        }
+        return builder.addMultiColumnStatistics(attached).build();
+    }
+
+    static MultiColumnCombinedStats preferMultiColumnStats(MultiColumnCombinedStats current,
+                                                                   MultiColumnCombinedStats candidate) {
+        if (current.isComplete() != candidate.isComplete()) {
+            return current.isComplete() ? current : candidate;
+        }
+        return mcvCoverage(candidate) > mcvCoverage(current) ? candidate : current;
+    }
+
+    private static double mcvCoverage(MultiColumnCombinedStats stats) {
+        if (stats.getRowCount() <= 0) {
+            return 0;
+        }
+        double rows = 0;
+        for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
+            rows += entry.getCount();
+        }
+        return rows / stats.getRowCount();
+    }
+
     public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,
                                                                       Statistics.Builder builder,
                                                                       Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        return estimateMultiColumnCombinedStats(table, builder, colRefToColumnMetaMap, null);
+    }
+
+    public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,
+                                                                      Statistics.Builder builder,
+                                                                      Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                                                      OptimizerContext optimizerContext) {
         if (!table.isNativeTableOrMaterializedView()) {
             return builder;
         }
@@ -117,6 +247,15 @@ public class StatisticsCalcUtils {
         for (Map.Entry<Set<Integer>, Long> entry : distinctCounts.entrySet()) {
             Set<Integer> uniqueColumnIds = entry.getKey();
             Long ndv = entry.getValue();
+            if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
+                List<String> names = new ArrayList<>();
+                uniqueColumnIds.forEach(id -> names.add(uniqueIdToColumnNameMap.get(id)));
+                if (!names.contains(null)) {
+                    optimizerContext.getDumpInfo().addExternalMcvStatistics(table,
+                            new ExternalMcvStatistics.Group(names, 0, ndv, List.of(), List.of(),
+                                    java.util.Collections.nCopies(names.size(), 0L)));
+                }
+            }
 
             Set<ColumnRefOperator> mcRefOperators = new HashSet<>(uniqueColumnIds.size());
             boolean allColumnsFound = true;

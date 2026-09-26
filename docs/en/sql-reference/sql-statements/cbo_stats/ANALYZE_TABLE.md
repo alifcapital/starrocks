@@ -114,6 +114,27 @@ PROPERTIES(
 );
 ```
 
+### Collect MCV statistics for external tables
+
+```sql
+ANALYZE [FULL] TABLE catalog.db.table MCV (column [, column ...])
+[PROPERTIES ("mcv_size" = "100", "mcv_bucket_num" = "64")];
+
+SHOW MCV STATS META;
+DROP MCV STATS catalog.db.table;
+DROP MCV STATS catalog.db.table (column [, column ...]);
+```
+
+MCV statistics describe the frequency distribution of one column or a column group. Collection scans the selected columns twice: sketches identify frequent candidates and, for a numeric or date/time singleton, residual bucket boundaries; a second pass counts the candidates, NULLs, and buckets. Counts are exact for the counting pass; distinct counts and candidate boundaries are estimated by sketches. Memory depends on the configured sketch, candidate, and bucket sizes rather than the number of distinct input tuples.
+
+- `mcv_size`: maximum number of frequent tuples to retain. Default: FE configuration `statistic_mcv_size` (100).
+- `mcv_bucket_num`: target number of residual buckets for a single column. Default: `statistic_mcv_bucket_num` (64). Boundaries can collapse, so fewer buckets may be produced. Numeric and date/time columns have ordered buckets; string and Boolean columns use residual mass and distinct count without ordered buckets.
+- Both properties accept positive integers. `mcv_bucket_num` cannot be specified for a multi-column group. Histogram properties do not apply to MCV collection.
+
+Only synchronous, full collection on supported external tables is available. Specify one or more top-level scalar columns. MCV statistics have their own storage and lifecycle; collecting a legacy histogram is not required. `DROP MCV STATS` without a column list removes all collected MCV groups of the table. With a column list, it removes only that exact group, regardless of column order; other MCV groups and basic statistics are preserved.
+
+A single-column record supplies frequent values, residual buckets, distinct count, and NULL frequency to the optimizer. Multi-column records also supply joint frequencies and component counts for correlated predicates. The optimizer evaluates known frequent tuples and estimates the remaining population separately. Collection does not pin a shared external snapshot across its two scans.
+
 ## References
 
 [SHOW ANALYZE STATUS](SHOW_ANALYZE_STATUS.md): view the status of a manual collection task.

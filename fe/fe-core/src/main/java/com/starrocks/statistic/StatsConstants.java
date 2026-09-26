@@ -70,6 +70,7 @@ public class StatsConstants {
     public static final String HISTOGRAM_STATISTICS_TABLE_NAME = "histogram_statistics";
     public static final String EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME = "external_histogram_statistics";
     public static final String MULTI_COLUMN_STATISTICS_TABLE_NAME = "multi_column_statistics";
+    public static final String EXTERNAL_MCV_STATISTICS_TABLE_NAME = "external_mcv_statistics";
 
 
     public static final String INFORMATION_SCHEMA = "information_schema";
@@ -103,6 +104,8 @@ public class StatsConstants {
     // Histogram Statistics properties
     public static final String HISTOGRAM_BUCKET_NUM = "histogram_bucket_num";
     public static final String HISTOGRAM_MCV_SIZE = "histogram_mcv_size";
+    public static final String MCV_SIZE = "mcv_size";
+    public static final String MCV_BUCKET_NUM = "mcv_bucket_num";
     public static final String HISTOGRAM_SAMPLE_RATIO = "histogram_sample_ratio";
     public static final String HISTOGRAM_COLLECT_BUCKET_NDV_MODE = "histogram_collect_bucket_ndv_mode";
 
@@ -138,7 +141,8 @@ public class StatsConstants {
             EXTERNAL_FULL_STATISTICS_TABLE_NAME,
             MULTI_COLUMN_STATISTICS_TABLE_NAME,
             HISTOGRAM_STATISTICS_TABLE_NAME,
-            EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME
+            EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME,
+            EXTERNAL_MCV_STATISTICS_TABLE_NAME
     );
 
     public enum AnalyzeType {

@@ -30,6 +30,8 @@ import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.tvr.common.TvrOptContext;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
 import com.starrocks.sql.optimizer.task.TaskContext;
 import com.starrocks.sql.optimizer.task.TaskScheduler;
 import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
@@ -38,11 +40,31 @@ import oshi.util.FormatUtil;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 public class OptimizerContext {
+    private final Map<ExternalStatisticsRequest, Optional<ExternalStatisticsAggregate>> externalStatisticsSnapshots =
+            new ConcurrentHashMap<>();
+
+    public Optional<ExternalStatisticsAggregate> getExternalStatisticsSnapshot(ExternalStatisticsRequest request,
+            Supplier<Optional<ExternalStatisticsAggregate>> snapshot) {
+        return externalStatisticsSnapshots.computeIfAbsent(request, ignored -> snapshot.get());
+    }
+
+    private final Map<ExternalStatisticsRequest, CompletableFuture<ExternalStatisticsAggregate>> externalStatisticsLoads =
+            new ConcurrentHashMap<>();
+
+    public CompletableFuture<ExternalStatisticsAggregate> getExternalStatisticsLoad(ExternalStatisticsRequest request,
+            Supplier<CompletableFuture<ExternalStatisticsAggregate>> loader) {
+        return externalStatisticsLoads.computeIfAbsent(request, ignored -> loader.get());
+    }
+
     // ============================ Query ============================
     private StatementBase statement;
     private ConnectContext connectContext;
@@ -242,6 +264,8 @@ public class OptimizerContext {
     public void setObtainedFromInternalStatistics(boolean obtainedFromInternalStatistics) {
         isObtainedFromInternalStatistics = obtainedFromInternalStatistics;
     }
+
+
 
     public void setInMemoPhase(boolean inMemoPhase) {
         this.inMemoPhase = inMemoPhase;

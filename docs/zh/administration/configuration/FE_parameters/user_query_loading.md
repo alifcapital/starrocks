@@ -860,6 +860,14 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述: 在加载触发的统计信息操作期间，用于决定 SAMPLE 和 FULL 统计信息收集之间的行数阈值。如果加载或更改的行数超过此阈值（默认 200,000），则使用 SAMPLE 统计信息收集；否则，使用 FULL 统计信息收集。此设置与 `enable_statistic_collect_on_first_load` 和 `statistic_sample_collect_ratio_threshold_of_first_load` 协同工作。
 - 引入版本: -
 
+### `enable_sync_statistics_load`
+
+- 默认值: false
+- 类型: Boolean
+- 单位: -
+- 是否可变: Yes
+- 描述: 控制查询规划是否等待统计信息缓存加载，包括外部表的基础统计信息、MCV 和分区统计信息。设为 `false` 时，统计信息异步加载，规划阶段可以使用回退估算；设为 `true` 时，规划阶段等待加载完成并使用其结果，加载失败时仍使用可用的回退估算。这可能增加查询规划延迟。该配置只读取已收集的统计信息，不会执行 `ANALYZE`，并在设置该配置的 FE 上动态生效。
+
 ### `statistic_update_interval_sec`
 
 - 默认值: 24 * 60 * 60
@@ -1433,3 +1441,19 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 是否可变: No
 - 描述: 存储 Yarn 配置文件的目录。
 - 引入版本: -
+
+### `statistic_mcv_size`
+
+- 默认值: 100
+- 类型: Int
+- 单位: -
+- 是否动态: 是
+- 描述: 外部表 ANALYZE MCV 默认保留的高频元组最大数量，可通过 mcv_size 为单次收集指定。
+
+### `statistic_mcv_bucket_num`
+
+- 默认值: 64
+- 类型: Int
+- 单位: -
+- 是否动态: 是
+- 描述: 外部表单列 ANALYZE MCV 的默认剩余桶目标数量，可通过 mcv_bucket_num 指定。

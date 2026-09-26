@@ -24,7 +24,6 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.common.AlreadyExistsException;
-import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.qe.ConnectContext;
@@ -37,6 +36,7 @@ import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.DropHistogramStmt;
@@ -50,6 +50,7 @@ import com.starrocks.sql.ast.ShowAnalyzeJobStmt;
 import com.starrocks.sql.ast.ShowAnalyzeStatusStmt;
 import com.starrocks.sql.ast.ShowBasicStatsMetaStmt;
 import com.starrocks.sql.ast.ShowHistogramStatsMetaStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowUserPropertyStmt;
 import com.starrocks.sql.ast.StatementBase;
@@ -60,6 +61,7 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalAnalyzeJob;
 import com.starrocks.statistic.ExternalAnalyzeStatus;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.FullStatisticsCollectJob;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
@@ -103,6 +105,7 @@ import static com.starrocks.sql.analyzer.AnalyzeTestUtil.connectContext;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.getConnectContext;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.getStarRocksAssert;
 import static com.starrocks.sql.ast.StatisticsType.MCDISTINCT;
+import static com.starrocks.sql.ast.StatisticsType.MCV;
 import static com.starrocks.statistic.AnalyzeMgr.IS_MULTI_COLUMN_STATS;
 
 public class AnalyzeStmtTest {
@@ -719,6 +722,23 @@ public class AnalyzeStmtTest {
     }
 
     @Test
+    public void testExternalHistogramIsNeverSampled() {
+        AnalyzeStmt analyzeStmt = (AnalyzeStmt) analyzeSuccess(
+                "analyze table hive0.tpch.customer update histogram on c_name with 64 buckets");
+        Assertions.assertTrue(analyzeStmt.isExternal());
+        Assertions.assertEquals("1", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+        Assertions.assertEquals("64", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_BUCKET_NUM));
+
+        analyzeStmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer update histogram on c_name "
+                + "with 64 buckets properties(\"histogram_sample_ratio\"=\"1\")");
+        Assertions.assertEquals("1", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+
+        analyzeFail("analyze table hive0.tpch.customer update histogram on c_name with 64 buckets "
+                        + "properties(\"histogram_sample_ratio\"=\"0.5\")",
+                "Sampled histogram collection is not supported on external table");
+    }
+
+    @Test
     public void testDropStats() {
         String sql = "drop stats t0";
         DropStatsStmt dropStatsStmt = (DropStatsStmt) analyzeSuccess(sql);
@@ -945,7 +965,7 @@ public class AnalyzeStmtTest {
         analyzeFail("analyze table db.tbl multiple columns (k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11)",
                 "column size 11 exceeded max size of 10 on multi-column combined analyze statement");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE)",
-                "Don't support analyze multi-columns combined statistics on external table");
+                "Multi-column combined statistics are not supported on external tables");
         analyzeFail("analyze table hive0.tpch.customer multiple columns (C_NAME, C_PHONE) with async mode",
                 "not support async analyze on multi-column analyze statement");
 
@@ -1036,11 +1056,13 @@ public class AnalyzeStmtTest {
             }
         };
 
-        ConnectContext session = UtFrameUtils.createDefaultCtx();
-        session.setCurrentWarehouse("etl");
-        session.getSessionVariable().setStatisticCollectParallelism(7);
         String background = Config.lake_background_warehouse;
+        boolean multiWarehouse = Config.enable_multi_warehouse;
         try {
+            Config.enable_multi_warehouse = true;
+            ConnectContext session = UtFrameUtils.createDefaultCtx();
+            session.setCurrentWarehouse("etl");
+            session.getSessionVariable().setStatisticCollectParallelism(7);
             // Manual collection must not depend on the automatic collector's warehouse.
             Config.lake_background_warehouse = "missing_background";
             AnalyzeStmt stmt = (AnalyzeStmt) UtFrameUtils.parseStmtWithNewParser(
@@ -1061,6 +1083,97 @@ public class AnalyzeStmtTest {
             Assertions.assertFalse(collected.get().getSessionVariable().isEnableMaterializedViewRewrite());
         } finally {
             Config.lake_background_warehouse = background;
+            Config.enable_multi_warehouse = multiWarehouse;
+        }
+    }
+
+    @Test
+    public void testAnalyzeMcvStats() {
+        analyzeFail("analyze table hive0.tpch.customer mcv ()");
+        analyzeFail("analyze table db.tbl mcv (kk1)", "MCV statistics are collected on external tables only");
+        analyzeFail("analyze sample table hive0.tpch.customer mcv (C_NAME)",
+                "MCV statistics are collected by a full scan");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME) with async mode",
+                "not support async analyze on MCV analyze statement");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME, C_PHONE, C_ADDRESS, C_CUSTKEY, C_NATIONKEY, "
+                        + "C_ACCTBAL, C_MKTSEGMENT, C_COMMENT, C_NAME, C_PHONE, C_ADDRESS)",
+                "column size 11 exceeded max size of 10 on MCV analyze statement");
+
+        AnalyzeStmt stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (C_NAME)");
+        Assertions.assertTrue(stmt.isExternal());
+        Assertions.assertFalse(stmt.isSample());
+        Assertions.assertFalse(stmt.isAsync());
+        Assertions.assertTrue(stmt.getAnalyzeTypeDesc() instanceof AnalyzeMcvDesc);
+        Assertions.assertEquals(List.of(MCV), stmt.getAnalyzeTypeDesc().getStatsTypes());
+        Assertions.assertEquals(1, stmt.getColumnNames().size());
+
+        stmt = (AnalyzeStmt) analyzeSuccess("analyze full table hive0.tpch.customer mcv (C_NAME, C_PHONE)");
+        Assertions.assertFalse(stmt.isSample());
+        Assertions.assertEquals(2, stmt.getColumnNames().size());
+    }
+
+    @Test
+    public void testMcvCollectionProperties() {
+        analyzeSuccess("analyze table hive0.tpch.customer mcv (C_CUSTKEY) "
+                + "properties ('mcv_size'='10', 'mcv_bucket_num'='8')");
+        analyzeSuccess("analyze table hive0.tpch.customer mcv (C_CUSTKEY) properties ('mcv_bucket_num'='10000')");
+        for (int buckets : List.of(10001, 1000000000, Integer.MAX_VALUE)) {
+            analyzeFail("analyze table hive0.tpch.customer mcv (C_CUSTKEY) properties ('mcv_bucket_num'='"
+                            + buckets + "')", "Property 'mcv_bucket_num' must be between 1 and 10000");
+        }
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME) properties ('mcv_size'='0')",
+                "Property 'mcv_size' must be a positive integer");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME) properties ('mcv_size'='1.5')",
+                "Property 'mcv_size' must be a positive integer");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME, C_PHONE) properties ('mcv_bucket_num'='8')",
+                "mcv_bucket_num applies to single-column MCV statistics only");
+        analyzeFail("analyze table hive0.tpch.customer mcv (C_NAME) properties ('histogram_mcv_size'='10')",
+                "Histogram properties do not apply to MCV; use mcv_size and mcv_bucket_num");
+        analyzeFail("analyze table hive0.tpch.customer (C_NAME) properties ('mcv_size'='10')",
+                "Property 'mcv_size' is only supported for ANALYZE MCV");
+    }
+
+    @Test
+    public void testDropMcvStats() {
+        DropStatsStmt stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer");
+        Assertions.assertTrue(stmt.isMcv());
+        Assertions.assertFalse(stmt.isMultiColumn());
+        Assertions.assertTrue(stmt.isExternal());
+        Assertions.assertTrue(stmt.getColumnNames().isEmpty());
+        stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer (C_PHONE, `c_name`)");
+        Assertions.assertEquals(List.of("c_phone", "c_name"), stmt.getColumnNames());
+        stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer (c_name)");
+        Assertions.assertEquals(List.of("c_name"), stmt.getColumnNames());
+        analyzeFail("drop mcv stats hive0.tpch.customer (c_name, C_NAME)", "specified twice");
+        analyzeFail("drop mcv stats hive0.tpch.customer (missing_column)", "Unknown column");
+        analyzeFail("drop mcv stats hive0.tpch.customer ()");
+        analyzeFail("drop stats hive0.tpch.customer (c_name)");
+        analyzeFail("drop multiple columns stats t0 (v1, v2)");
+        Assertions.assertFalse(((DropStatsStmt) analyzeSuccess("drop stats t0")).isMcv());
+        Assertions.assertTrue(((DropStatsStmt) analyzeSuccess("drop multiple columns stats t0")).isMultiColumn());
+        analyzeFail("drop mcv stats t0", "MCV statistics exist on external tables only");
+        analyzeFail("drop multiple columns stats hive0.tpch.customer",
+                "Multi-column combined statistics exist on native tables only");
+    }
+
+    @Test
+    public void testShowMcvStatsMeta() {
+        ShowMcvStatsMetaStmt stmt = (ShowMcvStatsMetaStmt) analyzeSuccess("show mcv stats meta");
+        List<List<String>> res = ShowExecutor.execute(stmt, getConnectContext()).getResultRows();
+        Assertions.assertTrue(res.isEmpty());
+        ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta("hive0", "tpch", "customer", List.of("c_name"),
+                StatsConstants.AnalyzeType.FULL, List.of(MCV), LocalDateTime.of(2020, 1, 1, 1, 1),
+                Map.of(IS_MULTI_COLUMN_STATS, "true"));
+        getConnectContext().getGlobalStateMgr().getAnalyzeMgr().addExternalMcvStatsMeta(meta);
+        res = ShowExecutor.execute(stmt, getConnectContext()).getResultRows();
+        Assertions.assertEquals(
+                "[[hive0.tpch, customer, [c_name], FULL, MCV, 2020-01-01 01:01:00, {is_multi_column_stats=true}]]",
+                res.toString());
+        // The native listing leaves the external statistics out.
+        ShowMultiColumnStatsMetaStmt nativeStmt =
+                (ShowMultiColumnStatsMetaStmt) analyzeSuccess("show multiple columns stats meta");
+        for (List<String> row : ShowExecutor.execute(nativeStmt, getConnectContext()).getResultRows()) {
+            Assertions.assertNotEquals("hive0.tpch", row.get(0));
         }
     }
 

@@ -1541,6 +1541,13 @@ public final class MetricRepo {
             }
         }
 
+        Map<String, StatisticsCacheMetrics> statisticsCaches = new java.util.TreeMap<>();
+        var state = GlobalStateMgr.getCurrentState();
+        if (state.getStatisticStorage() != null) {
+            statisticsCaches.putAll(state.getStatisticStorage().getCacheMetrics());
+        }
+        StatisticsCacheMetrics.visit(visitor, statisticsCaches);
+
         // database metrics
         collectDatabaseMetrics(visitor);
 

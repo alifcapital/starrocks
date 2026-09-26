@@ -62,7 +62,7 @@ class ReorderJoinStatisticsPruningTest {
         OptExpression expression = OptExpression.create(op);
         expression.deriveLogicalPropertyItself();
         expression.setStatistics(Statistics.builder().setOutputRowCount(100)
-                .setStatsSource(Statistics.StatsSource.ANALYZE)
+                .setStatsSource(Statistics.StatsSource.ANALYZE).setPartitionRestricted(true)
                 .setTableRowCountMayInaccurate(true).setShadowColumns(List.of(id))
                 .addColumnStatistic(id, known).addColumnStatistic(source, known)
                 .addColumnStatistic(cast, known).addColumnStatistic(unused, known)
@@ -96,6 +96,7 @@ class ReorderJoinStatisticsPruningTest {
         OptExpression result = prune(original, id);
         Statistics stats = result.getStatistics();
         assertEquals(oldStats.getStatsSource(), stats.getStatsSource());
+        assertEquals(oldStats.isPartitionRestricted(), stats.isPartitionRestricted());
         assertEquals(oldStats.isTableRowCountMayInaccurate(), stats.isTableRowCountMayInaccurate());
         assertEquals(oldStats.getShadowColumns(), stats.getShadowColumns());
         assertEquals(oldStats.getMultiColumnCombinedStats(), stats.getMultiColumnCombinedStats());

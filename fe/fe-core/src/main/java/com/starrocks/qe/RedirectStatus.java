@@ -194,6 +194,7 @@ import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowLoadWarningsStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowOpenTableStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
@@ -875,6 +876,11 @@ public class RedirectStatus {
 
         @Override
         public RedirectStatus visitShowMultiColumnsStatsMetaStatement(ShowMultiColumnStatsMetaStmt statement, Void context) {
+            return RedirectStatus.FORWARD_NO_SYNC;
+        }
+
+        @Override
+        public RedirectStatus visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt statement, Void context) {
             return RedirectStatus.FORWARD_NO_SYNC;
         }
 

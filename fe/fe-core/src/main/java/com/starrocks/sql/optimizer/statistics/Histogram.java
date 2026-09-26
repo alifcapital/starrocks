@@ -16,6 +16,8 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.statistic.StatisticUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Comparator;
 import java.util.List;
@@ -24,13 +26,67 @@ import java.util.Optional;
 import javax.annotation.Nonnull;
 
 public class Histogram {
+    private static final Logger LOG = LogManager.getLogger(Histogram.class);
 
     private final List<Bucket> buckets;
+    private final boolean stringValues;
     private final Map<String, Long> mcv;
 
+    /**
+     * Buckets carry the rows outside the MCVs. Passing none warns: row count estimation degrades to
+     * the MCV rows alone.
+     */
     public Histogram(List<Bucket> buckets, Map<String, Long> mcv) {
-        this.buckets = buckets == null ? List.of() : buckets;
+        this.stringValues = buckets != null && !buckets.isEmpty() && buckets.get(0) instanceof StringBucket;
         this.mcv = mcv == null ? Map.of() : mcv;
+        if (buckets != null && !buckets.isEmpty()) {
+            this.buckets = buckets;
+        } else {
+            LOG.debug("Histogram built without buckets, so its total row count covers the rows in its {} MCV "
+                    + "entries only. Buckets are needed for accurate row count estimation. If the MCV row counts "
+                    + "already cover every row, use Histogram(Map) instead.", this.mcv.size());
+            this.buckets = List.of();
+        }
+    }
+
+    /**
+     * For a histogram with no buckets, where the caller has established that the MCVs cover every
+     * row, or has reported that buckets could not be estimated.
+     */
+    public Histogram(Map<String, Long> mcv) {
+        this(mcv, false);
+    }
+
+    private Histogram(Map<String, Long> mcv, boolean stringValues) {
+        this.stringValues = stringValues;
+        this.mcv = mcv == null ? Map.of() : mcv;
+        this.buckets = List.of();
+    }
+
+    public static Histogram forStrings(List<Bucket> buckets, Map<String, Long> mcv) {
+        return buckets.isEmpty() ? new Histogram(mcv, true) : new Histogram(buckets, mcv);
+    }
+
+    public static Histogram ofSingleBucket(double minValue, double maxValue, double nonNullRowCount,
+                                          Map<String, Long> mcv) {
+        long mcvRows = mcv.values().stream().mapToLong(Long::longValue).sum();
+        long nonMcvRows = Math.max(0L, Math.round(nonNullRowCount) - mcvRows);
+        if (nonMcvRows == 0) {
+            return new Histogram(mcv);
+        }
+        if (!Double.isFinite(minValue) || !Double.isFinite(maxValue)) {
+            return new Histogram(List.of(
+                    new UnknownRangeBucket(nonMcvRows)), mcv);
+        }
+        return new Histogram(List.of(new Bucket(minValue, maxValue, nonMcvRows, 0L)), mcv);
+    }
+
+    public boolean hasUnknownRange() {
+        return buckets.stream().anyMatch(bucket -> bucket instanceof UnknownRangeBucket && bucket.getCount() > 0);
+    }
+
+    public boolean hasStringValues() {
+        return stringValues;
     }
 
     public long getTotalRows() {
@@ -64,6 +120,10 @@ public class Histogram {
     }
 
     public Optional<Long> getRowCountInBucket(ConstantOperator constantOperator, double totalDistinctCount) {
+        if (hasStringValues() && constantOperator.getType().isStringType() && !constantOperator.isNull()) {
+            double rows = StringHistogramEstimator.pointRows(this, constantOperator.getVarchar());
+            return rows > 0 ? Optional.of(Math.max(1L, Math.round(rows))) : Optional.empty();
+        }
         Optional<Double> valueOpt = StatisticUtils.convertStatisticsToDouble(constantOperator.getType(),
                 constantOperator.toString());
         if (valueOpt.isEmpty()) {

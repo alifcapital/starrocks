@@ -21,6 +21,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
+import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionKey;
@@ -33,6 +34,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.AnalyzeTypeDesc;
@@ -90,6 +92,8 @@ public class AnalyzeStmtAnalyzer {
 
             StatsConstants.HISTOGRAM_BUCKET_NUM,
             StatsConstants.HISTOGRAM_MCV_SIZE,
+            StatsConstants.MCV_SIZE,
+            StatsConstants.MCV_BUCKET_NUM,
             StatsConstants.HISTOGRAM_SAMPLE_RATIO,
             StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
             StatsConstants.INIT_SAMPLE_STATS_JOB,
@@ -165,6 +169,29 @@ public class AnalyzeStmtAnalyzer {
 
                 if (statement.isAsync()) {
                     throw new SemanticException("not support async analyze on multi-column analyze statement");
+                }
+            }
+
+            if (analyzeTypeDesc instanceof AnalyzeMcvDesc) {
+                if (columns.isEmpty()) {
+                    throw new SemanticException("MCV statistics need at least one column");
+                }
+                if (columns.size() > Config.statistics_max_multi_column_combined_num) {
+                    throw new SemanticException("column size " + columns.size() + " exceeded max size of "
+                            + Config.statistics_max_multi_column_combined_num + " on MCV analyze statement");
+                }
+                if (!CatalogMgr.isExternalCatalog(statement.getCatalogName())) {
+                    throw new SemanticException("MCV statistics are collected on external tables only");
+                }
+                if (statement.isSample()) {
+                    throw new SemanticException("MCV statistics are collected by a full scan, "
+                            + "use ANALYZE FULL TABLE ... MCV (...)");
+                }
+                if (statement.getPartitionNames() != null) {
+                    throw new SemanticException("not support specify partition names on MCV analyze statement");
+                }
+                if (statement.isAsync()) {
+                    throw new SemanticException("not support async analyze on MCV analyze statement");
                 }
             }
 
@@ -246,6 +273,7 @@ public class AnalyzeStmtAnalyzer {
             }
 
             analyzeProperties(statement.getProperties(), analyzeTable);
+            validateMcvProperties(statement, analyzeTable);
             analyzeAnalyzeTypeDesc(session, statement, statement.getAnalyzeTypeDesc());
 
             if (CatalogMgr.isExternalCatalog(statement.getCatalogName())) {
@@ -254,7 +282,8 @@ public class AnalyzeStmtAnalyzer {
                             "Analyze external table only support hive, iceberg, deltalake, paimon and odps table",
                             tableName.toString());
                 } else if (analyzeTypeDesc instanceof AnalyzeMultiColumnDesc) {
-                    throw new SemanticException("Don't support analyze multi-columns combined statistics on external table");
+                    throw new SemanticException("Multi-column combined statistics are not supported on external "
+                            + "tables, use ANALYZE FULL TABLE ... MCV (...)");
                 }
 
                 statement.setExternal(true);
@@ -374,6 +403,11 @@ public class AnalyzeStmtAnalyzer {
                 }
             }
             analyzeProperties(statement.getProperties(), analyzeJobTable);
+            for (String key : List.of(StatsConstants.MCV_SIZE, StatsConstants.MCV_BUCKET_NUM)) {
+                if (statement.getProperties().containsKey(key)) {
+                    throw new SemanticException("Property '%s' is only supported for ANALYZE MCV", key);
+                }
+            }
             analyzeAnalyzeTypeDesc(session, statement, statement.getAnalyzeTypeDesc());
             return null;
         }
@@ -421,6 +455,52 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException("Property %s value is error, msg: %s",
                             StatsConstants.STATISTIC_EXCLUDE_PATTERN, e.getMessage());
                 }
+            }
+        }
+
+        private void validateMcvProperties(AnalyzeStmt statement, Table table) {
+            boolean mcv = statement.getAnalyzeTypeDesc() instanceof AnalyzeMcvDesc;
+            for (String key : List.of(StatsConstants.MCV_SIZE, StatsConstants.MCV_BUCKET_NUM)) {
+                String value = statement.getProperties().get(key);
+                if (value == null) {
+                    continue;
+                }
+                if (!mcv) {
+                    throw new SemanticException("Property '%s' is only supported for ANALYZE MCV", key);
+                }
+                try {
+                    int parsed = Integer.parseInt(value);
+                    if (parsed <= 0) {
+                        throw new NumberFormatException();
+                    }
+                    if (key.equals(StatsConstants.MCV_BUCKET_NUM) && parsed > FunctionSet.DS_KLL_MAX_BUCKETS) {
+                        throw new SemanticException("Property '%s' must be between 1 and %s",
+                                key, FunctionSet.DS_KLL_MAX_BUCKETS);
+                    }
+                } catch (NumberFormatException e) {
+                    throw new SemanticException("Property '%s' must be a positive integer", key);
+                }
+            }
+            if (!mcv) {
+                return;
+            }
+            for (String key : statement.getProperties().keySet()) {
+                if (key.startsWith("histogram_")) {
+                    throw new SemanticException("Histogram properties do not apply to MCV; use mcv_size and mcv_bucket_num");
+                }
+            }
+            for (String name : statement.getColumnNames()) {
+                if (table.getColumn(name) == null) {
+                    throw new SemanticException("MCV statistics require top-level scalar columns: %s", name);
+                }
+                com.starrocks.type.Type type = table.getColumn(name).getType();
+                if (!type.canStatistic() || type.isComplexType() || type.isJsonType() || type.isOnlyMetricType()) {
+                    throw new SemanticException("Can't collect MCV statistics on column type %s", type.toSql());
+                }
+            }
+            if (statement.getColumnNames().size() != 1
+                    && statement.getProperties().containsKey(StatsConstants.MCV_BUCKET_NUM)) {
+                throw new SemanticException("mcv_bucket_num applies to single-column MCV statistics only");
             }
         }
 
@@ -472,6 +552,32 @@ public class AnalyzeStmtAnalyzer {
                     throw new SemanticException("Bucket number can't less than 1");
                 }
                 properties.put(StatsConstants.HISTOGRAM_BUCKET_NUM, String.valueOf(bucket));
+
+                if (analyzeTable.isAnalyzableExternalTable()) {
+                    // External histograms are built by sketches over a full scan of the column (see
+                    // ExternalHistogramStatisticsCollectJob); there is no sampled collection for them.
+                    // Every UPDATE HISTOGRAM statement is parsed as a sampled one, so only an explicit
+                    // histogram_sample_ratio below 1 asks for a sample.
+                    String ratio = properties.get(StatsConstants.HISTOGRAM_SAMPLE_RATIO);
+                    boolean sampleRequested = false;
+                    if (ratio != null) {
+                        try {
+                            sampleRequested = Double.parseDouble(ratio) < 1;
+                        } catch (NumberFormatException e) {
+                            throw new SemanticException("Invalid histogram_sample_ratio: %s", ratio);
+                        }
+                    }
+                    if (sampleRequested) {
+                        throw new SemanticException("Sampled histogram collection is not supported on external "
+                                + "table; ANALYZE TABLE ... UPDATE HISTOGRAM scans the whole column");
+                    }
+                    properties.put(StatsConstants.HISTOGRAM_SAMPLE_RATIO, "1");
+                    properties.computeIfAbsent(StatsConstants.HISTOGRAM_MCV_SIZE,
+                            p -> String.valueOf(Config.histogram_mcv_size));
+                    properties.computeIfAbsent(StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
+                            p -> String.valueOf(Config.histogram_collect_bucket_ndv_mode));
+                    return;
+                }
 
                 properties.computeIfAbsent(StatsConstants.HISTOGRAM_MCV_SIZE,
                         p -> String.valueOf(Config.histogram_mcv_size));
@@ -532,6 +638,31 @@ public class AnalyzeStmtAnalyzer {
             statement.setTableRef(tableRef);
             if (CatalogMgr.isExternalCatalog(tableRef.getCatalogName())) {
                 statement.setExternal(true);
+            }
+            if (statement.isMcv() && !statement.isExternal()) {
+                throw new SemanticException("MCV statistics exist on external tables only");
+            }
+            if (statement.isMultiColumn() && statement.isExternal()) {
+                throw new SemanticException("Multi-column combined statistics exist on native tables only, "
+                        + "use DROP MCV STATS");
+            }
+            if (!statement.getColumnNames().isEmpty()) {
+                TableName tableName = new TableName(tableRef.getCatalogName(), tableRef.getDbName(),
+                        tableRef.getTableName(), tableRef.getPos());
+                Table table = MetaUtils.getSessionAwareTable(session, null, tableName);
+                Set<String> mentionedColumns = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
+                List<String> columnNames = Lists.newArrayList();
+                for (String name : statement.getColumnNames()) {
+                    Column column = table.getColumn(name);
+                    if (column == null) {
+                        throw new SemanticException("Unknown column '%s'", name);
+                    }
+                    if (!mentionedColumns.add(column.getName())) {
+                        throw new SemanticException("Column '%s' specified twice", name);
+                    }
+                    columnNames.add(column.getName());
+                }
+                statement.setColumnNames(columnNames);
             }
             return null;
         }

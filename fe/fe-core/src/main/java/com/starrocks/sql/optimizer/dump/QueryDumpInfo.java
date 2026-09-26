@@ -29,6 +29,7 @@ import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.MaterializedViewOptimizer;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -53,6 +54,30 @@ public class QueryDumpInfo implements DumpInfo {
     private final Map<String, Map<String, Long>> partitionRowCountMap = new HashMap<>();
     // tableName->columnName->column statistics
     private final Map<String, Map<String, ColumnStatistic>> tableStatisticsMap = new HashMap<>();
+    // tableName->the multi-column statistics of the table: one group per collected column set, with
+    // its combined NDV and, for an external table, its MCV list.
+    private final Map<String, List<ExternalMcvStatistics.Group>> externalMcvStatisticsMap =
+            new LinkedHashMap<>();
+    // tableName->representative partition values (one tuple per concrete partition). Only populated for tables
+    // whose CREATE TABLE omits partition definitions (automatic/expression partitioning), so replay can
+    // recreate those partitions and match the per-partition row counts. Each inner list is one partition's
+    // value tuple (a single element for single-column partitioning).
+    private final Map<String, List<List<String>>> tableToAutomaticPartitionValues = new HashMap<>();
+    // db.table -> external catalog name, captured for connector (iceberg/hive/...) tables so replay can
+    // recreate the real external catalog directly instead of inferring it from the "resource" DDL property or
+    // the catalog.db.table references in the SQL. Only emitted by newer dumps; absent for older ones (replay
+    // then falls back to recovering the catalog from the SQL, keeping backward compatibility).
+    private final Map<String, String> externalTableCatalogMap = new LinkedHashMap<>();
+    // db.table -> total row count the connector reported for an external table. Iceberg has no other place to
+    // record it (unlike hive's hms scanRowCount), and without it replay falls back to a tiny default that
+    // clamps every column NDV and cardinality. Only emitted by newer dumps.
+    private final Map<String, Long> externalTableRowCountMap = new LinkedHashMap<>();
+    // db.table -> iceberg partition-spec transforms (e.g. "lo_orderdate" for identity, "day(dt)"), so replay
+    // rebuilds a real PartitionSpec instead of an empty (unpartitioned) one.
+    private final Map<String, List<String>> externalTablePartitionSpecMap = new LinkedHashMap<>();
+    // db.table -> iceberg partition names ("col=value"), so replay recreates the partitions and reproduces
+    // partition pruning (partitions=X/Y). Only emitted by newer dumps for partitioned iceberg tables.
+    private final Map<String, List<String>> externalTablePartitionNameMap = new LinkedHashMap<>();
     // tableName->createTableStmt
     private final Map<String, String> createTableStmtMap = new LinkedHashMap<>();
     // viewName->createViewStmt
@@ -202,6 +227,7 @@ public class QueryDumpInfo implements DumpInfo {
         this.tableMap.clear();
         this.partitionRowCountMap.clear();
         this.tableStatisticsMap.clear();
+        this.externalMcvStatisticsMap.clear();
         this.createTableStmtMap.clear();
         this.numCoresPerBe.clear();
         this.numCoresPerWarehouse.clear();
@@ -263,12 +289,74 @@ public class QueryDumpInfo implements DumpInfo {
         return tableStatisticsMap;
     }
 
+    @Override
+    public void addExternalMcvStatistics(Table table, ExternalMcvStatistics.Group group) {
+        addExternalMcvStatistics(getTableName(table.getId()), group);
+    }
+
+    public void addExternalMcvStatistics(String tableName, ExternalMcvStatistics.Group group) {
+        List<ExternalMcvStatistics.Group> groups =
+                externalMcvStatisticsMap.computeIfAbsent(tableName, k -> new ArrayList<>());
+        groups.removeIf(existing -> existing.getColumnNames().equals(group.getColumnNames()));
+        groups.add(group);
+    }
+
+    public Map<String, List<ExternalMcvStatistics.Group>> getExternalMcvStatisticsMap() {
+        return externalMcvStatisticsMap;
+    }
+
+    public void addAutomaticPartitionValues(String tableName, List<List<String>> partitionValues) {
+        tableToAutomaticPartitionValues.put(tableName, partitionValues);
+    }
+
+    public Map<String, List<List<String>>> getAutomaticPartitionValuesMap() {
+        return tableToAutomaticPartitionValues;
+    }
+
     public Map<Long, Pair<String, Table>> getTableMap() {
         return tableMap;
     }
 
     public Map<Long, Pair<String, View>> getViewMap() {
         return viewMap;
+    }
+
+    public void addExternalTableCatalog(String dbAndTable, String catalogName) {
+        externalTableCatalogMap.put(dbAndTable, catalogName);
+    }
+
+    public Map<String, String> getExternalTableCatalogMap() {
+        return externalTableCatalogMap;
+    }
+
+    public void addExternalTableRowCount(Table table, long rowCount) {
+        externalTableRowCountMap.put(getTableName(table.getId()), rowCount);
+    }
+
+    public void addExternalTableRowCount(String dbAndTable, long rowCount) {
+        externalTableRowCountMap.put(dbAndTable, rowCount);
+    }
+
+    public Map<String, Long> getExternalTableRowCountMap() {
+        return externalTableRowCountMap;
+    }
+
+    public void addExternalTablePartitions(Table table, List<String> partitionSpec, List<String> partitionNames) {
+        addExternalTablePartitions(getTableName(table.getId()), partitionSpec, partitionNames);
+    }
+
+    public void addExternalTablePartitions(String dbAndTable, List<String> partitionSpec,
+                                           List<String> partitionNames) {
+        externalTablePartitionSpecMap.put(dbAndTable, partitionSpec);
+        externalTablePartitionNameMap.put(dbAndTable, partitionNames);
+    }
+
+    public Map<String, List<String>> getExternalTablePartitionSpecMap() {
+        return externalTablePartitionSpecMap;
+    }
+
+    public Map<String, List<String>> getExternalTablePartitionNameMap() {
+        return externalTablePartitionNameMap;
     }
 
     public Map<String, String> getCreateTableStmtMap() {

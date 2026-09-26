@@ -22,13 +22,17 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.system.information.AnalyzeStatusSystemTable;
 import com.starrocks.common.FeConstants;
+import com.starrocks.common.Pair;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.journal.JournalEntity;
 import com.starrocks.persist.OperationType;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.sql.optimizer.statistics.CachedStatisticStorage;
+import com.starrocks.sql.optimizer.statistics.StatisticStorage;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.thrift.TAnalyzeStatusReq;
 import com.starrocks.thrift.TUniqueId;
@@ -45,8 +49,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class AnalyzeMgrTest {
     public static ConnectContext connectContext;
@@ -324,6 +331,84 @@ public class AnalyzeMgrTest {
                 requestId, TransactionState.LoadJobSourceType.INSERT_STREAMING, null, 44444L, 10000);
         transactionState.setTxnCommitAttachment(new InsertTxnCommitAttachment(0));
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().updateLoadRows(transactionState);
+    }
+
+    @Test
+    public void testNativeDropBasicAndMultiColumnAreIndependent() throws Exception {
+        StarRocksAssert ddl = new StarRocksAssert(connectContext);
+        String dbName = "db_drop_stats_isolation";
+        ddl.withDatabase(dbName).useDatabase(dbName)
+                .withTable("create table t (a int, b int) properties('replication_num'='1')");
+        GlobalStateMgr state = GlobalStateMgr.getCurrentState();
+        Database db = ddl.getDb(dbName);
+        Table table = state.getLocalMetastore().getTable(dbName, "t");
+        AnalyzeMgr manager = state.getAnalyzeMgr();
+        BasicStatsMeta basic = new BasicStatsMeta(db.getId(), table.getId(), List.of("a", "b"),
+                StatsConstants.AnalyzeType.FULL, LocalDateTime.now(), Map.of());
+        MultiColumnStatsMeta multi = new MultiColumnStatsMeta(db.getId(), table.getId(), Set.of(0, 1),
+                StatsConstants.AnalyzeType.FULL, List.of(StatisticsType.MCDISTINCT), LocalDateTime.now(), Map.of());
+        HistogramStatsMeta histogram = new HistogramStatsMeta(db.getId(), table.getId(), "a",
+                StatsConstants.AnalyzeType.HISTOGRAM, LocalDateTime.now(), Map.of());
+        manager.replayAddBasicStatsMeta(basic);
+        manager.replayAddMultiColumnStatsMeta(multi);
+        manager.replayAddHistogramStatsMeta(histogram);
+        List<String> deletes = new ArrayList<>();
+        new MockUp<StatisticExecutor>() {
+            @Mock
+            public boolean dropTableStatistics(ConnectContext ctx, List<Long> ids, StatsConstants.AnalyzeType type) {
+                Assertions.assertEquals(List.of(table.getId()), ids);
+                deletes.add(type.name());
+                return true;
+            }
+
+            @Mock
+            public boolean dropTableMultiColumnStatistics(ConnectContext ctx, List<Long> ids) {
+                Assertions.assertEquals(List.of(table.getId()), ids);
+                deletes.add("MULTIPLE");
+                return true;
+            }
+
+            @Mock
+            public boolean dropHistogramByTableIds(ConnectContext ctx, List<Long> ids) {
+                Assertions.fail("DROP STATS must not delete histograms");
+                return false;
+            }
+        };
+        StatisticStorage previous = state.getStatisticStorage();
+        StatisticStorage storage = org.mockito.Mockito.mock(StatisticStorage.class);
+        state.setStatisticStorage(storage);
+        try {
+            connectContext.setQueryId(UUIDUtil.genUUID());
+            connectContext.getState().reset();
+            StmtExecutor.newInternalExecutor(connectContext, UtFrameUtils.parseStmtWithNewParser(
+                    "DROP STATS " + dbName + ".t", connectContext)).execute();
+            Assertions.assertFalse(connectContext.getState().isError(), connectContext.getState().getErrorMessage());
+            Assertions.assertEquals(List.of("SAMPLE", "FULL"), deletes);
+            Assertions.assertNull(manager.getBasicStatsMetaMap().get(table.getId()));
+            Assertions.assertTrue(manager.getMultiColumnStatsMetaMap().containsValue(multi));
+            Assertions.assertSame(histogram, manager.getHistogramStatsMetaMap().get(new Pair<>(table.getId(), "a")));
+            org.mockito.Mockito.verify(storage).expireTableAndColumnStatistics(table, List.of("a", "b"));
+            org.mockito.Mockito.verifyNoMoreInteractions(storage);
+
+            manager.replayAddBasicStatsMeta(basic);
+            deletes.clear();
+            org.mockito.Mockito.clearInvocations(storage);
+            StmtExecutor.newInternalExecutor(connectContext, UtFrameUtils.parseStmtWithNewParser(
+                    "DROP MULTIPLE COLUMNS STATS " + dbName + ".t", connectContext)).execute();
+            Assertions.assertFalse(connectContext.getState().isError(), connectContext.getState().getErrorMessage());
+            Assertions.assertEquals(List.of("MULTIPLE"), deletes);
+            Assertions.assertSame(basic, manager.getBasicStatsMetaMap().get(table.getId()));
+            Assertions.assertFalse(manager.getMultiColumnStatsMetaMap().containsValue(multi));
+            Assertions.assertSame(histogram, manager.getHistogramStatsMetaMap().get(new Pair<>(table.getId(), "a")));
+            org.mockito.Mockito.verify(storage).expireMultiColumnStatistics(table.getId());
+            org.mockito.Mockito.verifyNoMoreInteractions(storage);
+        } finally {
+            state.setStatisticStorage(previous);
+            manager.replayRemoveBasicStatsMeta(basic);
+            manager.replayRemoveMultiColumnStatsMeta(multi);
+            manager.replayRemoveHistogramStatsMeta(histogram);
+            ddl.dropDatabase(dbName);
+        }
     }
 
     @Test

@@ -77,11 +77,11 @@ OutPut Exchange Id: 32
 |  common expressions:
 |  75 <-> 1.0 - [25: L_DISCOUNT, DOUBLE, false]
 |  76 <-> [24: L_EXTENDEDPRICE, DOUBLE, false] * [75: subtract, DOUBLE, false]
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
 |  * year-->[1995.0, 1996.0, 0.0, 2.0, 2.0] ESTIMATE
-|  * expr-->[810.9, 104949.5, 0.0, 8.0, 243622.67615999994] ESTIMATE
-|  * case-->[0.0, 104949.5, 0.0, 8.0, 243623.67615999994] MCV: [[0:243623]] ESTIMATE
+|  * expr-->[810.9, 104949.5, 0.0, 8.0, 290116.7934836973] ESTIMATE
+|  * case-->[0.0, 104949.5, 0.0, 8.0, 290117.7934836973] ESTIMATE
 |
 29:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
@@ -89,17 +89,17 @@ OutPut Exchange Id: 32
 |  build runtime filters:
 |  - filter_id = 6, build_expr = (60: N_NATIONKEY), remote = false
 |  output columns: 24, 25, 40, 61
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
 |  * S_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE
-|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 243622.67615999994] ESTIMATE
+|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 290116.7934836973] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |  * N_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] MCV: [[22:1][23:1][24:1][10:1][11:1]] ESTIMATE
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 25.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |  * year-->[1995.0, 1996.0, 0.0, 2.0, 2.0] ESTIMATE
-|  * expr-->[810.9, 104949.5, 0.0, 8.0, 243622.67615999994] ESTIMATE
-|  * case-->[0.0, 104949.5, 0.0, 8.0, 243623.67615999994] MCV: [[0:243623]] ESTIMATE
+|  * expr-->[810.9, 104949.5, 0.0, 8.0, 290116.7934836973] ESTIMATE
+|  * case-->[0.0, 104949.5, 0.0, 8.0, 290117.7934836973] ESTIMATE
 |
 |----28:EXCHANGE
 |       distribution type: BROADCAST
@@ -111,10 +111,10 @@ OutPut Exchange Id: 32
 |  24 <-> [24: L_EXTENDEDPRICE, DOUBLE, false]
 |  25 <-> [25: L_DISCOUNT, DOUBLE, false]
 |  40 <-> [40: O_ORDERDATE, DATE, false]
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
 |  * S_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE
-|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 243622.67615999994] ESTIMATE
+|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 290116.7934836973] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |
@@ -124,19 +124,19 @@ OutPut Exchange Id: 32
 |  build runtime filters:
 |  - filter_id = 5, build_expr = (21: L_SUPPKEY), remote = false
 |  output columns: 14, 24, 25, 40
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
-|  * S_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 243622.67615999994] ESTIMATE
+|  * S_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 290116.7934836973] ESTIMATE
 |  * S_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE
-|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 243622.67615999994] ESTIMATE
-|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 243622.67615999994] ESTIMATE
+|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 290116.7934836973] ESTIMATE
+|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 290116.7934836973] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |
 |----24:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [21: L_SUPPKEY, INT, false]
-|       cardinality: 243623
+|       cardinality: 290117
 |
 0:OlapScanNode
 table: supplier, rollup: supplier
@@ -179,10 +179,10 @@ OutPut Exchange Id: 24
 |  24 <-> [24: L_EXTENDEDPRICE, DOUBLE, false]
 |  25 <-> [25: L_DISCOUNT, DOUBLE, false]
 |  40 <-> [40: O_ORDERDATE, DATE, false]
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
-|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 243622.67615999997] ESTIMATE
-|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 243622.67615999997] ESTIMATE
+|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 290116.79348369734] ESTIMATE
+|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 290116.79348369734] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |
@@ -192,19 +192,19 @@ OutPut Exchange Id: 24
 |  build runtime filters:
 |  - filter_id = 4, build_expr = (37: O_CUSTKEY), remote = false
 |  output columns: 21, 24, 25, 40
-|  cardinality: 243623
+|  cardinality: 290117
 |  column statistics:
-|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 243622.67615999997] ESTIMATE
-|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 243622.67615999997] ESTIMATE
+|  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 290116.79348369734] ESTIMATE
+|  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 290116.79348369734] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
-|  * C_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 5.0] ESTIMATE
-|  * N_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 5.0] MCV: [[22:1][23:1][24:1][10:1][11:1]] ESTIMATE
+|  * N_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
+|  * R_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
 |
 |----21:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [37: O_CUSTKEY, INT, false]
-|       cardinality: 1218113
+|       cardinality: 1450584
 |
 10:Project
 |  output columns:
@@ -255,12 +255,12 @@ OutPut Exchange Id: 21
 |  25 <-> [25: L_DISCOUNT, DOUBLE, false]
 |  37 <-> [37: O_CUSTKEY, INT, false]
 |  40 <-> [40: O_ORDERDATE, DATE, false]
-|  cardinality: 1218113
+|  cardinality: 1450584
 |  column statistics:
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
-|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1218113.3808] ESTIMATE
+|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1450583.9674184867] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |
 19:HASH JOIN
@@ -269,20 +269,20 @@ OutPut Exchange Id: 21
 |  build runtime filters:
 |  - filter_id = 3, build_expr = (19: L_ORDERKEY), remote = false
 |  output columns: 21, 24, 25, 37, 40
-|  cardinality: 1218113
+|  cardinality: 1450584
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
-|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
+|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
-|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1218113.3808] ESTIMATE
+|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1450583.9674184867] ESTIMATE
 |  * O_ORDERDATE-->[7.888896E8, 8.519616E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1996-05-31:69600][1996-12-31:69000][1995-04-13:69000][1996-09-23:68900]] ESTIMATE
 |
 |----18:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [19: L_ORDERKEY, INT, false]
-|       cardinality: 4005000
+|       cardinality: 4769333
 |
 11:OlapScanNode
 table: orders, rollup: orders
@@ -310,9 +310,9 @@ OutPut Exchange Id: 18
 |  21 <-> [21: L_SUPPKEY, INT, false]
 |  24 <-> [24: L_EXTENDEDPRICE, DOUBLE, false]
 |  25 <-> [25: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 4005000
+|  cardinality: 4769333
 |  column statistics:
-|  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 4005000.0] ESTIMATE
+|  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 4769333.365089194] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
@@ -323,18 +323,18 @@ OutPut Exchange Id: 18
 |  build runtime filters:
 |  - filter_id = 2, build_expr = (1: P_PARTKEY), remote = false
 |  output columns: 19, 21, 24, 25
-|  cardinality: 4005000
+|  cardinality: 4769333
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
-|  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 4005000.0] ESTIMATE
-|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
+|  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 4769333.365089194] ESTIMATE
+|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |
 |----15:EXCHANGE
 |       distribution type: BROADCAST
-|       cardinality: 133500
+|       cardinality: 158978
 |
 12:OlapScanNode
 table: lineitem, rollup: lineitem
@@ -360,9 +360,9 @@ OutPut Exchange Id: 15
 14:Project
 |  output columns:
 |  1 <-> [1: P_PARTKEY, INT, false]
-|  cardinality: 133500
+|  cardinality: 158978
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
 |
 13:OlapScanNode
 table: part, rollup: part
@@ -370,9 +370,9 @@ preAggregation: on
 Predicates: [5: P_TYPE, VARCHAR, false] = 'ECONOMY ANODIZED STEEL'
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=33.0
-cardinality: 133500
+cardinality: 158978
 column statistics:
-* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 133500.0] ESTIMATE
+* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 158977.77883630648] ESTIMATE
 * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[ECONOMY ANODIZED STEEL:133500]] ESTIMATE
 
 PLAN FRAGMENT 8(F02)

@@ -2323,6 +2323,19 @@ public class StmtExecutor {
                                 analyzeStmt.getProperties()),
                         analyzeStatus,
                         false, false /* resetWarehouse */);
+            } else if (!analyzeTypeDesc.getStatsTypes().isEmpty()) {
+                statisticExecutor.collectStatistics(statsConnectCtx,
+                        StatisticsCollectJobFactory.buildExternalMcvStatisticsCollectJob(
+                                analyzeStmt.getCatalogName(),
+                                db, table,
+                                analyzeStmt.getColumnNames(),
+                                analyzeStmt.getColumnTypes(),
+                                StatsConstants.AnalyzeType.FULL,
+                                StatsConstants.ScheduleType.ONCE, analyzeStmt.getProperties(),
+                                analyzeTypeDesc.getStatsTypes(),
+                                List.of(analyzeStmt.getColumnNames())),
+                        analyzeStatus,
+                        false, false /* resetWarehouse */);
             } else {
                 StatsConstants.AnalyzeType analyzeType = analyzeStmt.isSample() ? StatsConstants.AnalyzeType.SAMPLE :
                         StatsConstants.AnalyzeType.FULL;
@@ -2388,23 +2401,32 @@ public class StmtExecutor {
         AnalyzeMgr analyzeMgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
         StatisticStorage statisticStorage = GlobalStateMgr.getCurrentState().getStatisticStorage();
         if (dropStatsStmt.isExternal()) {
-            analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
-            analyzeMgr.dropExternalBasicStatsData(table.getUUID());
-            analyzeMgr.removeExternalBasicStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
-            List<String> columns = table.getBaseSchema().stream().map(Column::getName).collect(Collectors.toList());
-            statisticStorage.expireConnectorTableColumnStatistics(table, columns);
+            if (dropStatsStmt.isMcv()) {
+                if (dropStatsStmt.getColumnNames().isEmpty()) {
+                    analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
+                    analyzeMgr.dropExternalMcvStatsMetaAndData(StatisticUtils.buildConnectContext(), tableName, table);
+                } else {
+                    analyzeMgr.dropExternalMcvStatsMetaAndData(StatisticUtils.buildConnectContext(), tableName, table,
+                            dropStatsStmt.getColumnNames());
+                }
+                statisticStorage.expireExternalMcvStatistics(table.getUUID());
+            } else {
+                analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
+                analyzeMgr.dropExternalBasicStatsData(table.getUUID());
+                analyzeMgr.removeExternalBasicStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+                List<String> columns = table.getBaseSchema().stream().map(Column::getName).collect(Collectors.toList());
+                statisticStorage.expireConnectorTableColumnStatistics(table, columns);
+            }
         } else {
-            List<String> columns = table.getBaseSchema().stream().filter(d -> !d.isAggregated()).map(Column::getName)
-                    .collect(Collectors.toList());
-            analyzeMgr.dropMultiColumnStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
-            statisticStorage.expireMultiColumnStatistics(table.getId());
-            GlobalStateMgr.getCurrentState().getAnalyzeMgr().dropAnalyzeStatus(table.getId());
-
-            if (!dropStatsStmt.isMultiColumn()) {
-                GlobalStateMgr.getCurrentState().getAnalyzeMgr().dropAnalyzeStatus(table.getId());
-                GlobalStateMgr.getCurrentState().getAnalyzeMgr()
-                        .dropBasicStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
-                GlobalStateMgr.getCurrentState().getStatisticStorage().expireTableAndColumnStatistics(table, columns);
+            analyzeMgr.dropAnalyzeStatus(table.getId());
+            if (dropStatsStmt.isMultiColumn()) {
+                analyzeMgr.dropMultiColumnStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
+                statisticStorage.expireMultiColumnStatistics(table.getId());
+            } else {
+                List<String> columns = table.getBaseSchema().stream().filter(d -> !d.isAggregated()).map(Column::getName)
+                        .collect(Collectors.toList());
+                analyzeMgr.dropBasicStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
+                statisticStorage.expireTableAndColumnStatistics(table, columns);
             }
         }
     }

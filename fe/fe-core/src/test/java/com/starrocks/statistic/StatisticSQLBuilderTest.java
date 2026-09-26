@@ -16,10 +16,15 @@ package com.starrocks.statistic;
 
 import com.google.common.collect.ImmutableList;
 import com.starrocks.type.IntegerType;
+import com.starrocks.type.VarcharType;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 // external_column_statistics / external_histogram_statistics store table_uuid hashed
 // (StatisticUtils.hashTableUuidForPkStorage) to stay within BE's primary_key_limit_size.
@@ -30,6 +35,62 @@ class StatisticSQLBuilderTest {
 
     private static final String TABLE_UUID =
             "iceberg.udp_abx_etl_db1_datawarehouse.tenant.account_buying_group.d6cfa1ed-0000-0000-0000-000000000000";
+
+    @Test
+    void dropMcvGroupUsesCollectionKeyAndPreservesOtherGroups() {
+        String all = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID);
+        String selected = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID, List.of("a", "b"));
+        Assertions.assertEquals(all + " and column_ids = '"
+                + ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("a", "b")) + "'", selected);
+        Assertions.assertEquals(selected,
+                StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID, List.of("b", "a")));
+        Assertions.assertNotEquals(selected,
+                StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID, List.of("a")));
+        Assertions.assertNotEquals(selected,
+                StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID, List.of("a", "b", "c")));
+        Assertions.assertTrue(selected.contains(StatisticUtils.hashTableUuidForPkStorage(TABLE_UUID)));
+        Assertions.assertTrue(selected.contains(TABLE_UUID));
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(TABLE_UUID, List.of()));
+    }
+
+    @Test
+    void partitionRequestsPreserveMissingPairsAndGroupEqualColumnSets() {
+        Map<String, Set<String>> request = new LinkedHashMap<>();
+        request.put("p=1", Set.of("a"));
+        request.put("p=2", Set.of("a"));
+        request.put("p=3", Set.of("b"));
+        String sql = StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID, request, false);
+        Assertions.assertTrue(sql.contains("(partition_name IN ('p=1', 'p=2') AND column_name IN ('a')) OR "
+                + "(partition_name IN ('p=3') AND column_name IN ('b'))"), sql);
+        Assertions.assertEquals(1, StringUtils.countMatches(sql, "FROM _statistics_.external_column_statistics"));
+        Assertions.assertTrue(sql.contains("WHERE rn = 1"));
+        String escaped = StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID,
+                Map.of("p='x", Set.of("c'1")), false);
+        Assertions.assertTrue(escaped.contains("'p=''x'"), escaped);
+        Assertions.assertTrue(escaped.contains("'c''1'"), escaped);
+        Assertions.assertTrue(StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID, Map.of(), false)
+                .contains("AND (FALSE)"));
+    }
+
+    @Test
+    void unpartitionedRequestsUseOneLogicalRowPerColumnRegardlessOfStoredPartitionLabel() {
+        String sql = StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID,
+                Map.of("", Set.of("a")), true);
+        Assertions.assertTrue(sql.contains("as INT), '', column_name, row_count, data_size, hll_serialize(ndv)"), sql);
+        Assertions.assertTrue(sql.contains("partition by column_name order by update_time desc"), sql);
+        Assertions.assertTrue(sql.contains("column_name IN ('a')"), sql);
+        Assertions.assertFalse(sql.contains("partition_name"), sql);
+        Assertions.assertTrue(sql.contains("WHERE rn = 1"), sql);
+    }
+
+    @Test
+    void mixedTypePredicatesEscapeColumnNames() {
+        String sql = StatisticSQLBuilder.buildQueryExternalFullStatisticsSQL(TABLE_UUID,
+                List.of("a\"b", "c\\d"), List.of(IntegerType.BIGINT, VarcharType.VARCHAR));
+        Assertions.assertTrue(sql.contains("column_name in (\"a\\\"b\")"), sql);
+        Assertions.assertTrue(sql.contains("column_name in (\"c\\\\d\")"), sql);
+    }
 
     @Test
     void buildQueryExternalFullStatisticsSQLMatchesHashedAndRawUuid() {
@@ -160,4 +221,22 @@ class StatisticSQLBuilderTest {
         Assertions.assertTrue(histogramSql.contains("table_name = 'o''brien'"), histogramSql);
         Assertions.assertTrue(histogramSql.contains("column_name in ('c''1')"), histogramSql);
     }
+    @Test
+    void partitionBlocksKeepExactMembershipLatestRowsAndTypedMinMax() {
+        var a = com.starrocks.sql.optimizer.statistics.ExternalStatisticsCacheKey.block(
+                TABLE_UUID, "a", List.of("p='1", "p=3"));
+        var b = com.starrocks.sql.optimizer.statistics.ExternalStatisticsCacheKey.block(
+                TABLE_UUID, "b", List.of("p=2"));
+        String sql = StatisticSQLBuilder.buildQueryExternalPartitionBlocksSQL(TABLE_UUID, List.of(a, b),
+                Map.of("a", IntegerType.LARGEINT, "b", com.starrocks.type.DateType.DATETIME));
+        Assertions.assertTrue(sql.contains("'p=''1', 'p=3'"), sql);
+        Assertions.assertTrue(sql.contains("column_name IN ('b') AND partition_name IN ('p=2')"), sql);
+        Assertions.assertTrue(sql.contains("partition by partition_name, column_name order by update_time desc"), sql);
+        Assertions.assertTrue(sql.contains("min(cast(nullif(min, '') as " + IntegerType.LARGEINT.toSql() + "))"), sql);
+        Assertions.assertTrue(sql.toLowerCase(java.util.Locale.ROOT).contains("as datetime"), sql);
+        Assertions.assertTrue(sql.contains("json_array(partition_name, row_count)"), sql);
+        Assertions.assertEquals(2, StringUtils.countMatches(sql, "hll_serialize(hll_union(ndv))"));
+        Assertions.assertFalse(sql.contains("group_concat"), "coverage must not be truncated by group_concat_max_len");
+    }
+
 }

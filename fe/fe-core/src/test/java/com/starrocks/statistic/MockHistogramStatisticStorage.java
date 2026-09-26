@@ -23,11 +23,15 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.starrocks.catalog.Table;
+import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.StatisticStorage;
 import com.starrocks.type.DateType;
@@ -49,6 +53,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.Utils.getLongFromDateTime;
@@ -384,6 +389,41 @@ public class MockHistogramStatisticStorage implements StatisticStorage {
             connectorTableColumnStats.add(new ConnectorTableColumnStats(columnStatistic, rowCount, "2024-01-01 00:00:00"));
         }
         return connectorTableColumnStats;
+    }
+
+    @Override
+    public Map<String, Histogram> getConnectorHistogramStatistics(Table table, List<String> columns) {
+        return getHistogramStatistics(table, columns);
+    }
+
+    @Override
+    public CompletableFuture<ExternalStatisticsAggregate> loadExternalStatistics(ExternalStatisticsRequest request) {
+        // These fixtures describe whole tables. They must also reach the scoped loader, rather than
+        // silently becoming connector-metadata fallback after the basic-statistics cache changed.
+        String[] identity = request.tableUUID.split("\\.");
+        if (!request.wholeTable || identity.length < 3) {
+            return CompletableFuture.completedFuture(new ExternalStatisticsAggregate.Builder(request).build());
+        }
+        Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                .getTable(ConnectContext.get(), identity[0], identity[1], identity[2]);
+        List<ConnectorTableColumnStats> values = getConnectorTableStatistics(table, request.columns);
+        double rows = tableRowCount.getOrDefault(table.getName(), -1);
+        Map<String, ColumnStatistic> columns = new HashMap<>();
+        Map<String, Integer> coverage = new HashMap<>();
+        for (int i = 0; i < request.columns.size(); i++) {
+            ColumnStatistic value = values.get(i).getColumnStatistic();
+            columns.put(request.columns.get(i), value);
+            coverage.put(request.columns.get(i), 1);
+            if (value.getHistogram() != null) {
+                rows = Math.max(rows, value.getHistogram().getTotalRows());
+            }
+        }
+        if (rows < 0) {
+            return CompletableFuture.completedFuture(new ExternalStatisticsAggregate.Builder(request).build());
+        }
+        ExternalStatisticsAggregate aggregate = Deencapsulation.newInstance(ExternalStatisticsAggregate.class,
+                rows, columns, coverage, Map.of(), 1, 1);
+        return CompletableFuture.completedFuture(aggregate);
     }
 
     private LocalDateTime formatDateFromString(String dateStr) {

@@ -46,6 +46,7 @@ public class Statistics {
     private final boolean tableRowCountMayInaccurate;
     private final Collection<ColumnRefOperator> shadowColumns;
     private final StatsSource statsSource;
+    private final boolean partitionRestricted;
 
     private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
 
@@ -66,6 +67,7 @@ public class Statistics {
         this.tableRowCountMayInaccurate = builder.tableRowCountMayInaccurate;
         this.shadowColumns = Collections.unmodifiableCollection(builder.shadowColumns);
         this.statsSource = builder.statsSource;
+        this.partitionRestricted = builder.partitionRestricted;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(builder.multiColumnCombinedStats);
     }
 
@@ -73,14 +75,19 @@ public class Statistics {
                        Map<ColumnRefOperator, ColumnStatistic> columnStatistics,
                        boolean tableRowCountMayInaccurate,
                        Collection<ColumnRefOperator> shadowColumns,
-                       StatsSource statsSource,
+                       StatsSource statsSource, boolean partitionRestricted,
                        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats) {
         this.outputRowCount = outputRowCount;
         this.columnStatistics = Collections.unmodifiableMap(columnStatistics);
         this.tableRowCountMayInaccurate = tableRowCountMayInaccurate;
         this.shadowColumns = Collections.unmodifiableCollection(shadowColumns);
         this.statsSource = statsSource;
+        this.partitionRestricted = partitionRestricted;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(multiColumnCombinedStats);
+    }
+
+    public boolean isPartitionRestricted() {
+        return partitionRestricted;
     }
 
     public double getOutputRowCount() {
@@ -92,7 +99,8 @@ public class Statistics {
         if (Double.compare(this.outputRowCount, clamped) == 0) {
             return this;
         }
-        return new Statistics(clamped, columnStatistics, tableRowCountMayInaccurate, shadowColumns, statsSource,
+        return new Statistics(clamped, columnStatistics, tableRowCountMayInaccurate, shadowColumns,
+                statsSource, partitionRestricted,
                 multiColumnCombinedStats);
     }
 
@@ -185,7 +193,7 @@ public class Statistics {
      * @return The largest subset and its corresponding statistics, or null if no match found
      */
     public Pair<Set<ColumnRefOperator>, MultiColumnCombinedStats> getLargestSubsetMCStats(Set<ColumnRefOperator> targetColumns) {
-        if (multiColumnCombinedStats.isEmpty() || targetColumns.size() <= 1) {
+        if (multiColumnCombinedStats.isEmpty() || targetColumns.isEmpty()) {
             return null;
         }
 
@@ -198,7 +206,8 @@ public class Statistics {
             Set<ColumnRefOperator> keySet = entry.getKey();
             int keySize = keySet.size();
 
-            if (keySize <= maxSize) {
+            // The NDV of a group with unread columns is not the NDV of the columns that are read.
+            if (keySize <= maxSize || !entry.getValue().isComplete()) {
                 continue;
             }
 
@@ -242,7 +251,7 @@ public class Statistics {
                 other.tableRowCountMayInaccurate,
                 other.shadowColumns,
                 other.statsSource,
-                other.multiColumnCombinedStats);
+                other.multiColumnCombinedStats).setPartitionRestricted(other.partitionRestricted);
     }
 
     public static Builder builder() {
@@ -257,6 +266,7 @@ public class Statistics {
         // which is used by mv rewrite to make the cost accurate
         private Collection<ColumnRefOperator> shadowColumns;
         private StatsSource statsSource = StatsSource.NONE;
+        private boolean partitionRestricted;
         private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
 
 
@@ -316,6 +326,12 @@ public class Statistics {
             return this;
         }
 
+        public Builder setMultiColumnStatistics(Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> mcStats) {
+            this.multiColumnCombinedStats.clear();
+            this.multiColumnCombinedStats.putAll(mcStats);
+            return this;
+        }
+
         public Builder addMultiColumnStatistics(Set<ColumnRefOperator> columns, MultiColumnCombinedStats mcStats) {
             this.multiColumnCombinedStats.put(columns, mcStats);
             return this;
@@ -337,6 +353,11 @@ public class Statistics {
 
         public Builder setShadowColumns(Collection<ColumnRefOperator> shadowColumns) {
             this.shadowColumns = shadowColumns;
+            return this;
+        }
+
+        public Builder setPartitionRestricted(boolean partitionRestricted) {
+            this.partitionRestricted = partitionRestricted;
             return this;
         }
 

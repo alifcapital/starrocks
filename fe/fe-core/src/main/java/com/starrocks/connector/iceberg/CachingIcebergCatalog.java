@@ -435,6 +435,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
     @Override
+    public Map<String, Partition> getCachedPartitions(IcebergTable icebergTable, long snapshotId) {
+        // Never use the mutable "current snapshot" alias (-1) for a pinned query snapshot.
+        if (snapshotId < 0) {
+            return null;
+        }
+        return partitionCache.getIfPresent(new IcebergTableName(
+                icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), snapshotId));
+    }
+
+    @Override
     public Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId,
                                                 ExecutorService executorService) {
         IcebergTableName key =

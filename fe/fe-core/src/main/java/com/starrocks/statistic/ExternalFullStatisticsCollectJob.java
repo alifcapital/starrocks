@@ -161,9 +161,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         long savedScanBytesCap = sessionVariable.getExternalStatsScanBytesCap();
         long savedScanFilesCap = sessionVariable.getExternalStatsScanFilesCap();
         long savedScanRowsCap = sessionVariable.getExternalStatsScanRowsCap();
-        // Saved so the forced CTE-reuse settings (set below, restored in finally) do not leak to a reused context.
+        // Saved so the forced CTE-reuse and spill settings (set below, restored in finally) do not leak to a
+        // reused context.
         boolean savedCboCteReuse = sessionVariable.isCboCteReuse();
         double savedCboCteReuseRatio = sessionVariable.getCboCTERuseRatio();
+        boolean savedEnableSpill = sessionVariable.isEnableSpill();
         long scanBytesCap = resolveScanCap(StatsConstants.EXTERNAL_ANALYZE_SCAN_BYTES_CAP,
                 Config.connector_table_analyze_scan_bytes_cap, jobId);
         long scanFilesCap = resolveScanCap(StatsConstants.EXTERNAL_ANALYZE_SCAN_FILES_CAP,
@@ -213,6 +215,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         // enable_profile. So re-force it here, the last write before the collection SQL runs. Do not remove.
         sessionVariable.setCboCteReuse(true);
         sessionVariable.setCboCTERuseRatio(0);
+        // The shared scan feeds the column branches through a multicast exchanger that keeps what the slowest
+        // branch has not consumed. With spilling on, the exchanger flushes that backlog to disk past its memory
+        // limit (SpillableMultiCastLocalExchanger); without, an integer branch running ahead of a wide string
+        // branch keeps most of the partition in memory.
+        sessionVariable.setEnableSpill(true);
 
         String status = "SUCCESS";
         String failureReason = "";
@@ -253,6 +260,7 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
             sessionVariable.setExternalStatsScanRowsCap(savedScanRowsCap);
             sessionVariable.setCboCteReuse(savedCboCteReuse);
             sessionVariable.setCboCTERuseRatio(savedCboCteReuseRatio);
+            sessionVariable.setEnableSpill(savedEnableSpill);
             LOG.info("[ExternalStats] collect end | jobId={} catalog={} db={} table={} status={} " +
                             "durationMs={} partitions={} columns={} reason={}",
                     jobId, catalogName, db.getOriginName(), table.getName(),
@@ -370,12 +378,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         // column's aggregate branch. Columns are split into groups so a wide table does not build one CTE
         // multicast to hundreds of consumers (inflating query/plan size and the memory held for the
         // materialized partition); each group scans the partition once, so total scans are
-        // partitions x ceil(columns / columnsPerScan). The group size mirrors the internal sample path
-        // (ColumnSampleManager.splitPrimitiveTypeStats): max(2, statistic_collect_parallelism), i.e. at least
-        // two columns share a scan. Each group is a self-contained CTE query and two CTE queries cannot be
-        // UNION ALL'd (one WITH per statement), so the outer group size is fixed to 1; parallelism only sets
-        // per-query pipeline dop in the execute loop.
-        int columnsPerScan = Math.max(2, parallelism);
+        // partitions x ceil(columns / columnsPerScan). The group size is statistic_collect_parallelism, one
+        // column per scan at its minimum. Each group is a self-contained CTE query and two CTE queries cannot
+        // be UNION ALL'd (one WITH per statement), so the outer group size is fixed to 1; parallelism only
+        // sets per-query pipeline dop in the execute loop.
+        int columnsPerScan = Math.max(1, parallelism);
         List<String> totalQuerySQL = new ArrayList<>();
         for (String partitionName : partitionNames) {
             if (DO_NOT_COLLECT_PARTITIONS.contains(partitionName)) {

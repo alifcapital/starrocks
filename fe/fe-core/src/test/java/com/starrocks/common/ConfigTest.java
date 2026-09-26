@@ -250,4 +250,30 @@ public class ConfigTest {
             Files.deleteIfExists(confFile);
         }
     }
+
+    @Test
+    public void testMutableStatisticsCacheBudgetsRejectInvalidChanges() throws Exception {
+        for (String name : List.of("external_statistics_cache_max_bytes", "statistic_mcv_cache_max_bytes")) {
+            java.lang.reflect.Field field = Config.class.getField(name);
+            long old = field.getLong(null);
+            try {
+                Config.setMutableConfig(name, "1073741824", false, "root");
+                Assertions.assertEquals(1073741824L, field.getLong(null));
+                for (String invalid : List.of("-1", "9223372036854775808", "invalid")) {
+                    Assertions.assertThrows(InvalidConfException.class,
+                            () -> Config.setMutableConfig(name, invalid, false, "root"));
+                    Assertions.assertEquals(1073741824L, field.getLong(null));
+                }
+                if (name.equals("external_statistics_cache_max_bytes")) {
+                    Config.setMutableConfig(name, "0", false, "root");
+                    Assertions.assertEquals(0, field.getLong(null));
+                } else {
+                    Assertions.assertThrows(InvalidConfException.class,
+                            () -> Config.setMutableConfig(name, "0", false, "root"));
+                }
+            } finally {
+                field.setLong(null, old);
+            }
+        }
+    }
 }

@@ -309,6 +309,11 @@ public interface IcebergCatalog extends MemoryTrackable {
     }
 
     // --------------- partition APIs ---------------
+    /** Complete partition directory for this exact snapshot, if resident. Must not perform I/O or load it. */
+    default Map<String, Partition> getCachedPartitions(IcebergTable icebergTable, long snapshotId) {
+        return null;
+    }
+
     default Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId, ExecutorService executorService) {
         return getPartitions(icebergTable, snapshotId, executorService, null);
     }
@@ -431,12 +436,17 @@ public interface IcebergCatalog extends MemoryTrackable {
                                     PARTITION_EQUALITY_DELETE_FILE_COUNT_COLUMN_INDEX,
                                     partitionName);
                             Partition partition = new Partition(lastUpdated, version, specId);
+                            partition.setValues(spec, org.apache.iceberg.Partitioning.partitionType(nativeTable), partitionData);
                             partition.setRecordCount(readPartitionLong(row, PARTITION_RECORD_COUNT_COLUMN_INDEX));
                             partition.setPositionDeleteRecordCount(
                                     readPartitionLong(row, PARTITION_POSITION_DELETE_RECORD_COUNT_COLUMN_INDEX));
                             partition.setEqualityDeleteRecordCount(
                                     readPartitionLong(row, PARTITION_EQUALITY_DELETE_RECORD_COUNT_COLUMN_INDEX));
-                            partitionMap.put(partitionName, partition);
+                            if (partitionMap.put(partitionName, partition) != null) {
+                                // One textual name may represent several evolved specs. The public map
+                                // cannot represent their union, so it must not drive statistics pruning.
+                                partition.clearValues();
+                            }
                         }
                     }
                 }

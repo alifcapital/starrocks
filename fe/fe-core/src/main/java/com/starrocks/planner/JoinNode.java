@@ -209,7 +209,6 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
                     && joinConjunct.getChild(0).getType().isFloatingPointType()) {
                 continue;
             }
-
             RuntimeFilterDescription rf = new RuntimeFilterDescription(sessionVariable);
             rf.setBuildPlanNodeId(this.id.asInt());
             rf.setBuildPlanNode(this);

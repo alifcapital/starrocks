@@ -851,6 +851,14 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 説明：ロードトリガー統計操作中に SAMPLE 統計収集と FULL 統計収集のどちらかを決定するための行数しきい値。ロードまたは変更された行数がこのしきい値 (デフォルト 200,000) を超える場合、SAMPLE 統計収集が使用されます。そうでない場合、FULL 統計収集が使用されます。この設定は、`enable_statistic_collect_on_first_load` および `statistic_sample_collect_ratio_threshold_of_first_load` と連携して機能します。
 - 導入時期：-
 
+### `enable_sync_statistics_load`
+
+- デフォルト: false
+- タイプ: Boolean
+- 単位: -
+- 変更可能: Yes
+- 説明: クエリプランの作成時に統計キャッシュの読み込みを待機するかどうかを制御します。外部テーブルの基本統計、MCV、およびパーティション統計にも適用されます。`false` の場合、統計を非同期で読み込む間は代替の推定値を使用できます。`true` の場合は読み込みを待機して結果を使用しますが、読み込みに失敗した場合は代替の推定値を使用します。プラン作成の待ち時間が増える可能性があります。この設定は収集済みの統計を読み込み、`ANALYZE` は実行しません。設定した FE 上で動的に有効になります。
+
 ### `statistic_update_interval_sec`
 
 - デフォルト：24 * 60 * 60
@@ -1415,3 +1423,19 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 変更可能：No
 - 説明：Yarn 設定ファイルを格納するディレクトリ。
 - 導入時期：-
+
+### `statistic_mcv_size`
+
+- Default: 100
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: 外部テーブルの ANALYZE MCV が保持する頻出タプルのデフォルト最大数。mcv_size で上書きできます。
+
+### `statistic_mcv_bucket_num`
+
+- Default: 64
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: 外部テーブルの単一列 ANALYZE MCV に使用する残余バケットのデフォルト目標数。mcv_bucket_num で上書きできます。

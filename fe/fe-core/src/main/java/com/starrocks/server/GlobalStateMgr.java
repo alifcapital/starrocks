@@ -796,6 +796,8 @@ public class GlobalStateMgr {
         this.compactionMgr = new CompactionMgr();
         this.compactionControlScheduler = new CompactionControlScheduler();
         this.configRefreshDaemon = new ConfigRefreshDaemon();
+        // Storage is constructed before this daemon; register here, after both exist.
+        this.configRefreshDaemon.registerListener(() -> statisticStorage.refreshCacheLimits());
         this.starMgrMetaSyncer = new StarMgrMetaSyncer();
         this.refreshDictionaryCacheTaskDaemon = new RefreshDictionaryCacheTaskDaemon();
 

@@ -19,14 +19,24 @@ import com.google.common.collect.Maps;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
+import com.starrocks.metric.StatisticsCacheMetrics;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 public interface StatisticStorage {
+    default Map<String, StatisticsCacheMetrics> getCacheMetrics() {
+        return Map.of();
+    }
+
+    /** Apply mutable cache budgets without recreating caches or discarding warm entries. */
+    default void refreshCacheLimits() {
+    }
+
     // partitionId: RowCount
     default Map<Long, Optional<Long>> getTableStatistics(Long tableId, Collection<Partition> partitions) {
         return partitions.stream().collect(Collectors.toMap(Partition::getId, p -> Optional.empty()));
@@ -70,6 +80,19 @@ public interface StatisticStorage {
                 map(col -> ConnectorTableColumnStats.unknown()).collect(Collectors.toList());
     }
 
+    /** Ready whole-table column statistics only; never starts loading, refreshing or waiting. */
+    default ColumnStatistic getCachedConnectorTableColumnStatistic(Table table, String column) {
+        return ColumnStatistic.unknown();
+    }
+
+    // Start missing loads without waiting, even when synchronous statistics loading is enabled.
+    // Callers still use the regular getters to consume results and apply the usual failure fallback.
+    default void prefetchConnectorTableStatistics(Table table, List<String> columns) {
+    }
+
+    default void prefetchExternalMcvStatistics(Table table) {
+    }
+
     default List<ConnectorTableColumnStats> getConnectorTableStatisticsSync(Table table, List<String> columns) {
         return getConnectorTableStatistics(table, columns);
     }
@@ -91,6 +114,26 @@ public interface StatisticStorage {
     }
 
     default void expireMultiColumnStatistics(Long tableId) {
+    }
+
+    // Loading never waits on the caller. The optimizer chooses sync/async consumption and memoizes
+    // this result only for its own planning lifetime; Caffeine retains the individual partition cells.
+    default CompletableFuture<ExternalStatisticsAggregate> loadExternalStatistics(ExternalStatisticsRequest request) {
+        return CompletableFuture.completedFuture(new ExternalStatisticsAggregate.Builder(request).build());
+    }
+
+    default void expireExternalPartitionStatistics(String tableUUID) {
+    }
+
+    // Multi-column statistics of an external table, looked up by its UUID.
+    default ExternalMcvStatistics getExternalMcvStatistics(Table table) {
+        return ExternalMcvStatistics.EMPTY;
+    }
+
+    default void expireExternalMcvStatistics(String tableUUID) {
+    }
+
+    default void refreshExternalMcvStatistics(String tableUUID, boolean isSync) {
     }
 
     default void expireHistogramStatistics(Long tableId, List<String> columns) {
@@ -123,4 +166,15 @@ public interface StatisticStorage {
     }
 
     void addColumnStatistic(Table table, String column, ColumnStatistic columnStatistic);
+
+    // Inject a histogram into the cache for query-dump replay; no-op if histograms aren't cached.
+    default void addHistogramStatistics(Table table, String column, Histogram histogram) {
+    }
+
+    // Inject multi-column statistics for query-dump replay; no-op unless they are cached.
+    default void addMultiColumnStatistics(Table table, MultiColumnCombinedStatistics statistics) {
+    }
+
+    default void addExternalMcvStatistics(Table table, ExternalMcvStatistics statistics) {
+    }
 }

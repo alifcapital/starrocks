@@ -785,3 +785,63 @@ When `true`, distribute automatic statistics collection by table across the posi
 Changes to the interval or daily window recalculate future slots on the next scheduler pass, including during the daytime. Running collections are not interrupted. Recalculation starts from the current time: it can extend the gap since the previous collection, and repeated configuration changes can postpone collection again.
 
 See [automatic collection scheduling](../../../using_starrocks/Cost_based_optimizer.md#spread-automatic-collection-across-the-interval) for first-run, restart, and nightly-window behavior.
+
+## external_statistics_cache_max_bytes
+
+- Default: 536870912 (512 MiB)
+- Type: Long
+- Range: Non-negative integer; `0` disables retention.
+- Unit: Bytes
+- Is mutable: Yes
+
+Limits the estimated retained size of cached external basic column statistics, including compact HLL sketches, scalar statistics, and keys. This cache is shared by scans of individual partitions and whole tables. It loads only requested columns. Selected-partition requests load missing partition cells in bounded batches and aggregate them in FE; eviction affects reuse, not statistics coverage. The configured capacity is an estimate of cached objects, not a hard limit on total FE memory or transient loading buffers. Changes are applied to the running cache on the next configuration refresh, normally within 10 seconds. Increasing the budget preserves warm entries; decreasing it evicts excess entries without deleting persisted statistics.
+
+Partition entries retain compact HLL sketches. Whole-table entries retain prepared scalar statistics per column and share the same memory budget. Whole-table requests load scalar aggregates computed by BE directly; they do not load the partition HLL entries into FE. An unpartitioned table retains only the prepared summary. Warm whole-table planning reuses this summary without merging HLLs again. Summaries follow the ordinary statistics refresh lifetime; a changed partition list alone does not invalidate them. Explicit statistics invalidation clears both scopes for the affected columns, and a failed refresh preserves the last successful value.
+
+
+## statistic_mcv_cache_max_bytes
+
+- Default: 536870912 (512 MiB)
+- Type: Long
+- Range: Positive integer
+- Unit: Bytes
+- Is mutable: Yes
+
+Limits the estimated retained bytes of prepared MCV statistics. Changes resize the existing cache on the next configuration refresh, normally within 10 seconds, without restarting FE or rerunning ANALYZE. Reducing the limit evicts excess entries; statistics remain in storage and can be loaded again. This is not a limit on transient loading or optimizer memory.
+
+```sql
+ADMIN SET FRONTEND CONFIG ("external_statistics_cache_max_bytes" = "1073741824");
+ADMIN SET FRONTEND CONFIG ("statistic_mcv_cache_max_bytes" = "1073741824");
+```
+
+### Statistics cache metrics
+
+Each FE exports these metrics on its ordinary `/metrics` endpoint:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `starrocks_fe_statistics_cache_requests_total` | Counter | Cache lookups, with `result="hit"` or `result="miss"`. |
+| `starrocks_fe_statistics_cache_evictions_total` | Counter | Entries evicted by capacity or expiration; explicit invalidation is excluded. |
+| `starrocks_fe_statistics_cache_entries` | Gauge | Current approximate number of entries. |
+| `starrocks_fe_statistics_cache_estimated_bytes` | Gauge | Current estimated retained weight used by the cache's byte budget. |
+| `starrocks_fe_statistics_cache_max_bytes` | Gauge | The running cache's current byte limit, including applied configuration changes. |
+
+The fixed `cache` label identifies the independently sized caches:
+
+| `cache` | Contents | Limit |
+| --- | --- | --- |
+| `external_basic` | TABLE summaries and partition statistics, HLL blocks and directories | `external_statistics_cache_max_bytes` |
+
+Counters describe cache lookups, including prefetch, rather than user queries. A hit means the entry exists: an asynchronous load may still be in progress, and a cached successful empty result is also a hit. The counters do not measure whether statistics were ready before a query's deadline. Direct maintenance of partition block directories and quiet dictionary-eligibility probes do not count as lookups. Counters reset when the FE/cache is recreated.
+
+TABLE and partition statistics share a single byte limit, so their capacity metrics are combined. Metrics collection does not traverse entries, trigger refreshes, merge sketches, or decode payloads. Byte gauges estimate retained objects, not total FE heap or in-flight loading buffers; asynchronous cache accounting may lag a recent update.
+
+For example, the hit ratio over five minutes, kept separate for each FE and cache:
+
+```promql
+sum by (instance, cache) (rate(starrocks_fe_statistics_cache_requests_total{result="hit"}[5m]))
+/
+sum by (instance, cache) (rate(starrocks_fe_statistics_cache_requests_total[5m]))
+```
+
+Compare misses and evictions with retained bytes versus the limit when changing a budget. An idle cache has no meaningful hit ratio, and misses after restart, expiration, explicit invalidation, or failed loading are not by themselves evidence of insufficient capacity.

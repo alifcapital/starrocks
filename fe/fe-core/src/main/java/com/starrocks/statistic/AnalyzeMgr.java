@@ -54,6 +54,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -80,6 +81,10 @@ public class AnalyzeMgr implements Writable {
     private final Map<Pair<Long, String>, HistogramStatsMeta> histogramStatsMetaMap;
     private final Map<StatsMetaColumnKey, ExternalHistogramStatsMeta> externalHistogramStatsMetaMap;
     private final Map<MultiColumnStatsKey, MultiColumnStatsMeta> multiColumnStatsMetaMap;
+    private final Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> externalMcvStatsMetaMap;
+    // Table-level lookup avoids scanning every collected column group during query planning.
+    private final Map<StatsMetaKey, Map<ExternalMcvStatsKey, ExternalMcvStatsMeta>> externalMcvTables =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     // ConnectContext of all currently running analyze tasks
     private final Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
@@ -103,6 +108,7 @@ public class AnalyzeMgr implements Writable {
         histogramStatsMetaMap = Maps.newConcurrentMap();
         externalHistogramStatsMetaMap = Maps.newConcurrentMap();
         multiColumnStatsMetaMap = Maps.newConcurrentMap();
+        externalMcvStatsMetaMap = Maps.newConcurrentMap();
     }
 
     public AnalyzeJob getAnalyzeJob(long id) {
@@ -334,6 +340,112 @@ public class AnalyzeMgr implements Writable {
 
     public Map<MultiColumnStatsKey, MultiColumnStatsMeta> getMultiColumnStatsMetaMap() {
         return multiColumnStatsMetaMap;
+    }
+
+    public Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> getExternalMcvStatsMetaMap() {
+        return externalMcvStatsMetaMap;
+    }
+
+    public void addExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        GlobalStateMgr.getCurrentState().getEditLog().logAddExternalMcvStatsMeta(meta,
+                wal -> replayAddExternalMcvStatsMeta(meta));
+    }
+
+    public synchronized void replayAddExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        meta.validate();
+        ExternalMcvStatsKey key = ExternalMcvStatsKey.of(meta);
+        externalMcvStatsMetaMap.put(key, meta);
+        externalMcvTables.computeIfAbsent(key.getTableKey(), ignored -> new java.util.concurrent.ConcurrentHashMap<>())
+                .put(key, meta);
+    }
+
+    public synchronized void replayRemoveExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        ExternalMcvStatsKey key = ExternalMcvStatsKey.of(meta);
+        externalMcvStatsMetaMap.remove(key);
+        Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> groups = externalMcvTables.get(key.getTableKey());
+        if (groups != null) {
+            groups.remove(key);
+            if (groups.isEmpty()) {
+                externalMcvTables.remove(key.getTableKey());
+            }
+        }
+    }
+
+    public void removeExternalMcvStatsMeta(String catalogName, String dbName, String tableName) {
+        StatsMetaKey tableKey = new StatsMetaKey(catalogName, dbName, tableName);
+        for (Map.Entry<ExternalMcvStatsKey, ExternalMcvStatsMeta> entry :
+                Lists.newArrayList(externalMcvStatsMetaMap.entrySet())) {
+            if (entry.getKey().getTableKey().equals(tableKey)) {
+                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(entry.getValue(),
+                        wal -> replayRemoveExternalMcvStatsMeta(entry.getValue()));
+            }
+        }
+    }
+
+    public boolean hasExternalMcvStatsMeta(Table table) {
+        if (!table.isHiveTable() && !table.isIcebergTable()) {
+            return false;
+        }
+        Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> groups = externalMcvTables.get(
+                new StatsMetaKey(table.getCatalogName(), table.getCatalogDBName(), table.getName()));
+        if (groups == null) {
+            return false;
+        }
+        String uuid = table.getUUID();
+        return groups.values().stream().anyMatch(meta -> meta.getTableUUID() == null
+                || meta.getTableUUID().isEmpty() || meta.getTableUUID().equals(uuid));
+    }
+
+    public void refreshExternalMcvStatisticsCache(String tableUUID, boolean isSync) {
+        GlobalStateMgr.getCurrentState().getStatisticStorage().refreshExternalMcvStatistics(tableUUID, isSync);
+    }
+
+    /**
+     * Replay handler for the external multi-column stats meta journals on followers: the cached copy is
+     * stale either way, so it is dropped and reloaded lazily. Journals written without a table UUID fall
+     * back to resolving the table.
+     */
+    public void replayExpireExternalMcvStatsCache(ExternalMcvStatsMeta meta) {
+        String tableUUID = meta.getTableUUID();
+        if (tableUUID == null || tableUUID.isEmpty()) {
+            try {
+                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                        .getTable(new ConnectContext(), meta.getCatalogName(), meta.getDbName(), meta.getTableName());
+                if (table == null) {
+                    return;
+                }
+                tableUUID = table.getUUID();
+            } catch (Exception e) {
+                LOG.warn("Failed to resolve table {}.{}.{} to expire its multi-column statistics cache",
+                        meta.getCatalogName(), meta.getDbName(), meta.getTableName(), e);
+                return;
+            }
+        }
+        GlobalStateMgr.getCurrentState().getStatisticStorage().expireExternalMcvStatistics(tableUUID);
+    }
+
+    public void dropExternalMcvStatsMetaAndData(String catalogName, String dbName, String tableName) {
+        new StatisticExecutor().dropExternalMcvStatistics(StatisticUtils.buildConnectContext(), catalogName,
+                dbName, tableName);
+        removeExternalMcvStatsMeta(catalogName, dbName, tableName);
+    }
+
+    public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
+                                                        Table table) {
+        new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID());
+        removeExternalMcvStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+    }
+
+    public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
+                                              Table table, List<String> columnNames) {
+        new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID(), columnNames);
+        ExternalMcvStatsKey key = new ExternalMcvStatsKey(tableName.getCatalog(), tableName.getDb(),
+                tableName.getTbl(), columnNames);
+        ExternalMcvStatsMeta meta = externalMcvStatsMetaMap.get(key);
+        if (meta != null) {
+            GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(meta,
+                    wal -> replayRemoveExternalMcvStatsMeta(meta));
+        }
     }
 
     public void refreshBasicStatisticsCache(Long dbId, Long tableId, List<String> columns, boolean async) {
@@ -662,6 +774,8 @@ public class AnalyzeMgr implements Writable {
             dropExternalBasicStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
                     droppedTable.getTableName());
             dropExternalHistogramStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
+                    droppedTable.getTableName());
+            dropExternalMcvStatsMetaAndData(droppedTable.getCatalogName(), droppedTable.getDbName(),
                     droppedTable.getTableName());
         }
     }
@@ -1063,7 +1177,8 @@ public class AnalyzeMgr implements Writable {
                 + 1 + histogramStatsMetaMap.size()
                 + 1 + externalBasicStatsMetaMap.size()
                 + 1 + externalHistogramStatsMetaMap.size()
-                + 1 + multiColumnStatsMetaMap.size();
+                + 1 + multiColumnStatsMetaMap.size()
+                + 1 + externalMcvStatsMetaMap.size();
 
         SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.ANALYZE_MGR, numJson);
 
@@ -1103,6 +1218,11 @@ public class AnalyzeMgr implements Writable {
             writer.writeJson(multiColumnStatsMeta);
         }
 
+        writer.writeInt(externalMcvStatsMetaMap.size());
+        for (ExternalMcvStatsMeta meta : externalMcvStatsMetaMap.values()) {
+            writer.writeJson(meta);
+        }
+
         writer.close();
     }
 
@@ -1120,6 +1240,18 @@ public class AnalyzeMgr implements Writable {
         reader.readCollection(ExternalHistogramStatsMeta.class, this::replayAddExternalHistogramStatsMeta);
 
         reader.readCollection(MultiColumnStatsMeta.class, this::replayAddMultiColumnStatsMeta);
+
+        // Catch only application errors after a complete record has been decoded. Reader failures
+        // (including malformed/truncated images) and VM errors must still abort image loading.
+        reader.readCollection(ExternalMcvStatsMeta.class, meta -> {
+            try {
+                replayAddExternalMcvStatsMeta(meta);
+            } catch (RuntimeException e) {
+                LOG.error("Skipping invalid external MCV statistics metadata while loading image: {}.{}.{}",
+                        meta == null ? null : meta.getCatalogName(), meta == null ? null : meta.getDbName(),
+                        meta == null ? null : meta.getTableName(), e);
+            }
+        });
     }
 
     private void updateBasicStatsMeta(long dbId, long tableId, long loadedRows) {
@@ -1228,6 +1360,51 @@ public class AnalyzeMgr implements Writable {
         @Override
         public int hashCode() {
             return Objects.hashCode(tableKey, columnName);
+        }
+    }
+
+    public static class ExternalMcvStatsKey {
+        private final StatsMetaKey tableKey;
+        // Case-insensitive like column names; the order of the group does not matter.
+        private final Set<String> columnNames;
+
+        public ExternalMcvStatsKey(String catalogName, String dbName, String tableName,
+                                           Collection<String> columnNames) {
+            this.tableKey = new StatsMetaKey(catalogName, dbName, tableName);
+            this.columnNames = new HashSet<>();
+            for (String columnName : columnNames) {
+                this.columnNames.add(columnName.toLowerCase());
+            }
+        }
+
+        public static ExternalMcvStatsKey of(ExternalMcvStatsMeta meta) {
+            return new ExternalMcvStatsKey(meta.getCatalogName(), meta.getDbName(), meta.getTableName(),
+                    meta.getColumnNames());
+        }
+
+        public StatsMetaKey getTableKey() {
+            return tableKey;
+        }
+
+        public Set<String> getColumnNames() {
+            return columnNames;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof ExternalMcvStatsKey)) {
+                return false;
+            }
+            ExternalMcvStatsKey that = (ExternalMcvStatsKey) o;
+            return Objects.equal(tableKey, that.tableKey) && Objects.equal(columnNames, that.columnNames);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(tableKey, columnNames);
         }
     }
 

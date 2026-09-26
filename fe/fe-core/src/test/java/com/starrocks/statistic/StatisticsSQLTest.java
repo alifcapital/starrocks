@@ -267,13 +267,40 @@ public class StatisticsSQLTest extends PlanTestBase {
 
         for (String col : columnNames) {
             String sql = Deencapsulation.invoke(hiveHistogramStatisticsCollectJob, "buildCollectHistogram",
-                    db, t0, 0.1, 10L, ImmutableMap.of("col_struct.c1.c11", "100"), col, IntegerType.INT);
+                    db, t0, 0.1, 10L, ImmutableMap.of("100", "100"), col, IntegerType.INT);
+            Assertions.assertTrue(sql.contains("rand() <= 0.1"), sql);
+            Assertions.assertTrue(sql.contains("cast(0.1 as double)"), sql);
             sql = sql.substring(sql.indexOf("SELECT"));
             starRocksAssert.useDatabase("_statistics_");
             String plan = getFragmentPlan(sql);
-            assertCContains(plan, "4:AGGREGATE (update finalize)\n" +
+            assertCContains(plan, "AGGREGATE (update finalize)\n" +
                     "  |  output: histogram");
         }
+    }
+
+    @Test
+    public void testExternalStringHistogramKeepsTailAndEscapedMcv() throws Exception {
+        Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                .getTable(connectContext, "hive0", "tpch", "region");
+        Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(connectContext, "hive0", "tpch");
+        var job = new ExternalHistogramStatisticsCollectJob("hive0", db, table,
+                List.of("r_name"), List.of(VarcharType.VARCHAR), StatsConstants.AnalyzeType.HISTOGRAM,
+                StatsConstants.ScheduleType.ONCE, Maps.newHashMap());
+        String sql = Deencapsulation.invoke(job, "buildCollectHistogram", db, table, 0.01, 64L,
+                ImmutableMap.of("O'HARA", "10", "a\\b\"c", "5"), "r_name", VarcharType.VARCHAR);
+        Assertions.assertTrue(sql.contains("Infinity"), sql);
+        Assertions.assertTrue(sql.contains("count(`r_name`) - 15"), sql);
+        Assertions.assertFalse(sql.contains("histogram("), sql);
+        starRocksAssert.useDatabase("_statistics_");
+        String selectSql = sql.substring(sql.indexOf("SELECT"));
+        getExecPlan(selectSql);
+        var query = (com.starrocks.sql.ast.QueryStatement) com.starrocks.sql.parser.SqlParser.parseSingleStatement(
+                selectSql, connectContext.getSessionVariable().getSqlMode());
+        var relation = (com.starrocks.sql.ast.SelectRelation) query.getQueryRelation();
+        var literal = (com.starrocks.sql.ast.expression.StringLiteral) relation.getSelectList().getItems().get(6).getExpr();
+        var mcv = com.google.gson.JsonParser.parseString(literal.getStringValue()).getAsJsonArray();
+        Assertions.assertEquals("O'HARA", mcv.get(0).getAsJsonArray().get(0).getAsString());
+        Assertions.assertEquals("a\\b\"c", mcv.get(1).getAsJsonArray().get(0).getAsString());
     }
 
     @Test

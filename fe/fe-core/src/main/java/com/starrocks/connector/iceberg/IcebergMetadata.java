@@ -1337,6 +1337,45 @@ public class IcebergMetadata implements ConnectorMetadata {
         }
     }
 
+    // Statistics must not materialize the file plan. Use only a complete, resident directory for
+    // the pinned snapshot; on a cache miss the caller keeps the manifest-level estimate.
+    @Override
+    public List<String> getScannedPartitionNames(Table table, ScalarOperator predicate, long limit,
+                                                TvrVersionRange version) {
+        IcebergTable icebergTable = (IcebergTable) table;
+        if (icebergTable.isUnPartitioned() || version == null || version.isEmpty()
+                || !version.from().isMin() || version.end().isEmpty()) {
+            return null;
+        }
+        Map<String, Partition> partitions = icebergCatalog.getCachedPartitions(
+                icebergTable, version.end().get());
+        if (partitions == null) {
+            return null;
+        }
+        org.apache.iceberg.Table nativeTable = icebergTable.getNativeTable();
+        PartitionCastPredicatePruner.PartitionResidual residual = PartitionCastPredicatePruner.split(
+                Utils.extractConjuncts(predicate), identityStringPartitionColumns(icebergTable));
+        if (residual.hasResidual()) {
+            return null;
+        }
+        Expression filter = convertPredicate(icebergTable, residual.pushable);
+        Map<Integer, Evaluator> evaluators = new HashMap<>();
+        List<String> names = new ArrayList<>();
+        for (Map.Entry<String, Partition> entry : partitions.entrySet()) {
+            Partition partition = entry.getValue();
+            PartitionSpec spec = nativeTable.specs().get(partition.getSpecId());
+            if (spec == null || partition.getValues() == null) {
+                return null;
+            }
+            Evaluator evaluator = evaluators.computeIfAbsent(spec.specId(), ignored -> new Evaluator(
+                    spec.partitionType(), Projections.inclusive(spec, false).project(filter), false));
+            if (evaluator.eval(partition.getValues())) {
+                names.add(entry.getKey());
+            }
+        }
+        return names;
+    }
+
     public List<PartitionKey> getPrunedPartitions(Table table, ScalarOperator predicate, long limit, TvrVersionRange version) {
         IcebergTable icebergTable = (IcebergTable) table;
         String dbName = icebergTable.getCatalogDBName();

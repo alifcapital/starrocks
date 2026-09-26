@@ -22,5 +22,7 @@ public enum StatisticsType {
     // for single column histogram
     HISTOGRAM,
     // for multi-column combined ndv
-    MCDISTINCT
+    MCDISTINCT,
+    // for multi-column most common value tuples
+    MCV
 }

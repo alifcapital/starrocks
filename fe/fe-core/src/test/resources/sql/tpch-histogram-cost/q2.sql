@@ -88,35 +88,35 @@ OutPut Exchange Id: 25
 21:ANALYTIC
 |  functions: [, min[([22: PS_SUPPLYCOST, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true], ]
 |  partition by: [1: P_PARTKEY, INT, false]
-|  cardinality: 80240
+|  cardinality: 63684
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 80240.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 80240.0] ESTIMATE
+|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 63684.420415843] ESTIMATE
 |  * S_ADDRESS-->[-Infinity, Infinity, 0.0, 40.0, 10000.0] ESTIMATE
 |  * S_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 10000.0] ESTIMATE
 |  * S_ACCTBAL-->[-998.22, 9999.72, 0.0, 8.0, 9955.0] ESTIMATE
 |  * S_COMMENT-->[-Infinity, Infinity, 0.0, 101.0, 10000.0] ESTIMATE
-|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 80240.0] ESTIMATE
+|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 25.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |  * N_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
 |  * R_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
-|  * min-->[1.0, 1000.0, 0.0, 8.0, 80240.0] ESTIMATE
+|  * min-->[1.0, 1000.0, 0.0, 8.0, 63684.420415843] ESTIMATE
 |
 20:SORT
 |  order by: [1, INT, false] ASC
 |  analytic partition by: [1: P_PARTKEY, INT, false]
 |  offset: 0
-|  cardinality: 80240
+|  cardinality: 63684
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 80240.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 80240.0] ESTIMATE
+|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 63684.420415843] ESTIMATE
 |  * S_ADDRESS-->[-Infinity, Infinity, 0.0, 40.0, 10000.0] ESTIMATE
 |  * S_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 10000.0] ESTIMATE
 |  * S_ACCTBAL-->[-998.22, 9999.72, 0.0, 8.0, 9955.0] ESTIMATE
 |  * S_COMMENT-->[-Infinity, Infinity, 0.0, 101.0, 10000.0] ESTIMATE
-|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 80240.0] ESTIMATE
+|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 25.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |  * N_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
 |  * R_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
@@ -124,7 +124,7 @@ OutPut Exchange Id: 25
 19:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [1: P_PARTKEY, INT, false]
-cardinality: 80240
+cardinality: 63684
 
 PLAN FRAGMENT 2(F00)
 
@@ -143,16 +143,16 @@ OutPut Exchange Id: 19
 |  17 <-> [17: S_COMMENT, VARCHAR, false]
 |  22 <-> [22: PS_SUPPLYCOST, DOUBLE, false]
 |  26 <-> [26: N_NAME, VARCHAR, false]
-|  cardinality: 80240
+|  cardinality: 63684
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 80240.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 80240.0] ESTIMATE
+|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 63684.420415843] ESTIMATE
 |  * S_ADDRESS-->[-Infinity, Infinity, 0.0, 40.0, 10000.0] ESTIMATE
 |  * S_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 10000.0] ESTIMATE
 |  * S_ACCTBAL-->[-998.22, 9999.72, 0.0, 8.0, 9955.0] ESTIMATE
 |  * S_COMMENT-->[-Infinity, Infinity, 0.0, 101.0, 10000.0] ESTIMATE
-|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 80240.0] ESTIMATE
+|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 25.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |
 17:HASH JOIN
@@ -161,16 +161,16 @@ OutPut Exchange Id: 19
 |  build runtime filters:
 |  - filter_id = 3, build_expr = (20: PS_SUPPKEY), remote = false
 |  output columns: 1, 3, 12, 13, 15, 16, 17, 22, 26
-|  cardinality: 80240
+|  cardinality: 63684
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 80240.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 80240.0] ESTIMATE
+|  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 63684.420415843] ESTIMATE
 |  * S_ADDRESS-->[-Infinity, Infinity, 0.0, 40.0, 10000.0] ESTIMATE
 |  * S_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 10000.0] ESTIMATE
 |  * S_ACCTBAL-->[-998.22, 9999.72, 0.0, 8.0, 9955.0] ESTIMATE
 |  * S_COMMENT-->[-Infinity, Infinity, 0.0, 101.0, 10000.0] ESTIMATE
-|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 80240.0] ESTIMATE
+|  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 63684.420415843] ESTIMATE
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 25.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |  * N_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
 |  * R_REGIONKEY-->[0.0, 4.0, 0.0, 4.0, 1.0] ESTIMATE
@@ -178,7 +178,7 @@ OutPut Exchange Id: 19
 |----16:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [20: PS_SUPPKEY, INT, false]
-|       cardinality: 401200
+|       cardinality: 318422
 |
 9:Project
 |  output columns:
@@ -251,11 +251,11 @@ OutPut Exchange Id: 16
 |  3 <-> [3: P_MFGR, VARCHAR, false]
 |  20 <-> [20: PS_SUPPKEY, INT, false]
 |  22 <-> [22: PS_SUPPLYCOST, DOUBLE, false]
-|  cardinality: 401200
+|  cardinality: 318422
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 100300.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 79605.52551980375] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 401200.0] ESTIMATE
+|  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 318422.102079215] ESTIMATE
 |  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 99864.0] ESTIMATE
 |
 14:HASH JOIN
@@ -264,18 +264,18 @@ OutPut Exchange Id: 16
 |  build runtime filters:
 |  - filter_id = 2, build_expr = (1: P_PARTKEY), remote = false
 |  output columns: 1, 3, 20, 22
-|  cardinality: 401200
+|  cardinality: 318422
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 100300.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 79605.52551980375] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
-|  * PS_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 100300.0] ESTIMATE
-|  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 401200.0] ESTIMATE
+|  * PS_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 79605.52551980375] ESTIMATE
+|  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 318422.102079215] ESTIMATE
 |  * PS_SUPPLYCOST-->[1.0, 1000.0, 0.0, 8.0, 99864.0] ESTIMATE
 |
 |----13:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [1: P_PARTKEY, INT, false]
-|       cardinality: 100300
+|       cardinality: 79606
 |
 10:OlapScanNode
 table: partsupp, rollup: partsupp
@@ -300,9 +300,9 @@ OutPut Exchange Id: 13
 |  output columns:
 |  1 <-> [1: P_PARTKEY, INT, false]
 |  3 <-> [3: P_MFGR, CHAR, false]
-|  cardinality: 100300
+|  cardinality: 79606
 |  column statistics:
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 100300.0] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 79605.52551980375] ESTIMATE
 |  * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
 |
 11:OlapScanNode
@@ -311,9 +311,9 @@ preAggregation: on
 Predicates: [6: P_SIZE, INT, false] = 12, [5: P_TYPE, VARCHAR, false] LIKE '%COPPER'
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=62.0
-cardinality: 100300
+cardinality: 79606
 column statistics:
-* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 100300.0] ESTIMATE
+* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 79605.52551980375] ESTIMATE
 * P_MFGR-->[-Infinity, Infinity, 0.0, 25.0, 5.0] ESTIMATE
 * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 * P_SIZE-->[12.0, 12.0, 0.0, 4.0, 50.0] MCV: [[12:401200]] ESTIMATE

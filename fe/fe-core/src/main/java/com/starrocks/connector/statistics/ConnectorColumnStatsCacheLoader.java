@@ -50,8 +50,8 @@ public class ConnectorColumnStatsCacheLoader implements
                                                                                      @NonNull Executor executor) {
         return CompletableFuture.supplyAsync(() -> {
             if (!GlobalStateMgr.getCurrentState().isReady()) {
-                LOG.debug("Skip loading connector column stats before catalog ready: {}", cacheKey);
-                return Optional.empty();
+                // A skipped load must not become a cached "no statistics" result.
+                throw new IllegalStateException("Cannot load connector column statistics before catalog is ready");
             }
             try {
                 ConnectContext connectContext = StatisticUtils.buildConnectContext();
@@ -65,7 +65,7 @@ public class ConnectorColumnStatsCacheLoader implements
                 }
             } catch (RuntimeException e) {
                 LOG.error(e);
-                return Optional.empty();
+                throw new CompletionException(e);
             } catch (Exception e) {
                 throw new CompletionException(e);
             } finally {
@@ -86,8 +86,7 @@ public class ConnectorColumnStatsCacheLoader implements
             }
 
             if (!GlobalStateMgr.getCurrentState().isReady()) {
-                LOG.debug("Skip loading connector column stats before catalog ready, size: {}", result.size());
-                return result;
+                throw new IllegalStateException("Cannot load connector column statistics before catalog is ready");
             }
 
             try {

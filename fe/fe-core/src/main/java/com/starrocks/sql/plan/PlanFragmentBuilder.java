@@ -2685,7 +2685,15 @@ public class PlanFragmentBuilder {
             if (producerStage) {
                 markHonestProducerAggSlotNullability(aggregationNode, aggregateExprList, intermediateAggrExprs);
             }
-            aggregationNode.computeStatistics(optExpr.getStatistics());
+            Statistics aggregateStatistics = optExpr.getStatistics();
+            if (!node.getType().isAnyGlobal() && aggregateStatistics != null
+                    && !aggregateStatistics.getMultiColumnCombinedStats().isEmpty()) {
+                // Memo statistics can describe the final groups even for a split local alternative.
+                // Repeated local groups do not have the final operator's frequency distribution.
+                aggregateStatistics = Statistics.buildFrom(aggregateStatistics)
+                        .setMultiColumnStatistics(Map.of()).build();
+            }
+            aggregationNode.computeStatistics(aggregateStatistics);
             aggregationNode.setGroupByMinMaxStats(node.getGroupByMinMaxStatistic());
 
             if (node.isOnePhaseAgg() || node.isMergedLocalAgg() || node.getType().isDistinctGlobal() ||
@@ -4565,6 +4573,10 @@ public class PlanFragmentBuilder {
                     new PlanFragment(context.getNextFragmentId(), exchangeNode, dataPartition);
             splitConsumeFragment.setQueryGlobalDicts(splitProduceFragment.getQueryGlobalDicts());
             splitConsumeFragment.setQueryGlobalDictExprs(splitProduceFragment.getQueryGlobalDictExprs());
+            // plus what the exchange replaced by this consumer carried for the fragment above it
+            splitConsumeFragment.mergeQueryGlobalDicts(consumerOperator.getGlobalDicts());
+            splitConsumeFragment.mergeQueryDictExprs(
+                    getGlobalDictsExprs(consumerOperator.getGlobalDictsExpr(), context));
             splitConsumeFragment.setLoadGlobalDicts(splitProduceFragment.getLoadGlobalDicts());
 
             if (consumerOperator.hasLimit()) {

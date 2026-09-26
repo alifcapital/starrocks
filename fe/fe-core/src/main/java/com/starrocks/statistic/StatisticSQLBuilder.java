@@ -19,6 +19,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.common.util.SqlUtils;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsCacheKey;
 import com.starrocks.type.Type;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.util.Strings;
@@ -27,8 +28,11 @@ import org.apache.velocity.app.VelocityEngine;
 
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME;
@@ -241,7 +245,8 @@ public class StatisticSQLBuilder {
             context.put("type", type);
             context.put("predicate",
                     tableUUIDPredicate + " and column_name in (" +
-                            names.stream().map(c -> "\"" + c + "\"").collect(Collectors.joining(", ")) + ")");
+                            names.stream().map(c -> "\"" + escapeForDoubleQuotedSqlString(c) + "\"")
+                                    .collect(Collectors.joining(", ")) + ")");
             querySQL.add(build(context, QUERY_EXTERNAL_FULL_STATISTIC_V2_TEMPLATE));
         });
 
@@ -449,6 +454,132 @@ public class StatisticSQLBuilder {
                 + " and table_name = '" + SqlUtils.escapeSqlString(tableName) + "'"
                 + " and column_name in (" + Joiner.on(", ").join(columnNames.stream()
                         .map(c -> "'" + SqlUtils.escapeSqlString(c) + "'").collect(Collectors.toList())) + ")";
+    }
+
+    // Rows come back as [column_names, row_count, ndv, mcv, buckets, null_counts].
+    public static String buildQueryExternalMcvStatisticsSQL(String tableUUID) {
+        return "SELECT column_names, row_count, ndv, mcv, buckets, null_counts FROM "
+                + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
+                + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID);
+    }
+
+    // One row per (partition, column) of the given partitions with its latest collection; the dedup
+    // is the one of QUERY_EXTERNAL_FULL_STATISTIC_V2_TEMPLATE. Bounds come as the stored text.
+    public static String buildQueryExternalPartitionStatisticsSQL(String tableUUID,
+                                                                  Map<String, Set<String>> columnsByPartition,
+                                                                  boolean unpartitioned) {
+        // Group equal column sets so a rectangular request has one pair of IN predicates. Keep
+        // different sets separate: partial cache hits must not turn into a partitions x columns scan.
+        Map<Set<String>, List<String>> partitionsByColumns = new LinkedHashMap<>();
+        columnsByPartition.forEach((partition, columns) -> {
+            if (!columns.isEmpty()) {
+                partitionsByColumns.computeIfAbsent(columns, ignored -> new ArrayList<>()).add(partition);
+            }
+        });
+        String predicate = partitionsByColumns.entrySet().stream()
+                .map(entry -> "(partition_name IN (" + quotedNames(entry.getValue()) + ") AND column_name IN ("
+                        + quotedNames(entry.getKey()) + "))")
+                .collect(Collectors.joining(" OR "));
+        if (unpartitioned) {
+            // An unpartitioned table has one logical statistics row per column. The collector's
+            // physical partition label is irrelevant; normalize it at this boundary and deduplicate
+            // before loading, rather than assuming that the stored label is an empty string.
+            Set<String> columns = columnsByPartition.values().stream().flatMap(Set::stream).collect(Collectors.toSet());
+            predicate = columns.isEmpty() ? "" : "column_name IN (" + quotedNames(columns) + ")";
+        }
+        if (predicate.isEmpty()) {
+            predicate = "FALSE";
+        }
+        String partitionProjection = unpartitioned ? "''" : "partition_name";
+        String deduplicationKey = unpartitioned ? "column_name" : "partition_name, column_name";
+        return "SELECT cast(" + StatsConstants.STATISTIC_EXTERNAL_VERSION + " as INT), " + partitionProjection
+                + ", column_name, row_count, data_size, hll_serialize(ndv), null_count, max, min"
+                + " FROM (SELECT *, row_number() over ("
+                + " partition by " + deduplicationKey + " order by update_time desc) as rn"
+                + " FROM " + StatsConstants.STATISTICS_DB_NAME + "." + EXTERNAL_FULL_STATISTICS_TABLE_NAME
+                + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID) + " AND (" + predicate + ")) dedup_t"
+                + " WHERE rn = 1";
+    }
+
+    public static String buildQueryExternalPartitionBlocksSQL(String tableUUID,
+            List<ExternalStatisticsCacheKey> blocks,
+            Map<String, Type> types) {
+        Map<String, List<Integer>> byType = new LinkedHashMap<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            Type type = types.get(blocks.get(i).columnName);
+            String boundType = type.isStringType() || !type.canStatistic() || type.isComplexType()
+                    ? "string" : type.toSql();
+            byType.computeIfAbsent(boundType, ignored -> new ArrayList<>()).add(i);
+        }
+        List<String> queries = new ArrayList<>();
+        byType.forEach((type, indices) -> {
+            StringBuilder cases = new StringBuilder("CASE");
+            List<String> predicates = new ArrayList<>();
+            for (int index : indices) {
+                ExternalStatisticsCacheKey block = blocks.get(index);
+                String predicate = "(column_name IN (" + quotedNames(List.of(block.columnName))
+                        + ") AND partition_name IN (" + quotedNames(block.partitions) + "))";
+                predicates.add(predicate);
+                cases.append(" WHEN ").append(predicate).append(" THEN ").append(index);
+            }
+            cases.append(" END");
+            String dedup = "SELECT *, row_number() over (partition by partition_name, column_name"
+                    + " order by update_time desc) AS rn FROM " + StatsConstants.STATISTICS_DB_NAME + "."
+                    + EXTERNAL_FULL_STATISTICS_TABLE_NAME + " WHERE " + buildTableUUIDInPredicateQuoted(tableUUID)
+                    + " AND (" + String.join(" OR ", predicates) + ")";
+            queries.add("SELECT cast(" + StatsConstants.STATISTIC_EXTERNAL_VERSION + " as INT), "
+                    + "concat(cast(block_id as varchar), '|[', array_join(array_agg(cast("
+                    + "json_array(partition_name, row_count) as varchar)), ','), ']'), column_name, "
+                    + "cast(sum(row_count) as bigint), cast(sum(data_size) as bigint), "
+                    + "hll_serialize(hll_union(ndv)), cast(sum(null_count) as bigint), "
+                    + blockBoundSql("max", type) + ", " + blockBoundSql("min", type) + " "
+                    + "FROM (SELECT *, " + cases + " AS block_id FROM (" + dedup + ") d WHERE rn = 1) b "
+                    + "GROUP BY block_id, column_name");
+        });
+        return String.join(" UNION ALL ", queries);
+    }
+
+    private static String blockBoundSql(String bound, String type) {
+        if (type.equals("string")) {
+            return "NULL"; // Basic statistics deliberately leave string/complex bounds unbounded.
+        }
+        String value = "cast(nullif(" + bound + ", '') as " + type + ")";
+        String result = "cast(" + bound + "(" + value + ") as string)";
+        if (type.equalsIgnoreCase("boolean")) {
+            // Match the FE parser and emit TRUE/FALSE: CAST(BOOLEAN AS STRING) emits 1/0,
+            // which the existing statistics parser would interpret as FALSE in both cases.
+            value = "if(nullif(" + bound + ", '') IS NULL, NULL, if(upper(" + bound + ") = 'TRUE', 1, 0))";
+            result = "if(count(" + value + ") = 0, NULL, if(" + bound + "(" + value + ") = 1, 'TRUE', 'FALSE'))";
+        }
+        // As in the per-partition accumulator, absent bounds do not contribute to MIN/MAX.
+        return result;
+    }
+
+    private static String quotedNames(Collection<String> names) {
+        return names.stream().map(name -> "'" + SqlUtils.escapeSqlString(name) + "'")
+                .collect(Collectors.joining(", "));
+    }
+
+    public static String buildDropExternalMcvStatisticsSQL(String tableUUID) {
+        return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
+                + " where " + buildTableUUIDInPredicateQuoted(tableUUID);
+    }
+
+    public static String buildDropExternalMcvStatisticsSQL(String tableUUID, List<String> columnNames) {
+        Preconditions.checkArgument(!columnNames.isEmpty(), "MCV column group must not be empty");
+        return buildDropExternalMcvStatisticsSQL(tableUUID) + " and column_ids = '"
+                + ExternalMcvStatisticsCollectJob.buildColumnIds(columnNames) + "'";
+    }
+
+    public static String buildDropExternalMcvStatisticsSQL(String catalogName, String dbName,
+                                                                   String tableName) {
+        return "delete from " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME
+                + " where catalog_name = '" + SqlUtils.escapeSqlString(catalogName) + "'"
+                + " and db_name = '" + SqlUtils.escapeSqlString(dbName) + "'"
+                + " and table_name = '" + SqlUtils.escapeSqlString(tableName) + "'";
     }
 
     private static String build(VelocityContext context, String template) {

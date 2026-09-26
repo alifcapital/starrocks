@@ -179,6 +179,17 @@ public class CacheRelaxDictManager implements IRelaxDictManager, MemoryTrackable
     }
 
     @Override
+    public Optional<ColumnDict> getCachedGlobalDict(String tableUUID, String columnName) {
+        if (!hasGlobalDict(tableUUID, columnName)) {
+            return Optional.empty();
+        }
+        // Quiet lookup never starts a load or a refresh while deciding whether to use an existing dictionary.
+        Optional<ColumnDict> value = dictStatistics.synchronous().policy()
+                .getIfPresentQuietly(new ConnectorTableColumnKey(tableUUID, columnName));
+        return value == null ? Optional.empty() : value;
+    }
+
+    @Override
     public Optional<ColumnDict> getGlobalDict(String tableUUID, String columnName) {
         ConnectorTableColumnKey key = new ConnectorTableColumnKey(tableUUID, columnName);
         CompletableFuture<Optional<ColumnDict>> columnFuture = dictStatistics.get(key);

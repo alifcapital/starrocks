@@ -20,6 +20,8 @@ import com.starrocks.utframe.StarRocksAssert;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 public class ArraySortLambdaTest extends PlanTestBase {
 
@@ -102,4 +104,31 @@ public class ArraySortLambdaTest extends PlanTestBase {
         String plan = getVerboseExplain(sql);
         assertCContains(plan, "([2, DOUBLE, true], [3, DOUBLE, true]) -> [2, DOUBLE, true] - [3, DOUBLE, true] < 0.0)");
     }
+
+    @Test
+    public void testArraySortLambdaCompoundCondition() throws Exception {
+        String sql = "select array_sort([1,2,3,4,5,6,7,8], " +
+                "(x,y)->case when (x = 1 and y = 2) or (y = 1 and x = 2) then -1 else x - y end)";
+        String plan = getFragmentPlan(sql);
+        assertCContains(plan, "array_sort_lambda");
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "x LIKE 'a%'",
+            "x NOT LIKE 'a%'",
+            "x LIKE 'a%' AND x LIKE '%b'",
+            "x LIKE 'a%' OR x LIKE '%b'",
+            "upper(x) NOT LIKE 'A%'",
+            "x IS NULL OR x LIKE 'a%'",
+            "x REGEXP '^a' OR x LIKE '%b'",
+            "NOT (x LIKE 'a%' OR x IS NULL)"
+    })
+    public void testArrayFilterPredicateWithoutLambdaColumnStatistics(String body) throws Exception {
+        // s1 has no collected statistics. The lambda slot must not be looked up as a table column.
+        String filter = "array_filter(x -> " + body + ", a1)";
+        assertContains(getFragmentPlan("SELECT " + filter + " FROM s1"), "array_filter");
+        assertContains(getFragmentPlan("SELECT v1 FROM s1 WHERE array_length(" + filter + ") > 0"),
+                "array_filter");
+    }
+
 }

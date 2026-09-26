@@ -16,10 +16,8 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Maps;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
@@ -139,11 +137,9 @@ public class CachedStatisticStorageTest {
 
                 cachedStatisticStorage.getColumnStatistic(table, "v2");
                 result = ColumnStatistic.builder().setDistinctValuesCount(999).build();
-                minTimes = 0;
 
                 cachedStatisticStorage.getColumnStatistic(table, "v3");
                 result = ColumnStatistic.builder().setDistinctValuesCount(666).build();
-                minTimes = 0;
             }
         };
         ColumnStatistic columnStatistic1 =
@@ -283,48 +279,38 @@ public class CachedStatisticStorageTest {
     }
 
     @Test
-    public void testGetConnectorTableStatisticsSync(
-            @Mocked AsyncLoadingCache<ConnectorTableColumnKey,
-                    Optional<ConnectorTableColumnStats>> connectorTableCachedStatistics,
-            @Mocked LoadingCache<ConnectorTableColumnKey,
-                    Optional<ConnectorTableColumnStats>> connectorTableTableSyncCachedStatistics) {
-        Table table =
-                connectContext.getGlobalStateMgr().getMetadataMgr().getTable(connectContext, "hive0", "partitioned_db", "t1");
-        List<ConnectorTableColumnKey> cacheKeys =
-                ImmutableList.of(new ConnectorTableColumnKey(table.getUUID(), "c1"),
-                        new ConnectorTableColumnKey(table.getUUID(), "c2"));
-
-        Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> columnKeyOptionalMap = Maps.newHashMap();
-        columnKeyOptionalMap.put(new ConnectorTableColumnKey(table.getUUID(), "c1"),
-                Optional.of(new ConnectorTableColumnStats(
-                        new ColumnStatistic(0, 10, 0, 20, 5), 5, "")));
-        columnKeyOptionalMap.put(new ConnectorTableColumnKey(table.getUUID(), "c2"),
-                Optional.of(new ConnectorTableColumnStats(
-                        new ColumnStatistic(0, 100, 0, 200, 50), 50, "")));
-
+    public void testGetConnectorTableStatisticsSync() {
+        Table table = connectContext.getGlobalStateMgr().getMetadataMgr().getTable(
+                connectContext, "hive0", "partitioned_db", "t1");
         new MockUp<StatisticUtils>() {
             @Mock
             public boolean checkStatisticTableStateNormal() {
                 return true;
             }
         };
-
-        CachedStatisticStorage cachedStatisticStorage = new CachedStatisticStorage();
-        List<ConnectorTableColumnStats> connectorColumnStatistics = cachedStatisticStorage.
-                getConnectorTableStatisticsSync(table, ImmutableList.of("c1", "c2"));
-        Assertions.assertEquals(2, connectorColumnStatistics.size());
-
+        CachedStatisticStorage storage = new CachedStatisticStorage();
+        ColumnStatistic statistic = new ColumnStatistic(0, 10, 0, 20, 5);
+        ConnectorTableColumnStats raw = new ConnectorTableColumnStats(statistic, 5, "2026-09-21 00:00:00");
+        ConnectorTableColumnStats estimated = new ConnectorTableColumnStats(statistic, 50, raw.getUpdateTime());
+        storage.externalStatisticsCache.synchronous().put(ExternalStatisticsCacheKey.table(table.getUUID(), "c1"),
+                Optional.of(new ExternalColumnStatistics.Summary(raw, estimated, "INT")));
+        storage.externalStatisticsCache.synchronous().put(
+                ExternalStatisticsCacheKey.table(table.getUUID(), "c2"), Optional.empty());
+        List<ConnectorTableColumnStats> result = storage.getConnectorTableStatisticsSync(table, List.of("c1", "c2"));
+        Assertions.assertEquals(5, result.get(0).getRowCount(), "Collection uses the raw count, before sample extrapolation");
+        Assertions.assertEquals(raw.getUpdateTime(), result.get(0).getUpdateTime());
+        Assertions.assertTrue(result.get(1).isUnknown());
+        result = storage.getConnectorTableStatistics(table, List.of("c1", "c2"));
+        Assertions.assertEquals(50, result.get(0).getRowCount(), "Planner uses the prepared sample estimate");
+        Assertions.assertSame(statistic, result.get(0).getColumnStatistic());
         new MockUp<StatisticUtils>() {
             @Mock
             public boolean checkStatisticTableStateNormal() {
                 return false;
             }
         };
-        connectorColumnStatistics = cachedStatisticStorage.
-                getConnectorTableStatisticsSync(table, ImmutableList.of("c1", "c2"));
-        Assertions.assertEquals(2, connectorColumnStatistics.size());
-        Assertions.assertTrue(connectorColumnStatistics.get(0).getColumnStatistic().isUnknown());
-        Assertions.assertTrue(connectorColumnStatistics.get(1).getColumnStatistic().isUnknown());
+        result = storage.getConnectorTableStatisticsSync(table, List.of("c1", "c2"));
+        Assertions.assertTrue(result.stream().allMatch(ConnectorTableColumnStats::isUnknown));
     }
 
     @Test
@@ -442,6 +428,66 @@ public class CachedStatisticStorageTest {
         Map<String, Histogram> histogramMap =
                 cachedStatisticStorage.getConnectorHistogramStatistics(table, ImmutableList.of("c1"));
         Assertions.assertEquals(0, histogramMap.size());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testGetHistogramStatisticsSkipInStatisticsConnection(
+            @Mocked AsyncLoadingCache<ColumnStatsCacheKey, Optional<Histogram>> histogramCache) {
+        Database db = connectContext.getGlobalStateMgr().getLocalMetastore().getDb("test");
+        OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "t0");
+
+        // A histogram-collect INSERT holds the histogram_statistics READ lock while its plan is
+        // optimized; estimating the source scan then calls getHistogramStatistics on the source
+        // table. If that synchronously loads the histogram, the loader re-acquires the
+        // histogram_statistics READ lock and (behind a queued publish WRITE) self-deadlocks.
+        // The guard must short-circuit for statistics-collect connections BEFORE touching the
+        // cache, so the loader is never dispatched. Assert getAll is never called.
+        new Expectations() {
+            {
+                histogramCache.getAll((Iterable<? extends ColumnStatsCacheKey>) any);
+                times = 0;
+            }
+        };
+
+        CachedStatisticStorage cachedStatisticStorage = new CachedStatisticStorage();
+
+        connectContext.setThreadLocalInfo();
+        boolean prev = connectContext.isStatisticsConnection();
+        connectContext.setStatisticsConnection(true);
+        try {
+            Map<String, Histogram> result =
+                    cachedStatisticStorage.getHistogramStatistics(table, ImmutableList.of("v1"));
+            Assertions.assertTrue(result.isEmpty());
+        } finally {
+            connectContext.setStatisticsConnection(prev);
+            ConnectContext.remove();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testGetHistogramStatisticsSkipForStatisticsInternalTable(
+            @Mocked AsyncLoadingCache<ColumnStatsCacheKey, Optional<Histogram>> histogramCache) {
+        Database statsDb = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(StatsConstants.STATISTICS_DB_NAME);
+        Table statsTable = GlobalStateMgr.getCurrentState().getLocalMetastore()
+                .getTable(statsDb.getFullName(), "table_statistic_v1");
+        Assertions.assertNotNull(statsTable);
+
+        // The other guard branch: statistics-internal tables (in the collect blacklist DB) must also
+        // skip the load, independent of the connection type, so the cache is never touched.
+        new Expectations() {
+            {
+                histogramCache.getAll((Iterable<? extends ColumnStatsCacheKey>) any);
+                times = 0;
+            }
+        };
+
+        CachedStatisticStorage cachedStatisticStorage = new CachedStatisticStorage();
+        ConnectContext.remove();
+        Map<String, Histogram> result =
+                cachedStatisticStorage.getHistogramStatistics(statsTable, ImmutableList.of("column_name"));
+        Assertions.assertTrue(result.isEmpty());
     }
 
     @Test

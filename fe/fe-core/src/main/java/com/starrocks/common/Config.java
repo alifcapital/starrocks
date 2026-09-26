@@ -2662,6 +2662,20 @@ public class Config extends ConfigBase {
     @ConfField
     public static long statistic_cache_columns = 100000;
 
+    @ConfField(mutable = true, comment = "Estimated byte capacity of the external column statistics cache, "
+            + "including partition HLLs and table summaries")
+    public static volatile long external_statistics_cache_max_bytes = 512L * 1024 * 1024;
+
+    @ConfField(mutable = true, comment = "Maximum partitions per reusable external statistics HLL block; "
+            + "1 uses individual partition entries. Bounded to 4096 by the loader")
+    public static int external_statistics_partition_block_size = 64;
+
+    @ConfField(comment = "Worker limit for partition statistics loads, separate from native statistics")
+    public static int external_statistics_partition_load_threads = 2;
+
+    @ConfField(comment = "Pending partition statistics load batches; excess work fails without blocking the planner")
+    public static int external_statistics_partition_load_queue_size = 32;
+
     /**
      * The max number of io tasks for each connector operator in collect statistic
      */
@@ -2868,6 +2882,23 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true)
     public static long histogram_mcv_size = 100;
+
+    @ConfField(mutable = true, comment = "Default number of frequent tuples collected by ANALYZE MCV")
+    public static int statistic_mcv_size = 100;
+
+    @ConfField(mutable = true, comment = "Maximum estimated retained bytes of external MCV statistics in the FE cache")
+    public static volatile long statistic_mcv_cache_max_bytes = 512L * 1024 * 1024;
+
+    @ConfField(mutable = true, comment = "Default number of residual buckets for a single-column ANALYZE MCV")
+    public static int statistic_mcv_bucket_num = 64;
+
+    /**
+     * log2 of the hash map size of the frequent-items sketch (ds_frequent_items) that finds the most
+     * common values during statistics collection. The sketch keeps at most 2^N entries per fragment and
+     * guarantees every value with a share above 3.5 / 2^N of the rows; 14 gives 16384 entries.
+     */
+    @ConfField(mutable = true)
+    public static int statistic_mcv_sketch_lg_map_size = 14;
 
     /**
      * default sample ratio of histogram statistics
