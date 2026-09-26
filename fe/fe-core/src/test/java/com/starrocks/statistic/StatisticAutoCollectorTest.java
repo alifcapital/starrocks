@@ -46,6 +46,16 @@ public class StatisticAutoCollectorTest {
                 return true;
             }
         };
+        // This test exercises schedule initialization, not maintenance or warehouse setup.
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public void clearStatisticFromDroppedPartition() {
+            }
+
+            @Mock
+            public void clearStatisticFromDroppedTable() {
+            }
+        };
         StatisticAutoCollector collector = new StatisticAutoCollector() {
             @Override
             Map<Long, Map<String, String>> scheduleJobProperties() {
