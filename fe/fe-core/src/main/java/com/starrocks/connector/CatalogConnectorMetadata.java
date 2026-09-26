@@ -154,6 +154,15 @@ public class CatalogConnectorMetadata implements ConnectorMetadata {
     }
 
     @Override
+    public Table getTableForDiscovery(ConnectContext context, String dbName, String tblName) {
+        ConnectorMetadata metadata = metadataOfTable(tblName);
+        if (metadata == null) {
+            metadata = metadataOfDb(dbName);
+        }
+        return metadata.getTableForDiscovery(context, dbName, tblName);
+    }
+
+    @Override
     public String getTableComment(ConnectContext context, String dbName, String tblName) {
         ConnectorMetadata metadata = metadataOfTable(tblName);
         if (metadata == null) {

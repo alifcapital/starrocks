@@ -59,7 +59,8 @@ public class ExternalTablesProcDir implements ProcDirInterface {
         }
         Table tbl = null;
         try {
-            tbl = metadataMgr.getTable(new ConnectContext(), catalogName, dbName, name);
+            tbl = metadataMgr.getTableForDiscovery(
+                    ConnectContext.get() == null ? new ConnectContext() : ConnectContext.get(), catalogName, dbName, name);
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage());
         }

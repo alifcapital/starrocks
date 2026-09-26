@@ -852,6 +852,15 @@ public class IcebergMetadata implements ConnectorMetadata {
     }
 
     @Override
+    public Table getTableForDiscovery(ConnectContext context, String dbName, String tblName) {
+        try {
+            return icebergCatalog.getTableForDiscovery(context, catalogName, dbName, tblName);
+        } catch (NoSuchTableException e) {
+            return getView(context, dbName, tblName);
+        }
+    }
+
+    @Override
     public Table getTable(ConnectContext context, String dbName, String tblName) {
         TableIdentifier identifier = TableIdentifier.of(dbName, tblName);
 
@@ -2275,6 +2284,9 @@ public class IcebergMetadata implements ConnectorMetadata {
                                          ScalarOperator predicate,
                                          long limit,
                                          TvrVersionRange version) {
+        IcebergTable scanTable = (IcebergTable) table;
+        icebergCatalog.recordScanAccess(session.getConnectContext(), scanTable.getCatalogDBName(),
+                scanTable.getCatalogTableName());
         if (!properties.enableGetTableStatsFromExternalMetadata()) {
             return StatisticsUtils.buildDefaultStatistics(columns.keySet());
         }

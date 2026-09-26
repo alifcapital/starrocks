@@ -847,7 +847,7 @@ public class ShowExecutorSimpleTest {
             }
 
             @Mock
-            public Table getTable(ConnectContext context, String catalogName, String dbName, String tblName) {
+            public Table getTableForDiscovery(ConnectContext context, String catalogName, String dbName, String tblName) {
                 List<Column> fullSchema = new ArrayList<>();
                 Column columnId = new Column("id", IntegerType.INT, true);
                 columnId.setComment("id");
@@ -902,7 +902,7 @@ public class ShowExecutorSimpleTest {
             }
 
             @Mock
-            public Table getTable(ConnectContext context, String catalogName, String dbName, String tblName) {
+            public Table getTableForDiscovery(ConnectContext context, String catalogName, String dbName, String tblName) {
                 List<Column> fullSchema = new ArrayList<>();
                 Column columnId = new Column("id", IntegerType.INT, true);
                 columnId.setComment("id");

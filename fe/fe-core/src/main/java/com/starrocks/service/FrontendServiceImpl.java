@@ -933,7 +933,7 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         Database db = metadataMgr.getDb(context, catalogName, params.db);
 
         if (db != null) {
-            Table table = metadataMgr.getTable(context, catalogName, params.db, params.table_name);
+            Table table = metadataMgr.getTableForDiscovery(context, catalogName, params.db, params.table_name);
             if (table == null) {
                 return result;
             }

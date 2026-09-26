@@ -716,7 +716,7 @@ public class ConnectProcessor {
         // external catalogs and the unlocked lookup changes nothing for them.
         Table table;
         try {
-            table = ctx.getGlobalStateMgr().getMetadataMgr().getTable(
+            table = ctx.getGlobalStateMgr().getMetadataMgr().getTableForDiscovery(
                     ctx, ctx.getCurrentCatalog(), ctx.getDatabase(), tableName);
         } catch (StarRocksConnectorException e) {
             LOG.error("errors happened when getting table {}", tableName, e);

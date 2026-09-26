@@ -14,6 +14,7 @@
 
 package com.starrocks.connector.iceberg;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.Weigher;
@@ -99,6 +100,21 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private final ConcurrentHashMap<String, String> tableRefreshLockMap = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestSnapshotTime = new ConcurrentHashMap<>();
 
+    // A bounded, detached schema cache for DESC / information_schema.columns.
+    private final Cache<IcebergTableName, DiscoveryEntry> discoverySchemas;
+    private java.util.function.LongSupplier discoveryClock = System::nanoTime;
+
+    private static class DiscoveryEntry {
+        private final IcebergDiscoveryTable schema;
+        private final long loadedAt;
+
+        private DiscoveryEntry(IcebergDiscoveryTable schema, long loadedAt) {
+            this.schema = schema;
+            this.loadedAt = loadedAt;
+        }
+    }
+
+
     private final com.github.benmanes.caffeine.cache.LoadingCache<IcebergTableName, Map<String, Partition>> partitionCache;
 
     public CachingIcebergCatalog(String catalogName, IcebergCatalog delegate, IcebergCatalogProperties icebergProperties,
@@ -109,6 +125,17 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         boolean enableCache = icebergProperties.isEnableIcebergMetadataCache();
         long tableCacheSize = Math.round(Runtime.getRuntime().maxMemory() *
                 icebergProperties.getIcebergTableCacheMemoryUsageRatio());
+        Caffeine<Object, Object> discoveryBuilder = Caffeine.newBuilder();
+        long schemaTtl = icebergProperties.getIcebergTableCacheTtlSec();
+        if (schemaTtl >= 0) {
+            discoveryBuilder.expireAfterAccess(schemaTtl, SECONDS);
+        }
+        // Schemas must not acquire another full Table-sized heap budget.
+        this.discoverySchemas = discoveryBuilder
+                .maximumWeight(enableCache ? Math.min(tableCacheSize, 256L * 1024 * 1024) : 0)
+                .weigher((Weigher<IcebergTableName, DiscoveryEntry>) (key, value) ->
+                        (int) Math.min(Integer.MAX_VALUE, Math.max(1, Estimator.estimate(key) + Estimator.estimate(value))))
+                .build();
         this.databases = newCacheBuilderWithMaximumSize(
                 icebergProperties.getIcebergTableCacheTtlSec(),
                 NEVER_CACHE,
@@ -241,11 +268,6 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             return delegate.getTable(connectContext, dbName, tableName);
         }
 
-        // only real client queries (COM_QUERY) prolong cache liveness; background tasks must not extend TTL.
-        if (ConnectContext.get() != null && ConnectContext.get().getCommand() == MysqlCommand.COM_QUERY) {
-            tableLatestAccessTime.put(icebergTableName, System.currentTimeMillis());
-        }
-
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable != null) {
             return cachedTable;
@@ -266,6 +288,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 Table icebergTable = delegate.getTable(connectContext, dbName, tableName);
                 if (icebergTable != null) {
                     tables.put(icebergTableName, icebergTable);
+                    updateDiscoverySchemaIfPresent(icebergTableName, icebergTable);
                 }
                 return icebergTable;
             }
@@ -275,6 +298,46 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             throw new StarRocksConnectorException(
                     String.format("Failed to get iceberg table %s.%s.%s", catalogName, dbName, tableName), e);
         }
+    }
+
+    @Override
+    public com.starrocks.catalog.Table getTableForDiscovery(
+            ConnectContext context, String ignoredCatalog, String dbName, String tableName) {
+        // Preserve per-user authorization and vended credential isolation for REST catalogs.
+        if (delegate instanceof IcebergRESTCatalog || !icebergProperties.isEnableIcebergTableCache()) {
+            return delegate.getTableForDiscovery(context, catalogName, dbName, tableName);
+        }
+        IcebergTableName key = new IcebergTableName(dbName, tableName);
+        synchronized (tableRefreshLock(dbName, tableName)) {
+            DiscoveryEntry entry = discoverySchemas.getIfPresent(key);
+            long ttl = icebergProperties.getIcebergTableCacheTtlSec();
+            if (entry != null && (ttl < 0 || discoveryClock.getAsLong() - entry.loadedAt < SECONDS.toNanos(ttl))) {
+                return entry.schema;
+            }
+            // An expired schema must not be renewed from an equally stale full Table.
+            Table table = entry == null ? tables.getIfPresent(key) : null;
+            if (table == null) {
+                table = delegate.getTable(context, dbName, tableName);
+            }
+            if (table == null) {
+                discoverySchemas.invalidate(key);
+                return null;
+            }
+            return cacheDiscoverySchema(key, table);
+        }
+    }
+
+    private void updateDiscoverySchemaIfPresent(IcebergTableName key, Table table) {
+        if (discoverySchemas.asMap().containsKey(key)) {
+            cacheDiscoverySchema(key, table);
+        }
+    }
+
+    private IcebergDiscoveryTable cacheDiscoverySchema(IcebergTableName key, Table table) {
+        IcebergDiscoveryTable schema = IcebergDiscoveryTable.from(
+                table, catalogName, key.dbName, key.tableName, getIcebergCatalogType().name());
+        discoverySchemas.put(key, new DiscoveryEntry(schema, discoveryClock.getAsLong()));
+        return schema;
     }
 
     @Override
@@ -421,7 +484,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private void refreshTable(String dbName, String tableName, ConnectContext ctx,
                               ExecutorService executorService, boolean checkMetadata) {
         synchronized (tableRefreshLock(dbName, tableName)) {
-            refreshTableUnderLock(dbName, tableName, ctx, executorService, checkMetadata);
+            try {
+                refreshTableUnderLock(dbName, tableName, ctx, executorService, checkMetadata);
+            } catch (RuntimeException e) {
+                discoverySchemas.invalidate(new IcebergTableName(dbName, tableName));
+                throw e;
+            }
         }
     }
 
@@ -430,6 +498,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable == null) {
+            discoverySchemas.invalidate(icebergTableName);
             invalidatePartitionCache(dbName, tableName);
             // Cold-start path: table wasn't cached yet (first refresh after FE restart).
             // Trigger footer warmup here too so the first user query doesn't pay S3 for the
@@ -483,6 +552,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                         ? currentTable : updateTable;
                 warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
                 tables.put(icebergTableName, retainedTable);
+                updateDiscoverySchemaIfPresent(icebergTableName, retainedTable);
                 invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
                 tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
@@ -497,6 +567,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         // Readers keep the previous, warm snapshot until all metadata for the candidate is ready.
         warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
         tables.put(keyWithoutSnap, updatedTable);
+        updateDiscoverySchemaIfPresent(keyWithoutSnap, updatedTable);
         invalidateOldPartitionSnapshots(dbName, tableName, updated);
         tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
         if (updated != null) {
@@ -557,7 +628,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 Long latestAccessTime = tableLatestAccessTime.get(identifier);
                 // drop entries that haven't been used within the table cache TTL window
                 if (latestAccessTime == null || (now - latestAccessTime) / 1000 > tableTtlSec) {
-                    invalidateCache(identifier);
+                    // Discovery has its own access lifetime; retiring a data scan must not evict it.
+                    synchronized (tableRefreshLock(identifier.dbName, identifier.tableName)) {
+                        invalidateCacheUnderLock(identifier, false);
+                    }
                     continue;
                 }
 
@@ -661,7 +735,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     @Override
     public void invalidateTableCache(String dbName, String tableName) {
         IcebergTableName key = new IcebergTableName(dbName, tableName);
-        tables.invalidate(key);
+        synchronized (tableRefreshLock(dbName, tableName)) {
+            tables.invalidate(key);
+        }
     }
 
     @Override
@@ -671,7 +747,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
     private void invalidateCache(IcebergTableName key) {
+        synchronized (tableRefreshLock(key.dbName, key.tableName)) {
+            invalidateCacheUnderLock(key, true);
+        }
+    }
+
+    private void invalidateCacheUnderLock(IcebergTableName key, boolean invalidateDiscovery) {
         tables.invalidate(key);
+        if (invalidateDiscovery) {
+            discoverySchemas.invalidate(key);
+        }
         invalidatePartitionCache(key.dbName, key.tableName);
         tableLatestAccessTime.remove(key);
         tableLatestRefreshTime.remove(key);
@@ -691,7 +776,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
     @Override
+    public void recordScanAccess(ConnectContext context, String dbName, String tableName) {
+        if (context != null && !shouldOnlyReadCache(context) &&
+                (context.getCommand() == MysqlCommand.COM_QUERY || context.getCommand() == MysqlCommand.COM_STMT_EXECUTE)) {
+            tableLatestAccessTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
+        }
+    }
+
+    @Override
     public StarRocksIcebergTableScan getTableScan(Table table, StarRocksIcebergTableScanContext scanContext) {
+        recordScanAccess(scanContext.getConnectContext(), scanContext.getDbName(), scanContext.getTableName());
         scanContext.setDataFileCache(dataFileCache);
         scanContext.setDeleteFileCache(deleteFileCache);
         scanContext.setMetaFileCacheMap(metaFileCacheMap);
@@ -835,6 +929,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         List<List<String>> partitionNames = getAllCachedPartitionNames();
         counter.put("Database", databases.estimatedSize());
         counter.put("Table", tables.estimatedSize());
+        counter.put("DiscoverySchema", discoverySchemas.estimatedSize());
         counter.put("TableSnapshot", tables.asMap().values()
                 .stream()
                 .mapToLong(this::countSnapshotsSafe)
@@ -856,7 +951,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     @Override
     public long estimateSize() {
-        return Estimator.estimate(tables.asMap(), 10) +
+        return Estimator.estimate(discoverySchemas.asMap(), 10) +
+                Estimator.estimate(tables.asMap(), 10) +
                 Estimator.estimate(databases.asMap(), 10) +
                 estimateDataFileCacheSize() +
                 estimateDeleteFileCacheSize() +

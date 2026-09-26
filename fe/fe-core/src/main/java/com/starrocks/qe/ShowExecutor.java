@@ -1018,7 +1018,7 @@ public class ShowExecutor {
             if (db == null) {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
             }
-            Table table = metadataMgr.getTable(context, catalogName, dbName, tableName);
+            Table table = metadataMgr.getTableForDiscovery(context, catalogName, dbName, tableName);
             if (table == null) {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR, tableName);
             }

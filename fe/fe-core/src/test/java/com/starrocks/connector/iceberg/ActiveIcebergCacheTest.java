@@ -327,6 +327,9 @@ class ActiveIcebergCacheTest {
             assertTrue(times(catalog, "tableLatestAccessTime").isEmpty());
             internal.setCommand(MysqlCommand.COM_QUERY);
             catalog.getTable(internal, "db", "tbl");
+            assertTrue(times(catalog, "tableLatestAccessTime").isEmpty());
+            catalog.getTableScan(current, new StarRocksIcebergTableScanContext(
+                    "test", "db", "tbl", com.starrocks.connector.PlanMode.LOCAL, internal));
             assertTrue(times(catalog, "tableLatestAccessTime").containsKey(key));
         } finally {
             ConnectContext.remove();
