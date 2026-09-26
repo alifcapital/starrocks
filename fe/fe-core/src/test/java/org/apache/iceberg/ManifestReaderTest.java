@@ -163,7 +163,12 @@ public class ManifestReaderTest {
         Mockito.when(table.name()).thenReturn("db.tbl");
         Snapshot snapshot = Mockito.mock(Snapshot.class);
         Mockito.when(table.schema()).thenReturn(TEST_SCHEMA);
-        Mockito.when(table.specs()).thenReturn(Map.of(TEST_SPEC.specId(), TEST_SPEC));
+        PartitionSpec currentSpec = selective
+                ? PartitionSpec.builderFor(TEST_SCHEMA).withSpecId(1).identity("data").build() : TEST_SPEC;
+        Mockito.when(table.spec()).thenReturn(currentSpec);
+        Mockito.when(table.specs()).thenReturn(selective
+                ? Map.of(TEST_SPEC.specId(), TEST_SPEC, currentSpec.specId(), currentSpec)
+                : Map.of(TEST_SPEC.specId(), TEST_SPEC));
         Mockito.when(table.io()).thenReturn(io);
         Mockito.when(table.currentSnapshot()).thenReturn(snapshot);
         Mockito.when(snapshot.snapshotId()).thenReturn(1L);
@@ -200,6 +205,40 @@ public class ManifestReaderTest {
     }
 
     @Test
+    public void testUnpartitionedSortedIdentifierTableKeepsFullStats() throws IOException {
+        for (boolean warmup : List.of(false, true)) {
+            DataFile file = newDataFileWithStats("unpartitioned-" + warmup + ".parquet", 10L);
+            ManifestFile manifest = writeManifest("unpartitioned-" + warmup + ".avro", file);
+            Cache<String, Set<DataFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+            FileIO io = Mockito.spy(new LocalFileIO());
+            StarRocksIcebergTableScan scan = cachedScan(manifest, cache, io, false);
+            Schema schema = new Schema(TEST_SCHEMA.columns(), Set.of(2));
+            Mockito.when(scan.table().schema()).thenReturn(schema);
+            Mockito.when(scan.table().sortOrders()).thenReturn(
+                    Map.of(1, SortOrder.builderFor(schema).asc("data").build()));
+            // Even a historical partition spec must not truncate a currently unpartitioned table.
+            PartitionSpec oldSpec = PartitionSpec.builderFor(schema).withSpecId(1).identity("data").build();
+            Mockito.when(scan.table().specs()).thenReturn(Map.of(0, TEST_SPEC, 1, oldSpec));
+            Assertions.assertTrue(StarRocksIcebergTableScan.statsKeepColumnIds(scan.table(), schema).isEmpty());
+            if (warmup) {
+                scan.refreshDataFileCache(List.of(manifest));
+            } else {
+                try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {
+                    tasks.forEach(task -> Assertions.assertEquals(10L, task.file().recordCount()));
+                }
+            }
+            Set<DataFile> cached = cache.getIfPresent(manifest.path());
+            Assertions.assertTrue(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(cached));
+            Assertions.assertEquals(file.lowerBounds(), cached.iterator().next().lowerBounds());
+            Mockito.doThrow(new AssertionError("Full statistics must be reused without reopening the manifest"))
+                    .when(io).newInputFile(Mockito.anyString());
+            try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+                Assertions.assertEquals(file.lowerBounds(), tasks.iterator().next().file().lowerBounds());
+            }
+        }
+    }
+
+    @Test
     public void testPartialStatsUpgradedAndNotDowngradedByWarmup() throws IOException {
         DataFile file = newDataFileWithStats("upgrade.parquet", 10L);
         ManifestFile manifest = writeManifest("upgrade.avro", file);
@@ -209,7 +248,7 @@ public class ManifestReaderTest {
         scan.refreshDataFileCache(List.of(manifest));
         Assertions.assertFalse(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(
                 cache.getIfPresent(manifest.path())));
-        // Sorting on column 2 does not keep the statistics of column 1.
+        // Partitioning and sorting on column 2 do not keep the statistics of column 1.
         DataFile partial = cache.getIfPresent(manifest.path()).iterator().next();
         Assertions.assertTrue(partial.lowerBounds() == null || !partial.lowerBounds().containsKey(1));
         try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {

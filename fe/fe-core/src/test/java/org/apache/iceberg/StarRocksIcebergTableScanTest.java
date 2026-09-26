@@ -142,6 +142,7 @@ public class StarRocksIcebergTableScanTest {
         SortOrder oldOrder = SortOrder.builderFor(schema).asc("id").build();
         SortOrder currentOrder = SortOrder.builderFor(schema).asc("data").build();
         Table table = Mockito.mock(Table.class);
+        Mockito.when(table.spec()).thenReturn(spec);
         Mockito.when(table.specs()).thenReturn(ImmutableMap.of(spec.specId(), spec));
         Mockito.when(table.sortOrders()).thenReturn(ImmutableMap.of(1, oldOrder, 2, currentOrder));
 

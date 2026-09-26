@@ -409,7 +409,7 @@ public class StarRocksIcebergTableScan
 
         if (dataFileCacheWithMetrics) {
             // An explicit full-statistics request upgrades missing/partial manifest entries.
-            // Ordinary readers retain only the prune-effective columns to bound memory use.
+            // Ordinary readers limit metrics only for partitioned tables to bound memory use.
             if (shouldReturnColumnStats()) {
                 return null;
             }
@@ -433,6 +433,10 @@ public class StarRocksIcebergTableScan
     // source columns -- unioned across all specs and sort orders so partition/sort evolution stays
     // covered -- plus identifier columns (equality-delete correctness). Empty result caches all.
     static Set<Integer> statsKeepColumnIds(Table table, Schema schema) {
+        // Sorting or identifiers alone must not truncate statistics for unpartitioned tables.
+        if (table.spec().isUnpartitioned()) {
+            return Set.of();
+        }
         Set<Integer> ids = new HashSet<>(schema.identifierFieldIds());
         table.specs().values().forEach(spec -> spec.fields().forEach(field -> ids.add(field.sourceId())));
         table.sortOrders().values().forEach(order -> order.fields().forEach(field -> ids.add(field.sourceId())));
