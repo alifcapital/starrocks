@@ -413,7 +413,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable == null) {
-            partitionCache.invalidate(icebergTableName);
+            invalidatePartitionCache(dbName, tableName);
         } else {
             BaseTable currentTable = (BaseTable) cachedTable;
             if (!checkMetadata) {
@@ -456,6 +456,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 // table so the cache stops serving the old (expiring) vended FileIO token.
                 warmCurrentSnapshot(updateTable, dbName, tableName, executorService);
                 tables.put(icebergTableName, updateTable);
+                invalidateOldPartitionSnapshots(dbName, tableName, updateTable.currentSnapshot());
                 tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
         }
@@ -467,9 +468,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         Snapshot updated = updatedTable.currentSnapshot();
 
         // Readers keep the previous, warm snapshot until all metadata for the candidate is ready.
-        // Retain old snapshot partition entries for queries already using that snapshot.
         warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
         tables.put(keyWithoutSnap, updatedTable);
+        invalidateOldPartitionSnapshots(dbName, tableName, updated);
         tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
         if (updated != null) {
             tableLatestSnapshotTime.put(keyWithoutSnap, updated.timestampMillis());
@@ -553,9 +554,14 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     @Override
     public void invalidatePartitionCache(String dbName, String tableName) {
-        // will invalidate all snapshots of this table
-        IcebergTableName key = new IcebergTableName(dbName, tableName);
-        partitionCache.invalidate(key);
+        invalidateOldPartitionSnapshots(dbName, tableName, null);
+    }
+
+    private void invalidateOldPartitionSnapshots(String dbName, String tableName, Snapshot retainedSnapshot) {
+        // A table-only key is not a wildcard removal: explicitly visit every cached version.
+        partitionCache.asMap().keySet().removeIf(key -> key.dbName.equalsIgnoreCase(dbName)
+                && key.tableName.equalsIgnoreCase(tableName)
+                && (retainedSnapshot == null || key.snapshotId != retainedSnapshot.snapshotId()));
     }
 
     @Override
@@ -572,8 +578,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     private void invalidateCache(IcebergTableName key) {
         tables.invalidate(key);
-        // will invalidate all snapshots of this table
-        partitionCache.invalidate(key);
+        invalidatePartitionCache(key.dbName, key.tableName);
         tableLatestAccessTime.remove(key);
         tableLatestRefreshTime.remove(key);
         tableLatestSnapshotTime.remove(key);
@@ -650,7 +655,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             }
             IcebergTableName that = (IcebergTableName) o;
             return dbName.equalsIgnoreCase(that.dbName) && tableName.equalsIgnoreCase(that.tableName) &&
-                    (ignoreSnapshotId || snapshotId == that.snapshotId);
+                    (ignoreSnapshotId == that.ignoreSnapshotId && snapshotId == that.snapshotId);
         }
 
         @Override
