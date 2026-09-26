@@ -83,6 +83,100 @@ public class CachingIcebergCatalogTest {
         connectContext = UtFrameUtils.createDefaultCtx();
     }
 
+    private BaseTable mockRefreshCandidate(long snapshotId, String location) {
+        BaseTable table = Mockito.mock(BaseTable.class);
+        TableOperations ops = Mockito.mock(TableOperations.class);
+        TableMetadata metadata = Mockito.mock(TableMetadata.class);
+        Snapshot snapshot = Mockito.mock(Snapshot.class);
+        Mockito.when(table.operations()).thenReturn(ops);
+        Mockito.when(ops.current()).thenReturn(metadata);
+        Mockito.when(metadata.metadataFileLocation()).thenReturn(location);
+        Mockito.when(table.currentSnapshot()).thenReturn(snapshot);
+        Mockito.when(snapshot.snapshotId()).thenReturn(snapshotId);
+        Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(List.of());
+        Mockito.when(snapshot.deleteManifests(Mockito.any())).thenReturn(List.of());
+        return table;
+    }
+
+    @Test
+    public void testRefreshPublishesOnlyAfterWarmup() throws Exception {
+        for (boolean sameMetadata : List.of(false, true)) {
+            IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+            ExecutorService workers = Executors.newFixedThreadPool(2);
+            CountDownLatch warming = new CountDownLatch(1);
+            CountDownLatch finish = new CountDownLatch(1);
+            try {
+                CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                        CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+                BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+                BaseTable candidate = mockRefreshCandidate(sameMetadata ? 1L : 2L,
+                        sameMetadata ? "old.json" : "new.json");
+                Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+                tables.put(new IcebergTableName("db", "tbl"), oldTable);
+                Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                        .thenReturn(candidate);
+                Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any()))
+                        .thenAnswer(inv -> {
+                            Assertions.assertSame(candidate, ((IcebergTable) inv.getArgument(0)).getNativeTable());
+                            return Map.of();
+                        });
+                Mockito.when(candidate.currentSnapshot().deleteManifests(Mockito.any())).thenAnswer(inv -> {
+                    warming.countDown();
+                    Assertions.assertTrue(finish.await(5, TimeUnit.SECONDS));
+                    return List.of();
+                });
+                java.util.concurrent.Future<?> refresh = workers.submit(
+                        () -> catalog.refreshTable("db", "tbl", new ConnectContext(), workers));
+                Assertions.assertTrue(warming.await(5, TimeUnit.SECONDS));
+                java.util.concurrent.Future<Table> read = workers.submit(
+                        () -> catalog.getTable(new ConnectContext(), "db", "tbl"));
+                Assertions.assertSame(oldTable, read.get(2, TimeUnit.SECONDS),
+                        "A query must not wait for candidate warmup or observe the cold candidate");
+                finish.countDown();
+                refresh.get(5, TimeUnit.SECONDS);
+                Assertions.assertSame(candidate, catalog.getTable(new ConnectContext(), "db", "tbl"));
+                Mockito.verify(delegate).getPartitions(Mockito.any(), Mockito.eq(sameMetadata ? 1L : 2L), Mockito.any());
+            } finally {
+                finish.countDown();
+                workers.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void testBackgroundWarmupFailureRetainsPreviousSnapshotAndRetries() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+            BaseTable candidate = mockRefreshCandidate(2L, "new.json");
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, oldTable);
+            Map<IcebergTableName, Long> access = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+            access.put(key, System.currentTimeMillis());
+            Map<IcebergTableName, Long> refreshed = Deencapsulation.getField(catalog, "tableLatestRefreshTime");
+            refreshed.put(key, 1L);
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                    .thenReturn(candidate);
+            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any())).thenReturn(Map.of());
+            Mockito.when(candidate.currentSnapshot().deleteManifests(Mockito.any()))
+                    .thenThrow(new RuntimeException("S3 unavailable"));
+            catalog.refreshCatalog();
+            Assertions.assertSame(oldTable, tables.getIfPresent(key));
+            Assertions.assertEquals(1L, refreshed.get(key));
+            Snapshot candidateSnapshot = candidate.currentSnapshot();
+            Mockito.doReturn(List.of()).when(candidateSnapshot).deleteManifests(Mockito.any());
+            catalog.refreshCatalog();
+            Assertions.assertSame(candidate, tables.getIfPresent(key));
+            Assertions.assertTrue(refreshed.get(key) > 1L);
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
     @Test
     public void testWarmDeletesIndependentlyAndRefillEvictedEntries() {
         for (String dataBudget : List.of("0", "0.1")) {
