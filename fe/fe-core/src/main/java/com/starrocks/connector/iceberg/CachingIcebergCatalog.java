@@ -144,34 +144,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                             ConnectContext context = new ConnectContext();
                             context.setOnlyReadIcebergCache(true);
                             Table nativeTable = getTable(context, key.dbName, key.tableName);
-                            IcebergTable icebergTable =
-                                    IcebergTable.builder()
-                                            .setCatalogDBName(key.dbName)
-                                            .setSrTableName(key.tableName)
-                                            .setCatalogTableName(key.tableName)
-                                            .setNativeTable(nativeTable).build();
-                            Map<String, Partition> partitions =
-                                    delegate.getPartitions(icebergTable, key.snapshotId, null);
-                            if (partitions.size() > PARTITION_LOAD_LOG_THRESHOLD) {
-                                // -1 is used by callers as "use current snapshot" (see IcebergCatalog#getPartitions);
-                                // resolve it here so the summary and logged snapshot id reflect the snapshot actually scanned.
-                                Snapshot snapshot = key.snapshotId == -1
-                                        ? nativeTable.currentSnapshot() : nativeTable.snapshot(key.snapshotId);
-                                long loggedSnapshotId = snapshot != null ? snapshot.snapshotId() : key.snapshotId;
-                                Map<String, String> summary =
-                                        (snapshot != null && snapshot.summary() != null)
-                                                ? snapshot.summary() : Collections.emptyMap();
-                                LOG.info("Loaded large iceberg partition set: catalog={}, table={}.{}, snapshot={}, "
-                                                + "partitions={}, dataFiles={}, deleteFiles={}, specs={}, "
-                                                + "partitionFields={}",
-                                        catalogName, key.dbName, key.tableName, loggedSnapshotId,
-                                        partitions.size(),
-                                        summary.getOrDefault(SnapshotSummary.TOTAL_DATA_FILES_PROP, "?"),
-                                        summary.getOrDefault(SnapshotSummary.TOTAL_DELETE_FILES_PROP, "?"),
-                                        nativeTable.specs().size(),
-                                        nativeTable.spec().fields().size());
-                            }
-                            return partitions;
+                            return loadPartitions(nativeTable, key);
                         }
                     });
         long dataFileCacheSize = Math.round(Runtime.getRuntime().maxMemory() *
@@ -354,6 +327,37 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return delegate.getView(connectContext, dbName, viewName);
     }
 
+    private Map<String, Partition> loadPartitions(Table nativeTable, IcebergTableName key) {
+        IcebergTable icebergTable =
+                IcebergTable.builder()
+                        .setCatalogDBName(key.dbName)
+                        .setSrTableName(key.tableName)
+                        .setCatalogTableName(key.tableName)
+                        .setNativeTable(nativeTable).build();
+        Map<String, Partition> partitions =
+                delegate.getPartitions(icebergTable, key.snapshotId, null);
+        if (partitions.size() > PARTITION_LOAD_LOG_THRESHOLD) {
+            // -1 is used by callers as "use current snapshot" (see IcebergCatalog#getPartitions);
+            // resolve it here so the summary and logged snapshot id reflect the snapshot actually scanned.
+            Snapshot snapshot = key.snapshotId == -1
+                    ? nativeTable.currentSnapshot() : nativeTable.snapshot(key.snapshotId);
+            long loggedSnapshotId = snapshot != null ? snapshot.snapshotId() : key.snapshotId;
+            Map<String, String> summary =
+                    (snapshot != null && snapshot.summary() != null)
+                            ? snapshot.summary() : Collections.emptyMap();
+            LOG.info("Loaded large iceberg partition set: catalog={}, table={}.{}, snapshot={}, "
+                            + "partitions={}, dataFiles={}, deleteFiles={}, specs={}, "
+                            + "partitionFields={}",
+                    catalogName, key.dbName, key.tableName, loggedSnapshotId,
+                    partitions.size(),
+                    summary.getOrDefault(SnapshotSummary.TOTAL_DATA_FILES_PROP, "?"),
+                    summary.getOrDefault(SnapshotSummary.TOTAL_DELETE_FILES_PROP, "?"),
+                    nativeTable.specs().size(),
+                    nativeTable.spec().fields().size());
+        }
+        return partitions;
+    }
+
     @Override
     public Map<String, Partition> getPartitions(IcebergTable icebergTable, long snapshotId,
                                                 ExecutorService executorService) {
@@ -450,8 +454,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             } else {
                 // Metadata unchanged keeps the partition/file caches valid; still swap in the reloaded
                 // table so the cache stops serving the old (expiring) vended FileIO token.
-                tables.put(icebergTableName, updateTable);
                 warmCurrentSnapshot(updateTable, dbName, tableName, executorService);
+                tables.put(icebergTableName, updateTable);
                 tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
         }
@@ -460,15 +464,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private void refreshTable(BaseTable currentTable, BaseTable updatedTable,
                               String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
         IcebergTableName keyWithoutSnap = new IcebergTableName(dbName, tableName);
-        Snapshot previous = currentTable.currentSnapshot();
         Snapshot updated = updatedTable.currentSnapshot();
 
-        // Publish new metadata before loading partitions; the loader reads this table from the cache.
-        tables.put(keyWithoutSnap, updatedTable);
-        if (previous != null) {
-            partitionCache.invalidate(new IcebergTableName(dbName, tableName, previous.snapshotId()));
-        }
+        // Readers keep the previous, warm snapshot until all metadata for the candidate is ready.
+        // Retain old snapshot partition entries for queries already using that snapshot.
         warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
+        tables.put(keyWithoutSnap, updatedTable);
         tableLatestRefreshTime.put(keyWithoutSnap, System.currentTimeMillis());
         if (updated != null) {
             tableLatestSnapshotTime.put(keyWithoutSnap, updated.timestampMillis());
@@ -484,7 +485,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             return;
         }
         // A stable table can lose partition/manifest entries to TTL or memory pressure too.
-        partitionCache.get(new IcebergTableName(dbName, tableName, snapshot.snapshotId()));
+        IcebergTableName snapshotKey = new IcebergTableName(dbName, tableName, snapshot.snapshotId());
+        // The candidate is intentionally not in the public table cache yet.
+        partitionCache.get(snapshotKey, key -> loadPartitions(table, key));
         // Each cache has its own budget: disabling data caching must not disable delete warmup.
         // Manifest files are immutable; refill missing/incomplete entries even on stable snapshots.
         List<ManifestFile> manifestFiles = dataFileCache != null &&
@@ -537,10 +540,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                         (now - latestRefreshTime) / 1000 < metaTtlSec;
                 refreshTable(identifier.dbName, identifier.tableName, new ConnectContext(),
                         backgroundExecutor, !metadataFresh);
-            } catch (Exception e) {
-                LOG.warn("refresh {}.{} metadata cache failed, msg : ", identifier.dbName,
-                        identifier.tableName, e);
+            } catch (NoSuchTableException e) {
                 invalidateCache(identifier);
+            } catch (Exception e) {
+                // A transient refresh/warmup failure must not evict the last usable snapshot.
+                // Leave the successful-check timestamp unchanged so the next cycle retries.
+                LOG.warn("refresh {}.{} metadata cache failed; retaining cached snapshot", identifier.dbName,
+                        identifier.tableName, e);
             }
         }
     }
