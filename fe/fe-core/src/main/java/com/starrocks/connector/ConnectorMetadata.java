@@ -121,6 +121,11 @@ public interface ConnectorMetadata {
         return Lists.newArrayList();
     }
 
+    /** Schema discovery only. The returned table must never be used to plan a data scan. */
+    default Table getTableForDiscovery(ConnectContext context, String dbName, String tblName) {
+        return getTable(context, dbName, tblName);
+    }
+
     /**
      * Get Table descriptor for the table specific by `dbName`.`tblName`
      *

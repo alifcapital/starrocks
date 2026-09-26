@@ -101,7 +101,7 @@ import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.getResource
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT_DEFAULT;
 
-public class IcebergTable extends Table {
+public class IcebergTable extends Table implements IcebergTableDescription {
     private static final Logger LOG = LogManager.getLogger(IcebergTable.class);
 
     private static final String PARQUET_FORMAT = "parquet";
@@ -243,6 +243,11 @@ public class IcebergTable extends Table {
     public List<Integer> partitionColumnIndexes() {
         List<Column> partitionCols = getPartitionColumns();
         return partitionCols.stream().map(col -> fullSchema.indexOf(col)).collect(Collectors.toList());
+    }
+
+    @Override
+    public SortOrder getSortOrder() {
+        return getNativeTable().sortOrder();
     }
 
     public List<Integer> getSortKeyIndexes() {

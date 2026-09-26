@@ -119,6 +119,16 @@ public interface IcebergCatalog extends MemoryTrackable {
 
     List<String> listTables(ConnectContext context, String dbName);
 
+    default void recordScanAccess(ConnectContext context, String dbName, String tableName) {
+    }
+
+    default com.starrocks.catalog.Table getTableForDiscovery(
+            ConnectContext context, String catalogName, String dbName, String tableName) {
+        Table table = getTable(context, dbName, tableName);
+        return table == null ? null : IcebergDiscoveryTable.from(table,
+                catalogName, dbName, tableName, getIcebergCatalogType().name());
+    }
+
     default boolean createTable(ConnectContext context,
                                 String dbName,
                                 String tableName,

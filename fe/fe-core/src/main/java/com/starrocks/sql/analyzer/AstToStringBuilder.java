@@ -27,6 +27,7 @@ import com.starrocks.catalog.FileTable;
 import com.starrocks.catalog.HiveTable;
 import com.starrocks.catalog.HudiTable;
 import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.IcebergTableDescription;
 import com.starrocks.catalog.Index;
 import com.starrocks.catalog.JDBCTable;
 import com.starrocks.catalog.ListPartitionInfo;
@@ -449,7 +450,7 @@ public class AstToStringBuilder {
                 partitionNames = table.getPartitionColumnNames();
                 createTableSql.append(String.join(", ", partitionNames)).append(")");
             } else {
-                partitionNames = ((IcebergTable) table).getPartitionColumnNamesWithTransform();
+                partitionNames = ((IcebergTableDescription) table).getPartitionColumnNamesWithTransform();
                 createTableSql.append("\nPARTITION BY ").append(String.join(", ", partitionNames));
             }
         }
@@ -461,8 +462,8 @@ public class AstToStringBuilder {
 
         // Order by
         if (table.isIcebergTable()) {
-            IcebergTable icebergTable = (IcebergTable) table;
-            SortOrder sortOrder = icebergTable.getNativeTable().sortOrder();
+            IcebergTableDescription icebergTable = (IcebergTableDescription) table;
+            SortOrder sortOrder = icebergTable.getSortOrder();
             if (sortOrder != null && sortOrder.isSorted()) {
                 List<String> columnNames = table.getFullSchema().stream().map(Column::getName).toList();
                 List<String> sortColumns = new ArrayList<>();
@@ -503,7 +504,7 @@ public class AstToStringBuilder {
 
         // Iceberg format-version is not stored in properties, need to add it explicitly
         if (table.isIcebergTable()) {
-            IcebergTable icebergTable = (IcebergTable) table;
+            IcebergTableDescription icebergTable = (IcebergTableDescription) table;
             properties.put("format-version", String.valueOf(icebergTable.getFormatVersion()));
         }
 

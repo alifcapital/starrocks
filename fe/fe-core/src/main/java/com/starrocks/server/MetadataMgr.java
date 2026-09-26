@@ -521,6 +521,14 @@ public class MetadataMgr {
         return Optional.ofNullable(getTable(context, tableName.getCatalog(), tableName.getDb(), tableName.getTbl()));
     }
 
+    /** Display-only lookup; deliberately separate from the query-planning table lookup. */
+    public Table getTableForDiscovery(ConnectContext context, String catalogName, String dbName, String tblName) {
+        Table table = getOptionalMetadata(catalogName)
+                .map(metadata -> metadata.getTableForDiscovery(context, dbName, tblName)).orElse(null);
+        // Metadata tables still require the normal validation that their base table exists.
+        return table != null && table.isMetadataTable() ? getTable(context, catalogName, dbName, tblName) : table;
+    }
+
     public Table getTable(ConnectContext context, String catalogName, String dbName, String tblName) {
         Optional<ConnectorMetadata> connectorMetadata = getOptionalMetadata(catalogName);
         Table connectorTable = connectorMetadata.map(metadata -> metadata.getTable(context, dbName, tblName)).orElse(null);
