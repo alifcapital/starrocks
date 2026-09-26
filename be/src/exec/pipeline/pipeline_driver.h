@@ -642,6 +642,9 @@ protected:
     std::shared_ptr<PipelineTimerTask> _global_rf_timer;
 
     std::atomic<bool> _local_prepare_is_done{false};
+    // Published when yielding: buffered measurement input can progress without
+    // new source data. Readiness notifications may run on another thread.
+    std::atomic<bool> _local_rf_draining{false};
 
 protected:
     // metrics

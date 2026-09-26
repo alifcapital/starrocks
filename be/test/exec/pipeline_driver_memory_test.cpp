@@ -251,6 +251,29 @@ TEST_F(PipelineDriverMemoryTest, FinishedSinkEarlyReturn) {
     EXPECT_EQ(&unrelated, tls_mem_tracker);
 }
 
+TEST_F(PipelineDriverMemoryTest, LocalRfDrainProgressesWithoutSourceInput) {
+    _source->on_has_output = [] { return false; };
+    EXPECT_FALSE(_driver->check_is_ready());
+    EXPECT_FALSE(_driver->is_not_blocked().value());
+    _driver->_local_rf_draining.store(true);
+    EXPECT_TRUE(_driver->check_is_ready());
+    EXPECT_TRUE(_driver->is_not_blocked().value());
+    _driver->_local_rf_draining.store(false);
+    EXPECT_FALSE(_driver->check_is_ready());
+    EXPECT_FALSE(_driver->is_not_blocked().value());
+}
+
+TEST_F(PipelineDriverMemoryTest, LocalRfDrainStillRespectsDownstreamBackpressure) {
+    _source->on_has_output = [] { return false; };
+    _sink->on_need_input = [] { return false; };
+    _driver->_local_rf_draining.store(true);
+    EXPECT_FALSE(_driver->check_is_ready());
+    EXPECT_FALSE(_driver->is_not_blocked().value());
+    _sink->on_need_input = [] { return true; };
+    EXPECT_TRUE(_driver->check_is_ready());
+    EXPECT_TRUE(_driver->is_not_blocked().value());
+}
+
 TEST_F(PipelineDriverMemoryTest, ObserverFromAnotherFragment) {
     RecordingDriverQueue queue;
     _fragment_ctx.init_event_scheduler();

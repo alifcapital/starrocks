@@ -79,6 +79,7 @@ set(EXEC_FILES
         ./exec/workgroup/mem_tracker_manager_test.cpp
         ./exec/pipeline/schedule/observer_test.cpp
         ./exec/pipeline/schedule/pipeline_timer_test.cpp
+        ./exec/pipeline/local_runtime_filter_feedback_test.cpp
         ./exec/pipeline/runtime_filter_merger_test.cpp
         ./exec/pipeline/pipeline_control_flow_test.cpp
         ./exec/pipeline_driver_memory_test.cpp
@@ -137,6 +138,7 @@ set(EXEC_FILES
         ./exec/file_scan_node_test.cpp
         ./exec/hdfs_scan_node_test.cpp
         ./exec/join_hash_map_test.cpp
+        ./exec/hash_join_feedback_test.cpp
         ./exec/json_parser_test.cpp
         ./exec/cache_stats_scanner_test.cpp
         ./exec/lake_meta_scanner_test.cpp

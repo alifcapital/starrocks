@@ -58,11 +58,13 @@ private:
     ChunkPtr _probe_chunk;
     Columns _key_columns;
     bool _current_probe_has_remain = false;
+    size_t _input_rows = 0;
 };
 
 Status SingleHashJoinProberImpl::push_probe_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     DCHECK(!_probe_chunk);
     _probe_chunk = std::move(chunk);
+    _input_rows = _probe_chunk->num_rows();
     _current_probe_has_remain = true;
     RETURN_IF_ERROR(_hash_joiner.prepare_probe_key_columns(&_key_columns, _probe_chunk));
     return Status::OK();
@@ -76,6 +78,7 @@ StatusOr<ChunkPtr> SingleHashJoinProberImpl::probe_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_hash_joiner.filter_probe_output_chunk(chunk, *_hash_table));
     RETURN_IF_ERROR(_hash_joiner.lazy_output_chunk<false>(state, &_probe_chunk, &chunk, *_hash_table));
     if (!_current_probe_has_remain) {
+        if (_completed_rows != nullptr) *_completed_rows += _input_rows;
         _probe_chunk = nullptr;
     }
     TRY_CATCH_ALLOC_SCOPE_END()
@@ -165,6 +168,10 @@ public:
     StatusOr<ChunkPtr> probe_chunk(RuntimeState* state) override;
     StatusOr<ChunkPtr> probe_remain(RuntimeState* state, bool* has_remain) override;
     void reset(RuntimeState* runtime_state) override;
+    void track_completed_rows(int64_t* counter) override {
+        for (auto& prober : _probers) prober->track_completed_rows(counter);
+    }
+    Status drain_input(RuntimeState* state) override;
     void set_probers(std::vector<std::unique_ptr<SingleHashJoinProberImpl>>&& probers) {
         _probers = std::move(probers);
         _partition_input_channels.resize(_probers.size(), PartitionChunkChannel(&_mem_tracker));
@@ -173,6 +180,7 @@ public:
 private:
     MemTracker _mem_tracker;
     bool _all_input_finished = false;
+    bool _draining_input = false;
     int32_t _remain_partition_idx = 0;
     std::vector<std::unique_ptr<SingleHashJoinProberImpl>> _probers;
     std::vector<PartitionChunkChannel> _partition_input_channels;
@@ -219,6 +227,7 @@ Status PartitionedHashJoinProberImpl::on_input_finished(RuntimeState* runtime_st
 
 Status PartitionedHashJoinProberImpl::push_probe_chunk(RuntimeState* state, ChunkPtr&& chunk) {
     SCOPED_TIMER(_hash_joiner.probe_metrics().partition_probe_overhead);
+    _draining_input = false;
     auto& probers = _probers;
     auto& partition_keys = _hash_joiner.probe_expr_ctxs();
 
@@ -324,7 +333,8 @@ StatusOr<ChunkPtr> PartitionedHashJoinProberImpl::probe_chunk(RuntimeState* stat
             if (probers[i]->probe_chunk_empty()) {
                 RETURN_IF_ERROR(probers[i]->push_probe_chunk(state, _partition_input_channels[i].pull()));
             }
-            _partition_input_channels[i].set_processing(_partition_input_channels[i].size() > 1);
+            _partition_input_channels[i].set_processing(_partition_input_channels[i].size() >
+                                                        (_draining_input ? 0 : 1));
             auto chunk = std::make_shared<Chunk>();
             ASSIGN_OR_RETURN(chunk, probers[i]->probe_chunk(state))
             return chunk;
@@ -356,7 +366,23 @@ StatusOr<ChunkPtr> PartitionedHashJoinProberImpl::probe_remain(RuntimeState* sta
     return nullptr;
 }
 
+Status PartitionedHashJoinProberImpl::drain_input(RuntimeState* state) {
+    SCOPED_TIMER(_hash_joiner.probe_metrics().partition_probe_overhead);
+    _draining_input = true;
+    for (size_t i = 0; i < _probers.size(); ++i) {
+        auto& channel = _partition_input_channels[i];
+        if (channel.is_empty()) continue;
+        channel.set_processing(true);
+        if (_probers[i]->probe_chunk_empty()) {
+            RETURN_IF_ERROR(_probers[i]->push_probe_chunk(state, channel.pull()));
+            channel.set_processing(!channel.is_empty());
+        }
+    }
+    return Status::OK();
+}
+
 void PartitionedHashJoinProberImpl::reset(RuntimeState* runtime_state) {
+    _draining_input = false;
     for (auto& prober : _probers) {
         prober->reset(runtime_state);
     }

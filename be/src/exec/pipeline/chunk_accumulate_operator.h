@@ -35,6 +35,10 @@ public:
     Status push_chunk(RuntimeState* state, const ChunkPtr& chunk) override;
     StatusOr<ChunkPtr> pull_chunk(RuntimeState* state) override;
 
+    void drain_input() {
+        if (_local_rf_feedback) _acc.flush();
+    }
+
     bool has_output() const override { return _acc.has_output(); }
     bool need_input() const override { return _acc.need_input(); }
     bool is_finished() const override { return _acc.is_finished(); }

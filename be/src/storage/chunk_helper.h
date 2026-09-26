@@ -149,6 +149,8 @@ public:
     void set_max_size(size_t max_size) { _max_size = max_size; }
     void push(const ChunkPtr& chunk);
     ChunkPtr& pull();
+    // Make buffered input available without ending the stream.
+    void flush();
     void finalize();
     void reset();
     void reset_state();

@@ -14,6 +14,7 @@
 
 #include "exec/pipeline/chunk_accumulate_operator.h"
 
+#include "exec/pipeline/hashjoin/local_runtime_filter_feedback.h"
 #include "runtime/runtime_state.h"
 
 namespace starrocks::pipeline {
@@ -26,11 +27,14 @@ Status ChunkAccumulateOperator::prepare(RuntimeState* state) {
 
 Status ChunkAccumulateOperator::push_chunk(RuntimeState* state, const ChunkPtr& chunk) {
     _acc.push(chunk);
+    if (_local_rf_feedback && _local_rf_feedback->needs_drain()) _acc.flush();
     return Status::OK();
 }
 
 StatusOr<ChunkPtr> ChunkAccumulateOperator::pull_chunk(RuntimeState*) {
-    return std::move(_acc.pull());
+    auto result = std::move(_acc.pull());
+    if (_local_rf_feedback && _local_rf_feedback->needs_drain()) _acc.flush();
+    return result;
 }
 
 Status ChunkAccumulateOperator::set_finishing(RuntimeState* state) {

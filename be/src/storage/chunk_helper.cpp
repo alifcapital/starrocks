@@ -742,6 +742,13 @@ void ChunkPipelineAccumulator::finalize() {
     _mem_usage = 0;
 }
 
+void ChunkPipelineAccumulator::flush() {
+    if (_out_chunk == nullptr) {
+        _out_chunk = std::move(_in_chunk);
+        _mem_usage = 0;
+    }
+}
+
 void ChunkPipelineAccumulator::reset_state() {
     reset();
     _finalized = false;

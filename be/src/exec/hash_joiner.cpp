@@ -264,6 +264,18 @@ bool HashJoiner::need_input() const {
     return _phase == HashJoinPhase::PROBE && _hash_join_prober->need_input();
 }
 
+void HashJoiner::track_completed_probe_rows() {
+    _hash_join_prober->track_completed_rows();
+}
+
+int64_t HashJoiner::completed_probe_rows() const {
+    return _hash_join_prober->completed_rows();
+}
+
+Status HashJoiner::drain_probe_input(RuntimeState* state) {
+    return _hash_join_prober->drain_input(state);
+}
+
 bool HashJoiner::has_output() const {
     if (_phase == HashJoinPhase::BUILD) {
         return false;

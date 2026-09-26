@@ -23,6 +23,7 @@
 #include "column/datum_tuple.h"
 #include "column/field.h"
 #include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "column/vectorized_fwd.h"
 #include "testutil/column_test_helper.h"
 #include "testutil/parallel_test.h"
@@ -1062,6 +1063,68 @@ TEST_F(ChunkTest, test_mutable_chunk_filter_range) {
     size_t filtered = mutable_chunk->filter_range(selection, 1, 4);
     ASSERT_EQ(3, filtered);
     ASSERT_EQ(3, mutable_chunk->num_rows());
+}
+
+template <typename ChunkType>
+static void check_filter_range_values() {
+    // Cover SIMD boundaries, nullable strings, and the prefix/suffix semantics
+    // that must still hold when the selected range contains no rejected rows.
+    for (size_t rows : {0, 1, 31, 32, 63, 64, 65, 130}) {
+        for (int pattern = 0; pattern < 5; ++pattern) {
+            auto numbers = Int32Column::create();
+            auto strings = BinaryColumn::create();
+            auto nulls = NullColumn::create();
+            for (size_t i = 0; i < rows; ++i) {
+                numbers->append(i);
+                strings->append(std::string(i % 17, 'a') + std::to_string(i));
+                nulls->append(i % 7 == 0);
+            }
+            ChunkType chunk;
+            chunk.append_column(std::move(numbers), SlotId{0});
+            chunk.append_column(NullableColumn::create(std::move(strings), std::move(nulls)), SlotId{1});
+            // Extra zeros outside the range must not affect the decision.
+            Buffer<uint8_t> selection(rows + 1, 1);
+            selection[rows] = 0;
+            size_t from = 0;
+            size_t to = rows;
+            if (pattern == 1) {
+                for (size_t i = 0; i < rows; i += 3) selection[i] = 0;
+            } else if (pattern == 2) {
+                std::fill(selection.begin(), selection.end(), 0);
+            } else if (pattern == 3) {
+                from = rows / 3;
+                to = rows / 2;
+            } else if (pattern == 4) {
+                to = rows / 2;
+            }
+            std::vector<size_t> expected;
+            for (size_t i = 0; i < to; ++i) {
+                if (i < from || selection[i] != 0) expected.push_back(i);
+            }
+            SCOPED_TRACE(testing::Message() << "rows=" << rows << " pattern=" << pattern);
+            ASSERT_EQ(expected.size(), chunk.filter_range(selection, from, to));
+            ASSERT_EQ(expected.size(), chunk.num_rows());
+            chunk.check_or_die();
+            for (size_t i = 0; i < expected.size(); ++i) {
+                size_t original = expected[i];
+                ASSERT_EQ(original, chunk.get_column_by_index(0)->get(i).get_int32());
+                auto value = chunk.get_column_by_index(1)->get(i);
+                ASSERT_EQ(original % 7 == 0, value.is_null());
+                if (!value.is_null()) {
+                    ASSERT_EQ(std::string(original % 17, 'a') + std::to_string(original),
+                              value.get_slice().to_string());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(ChunkTest, filter_range_values) {
+    check_filter_range_values<Chunk>();
+}
+
+TEST_F(ChunkTest, mutable_filter_range_values) {
+    check_filter_range_values<MutableChunk>();
 }
 
 // NOLINTNEXTLINE
