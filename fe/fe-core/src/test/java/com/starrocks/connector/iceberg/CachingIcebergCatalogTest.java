@@ -146,7 +146,7 @@ public class CachingIcebergCatalogTest {
             tables.put(key, oldTable);
             Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
                     .thenReturn(unchanged, changedMetadata);
-            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any()))
+            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                     .thenAnswer(inv -> {
                         Assertions.assertSame(oldTable, ((IcebergTable) inv.getArgument(0)).getNativeTable());
                         return Map.of();
@@ -192,7 +192,7 @@ public class CachingIcebergCatalogTest {
                 partitions.put(otherTableKey, Map.of());
                 Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
                         .thenReturn(candidate);
-                Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any()))
+                Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                         .thenAnswer(inv -> {
                             Assertions.assertSame(candidate, ((IcebergTable) inv.getArgument(0)).getNativeTable());
                             return Map.of();
@@ -219,7 +219,8 @@ public class CachingIcebergCatalogTest {
                 Assertions.assertNotNull(partitions.getIfPresent(
                         new IcebergTableName("db", "tbl", sameMetadata ? 1L : 2L)));
                 Assertions.assertSame(candidate, catalog.getTable(new ConnectContext(), "db", "tbl"));
-                Mockito.verify(delegate).getPartitions(Mockito.any(), Mockito.eq(sameMetadata ? 1L : 2L), Mockito.any());
+                Mockito.verify(delegate).getPartitions(
+                        Mockito.any(), Mockito.eq(sameMetadata ? 1L : 2L), Mockito.any(), Mockito.any());
             } finally {
                 finish.countDown();
                 workers.shutdownNow();
@@ -245,7 +246,8 @@ public class CachingIcebergCatalogTest {
             refreshed.put(key, 1L);
             Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
                     .thenReturn(candidate);
-            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any())).thenReturn(Map.of());
+            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
+                    .thenReturn(Map.of());
             Mockito.when(candidate.currentSnapshot().deleteManifests(Mockito.any()))
                     .thenThrow(new RuntimeException("S3 unavailable"));
             catalog.refreshCatalog();
@@ -461,7 +463,7 @@ public class CachingIcebergCatalogTest {
                 icebergCatalog.getTable((ConnectContext) any, "db", "test");
                 result = nativeTable;
                 minTimes = 0;
-                icebergCatalog.getPartitions((IcebergTable) any, anyLong, null);
+                icebergCatalog.getPartitions((IcebergTable) any, anyLong, null, (java.util.function.Supplier<TableScan>) any);
                 result = partitionMap;
                 minTimes = 0;
             }
@@ -1012,7 +1014,7 @@ public class CachingIcebergCatalogTest {
                 result = nativeTable;
                 minTimes = 0;
 
-                delegate.getPartitions((IcebergTable) any, -1L, null);
+                delegate.getPartitions((IcebergTable) any, -1L, null, (java.util.function.Supplier<TableScan>) any);
                 result = bigPartitions;
                 minTimes = 1;
             }

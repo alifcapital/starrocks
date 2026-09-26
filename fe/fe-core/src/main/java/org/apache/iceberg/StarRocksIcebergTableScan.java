@@ -477,7 +477,7 @@ public class StarRocksIcebergTableScan
                     try (ManifestReader<DeleteFile> reader =
                                  ManifestFiles.readDeleteManifest(manifest, io(), scanSpecsById)) {
                         for (ManifestEntry<DeleteFile> entry : reader.liveEntries()) {
-                            files.add(DeleteFileWrapper.wrap(entry.file().copy()));
+                            files.add(DeleteFileWrapper.wrap(entry.file().copy(), entry.snapshotId()));
                         }
                     } catch (IOException e) {
                         throw new StarRocksConnectorException("Failed to warm delete manifest " + manifest.path(), e);
@@ -486,6 +486,55 @@ public class StarRocksIcebergTableScan
                             t -> ConcurrentHashMap.newKeySet()).add(manifest.path());
                     deleteFileCache.put(manifest.path(), files);
                 });
+    }
+
+    public TableScan newPartitionScan() {
+        return new StarRocksIcebergPartitionsTable(table(), this).newScan();
+    }
+
+    // PARTITIONS needs entry snapshot provenance in addition to the live file descriptions.
+    // Entries without provenance (e.g. populated by an older reader) must be reread once.
+    CloseableIterable<ManifestEntry<?>> partitionEntries(ManifestFile manifest) {
+        if (manifest.content() == ManifestContent.DATA) {
+            Set<DataFile> files = dataFileCache == null ? null : getCompleteCachedFiles(dataFileCache, manifest);
+            if (files != null && files.stream().allMatch(file -> file instanceof DataFileWrapper &&
+                    ((DataFileWrapper) file).entrySnapshotId() != null)) {
+                return CloseableIterable.transform(CloseableIterable.withNoopClose(files),
+                        file -> cachedPartitionEntry(file, ((DataFileWrapper) file).entrySnapshotId()));
+            }
+            if (dataFileCache != null && !onlyReadCache) {
+                dataFileCache.asMap().putIfAbsent(manifest.path(), ConcurrentHashMap.newKeySet());
+                metaFileCacheMap.computeIfAbsent(icebergTableName,
+                        key -> ConcurrentHashMap.newKeySet()).add(manifest.path());
+            }
+            ManifestReader<DataFile> reader = ManifestFiles.read(manifest, io(), table().specs())
+                    .select(BaseScan.scanColumns(manifest.content()))
+                    .dataFileCache(onlyReadCache ? null : dataFileCache)
+                    .cacheWithMetrics(dataFileCacheWithMetrics)
+                    .identifierFieldIds(statsKeepColumnIds(table(), tableSchema()));
+            return CloseableIterable.transform(reader.liveEntries(), entry -> entry.copyWithoutStats());
+        }
+        Set<DeleteFile> files = deleteFileCache == null ? null : getCompleteCachedFiles(deleteFileCache, manifest);
+        if (files != null && files.stream().allMatch(file -> file instanceof DeleteFileWrapper &&
+                ((DeleteFileWrapper) file).entrySnapshotId() != null)) {
+            return CloseableIterable.transform(CloseableIterable.withNoopClose(files),
+                    file -> cachedPartitionEntry(file, ((DeleteFileWrapper) file).entrySnapshotId()));
+        }
+        if (deleteFileCache != null && !onlyReadCache) {
+            deleteFileCache.asMap().putIfAbsent(manifest.path(), ConcurrentHashMap.newKeySet());
+            metaFileCacheMap.computeIfAbsent(icebergTableName,
+                    key -> ConcurrentHashMap.newKeySet()).add(manifest.path());
+        }
+        ManifestReader<DeleteFile> reader = ManifestFiles.readDeleteManifest(manifest, io(), table().specs())
+                .select(ManifestReader.ALL_COLUMNS)
+                .deleteFileCache(onlyReadCache ? null : deleteFileCache);
+        return CloseableIterable.transform(reader.liveEntries(), entry -> entry.copyWithoutStats());
+    }
+
+    private <F extends ContentFile<F>> ManifestEntry<F> cachedPartitionEntry(F file, Long entrySnapshotId) {
+        return new GenericManifestEntry<F>(ManifestEntry.getSchema(
+                table().specs().get(file.specId()).partitionType()).asStruct())
+                .wrapExisting(entrySnapshotId, file.dataSequenceNumber(), file.fileSequenceNumber(), file);
     }
 
     public Set<DeleteFile> getDeleteFiles(FileContent fileContent) {

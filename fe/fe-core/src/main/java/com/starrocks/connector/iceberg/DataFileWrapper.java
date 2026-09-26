@@ -27,6 +27,7 @@ import java.util.Set;
 // checking hashcode and equals for manifest cache
 public class DataFileWrapper implements DataFile {
     private final DataFile dataFile;
+    private final Long entrySnapshotId;
     // True means no column metrics were discarded, not that the writer supplied every metric.
     private final boolean fullColumnStats;
 
@@ -35,8 +36,13 @@ public class DataFileWrapper implements DataFile {
     }
 
     private DataFileWrapper(DataFile dataFile, boolean fullColumnStats) {
+        this(dataFile, fullColumnStats, null);
+    }
+
+    private DataFileWrapper(DataFile dataFile, boolean fullColumnStats, Long entrySnapshotId) {
         this.dataFile = dataFile;
         this.fullColumnStats = fullColumnStats;
+        this.entrySnapshotId = entrySnapshotId;
     }
 
     public static DataFileWrapper wrap(DataFile dataFile) {
@@ -50,6 +56,14 @@ public class DataFileWrapper implements DataFile {
     public static boolean hasFullColumnStats(Set<DataFile> files) {
         return files.stream().allMatch(file -> file instanceof DataFileWrapper &&
                 ((DataFileWrapper) file).fullColumnStats);
+    }
+
+    public static DataFileWrapper wrap(DataFile file, boolean fullColumnStats, Long entrySnapshotId) {
+        return new DataFileWrapper(file, fullColumnStats, entrySnapshotId);
+    }
+
+    public Long entrySnapshotId() {
+        return entrySnapshotId;
     }
 
     @Override
