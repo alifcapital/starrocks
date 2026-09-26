@@ -45,7 +45,7 @@ import java.util.Map;
 /** Versioned, bounded binary payload. Frequencies never pass through JSON or double counters. */
 public final class JoinStatisticsCodec {
     private static final int MAGIC = 0x53524a53;
-    private static final int VERSION = 4;
+    private static final int VERSION = 5;
     private static final int MAX_STRING_BYTES = 1 << 20;
 
     private JoinStatisticsCodec() {
@@ -73,14 +73,16 @@ public final class JoinStatisticsCodec {
         }
         ByteArrayInputStream buffer = new ByteArrayInputStream(payload);
         DataInputStream header = new DataInputStream(buffer);
-        if (header.readInt() != MAGIC || header.readInt() != VERSION) {
+        int magic = header.readInt();
+        int version = header.readInt();
+        if (magic != MAGIC || (version != 4 && version != VERSION)) {
             throw new IOException("Unsupported JOIN statistics payload format");
         }
         // DataInputStream reads primitive values a byte at a time. Buffer above the decoder to
         // avoid a JNI decompression call for every byte of a long or double.
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(new LimitedInput(
                 new ZstdInputStream(buffer).setLongMax(23), maxBytes), 64 * 1024))) {
-            JoinStatisticsData data = readBody(in, maxBytes);
+            JoinStatisticsData data = readBody(in, maxBytes, version);
             if (data.getObjectId() != objectId || data.getGeneration() != generation || data.estimatedSize() > maxBytes) {
                 throw new IOException("JOIN statistics payload identity or size mismatch");
             }
@@ -130,6 +132,18 @@ public final class JoinStatisticsCodec {
         out.writeInt(data.getBases().size());
         for (JoinStatisticsBasis basis : data.getBases()) {
             out.writeInt(basis.getDomain());
+            JoinStatisticsHeadKeys keys = basis.getHeadKeys();
+            out.writeByte(keys == null ? 0 : keys.isInteger() ? 1 : 2);
+            if (keys != null) {
+                out.writeInt(keys.size());
+                for (int i = 0; i < keys.size(); i++) {
+                    if (keys.isInteger()) {
+                        out.writeLong(keys.integer(i));
+                    } else {
+                        writeString(out, keys.text(i));
+                    }
+                }
+            }
             out.writeInt(basis.getSources().size());
             for (int side = 0; side < basis.getSources().size(); side++) {
                 out.writeInt(basis.getSources().get(side));
@@ -211,7 +225,7 @@ public final class JoinStatisticsCodec {
         };
     }
 
-    private static JoinStatisticsData readBody(DataInputStream in, int maxBytes) throws IOException {
+    private static JoinStatisticsData readBody(DataInputStream in, int maxBytes, int version) throws IOException {
         long objectId = in.readLong();
         long generation = in.readLong();
         int sourceCount = count(in, 4);
@@ -270,6 +284,27 @@ public final class JoinStatisticsCodec {
         long preparedBytes = 0;
         for (int c = 0; c < basisCount; c++) {
             int domain = count(in, com.starrocks.statistic.JoinStatisticsDefinition.MAX_DOMAINS - 1);
+            JoinStatisticsHeadKeys keys = null;
+            int encoding = version >= 5 ? in.readUnsignedByte() : 0;
+            if (encoding == 1) {
+                long[] values = new long[count(in, JoinStatisticsCorrelation.HEAD_BUDGET)];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = in.readLong();
+                }
+                keys = new JoinStatisticsHeadKeys(values);
+            } else if (encoding == 2) {
+                String[] values = new String[count(in, JoinStatisticsCorrelation.HEAD_BUDGET)];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = readString(in);
+                }
+                keys = new JoinStatisticsHeadKeys(values);
+            } else if (encoding != 0) {
+                throw new IOException("Invalid JOIN head key encoding");
+            }
+            preparedBytes += keys == null ? 0 : keys.estimatedSize();
+            if (preparedBytes > maxBytes) {
+                throw new IOException("JOIN head keys exceed the object memory limit");
+            }
             int sides = count(in, 4);
             List<Integer> ids = new ArrayList<>();
             List<List<JoinStatisticsBasis.Slice>> slices = new ArrayList<>();
@@ -325,7 +360,7 @@ public final class JoinStatisticsCodec {
                 }
                 pairs.add(new JoinStatisticsBasis.Pair(left, right, leftSize, rightSize, products));
             }
-            bases.add(new JoinStatisticsBasis(domain, ids, slices, pairs));
+            bases.add(new JoinStatisticsBasis(domain, ids, slices, pairs, keys));
         }
         int intraCount = count(in, 12);
         List<JoinStatisticsData.IntraCorrelation> intra = new ArrayList<>();

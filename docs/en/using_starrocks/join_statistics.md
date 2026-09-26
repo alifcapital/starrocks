@@ -138,3 +138,20 @@ simultaneous hard constraints or higher moments of an exact distribution. Unchan
 continue to use the full collected information. Multiple compatible partial objects can still be
 combined by the existing bounded estimator. A zero estimate from old support is ignored when all
 current scan estimates are positive.
+
+### Skew key labels
+
+The numeric head retains up to 16,384 positions per equality domain independently of label storage.
+Scalar integer labels use compact numeric arrays and do not consume the text budget. Textual and
+compound labels of at most 256 UTF-8 bytes are always retained; remaining labels share the unused
+portion of a 4 MiB text budget across the entire object. If the guaranteed short labels alone exceed
+4 MiB, they are preserved and no longer labels are added. Three full short-label dictionaries can
+therefore retain up to 12 MiB of text. UUID strings fit the short-label guarantee. No value is truncated.
+Long labels are considered in head importance order, with equal initial shares across textual domains
+and redistribution of unused shares. Only lengths are read before selecting labels, so oversized
+values are not transferred to FE merely to discard them. Refresh the object to populate longer labels.
+
+Automatic skew V2 rejects a partial candidate if an omitted label has a known frequency at least as
+large as the largest selected key and meets the existing single-key skew threshold. This conservative
+guard also skips histogram fallback for that candidate side. It does not change manual skew hints or
+numeric JOIN/RF estimates. A less frequent omitted key does not by itself disable a useful rewrite.

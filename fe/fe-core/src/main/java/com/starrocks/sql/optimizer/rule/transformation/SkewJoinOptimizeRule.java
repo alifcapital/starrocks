@@ -54,6 +54,8 @@ import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rule.Rule;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.skew.DataSkew;
+import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.statistics.SkewJoinStatistics;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.type.ArrayType;
 import com.starrocks.type.BooleanType;
@@ -125,8 +127,26 @@ public class SkewJoinOptimizeRule extends TransformationRule {
      */
     private static Optional<DataSkew.SkewInfo> getSkewInfoForPredicate(BinaryPredicateOperator equalConj,
             ColumnRefSet leftOutputColumns, Statistics leftChildStats, DataSkew.Thresholds skewThresholds) {
-        return getLeftSideColumn(equalConj, leftOutputColumns)
-                .filter(col -> leftChildStats.getColumnStatistics().containsKey(col))
+        var column = getLeftSideColumn(equalConj, leftOutputColumns);
+        if (column.isEmpty()) {
+            return Optional.empty();
+        }
+        var known = SkewJoinStatistics.find(leftChildStats, List.of(column.get()), skewThresholds.mcvLimit());
+        if (known != null) {
+            double nulls = known.entries().stream().filter(e -> e.values().get(0) == null)
+                    .mapToDouble(SkewJoinStatistics.Entry::rows).sum();
+            var values = known.entries().stream().filter(e -> e.values().get(0) != null)
+                    .map(e -> com.starrocks.common.Pair.create(e.values().get(0), (long) e.rows())).toList();
+            double mass = values.stream().mapToDouble(e -> e.second).sum();
+            if (nulls / known.rows() > skewThresholds.relativeRowThreshold() && nulls >= mass) {
+                return Optional.of(new DataSkew.SkewInfo(DataSkew.SkewType.SKEWED_NULL));
+            }
+            if (mass / known.rows() > skewThresholds.relativeRowThreshold()) {
+                return Optional.of(new DataSkew.SkewInfo(DataSkew.SkewType.SKEWED_MCV,
+                        DataSkew.AdditionalInfo.NONE, Optional.of(values)));
+            }
+        }
+        return column.filter(col -> leftChildStats.getColumnStatistics().containsKey(col))
                 .map(leftChildStats::getColumnStatistic)
                 .map(colStats -> DataSkew.getColumnSkewInfo(leftChildStats, colStats, skewThresholds));
     }
@@ -155,7 +175,8 @@ public class SkewJoinOptimizeRule extends TransformationRule {
         List<BinaryPredicateOperator> equalConjs = JoinHelper.
                 getEqualsPredicate(leftOutputColumns, rightOutputColumns,
                         Utils.extractConjuncts(joinOperator.getOnPredicate()));
-        if (equalConjs.isEmpty()) {
+        if (equalConjs.isEmpty() || equalConjs.stream().anyMatch(eq -> eq.getBinaryType() != BinaryType.EQ)) {
+            // NULL salting assumes NULL never matches; NULL-safe equality needs a different rewrite.
             return false;
         }
         Statistics leftChildStats = input.inputAt(0).getStatistics();
@@ -165,6 +186,55 @@ public class SkewJoinOptimizeRule extends TransformationRule {
         final var mcvLimit = context.getSessionVariable().getSkewJoinOptimizeUseMCVCount();
         final var rowPercentageThreshold = context.getSessionVariable().getSkewJoinDataSkewThreshold();
         final var skewThresholds = new DataSkew.Thresholds(mcvLimit, rowPercentageThreshold);
+
+        if (equalConjs.size() > 1) {
+            List<ColumnRefOperator> tupleColumns = new ArrayList<>();
+            for (var equality : equalConjs) {
+                var column = getLeftSideColumn(equality, leftOutputColumns);
+                if (column.isEmpty()) {
+                    break;
+                }
+                tupleColumns.add(column.get());
+            }
+            if (tupleColumns.size() == equalConjs.size()) {
+                var distribution = SkewJoinStatistics.find(leftChildStats, tupleColumns, mcvLimit);
+                if (distribution != null) {
+                    List<ScalarOperator> hot = new ArrayList<>();
+                    List<List<ConstantOperator>> hotKeys = new ArrayList<>();
+                    double mass = 0;
+                    for (var entry : distribution.entries()) {
+                        var values = SkewJoinStatistics.constants(entry, tupleColumns);
+                        if (values.size() != tupleColumns.size() || values.stream().anyMatch(ConstantOperator::isNull)) {
+                            continue;
+                        }
+                        List<ScalarOperator> predicates = new ArrayList<>();
+                        for (int i = 0; i < values.size(); i++) {
+                            predicates.add(BinaryPredicateOperator.eq(tupleColumns.get(i), values.get(i)));
+                        }
+                        hot.add(Utils.compoundAnd(predicates));
+                        hotKeys.add(values);
+                        mass += entry.rows();
+                    }
+                    if (!hot.isEmpty() && mass / distribution.rows() > rowPercentageThreshold) {
+                        List<ColumnRefOperator> otherKeys = equalConjs.stream().map(equality -> {
+                            ColumnRefOperator a = equality.getChild(0).cast();
+                            ColumnRefOperator b = equality.getChild(1).cast();
+                            return leftOutputColumns.contains(a) ? b : a;
+                        }).toList();
+                        var other = SkewJoinStatistics.find(input.inputAt(1).getStatistics(), otherKeys, mcvLimit);
+                        if (SkewJoinStatistics.overlappingRows(other, otherKeys, hotKeys)
+                                > context.getSessionVariable().getSkewJoinMaxOtherSideOverlapRowCount()) {
+                            return false;
+                        }
+                        joinOperator.setSkewColumn(Utils.compoundOr(hot));
+                        joinOperator.setSkewValues(List.of(ConstantOperator.createBoolean(true)));
+                        return true;
+                    }
+                    // Individual hot columns do not prove a hot tuple.
+                    return false;
+                }
+            }
+        }
 
         // If any predicate is not skewed, the composite hash key already distributes data well,
         // and we do not need to add salting.
@@ -222,6 +292,13 @@ public class SkewJoinOptimizeRule extends TransformationRule {
             final var skewInfoMcvs = skewInfo.getMcvs();
             if (skewInfo.type() == DataSkew.SkewType.SKEWED_MCV && skewInfoMcvs.isPresent()) {
                 final var rightChildStats = input.inputAt(1).getStatistics();
+                var otherKeys = List.of(skewPredicate.otherColumn);
+                var other = SkewJoinStatistics.find(rightChildStats, otherKeys, mcvLimit);
+                var hotKeys = skewValues.stream().map(value -> List.of((ConstantOperator) value)).toList();
+                if (SkewJoinStatistics.overlappingRows(other, otherKeys, hotKeys)
+                        > context.getSessionVariable().getSkewJoinMaxOtherSideOverlapRowCount()) {
+                    continue;
+                }
                 if (rightChildStats != null && rightChildStats.getColumnStatistics().containsKey(skewPredicate.otherColumn)) {
                     final var otherColumnStats = rightChildStats.getColumnStatistic(skewPredicate.otherColumn);
                     if (otherColumnStats != null && otherColumnStats.getHistogram() != null) {
@@ -254,6 +331,9 @@ public class SkewJoinOptimizeRule extends TransformationRule {
         List<BinaryPredicateOperator> equalConjs = JoinHelper.
                 getEqualsPredicate(leftOutputColumns, rightOutputColumns,
                         Utils.extractConjuncts(oldJoinOperator.getOnPredicate()));
+        if (equalConjs.stream().anyMatch(eq -> eq.getBinaryType() != BinaryType.EQ)) {
+            return Lists.newArrayList();
+        }
         for (BinaryPredicateOperator equalConj : equalConjs) {
             ScalarOperator child0 = equalConj.getChild(0);
             ScalarOperator child1 = equalConj.getChild(1);
@@ -290,6 +370,19 @@ public class SkewJoinOptimizeRule extends TransformationRule {
                 if (otherSideSkewColumn != null) {
                     break;
                 }
+            }
+        }
+        if (otherSideSkewColumn == null && skewColumn.getType().isBoolean()
+                && !oldJoinOperator.getJoinHint().equals(HintNode.HINT_JOIN_SKEW)) {
+            Map<ColumnRefOperator, ScalarOperator> mapping = Maps.newHashMap();
+            for (var equality : equalConjs) {
+                if (equality.getChild(0) instanceof ColumnRefOperator a
+                        && equality.getChild(1) instanceof ColumnRefOperator b) {
+                    mapping.put(leftOutputColumns.contains(a) ? a : b, leftOutputColumns.contains(a) ? b : a);
+                }
+            }
+            if (Utils.extractColumnRef(skewColumn).stream().allMatch(mapping::containsKey)) {
+                otherSideSkewColumn = new ReplaceColumnRefRewriter(mapping).rewrite(skewColumn);
             }
         }
         // when use hint, we should check the skew column, and throw exception if not found

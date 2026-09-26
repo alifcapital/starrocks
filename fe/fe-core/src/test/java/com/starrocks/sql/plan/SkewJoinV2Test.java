@@ -144,13 +144,79 @@ public class SkewJoinV2Test extends PlanTestBase {
     }
 
     @Test
+    public void testOmittedHeavierKeyBlocksPartialRewriteAndHistogramFallback() {
+        var mixed = new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(20_000_000,
+                List.of(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("1"), 2_200_000),
+                        new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("2"), 2_200_000),
+                        new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("3"), 2_200_000)),
+                "JOIN_STATISTICS", 2_400_000);
+        var distribution = new java.util.concurrent.atomic.AtomicReference<>(mixed);
+        boolean oldUnitTest = FeConstants.runningUnitTest;
+        FeConstants.runningUnitTest = true;
+        try (var mocked = org.mockito.Mockito.mockStatic(
+                com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+            mocked.when(() -> com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.find(
+                    org.mockito.Mockito.any(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyInt()))
+                    .thenAnswer(invocation -> {
+                        List<com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator> columns = invocation.getArgument(1);
+                        return columns.get(0).getName().equals("v1") ? distribution.get() : null;
+                    });
+            var probe = buildIntMcvColumnStat(13_400_000, Map.of("1", 2_200_000L, "2", 2_200_000L, "3", 2_200_000L), 0);
+            var build = buildIntMcvColumnStat(20_000_000, Map.of(), 0);
+            withMockedMcvStats(20_000_000, 20_000_000, probe, build, () -> {
+                try {
+                    String sql = "select sum(v2 + v5) from t0 join[shuffle] t1 on v1 = v4";
+                    assertNotContains(getFragmentPlan(sql), "SplitCastDataSink");
+                    // Fully available labels permit the existing rewrite; the histogram itself is also skewed.
+                    distribution.set(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(
+                            mixed.rows(), mixed.entries(), mixed.source()));
+                    assertContains(getFragmentPlan(sql), "SplitCastDataSink");
+                    distribution.set(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(
+                            20_000_000, List.of(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(
+                                    List.of("1"), 14_000_000)), "JOIN_STATISTICS", 1_000_000));
+                    assertContains(getFragmentPlan(sql), "SplitCastDataSink");
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } finally {
+            FeConstants.runningUnitTest = oldUnitTest;
+        }
+    }
+
+    @Test
+    public void testRightSkewUsesSameBuildSideInBothBranches() throws Exception {
+        String plan = getFragmentPlan("select sum(v2 + v5) from t0 "
+                + "join[skew|t1.v4(1,2)] t1 on v1 = v4");
+        assertContains(plan, "SplitCastDataSink", "UNION");
+        // Reversing only the broadcast branch produces a bounded split-buffer dependency cycle.
+        org.junit.jupiter.api.Assertions.assertEquals(2, plan.lines()
+                .filter(line -> line.contains("equal join conjunct: 4: v4 = 1: v1")).count(), plan);
+    }
+
+    @Test
+    public void testNullSafeSkewHintRetainsOrdinaryJoin() throws Exception {
+        assertNotContains(getFragmentPlan("select count(*) from t0 "
+                + "join[skew|t0.v1(null,1)] t1 on v1 <=> v4"), "SplitCastDataSink");
+    }
+
+    @Test
+    public void testAggregateExpressionAfterSkewSplit() throws Exception {
+        for (String equality : List.of("v1 = v4", "v1 = v4 and v2 = v5")) {
+            String plan = getFragmentPlan("select count(*), sum(v2 + v5) from t0 "
+                    + "join[skew|t0.v1(1,2)] t1 on " + equality);
+            assertContains(plan, "SplitCastDataSink", "UNION", "sum(");
+        }
+    }
+
+    @Test
     public void testSkewJoinV2WithRightSideHint1() throws Exception {
         String sql = "select v2, v5 from t0 join[skew|t1.v4(1,2)] t1 on v1 = v4 ";
         String sqlPlan = getVerboseExplain(sql);
         assertCContains(sqlPlan, "Input Partition: RANDOM\n" +
                 "  SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 1: v1\n" +
-                "  OutPut Exchange Id: 02\n" +
+                "  OutPut Exchange Id: 03\n" +
                 "  Split expr: ([1: v1, BIGINT, true] NOT IN (1, 2)) OR ([1: v1, BIGINT, true] IS NULL)\n" +
                 "  OutPut Partition: UNPARTITIONED\n" +
                 "  OutPut Exchange Id: 07\n" +
@@ -429,7 +495,7 @@ public class SkewJoinV2Test extends PlanTestBase {
         PlanTestBase.assertContains(sqlPlan, "Input Partition: RANDOM\n" +
                 "  SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 7: abs\n" +
-                "  OutPut Exchange Id: 05\n" +
+                "  OutPut Exchange Id: 04\n" +
                 "  Split expr: ([7: abs, LARGEINT, true] NOT IN (abs[(1); args: BIGINT; result: LARGEINT; args nullable: " +
                 "false; result nullable: true], abs[(2); args: BIGINT; result: LARGEINT; args nullable: false; result " +
                 "nullable: true])) OR ([7: abs, LARGEINT, true] IS NULL)\n" +
@@ -440,7 +506,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 "true])");
         PlanTestBase.assertContains(sqlPlan, "SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 8: abs\n" +
-                "  OutPut Exchange Id: 04\n" +
+                "  OutPut Exchange Id: 05\n" +
                 "  Split expr: ([8: abs, LARGEINT, true] NOT IN (abs[(1); args: BIGINT; result: LARGEINT; args nullable: " +
                 "false; result nullable: true], abs[(2); args: BIGINT; result: LARGEINT; args nullable: false; result " +
                 "nullable: true])) OR ([8: abs, LARGEINT, true] IS NULL)\n" +
@@ -583,7 +649,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 assertCContains(plan, "Input Partition: RANDOM\n" +
                         "  SplitCastDataSink:\n" +
                         "  OutPut Partition: HASH_PARTITIONED: 4: v4\n" +
-                        "  OutPut Exchange Id: 03\n" +
+                        "  OutPut Exchange Id: 02\n" +
                         "  Split expr: ([4: v4, BIGINT, true] NOT IN (1, 2)) OR ([4: v4, BIGINT, true] IS NULL)\n" +
                         "  OutPut Partition: RANDOM\n" +
                         "  OutPut Exchange Id: 06\n" +
@@ -591,7 +657,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 assertCContains(plan, "Input Partition: RANDOM\n" +
                         "  SplitCastDataSink:\n" +
                         "  OutPut Partition: HASH_PARTITIONED: 1: v1\n" +
-                        "  OutPut Exchange Id: 02\n" +
+                        "  OutPut Exchange Id: 03\n" +
                         "  Split expr: ([1: v1, BIGINT, true] NOT IN (1, 2)) OR ([1: v1, BIGINT, true] IS NULL)\n" +
                         "  OutPut Partition: UNPARTITIONED\n" +
                         "  OutPut Exchange Id: 07\n" +

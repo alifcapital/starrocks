@@ -352,6 +352,7 @@ public final class JoinStatisticsBasis {
         }
     }
 
+    private final JoinStatisticsHeadKeys headKeys;
     private final int domain;
     private final List<Integer> sources;
     private final List<List<Slice>> sides;
@@ -362,6 +363,12 @@ public final class JoinStatisticsBasis {
     }
 
     public JoinStatisticsBasis(int domain, List<Integer> sources, List<List<Slice>> sides, List<Pair> pairs) {
+        this(domain, sources, sides, pairs, null);
+    }
+
+    public JoinStatisticsBasis(int domain, List<Integer> sources, List<List<Slice>> sides, List<Pair> pairs,
+                               JoinStatisticsHeadKeys headKeys) {
+        this.headKeys = headKeys;
         if (domain < 0 || domain >= com.starrocks.statistic.JoinStatisticsDefinition.MAX_DOMAINS
                 || sources.size() < 2 || sources.size() > 4
                 || sources.size() != sides.size() || sources.stream().distinct().count() != sources.size()) {
@@ -379,7 +386,7 @@ public final class JoinStatisticsBasis {
         this.domain = domain;
         this.sources = List.copyOf(sources);
         this.sides = sides.stream().map(List::copyOf).toList();
-        int headSize = -1;
+        int headSize = headKeys == null ? -1 : headKeys.size();
         for (List<Slice> side : sides) {
             if (side.isEmpty() || side.size() > JoinStatisticsData.MAX_SLICES) {
                 throw new IllegalArgumentException("Invalid shared JOIN slices");
@@ -393,6 +400,10 @@ public final class JoinStatisticsBasis {
                 }
             }
         }
+    }
+
+    public JoinStatisticsHeadKeys getHeadKeys() {
+        return headKeys;
     }
 
     public List<Pair> getPairs() {
@@ -451,7 +462,7 @@ public final class JoinStatisticsBasis {
     }
 
     public long estimatedSize() {
-        long bytes = 152 + 8L * pairs.size();
+        long bytes = 160 + 8L * pairs.size() + (headKeys == null ? 0 : headKeys.estimatedSize());
         for (Pair pair : pairs) {
             bytes += pair.estimatedSize();
         }

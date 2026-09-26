@@ -60,6 +60,10 @@ public final class JoinStatisticsPlanner {
     private record KeyRequest(JoinStatisticsScope scope, ColumnRefOperator column) {
     }
 
+    private record SkewRequest(Request scope, List<ColumnRefOperator> columns, double rows, int limit) { }
+
+    private final Map<SkewRequest, Optional<SkewJoinStatistics.Distribution>> skew = new HashMap<>();
+
     private record OuterRequest(Request request, String optionalSource) { }
 
     public record KeyStatistics(double rows, DegreeStatistics degree) {
@@ -152,6 +156,7 @@ public final class JoinStatisticsPlanner {
         retainedSnapshotBytes = 0;
         estimates.clear();
         keys.clear();
+        skew.clear();
         outerPreservation.clear();
         outerEstimates.clear();
         correlations.clear();
@@ -803,6 +808,201 @@ public final class JoinStatisticsPlanner {
         }
         keys.put(request, result);
         return result;
+    }
+
+    /** Exact retained-key frequencies. Different-key chains require joint key frequencies, not marginal products. */
+    public synchronized SkewJoinStatistics.Distribution skewStatistics(JoinStatisticsScope scope,
+            List<ColumnRefOperator> columns, double estimatedRows, int limit) {
+        if (scope == null || scope.getOutputs().isEmpty() || !hasDefinitions()) {
+            return null;
+        }
+        List<JoinStatisticsScope.ColumnOrigin> origins = columns.stream().map(scope.getColumns()::get).toList();
+        if (origins.stream().anyMatch(java.util.Objects::isNull)
+                || origins.stream().map(JoinStatisticsScope.ColumnOrigin::tableUuid).distinct().count() != 1) {
+            return null;
+        }
+        var request = new SkewRequest(new Request(scope.getSources(), scope.getEqualities(),
+                scope.getOutputs(), scope.getColumns()), List.copyOf(columns), estimatedRows, limit);
+        if (skew.containsKey(request)) {
+            return skew.get(request).orElse(null);
+        }
+        if (skew.size() >= 1024) {
+            return null;
+        }
+        long budget = TimeUnit.MILLISECONDS.toNanos(Config.statistic_join_optimizer_budget_ms) - elapsedNanos;
+        if (budget <= 0) {
+            return null;
+        }
+        long started = System.nanoTime();
+        long[] loading = {0};
+        SkewJoinStatistics.Distribution result = null;
+        long newest = -1;
+        try {
+            for (var meta : JoinStatisticsBindings.bind(definitions, scope, budget)) {
+                if (System.nanoTime() - started - loading[0] >= budget || Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                if (meta.getGeneration() == 0 || meta.getCollectedAt() < newest) {
+                    continue;
+                }
+                var definition = meta.getDefinition();
+                int source = -1;
+                for (int i = 0; i < definition.getSources().size(); i++) {
+                    if (definition.getSources().get(i).getUuid().equals(origins.get(0).tableUuid())) {
+                        source = i;
+                    }
+                }
+                if (source < 0) {
+                    continue;
+                }
+                for (int domain = 0; domain < definition.getDomains().size(); domain++) {
+                    var key = definition.getDomains().get(domain);
+                    var names = key.getColumns().get(source);
+                    if (names == null || names.size() != columns.size()) {
+                        continue;
+                    }
+                    int[] positions = origins.stream().mapToInt(o -> names.indexOf(o.name())).toArray();
+                    boolean compatible = java.util.Arrays.stream(positions).distinct().count() == positions.length;
+                    for (int i = 0; i < positions.length; i++) {
+                        compatible &= positions[i] >= 0 && JoinStatisticsDefinition.matchesKeyType(
+                                origins.get(i).type(), key.getTypes().get(Math.max(0, positions[i])));
+                    }
+                    // All inputs must be joined on this entire domain. Do not multiply unrelated marginals.
+                    for (var edge : scope.getEqualities()) {
+                        int a = domainComponent(definition, key, edge.left());
+                        compatible &= a >= 0 && a == domainComponent(definition, key, edge.right());
+                    }
+                    if (!compatible || (scope.getSources().size() > 1
+                            && (JoinStatisticsKeyLayout.match(definition, scope) == null
+                            || scope.getEqualities().size() < columns.size() * (scope.getSources().size() - 1)))) {
+                        continue;
+                    }
+                    var loaded = snapshot(meta, loading);
+                    if (loaded.isEmpty()) {
+                        continue;
+                    }
+                    var data = loaded.get();
+                    final int domainId = domain;
+                    var basis = data.getBases().stream().filter(b -> b.getDomain() == domainId).findFirst().orElse(null);
+                    if (basis == null || basis.getHeadKeys() == null) {
+                        continue;
+                    }
+                    double[] frequencies = new double[basis.getHeadKeys().size()];
+                    java.util.Arrays.fill(frequencies, 1);
+                    double rows = estimatedRows;
+                    int included = 0;
+                    double nullRows = 0;
+                    for (int side = 0; side < basis.getSources().size(); side++) {
+                        int id = basis.getSources().get(side);
+                        String role = definition.getSources().get(id).getUuid();
+                        var scan = scope.getSources().get(role);
+                        if (scan == null) {
+                            continue;
+                        }
+                        // Ordinary equality rejects NULL keys. Removing its redundant scan check is safe:
+                        // head frequencies already contain only non-NULL keys; the row denominator stays conservative.
+                        var keyNames = key.getColumns().get(id);
+                        var predicates = scan.predicates().stream().filter(predicate -> {
+                            if (predicate instanceof IsNullPredicateOperator check && check.isNotNull()
+                                    && check.getChild(0) instanceof ColumnRefOperator ref) {
+                                var origin = scope.getColumns().get(ref);
+                                return origin == null || !origin.tableUuid().equals(role)
+                                        || !keyNames.contains(origin.name());
+                            }
+                            return true;
+                        }).toList();
+                        var selectedScan = new JoinStatisticsScope.Source(role, scan.estimatedRows(), predicates,
+                                scan.physicalUuid(), scan.tableState());
+                        var selection = select(data.getSources().get(id), selectedScan, scope.getColumns());
+                        if (selection == null || !selection.hasExactRows()) {
+                            compatible = false;
+                            break;
+                        }
+                        included++;
+                        if (scope.getSources().size() == 1) {
+                            rows = selection.rowLimit() * scan.tableState().scale(data.getSources().get(id));
+                            if (columns.size() == 1 && predicates.size() == scan.predicates().size()) {
+                                nullRows = selection.nullRows(data.getSources().get(id), domain)
+                                        * scan.tableState().scale(data.getSources().get(id));
+                            }
+                        }
+                        long[] head = selection.head(basis, side);
+                        boolean output = scope.getOutputs().contains(role);
+                        double scale = scan.tableState().scale(data.getSources().get(id));
+                        for (int h = 0; h < head.length; h++) {
+                            frequencies[h] *= scale == 0 ? 0 : output ? head[h] * scale : head[h] > 0 ? 1 : 0;
+                        }
+                    }
+                    if (!compatible || included != scope.getSources().size()) {
+                        continue;
+                    }
+                    // For a JOIN input use its bound as denominator, never divide by an unrelated base cardinality.
+                    rows = Math.max(rows, java.util.Arrays.stream(frequencies).sum());
+                    if (!Double.isFinite(rows) || rows <= 0) {
+                        continue;
+                    }
+                    // Only retained winners are boxed; a 16K head must not allocate 16K Java Integers per lookup.
+                    java.util.PriorityQueue<Integer> top = new java.util.PriorityQueue<>(
+                            java.util.Comparator.<Integer>comparingDouble(i -> frequencies[i]).thenComparingInt(i -> -i));
+                    double maximumOmittedRows = 0;
+                    for (int h = 0; h < frequencies.length; h++) {
+                        // Missing text is not SQL NULL and must not displace an available skew key.
+                        if (!basis.getHeadKeys().hasValue(h)) {
+                            maximumOmittedRows = Math.max(maximumOmittedRows, frequencies[h]);
+                            continue;
+                        }
+                        if (frequencies[h] > 0 && (top.size() < limit || frequencies[h] > frequencies[top.peek()])) {
+                            top.add(h);
+                            if (top.size() > limit) {
+                                top.remove();
+                            }
+                        }
+                    }
+                    List<SkewJoinStatistics.Entry> entries = new ArrayList<>();
+                    while (!top.isEmpty()) {
+                        int h = top.remove();
+                        List<String> values = basis.getHeadKeys().tuple(h, columns.size());
+                        if (values.size() != columns.size()) {
+                            continue;
+                        }
+                        entries.add(new SkewJoinStatistics.Entry(
+                                java.util.Arrays.stream(positions).mapToObj(values::get).toList(), frequencies[h]));
+                    }
+                    if (nullRows > 0) {
+                        entries.add(new SkewJoinStatistics.Entry(java.util.Collections.singletonList(null), nullRows));
+                    }
+                    entries.sort(java.util.Comparator.comparingDouble(SkewJoinStatistics.Entry::rows).reversed());
+                    if (entries.size() > limit) {
+                        entries = entries.subList(0, limit);
+                    }
+                    result = new SkewJoinStatistics.Distribution(rows, entries, "JOIN_STATISTICS", maximumOmittedRows);
+                    newest = meta.getCollectedAt();
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.debug("Cannot apply JOIN heavy-key statistics", e);
+        } finally {
+            long spent = System.nanoTime() - started - loading[0];
+            elapsedNanos += spent;
+            Tracers.count(Tracers.Module.OPTIMIZER, "SkewStatistics.LookupMicros", spent / 1000);
+        }
+        if (result != null) {
+            Tracers.log(Tracers.Module.OPTIMIZER, "Skew JOIN statistics: columns={}, rows={}, keys={}",
+                    columns, result.rows(), result.entries());
+        }
+        skew.put(request, Optional.ofNullable(result));
+        return result;
+    }
+
+    private static int domainComponent(JoinStatisticsDefinition definition, JoinStatisticsDefinition.KeyDomain domain,
+                                       JoinStatisticsScope.ColumnOrigin origin) {
+        for (int source = 0; source < definition.getSources().size(); source++) {
+            if (definition.getSources().get(source).getUuid().equals(origin.tableUuid())) {
+                var columns = domain.getColumns().get(source);
+                return columns == null ? -1 : columns.indexOf(origin.name());
+            }
+        }
+        return -1;
     }
 
     private static long loadTimeoutMillis() {

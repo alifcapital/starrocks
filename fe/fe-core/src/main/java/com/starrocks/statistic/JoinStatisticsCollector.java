@@ -19,17 +19,18 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.util.SqlUtils;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.statistics.CompactDegreeVector;
 import com.starrocks.sql.optimizer.statistics.DegreeStatistics;
 import com.starrocks.sql.optimizer.statistics.JoinStatisticsBasis;
 import com.starrocks.sql.optimizer.statistics.JoinStatisticsCorrelation;
 import com.starrocks.sql.optimizer.statistics.JoinStatisticsData;
+import com.starrocks.sql.optimizer.statistics.JoinStatisticsHeadKeys;
 import com.starrocks.type.Type;
 import org.apache.iceberg.Snapshot;
 import org.apache.logging.log4j.LogManager;
@@ -59,6 +60,10 @@ public final class JoinStatisticsCollector implements AutoCloseable {
     private final long started = System.nanoTime();
     private boolean boundedJoin;
     private long preparedBytes;
+    private final List<PendingHead> pendingHeads = new ArrayList<>();
+
+    private record PendingHead(int domain, String table, int[] lengths) { }
+
 
     private static final class Source {
         private Table table;
@@ -134,7 +139,8 @@ public final class JoinStatisticsCollector implements AutoCloseable {
         for (int i = 0; i < sources.size(); i++) {
             collectSource(i);
             Source source = sources.get(i);
-            if (source.table instanceof OlapTable nativeTable && nativeVersion(nativeTable, source.databaseId) != source.snapshot) {
+            if (source.table instanceof OlapTable nativeTable
+                    && nativeVersion(nativeTable, source.databaseId) != source.snapshot) {
                 // Native ANALYZE, like ordinary statistics collection, need not stop concurrent writes.
                 // Do not claim the two collection passes form a reusable stable-version cohort.
                 source.snapshot = -ticket.getGeneration() - 1;
@@ -166,8 +172,64 @@ public final class JoinStatisticsCollector implements AutoCloseable {
                     source.rows, definition.getSources().get(i).getPredicates(), source.types, source.tuples,
                     source.tupleRows, source.moments));
         }
+        completeHeadDictionaries(bases);
         check();
         return new JoinStatisticsData(ticket.getPrevious().getId(), ticket.getGeneration(), prepared, bases, intra);
+    }
+
+    private void completeHeadDictionaries(List<JoinStatisticsBasis> bases) throws Exception {
+        var selections = JoinStatisticsHeadBudget.select(pendingHeads.stream().map(PendingHead::lengths).toList());
+        for (int d = 0; d < pendingHeads.size(); d++) {
+            check();
+            PendingHead pending = pendingHeads.get(d);
+            var selected = selections.get(d);
+            String[] values = new String[pending.lengths.length];
+            if (!selected.isEmpty()) {
+                String projection = "SELECT hid,CAST(k AS VARCHAR) FROM " + pending.table;
+                List<List<String>> rows = new ArrayList<>();
+                if (selected.cardinality() == values.length) {
+                    rows = query(projection + " ORDER BY hid");
+                } else {
+                    int[] ids = selected.stream().toArray();
+                    // Bound SQL expression size even when most of the 16K head fits the byte budget.
+                    for (int start = 0; start < ids.length; start += 4096) {
+                        String batch = Arrays.stream(ids, start, Math.min(ids.length, start + 4096))
+                                .mapToObj(Integer::toString).collect(Collectors.joining(","));
+                        rows.addAll(query(projection + " WHERE hid IN (" + batch + ") ORDER BY hid"));
+                    }
+                }
+                if (rows.size() != selected.cardinality()) {
+                    throw new DdlException("Incomplete JOIN head dictionary");
+                }
+                for (var row : rows) {
+                    int index = Integer.parseInt(row.get(0));
+                    String value = row.get(1);
+                    if (index < 0 || index >= values.length || !selected.get(index)
+                            || values[index] != null || value == null
+                            || value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length != pending.lengths[index]) {
+                        throw new DdlException("JOIN head dictionary changed during collection");
+                    }
+                    values[index] = value;
+                }
+            }
+            JoinStatisticsHeadKeys keys = new JoinStatisticsHeadKeys(values);
+            preparedBytes += keys.estimatedSize();
+            if (preparedBytes > Config.statistic_join_object_max_bytes) {
+                throw new DdlException("JOIN statistics exceed object memory budget");
+            }
+            for (int b = 0; b < bases.size(); b++) {
+                var basis = bases.get(b);
+                if (basis.getDomain() == pending.domain) {
+                    List<List<JoinStatisticsBasis.Slice>> sides = new ArrayList<>();
+                    for (int side = 0; side < basis.getSources().size(); side++) {
+                        sides.add(basis.getSlices(side));
+                    }
+                    bases.set(b, new JoinStatisticsBasis(basis.getDomain(), basis.getSources(), sides, basis.getPairs(), keys));
+                    break;
+                }
+            }
+            drop(pending.table);
+        }
     }
 
     static long nativeVersion(OlapTable table, long databaseId) {
@@ -355,7 +417,22 @@ public final class JoinStatisticsCollector implements AutoCloseable {
                 + String.join(",", columns) + " FROM (" + String.join(" UNION ALL ", inputs)
                 + ") all_sources GROUP BY k) grouped WHERE " + String.join("+", scores)
                 + " > 0 ORDER BY score DESC,k LIMIT " + JoinStatisticsCorrelation.HEAD_BUDGET + ") ranked");
-        int headSize = Math.toIntExact(number(query("SELECT COUNT(*) FROM " + head).get(0).get(0)));
+        var keyTypes = definition.getDomains().get(domain).getTypes();
+        boolean integerKey = scalarIntegerKey(keyTypes);
+        JoinStatisticsHeadKeys headKeys = null;
+        int headSize;
+        if (integerKey) {
+            var values = query("SELECT CAST(k AS VARCHAR) FROM " + head + " ORDER BY hid");
+            headKeys = new JoinStatisticsHeadKeys(values.stream().mapToLong(row -> Long.parseLong(row.get(0))).toArray());
+            preparedBytes += headKeys.estimatedSize();
+            headSize = headKeys.size();
+        } else {
+            // Only lengths cross into FE until every domain has its share of the object-wide byte budget.
+            var lengths = query("SELECT length(CAST(k AS VARCHAR)) FROM " + head + " ORDER BY hid");
+            int[] bytes = lengths.stream().mapToInt(row -> Integer.parseInt(row.get(0))).toArray();
+            headSize = bytes.length;
+            pendingHeads.add(new PendingHead(domain, head, bytes));
+        }
         List<List<JoinStatisticsBasis.Slice>> sides = new ArrayList<>();
         int[] orders = JoinStatisticsBasis.momentOrders();
         for (int sourceId : group) {
@@ -426,16 +503,21 @@ public final class JoinStatisticsCollector implements AutoCloseable {
             drop(tail);
             sides.add(slices);
         }
-        drop(head);
-        return new JoinStatisticsBasis(domain, group, sides, collectPairs(domain, group));
+        if (integerKey) {
+            drop(head);
+        }
+        return new JoinStatisticsBasis(domain, group, sides, collectPairs(domain, group), headKeys);
     }
 
     // Key domains may be separate, but all must have an exact signed 64-bit representation.
     private boolean compactDegrees() {
         return definition.getDomains().size() <= 2
-                && definition.getDomains().stream().allMatch(domain -> domain.getTypes().size() == 1
-                && Set.of("TINYINT", "SMALLINT", "INT", "BIGINT").contains(domain.getTypes().get(0)
-                .toUpperCase(java.util.Locale.ROOT).replaceFirst("\\(.*\\)$", "")));
+                && definition.getDomains().stream().allMatch(domain -> scalarIntegerKey(domain.getTypes()));
+    }
+
+    static boolean scalarIntegerKey(List<String> types) {
+        return types.size() == 1 && Set.of("TINYINT", "SMALLINT", "INT", "BIGINT").contains(types.get(0)
+                .toUpperCase(java.util.Locale.ROOT).replaceFirst("\\(.*\\)$", ""));
     }
 
     private void collectCompactSource(Source source, List<Integer> domains, List<String> keys,
@@ -444,7 +526,8 @@ public final class JoinStatisticsCollector implements AutoCloseable {
         String input = " FROM (SELECT " + String.join(",", projections) + " FROM " + source.scan
                 + ") s JOIN [BROADCAST] " + dictionary + " c ON s.predicate_tuple=c.p";
         if (domains.size() == 2) {
-            String left = "k" + domains.get(0), right = "k" + domains.get(1);
+            String left = "k" + domains.get(0);
+            String right = "k" + domains.get(1);
             // 256 x 128 value rectangles, plus distinct NULL IDs. The support has at
             // most 257 x 129 entries, still below the binary-cell limit with counters.
             source.joint = create("cid INT,s0 BIGINT,s1 BIGINT,s VARBINARY(1048576),n BIGINT,nn0 BIGINT,nn1 BIGINT",
@@ -576,7 +659,10 @@ public final class JoinStatisticsCollector implements AutoCloseable {
         execute("SET chunk_size=32,streaming_preaggregation_mode='auto'");
         List<JoinStatisticsBasis.Pair> pairs = collectPairs(domain, group);
         execute("SET chunk_size=1024");
-        return new JoinStatisticsBasis(domain, group, sides, pairs);
+        JoinStatisticsHeadKeys headKeys = new JoinStatisticsHeadKeys(
+                positions.keySet().stream().mapToLong(Long::longValue).toArray());
+        preparedBytes += headKeys.estimatedSize();
+        return new JoinStatisticsBasis(domain, group, sides, pairs, headKeys);
     }
 
     static JoinStatisticsBasis.Slice compactSummary(JsonObject value, Map<Long, Integer> positions, boolean unit) {
@@ -624,9 +710,9 @@ public final class JoinStatisticsCollector implements AutoCloseable {
                             + " r ON l.shard=r.shard) p GROUP BY lc,rc");
                 } else {
                     executeHeavy("INSERT INTO " + matrix + " SELECT l.cid,r.cid,SUM(CAST(l.d AS DOUBLE)*r.d),"
-                        + "SUM(CAST(r.d AS DOUBLE)),SUM(CAST(l.d AS DOUBLE)),COUNT(*) FROM " + l.degrees.get(domain)
-                        + " l JOIN [SHUFFLE] " + r.degrees.get(domain) + " r ON l.k" + domain + "=r.k" + domain
-                        + " WHERE l.k" + domain + " IS NOT NULL GROUP BY l.cid,r.cid");
+                            + "SUM(CAST(r.d AS DOUBLE)),SUM(CAST(l.d AS DOUBLE)),COUNT(*) FROM " + l.degrees.get(domain)
+                            + " l JOIN [SHUFFLE] " + r.degrees.get(domain) + " r ON l.k" + domain + "=r.k" + domain
+                            + " WHERE l.k" + domain + " IS NOT NULL GROUP BY l.cid,r.cid");
                 }
                 double[] products = new double[cells];
                 for (int start = 0; start < leftSize; start += 16) {

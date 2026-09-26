@@ -36,7 +36,8 @@ keys overlap. Pair values strengthen the power-one LP constraints without a sepa
 for every projection. Matrix allocations are admitted against the object memory limit before
 collection/allocation. Native collection and the prepared Java cache have no Python dependency.
 
-The development payload version is 4; earlier development generations must be recollected.
+The collector writes payload version 5, including compact head-key labels for skew planning.
+The reader also accepts version 4; older development generations must be recollected.
 When comparing estimates, use the same source snapshots and slice dictionary. A smaller shared tail
 alone can lose precision because it no longer pre-intersects supports for every subset. Test the
 complete representation, including pair values, and report partial predicate coverage separately

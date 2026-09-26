@@ -100,6 +100,22 @@ public final class JoinStatisticsEstimate {
             return new JoinStatisticsPlanner.KeyStatistics(rowLimit, degree);
         }
 
+        long nullRows(JoinStatisticsData.Source source, int domain) {
+            long result = 0;
+            for (int slice : slices) {
+                result = Math.addExact(result, source.getDegrees().get(domain).get(slice).getNullCount());
+            }
+            return result;
+        }
+
+        long[] head(JoinStatisticsBasis basis, int side) {
+            long[] result = new long[basis.getSlices(side).get(0).getHead().size()];
+            for (int slice : slices) {
+                basis.getSlices(side).get(slice).getHead().addTo(result);
+            }
+            return result;
+        }
+
         boolean hasExactRows() {
             return exactRows;
         }
