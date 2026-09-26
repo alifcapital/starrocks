@@ -1,0 +1,84 @@
+-- name: test_exact_degree_pairs
+CREATE TABLE degree_pairs(cid INT,k0 BIGINT,k1 BIGINT)
+DUPLICATE KEY(cid) DISTRIBUTED BY HASH(cid) BUCKETS 3
+PROPERTIES('replication_num'='1');
+-- result:
+-- !result
+INSERT INTO degree_pairs VALUES
+(0,0,0),(0,0,NULL),(0,NULL,0),(0,NULL,NULL),
+(0,-9223372036854775808,9223372036854775807),
+(0,-9223372036854775808,9223372036854775807),
+(0,9223372036854775807,-9223372036854775808),
+(1,-1,-1),(1,-1,128),(1,256,-1),(1,256,-1);
+-- result:
+-- !result
+INSERT INTO degree_pairs
+SELECT n%3,IF(n%17=0,NULL,n%2000-1000),IF(n%19=0,NULL,n*17%381-190)
+FROM TABLE(generate_series(1,20000)) t(n);
+-- result:
+-- !result
+SET enable_spill=true,spill_mode='force',chunk_size=128;
+-- result:
+-- !result
+CREATE TABLE degree_pair_blocks(cid INT,s0 BIGINT,s1 BIGINT,s VARBINARY(1048576),n BIGINT,nn0 BIGINT,nn1 BIGINT)
+DUPLICATE KEY(cid,s0,s1) DISTRIBUTED BY HASH(s0,s1) BUCKETS 3
+PROPERTIES('replication_num'='1');
+-- result:
+-- !result
+INSERT INTO degree_pair_blocks
+SELECT cid,COALESCE(bit_shift_right(k0,8),0),COALESCE(bit_shift_right(k1,7),0),
+stats_degree_state(bitor(bitor(bit_shift_left(COALESCE(bitand(k0,255),0),7),COALESCE(bitand(k1,127),0)),
+IF(k0 IS NULL,32768,0)+IF(k1 IS NULL,65536,0))),COUNT(*),COUNT(k0),COUNT(k1)
+FROM degree_pairs GROUP BY cid,COALESCE(bit_shift_right(k0,8),0),COALESCE(bit_shift_right(k1,7),0);
+-- result:
+-- !result
+CREATE TABLE degree_pair_marginals(cid INT,side INT,s VARBINARY(1048576))
+DUPLICATE KEY(cid,side) DISTRIBUTED BY HASH(cid) BUCKETS 3
+PROPERTIES('replication_num'='1');
+-- result:
+-- !result
+INSERT INTO degree_pair_marginals
+SELECT cid,0,stats_degree_merge(stats_degree_project(s,s0,0)) FROM degree_pair_blocks GROUP BY cid
+UNION ALL
+SELECT cid,1,stats_degree_merge(stats_degree_project(s,s1,1)) FROM degree_pair_blocks GROUP BY cid;
+-- result:
+-- !result
+WITH exact AS (
+SELECT cid,0 side,stats_degree_state(k0) s FROM degree_pairs GROUP BY cid
+UNION ALL
+SELECT cid,1 side,stats_degree_state(k1) s FROM degree_pairs GROUP BY cid)
+SELECT COUNT(*) FROM exact e FULL JOIN degree_pair_marginals p ON e.cid=p.cid AND e.side=p.side
+WHERE e.cid IS NULL OR p.cid IS NULL OR stats_degree_info(e.s)!=stats_degree_info(p.s)
+OR get_json_double(stats_degree_pair(e.s,p.s),'$[0]')!=get_json_double(stats_degree_info(e.s),'$.moments[1]');
+-- result:
+0
+-- !result
+WITH exact_pairs AS (SELECT cid,k0,k1 FROM degree_pairs GROUP BY cid,k0,k1),
+l AS (SELECT cid,k0,COUNT(*) d FROM degree_pairs GROUP BY cid,k0),
+r AS (SELECT cid,k1,COUNT(*) d FROM degree_pairs GROUP BY cid,k1),
+expected AS (SELECT j.cid,COUNT(*) n,SUM(CAST(l.d AS DOUBLE)*r.d) m1,
+SUM(POW(CAST(l.d AS DOUBLE)*r.d,2)) m2,SUM(POW(CAST(l.d AS DOUBLE)*r.d,3)) m3
+FROM exact_pairs j JOIN l ON j.cid=l.cid AND j.k0=l.k0 JOIN r ON j.cid=r.cid AND j.k1=r.k1 GROUP BY j.cid),
+values_ AS (SELECT j.cid,stats_degree_intra(j.s,l.s,r.s,j.s0,j.s1) v
+FROM degree_pair_blocks j JOIN degree_pair_marginals l ON j.cid=l.cid AND l.side=0
+JOIN degree_pair_marginals r ON j.cid=r.cid AND r.side=1),
+actual AS (SELECT cid,SUM(get_json_double(v,'$[0]')) n,SUM(get_json_double(v,'$[1]')) m1,
+SUM(get_json_double(v,'$[2]')) m2,SUM(get_json_double(v,'$[3]')) m3 FROM values_ GROUP BY cid)
+SELECT COUNT(*) FROM expected e FULL JOIN actual a ON e.cid=a.cid WHERE e.cid IS NULL OR a.cid IS NULL
+OR e.n!=a.n OR ABS(e.m1-a.m1)/GREATEST(1,e.m1)>1e-12
+OR ABS(e.m2-a.m2)/GREATEST(1,e.m2)>1e-12 OR ABS(e.m3-a.m3)/GREATEST(1,e.m3)>1e-12;
+-- result:
+0
+-- !result
+SET spill_mode='auto';
+-- result:
+-- !result
+DROP TABLE degree_pair_marginals;
+-- result:
+-- !result
+DROP TABLE degree_pair_blocks;
+-- result:
+-- !result
+DROP TABLE degree_pairs;
+-- result:
+-- !result

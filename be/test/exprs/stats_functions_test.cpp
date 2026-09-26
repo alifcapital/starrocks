@@ -20,6 +20,7 @@
 #include "column/column_helper.h"
 #include "column/nullable_column.h"
 #include "exprs/function_context.h"
+#include "exprs/agg/exact_degree_state.h"
 
 namespace starrocks {
 
@@ -88,6 +89,33 @@ TEST_F(StatsFunctionsTest, tuple_key_const_input) {
     ASSERT_TRUE(result->is_constant());
     ASSERT_EQ(3, result->size());
     EXPECT_EQ("k#v", ColumnHelper::get_const_value<TYPE_VARCHAR>(result).to_string());
+}
+
+TEST_F(StatsFunctionsTest, degree_pair_repeated_payloads_and_chunk_lifetime) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    auto left = BinaryColumn::create();
+    auto right = BinaryColumn::create();
+    ExactDegreeState a, b;
+    a.update(1);
+    a.update(1);
+    b.update(1);
+    for (int row = 0; row < 4096; row++) {
+        left->append(a.serialize());
+        right->append(b.serialize());
+    }
+    auto result = StatsFunctions::degree_pair(ctx.get(), {left, right});
+    ASSERT_TRUE(result.ok());
+    auto output = ColumnHelper::cast_to<TYPE_VARCHAR>(result.value());
+    for (int row = 0; row < 4096; row++) EXPECT_EQ("[2,1,2,1]", output->get_slice(row).to_string());
+    left->reset_column();
+    right->reset_column();
+    a = ExactDegreeState();
+    a.update(2);
+    left->append(a.serialize());
+    right->append(b.serialize());
+    result = StatsFunctions::degree_pair(ctx.get(), {left, right});
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ("[0,0,0,0]", ColumnHelper::cast_to<TYPE_VARCHAR>(result.value())->get_slice(0).to_string());
 }
 
 } // namespace starrocks
