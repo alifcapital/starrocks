@@ -867,6 +867,9 @@ vectorized_functions = [
     [100025, 'uuid_v7', True, False, 'VARCHAR', [], "UtilityFunctions::uuid_v7"],
     [100026, 'uuid_v7_numeric', True, False, 'LARGEINT', [], "UtilityFunctions::uuid_v7_numeric"],
     [100027, 'query_id', True, False, 'VARCHAR', [], "UtilityFunctions::query_id"],
+    # Fork-owned statistics IDs: 1100000-1100099. Keep stable across FE/BE versions.
+    # Do not reuse upstream's growing 1000xx utility-function range.
+    [1100001, 'stats_tuple_key', True, False, 'VARCHAR', ['VARCHAR', '...'], 'StatsFunctions::tuple_key'],
 
     # json string function
     [110022, "get_json_int", False, False, "BIGINT", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bigint",

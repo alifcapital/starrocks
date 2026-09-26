@@ -841,6 +841,7 @@ bool PipelineDriver::check_is_ready() {
 }
 
 void PipelineDriver::cancel_operators(RuntimeState* runtime_state) {
+    // Cancellation also runs on the blocked-driver poller and can release operator-owned memory.
     SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(runtime_state->instance_mem_tracker());
     if (this->query_ctx()->is_query_expired()) {
         if (_has_log_cancelled.exchange(true) == false) {

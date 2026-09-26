@@ -38,6 +38,7 @@
 #include "exec/workgroup/work_group_fwd.h"
 #include "exprs/runtime_filter_bank.h"
 #include "fmt/printf.h"
+#include "runtime/current_thread.h"
 #include "runtime/mem_tracker.h"
 #include "util/phmap/phmap.h"
 
@@ -497,6 +498,7 @@ public:
     // Whether the driver is at finishing state in one epoch. when the driver is in `EPOCH_PENDING_FINISH` state,
     // use `is_still_epoch_finishing` method to check whether the driver has changed yet.
     bool is_still_epoch_finishing() {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_runtime_state->instance_mem_tracker());
         return source_operator()->is_epoch_finishing() || sink_operator()->is_epoch_finishing();
     }
 

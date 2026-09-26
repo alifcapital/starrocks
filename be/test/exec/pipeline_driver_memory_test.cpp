@@ -42,6 +42,7 @@ public:
     bool need_input() const override { return on_need_input ? on_need_input() : true; }
     bool is_finished() const override { return on_is_finished ? on_is_finished() : false; }
     bool pending_finish() const override { return on_pending_finish ? on_pending_finish() : false; }
+    bool is_epoch_finishing() const override { return on_epoch_finishing ? on_epoch_finishing() : false; }
     Status set_cancelled(RuntimeState*) override {
         if (on_cancel) on_cancel();
         return Status::OK();
@@ -52,6 +53,7 @@ public:
     std::function<bool()> on_need_input;
     std::function<bool()> on_is_finished;
     std::function<bool()> on_pending_finish;
+    std::function<bool()> on_epoch_finishing;
     std::function<void()> on_cancel;
 };
 
@@ -225,6 +227,10 @@ TEST_F(PipelineDriverMemoryTest, CompletionAndCancellation) {
     _source->on_pending_finish = release;
     _sink->on_pending_finish = release;
     EXPECT_FALSE(_driver->is_still_pending_finish());
+    EXPECT_EQ(&unrelated, tls_mem_tracker);
+    _source->on_epoch_finishing = release;
+    _sink->on_epoch_finishing = release;
+    EXPECT_FALSE(_driver->is_still_epoch_finishing());
     EXPECT_EQ(&unrelated, tls_mem_tracker);
     _source->on_cancel = [&]() { EXPECT_EQ(owner, tls_mem_tracker); };
     _sink->on_cancel = _source->on_cancel;
