@@ -23,6 +23,7 @@ import com.starrocks.connector.PlanMode;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.AsyncIterable;
 import com.starrocks.connector.iceberg.CachingIcebergCatalog.IcebergTableName;
+import com.starrocks.connector.iceberg.DataFileWrapper;
 import com.starrocks.connector.iceberg.DeleteFileWrapper;
 import com.starrocks.connector.iceberg.IcebergApiConverter;
 import com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext;
@@ -279,9 +280,7 @@ public class StarRocksIcebergTableScan
     }
 
     private boolean useCache() {
-        // A scan that needs full per-column statistics must not reuse the manifest cache, which
-        // may hold selectively-pruned entries; it reads full stats fresh via the non-cache path.
-        return dataFileCache != null && !shouldReturnColumnStats();
+        return dataFileCache != null;
     }
 
     private void planDeletesLocallyWithCache(List<ManifestFile> deleteManifests) {
@@ -324,14 +323,14 @@ public class StarRocksIcebergTableScan
         List<ManifestFile> dataManifestWithoutCache = new ArrayList<>();
         for (ManifestFile manifestFile : dataManifests) {
             Set<DataFile> dataFiles = getCompleteCachedFiles(dataFileCache, manifestFile);
-            if (dataFiles != null) {
+            if (dataFiles != null && (!shouldReturnColumnStats() || DataFileWrapper.hasFullColumnStats(dataFiles))) {
                 scanMetrics().scannedDataManifests().increment();
                 if (!dataFiles.isEmpty()) {
                     dataManifestWithCache.add(new Pair(manifestFile, dataFiles));
                 }
             } else {
                 if (!onlyReadCache) {
-                    dataFileCache.put(manifestFile.path(), ConcurrentHashMap.newKeySet());
+                    dataFileCache.asMap().putIfAbsent(manifestFile.path(), ConcurrentHashMap.newKeySet());
                     metaFileCacheMap.computeIfAbsent(icebergTableName,
                             t -> ConcurrentHashMap.newKeySet()).add(manifestFile.path());
                 }
@@ -385,7 +384,7 @@ public class StarRocksIcebergTableScan
                         .specsById(scanSpecsById)
                         .scanMetrics(scanMetrics())
                         .ignoreDeleted()
-                        .withDataFileCache(dataFileCache)
+                        .withDataFileCache(onlyReadCache ? null : dataFileCache)
                         .preparedDeleteFileIndex(deleteFileIndex)
                         .identifierFieldIds(getIdentifierFieldIds())
                         .cacheWithMetrics(dataFileCacheWithMetrics);
@@ -407,9 +406,11 @@ public class StarRocksIcebergTableScan
         }
 
         if (dataFileCacheWithMetrics) {
-            // Cache statistics only for the prune-effective keep-set; an empty keep set caches all
-            // columns. Scans that need full column stats never reach here -- useCache() routes them
-            // to the non-cache path.
+            // An explicit full-statistics request upgrades missing/partial manifest entries.
+            // Ordinary readers retain only the prune-effective columns to bound memory use.
+            if (shouldReturnColumnStats()) {
+                return null;
+            }
             Set<Integer> keepColumnIds = statsKeepColumnIds(table(), tableSchema());
             if (!keepColumnIds.isEmpty()) {
                 return keepColumnIds;
@@ -438,7 +439,7 @@ public class StarRocksIcebergTableScan
 
     public void refreshDataFileCache(List<ManifestFile> manifestFiles) {
         manifestFiles.forEach(manifestFile -> {
-            dataFileCache.put(manifestFile.path(), Sets.newHashSet());
+            dataFileCache.asMap().putIfAbsent(manifestFile.path(), Sets.newHashSet());
             metaFileCacheMap.computeIfAbsent(icebergTableName,
                     t -> ConcurrentHashMap.newKeySet()).add(manifestFile.path());
         });

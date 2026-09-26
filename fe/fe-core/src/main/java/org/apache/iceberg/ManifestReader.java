@@ -306,7 +306,8 @@ public class ManifestReader<F extends ContentFile<F>> extends CloseableGroup
                             DataFile copiedDataFile = dataFileCacheWithMetrics ?
                                     dataFile.copyWithStats(requestedColumnIds) :
                                     dataFile.copyWithoutStats();
-                            tmpDataFiles.add(DataFileWrapper.wrap(copiedDataFile));
+                            tmpDataFiles.add(DataFileWrapper.wrap(copiedDataFile,
+                                    dataFileCacheWithMetrics && requestedColumnIds == null));
                         }
                         return entry;
                     });
@@ -355,7 +356,12 @@ public class ManifestReader<F extends ContentFile<F>> extends CloseableGroup
                 try {
                     if (fullyConsumed.get()) {
                         if (!tmpDataFiles.isEmpty()) {
-                            dataFileCache.put(file.location(), tmpDataFiles); // to recalculate the weight
+                            // Concurrent ordinary readers must not downgrade a completed full-statistics fill.
+                            // compute also recalculates the cache weight after an upgrade.
+                            dataFileCache.asMap().compute(file.location(), (key, previous) ->
+                                    previous != null && previous.size() == tmpDataFiles.size() &&
+                                            DataFileWrapper.hasFullColumnStats(previous)
+                                            ? previous : tmpDataFiles);
                         }
                         if (!tmpDeleteFiles.isEmpty()) {
                             deleteFileCache.put(file.location(), tmpDeleteFiles); // to recalculate the weight
