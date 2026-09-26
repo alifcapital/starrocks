@@ -777,7 +777,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 ### enable_statistic_auto_collect_staggered_schedule
 
 - 类型：Boolean
-- 默认值：`false`
+- 默认值：`true`
 - 是否支持动态修改：是，无需重启。
 
 启用后，按表将自动统计信息收集分散到正值收集周期内允许的每日时间窗口中。支持已有和新建的内部、外部及数据库级任务。不影响手动 `ANALYZE`；周期非正时保留原有调度方式。

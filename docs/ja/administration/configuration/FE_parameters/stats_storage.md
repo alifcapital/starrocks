@@ -777,7 +777,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 ### enable_statistic_auto_collect_staggered_schedule
 
 - 型: Boolean
-- デフォルト: `false`
+- デフォルト: `true`
 - 動的変更: 可能。再起動は不要です。
 
 有効にすると、正の収集間隔と許可された日次時間帯に従って、テーブルごとに自動統計収集を分散します。既存および新規の内部・外部ジョブとデータベース単位のジョブが対象です。手動の `ANALYZE` は影響を受けません。間隔がゼロ以下の場合は従来の動作を維持します。

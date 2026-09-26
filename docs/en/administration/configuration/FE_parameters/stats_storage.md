@@ -777,7 +777,7 @@ Set `enable_execute_script_on_frontend = false` in production. Sample-Based Tabl
 ### enable_statistic_auto_collect_staggered_schedule
 
 - Type: Boolean
-- Default: `false`
+- Default: `true`
 - Mutable: Yes; no restart required
 
 When `true`, distribute automatic statistics collection by table across the positive collection interval and allowed daily window. This covers existing and new native/external jobs, including database-wide jobs. Manual `ANALYZE` is unaffected. A non-positive interval retains legacy scheduling.
