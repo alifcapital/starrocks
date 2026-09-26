@@ -54,6 +54,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CountDownLatch;
@@ -99,6 +100,36 @@ public class CachingIcebergCatalogTest {
     }
 
     @Test
+    public void testInvalidateAllPartitionSnapshots() {
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, Mockito.mock(IcebergCatalog.class), DEFAULT_CATALOG_PROPERTIES, workers);
+            Cache<IcebergTableName, Map<String, Partition>> partitions =
+                    Deencapsulation.getField(catalog, "partitionCache");
+            IcebergTableName other = new IcebergTableName("db", "other", 1L);
+            for (boolean fullReset : List.of(false, true)) {
+                for (long snapshot : List.of(-1L, 1L, 2L)) {
+                    partitions.put(new IcebergTableName("db", "tbl", snapshot), Map.of());
+                }
+                partitions.put(other, Map.of());
+                if (fullReset) {
+                    catalog.invalidateCache("DB", "TBL");
+                } else {
+                    catalog.invalidatePartitionCache("DB", "TBL");
+                }
+                Assertions.assertEquals(Set.of(other), partitions.asMap().keySet());
+            }
+            IcebergTableName tableKey = new IcebergTableName("db", "tbl");
+            IcebergTableName snapshotKey = new IcebergTableName("db", "tbl", 1L);
+            Assertions.assertNotEquals(tableKey, snapshotKey);
+            Assertions.assertNotEquals(snapshotKey, tableKey);
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
     public void testRefreshPublishesOnlyAfterWarmup() throws Exception {
         for (boolean sameMetadata : List.of(false, true)) {
             IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
@@ -113,6 +144,14 @@ public class CachingIcebergCatalogTest {
                         sameMetadata ? "old.json" : "new.json");
                 Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
                 tables.put(new IcebergTableName("db", "tbl"), oldTable);
+                Cache<IcebergTableName, Map<String, Partition>> partitions =
+                        Deencapsulation.getField(catalog, "partitionCache");
+                IcebergTableName staleKey = new IcebergTableName("db", "tbl", 99L);
+                IcebergTableName currentKey = new IcebergTableName("db", "tbl", -1L);
+                IcebergTableName otherTableKey = new IcebergTableName("db", "other", 99L);
+                partitions.put(staleKey, Map.of());
+                partitions.put(currentKey, Map.of());
+                partitions.put(otherTableKey, Map.of());
                 Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
                         .thenReturn(candidate);
                 Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any()))
@@ -132,8 +171,15 @@ public class CachingIcebergCatalogTest {
                         () -> catalog.getTable(new ConnectContext(), "db", "tbl"));
                 Assertions.assertSame(oldTable, read.get(2, TimeUnit.SECONDS),
                         "A query must not wait for candidate warmup or observe the cold candidate");
+                Assertions.assertNotNull(partitions.getIfPresent(staleKey));
+                Assertions.assertNotNull(partitions.getIfPresent(currentKey));
                 finish.countDown();
                 refresh.get(5, TimeUnit.SECONDS);
+                Assertions.assertNull(partitions.getIfPresent(staleKey));
+                Assertions.assertNull(partitions.getIfPresent(currentKey));
+                Assertions.assertNotNull(partitions.getIfPresent(otherTableKey));
+                Assertions.assertNotNull(partitions.getIfPresent(
+                        new IcebergTableName("db", "tbl", sameMetadata ? 1L : 2L)));
                 Assertions.assertSame(candidate, catalog.getTable(new ConnectContext(), "db", "tbl"));
                 Mockito.verify(delegate).getPartitions(Mockito.any(), Mockito.eq(sameMetadata ? 1L : 2L), Mockito.any());
             } finally {
