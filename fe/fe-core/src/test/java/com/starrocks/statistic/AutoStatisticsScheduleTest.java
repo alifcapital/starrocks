@@ -32,6 +32,31 @@ public class AutoStatisticsScheduleTest {
             new AutoStatisticsSchedule.Window(3601, 4 * 3600 - 1, "UTC");
 
     @Test
+    public void missingStatisticsRunInFirstWindowAndRetryAfterFailureOrReplay() {
+        LocalDateTime day = LocalDateTime.of(2026, 9, 25, 12, 0);
+        LocalDateTime night = day.plusDays(1).withHour(1).withMinute(1);
+        AutoStatisticsSchedule schedule = new AutoStatisticsSchedule();
+        for (int i = 0; i < 100; i++) {
+            String key = "new:" + i;
+            Assertions.assertNull(schedule.due(key, WEEK, day, NIGHT, true));
+            Assertions.assertNotNull(schedule.due(key, WEEK, night, NIGHT, true));
+            // No completion on failure: even the next night's retry must not wait a week.
+            Assertions.assertNull(schedule.due(key, WEEK, day.plusDays(1), NIGHT, true));
+            schedule = GsonUtils.GSON.fromJson(GsonUtils.GSON.toJson(schedule), AutoStatisticsSchedule.class);
+            LocalDateTime retryTime = night.plusDays(1);
+            AutoStatisticsSchedule.Attempt retry = schedule.due(key, WEEK, retryTime, NIGHT, true);
+            Assertions.assertNotNull(retry);
+            retry.complete(retryTime);
+            LocalDateTime next = schedule.getNext(key);
+            Assertions.assertTrue(next.isAfter(retryTime));
+            Assertions.assertFalse(next.isAfter(retryTime.plusWeeks(1)));
+            // Successful collection creates statistics: subsequent visits use the recurring slot.
+            Assertions.assertNull(schedule.due(key, WEEK, retryTime, NIGHT, false));
+            Assertions.assertNotNull(schedule.due(key, WEEK, next, NIGHT, false));
+        }
+    }
+
+    @Test
     public void oldAnalyzeJobsAcquireIndependentSchedulesAndPersistThem() {
         String nativeJson = "{\"clazz\":\"NativeAnalyzeJob\",\"id\":7,\"dbId\":-1,\"tableId\":-1}";
         String externalJson = "{\"clazz\":\"ExternalAnalyzeJob\",\"id\":8,\"catalogName\":\"iceberg\"}";

@@ -252,7 +252,7 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
     }
 
     @Test
-    public void testStaggeredDatabaseJobsScheduleEachTableBeforeFirstCollection() {
+    public void testStaggeredDatabaseJobsCollectNewTablesInFirstWindow() {
         boolean oldEnabled = Config.enable_statistic_auto_collect_staggered_schedule;
         String oldStart = Config.statistic_auto_analyze_start_time;
         String oldEnd = Config.statistic_auto_analyze_end_time;
@@ -296,12 +296,12 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
             Assertions.assertNotNull(slot0);
             Assertions.assertNotNull(slot1);
             Assertions.assertNotEquals(slot0, slot1);
-            now[0] = slot0;
+            now[0] = LocalDateTime.of(2026, 9, 26, 1, 1);
             List<StatisticsCollectJob> due = nativeJob.instantiateJobs();
             StatisticsCollectJob first = due.stream().filter(j -> j.getTable().getId() == t0StatsTableId)
                     .findFirst().orElseThrow();
             first.completeCollectSchedule();
-            Assertions.assertEquals(slot0.plusWeeks(1), nativeJob.getCollectSchedule().getNext(key0));
+            Assertions.assertTrue(nativeJob.getCollectSchedule().getNext(key0).isAfter(now[0]));
 
             now[0] = LocalDateTime.of(2026, 9, 25, 12, 0);
             ExternalAnalyzeJob externalJob = new ExternalAnalyzeJob("hive0", "partitioned_db", null, null, null,
@@ -317,11 +317,11 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
             LocalDateTime externalSlot = externalJob.getCollectSchedule().getNext(externalKey);
             Assertions.assertNotNull(externalSlot);
             Assertions.assertFalse(externalSlot.isAfter(now[0].plusWeeks(1)));
-            now[0] = externalSlot;
+            now[0] = LocalDateTime.of(2026, 9, 26, 1, 1);
             StatisticsCollectJob externalRun = externalJob.instantiateJobs().stream()
                     .filter(j -> j.getTable().getUUID().equals(externalTable.getUUID())).findFirst().orElseThrow();
             externalRun.completeCollectSchedule();
-            Assertions.assertEquals(externalSlot.plusWeeks(1), externalJob.getCollectSchedule().getNext(externalKey));
+            Assertions.assertTrue(externalJob.getCollectSchedule().getNext(externalKey).isAfter(now[0]));
 
             now[0] = LocalDateTime.of(2026, 9, 25, 12, 0);
             NativeAnalyzeJob allNative = new NativeAnalyzeJob(StatsConstants.DEFAULT_ALL_ID, StatsConstants.DEFAULT_ALL_ID,

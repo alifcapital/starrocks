@@ -76,11 +76,26 @@ public class AutoStatisticsSchedule {
     }
 
     synchronized Attempt due(String key, long interval, LocalDateTime now, Window window) {
+        return due(key, interval, now, window, false);
+    }
+
+    synchronized Attempt due(String key, long interval, LocalDateTime now, Window window,
+                             boolean initialCollection) {
         if (interval <= 0 || window.length == 0) {
             return null;
         }
         Entry entry = tables.get(key);
         boolean firstVisit = activated.add(key);
+        // Missing statistics must not wait several days for the recurring weekly phase.
+        // Re-check metadata on every pass, so a failed first collection remains eligible,
+        // including after restart or when the next permitted window opens.
+        if (initialCollection && window.contains(now)) {
+            entry = new Entry(now, interval, window.signature);
+            tables.put(key, entry);
+            dirty = true;
+            return new Attempt(this, key, entry, window);
+        }
+
         if (entry == null || entry.interval != interval || !window.signature.equals(entry.window)
                 || (firstVisit && !entry.next.isAfter(now))
                 || (!window.sameWindow(entry.next, now) && !entry.next.isAfter(now))) {

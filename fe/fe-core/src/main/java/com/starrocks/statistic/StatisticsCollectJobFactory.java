@@ -697,7 +697,8 @@ public class StatisticsCollectJobFactory {
         }
         String key = job.getId() + ":" + db.getFullName() + ":" + table.getUUID();
         AutoStatisticsSchedule.Attempt attempt = job.getCollectSchedule().due(key, interval,
-                AutoStatisticsSchedule.now(), AutoStatisticsSchedule.Window.current());
+                AutoStatisticsSchedule.now(), AutoStatisticsSchedule.Window.current(),
+                needsInitialCollection(job, db, table));
         if (attempt == null) {
             return;
         }
@@ -712,6 +713,20 @@ public class StatisticsCollectJobFactory {
                 jobs.get(i).setCollectScheduleAttempt(attempt);
             }
         }
+    }
+
+    private static boolean needsInitialCollection(AnalyzeJob job, Database db, Table table) {
+        AnalyzeMgr mgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
+        if (!job.isNative()) {
+            return !mgr.getExternalBasicStatsMetaMap().containsKey(
+                    new AnalyzeMgr.StatsMetaKey(job.getCatalogName(), db.getFullName(), table.getName()));
+        }
+        if (job.getAnalyzeType() == StatsConstants.AnalyzeType.HISTOGRAM) {
+            List<HistogramStatsMeta> metas = mgr.getHistogramMetaByTable(table.getId());
+            return CollectionUtils.isEmpty(metas) || metas.stream().anyMatch(HistogramStatsMeta::isInitJobMeta);
+        }
+        BasicStatsMeta meta = mgr.getTableBasicStatsMeta(table.getId());
+        return meta == null || meta.isInitJobMeta();
     }
 
     private static long externalInterval(Table table, Map<String, String> properties, List<String> columns) {
