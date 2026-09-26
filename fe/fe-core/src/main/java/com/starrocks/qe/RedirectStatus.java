@@ -835,6 +835,13 @@ public class RedirectStatus {
         // ------------------------------------------- Analyze Statement ---------------------------------------------------
 
         @Override
+        public RedirectStatus visitJoinStatisticsStatement(com.starrocks.sql.ast.JoinStatisticsStmt statement,
+                                                           Void context) {
+            return statement.getAction() == com.starrocks.sql.ast.JoinStatisticsStmt.Action.SHOW
+                    ? RedirectStatus.FORWARD_NO_SYNC : RedirectStatus.FORWARD_WITH_SYNC;
+        }
+
+        @Override
         public RedirectStatus visitAnalyzeStatement(AnalyzeStmt statement, Void context) {
             return RedirectStatus.FORWARD_WITH_SYNC;
         }

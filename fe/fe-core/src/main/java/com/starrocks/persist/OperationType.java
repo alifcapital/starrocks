@@ -725,6 +725,12 @@ public class OperationType {
     @IgnorableOnReplayFailed
     public static final short OP_REMOVE_EXTERNAL_MCV_STATS_META = 30001;
 
+    @IgnorableOnReplayFailed
+    public static final short OP_UPSERT_JOIN_STATISTICS = 30002;
+
+    @IgnorableOnReplayFailed
+    public static final short OP_DROP_JOIN_STATISTICS = 30003;
+
     public static final ImmutableSet<Short> IGNORABLE_OPERATIONS = buildIgnorableOperations();
 
     private static ImmutableSet<Short> buildIgnorableOperations() {
@@ -754,7 +760,9 @@ public class OperationType {
                     opType != OP_GRANT_ROLE_TO_GROUP &&
                     opType != OP_REVOKE_ROLE_FROM_GROUP &&
                     opType != OP_ADD_EXTERNAL_MCV_STATS_META &&
-                    opType != OP_REMOVE_EXTERNAL_MCV_STATS_META) {
+                    opType != OP_REMOVE_EXTERNAL_MCV_STATS_META &&
+                    opType != OP_UPSERT_JOIN_STATISTICS &&
+                    opType != OP_DROP_JOIN_STATISTICS) {
                 LOG.fatal("OperationType cannot use a value exceeding 20000, " +
                         "and an error will be reported if it exceeds : {} = {}", field.getName(), opType);
                 System.exit(-1);

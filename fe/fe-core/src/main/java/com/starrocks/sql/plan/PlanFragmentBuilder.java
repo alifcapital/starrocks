@@ -295,7 +295,11 @@ public class PlanFragmentBuilder {
         createOutputFragment(new PhysicalPlanTranslator(columnRefFactory).translate(plan, execPlan), execPlan,
                 outputColumns, hasOutputFragment);
         execPlan.setPlanCount(plan.getPlanCount());
-        return finalizeFragments(execPlan, resultSinkType);
+        try {
+            return finalizeFragments(execPlan, resultSinkType);
+        } finally {
+            releaseJoinStatistics(plan);
+        }
     }
 
     public static ExecPlan createPhysicalPlan(OptExpression plan, ConnectContext connectContext,
@@ -342,8 +346,17 @@ public class PlanFragmentBuilder {
                 view.writeQuorum(), view.enableReplicatedStorage(), false, false,
                 connectContext.getCurrentComputeResource());
         execPlan.getTopFragment().setSink(tableSink);
-
+        releaseJoinStatistics(optExpr);
         return execPlan;
+    }
+
+    private static void releaseJoinStatistics(OptExpression expression) {
+        if (expression.getStatistics() != null && expression.getStatistics().getJoinStatisticsPlanner() != null) {
+            expression.getStatistics().getJoinStatisticsPlanner().finishPlanning();
+        }
+        for (OptExpression child : expression.getInputs()) {
+            releaseJoinStatistics(child);
+        }
     }
 
     private static TupleDescriptor buildTupleDesc(ExecPlan execPlan, Table table) {
@@ -832,6 +845,8 @@ public class PlanFragmentBuilder {
             Optional.ofNullable(optExpression.getStatistics()).ifPresent(statistics -> {
                 Statistics.Builder b = Statistics.builder();
                 b.setOutputRowCount(statistics.getOutputRowCount());
+                b.setJoinStatisticsScope(statistics.getJoinStatisticsScope());
+                b.setJoinStatisticsPlanner(statistics.getJoinStatisticsPlanner());
                 b.addColumnStatisticsFromOtherStatistic(statistics, new ColumnRefSet(node.getOutputColumns()), true);
                 // The optimizer has already projected these distributions into output column IDs.
                 // Keep them with the scalar statistics when materializing the physical projection.

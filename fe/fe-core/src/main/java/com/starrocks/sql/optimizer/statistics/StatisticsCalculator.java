@@ -249,6 +249,16 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
     public void estimatorStats() {
         expressionContext.getOp().accept(this, expressionContext);
+        if (optimizerContext != null && expressionContext.getStatistics() != null) {
+            Statistics statistics = expressionContext.getStatistics();
+            JoinStatisticsPlanner planner = optimizerContext.getJoinStatisticsPlanner();
+            JoinStatisticsScope scope = planner.deriveScope(expressionContext, columnRefFactory, true);
+            JoinStatisticsPlanner scopePlanner = scope == null ? null : planner;
+            if (scope != statistics.getJoinStatisticsScope() || scopePlanner != statistics.getJoinStatisticsPlanner()) {
+                expressionContext.setStatistics(Statistics.buildFrom(statistics)
+                        .setJoinStatisticsScope(scope).setJoinStatisticsPlanner(scopePlanner).build());
+            }
+        }
     }
 
     @Override
@@ -1448,8 +1458,36 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             innerJoinStats = crossJoinStats.withOutputRowCount(innerRowCount);
         }
 
+        OptionalDouble joinBound = OptionalDouble.empty();
+        if (optimizerContext != null && (joinType.isInnerJoin() || joinType.isSemiJoin())) {
+            JoinStatisticsPlanner planner = optimizerContext.getJoinStatisticsPlanner();
+            JoinStatisticsScope scope = planner.deriveScope(context, columnRefFactory, false);
+            joinBound = planner.estimate(scope);
+            if (joinType.isInnerJoin() && joinBound.isPresent()) {
+                innerRowCount = joinBound.getAsDouble();
+                innerJoinStats = innerJoinStats.withOutputRowCount(innerRowCount);
+            }
+        }
+
         Statistics.Builder joinStatsBuilder;
         double outputRowCount;
+        boolean preservesOuterRows = optimizerContext != null
+                && ((joinType == JoinOperator.LEFT_OUTER_JOIN
+                && optimizerContext.getJoinStatisticsPlanner().preservesOuterRows(
+                        leftStatistics.getJoinStatisticsScope(), rightStatistics.getJoinStatisticsScope(), joinOnPredicate))
+                || (joinType == JoinOperator.RIGHT_OUTER_JOIN
+                && optimizerContext.getJoinStatisticsPlanner().preservesOuterRows(
+                        rightStatistics.getJoinStatisticsScope(), leftStatistics.getJoinStatisticsScope(), joinOnPredicate)));
+        Optional<JoinStatisticsPlanner.OuterEstimate> outerBound = Optional.empty();
+        if (!preservesOuterRows && optimizerContext != null) {
+            if (joinType == JoinOperator.LEFT_OUTER_JOIN) {
+                outerBound = optimizerContext.getJoinStatisticsPlanner().estimateOuter(
+                        leftStatistics.getJoinStatisticsScope(), rightStatistics.getJoinStatisticsScope(), joinOnPredicate);
+            } else if (joinType == JoinOperator.RIGHT_OUTER_JOIN) {
+                outerBound = optimizerContext.getJoinStatisticsPlanner().estimateOuter(
+                        rightStatistics.getJoinStatisticsScope(), leftStatistics.getJoinStatisticsScope(), joinOnPredicate);
+            }
+        }
         switch (joinType) {
             case CROSS_JOIN:
                 joinStatsBuilder = Statistics.buildFrom(crossJoinStats);
@@ -1464,9 +1502,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 break;
             case LEFT_OUTER_JOIN:
                 joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
-                outputRowCount = max(innerRowCount, leftRowCount);
+                outputRowCount = preservesOuterRows ? leftRowCount
+                        : outerBound.map(JoinStatisticsPlanner.OuterEstimate::rows).orElse(max(innerRowCount, leftRowCount));
                 joinStatsBuilder.setOutputRowCount(outputRowCount);
-                computeNullFractionForOuterJoin(leftRowCount, innerRowCount, outputRowCount,
+                computeNullFractionForOuterJoin(leftRowCount,
+                        outerBound.map(JoinStatisticsPlanner.OuterEstimate::matchedRows).orElse(innerRowCount), outputRowCount,
                         leftStatistics, rightStatistics, eqOnPredicates, hasUnknownColumnStatistics, joinStatsBuilder);
                 break;
             case ASOF_LEFT_OUTER_JOIN:
@@ -1492,9 +1532,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 break;
             case RIGHT_OUTER_JOIN:
                 joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
-                outputRowCount = max(innerRowCount, rightRowCount);
+                outputRowCount = preservesOuterRows ? rightRowCount
+                        : outerBound.map(JoinStatisticsPlanner.OuterEstimate::rows).orElse(max(innerRowCount, rightRowCount));
                 joinStatsBuilder.setOutputRowCount(outputRowCount);
-                computeNullFractionForOuterJoin(rightRowCount, innerRowCount, outputRowCount,
+                computeNullFractionForOuterJoin(rightRowCount,
+                        outerBound.map(JoinStatisticsPlanner.OuterEstimate::matchedRows).orElse(innerRowCount), outputRowCount,
                         rightStatistics, leftStatistics, eqOnPredicates, hasUnknownColumnStatistics, joinStatsBuilder);
                 break;
             case RIGHT_ANTI_JOIN:
@@ -1519,7 +1561,13 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 throw new StarRocksPlannerException("Not support join type : " + joinType,
                         ErrorType.INTERNAL_ERROR);
         }
+        if (joinType.isSemiJoin() && joinBound.isPresent()) {
+            joinStatsBuilder.setOutputRowCount(joinBound.getAsDouble());
+        }
         Statistics joinStats = joinStatsBuilder.build();
+        if (joinBound.isPresent()) {
+            joinStats = StatisticsEstimateUtils.adjustStatisticsByRowCount(joinStats, joinStats.getOutputRowCount());
+        }
         if (!joinType.isCrossJoin() && !eqOnPredicates.isEmpty()) {
             joinStats = McvStatisticsPropagation.afterJoin(crossJoinStats, joinStats, joinType.isInnerJoin());
         }
@@ -1616,7 +1664,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     // This method first restores the original null fractions for the outer side's eq-join columns
     // (the only columns whose null fractions are zeroed by the inner join estimation), then computes
     // the new null fractions for the inner (nullable) side's columns to account for additional null rows.
-    private void computeNullFractionForOuterJoin(double outerSideRowCount, double innerRowCount,
+    private void computeNullFractionForOuterJoin(double outerSideRowCount, double matchedOuterRows,
                                                  double outputRowCount, Statistics outerSideStatistics,
                                                  Statistics innerSideStatistics, List<BinaryPredicateOperator> eqOnPredicates,
                                                  boolean hasUncertainSelectivity, Statistics.Builder builder) {
@@ -1624,10 +1672,15 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         // Only these columns had their null fractions zeroed during inner join estimation.
         final var outerColumns = outerSideStatistics.getUsedColumns();
         Set<ColumnRefOperator> outerEqJoinColumns = new HashSet<>();
+        Set<ColumnRefOperator> innerNullRejectedColumns = new HashSet<>();
         for (final var eqOnPredicate : eqOnPredicates) {
             for (final var child : eqOnPredicate.getChildren()) {
                 if (child instanceof ColumnRefOperator colRef && outerColumns.contains(colRef.getId())) {
                     outerEqJoinColumns.add(colRef);
+                }
+                if (eqOnPredicate.getBinaryType() == BinaryType.EQ
+                        && child instanceof ColumnRefOperator colRef && !outerColumns.contains(colRef.getId())) {
+                    innerNullRejectedColumns.add(colRef);
                 }
             }
         }
@@ -1651,15 +1704,17 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             }
         }
 
+        // JOIN statistics supply matched retained-side rows (membership). Legacy callers
+        // approximate that count with inner bag cardinality when membership is unavailable.
         // Compute new null fractions for the inner (nullable) side's columns.
         // Two sources of NULLs for inner-side columns after an outer join:
-        // 1. Unmatched rows: outerSideRowCount - innerRowCount (row-count based, from selectivity)
+        // 1. Unmatched rows: outerSideRowCount - matchedOuterRows (row-count based, from selectivity)
         // 2. Null-key rows: outer-side rows whose join key is NULL can never match under normal =,
         //    so inner-side columns are NULL for those rows regardless of row-count estimates.
         //
         // Source (2) is only used as a fallback when the computed selectivity is uncertain, making the
         // selectivity-based estimate (1) unreliable.
-        final double nullRowsFromSelectivity = Math.max(0, outerSideRowCount - innerRowCount);
+        final double nullRowsFromSelectivity = Math.max(0, outerSideRowCount - matchedOuterRows);
         double effectiveNullRowCount = nullRowsFromSelectivity;
         if (hasUncertainSelectivity) {
             // For EQ_FOR_NULL (<=>) predicates, NULL keys can match, so we exclude those columns.
@@ -1680,7 +1735,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             for (final var entry : innerSideStatistics.getColumnStatistics().entrySet()) {
                 final var innerStat = entry.getValue();
                 final double matchedRows = outputRowCount - effectiveNullRowCount;
-                final double matchNullCount = innerStat.getNullsFraction() * Math.max(0, matchedRows);
+                // Ordinary equality rejects NULL keys before matching. Their original scan NULL
+                // fraction must not be added back to the matched rows of the optional side.
+                final double matchedNullFraction = innerNullRejectedColumns.contains(entry.getKey())
+                        ? 0 : innerStat.getNullsFraction();
+                final double matchNullCount = matchedNullFraction * Math.max(0, matchedRows);
                 final double newNullFraction = Math.min(1.0, (matchNullCount + effectiveNullRowCount) / outputRowCount);
                 builder.addColumnStatistic(entry.getKey(),
                         buildFrom(innerStat).setNullsFraction(newNullFraction).build());

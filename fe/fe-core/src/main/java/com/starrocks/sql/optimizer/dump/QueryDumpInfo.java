@@ -43,6 +43,12 @@ public class QueryDumpInfo implements DumpInfo {
     private String originStmt = "";
 
     private StatementBase statementBase;
+    private final JoinStatisticsDump joinStatistics = new JoinStatisticsDump();
+
+    public JoinStatisticsDump getJoinStatistics() {
+        return joinStatistics;
+    }
+
     private final Set<Resource> resourceSet = new HashSet<>();
     // tableId-><dbName, table>
     private final Map<Long, Pair<String, Table>> tableMap = new LinkedHashMap<>();
@@ -228,6 +234,7 @@ public class QueryDumpInfo implements DumpInfo {
         this.partitionRowCountMap.clear();
         this.tableStatisticsMap.clear();
         this.externalMcvStatisticsMap.clear();
+        this.joinStatistics.clear();
         this.createTableStmtMap.clear();
         this.numCoresPerBe.clear();
         this.numCoresPerWarehouse.clear();

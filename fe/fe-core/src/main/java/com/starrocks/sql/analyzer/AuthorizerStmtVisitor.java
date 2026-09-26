@@ -1069,6 +1069,15 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
     // --------------------------------------- Analyze related statements -----------------------------
 
     @Override
+    public Void visitJoinStatisticsStatement(com.starrocks.sql.ast.JoinStatisticsStmt statement, ConnectContext context) {
+        if (statement.getDefinition() != null) {
+            statement.getDefinition().getSources().forEach(source ->
+                    Authorizer.checkActionForAnalyzeStatement(context, source.getTableName()));
+        }
+        return null;
+    }
+
+    @Override
     public Void visitAnalyzeStatement(AnalyzeStmt statement, ConnectContext context) {
         checkWarehouseUsagePrivilege(context.getCurrentWarehouseName(), context);
         TableRef tableRef = statement.getTableRef();

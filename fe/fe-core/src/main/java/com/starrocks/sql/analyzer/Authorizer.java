@@ -159,7 +159,9 @@ public class Authorizer {
         if (isInsertIntoSomethingThatIsNotATable(context, tableName, privilegeType, resolvedTable)) {
             return;
         }
-        getInstance().getAccessControlOrDefault(tableName.getCatalog())
+        // A resolved connector retains the registered catalog spelling even if TableName normalizes it.
+        String catalog = resolvedTable == null ? tableName.getCatalog() : resolvedTable.getCatalogName();
+        getInstance().getAccessControlOrDefault(catalog)
                 .checkTableAction(context, tableName, privilegeType);
     }
 
@@ -276,7 +278,8 @@ public class Authorizer {
                 if (privilegeType == null) {
                     checkAnyActionOnTable(context, new TableName(tbl.getCatalogName(), dbName, tbl.getName()));
                 } else {
-                    checkTableAction(context, dbName, tbl.getName(), privilegeType);
+                    checkResolvedTableAction(context, new TableName(tbl.getCatalogName(), dbName, tbl.getName()),
+                            tbl instanceof Table table ? table : null, privilegeType);
                 }
                 break;
             case MATERIALIZED_VIEW:

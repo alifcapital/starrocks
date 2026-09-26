@@ -491,6 +491,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_USE_CORRELATED_JOIN_ESTIMATE = "cbo_use_correlated_join_estimate";
     public static final String CBO_USE_CORRELATED_PREDICATE_ESTIMATE = "cbo_use_correlated_predicate_estimate";
     public static final String CBO_ENABLE_MCV_ESTIMATE = "cbo_enable_mcv_estimate";
+    public static final String CBO_ENABLE_JOIN_STATISTICS = "cbo_enable_join_statistics";
+    public static final String CBO_ENABLE_JOIN_STATISTICS_COMPOSITION = "cbo_enable_join_statistics_composition";
     public static final String CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS =
             "cbo_enable_partition_aware_external_statistics";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT = "always_collect_low_card_dict";
@@ -1564,6 +1566,20 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // Estimate predicates with the most common value lists of the MCV statistics when they exist.
     @VariableMgr.VarAttr(name = CBO_ENABLE_MCV_ESTIMATE)
     private boolean cboEnableMcvEstimate = true;
+
+    @VariableMgr.VarAttr(name = CBO_ENABLE_JOIN_STATISTICS)
+    private boolean cboEnableJoinStatistics = true;
+
+    @VariableMgr.VarAttr(name = CBO_ENABLE_JOIN_STATISTICS_COMPOSITION)
+    private boolean cboEnableJoinStatisticsComposition = true;
+
+    public boolean isCboEnableJoinStatisticsComposition() {
+        return cboEnableJoinStatisticsComposition;
+    }
+
+    public boolean isCboEnableJoinStatistics() {
+        return cboEnableJoinStatistics;
+    }
 
     // Restrict the internal statistics of an external table to the partitions a scan reads.
     @VariableMgr.VarAttr(name = CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS)

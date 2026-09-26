@@ -1546,6 +1546,9 @@ public final class MetricRepo {
         if (state.getStatisticStorage() != null) {
             statisticsCaches.putAll(state.getStatisticStorage().getCacheMetrics());
         }
+        if (state.getAnalyzeMgr() != null && state.getAnalyzeMgr().getJoinStatisticsManager() != null) {
+            statisticsCaches.put("join", state.getAnalyzeMgr().getJoinStatisticsManager().getCacheMetrics());
+        }
         StatisticsCacheMetrics.visit(visitor, statisticsCaches);
 
         // database metrics

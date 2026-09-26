@@ -52,6 +52,13 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
         QueryDumpInfo dumpInfo = new QueryDumpInfo();
 
         JsonObject dumpJsonObject = jsonElement.getAsJsonObject();
+        if (dumpJsonObject.has("join_statistics")) {
+            try {
+                dumpInfo.getJoinStatistics().read(dumpJsonObject.getAsJsonArray("join_statistics"));
+            } catch (IOException | IllegalArgumentException e) {
+                throw new JsonParseException("Invalid JOIN statistics in query dump", e);
+            }
+        }
         // statement
         String statement = dumpJsonObject.get("statement").getAsString();
         dumpInfo.setOriginStmt(statement);

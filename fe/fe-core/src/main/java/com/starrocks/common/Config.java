@@ -2889,6 +2889,18 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "Maximum estimated retained bytes of external MCV statistics in the FE cache")
     public static volatile long statistic_mcv_cache_max_bytes = 512L * 1024 * 1024;
 
+    @ConfField(mutable = true)
+    public static long statistic_join_collect_memory_limit = 2L * 1024 * 1024 * 1024;
+
+    @ConfField(mutable = true)
+    public static int statistic_join_object_max_bytes = 256 * 1024 * 1024;
+
+    @ConfField(mutable = true)
+    public static volatile long statistic_join_cache_max_bytes = 512L * 1024 * 1024;
+
+    @ConfField(mutable = true)
+    public static int statistic_join_optimizer_budget_ms = 60;
+
     @ConfField(mutable = true, comment = "Default number of residual buckets for a single-column ANALYZE MCV")
     public static int statistic_mcv_bucket_num = 64;
 

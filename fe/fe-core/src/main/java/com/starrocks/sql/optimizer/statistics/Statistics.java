@@ -47,6 +47,8 @@ public class Statistics {
     private final Collection<ColumnRefOperator> shadowColumns;
     private final StatsSource statsSource;
     private final boolean partitionRestricted;
+    private final JoinStatisticsScope joinStatisticsScope;
+    private final JoinStatisticsPlanner joinStatisticsPlanner;
 
     private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
 
@@ -68,6 +70,8 @@ public class Statistics {
         this.shadowColumns = Collections.unmodifiableCollection(builder.shadowColumns);
         this.statsSource = builder.statsSource;
         this.partitionRestricted = builder.partitionRestricted;
+        this.joinStatisticsScope = builder.joinStatisticsScope;
+        this.joinStatisticsPlanner = builder.joinStatisticsPlanner;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(builder.multiColumnCombinedStats);
     }
 
@@ -75,7 +79,8 @@ public class Statistics {
                        Map<ColumnRefOperator, ColumnStatistic> columnStatistics,
                        boolean tableRowCountMayInaccurate,
                        Collection<ColumnRefOperator> shadowColumns,
-                       StatsSource statsSource, boolean partitionRestricted,
+                       StatsSource statsSource, boolean partitionRestricted, JoinStatisticsScope joinStatisticsScope,
+                       JoinStatisticsPlanner joinStatisticsPlanner,
                        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats) {
         this.outputRowCount = outputRowCount;
         this.columnStatistics = Collections.unmodifiableMap(columnStatistics);
@@ -83,7 +88,17 @@ public class Statistics {
         this.shadowColumns = Collections.unmodifiableCollection(shadowColumns);
         this.statsSource = statsSource;
         this.partitionRestricted = partitionRestricted;
+        this.joinStatisticsScope = joinStatisticsScope;
+        this.joinStatisticsPlanner = joinStatisticsPlanner;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(multiColumnCombinedStats);
+    }
+
+    public JoinStatisticsPlanner getJoinStatisticsPlanner() {
+        return joinStatisticsPlanner;
+    }
+
+    public JoinStatisticsScope getJoinStatisticsScope() {
+        return joinStatisticsScope;
     }
 
     public boolean isPartitionRestricted() {
@@ -100,7 +115,7 @@ public class Statistics {
             return this;
         }
         return new Statistics(clamped, columnStatistics, tableRowCountMayInaccurate, shadowColumns,
-                statsSource, partitionRestricted,
+                statsSource, partitionRestricted, joinStatisticsScope, joinStatisticsPlanner,
                 multiColumnCombinedStats);
     }
 
@@ -251,7 +266,8 @@ public class Statistics {
                 other.tableRowCountMayInaccurate,
                 other.shadowColumns,
                 other.statsSource,
-                other.multiColumnCombinedStats).setPartitionRestricted(other.partitionRestricted);
+                other.multiColumnCombinedStats).setPartitionRestricted(other.partitionRestricted)
+                .setJoinStatisticsScope(other.joinStatisticsScope).setJoinStatisticsPlanner(other.joinStatisticsPlanner);
     }
 
     public static Builder builder() {
@@ -267,6 +283,8 @@ public class Statistics {
         private Collection<ColumnRefOperator> shadowColumns;
         private StatsSource statsSource = StatsSource.NONE;
         private boolean partitionRestricted;
+        private JoinStatisticsScope joinStatisticsScope;
+        private JoinStatisticsPlanner joinStatisticsPlanner;
         private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
 
 
@@ -358,6 +376,16 @@ public class Statistics {
 
         public Builder setPartitionRestricted(boolean partitionRestricted) {
             this.partitionRestricted = partitionRestricted;
+            return this;
+        }
+
+        public Builder setJoinStatisticsPlanner(JoinStatisticsPlanner planner) {
+            this.joinStatisticsPlanner = planner;
+            return this;
+        }
+
+        public Builder setJoinStatisticsScope(JoinStatisticsScope scope) {
+            this.joinStatisticsScope = scope;
             return this;
         }
 

@@ -22,6 +22,8 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.statistic.AnalyzeMgr;
 import com.starrocks.statistic.ExternalMcvStatsMeta;
+import com.starrocks.statistic.JoinStatisticsDefinition;
+import com.starrocks.statistic.JoinStatisticsMeta;
 import com.starrocks.statistic.StatsConstants;
 import mockit.Mock;
 import mockit.MockUp;
@@ -89,4 +91,23 @@ class StatisticsJournalOpcodeTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void joinStatisticsUsesForkOpcodeAndReplays(boolean drop) throws Exception {
+        JoinStatisticsDefinition definition = new JoinStatisticsDefinition("tx_users", List.of(
+                new JoinStatisticsDefinition.Source("iceberg", "db", "transactions", "tx-uuid", List.of("status")),
+                new JoinStatisticsDefinition.Source("iceberg", "db", "users", "users-uuid", List.of("country"))),
+                List.of(new JoinStatisticsDefinition.KeyDomain(Map.of(0, List.of("user_id"), 1, List.of("id")),
+                        List.of("BIGINT"))), Map.of());
+        JoinStatisticsMeta meta = new JoinStatisticsMeta(10, definition, 2, 1, 100, "digest", 1);
+        JournalEntity entry = roundTrip((short) (drop ? 30003 : 30002),
+                log -> log.logJoinStatistics(meta, drop, null));
+        JoinStatisticsMeta restored = Assertions.assertInstanceOf(JoinStatisticsMeta.class, entry.data());
+        Assertions.assertEquals(GsonUtils.GSON.toJson(meta), GsonUtils.GSON.toJson(restored));
+        AnalyzeMgr analyze = Mockito.mock(AnalyzeMgr.class);
+        GlobalStateMgr state = Mockito.mock(GlobalStateMgr.class);
+        Mockito.when(state.getAnalyzeMgr()).thenReturn(analyze);
+        new EditLog(new LinkedBlockingQueue<>()).loadJournal(state, entry);
+        Mockito.verify(analyze).replayJoinStatistics(restored, drop);
+    }
 }

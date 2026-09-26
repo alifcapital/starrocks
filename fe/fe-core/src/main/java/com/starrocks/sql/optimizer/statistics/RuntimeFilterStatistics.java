@@ -31,13 +31,35 @@ public final class RuntimeFilterStatistics {
     private final double nullFraction;
     private final Map<String, Double> head;
     private final boolean completeHead;
+    private final JoinKey joinKey;
+
+    private record JoinKey(JoinStatisticsPlanner planner, JoinStatisticsScope scope, ColumnRefOperator column, double rows) {
+    }
 
     private RuntimeFilterStatistics(Type type, double ndv, double nullFraction, Map<String, Double> head) {
+        this(type, ndv, nullFraction, head, null);
+    }
+
+    private RuntimeFilterStatistics(Type type, double ndv, double nullFraction, Map<String, Double> head, JoinKey joinKey) {
         this.type = type;
         this.ndv = ndv;
         this.nullFraction = clamp(nullFraction);
         this.head = Map.copyOf(head);
         this.completeHead = mass(head) >= 1 - this.nullFraction - 1e-9;
+        this.joinKey = joinKey;
+    }
+
+    public RuntimeFilterStatistics withJoinStatistics(JoinStatisticsPlanner planner, JoinStatisticsScope scope,
+                                                      ColumnRefOperator column, double rows) {
+        if (planner == null || scope == null || column == null || !scope.getColumns().containsKey(column) || rows <= 0) {
+            return this;
+        }
+        JoinStatisticsPlanner.KeyStatistics key = planner.keyStatistics(scope, column);
+        double keyNdv = key == null || key.degree() == null ? ndv : key.degree().getDistinctCount();
+        double keyNulls = key == null || key.degree() == null || key.rows() == 0 ? nullFraction
+                : key.degree().getNullCount() / (double) Math.max(1, key.degree().getRowCount());
+        double probeRows = key == null ? rows : key.rows();
+        return new RuntimeFilterStatistics(type, keyNdv, keyNulls, head, new JoinKey(planner, scope, column, probeRows));
     }
 
     public double getNdv() {
@@ -63,7 +85,7 @@ public final class RuntimeFilterStatistics {
         if (rows < 0 || ndv <= rows) {
             return this;
         }
-        return new RuntimeFilterStatistics(type, rows, nullFraction, rows < head.size() ? Map.of() : head);
+        return new RuntimeFilterStatistics(type, rows, nullFraction, rows < head.size() ? Map.of() : head, joinKey);
     }
 
     public static RuntimeFilterStatistics from(ColumnRefOperator column, ColumnStatistic basic,
@@ -126,6 +148,14 @@ public final class RuntimeFilterStatistics {
 
     /** Estimates membership, so build-side duplicates do not multiply probe rows. */
     public OptionalDouble probePassFraction(RuntimeFilterStatistics probe, boolean nullSafe) {
+        if (!nullSafe && probe != null && joinKey != null && probe.joinKey != null
+                && joinKey.planner == probe.joinKey.planner) {
+            OptionalDouble rows = joinKey.planner.membership(joinKey.scope, joinKey.column,
+                    probe.joinKey.scope, probe.joinKey.column);
+            if (rows.isPresent()) {
+                return OptionalDouble.of(probe.joinKey.rows == 0 ? 0 : clamp(rows.getAsDouble() / probe.joinKey.rows));
+            }
+        }
         if (probe == null || ndv < 0 || probe.ndv < 0 || !comparable(type, probe.type)) {
             return OptionalDouble.empty();
         }

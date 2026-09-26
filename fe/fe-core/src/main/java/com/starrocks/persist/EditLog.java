@@ -104,6 +104,7 @@ import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
 import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
+import com.starrocks.statistic.JoinStatisticsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.NativeAnalyzeJob;
 import com.starrocks.statistic.NativeAnalyzeStatus;
@@ -1024,6 +1025,12 @@ public class EditLog {
                     if (!GlobalStateMgr.isCheckpointThread()) {
                         globalStateMgr.getAnalyzeMgr().replayExpireExternalHistogramStatsCache(histogramStatsMeta);
                     }
+                    break;
+                }
+                case OperationType.OP_UPSERT_JOIN_STATISTICS:
+                case OperationType.OP_DROP_JOIN_STATISTICS: {
+                    globalStateMgr.getAnalyzeMgr().replayJoinStatistics(
+                            (JoinStatisticsMeta) journal.data(), opCode == OperationType.OP_DROP_JOIN_STATISTICS);
                     break;
                 }
                 case OperationType.OP_ADD_EXTERNAL_MCV_STATS_META: {
@@ -2080,6 +2087,11 @@ public class EditLog {
 
     public void logAddExternalMcvStatsMeta(ExternalMcvStatsMeta meta, WALApplier walApplier) {
         logJsonObject(OperationType.OP_ADD_EXTERNAL_MCV_STATS_META, meta, walApplier);
+    }
+
+    public void logJoinStatistics(JoinStatisticsMeta meta, boolean drop, WALApplier applier) {
+        logJsonObject(drop ? OperationType.OP_DROP_JOIN_STATISTICS : OperationType.OP_UPSERT_JOIN_STATISTICS,
+                meta, applier);
     }
 
     public void logRemoveExternalMcvStatsMeta(ExternalMcvStatsMeta meta, WALApplier walApplier) {

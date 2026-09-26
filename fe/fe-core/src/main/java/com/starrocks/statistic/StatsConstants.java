@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 public class StatsConstants {
+    public static final String JOIN_STATISTICS_TABLE_NAME = "join_statistics";
     public static final long DEFAULT_ALL_ID = -1;
 
     public static final int STATISTIC_DATA_VERSION = 1;

@@ -424,6 +424,27 @@ public class StatisticsMetaManager extends FrontendDaemon {
         return checkTableExist(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
     }
 
+    private boolean createJoinStatisticsTable(ConnectContext context) {
+        List<String> keys = List.of("object_id", "generation", "part_id");
+        try {
+            TableRef table = new TableRef(QualifiedName.of(List.of(STATISTICS_DB_NAME,
+                    StatsConstants.JOIN_STATISTICS_TABLE_NAME)), null, NodePosition.ZERO);
+            CreateTableStmt statement = new CreateTableStmt(false, false, table,
+                    StatisticUtils.buildStatsColumnDef(StatsConstants.JOIN_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    new KeysDesc(RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS, keys),
+                    null, new HashDistributionDesc(10, List.of("object_id")),
+                    new HashMap<>(Map.of(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM,
+                            Integer.toString(AutoInferUtil.calDefaultReplicationNum()))), null, "");
+            Analyzer.analyze(statement, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(statement);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create JOIN statistics table", e);
+            return false;
+        }
+        return checkTableExist(StatsConstants.JOIN_STATISTICS_TABLE_NAME);
+    }
+
     private boolean createSPMBaselinesTable(ConnectContext context) {
         LOG.info("create spm_baselines table start");
         TableName tableName = new TableName(STATISTICS_DB_NAME, SPM_BASELINE_TABLE_NAME);
@@ -540,6 +561,8 @@ public class StatisticsMetaManager extends FrontendDaemon {
                 return createMultiColumnStatisticsTable(context);
             } else if (tableName.equals(EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
                 return createExternalMcvStatisticsTable(context);
+            } else if (tableName.equals(StatsConstants.JOIN_STATISTICS_TABLE_NAME)) {
+                return createJoinStatisticsTable(context);
             } else if (SPM_BASELINE_TABLE_NAME.equals(tableName)) {
                 return createSPMBaselinesTable(context);
             } else if (QUERY_HISTORY_TABLE_NAME.equals(tableName)) {
@@ -655,6 +678,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(MULTI_COLUMN_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(StatsConstants.JOIN_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(SPM_BASELINE_TABLE_NAME);
         refreshStatisticsTable(QUERY_HISTORY_TABLE_NAME);
 
@@ -664,6 +688,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
             lastAnalyzeStatusCleanupNanos = System.nanoTime();
         }
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().getJoinStatisticsManager().cleanOrphans();
         GlobalStateMgr.getCurrentState().getQueryHistoryMgr().clearExpiredQueryHistory();
 
         RepoCreator.getInstance().run();

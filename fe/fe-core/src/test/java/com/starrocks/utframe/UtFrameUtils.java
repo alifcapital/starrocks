@@ -1031,10 +1031,11 @@ public class UtFrameUtils {
     // Remove shared-data / enterprise-only properties from a dumped CREATE MATERIALIZED VIEW statement so it
     // can be created in the open-source (shared-nothing) replay environment. analyzeMVProperties rejects the
     // ENTIRE property map on the first unknown key, so an un-stripped enterprise MV would fail to create.
-    private static String stripReplayUnsupportedMvProperties(String mvDdl) {
+    private static String stripReplayUnsupportedStorageProperties(String mvDdl) {
         String result = mvDdl;
         for (String key : new String[] {"warehouse", "storage_volume",
-                "datacache.enable", "datacache.partition_duration", "enable_async_write_back"}) {
+                "datacache.enable", "datacache.partition_duration", "enable_async_write_back",
+                "cloud_native_fast_schema_evolution_v2"}) {
             // drop the "key" = "value" entry plus any trailing comma/whitespace
             result = result.replaceAll("\"" + java.util.regex.Pattern.quote(key) + "\"\\s*=\\s*\"[^\"]*\"\\s*,?\\s*", "");
         }
@@ -1123,7 +1124,8 @@ public class UtFrameUtils {
             String dropTable = String.format("drop table if exists `%s`.`%s`;", dbName, tableName);
             connectContext.executeSql(dropTable);
             starRocksAssert.useDatabase(dbName);
-            starRocksAssert.withTable(entry.getValue());
+            starRocksAssert.withTable(RunMode.isSharedDataMode() ? entry.getValue()
+                    : stripReplayUnsupportedStorageProperties(entry.getValue()));
         }
         // create view
         for (Map.Entry<String, String> entry : replayDumpInfo.getCreateViewStmtMap().entrySet()) {
@@ -1159,7 +1161,7 @@ public class UtFrameUtils {
             // (shared-nothing) replay env cannot analyze (warehouse / storage_volume / datacache.*), so a
             // dump captured from a shared-data cluster still creates its MVs -- otherwise
             // PropertyAnalyzer.analyzeMVProperties rejects the whole property set.
-            starRocksAssert.withMaterializedView(stripReplayUnsupportedMvProperties(entry.getValue()));
+            starRocksAssert.withMaterializedView(stripReplayUnsupportedStorageProperties(entry.getValue()));
         }
 
         // mock be core stat
@@ -1298,10 +1300,22 @@ public class UtFrameUtils {
                         new ExternalMcvStatistics(entry.getValue()));
             }
         }
+        connectContext.setJoinStatisticsReplay(replayDumpInfo.getJoinStatistics().remap(source -> {
+            var name = source.getTableName();
+            var state = GlobalStateMgr.getCurrentState();
+            // A consulted larger object can include tables outside the dumped query subgraph.
+            if (!CatalogMgr.isInternalCatalog(name.getCatalog()) && !state.getCatalogMgr().catalogExists(name.getCatalog())) {
+                return null;
+            }
+            return state.getMetadataMgr().getTable(connectContext, name).orElse(null);
+        }));
         return replaySql;
     }
 
     private static void tearMockEnv() {
+        if (ConnectContext.get() != null) {
+            ConnectContext.get().setJoinStatisticsReplay(null);
+        }
         int backendId = 10002;
         int backendIdSize = GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getAliveBackendNumber();
         for (int i = 1; i < backendIdSize; ++i) {
