@@ -37,7 +37,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.apache.iceberg.types.Types.NestedField.required;
@@ -74,13 +73,8 @@ public class ManifestReaderTest {
         Mockito.when(dataFileCache.getIfPresent(manifest.path()))
                 .thenAnswer(invocation -> getCount.getAndIncrement() == 0 ? placeholder : null);
 
-        AtomicReference<Set<DataFile>> cachedFilesRef = new AtomicReference<>();
-        Mockito.doAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            Set<DataFile> cachedFiles = invocation.getArgument(1);
-            cachedFilesRef.set(cachedFiles);
-            return null;
-        }).when(dataFileCache).put(Mockito.eq(manifest.path()), Mockito.anySet());
+        ConcurrentHashMap<String, Set<DataFile>> stored = new ConcurrentHashMap<>();
+        Mockito.when(dataFileCache.asMap()).thenReturn(stored);
 
         ManifestReader<DataFile> reader = ManifestFiles.read(manifest, FILE_IO, Map.of(TEST_SPEC.specId(), TEST_SPEC))
                 .select(ManifestReader.ALL_COLUMNS)
@@ -95,11 +89,11 @@ public class ManifestReaderTest {
         }
 
         Mockito.verify(dataFileCache, Mockito.times(1)).getIfPresent(manifest.path());
-        Mockito.verify(dataFileCache, Mockito.times(1)).put(Mockito.eq(manifest.path()), Mockito.anySet());
+        Mockito.verify(dataFileCache, Mockito.times(1)).asMap();
         Assertions.assertTrue(placeholder.isEmpty(), "placeholder should stay empty until the full manifest is ready");
-        Assertions.assertNotNull(cachedFilesRef.get(), "a fully materialized cache entry should be published on close");
+        Assertions.assertNotNull(stored.get(manifest.path()), "a fully materialized cache entry should be published on close");
         Assertions.assertEquals(Set.of(file1.location(), file2.location()),
-                cachedFilesRef.get().stream().map(DataFile::location).collect(Collectors.toSet()));
+                stored.get(manifest.path()).stream().map(DataFile::location).collect(Collectors.toSet()));
     }
 
     @Test
@@ -112,13 +106,8 @@ public class ManifestReaderTest {
         Set<DataFile> placeholder = ConcurrentHashMap.newKeySet();
         Mockito.when(dataFileCache.getIfPresent(manifest.path())).thenReturn(placeholder);
 
-        AtomicReference<Set<DataFile>> cachedFilesRef = new AtomicReference<>();
-        Mockito.doAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            Set<DataFile> cachedFiles = invocation.getArgument(1);
-            cachedFilesRef.set(cachedFiles);
-            return null;
-        }).when(dataFileCache).put(Mockito.eq(manifest.path()), Mockito.anySet());
+        ConcurrentHashMap<String, Set<DataFile>> stored = new ConcurrentHashMap<>();
+        Mockito.when(dataFileCache.asMap()).thenReturn(stored);
 
         ManifestReader<DataFile> reader = ManifestFiles.read(manifest, FILE_IO, Map.of(TEST_SPEC.specId(), TEST_SPEC))
                 .select(SCAN_COLUMNS_WITHOUT_STATS)
@@ -132,8 +121,8 @@ public class ManifestReaderTest {
             }
         }
 
-        Assertions.assertNotNull(cachedFilesRef.get(), "cache entry should be published after full consumption");
-        DataFile cachedFile = cachedFilesRef.get().iterator().next();
+        Assertions.assertNotNull(stored.get(manifest.path()), "cache entry should be published after full consumption");
+        DataFile cachedFile = stored.get(manifest.path()).iterator().next();
         Assertions.assertNotNull(cachedFile.lowerBounds(), "cached data file should keep lower bounds");
         Assertions.assertEquals(file.lowerBounds(), cachedFile.lowerBounds());
         Assertions.assertEquals(file.upperBounds(), cachedFile.upperBounds());
@@ -164,8 +153,120 @@ public class ManifestReaderTest {
         }
 
         Mockito.verify(dataFileCache, Mockito.times(1)).getIfPresent(manifest.path());
-        Mockito.verify(dataFileCache, Mockito.never()).put(Mockito.eq(manifest.path()), Mockito.anySet());
+        Mockito.verify(dataFileCache, Mockito.never()).asMap();
         Assertions.assertTrue(placeholder.isEmpty(), "partial iteration must not leak partially cached files");
+    }
+
+    private StarRocksIcebergTableScan cachedScan(ManifestFile manifest, Cache<String, Set<DataFile>> cache,
+                                                FileIO io, boolean selective) {
+        Table table = Mockito.mock(Table.class);
+        Mockito.when(table.name()).thenReturn("db.tbl");
+        Snapshot snapshot = Mockito.mock(Snapshot.class);
+        Mockito.when(table.schema()).thenReturn(TEST_SCHEMA);
+        Mockito.when(table.specs()).thenReturn(Map.of(TEST_SPEC.specId(), TEST_SPEC));
+        Mockito.when(table.io()).thenReturn(io);
+        Mockito.when(table.currentSnapshot()).thenReturn(snapshot);
+        Mockito.when(snapshot.snapshotId()).thenReturn(1L);
+        Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(List.of(manifest));
+        Mockito.when(snapshot.deleteManifests(Mockito.any())).thenReturn(List.of());
+        Mockito.when(table.sortOrders()).thenReturn(selective
+                ? Map.of(1, SortOrder.builderFor(TEST_SCHEMA).asc("data").build()) : Map.of());
+        com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext context =
+                new com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext(
+                        "catalog", "db", "tbl", com.starrocks.connector.PlanMode.LOCAL);
+        context.setDataFileCache(cache);
+        context.setDataFileCacheWithMetrics(true);
+        context.setMetaFileCacheMap(new ConcurrentHashMap<>());
+        return new StarRocksIcebergTableScan(table, TEST_SCHEMA, TableScanContext.empty(), context);
+    }
+
+    @Test
+    public void testFullStatsReusedWithoutOpeningManifest() throws IOException {
+        DataFile file = newDataFileWithStats("full.parquet", 10L);
+        ManifestFile manifest = writeManifest("full.avro", file);
+        Cache<String, Set<DataFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+        FileIO io = Mockito.spy(new LocalFileIO());
+        StarRocksIcebergTableScan scan = cachedScan(manifest, cache, io, false);
+        scan.refreshDataFileCache(List.of(manifest));
+        Assertions.assertTrue(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(
+                cache.getIfPresent(manifest.path())));
+        Mockito.doThrow(new AssertionError("Warm full statistics must not read S3"))
+                .when(io).newInputFile(Mockito.anyString());
+        try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+            FileScanTask task = tasks.iterator().next();
+            Assertions.assertEquals(file.lowerBounds(), task.file().lowerBounds());
+            Assertions.assertEquals(file.nullValueCounts(), task.file().nullValueCounts());
+        }
+    }
+
+    @Test
+    public void testPartialStatsUpgradedAndNotDowngradedByWarmup() throws IOException {
+        DataFile file = newDataFileWithStats("upgrade.parquet", 10L);
+        ManifestFile manifest = writeManifest("upgrade.avro", file);
+        Cache<String, Set<DataFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+        FileIO io = Mockito.spy(new LocalFileIO());
+        StarRocksIcebergTableScan scan = cachedScan(manifest, cache, io, true);
+        scan.refreshDataFileCache(List.of(manifest));
+        Assertions.assertFalse(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(
+                cache.getIfPresent(manifest.path())));
+        // Sorting on column 2 does not keep the statistics of column 1.
+        DataFile partial = cache.getIfPresent(manifest.path()).iterator().next();
+        Assertions.assertTrue(partial.lowerBounds() == null || !partial.lowerBounds().containsKey(1));
+        try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+            for (FileScanTask task : tasks) {
+                Assertions.assertEquals(file.lowerBounds(), task.file().lowerBounds());
+            }
+        }
+        Set<DataFile> full = cache.getIfPresent(manifest.path());
+        Assertions.assertTrue(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(full));
+        scan.refreshDataFileCache(List.of(manifest));
+        Assertions.assertSame(full, cache.getIfPresent(manifest.path()), "ordinary warmup must not downgrade full stats");
+        Mockito.doThrow(new AssertionError("Upgraded statistics must not read S3"))
+                .when(io).newInputFile(Mockito.anyString());
+        try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+            Assertions.assertEquals(file.lowerBounds(), tasks.iterator().next().file().lowerBounds());
+        }
+    }
+
+    @Test
+    public void testMixedManifestsReadOnlyTheOneMissingFullStats() throws IOException {
+        ManifestFile warm = writeManifest("already-full.avro", newDataFileWithStats("warm.parquet", 10L));
+        ManifestFile partial = writeManifest("still-partial.avro", newDataFileWithStats("partial.parquet", 20L));
+        Cache<String, Set<DataFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+        FileIO io = Mockito.spy(new LocalFileIO());
+        cachedScan(warm, cache, io, false).refreshDataFileCache(List.of(warm));
+        StarRocksIcebergTableScan scan = cachedScan(partial, cache, io, true);
+        scan.refreshDataFileCache(List.of(partial));
+        Mockito.when(scan.table().currentSnapshot().dataManifests(Mockito.any())).thenReturn(List.of(warm, partial));
+        Mockito.clearInvocations(io);
+        Mockito.doThrow(new AssertionError("The full manifest must not be reopened"))
+                .when(io).newInputFile(warm.path());
+        long rows = 0;
+        try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+            for (FileScanTask task : tasks) {
+                rows += task.file().recordCount();
+            }
+        }
+        Assertions.assertEquals(30L, rows);
+        Mockito.verify(io, Mockito.atLeastOnce()).newInputFile(partial.path());
+        Assertions.assertTrue(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(
+                cache.getIfPresent(partial.path())));
+    }
+
+    @Test
+    public void testWriterMissingMetricsAreStillComplete() throws IOException {
+        ManifestFile manifest = writeManifest("no-metrics.avro", newDataFile("no-metrics.parquet", 10L));
+        Cache<String, Set<DataFile>> cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+        FileIO io = Mockito.spy(new LocalFileIO());
+        StarRocksIcebergTableScan scan = cachedScan(manifest, cache, io, false);
+        scan.refreshDataFileCache(List.of(manifest));
+        Assertions.assertTrue(com.starrocks.connector.iceberg.DataFileWrapper.hasFullColumnStats(
+                cache.getIfPresent(manifest.path())));
+        Mockito.doThrow(new AssertionError("Writer omitted metrics; rereading cannot recover them"))
+                .when(io).newInputFile(Mockito.anyString());
+        try (CloseableIterable<FileScanTask> tasks = scan.includeColumnStats().planFiles()) {
+            Assertions.assertEquals(10L, tasks.iterator().next().file().recordCount());
+        }
     }
 
     private ManifestFile writeManifest(String manifestFileName, DataFile... dataFiles) throws IOException {

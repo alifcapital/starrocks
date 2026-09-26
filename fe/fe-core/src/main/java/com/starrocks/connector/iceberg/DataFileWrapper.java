@@ -27,13 +27,29 @@ import java.util.Set;
 // checking hashcode and equals for manifest cache
 public class DataFileWrapper implements DataFile {
     private final DataFile dataFile;
+    // True means no column metrics were discarded, not that the writer supplied every metric.
+    private final boolean fullColumnStats;
 
     public DataFileWrapper(DataFile dataFile) {
+        this(dataFile, false);
+    }
+
+    private DataFileWrapper(DataFile dataFile, boolean fullColumnStats) {
         this.dataFile = dataFile;
+        this.fullColumnStats = fullColumnStats;
     }
 
     public static DataFileWrapper wrap(DataFile dataFile) {
         return new DataFileWrapper(dataFile);
+    }
+
+    public static DataFileWrapper wrap(DataFile dataFile, boolean fullColumnStats) {
+        return new DataFileWrapper(dataFile, fullColumnStats);
+    }
+
+    public static boolean hasFullColumnStats(Set<DataFile> files) {
+        return files.stream().allMatch(file -> file instanceof DataFileWrapper &&
+                ((DataFileWrapper) file).fullColumnStats);
     }
 
     @Override
