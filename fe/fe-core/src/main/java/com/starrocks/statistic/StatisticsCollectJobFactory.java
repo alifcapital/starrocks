@@ -717,9 +717,9 @@ public class StatisticsCollectJobFactory {
 
     private static boolean needsInitialCollection(AnalyzeJob job, Database db, Table table) {
         AnalyzeMgr mgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
-        if (!job.isNative()) {
+        if (job instanceof ExternalAnalyzeJob externalJob) {
             return !mgr.getExternalBasicStatsMetaMap().containsKey(
-                    new AnalyzeMgr.StatsMetaKey(job.getCatalogName(), db.getFullName(), table.getName()));
+                    new AnalyzeMgr.StatsMetaKey(externalJob.getCatalogName(), db.getFullName(), table.getName()));
         }
         if (job.getAnalyzeType() == StatsConstants.AnalyzeType.HISTOGRAM) {
             List<HistogramStatsMeta> metas = mgr.getHistogramMetaByTable(table.getId());
