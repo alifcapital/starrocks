@@ -452,11 +452,14 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 refreshTable(currentTable, updateTable, dbName, tableName, ctx, executorService);
                 LOG.info("Finished to refresh iceberg table {}.{}", dbName, tableName);
             } else {
-                // Metadata unchanged keeps the partition/file caches valid; still swap in the reloaded
-                // table so the cache stops serving the old (expiring) vended FileIO token.
-                warmCurrentSnapshot(updateTable, dbName, tableName, executorService);
-                tables.put(icebergTableName, updateTable);
-                invalidateOldPartitionSnapshots(dbName, tableName, updateTable.currentSnapshot());
+                // Glue uses catalog-configured credentials (including refreshing AWS providers), not
+                // per-table vended tokens. Keep its warm Snapshot objects when metadata is unchanged.
+                // Other catalogs retain the reload path, needed for REST vended credential renewal.
+                BaseTable retainedTable = getIcebergCatalogType() == IcebergCatalogType.GLUE_CATALOG
+                        ? currentTable : updateTable;
+                warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
+                tables.put(icebergTableName, retainedTable);
+                invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
                 tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
         }
