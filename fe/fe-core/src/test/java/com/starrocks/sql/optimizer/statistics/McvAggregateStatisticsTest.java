@@ -94,8 +94,13 @@ public class McvAggregateStatisticsTest {
         Assertions.assertEquals(2, group.getNdv());
         Assertions.assertEquals(Map.of("1", 1L, "2", 1L), group.getMcv().stream().collect(
                 Collectors.toMap(entry -> entry.getValues().get(0), MultiColumnCombinedStats.McvEntry::getCount)));
+        RuntimeFilterStatistics probe = RuntimeFilterStatistics.from(key, output.getColumnStatistic(key),
+                output.getMultiColumnCombinedStats().values(), output.getOutputRowCount());
         MultiColumnCombinedStats singleton = new MultiColumnCombinedStats(1, 1, List.of(key),
                 List.of(new MultiColumnCombinedStats.McvEntry(List.of("1"), 1)));
+        RuntimeFilterStatistics build = RuntimeFilterStatistics.from(key, ColumnStatistic.unknown(),
+                List.of(singleton), 1);
+        Assertions.assertEquals(0.5, build.probePassFraction(probe, false).orElseThrow(), 1e-9);
     }
 
     @Test

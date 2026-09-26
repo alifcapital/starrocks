@@ -64,6 +64,11 @@ public class McvCastStatisticsTest {
         Assertions.assertEquals(List.of(400L), group.getNullCounts());
         Assertions.assertEquals(600, group.getMcv().stream().filter(e -> e.getValues().get(0) != null)
                 .mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum());
+        RuntimeFilterStatistics cast = RuntimeFilterStatistics.fromExpression(CAST, input(true));
+        Assertions.assertEquals(1, cast.getNdv());
+        RuntimeFilterStatistics build = RuntimeFilterStatistics.from(OUTPUT,
+                ColumnStatistic.builder().setDistinctValuesCount(1).build(), List.of(), 1);
+        Assertions.assertEquals(0.6, build.probePassFraction(cast, false).orElseThrow(), 1e-9);
     }
 
     @Test
@@ -73,6 +78,13 @@ public class McvCastStatisticsTest {
         Assertions.assertEquals(99, group.getNdv()); // 98 non-NULL + one known NULL value
         Assertions.assertEquals(List.of(100L), group.getNullCounts());
         Assertions.assertEquals(700, group.getMcv().stream().mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum());
+        Assertions.assertEquals(98, RuntimeFilterStatistics.fromExpression(CAST, input(false)).getNdv());
+    }
+
+    @Test
+    public void testBasicNdvSurvivesWithoutMcv() {
+        Statistics basic = Statistics.buildFrom(input(false)).setMultiColumnStatistics(Map.of()).build();
+        Assertions.assertEquals(100, RuntimeFilterStatistics.fromExpression(CAST, basic).getNdv());
     }
 
     @Test
@@ -82,6 +94,12 @@ public class McvCastStatisticsTest {
                 Map.of(SOURCE, SOURCE, OUTPUT, CAST), input);
         MultiColumnCombinedStats group = projected.get(Set.of(OUTPUT));
         Assertions.assertNotNull(group);
+        RuntimeFilterStatistics fromSlot = RuntimeFilterStatistics.from(OUTPUT,
+                ExpressionStatisticCalculator.calculate(CAST, input), List.of(group), 1000);
+        RuntimeFilterStatistics fromExpression = RuntimeFilterStatistics.fromExpression(CAST, input);
+        Assertions.assertEquals(fromSlot.getNdv(), fromExpression.getNdv());
+        Assertions.assertEquals(fromSlot.probePassFraction(fromExpression, true).orElseThrow(),
+                fromExpression.probePassFraction(fromSlot, true).orElseThrow(), 1e-9);
         Assertions.assertEquals(4, input.getMultiColumnCombinedStats().get(Set.of(SOURCE)).getMcv().size());
         Assertions.assertEquals(400, input.getMultiColumnCombinedStats().get(Set.of(SOURCE)).getMcv().get(0).getCount());
     }
@@ -115,6 +133,7 @@ public class McvCastStatisticsTest {
     public void testDisabledMcvKeepsBasicFallback() {
         ConnectContext.get().getSessionVariable().setCboEnableMcvEstimate(false);
         Assertions.assertNull(McvCastStatistics.derive(OUTPUT, CAST, input(true)));
+        Assertions.assertEquals(3, RuntimeFilterStatistics.fromExpression(CAST, input(true)).getNdv());
     }
 
     @Test

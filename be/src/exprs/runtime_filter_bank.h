@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <set>
 
@@ -78,6 +79,7 @@ public:
     static RuntimeFilter* create_join_runtime_filter(ObjectPool* pool, LogicalType type, int8_t join_mode,
                                                      const pipeline::RuntimeMembershipFilterBuildParam& param,
                                                      size_t column_offset, size_t row_count);
+
     // ====================================
     static Status fill_runtime_filter(const ColumnPtr& column, LogicalType type, RuntimeFilter* filter,
                                       size_t column_offset, bool eq_null, bool is_skew_join = false);
@@ -104,6 +106,10 @@ public:
     ExprContext* build_expr_ctx() { return _build_expr_ctx; }
     LogicalType build_expr_type() const { return _build_expr_ctx->root()->type().type; }
     int build_expr_order() const { return _build_expr_order; }
+    std::optional<size_t> estimated_build_ndv() const { return _estimated_build_ndv; }
+    size_t estimate_local_ndv(size_t rows, size_t hash_table_ndv) const {
+        return std::min(rows, _estimated_build_ndv.value_or(hash_table_ndv));
+    }
     const TUniqueId& sender_finst_id() const { return _sender_finst_id; }
     const std::unordered_set<TUniqueId>& broadcast_grf_senders() const { return _broadcast_grf_senders; }
     const std::vector<TRuntimeFilterDestination>& broadcast_grf_destinations() const {
@@ -156,6 +162,7 @@ private:
 
     ExprContext* _build_expr_ctx = nullptr;
     int _build_expr_order;
+    std::optional<size_t> _estimated_build_ndv;
     bool _has_remote_targets;
     bool _has_consumer;
     int8_t _join_mode;

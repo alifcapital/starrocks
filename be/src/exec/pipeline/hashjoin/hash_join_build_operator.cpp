@@ -96,10 +96,7 @@ Status HashJoinBuildOperator::set_finishing(RuntimeState* state) {
     size_t merger_index = _driver_sequence;
     // Broadcast Join only has one build operator.
     DCHECK(_distribution_mode != TJoinDistributionMode::BROADCAST || _driver_sequence == 0);
-    {
-        SCOPED_TIMER(_join_builder->build_metrics().build_runtime_filter_timer);
-        RETURN_IF_ERROR(_join_builder->create_runtime_filters(state));
-    }
+    RETURN_IF_ERROR(_join_builder->create_runtime_filters(state));
 
     auto ht_row_count = _join_builder->get_ht_row_count();
     auto& partial_in_filters = _join_builder->get_runtime_in_filters();
@@ -149,6 +146,7 @@ Status HashJoinBuildOperator::set_finishing(RuntimeState* state) {
     if (is_colocate_runtime_filter) {
         // init local colocate in/bloom filters
         RuntimeInFilterList in_filter_lists(partial_in_filters.begin(), partial_in_filters.end());
+        in_filter_lists.remove(nullptr);
         if (partial_bloom_filters.size() == partial_bloom_filter_build_params.size()) {
             for (size_t i = 0; i < partial_bloom_filters.size(); ++i) {
                 if (partial_bloom_filter_build_params[i].has_value()) {
@@ -186,7 +184,8 @@ Status HashJoinBuildOperator::set_finishing(RuntimeState* state) {
                                             if (desc->runtime_filter() == nullptr) {
                                                 return total;
                                             }
-                                            return desc->runtime_filter()->get_membership_filter()->bf_alloc_size();
+                                            return total +
+                                                   desc->runtime_filter()->get_membership_filter()->bf_alloc_size();
                                         });
                 COUNTER_UPDATE(_join_builder->build_metrics().partial_runtime_bloom_filter_bytes, total_bf_bytes);
             }

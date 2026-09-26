@@ -1273,7 +1273,7 @@ FROM test;
 
 ### max_pushdown_conditions_per_column
 
-* 描述：该变量的具体含义请参阅 [BE 配置项](../administration/configuration/BE_parameters/BE_parameters.md)中 `max_pushdown_conditions_per_column` 的说明。
+* 描述：该变量的具体含义请参阅 [BE 配置项](../administration/configuration/BE_parameters/BE_parameters.md)中 `max_pushdown_conditions_per_column` 的说明。 对于 JOIN 生成的 IN 过滤器，在构建和合并过程中按实际的非 NULL 唯一值数量检查此上限。
 * 默认值：`-1`，表示使用 `be.conf` 中的配置值。如果设置大于 0，则忽略 `be.conf` 中的配置值。
 * 类型：Int
 
@@ -1522,7 +1522,7 @@ FROM test;
 
 ### runtime_join_filter_push_down_limit
 
-* 描述：生成 Bloomfilter 类型的 Local RF 的 Hash Table 的行数阈值。超过该阈值, 则不产生 Local RF。该变量避免产生过大 Local RF。取值为整数，表示行数。
+* 描述：生成本地 Bloom Runtime Filter 所允许的构建端唯一键值数量上限。对于单个连接键，BE 从哈希表获取 NDV。对于复合键，优先使用 FE 对各分量的估算，并以本地构建端行数为上限；没有估算时回退到哈希表估算。此过程不会额外扫描构建键。对于保留独立位数组的分区过滤器，按各部分过滤器的唯一值数量之和检查上限。超过上限时，不生成该本地过滤器。
 * 默认值：1024000
 * 类型：Long
 

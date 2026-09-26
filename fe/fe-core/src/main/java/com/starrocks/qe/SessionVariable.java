@@ -2059,6 +2059,18 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
 
+    @VarAttr(name = "enable_joint_runtime_filter_selection")
+    private boolean enableJointRuntimeFilterSelection = true;
+
+    public void setEnableJointRuntimeFilterSelection(boolean enabled) {
+        enableJointRuntimeFilterSelection = enabled;
+    }
+
+    public boolean isEnableJointRuntimeFilterSelection() {
+        return enableJointRuntimeFilterSelection;
+    }
+
+
     //In order to be compatible with the logic of the old planner,
     //When the column name is the same as the alias name,
     //the alias will be used as the groupby column if set to true.

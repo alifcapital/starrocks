@@ -86,8 +86,6 @@ OutPut Exchange Id: 32
 29:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
 |  equal join conjunct: [14: S_NATIONKEY, INT, false] = [60: N_NATIONKEY, INT, false]
-|  build runtime filters:
-|  - filter_id = 6, build_expr = (60: N_NATIONKEY), remote = false
 |  output columns: 24, 25, 40, 61
 |  cardinality: 290117
 |  column statistics:
@@ -146,7 +144,6 @@ actualRows=0, avgRowSize=8.0
 cardinality: 1000000
 probe runtime filters:
 - filter_id = 5, probe_expr = (11: S_SUPPKEY)
-- filter_id = 6, probe_expr = (14: S_NATIONKEY)
 column statistics:
 * S_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 * S_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE

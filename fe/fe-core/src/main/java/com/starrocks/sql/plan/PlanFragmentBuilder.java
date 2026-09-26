@@ -833,6 +833,13 @@ public class PlanFragmentBuilder {
                 Statistics.Builder b = Statistics.builder();
                 b.setOutputRowCount(statistics.getOutputRowCount());
                 b.addColumnStatisticsFromOtherStatistic(statistics, new ColumnRefSet(node.getOutputColumns()), true);
+                // The optimizer has already projected these distributions into output column IDs.
+                // Keep them with the scalar statistics when materializing the physical projection.
+                statistics.getMultiColumnCombinedStats().forEach((columns, group) -> {
+                    if (node.getOutputColumns().containsAll(columns)) {
+                        b.addMultiColumnStatistics(columns, group);
+                    }
+                });
                 projectNode.computeStatistics(b.build());
             });
 

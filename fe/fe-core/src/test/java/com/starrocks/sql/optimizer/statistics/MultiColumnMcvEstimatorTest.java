@@ -159,6 +159,11 @@ public class MultiColumnMcvEstimatorTest {
         Assertions.assertEquals(100, marginal.getRowCount(), 1e-9);
         Assertions.assertEquals(1, marginal.getNdv());
         Assertions.assertEquals(List.of("2"), marginal.getMcv().get(0).getValues());
+        RuntimeFilterStatistics build = RuntimeFilterStatistics.from(GATE, filtered.getColumnStatistic(GATE),
+                filtered.getMultiColumnCombinedStats().values(), filtered.getOutputRowCount());
+        RuntimeFilterStatistics probe = RuntimeFilterStatistics.from(GATE, input.getColumnStatistic(GATE),
+                List.of(input.getMultiColumnCombinedStats().get(Set.of(GATE))), 1000);
+        Assertions.assertEquals(0.1, build.probePassFraction(probe, false).orElseThrow(), 1e-9);
         Assertions.assertEquals(1000, input.getMultiColumnCombinedStats().get(Set.of(GATE)).getRowCount(), 1e-9);
     }
 
@@ -326,13 +331,19 @@ public class MultiColumnMcvEstimatorTest {
                                 new MultiColumnCombinedStats.McvEntry(List.of("cold", "0"), 150),
                                 new MultiColumnCombinedStats.McvEntry(Arrays.asList("unknown", null), 150))))
                 .build();
+        RuntimeFilterStatistics probe = RuntimeFilterStatistics.from(STATUS, input.getColumnStatistic(STATUS),
+                input.getMultiColumnCombinedStats().values(), input.getOutputRowCount());
         List<ScalarOperator> predicates = List.of(flag,
                 new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, flag),
                 eq(flag, ConstantOperator.createBoolean(true)));
         double[] fractions = {0.7, 0.15, 0.7};
         for (int i = 0; i < predicates.size(); i++) {
             Statistics filtered = PredicateStatisticsCalculator.statisticsCalculate(predicates.get(i), input);
+            RuntimeFilterStatistics build = RuntimeFilterStatistics.from(STATUS, filtered.getColumnStatistic(STATUS),
+                    filtered.getMultiColumnCombinedStats().values(), filtered.getOutputRowCount());
             Assertions.assertEquals(1000 * fractions[i], filtered.getOutputRowCount(), 1e-6);
+            Assertions.assertEquals(1, build.getNdv(), 1e-6);
+            Assertions.assertEquals(fractions[i], build.probePassFraction(probe, false).orElseThrow(), 1e-6);
         }
     }
 

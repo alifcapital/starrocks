@@ -79,6 +79,7 @@ set(EXEC_FILES
         ./exec/workgroup/mem_tracker_manager_test.cpp
         ./exec/pipeline/schedule/observer_test.cpp
         ./exec/pipeline/schedule/pipeline_timer_test.cpp
+        ./exec/pipeline/runtime_filter_merger_test.cpp
         ./exec/pipeline/pipeline_control_flow_test.cpp
         ./exec/pipeline_driver_memory_test.cpp
         ./exec/pipeline/pipeline_driver_queue_test.cpp

@@ -42,6 +42,7 @@ import com.starrocks.common.StarRocksException;
 import com.starrocks.planner.expression.ExprToThrift;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.TreeNode;
+import com.starrocks.sql.ast.expression.CastExpr;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.ExprSubstitutionMap;
 import com.starrocks.sql.ast.expression.ExprToSql;
@@ -52,10 +53,13 @@ import com.starrocks.sql.formatter.ExprExplainVisitor;
 import com.starrocks.sql.formatter.ExprVerboseVisitor;
 import com.starrocks.sql.formatter.FormatOptions;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
+import com.starrocks.sql.optimizer.statistics.RuntimeFilterJointSelection;
+import com.starrocks.sql.optimizer.statistics.RuntimeFilterStatistics;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
 import com.starrocks.thrift.TExplainLevel;
@@ -68,6 +72,7 @@ import org.roaringbitmap.RoaringBitmap;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -270,6 +275,80 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
 
     public long getCardinality() {
         return cardinality;
+    }
+
+    public long getColumnNdv(Expr expr) {
+        RuntimeFilterStatistics stats = getRuntimeFilterStatistics(expr);
+        return stats == null || stats.getNdv() < 0 ? -1 : (long) Math.ceil(stats.getNdv());
+    }
+
+    public RuntimeFilterStatistics getRuntimeFilterStatistics(Expr expr) {
+        if (expr instanceof CastExpr && columnStatistics != null) {
+            ScalarOperator expression = runtimeFilterExpression(expr);
+            if (expression != null) {
+                Statistics input = Statistics.builder()
+                        .setOutputRowCount(cardinality < 0 ? Double.POSITIVE_INFINITY : cardinality)
+                        .addColumnStatistics(columnStatistics)
+                        .setMultiColumnStatistics(multiColumnCombinedStats == null ? Map.of() : multiColumnCombinedStats)
+                        .build();
+                return RuntimeFilterStatistics.fromExpression(expression, input).boundByRows(cardinality);
+            }
+        }
+        if (!(expr instanceof SlotRef)) {
+            if (this instanceof ExchangeNode && children.size() == 1) {
+                RuntimeFilterStatistics stats = getChild(0).getRuntimeFilterStatistics(expr);
+                return stats == null ? null : stats.boundByRows(cardinality);
+            }
+            return null;
+        }
+        int slotId = ((SlotRef) expr).getSlotId().asInt();
+        if (columnStatistics != null) {
+            for (Map.Entry<ColumnRefOperator, ColumnStatistic> entry : columnStatistics.entrySet()) {
+                if (entry.getKey().getId() == slotId) {
+                    if (entry.getValue() == null) {
+                        return null;
+                    }
+                    return RuntimeFilterStatistics.from(entry.getKey(), entry.getValue(),
+                            multiColumnCombinedStats == null ? List.of() : multiColumnCombinedStats.values(),
+                            cardinality);
+                }
+            }
+        }
+        // Exchanges preserve values. Other operators may filter, duplicate, or replace them.
+        if (this instanceof ExchangeNode && children.size() == 1) {
+            RuntimeFilterStatistics stats = getChild(0).getRuntimeFilterStatistics(expr);
+            return stats == null ? null : stats.boundByRows(cardinality);
+        }
+        return null;
+    }
+
+    public BitSet selectRuntimeFilters(List<RuntimeFilterDescription> filters, double minRejection) {
+        if (multiColumnCombinedStats == null && this instanceof ExchangeNode && children.size() == 1) {
+            return getChild(0).selectRuntimeFilters(filters, minRejection, id.asInt());
+        }
+        return selectRuntimeFilters(filters, minRejection, id.asInt());
+    }
+
+    private BitSet selectRuntimeFilters(List<RuntimeFilterDescription> filters, double minRejection,
+                                                 int targetId) {
+        return RuntimeFilterJointSelection.select(filters.stream()
+                .map(filter -> new RuntimeFilterJointSelection.Key(
+                        columnStatistics == null ? null : runtimeFilterExpression(
+                                filter.getNodeIdToProbeExpr().get(targetId)),
+                        filter.getBuildKeyStatistics(), filter.isEqualForNull())).toList(),
+                multiColumnCombinedStats == null ? List.of() : multiColumnCombinedStats.values(), minRejection);
+    }
+
+    private ScalarOperator runtimeFilterExpression(Expr expression) {
+        if (expression instanceof CastExpr) {
+            ScalarOperator child = runtimeFilterExpression(expression.getChild(0));
+            return child == null ? null : new CastOperator(expression.getType(), child);
+        }
+        if (expression instanceof SlotRef slot) {
+            return columnStatistics.keySet().stream()
+                    .filter(column -> column.getId() == slot.getSlotId().asInt()).findFirst().orElse(null);
+        }
+        return null;
     }
 
     public float getAvgRowSize() {
@@ -800,7 +879,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         if (accept) {
             return true;
         }
-        if (isBound && description.canProbeUse(this, context)) {
+        if (isBound && description.canProbeUse(this, probeExpr, context)) {
             description.addProbeExpr(id.asInt(), probeExpr);
             description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr, partitionByExprs);
             probeRuntimeFilters.add(description);
@@ -914,7 +993,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         if (accept) {
             return true;
         }
-        if (isBound && addProbeInfo && description.canProbeUse(this, context)) {
+        if (isBound && addProbeInfo && description.canProbeUse(this, probeExpr, context)) {
             // can not push down to children.
             // use runtime filter at this level.
             description.addProbeExpr(id.asInt(), probeExpr);

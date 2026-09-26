@@ -67,7 +67,6 @@ OutPut Exchange Id: 24
 |  equal join conjunct: [40: S_NATIONKEY, INT, false] = [4: C_NATIONKEY, INT, false]
 |  equal join conjunct: [20: L_ORDERKEY, INT, false] = [10: O_ORDERKEY, INT, false]
 |  build runtime filters:
-|  - filter_id = 4, build_expr = (4: C_NATIONKEY), remote = false
 |  - filter_id = 5, build_expr = (10: O_ORDERKEY), remote = false
 |  output columns: 25, 26, 46
 |  cardinality: 16381891
@@ -117,8 +116,6 @@ OutPut Exchange Id: 24
 |----11:EXCHANGE
 |       distribution type: BROADCAST
 |       cardinality: 200000
-|       probe runtime filters:
-|       - filter_id = 4, probe_expr = (40: S_NATIONKEY)
 |
 0:OlapScanNode
 table: lineitem, rollup: lineitem
@@ -153,8 +150,6 @@ OutPut Exchange Id: 20
 18:HASH JOIN
 |  join op: INNER JOIN (BUCKET_SHUFFLE)
 |  equal join conjunct: [1: C_CUSTKEY, INT, false] = [11: O_CUSTKEY, INT, false]
-|  build runtime filters:
-|  - filter_id = 3, build_expr = (11: O_CUSTKEY), remote = false
 |  output columns: 4, 10
 |  cardinality: 22752627
 |  column statistics:
@@ -174,8 +169,6 @@ preAggregation: on
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=12.0
 cardinality: 15000000
-probe runtime filters:
-- filter_id = 3, probe_expr = (1: C_CUSTKEY)
 column statistics:
 * C_CUSTKEY-->[1.0, 1.5E7, 0.0, 8.0, 1.5E7] ESTIMATE
 * C_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE

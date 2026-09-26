@@ -59,6 +59,8 @@ struct RuntimeMembershipFilterBuildParam {
               columns(std::move(columns)),
               runtime_filter(std::move(runtime_filter)),
               _type_descriptor(std::move(type_descriptor)) {}
+    // Local filter size estimate; never constructed by scanning key columns again.
+    std::optional<size_t> ndv;
     bool multi_partitioned;
     bool eq_null;
     bool is_empty;
@@ -299,12 +301,14 @@ private:
 class PartialRuntimeFilterMerger {
 public:
     PartialRuntimeFilterMerger(ObjectPool* pool, size_t local_rf_limit, size_t global_rf_limit, int func_version,
-                               bool enable_join_runtime_bitset_filter)
+                               bool enable_join_runtime_bitset_filter,
+                               size_t max_in_values = config::max_pushdown_conditions_per_column)
             : _pool(pool),
               _local_rf_limit(local_rf_limit),
               _global_rf_limit(global_rf_limit),
               _func_version(func_version),
-              _enable_join_runtime_bitset_filter(enable_join_runtime_bitset_filter) {}
+              _enable_join_runtime_bitset_filter(enable_join_runtime_bitset_filter),
+              _max_in_values(max_in_values) {}
 
     void incr_builder() {
         _ht_row_counts.emplace_back(0);
@@ -350,6 +354,9 @@ private:
     const size_t _global_rf_limit;
     const int _func_version;
     const bool _enable_join_runtime_bitset_filter;
+    const size_t _max_in_values;
+
+    size_t _filter_ndv(size_t filter_index, bool partitioned) const;
 
     std::atomic<bool> _always_true{false};
     std::atomic<size_t> _num_active_builders{0};

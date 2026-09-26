@@ -18,6 +18,7 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.FeConstants;
+import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
@@ -279,8 +280,6 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "  |    8:HASH JOIN\n" +
                     "  |    |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |    |  equal join conjunct: [1: S_SUPPKEY, INT, false] = [9: S_SUPPKEY, INT, false]\n" +
-                    "  |    |  build runtime filters:\n" +
-                    "  |    |  - filter_id = 1, build_expr = (9: S_SUPPKEY), remote = false\n" +
                     "  |    |  output columns: 17, 18\n" +
                     "  |    |  cardinality: 1\n" +
                     "  |    |  \n" +
@@ -290,12 +289,59 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "  |    |    \n" +
                     "  |    6:EXCHANGE\n" +
                     "  |       distribution type: ROUND_ROBIN\n" +
-                    "  |       cardinality: 1\n" +
-                    "  |       probe runtime filters:\n" +
-                    "  |       - filter_id = 1, probe_expr = (1: S_SUPPKEY)");
+                    "  |       cardinality: 1");
+            assertNotContains(plan, "build runtime filters");
         } finally {
             FeConstants.USE_MOCK_DICT_MANAGER = oldMockDictManager;
             connectContext.getSessionVariable().setEnableLowCardinalityOptimize(oldLowCardinality);
+        }
+    }
+
+    private static ColumnStatistic ndvStat(double ndv) {
+        return new ColumnStatistic(1, ndv, 0, 8, ndv);
+    }
+
+    // A two-key skew join exercises the broadcast friend mirroring the shuffle friend's gated conjuncts.
+    // The build-side size gate keeps the narrow key (v4) and drops the wide key (v5) on the partitioned
+    // shuffle friend. The broadcast friend must skip the same wide key; otherwise it builds filters for
+    // both keys and PlanFragment#collectNodes clears the remote runtime filters on both friends because
+    // their build-filter counts differ, discarding the surviving narrow filter.
+    @Test
+    public void testSkewJoinV2BroadcastFriendMirrorsGatedConjunct() throws Exception {
+        SessionVariable sv = connectContext.getSessionVariable();
+        long savedMax = sv.getGlobalRuntimeFilterBuildMaxSize();
+        long savedProbeMin = sv.getGlobalRuntimeFilterProbeMinSize();
+        boolean savedGrf = sv.getEnableGlobalRuntimeFilter();
+        StatisticStorage oldStorage = connectContext.getGlobalStateMgr().getStatisticStorage();
+        try {
+            sv.setGlobalRuntimeFilterBuildMaxSize(1000);
+            sv.setGlobalRuntimeFilterProbeMinSize(0);
+            sv.setEnableGlobalRuntimeFilter(true);
+            sv.disableJoinReorder();
+
+            TestStatisticStorage storage = new TestStatisticStorage();
+            connectContext.getGlobalStateMgr().setStatisticStorage(storage);
+            OlapTable t0 = getOlapTable("t0");
+            OlapTable t1 = getOlapTable("t1");
+            setTableStatistics(t0, 100_000_000);
+            setTableStatistics(t1, 10_000_000);
+            // Build side t1: v4 is narrow (NDV below the size gate, filter kept), v5 is wide (NDV above the
+            // gate, filter dropped). Probe-side NDV is left unknown so the probe gate accepts on the
+            // build/probe row-count ratio (10M / 100M), keeping this test focused on the build-side mirroring.
+            storage.addColumnStatistic(t1, "v4", ndvStat(100));
+            storage.addColumnStatistic(t1, "v5", ndvStat(5_000_000));
+
+            String sql = "select v3, v6 from t0 join[skew|t0.v1(1,2)] t1 on v1 = v4 and v2 = v5";
+            String plan = getVerboseExplain(sql);
+            // The narrow key's remote runtime filter survives the skew split; without the mirroring it would
+            // be cleared together with the broadcast friend's filters on the count mismatch.
+            assertContains(plan, "remote = true");
+        } finally {
+            sv.setGlobalRuntimeFilterBuildMaxSize(savedMax);
+            sv.setGlobalRuntimeFilterProbeMinSize(savedProbeMin);
+            sv.setEnableGlobalRuntimeFilter(savedGrf);
+            sv.enableJoinReorder();
+            connectContext.getGlobalStateMgr().setStatisticStorage(oldStorage);
         }
     }
 
@@ -316,9 +362,9 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "(select distinct upper(S_ADDRESS) u, S_SUPPKEY k from supplier) t1 " +
                     "join[skew|t1.k(1,2)] supplier s2 on t1.k = s2.S_SUPPKEY";
             String plan = getVerboseExplain(sql);
-            // the top fragment evaluates ifnull() as a DictMapping over the derived dict 21 ...
-            assertContains(plan, "18 <-> DictDecode([21: upper, INT, true], [ifnull[(<place-holder>, 'x')");
-            // ... so it must carry 21's global dict expr (it arrives through the split consumers)
+            // The top projection decodes the derived dictionary before evaluating ifnull().
+            assertContains(plan, "18 <-> ifnull[(DictDecode([21: upper, INT, true], [<place-holder>]), 'x')");
+            // It must carry the derived dictionary expression through the split consumers.
             assertContains(plan, "  RESULT SINK\n" +
                     "\n" +
                     "  Global Dict Exprs:\n" +

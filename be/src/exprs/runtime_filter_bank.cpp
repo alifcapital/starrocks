@@ -50,8 +50,12 @@ RuntimeFilter* RuntimeFilterHelper::transmit_to_runtime_empty_filter(ObjectPool*
     RuntimeFilter* filter = type_dispatch_filter(
             membership_filter->logical_type(), static_cast<RuntimeFilter*>(nullptr),
             [&]<LogicalType LT>() -> RuntimeFilter* {
-                return new ComposedRuntimeEmptyFilter<LT>(*down_cast<const MinMaxRuntimeFilter<LT>*>(min_max_filter),
-                                                          *membership_filter);
+                auto* empty = new ComposedRuntimeEmptyFilter<LT>(
+                        *down_cast<const MinMaxRuntimeFilter<LT>*>(min_max_filter), *membership_filter);
+                // NULL membership is carried by the membership filter during Bloom merging.
+                // Min/max-only evaluation must inherit it, just as deserialization does.
+                if (membership_filter->has_null()) empty->insert_null();
+                return empty;
             });
 
     if (pool != nullptr && filter != nullptr) {
@@ -517,6 +521,9 @@ Status RuntimeFilterBuildDescriptor::init(ObjectPool* pool, const TRuntimeFilter
                                           RuntimeState* state) {
     _filter_id = desc.filter_id;
     _build_expr_order = desc.expr_order;
+    _estimated_build_ndv = desc.__isset.estimated_build_ndv && desc.estimated_build_ndv >= 0
+                                   ? std::optional<size_t>(desc.estimated_build_ndv)
+                                   : std::nullopt;
     _has_remote_targets = desc.has_remote_targets;
 
     if (desc.__isset.runtime_filter_merge_nodes) {

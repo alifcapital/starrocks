@@ -29,6 +29,7 @@ import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
+import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.AfterEach;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -431,7 +433,11 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 + "'FRANCE') ) and l_shipdate between date '1995-01-01' and date '1996-12-31' ) as shipping "
                 + "group by supp_nation, cust_nation, l_year order by supp_nation, cust_nation, l_year;";
         String plan = getCostExplain(sql);
-        assertContains(plan, "build_expr = (1: S_SUPPKEY)");
+        // Both supplier-key domains have NDV 1M: locality must not retain this unselective RF.
+        assertNotContains(plan, "build_expr = (1: S_SUPPKEY)");
+        // The full supplier nation domain cannot reject the already restricted probe domain either.
+        assertNotContains(plan, "build_expr = (4: S_NATIONKEY)");
+        assertContains(plan, "build_expr = (26: O_ORDERKEY)");
     }
 
     @Test
@@ -758,8 +764,6 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 + "  |  join op: RIGHT OUTER JOIN (BUCKET_SHUFFLE)\n"
                 + "  |  equal join conjunct: [1: PS_PARTKEY, INT, true] = [7: P_PARTKEY, INT, false]\n"
                 + "  |  other predicates: [1: PS_PARTKEY, INT, true] IS NULL\n"
-                + "  |  build runtime filters:\n"
-                + "  |  - filter_id = 0, build_expr = (7: P_PARTKEY), remote = false\n"
                 + "  |  output columns: 1, 2\n"
                 + "  |  cardinality: 8000000");
         // test full outer join
@@ -865,6 +869,24 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
 
     @Test
     public void testGenRuntimeFilterWhenRightJoin() throws Exception {
+        // Make the build (part) side selective: NDV(p_partkey) below NDV(l_partkey) so the runtime filter
+        // prunes the probe (semijoin selectivity 50000/200000 = 0.25). On the unfiltered TPCH FK join the two
+        // sides have equal NDV, which is correctly judged useless by the probe gate; this keeps the test on
+        // its original intent - right joins generate a remote runtime filter when it is actually useful.
+        new MockUp<MockTpchStatisticStorage>() {
+            @Mock
+            public List<ColumnStatistic> getColumnStatistics(Invocation invocation, Table table, List<String> columns) {
+                List<ColumnStatistic> stats = invocation.proceed(table, columns);
+                List<ColumnStatistic> result = new ArrayList<>(stats);
+                for (int i = 0; i < columns.size(); i++) {
+                    if (columns.get(i).equalsIgnoreCase("p_partkey")) {
+                        result.set(i, new ColumnStatistic(1, 200000, 0, 8, 50000));
+                    }
+                }
+                return result;
+            }
+        };
+
         String sql = "select * from lineitem right anti join [shuffle] part on lineitem.l_partkey = part.p_partkey";
         String plan = getVerboseExplain(sql);
         assertContains(plan, "  4:HASH JOIN\n" +
