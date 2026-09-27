@@ -514,6 +514,8 @@ enum InternalServiceVersion {
 struct TAdaptiveDopParam {
   1: optional i64 max_block_rows_per_driver_seq
   2: optional i64 max_output_amplification_factor
+  // Zero or absent preserves the row-only buffering policy.
+  3: optional i64 max_block_bytes_per_driver_seq
 }
 
 struct TPredicateTreeParams {

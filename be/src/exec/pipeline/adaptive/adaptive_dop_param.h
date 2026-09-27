@@ -20,6 +20,7 @@ namespace starrocks::pipeline {
 
 struct AdaptiveDopParam {
     size_t max_block_rows_per_driver_seq = 0;
+    size_t max_block_bytes_per_driver_seq = 0; // Zero disables the byte threshold (old FE compatibility).
     int64_t max_output_amplification_factor = 0;
 };
 

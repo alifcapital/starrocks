@@ -1124,6 +1124,14 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
 * **Data type**: boolean
 * **Introduced in**: v3.2.0
 
+### runtime_adaptive_dop_max_block_bytes_per_driver_seq
+
+* **Scope**: Global, Session
+* **Default**: `16777216` (16 MiB)
+* **Data type**: Long
+* **Range**: Non-negative integers; `0` disables the byte threshold.
+* **Description**: Limits initial buffering for runtime adaptive DOP by the retained memory of chunks, in addition to the row threshold. Each adaptive buffer uses this value multiplied by its maximum DOP. Reaching either threshold starts downstream execution with the upstream DOP unchanged. DOP can be reduced only when the input ends before both thresholds are reached. For example, DOP 8 gives a 128 MiB byte threshold. This is a switching threshold, not a hard memory cap: in-flight chunks may exceed it, and separate adaptive buffers have separate budgets. Only effective when runtime adaptive DOP is used. An older FE that omits this parameter retains the row-only policy.
+
 ### enable_scan_datacache
 
 * **Description**: Specifies whether to enable the Data Cache feature. After this feature is enabled, StarRocks caches hot data read from external storage systems into blocks, which accelerates queries and analysis. For more information, see [Data Cache](../data_source/data_cache/data_cache.md). In versions prior to 3.2, this variable was named as `enable_scan_block_cache`.

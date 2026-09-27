@@ -174,6 +174,10 @@ Status FragmentExecutor::_prepare_fragment_ctx(const UnifiedExecPlanFragmentPara
         auto& adaptive_dop_param = _fragment_ctx->adaptive_dop_param();
         adaptive_dop_param.max_block_rows_per_driver_seq = tadaptive_dop_param.max_block_rows_per_driver_seq;
         adaptive_dop_param.max_output_amplification_factor = tadaptive_dop_param.max_output_amplification_factor;
+        if (tadaptive_dop_param.__isset.max_block_bytes_per_driver_seq &&
+            tadaptive_dop_param.max_block_bytes_per_driver_seq > 0) {
+            adaptive_dop_param.max_block_bytes_per_driver_seq = tadaptive_dop_param.max_block_bytes_per_driver_seq;
+        }
     }
 
     if (request.common().__isset.pred_tree_params) {

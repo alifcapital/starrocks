@@ -171,6 +171,8 @@ public class TFragmentInstanceFactory {
                 }
                 if (fragment.isUseRuntimeAdaptiveDop()) {
                     result.setAdaptive_dop_param(new TAdaptiveDopParam());
+                    result.adaptive_dop_param.setMax_block_bytes_per_driver_seq(
+                            sessionVariable.getAdaptiveDopMaxBlockBytesPerDriverSeq());
                     result.adaptive_dop_param.setMax_block_rows_per_driver_seq(
                             sessionVariable.getAdaptiveDopMaxBlockRowsPerDriverSeq());
                     result.adaptive_dop_param.setMax_output_amplification_factor(

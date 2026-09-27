@@ -14,6 +14,7 @@
 
 #include "exec/pipeline/adaptive/collect_stats_context.h"
 
+#include <limits>
 #include <utility>
 
 #include "column/chunk.h"
@@ -25,6 +26,14 @@
 namespace starrocks::pipeline {
 
 /// BlockState.
+BlockState::BlockState(CollectStatsContext* const ctx)
+        : CollectStatsState(ctx),
+          _max_buffer_rows(ctx->_max_block_rows_per_driver_seq * ctx->_max_dop),
+          _max_buffer_bytes(ctx->_max_dop > 0 && ctx->_max_block_bytes_per_driver_seq >
+                                                         std::numeric_limits<size_t>::max() / ctx->_max_dop
+                                    ? std::numeric_limits<size_t>::max()
+                                    : ctx->_max_block_bytes_per_driver_seq * ctx->_max_dop) {}
+
 std::string BlockState::name() const {
     return "Block";
 }
@@ -34,12 +43,15 @@ bool BlockState::need_input(int32_t driver_seq) const {
 }
 
 Status BlockState::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
-    size_t num_chunk_rows = chunk->num_rows();
+    const size_t num_chunk_rows = chunk->num_rows();
+    const size_t num_chunk_bytes = _max_buffer_bytes > 0 ? chunk->memory_usage() : 0;
     _ctx->_buffer_chunk_queue(driver_seq).emplace(std::move(chunk));
-    size_t prev_num_rows = _num_rows.fetch_add(num_chunk_rows);
+    const size_t num_rows = _num_rows.fetch_add(num_chunk_rows) + num_chunk_rows;
+    const size_t num_bytes = _max_buffer_bytes > 0 ? _num_bytes.fetch_add(num_chunk_bytes) + num_chunk_bytes : 0;
 
-    // It receives _max_buffer_rows rows after this push_chunk, so transform to PASSTHROUGH state.
-    if (prev_num_rows < _max_buffer_rows && prev_num_rows + num_chunk_rows >= _max_buffer_rows) {
+    // This is a switching threshold, not a hard allocation limit: in-flight chunks may overshoot it.
+    if ((num_rows >= _max_buffer_rows || (_max_buffer_bytes > 0 && num_bytes >= _max_buffer_bytes)) &&
+        !_transition_started.exchange(true)) {
         _ctx->_transform_state(CollectStatsStateEnum::PASSTHROUGH, _ctx->_upstream_dop);
     }
     return Status::OK();
@@ -56,6 +68,10 @@ StatusOr<ChunkPtr> BlockState::pull_chunk(int32_t driver_seq) {
 Status BlockState::set_finishing(int32_t driver_seq) {
     int num_finished_seqs = ++_num_finished_seqs;
     if (num_finished_seqs != _ctx->_upstream_dop) {
+        return Status::OK();
+    }
+
+    if (_transition_started.exchange(true)) {
         return Status::OK();
     }
 
@@ -230,6 +246,7 @@ CollectStatsContext::CollectStatsContext(RuntimeState* const runtime_state, size
         : _max_dop(max_dop),
           _max_block_rows_per_driver_seq(param.max_block_rows_per_driver_seq > 0 ? param.max_block_rows_per_driver_seq
                                                                                  : 1),
+          _max_block_bytes_per_driver_seq(param.max_block_bytes_per_driver_seq),
           _max_output_amplification_factor(param.max_output_amplification_factor),
           _buffer_chunk_queue_per_driver_seq(max_dop),
           _is_finishing_per_driver_seq(max_dop),

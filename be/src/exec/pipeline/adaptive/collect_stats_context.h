@@ -44,11 +44,11 @@ enum class CollectStatsStateEnum { BLOCK = 0, PASSTHROUGH, ROUND_ROBIN };
 /// CsSink starts from BlockState and transforms to PassthroughState or RoundRobinState conditionally.
 /// - BlockState blocks the input data and doesn't push it to NextOp.
 /// - PassthroughState is transformed to,
-///   when BlockState receives max_block_rows_per_driver_seq*DOP rows and SourceOp hasn't been not EOS.
+///   when buffered rows or bytes reach their per-driver threshold multiplied by DOP.
 ///   - It doesn't adjust DOP of pipeline#2,
 ///   - and passes chunks from the i-th pipeline#1 driver to the i-th pipeline#2 driver.
 /// - RoundRobinState is transformed to,
-///   when SourceOp has been EOS before BlockState receives max_block_rows_per_driver_seq*DOP rows.
+///   when SourceOp reaches EOS before either buffering threshold is reached.
 ///   - It adjust DOP of pipeline#2 to compute_max_le_power2(num_rows/max_block_rows_per_driver_seq),
 ///   - and passes chunks from the i-th pipeline#1 driver to the j-th pipeline#2 driver, where j=i%new_dop.
 class CollectStatsContext final : public ContextWithDependency {
@@ -104,6 +104,7 @@ private:
     size_t _downstream_dop = 0;
 
     const size_t _max_block_rows_per_driver_seq;
+    const size_t _max_block_bytes_per_driver_seq;
     const int64_t _max_output_amplification_factor;
 
     std::vector<BufferChunkQueue> _buffer_chunk_queue_per_driver_seq;
@@ -137,8 +138,7 @@ protected:
 
 class BlockState final : public CollectStatsState {
 public:
-    BlockState(CollectStatsContext* const ctx)
-            : CollectStatsState(ctx), _max_buffer_rows(ctx->_max_block_rows_per_driver_seq * ctx->_max_dop) {}
+    BlockState(CollectStatsContext* const ctx);
     ~BlockState() override = default;
 
     std::string name() const override;
@@ -156,6 +156,10 @@ private:
     std::atomic<int> _num_finished_seqs = 0;
     std::atomic<size_t> _num_rows = 0;
     const size_t _max_buffer_rows;
+    const size_t _max_buffer_bytes;
+    std::atomic<size_t> _num_bytes = 0;
+    // Row and byte thresholds may be crossed by different drivers concurrently. Publish only once.
+    std::atomic<bool> _transition_started = false;
 };
 
 class PassthroughState final : public CollectStatsState {

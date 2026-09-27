@@ -372,6 +372,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_PIPELINE = "enable_pipeline";
 
     public static final String ENABLE_RUNTIME_ADAPTIVE_DOP = "enable_runtime_adaptive_dop";
+    public static final String ADAPTIVE_DOP_MAX_BLOCK_BYTES_PER_DRIVER_SEQ =
+            "runtime_adaptive_dop_max_block_bytes_per_driver_seq";
     public static final String ADAPTIVE_DOP_MAX_BLOCK_ROWS_PER_DRIVER_SEQ =
             "runtime_adaptive_dop_max_block_rows_per_driver_seq";
     public static final String ADAPTIVE_DOP_MAX_OUTPUT_AMPLIFICATION_FACTOR =
@@ -1264,6 +1266,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VariableMgr.VarAttr(name = ENABLE_RUNTIME_ADAPTIVE_DOP)
     private boolean enableRuntimeAdaptiveDop = false;
+
+    // Stop buffering and retain upstream DOP when retained chunks reach this budget per driver.
+    @VariableMgr.VarAttr(name = ADAPTIVE_DOP_MAX_BLOCK_BYTES_PER_DRIVER_SEQ)
+    private long adaptiveDopMaxBlockBytesPerDriverSeq = 16L * 1024 * 1024;
 
     @VariableMgr.VarAttr(name = ADAPTIVE_DOP_MAX_BLOCK_ROWS_PER_DRIVER_SEQ, flag = VariableMgr.INVISIBLE)
     private long adaptiveDopMaxBlockRowsPerDriverSeq = 4096L * 4;
@@ -4721,6 +4727,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isEnableRuntimeAdaptiveDop() {
         return enablePipelineEngine && enableRuntimeAdaptiveDop;
+    }
+
+    public long getAdaptiveDopMaxBlockBytesPerDriverSeq() {
+        return adaptiveDopMaxBlockBytesPerDriverSeq;
     }
 
     public long getAdaptiveDopMaxBlockRowsPerDriverSeq() {
