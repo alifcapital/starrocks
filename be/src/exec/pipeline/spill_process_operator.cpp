@@ -16,7 +16,6 @@
 
 #include <memory>
 
-#include "exec/pipeline/context_with_dependency.h"
 #include "exec/pipeline/spill_process_channel.h"
 #include "exec/spill/executor.h"
 #include "exec/spill/spiller.hpp"
@@ -25,19 +24,7 @@ namespace starrocks::pipeline {
 
 Status SpillProcessOperator::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(SourceOperator::prepare(state));
-    // Lifetime anchor: hold a ref on the spilling context (hash joiner / aggregator) for the whole
-    // spill-processing lifetime, so async spill tasks (which reference context-owned state such as the
-    // build chunks / hash map) never dereference it after the owning operators free it on cancel/close.
-    if (auto* context = _channel->guarded_context(); context != nullptr) {
-        context->ref();
-    }
-    // The pump sleeps INPUT_EMPTY on has_output() (has_task && !is_full), so it belongs on the spiller's
-    // source list: flush completion notifies both lists, and the channel handshake (enqueue / set_finishing)
-    // wakes the source side. The spiller is set on the channel before prepare (create() wired it). The gate
-    // for poller mode is inside subscribe_source.
-    if (_channel->spiller() != nullptr) {
-        _channel->spiller()->observable().subscribe_source(state, observer());
-    }
+    _channel->prepare_source(state, observer());
     return Status::OK();
 }
 
@@ -65,7 +52,7 @@ std::optional<BlockReason> SpillProcessOperator::_blocked_on() const {
     if (!_channel->has_task()) {
         return named<BlockReason::WAIT_CHANNEL, kCoveredWakeups>();
     }
-    if (_channel->spiller() != nullptr && _channel->spiller()->is_full()) {
+    if (auto spiller = _channel->spiller(); spiller != nullptr && spiller->is_full()) {
         return named<BlockReason::WAIT_RESTORE, kCoveredWakeups>();
     }
     return std::nullopt;
@@ -81,12 +68,7 @@ Status SpillProcessOperator::set_finished(RuntimeState* state) {
 }
 
 void SpillProcessOperator::close(RuntimeState* state) {
-    _channel->close();
-    // Release the lifetime-anchor ref taken in prepare(); the channel is drained by now, so no spill
-    // task will dereference the context after this (which may be the last unref -> context close()).
-    if (auto* context = _channel->guarded_context(); context != nullptr) {
-        context->unref(state);
-    }
+    _channel->close(state);
     SourceOperator::close(state);
 }
 
@@ -106,7 +88,7 @@ StatusOr<ChunkPtr> SpillProcessOperator::pull_chunk(RuntimeState* state) {
     if (chunk_st.status().ok() && !state->is_cancelled()) {
         auto chunk = chunk_st.value();
         if (chunk != nullptr && !chunk->is_empty()) {
-            auto& spiller = _channel->spiller();
+            auto spiller = _channel->spiller();
             RETURN_IF_ERROR(
                     spiller->spill(state, std::move(chunk_st.value()), TRACKER_WITH_SPILLER_GUARD(state, spiller)));
         }

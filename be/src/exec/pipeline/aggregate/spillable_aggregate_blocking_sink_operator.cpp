@@ -363,7 +363,7 @@ OperatorPtr SpillableAggregateBlockingSinkOperatorFactory::create(int32_t degree
     auto spill_channel = _spill_channel_factory->get_or_create(driver_sequence);
 
     spill_channel->set_spiller(spiller);
-    // Anchor the spill channel to the aggregator's lifetime (see SpillProcessOperator prepare/close).
+    // Anchor the spill channel to the aggregator's lifetime (the channel acquires its own ref).
     spill_channel->set_guarded_context(aggregator.get());
     aggregator->set_spiller(spiller);
     aggregator->set_spill_channel(std::move(spill_channel));
