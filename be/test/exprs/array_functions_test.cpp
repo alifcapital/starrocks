@@ -4404,13 +4404,13 @@ TEST_F(ArrayFunctionsTest, array_join_string) {
     Slice null_str("NULL");
     auto null_column = ColumnHelper::create_const_column<LogicalType::TYPE_VARCHAR>(null_str, 3);
 
-    auto dest_column = ArrayJoin::process(nullptr, {src_column, sep_column});
+    auto dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("352__66__4325"), dest_column->get(0).get_slice());
     ASSERT_EQ(Slice("235__99__8__43251"), dest_column->get(1).get_slice());
     ASSERT_EQ(Slice("44__33__22__112"), dest_column->get(2).get_slice());
 
-    dest_column = ArrayJoin::process(nullptr, {src_column, sep_column, null_column});
+    dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column, null_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("352__66__4325"), dest_column->get(0).get_slice());
     ASSERT_EQ(Slice("235__99__8__43251"), dest_column->get(1).get_slice());
@@ -4446,13 +4446,13 @@ TEST_F(ArrayFunctionsTest, array_join_nullable_elements) {
     Slice null_str("NULL");
     auto null_column = ColumnHelper::create_const_column<LogicalType::TYPE_VARCHAR>(null_str, 3);
 
-    auto dest_column = ArrayJoin::process(nullptr, {src_column, sep_column});
+    auto dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("55__333__6666"), dest_column->get(0).get_slice());
     ASSERT_EQ(Slice("22__333"), dest_column->get(1).get_slice());
     ASSERT_EQ(Slice(""), dest_column->get(2).get_slice());
 
-    dest_column = ArrayJoin::process(nullptr, {src_column, sep_column, null_column});
+    dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column, null_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("55__NULL__333__6666"), dest_column->get(0).get_slice());
     ASSERT_EQ(Slice("22__333__NULL__NULL"), dest_column->get(1).get_slice());
@@ -4488,13 +4488,13 @@ TEST_F(ArrayFunctionsTest, array_join_nullable_array) {
     Slice null_str("NULL");
     auto null_column = ColumnHelper::create_const_column<LogicalType::TYPE_VARCHAR>(null_str, 3);
 
-    auto dest_column = ArrayJoin::process(nullptr, {src_column, sep_column});
+    auto dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("5__33__666"), dest_column->get(0).get_slice());
     ASSERT_TRUE(dest_column->get(1).is_null());
     ASSERT_EQ(Slice(""), dest_column->get(2).get_slice());
 
-    dest_column = ArrayJoin::process(nullptr, {src_column, sep_column, null_column});
+    dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column, null_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_EQ(Slice("5__NULL__33__666"), dest_column->get(0).get_slice());
     ASSERT_TRUE(dest_column->get(1).is_null());
@@ -4527,13 +4527,13 @@ TEST_F(ArrayFunctionsTest, array_join_only_null) {
     Slice null_str("NULL");
     auto null_column = ColumnHelper::create_const_column<LogicalType::TYPE_VARCHAR>(null_str, 3);
 
-    auto dest_column = ArrayJoin::process(nullptr, {src_column, sep_column});
+    auto dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_TRUE(dest_column->get(0).is_null());
     ASSERT_TRUE(dest_column->get(1).is_null());
     ASSERT_TRUE(dest_column->get(2).is_null());
 
-    dest_column = ArrayJoin::process(nullptr, {src_column, sep_column, null_column});
+    dest_column = ArrayJoin::process(nullptr, Columns{src_column, sep_column, null_column});
     ASSERT_EQ(dest_column->size(), 3);
     ASSERT_TRUE(dest_column->get(0).is_null());
     ASSERT_TRUE(dest_column->get(1).is_null());
@@ -5492,7 +5492,7 @@ TEST_F(ArrayFunctionsTest, array_match_nullable) {
     src_column->append_datum(DatumArray{(int8_t)0, Datum()});
     src_column->append_datum(DatumArray{});
 
-    auto dest_column = ArrayMatch<true>::process(nullptr, {src_column});
+    auto dest_column = ArrayMatch<true>::process(nullptr, Columns{src_column});
     ASSERT_TRUE(dest_column->is_nullable());
     ASSERT_EQ(dest_column->size(), 7);
     ASSERT_TRUE(dest_column->get(0).get_int8());
@@ -5503,7 +5503,7 @@ TEST_F(ArrayFunctionsTest, array_match_nullable) {
     ASSERT_TRUE(dest_column->get(5).is_null());
     ASSERT_FALSE(dest_column->get(6).get_int8());
 
-    dest_column = ArrayMatch<false>::process(nullptr, {src_column});
+    dest_column = ArrayMatch<false>::process(nullptr, Columns{src_column});
     ASSERT_TRUE(dest_column->is_nullable());
     ASSERT_EQ(dest_column->size(), 7);
     ASSERT_FALSE(dest_column->get(0).get_int8());
@@ -5525,7 +5525,7 @@ TEST_F(ArrayFunctionsTest, array_match_not_null) {
     src_column->append_datum(DatumArray{(int8_t)0, Datum()});
     src_column->append_datum(DatumArray{});
 
-    auto dest_column = ArrayMatch<true>::process(nullptr, {src_column});
+    auto dest_column = ArrayMatch<true>::process(nullptr, Columns{src_column});
     ASSERT_TRUE(dest_column->is_nullable());
     ASSERT_EQ(dest_column->size(), 7);
     ASSERT_TRUE(dest_column->get(0).get_int8());
@@ -5536,7 +5536,7 @@ TEST_F(ArrayFunctionsTest, array_match_not_null) {
     ASSERT_TRUE(dest_column->get(5).is_null());
     ASSERT_FALSE(dest_column->get(6).get_int8());
 
-    dest_column = ArrayMatch<false>::process(nullptr, {src_column});
+    dest_column = ArrayMatch<false>::process(nullptr, Columns{src_column});
     ASSERT_TRUE(dest_column->is_nullable());
     ASSERT_EQ(dest_column->size(), 7);
     ASSERT_FALSE(dest_column->get(0).get_int8());
@@ -5552,11 +5552,11 @@ TEST_F(ArrayFunctionsTest, array_match_only_null) {
     // test only null
     {
         auto src_column = ColumnHelper::create_const_null_column(3);
-        auto dest_column = ArrayMatch<false>::process(nullptr, {src_column});
+        auto dest_column = ArrayMatch<false>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_TRUE(dest_column->only_null());
 
-        dest_column = ArrayMatch<true>::process(nullptr, {src_column});
+        dest_column = ArrayMatch<true>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_TRUE(dest_column->only_null());
     }
@@ -5565,11 +5565,11 @@ TEST_F(ArrayFunctionsTest, array_match_only_null) {
         auto src_column = ColumnHelper::create_column(TYPE_ARRAY_BOOLEAN, false);
         src_column->append_datum(DatumArray{(uint8) false, (uint8) true});
         src_column = ConstColumn::create(std::move(src_column), 3);
-        auto dest_column = ArrayMatch<false>::process(nullptr, {src_column});
+        auto dest_column = ArrayMatch<false>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_FALSE(dest_column->get(0).get_int8());
 
-        dest_column = ArrayMatch<true>::process(nullptr, {src_column});
+        dest_column = ArrayMatch<true>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_TRUE(dest_column->get(0).get_int8());
     }
@@ -5578,11 +5578,11 @@ TEST_F(ArrayFunctionsTest, array_match_only_null) {
         auto src_column = ColumnHelper::create_column(TYPE_ARRAY_BOOLEAN, false);
         src_column->append_datum(DatumArray{});
         src_column = ConstColumn::create(std::move(src_column), 3);
-        auto dest_column = ArrayMatch<true>::process(nullptr, {src_column});
+        auto dest_column = ArrayMatch<true>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_FALSE(dest_column->get(0).get_int8());
 
-        dest_column = ArrayMatch<false>::process(nullptr, {src_column});
+        dest_column = ArrayMatch<false>::process(nullptr, Columns{src_column});
         ASSERT_EQ(dest_column->size(), 3);
         ASSERT_TRUE(dest_column->get(0).get_int8());
     }
