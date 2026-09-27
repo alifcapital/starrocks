@@ -70,6 +70,7 @@ import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.ScanOperatorPredicates;
+import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.sql.optimizer.operator.UKFKConstraints;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAssertOneRowOperator;
@@ -287,7 +288,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         }
 
         Statistics.Builder statisticsBuilder = Statistics.buildFrom(statistics);
-        if (limit != Operator.DEFAULT_LIMIT && limit < statistics.getOutputRowCount()) {
+        if (!isPeerPreservingAggTopN(node) && limit != Operator.DEFAULT_LIMIT && limit < statistics.getOutputRowCount()) {
             statisticsBuilder.setOutputRowCount(limit);
         }
         // CTE consumer has children but the children do not estimate the statistics, so here need to filter null
@@ -2259,6 +2260,18 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         return computeTopNNode(context, node);
     }
 
+    // A pushed rank limit bounds rank, not cardinality. Keeping the input estimate is
+    // conservative when conditional group NDV at the boundary is unavailable.
+    private static boolean isPeerPreservingAggTopN(Operator node) {
+        if (node instanceof LogicalTopNOperator topn) {
+            return topn.isTopNPushDownAgg() && topn.getTopNType() == TopNType.RANK;
+        }
+        if (node instanceof PhysicalTopNOperator topn) {
+            return topn.isTopNPushDownAgg() && topn.getTopNType() == TopNType.RANK;
+        }
+        return false;
+    }
+
     private Void computeTopNNode(ExpressionContext context, Operator node) {
         Preconditions.checkState(context.arity() == 1);
 
@@ -2301,7 +2314,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                                     inputStatistics.getOutputRowCount())));
         }
 
-        if (isTopNPushDownAgg) {
+        if (isTopNPushDownAgg && !isPeerPreservingAggTopN(node)) {
             double outputRowCount = inputStatistics.getOutputRowCount();
             if (limit != Operator.DEFAULT_LIMIT) {
                 double effectiveLimit = Math.max(1D, (double) limit + (double) offset);

@@ -216,7 +216,10 @@ struct AggTopRuntimeFilterBuilderImpl {
                 }
             }
         }
-        if (heap_builder->size() > 0) {
+        // NULL group keys are not inserted into this heap. The aggregate hash table can
+        // contain K groups while this heap still has fewer than K candidates. Publishing
+        // a bound then would discard later non-NULL groups needed by NULLS LAST.
+        if (limit > 0 && heap_builder->size() >= limit) {
             down_cast<MinMaxRuntimeFilter<ltype>*>(rf)->template update_min_max<!isAsc>(heap_builder->top());
         }
     }
@@ -273,7 +276,10 @@ struct AggTopNRuntimeFilterUpdaterImpl {
                 }
             }
         }
-        if (heap_builder->size() > 0) {
+        // NULL group keys are not inserted into this heap. The aggregate hash table can
+        // contain K groups while this heap still has fewer than K candidates. Publishing
+        // a bound then would discard later non-NULL groups needed by NULLS LAST.
+        if (limit > 0 && heap_builder->size() >= limit) {
             down_cast<MinMaxRuntimeFilter<ltype>*>(rf)->template update_min_max<!isAsc>(heap_builder->top());
         }
     }

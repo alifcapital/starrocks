@@ -1,4 +1,5 @@
 set(EXEC_FILES
+        ./exec/agg_topn_runtime_filter_test.cpp
         ./connector/footer_prefetch_task_test.cpp
         ./exec/pipeline/scan/footer_prefetch_state_test.cpp
         ./exec/pipeline/scan/warm_slot_reservation_test.cpp
