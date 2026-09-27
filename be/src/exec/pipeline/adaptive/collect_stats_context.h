@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <mutex>
+
 #include "column/vectorized_fwd.h"
 #include "exec/pipeline/adaptive/adaptive_fwd.h"
 #include "exec/pipeline/context_with_dependency.h"
@@ -27,6 +29,8 @@ template <typename T>
 class StatusOr;
 
 namespace pipeline {
+
+class PipelineObserver;
 
 enum class CollectStatsStateEnum { BLOCK = 0, PASSTHROUGH, ROUND_ROBIN };
 
@@ -60,6 +64,11 @@ public:
 
     void close(RuntimeState* state) override;
 
+    // Drivers are prepared at different times. Fixed per-driver atomic slots allow late
+    // subscription while upstream drivers are already producing/finishing.
+    void attach_sink_observer(int32_t driver_seq, PipelineObserver* observer);
+    void attach_source_observer(int32_t driver_seq, PipelineObserver* observer);
+
     bool need_input(int32_t driver_seq) const;
     bool has_output(int32_t driver_seq) const;
     bool is_downstream_finished(int32_t driver_seq) const;
@@ -81,6 +90,9 @@ public:
     EventPtr blocking_event() const { return _blocking_event; }
 
 private:
+    void _notify_source(int32_t driver_seq);
+    void _notify_sink(int32_t driver_seq);
+
     using BufferChunkQueue = std::queue<ChunkPtr>;
 
     CollectStatsStateRawPtr _get_state(CollectStatsStateEnum state) const;
@@ -108,10 +120,15 @@ private:
     const int64_t _max_output_amplification_factor;
 
     std::vector<BufferChunkQueue> _buffer_chunk_queue_per_driver_seq;
+    // Another producer may publish PASSTHROUGH while this driver's last BLOCK push
+    // is still appending its initial queue. Protect that handoff independently per driver.
+    mutable std::vector<std::mutex> _buffer_mutex_per_driver_seq;
+    std::vector<std::atomic<PipelineObserver*>> _source_observers;
+    std::vector<std::atomic<PipelineObserver*>> _sink_observers;
     // Retained bytes across both the initial buffer and the streaming queue.
     std::vector<std::atomic<size_t>> _buffer_bytes_per_driver_seq;
     std::vector<std::atomic<uint8_t>> _is_finishing_per_driver_seq;
-    std::vector<uint8_t> _is_finished_per_driver_seq;
+    std::vector<std::atomic<uint8_t>> _is_finished_per_driver_seq;
 
     RuntimeState* const _runtime_state;
 

@@ -22,6 +22,7 @@
 #include "exec/pipeline/adaptive/adaptive_dop_param.h"
 #include "exec/pipeline/adaptive/event.h"
 #include "exec/pipeline/adaptive/utils.h"
+#include "exec/pipeline/schedule/observer.h"
 
 namespace starrocks::pipeline {
 
@@ -48,7 +49,10 @@ Status BlockState::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
     if (_max_buffer_bytes > 0) {
         _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_add(num_chunk_bytes, std::memory_order_relaxed);
     }
-    _ctx->_buffer_chunk_queue(driver_seq).emplace(std::move(chunk));
+    {
+        std::lock_guard lock(_ctx->_buffer_mutex_per_driver_seq[driver_seq]);
+        _ctx->_buffer_chunk_queue(driver_seq).emplace(std::move(chunk));
+    }
     const size_t num_rows = _num_rows.fetch_add(num_chunk_rows) + num_chunk_rows;
     const size_t num_bytes = _max_buffer_bytes > 0 ? _num_bytes.fetch_add(num_chunk_bytes) + num_chunk_bytes : 0;
 
@@ -129,9 +133,11 @@ Status PassthroughState::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
 }
 
 bool PassthroughState::has_output(int32_t driver_seq) const {
-    const auto& buffer_chunk_queue = _ctx->_buffer_chunk_queue(driver_seq);
-    if (!buffer_chunk_queue.empty()) {
-        return true;
+    {
+        std::lock_guard lock(_ctx->_buffer_mutex_per_driver_seq[driver_seq]);
+        if (!_ctx->_buffer_chunk_queue(driver_seq).empty()) {
+            return true;
+        }
     }
 
     size_t num_chunks = _in_chunk_queue_per_driver_seq[driver_seq].queue.size_approx();
@@ -159,6 +165,7 @@ bool PassthroughState::has_output(int32_t driver_seq) const {
 }
 
 StatusOr<ChunkPtr> PassthroughState::pull_chunk(int32_t driver_seq) {
+    std::unique_lock lock(_ctx->_buffer_mutex_per_driver_seq[driver_seq]);
     auto& buffer_chunk_queue = _ctx->_buffer_chunk_queue(driver_seq);
     if (!buffer_chunk_queue.empty()) {
         auto chunk = std::move(buffer_chunk_queue.front());
@@ -169,6 +176,7 @@ StatusOr<ChunkPtr> PassthroughState::pull_chunk(int32_t driver_seq) {
         return chunk;
     }
 
+    lock.unlock();
     auto& passthrough_chunk_queue = _in_chunk_queue_per_driver_seq[driver_seq].queue;
     ChunkPtr chunk = nullptr;
     if (UNLIKELY(!passthrough_chunk_queue.try_dequeue(chunk))) {
@@ -189,6 +197,7 @@ bool PassthroughState::is_downstream_finished(int32_t driver_seq) const {
         return false;
     }
 
+    std::lock_guard lock(_ctx->_buffer_mutex_per_driver_seq[driver_seq]);
     const auto& buffer_chunk_queue = _ctx->_buffer_chunk_queue(driver_seq);
     const auto& passthrough_chunk_queue = _in_chunk_queue_per_driver_seq[driver_seq].queue;
     // _is_finishing_per_driver_seq is set to true using memory_order_release after all the chunks are enqueued.
@@ -271,6 +280,9 @@ CollectStatsContext::CollectStatsContext(RuntimeState* const runtime_state, size
           _max_block_bytes_per_driver_seq(param.max_block_bytes_per_driver_seq),
           _max_output_amplification_factor(param.max_output_amplification_factor),
           _buffer_chunk_queue_per_driver_seq(max_dop),
+          _buffer_mutex_per_driver_seq(max_dop),
+          _source_observers(max_dop),
+          _sink_observers(max_dop),
           _buffer_bytes_per_driver_seq(max_dop),
           _is_finishing_per_driver_seq(max_dop),
           _is_finished_per_driver_seq(max_dop),
@@ -280,6 +292,32 @@ CollectStatsContext::CollectStatsContext(RuntimeState* const runtime_state, size
     _state_payloads[CollectStatsStateEnum::PASSTHROUGH] = std::make_unique<PassthroughState>(this);
     _state_payloads[CollectStatsStateEnum::ROUND_ROBIN] = std::make_unique<RoundRobinState>(this);
     _set_state(CollectStatsStateEnum::BLOCK);
+}
+
+void CollectStatsContext::attach_sink_observer(int32_t driver_seq, PipelineObserver* observer) {
+    if (!_runtime_state->enable_event_scheduler()) return;
+    DCHECK(observer != nullptr);
+    _sink_observers[driver_seq].store(observer, std::memory_order_release);
+}
+
+void CollectStatsContext::attach_source_observer(int32_t driver_seq, PipelineObserver* observer) {
+    if (!_runtime_state->enable_event_scheduler()) return;
+    DCHECK(observer != nullptr);
+    _source_observers[driver_seq].store(observer, std::memory_order_release);
+    // Driver submission checks readiness after prepare; notifications before this
+    // subscription do not have to be replayed or invoke a partially prepared driver.
+}
+
+void CollectStatsContext::_notify_source(int32_t driver_seq) {
+    if (auto* observer = _source_observers[driver_seq].load(std::memory_order_acquire)) {
+        observer->source_trigger();
+    }
+}
+
+void CollectStatsContext::_notify_sink(int32_t driver_seq) {
+    if (auto* observer = _sink_observers[driver_seq].load(std::memory_order_acquire)) {
+        observer->sink_trigger();
+    }
 }
 
 std::string CollectStatsContext::readable_state() const {
@@ -293,6 +331,7 @@ bool CollectStatsContext::need_input(int32_t driver_seq) const {
 }
 
 Status CollectStatsContext::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
+    DeferOp notify([this, driver_seq] { _notify_source(driver_seq); });
     return _state_ref()->push_chunk(driver_seq, std::move(chunk));
 }
 
@@ -301,16 +340,19 @@ bool CollectStatsContext::has_output(int32_t driver_seq) const {
 }
 
 StatusOr<ChunkPtr> CollectStatsContext::pull_chunk(int32_t driver_seq) {
+    DeferOp notify([this, driver_seq] { _notify_sink(driver_seq); });
     return _state_ref()->pull_chunk(driver_seq);
 }
 
 Status CollectStatsContext::set_finishing(int32_t driver_seq) {
+    DeferOp notify([this, driver_seq] { _notify_source(driver_seq); });
     _is_finishing_per_driver_seq[driver_seq] = true;
     return _state_ref()->set_finishing(driver_seq);
 }
 
 Status CollectStatsContext::set_finished(int32_t driver_seq) {
     _is_finished_per_driver_seq[driver_seq] = true;
+    _notify_sink(driver_seq);
     return Status::OK();
 }
 

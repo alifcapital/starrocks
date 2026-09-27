@@ -25,6 +25,7 @@ public:
                                const int32_t driver_sequence, CollectStatsContextRawPtr ctx);
     ~CollectStatsSourceOperator() override = default;
 
+    Status prepare(RuntimeState* state) override;
     void close(RuntimeState* state) override;
 
     bool has_output() const override;
@@ -45,6 +46,8 @@ class CollectStatsSourceOperatorFactory final : public SourceOperatorFactory {
 public:
     CollectStatsSourceOperatorFactory(int32_t id, int32_t plan_node_id, CollectStatsContextPtr ctx);
     ~CollectStatsSourceOperatorFactory() override = default;
+
+    bool support_event_scheduler() const override { return true; }
 
     Status prepare(RuntimeState* state) override;
     void close(RuntimeState* state) override;

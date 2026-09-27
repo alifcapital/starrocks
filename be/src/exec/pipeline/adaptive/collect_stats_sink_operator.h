@@ -46,6 +46,8 @@ public:
     CollectStatsSinkOperatorFactory(int32_t id, int32_t plan_node_id, CollectStatsContextPtr ctx);
     ~CollectStatsSinkOperatorFactory() override = default;
 
+    bool support_event_scheduler() const override { return true; }
+
     OperatorPtr create(int32_t degree_of_parallelism, int32_t driver_sequence) override;
 
 private:

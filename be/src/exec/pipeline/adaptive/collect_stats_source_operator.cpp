@@ -26,6 +26,12 @@ CollectStatsSourceOperator::CollectStatsSourceOperator(OperatorFactory* factory,
                                                        const int32_t driver_sequence, CollectStatsContextRawPtr ctx)
         : SourceOperator(factory, id, "collect_stats_source", plan_node_id, true, driver_sequence), _ctx(ctx) {}
 
+Status CollectStatsSourceOperator::prepare(RuntimeState* state) {
+    RETURN_IF_ERROR(SourceOperator::prepare(state));
+    _ctx->attach_source_observer(_driver_sequence, observer());
+    return Status::OK();
+}
+
 void CollectStatsSourceOperator::close(RuntimeState* state) {
     Operator::close(state);
 

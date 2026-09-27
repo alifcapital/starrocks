@@ -27,6 +27,7 @@ Status CollectStatsSinkOperator::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(Operator::prepare(state));
     _ctx->ref();
     _ctx->incr_sinker();
+    _ctx->attach_sink_observer(_driver_sequence, observer());
 
     return Status::OK();
 }

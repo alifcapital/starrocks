@@ -15,11 +15,15 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <thread>
 
 #include "column/binary_column.h"
 #include "exec/pipeline/adaptive/adaptive_dop_param.h"
 #include "exec/pipeline/adaptive/collect_stats_context.h"
+#include "exec/pipeline/adaptive/collect_stats_sink_operator.h"
+#include "exec/pipeline/adaptive/collect_stats_source_operator.h"
+#include "exec/pipeline/schedule/observer.h"
 #include "runtime/runtime_state.h"
 #include "testutil/assert.h"
 
@@ -216,5 +220,173 @@ TEST(AdaptiveDopByteLimitTest, ConcurrentStreamingDrainsByteLimitedQueue) {
     ASSERT_EQ(count, received);
     ASSERT_TRUE(ctx.need_input(0));
     ASSERT_TRUE(ctx.is_downstream_finished(0));
+}
+namespace {
+class AdaptiveCountingObserver final : public PipelineObserver {
+public:
+    AdaptiveCountingObserver() : PipelineObserver(nullptr) {}
+    void source_trigger() override { ++sources; }
+    void sink_trigger() override { ++sinks; }
+    std::atomic<int> sources{0};
+    std::atomic<int> sinks{0};
+};
+} // namespace
+
+TEST(AdaptiveDopByteLimitTest, EventFactoriesAndLateSourceSubscription) {
+    RuntimeState state;
+    state.set_enable_event_scheduler(true);
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 1;
+    auto ctx = std::make_shared<CollectStatsContext>(&state, 1, param);
+    CollectStatsSinkOperatorFactory sink_factory(0, 0, ctx);
+    CollectStatsSourceOperatorFactory source_factory(1, 0, ctx);
+    EXPECT_TRUE(sink_factory.support_event_scheduler());
+    EXPECT_TRUE(source_factory.support_event_scheduler());
+    add_sinkers(*ctx, 1);
+    AdaptiveCountingObserver sink, source;
+    ctx->attach_sink_observer(0, &sink);
+    auto chunk = make_chunk(1, 16);
+    ASSERT_OK(ctx->push_chunk(0, chunk)); // Source does not exist until DOP is chosen.
+    ctx->attach_source_observer(0, &source);
+    ASSERT_TRUE(ctx->has_output(0)); // submit observes data published before subscription.
+    ASSERT_TRUE(ctx->pull_chunk(0).ok());
+    EXPECT_EQ(1, sink.sinks.load());
+    ASSERT_OK(ctx->push_chunk(0, chunk));
+    EXPECT_EQ(1, source.sources.load());
+    ASSERT_OK(ctx->set_finishing(0));
+    EXPECT_EQ(2, source.sources.load());
+    ASSERT_TRUE(ctx->has_output(0)); // EOS releases a batch below the 16-chunk threshold.
+    ASSERT_TRUE(ctx->pull_chunk(0).ok());
+    EXPECT_TRUE(ctx->is_downstream_finished(0));
+    ASSERT_OK(ctx->set_finished(0));
+    EXPECT_EQ(3, sink.sinks.load());
+    EXPECT_TRUE(ctx->is_upstream_finished(0));
+}
+
+TEST(AdaptiveDopByteLimitTest, ByteBackpressureAndEarlyFinishNotifyProducer) {
+    RuntimeState state;
+    state.set_enable_event_scheduler(true);
+    auto chunk = make_chunk(1, 4096);
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 16384;
+    param.max_block_bytes_per_driver_seq = chunk->memory_usage();
+    CollectStatsContext ctx(&state, 1, param);
+    add_sinkers(ctx, 1);
+    AdaptiveCountingObserver sink, source;
+    ctx.attach_sink_observer(0, &sink);
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ctx.attach_source_observer(0, &source);
+    ASSERT_FALSE(ctx.need_input(0));
+    ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    ASSERT_TRUE(ctx.need_input(0));
+    EXPECT_EQ(1, sink.sinks.load());
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_FALSE(ctx.need_input(0));
+    EXPECT_EQ(1, source.sources.load());
+    ASSERT_TRUE(ctx.has_output(0)); // Byte threshold wakes before 16 chunks accumulate.
+    ASSERT_OK(ctx.set_finished(0)); // LIMIT closes a consumer without draining its queue.
+    EXPECT_TRUE(ctx.is_upstream_finished(0));
+    EXPECT_EQ(2, sink.sinks.load());
+}
+
+TEST(AdaptiveDopByteLimitTest, EventSubscriptionRacesWithProducer) {
+    RuntimeState state;
+    state.set_enable_event_scheduler(true);
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 1;
+    for (int i = 0; i < 100; ++i) {
+        CollectStatsContext ctx(&state, 1, param);
+        add_sinkers(ctx, 1);
+        AdaptiveCountingObserver source;
+        auto chunk = make_chunk(1, 8);
+        std::thread producer([&] {
+            ASSERT_OK(ctx.push_chunk(0, chunk));
+            ASSERT_OK(ctx.set_finishing(0));
+        });
+        ctx.attach_source_observer(0, &source);
+        producer.join();
+        ASSERT_TRUE(ctx.has_output(0));
+        ASSERT_TRUE(ctx.pull_chunk(0).ok());
+        ASSERT_TRUE(ctx.is_downstream_finished(0));
+    }
+}
+
+TEST(AdaptiveDopByteLimitTest, PollingDoesNotSubscribeNullObservers) {
+    RuntimeState state;
+    state.set_enable_event_scheduler(false);
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 1;
+    CollectStatsContext ctx(&state, 1, param);
+    add_sinkers(ctx, 1);
+    ctx.attach_source_observer(0, nullptr);
+    ctx.attach_sink_observer(0, nullptr);
+    ASSERT_OK(ctx.push_chunk(0, make_chunk(1, 8)));
+    ASSERT_OK(ctx.set_finishing(0));
+    ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    ASSERT_OK(ctx.set_finished(0));
+}
+namespace {
+class AdaptiveWaitObserver final : public PipelineObserver {
+public:
+    AdaptiveWaitObserver() : PipelineObserver(nullptr) {}
+    void source_trigger() override { signal(); }
+    void sink_trigger() override { signal(); }
+    template <class Predicate>
+    bool wait(Predicate ready) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(10), ready);
+    }
+
+private:
+    void signal() {
+        std::lock_guard lock(mutex);
+        cv.notify_all();
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+};
+} // namespace
+
+TEST(AdaptiveDopByteLimitTest, EventOnlyStreamingMakesProgressWithoutPolling) {
+    for (bool byte_limit : {false, true}) {
+        RuntimeState state;
+        state.set_enable_event_scheduler(true);
+        auto chunk = make_chunk(1, byte_limit ? 4096 : 8);
+        AdaptiveDopParam param;
+        param.max_block_rows_per_driver_seq = 1;
+        param.max_block_bytes_per_driver_seq = byte_limit ? chunk->memory_usage() : 0;
+        CollectStatsContext ctx(&state, 1, param);
+        add_sinkers(ctx, 1);
+        AdaptiveWaitObserver source, sink;
+        ctx.attach_sink_observer(0, &sink);
+        ASSERT_OK(ctx.push_chunk(0, chunk));
+        ctx.attach_source_observer(0, &source);
+        constexpr int count = 256;
+        std::thread producer([&] {
+            for (int i = 1; i < count; ++i) {
+                if (!sink.wait([&] { return ctx.need_input(0); })) {
+                    ADD_FAILURE() << "Producer lost OUTPUT_FULL wakeup";
+                    return;
+                }
+                ASSERT_OK(ctx.push_chunk(0, chunk));
+            }
+            ASSERT_OK(ctx.set_finishing(0));
+        });
+        int received = 0;
+        while (received < count) {
+            if (!source.wait([&] { return ctx.has_output(0) || ctx.is_downstream_finished(0); })) {
+                ADD_FAILURE() << "Consumer lost INPUT_EMPTY wakeup";
+                break;
+            }
+            if (ctx.is_downstream_finished(0)) break;
+            auto next = ctx.pull_chunk(0);
+            EXPECT_TRUE(next.ok());
+            if (!next.ok()) break;
+            ++received;
+        }
+        producer.join();
+        EXPECT_EQ(count, received);
+        EXPECT_TRUE(ctx.is_downstream_finished(0));
+    }
 }
 } // namespace starrocks::pipeline
