@@ -459,7 +459,8 @@ public class PlanFragmentBuilder {
                 normalizer.normalize();
             }
         } else if (ConnectContext.get() != null &&
-                ConnectContext.get().getSessionVariable().isEnableRuntimeAdaptiveDop()) {
+                ConnectContext.get().getSessionVariable().isEnableRuntimeAdaptiveDop() &&
+                fragments.stream().noneMatch(PlanFragment::containsExpensiveFunctionsForAdaptiveDop)) {
             for (PlanFragment fragment : fragments) {
                 if (fragment.canUseRuntimeAdaptiveDop()) {
                     fragment.enableAdaptiveDop();

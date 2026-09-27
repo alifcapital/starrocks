@@ -46,6 +46,7 @@ class AdaptiveDopCostPlanTest extends PlanTestBase {
                             + "select cast(v4 as varchar) from t1");
             for (String query : queries) {
                 ExecPlan plan = getExecPlan(query);
+                assertTrue(plan.getFragments().stream().noneMatch(PlanFragment::isUseRuntimeAdaptiveDop), query);
                 boolean found = false;
                 for (PlanFragment fragment : plan.getFragments()) {
                     if (AdaptiveDopCostGuard.containsExpensiveFunction(fragment.toThrift())) {

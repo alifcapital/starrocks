@@ -67,6 +67,7 @@ class AdaptiveDopCostGuardTest {
         fragment.setSink(new NoopSink());
         assertNull(fragment.getOutputExprs());
         assertNull(fragment.getQueryGlobalDictExprs());
+        assertFalse(fragment.containsExpensiveFunctionsForAdaptiveDop());
         assertTrue(fragment.canUseRuntimeAdaptiveDop());
     }
 
