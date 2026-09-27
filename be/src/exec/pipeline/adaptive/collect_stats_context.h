@@ -108,6 +108,8 @@ private:
     const int64_t _max_output_amplification_factor;
 
     std::vector<BufferChunkQueue> _buffer_chunk_queue_per_driver_seq;
+    // Retained bytes across both the initial buffer and the streaming queue.
+    std::vector<std::atomic<size_t>> _buffer_bytes_per_driver_seq;
     std::vector<std::atomic<uint8_t>> _is_finishing_per_driver_seq;
     std::vector<uint8_t> _is_finished_per_driver_seq;
 

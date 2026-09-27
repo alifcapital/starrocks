@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <thread>
 
 #include "column/binary_column.h"
@@ -125,5 +126,95 @@ TEST(AdaptiveDopByteLimitTest, ConcurrentThresholdsKeepAllChunks) {
         ASSERT_EQ(32, result.value()->num_rows());
         ASSERT_FALSE(ctx.has_output(i));
     }
+}
+TEST(AdaptiveDopByteLimitTest, StreamingBytesApplyBackpressureAndUnplugBeforeSixteenChunks) {
+    RuntimeState state;
+    auto chunk = make_chunk(16, 1024);
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 16384;
+    param.max_block_bytes_per_driver_seq = chunk->memory_usage();
+    CollectStatsContext ctx(&state, 1, param);
+    add_sinkers(ctx, 1);
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_EQ("Passthrough", ctx.readable_state());
+    // The initial buffer also counts; switching states must not open a second full budget.
+    ASSERT_FALSE(ctx.need_input(0));
+    ASSERT_TRUE(ctx.has_output(0));
+    ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    ASSERT_TRUE(ctx.need_input(0));
+    for (int i = 0; i < 40; ++i) {
+        ASSERT_OK(ctx.push_chunk(0, chunk));
+        ASSERT_FALSE(ctx.need_input(0));
+        // Waiting for the old 16-chunk unplug threshold here would deadlock.
+        ASSERT_TRUE(ctx.has_output(0));
+        auto result = ctx.pull_chunk(0);
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(chunk.get(), result.value().get());
+        ASSERT_TRUE(ctx.need_input(0));
+        ASSERT_FALSE(ctx.has_output(0));
+    }
+    ASSERT_OK(ctx.set_finishing(0));
+    ASSERT_TRUE(ctx.is_downstream_finished(0));
+}
+
+TEST(AdaptiveDopByteLimitTest, StreamingZeroBytesKeepsChunkThresholds) {
+    RuntimeState state;
+    AdaptiveDopParam param;
+    param.max_block_rows_per_driver_seq = 1;
+    CollectStatsContext ctx(&state, 1, param);
+    add_sinkers(ctx, 1);
+    auto chunk = make_chunk(1, 1024);
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    for (int i = 0; i < 15; ++i) {
+        ASSERT_OK(ctx.push_chunk(0, chunk));
+        ASSERT_FALSE(ctx.has_output(0));
+    }
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_TRUE(ctx.has_output(0));
+    for (int i = 16; i < 32; ++i) ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_FALSE(ctx.need_input(0));
+    for (int i = 0; i < 32; ++i) ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    ASSERT_TRUE(ctx.need_input(0));
+    ASSERT_OK(ctx.set_finishing(0));
+    ASSERT_TRUE(ctx.is_downstream_finished(0));
+}
+TEST(AdaptiveDopByteLimitTest, ConcurrentStreamingDrainsByteLimitedQueue) {
+    RuntimeState state;
+    AdaptiveDopParam param;
+    auto chunk = make_chunk(16, 1024);
+    param.max_block_rows_per_driver_seq = 1;
+    param.max_block_bytes_per_driver_seq = 3 * chunk->memory_usage();
+    CollectStatsContext ctx(&state, 1, param);
+    add_sinkers(ctx, 1);
+    ASSERT_OK(ctx.push_chunk(0, chunk));
+    ASSERT_TRUE(ctx.pull_chunk(0).ok());
+    constexpr int count = 256;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::thread producer([&] {
+        for (int i = 0; i < count; ++i) {
+            while (!ctx.need_input(0) && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+            ASSERT_TRUE(ctx.need_input(0));
+            ASSERT_OK(ctx.push_chunk(0, chunk));
+        }
+        ASSERT_OK(ctx.set_finishing(0));
+    });
+    int received = 0;
+    while (received < count && std::chrono::steady_clock::now() < deadline) {
+        if (ctx.has_output(0)) {
+            auto result = ctx.pull_chunk(0);
+            EXPECT_TRUE(result.ok());
+            if (result.ok()) {
+                EXPECT_EQ(chunk.get(), result.value().get());
+            }
+            ++received;
+        } else {
+            std::this_thread::yield();
+        }
+    }
+    producer.join();
+    ASSERT_EQ(count, received);
+    ASSERT_TRUE(ctx.need_input(0));
+    ASSERT_TRUE(ctx.is_downstream_finished(0));
 }
 } // namespace starrocks::pipeline

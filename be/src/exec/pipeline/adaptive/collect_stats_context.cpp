@@ -45,6 +45,9 @@ bool BlockState::need_input(int32_t driver_seq) const {
 Status BlockState::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
     const size_t num_chunk_rows = chunk->num_rows();
     const size_t num_chunk_bytes = _max_buffer_bytes > 0 ? chunk->memory_usage() : 0;
+    if (_max_buffer_bytes > 0) {
+        _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_add(num_chunk_bytes, std::memory_order_relaxed);
+    }
     _ctx->_buffer_chunk_queue(driver_seq).emplace(std::move(chunk));
     const size_t num_rows = _num_rows.fetch_add(num_chunk_rows) + num_chunk_rows;
     const size_t num_bytes = _max_buffer_bytes > 0 ? _num_bytes.fetch_add(num_chunk_bytes) + num_chunk_bytes : 0;
@@ -105,12 +108,20 @@ PassthroughState::PassthroughState(CollectStatsContext* const ctx)
           _unpluging_per_driver_seq(ctx->_max_dop) {}
 
 bool PassthroughState::need_input(int32_t driver_seq) const {
-    return _in_chunk_queue_per_driver_seq[driver_seq].queue.size_approx() < MAX_PASSTHROUGH_CHUNKS_PER_DRIVER_SEQ;
+    // The byte budget includes initial chunks still waiting to be consumed.
+    return _in_chunk_queue_per_driver_seq[driver_seq].queue.size_approx() < MAX_PASSTHROUGH_CHUNKS_PER_DRIVER_SEQ &&
+           (_ctx->_max_block_bytes_per_driver_seq == 0 ||
+            _ctx->_buffer_bytes_per_driver_seq[driver_seq].load(std::memory_order_relaxed) <
+                    _ctx->_max_block_bytes_per_driver_seq);
 }
 
 Status PassthroughState::push_chunk(int32_t driver_seq, ChunkPtr chunk) {
+    const size_t bytes = _ctx->_max_block_bytes_per_driver_seq > 0 ? chunk->memory_usage() : 0;
+    // Account before publishing: the consumer may dequeue immediately.
+    if (bytes > 0) _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_add(bytes, std::memory_order_relaxed);
     auto& [chunk_queue, token] = _in_chunk_queue_per_driver_seq[driver_seq];
     if (UNLIKELY(!chunk_queue.enqueue(token, std::move(chunk)))) {
+        if (bytes > 0) _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_sub(bytes, std::memory_order_relaxed);
         return Status::MemoryLimitExceeded(
                 "allocation failed when enqueueing into the passthrough queue of CollectStatsSink");
     }
@@ -131,7 +142,12 @@ bool PassthroughState::has_output(int32_t driver_seq) const {
         }
         unpluging = false;
         return false;
-    } else if (num_chunks >= UNPLUG_THRESHOLD_PER_DRIVER_SEQ) {
+        // A byte-limited producer may stop before reaching the chunk-count threshold.
+        // Wake the consumer early enough to drain wide chunks and avoid deadlock.
+    } else if (num_chunks >= UNPLUG_THRESHOLD_PER_DRIVER_SEQ ||
+               (num_chunks > 0 && _ctx->_max_block_bytes_per_driver_seq > 0 &&
+                _ctx->_buffer_bytes_per_driver_seq[driver_seq].load(std::memory_order_relaxed) >=
+                        (_ctx->_max_block_bytes_per_driver_seq / 2 + _ctx->_max_block_bytes_per_driver_seq % 2))) {
         unpluging = true;
         return true;
     }
@@ -147,6 +163,9 @@ StatusOr<ChunkPtr> PassthroughState::pull_chunk(int32_t driver_seq) {
     if (!buffer_chunk_queue.empty()) {
         auto chunk = std::move(buffer_chunk_queue.front());
         buffer_chunk_queue.pop();
+        if (_ctx->_max_block_bytes_per_driver_seq > 0) {
+            _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_sub(chunk->memory_usage(), std::memory_order_relaxed);
+        }
         return chunk;
     }
 
@@ -154,6 +173,9 @@ StatusOr<ChunkPtr> PassthroughState::pull_chunk(int32_t driver_seq) {
     ChunkPtr chunk = nullptr;
     if (UNLIKELY(!passthrough_chunk_queue.try_dequeue(chunk))) {
         return Status::InternalError("attempt to dequeue from the empty passthrough queue of CollectStatsSource");
+    }
+    if (_ctx->_max_block_bytes_per_driver_seq > 0) {
+        _ctx->_buffer_bytes_per_driver_seq[driver_seq].fetch_sub(chunk->memory_usage(), std::memory_order_relaxed);
     }
     return chunk;
 }
@@ -249,6 +271,7 @@ CollectStatsContext::CollectStatsContext(RuntimeState* const runtime_state, size
           _max_block_bytes_per_driver_seq(param.max_block_bytes_per_driver_seq),
           _max_output_amplification_factor(param.max_output_amplification_factor),
           _buffer_chunk_queue_per_driver_seq(max_dop),
+          _buffer_bytes_per_driver_seq(max_dop),
           _is_finishing_per_driver_seq(max_dop),
           _is_finished_per_driver_seq(max_dop),
           _runtime_state(runtime_state),
