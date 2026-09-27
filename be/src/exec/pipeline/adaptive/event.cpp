@@ -133,6 +133,15 @@ void CollectStatsSourceInitializeEvent::process(RuntimeState* state) {
 
         for (auto& driver : all_drivers) {
             auto task_fn = [&driver, runtime_state = state, sync_ctx]() {
+                // The waiter may start and finish the query as soon as pending_tasks reaches zero.
+                // Flush and detach the thread-local tracker before allowing query teardown to destroy
+                // its parent trackers. Holding only the instance tracker does not pin those parents.
+                DeferOp task_finished([sync_ctx] {
+                    if (sync_ctx->pending_tasks.fetch_sub(1) == 1) {
+                        std::lock_guard<std::mutex> l(sync_ctx->mutex);
+                        sync_ctx->cv.notify_all();
+                    }
+                });
                 // hold mem tracker's shared ptr for thread safe
                 auto mem_tracker = runtime_state->instance_mem_tracker_ptr();
                 SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(mem_tracker.get());
@@ -144,11 +153,6 @@ void CollectStatsSourceInitializeEvent::process(RuntimeState* state) {
                         // Another thread already set the error, clean up our allocation
                         delete new_error;
                     }
-                }
-
-                if (sync_ctx->pending_tasks.fetch_sub(1) == 1) {
-                    std::lock_guard<std::mutex> l(sync_ctx->mutex);
-                    sync_ctx->cv.notify_all();
                 }
             };
 
