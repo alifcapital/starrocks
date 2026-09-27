@@ -86,7 +86,7 @@ TEST_F(AggregateTest, test_hll_convert_to_serialize_format) {
         const auto& offsets = binary->get_offset();
         ASSERT_EQ(input->size() + 1, offsets.size());
         EXPECT_EQ(0, offsets[0]);
-        EXPECT_EQ(binary->get_bytes().size(), offsets.back());
+        EXPECT_EQ(binary->get_immutable_bytes().size(), offsets.back());
         for (size_t i = 1; i < offsets.size(); ++i) {
             EXPECT_LE(offsets[i - 1], offsets[i]);
         }
