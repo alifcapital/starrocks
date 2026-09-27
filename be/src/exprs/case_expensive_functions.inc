@@ -34,10 +34,16 @@
 "json_pretty", "json_remove", "json_set", "is_json_scalar",
 // Variant (`->` arrow operator lowers to json_query in FE, so it is covered above)
 "get_variant", "variant_query", "variant_typeof",
+"get_variant_bool", "get_variant_int", "get_variant_double", "get_variant_string",
+"get_variant_date", "get_variant_datetime", "get_variant_time",
 // Regular expressions
 "regexp", "regexp_count", "regexp_extract", "regexp_extract_all", "regexp_replace", "regexp_split",
+"replace_old", // Legacy alias implemented by regexp_replace.
 // Text tokenization / n-gram similarity
 "tokenize", "ngram_search", "ngram_search_case_insensitive",
+"levenshtein_distance", "levenshtein_ratio", "levenshtein_tj_distance", "levenshtein_tj_ratio",
+// Vector distance scans all elements of both vectors.
+"cosine_similarity", "cosine_similarity_norm", "approx_cosine_similarity", "l2_distance", "approx_l2_distance",
 // URL parsing (codecs url_encode/url_decode are CHEAP and absent)
 "parse_url", "url_extract_host", "url_extract_parameter",
 // Date/time parsed out of arbitrary text (format/extract helpers are CHEAP and absent)
@@ -45,6 +51,7 @@
 // Cryptography / crypto-hash / payload encoding (fast non-crypto hashes crc32/murmur/xxhash are CHEAP)
 "md5", "md5sum", "md5sum_numeric", "sha2", "sm3", "aes_encrypt", "aes_decrypt",
 "to_base64", "from_base64", "base64_decode_binary", "base64_decode_string",
+"encode_fingerprint_sha256",
 // Bitmap
 "to_bitmap", "array_to_bitmap", "base64_to_bitmap", "sub_bitmap",
 "bitmap_and", "bitmap_andnot", "bitmap_contains", "bitmap_count", "bitmap_empty",
@@ -54,6 +61,7 @@
 "bitmap_to_string", "bitmap_xor",
 // HLL
 "hll_cardinality", "hll_empty", "hll_hash",
+"hll_serialize", "hll_deserialize",
 // Percentile (scalar ops)
 "percentile_approx_raw", "percentile_empty", "percentile_hash", "percentile_union",
 // Geospatial
@@ -64,5 +72,7 @@
 "all_match", "any_match", "array_distinct", "array_filter", "array_intersect", "array_join",
 "array_map", "array_sort", "array_sortby", "map_apply", "map_filter", "transform_keys",
 "transform_values", "distinct_map_keys",
+"array_sort_lambda", "array_generate", "array_repeat", "array_top_n", "array_flatten",
+"array_concat", "arrays_zip", "map_from_arrays", "map_concat", "map_entries",
 // External lookups / HTTP (UDFs handled structurally elsewhere)
-"dict_mapping", "dictionary_get", "lookup_string", "http_request",
+"dict_mapping", "dictionary_get", "lookup_string", "http_request", "ai_query",

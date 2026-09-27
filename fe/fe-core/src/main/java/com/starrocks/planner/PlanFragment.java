@@ -248,7 +248,14 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     public boolean canUseRuntimeAdaptiveDop() {
-        return getPlanRoot().canUseRuntimeAdaptiveDop() && getSink().canUseRuntimeAdaptiveDop();
+        return getPlanRoot().canUseRuntimeAdaptiveDop() && getSink().canUseRuntimeAdaptiveDop()
+                && !AdaptiveDopCostGuard.containsExpensiveFunction(planRoot.treeToThrift())
+                && (outputExprs == null || !AdaptiveDopCostGuard.containsExpensiveFunction(
+                        ExprToThrift.treesToThrift(outputExprs)))
+                && !AdaptiveDopCostGuard.containsExpensiveFunction(sink.toThrift())
+                && !AdaptiveDopCostGuard.containsExpensiveFunction(dataPartition.toThrift())
+                && MapUtils.emptyIfNull(queryGlobalDictExprs).values().stream().noneMatch(expr ->
+                        AdaptiveDopCostGuard.containsExpensiveFunction(ExprToThrift.treeToThrift(expr)));
     }
 
     public void enableAdaptiveDop() {

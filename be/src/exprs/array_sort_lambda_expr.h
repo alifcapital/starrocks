@@ -29,6 +29,7 @@ namespace starrocks {
 class ArraySortLambdaExpr final : public Expr {
 public:
     ArraySortLambdaExpr(const TExprNode& node);
+    bool is_expensive_node() const override { return true; }
 
     // for tests
     explicit ArraySortLambdaExpr(TypeDescriptor type);
