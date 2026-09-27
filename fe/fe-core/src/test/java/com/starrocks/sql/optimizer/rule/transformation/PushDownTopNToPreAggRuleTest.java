@@ -29,7 +29,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import com.starrocks.sql.optimizer.statistics.Statistics;
-import com.starrocks.catalog.Type;
+import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -40,8 +40,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class PushDownTopNToPreAggRuleTest {
     private final ColumnRefFactory factory = new ColumnRefFactory();
-    private final ColumnRefOperator a = factory.create("a", Type.INT, true);
-    private final ColumnRefOperator b = factory.create("b", Type.INT, true);
+    private final ColumnRefOperator a = factory.create("a", IntegerType.INT, true);
+    private final ColumnRefOperator b = factory.create("b", IntegerType.INT, true);
     private final OptimizerContext context = OptimizerFactory.mockContext(factory);
     private final PushDownTopNToPreAggRule rule = PushDownTopNToPreAggRule.getInstance();
 

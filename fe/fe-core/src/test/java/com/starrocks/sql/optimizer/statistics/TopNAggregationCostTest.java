@@ -16,7 +16,7 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
-import com.starrocks.catalog.Type;
+import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -26,9 +26,9 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class TopNAggregationCostTest {
-    private final ColumnRefOperator a = new ColumnRefOperator(1, Type.INT, "a", true);
-    private final ColumnRefOperator b = new ColumnRefOperator(2, Type.INT, "b", true);
-    private final ColumnRefOperator c = new ColumnRefOperator(3, Type.INT, "c", true);
+    private final ColumnRefOperator a = new ColumnRefOperator(1, IntegerType.INT, "a", true);
+    private final ColumnRefOperator b = new ColumnRefOperator(2, IntegerType.INT, "b", true);
+    private final ColumnRefOperator c = new ColumnRefOperator(3, IntegerType.INT, "c", true);
     private final List<Ordering> asc = List.of(new Ordering(a, true, false));
 
     private Statistics stats(double aNdv, long groupNdv, Histogram histogram, double nulls) {
