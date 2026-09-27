@@ -216,6 +216,20 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         this.backgroundExecutor = executorService;
     }
 
+    public void updateCacheMemoryLimits(IcebergCatalogProperties properties) {
+        long heap = Runtime.getRuntime().maxMemory();
+        tables.policy().eviction().orElseThrow().setMaximum(
+                Math.round(heap * properties.getIcebergTableCacheMemoryUsageRatio()));
+        discoverySchemas.policy().eviction().orElseThrow().setMaximum(
+                Math.min(Math.round(heap * properties.getIcebergTableCacheMemoryUsageRatio()), 256L * 1024 * 1024));
+        partitionCache.policy().eviction().orElseThrow().setMaximum(
+                Math.round(heap * properties.getIcebergPartitionCacheMemoryUsageRatio()));
+        dataFileCache.policy().eviction().orElseThrow().setMaximum(
+                Math.round(heap * properties.getIcebergDataFileCacheMemoryUsageRatio()));
+        deleteFileCache.policy().eviction().orElseThrow().setMaximum(
+                Math.round(heap * properties.getIcebergDeleteFileCacheMemoryUsageRatio()));
+    }
+
     @Override
     public IcebergCatalogType getIcebergCatalogType() {
         return delegate.getIcebergCatalogType();
