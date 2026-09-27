@@ -28,6 +28,23 @@ public class IcebergTopNRuntimeFilterTest extends ConnectorPlanTestBase {
     }
 
     @Test
+    public void testIncompleteGroupOrderingKeepsBoundaryPeers() throws Exception {
+        int stage = connectContext.getSessionVariable().getNewPlannerAggStage();
+        int mode = connectContext.getSessionVariable().getTopNPushDownAggMode();
+        try {
+            connectContext.getSessionVariable().setNewPlanerAggStage(2);
+            // No aggregate RF in this mode: verify the local sort itself keeps complete peers.
+            connectContext.getSessionVariable().setEnablePreAggTopNPushDown(0);
+            String sql = "select id, data, count(*) from iceberg0.unpartitioned_db.t0 " +
+                    "group by id, data order by id limit 1";
+            assertVerbosePlanContains(sql, "type: RANK", "icebergscannode");
+        } finally {
+            connectContext.getSessionVariable().setNewPlanerAggStage(stage);
+            connectContext.getSessionVariable().setEnablePreAggTopNPushDown(mode);
+        }
+    }
+
+    @Test
     public void testIcebergTopNRuntimeFilterOnGroupByOrderByKey() throws Exception {
         int originalAggStage = connectContext.getSessionVariable().getNewPlannerAggStage();
         boolean originalDisableSingleTableStats =

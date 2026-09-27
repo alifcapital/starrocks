@@ -1,0 +1,101 @@
+-- name: test_agg_topn_boundary_peers
+-- Every complete group contains exactly 1000 rows, whichever tied groups LIMIT selects.
+
+CREATE TABLE topn_peers(id BIGINT, a INT, b INT, v BIGINT)
+DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 16 PROPERTIES("replication_num"="1");
+
+INSERT INTO topn_peers SELECT generate_series, IF(generate_series % 2 = 0, NULL, 1),
+generate_series % 97, generate_series % 97 FROM TABLE(generate_series(0, 193999));
+
+SET enable_query_cache=false;
+
+SET enable_runtime_adaptive_dop=false;
+
+SET new_planner_agg_stage=2;
+
+SET chunk_size=128;
+
+SET pipeline_dop=1;
+
+SET topn_push_down_agg_mode=0;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a DESC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST, b DESC LIMIT 10) q;
+
+SET topn_push_down_agg_mode=1;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a DESC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST, b DESC LIMIT 10) q;
+
+SET pipeline_dop=8;
+
+SET topn_push_down_agg_mode=0;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a DESC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST, b DESC LIMIT 10) q;
+
+SET topn_push_down_agg_mode=1;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a DESC NULLS LAST LIMIT 10) q;
+
+SELECT count(*), min(n), max(n), sum(IF(total = b * 1000, 0, 1))
+FROM (SELECT a,b,count(*) n,sum(v) total FROM topn_peers GROUP BY a,b
+      ORDER BY a ASC NULLS FIRST, b DESC LIMIT 10) q;
+
+SET enable_spill=true;
+
+SET spill_mode="force";
+
+SELECT count(*), min(n), max(n) FROM
+(SELECT a,b,count(*) n FROM topn_peers GROUP BY a,b ORDER BY a NULLS FIRST LIMIT 129) q;
+
+DROP TABLE topn_peers;

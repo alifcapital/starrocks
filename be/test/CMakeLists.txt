@@ -3,6 +3,7 @@ set(EXEC_FILES
         ./connector/footer_prefetch_task_test.cpp
         ./exec/pipeline/scan/footer_prefetch_state_test.cpp
         ./exec/pipeline/scan/warm_slot_reservation_test.cpp
+        ./exec/agg_topn_runtime_filter_test.cpp
         ./exec/aggregator_limited_mem_state_test.cpp
         ./agent/agent_task_test.cpp
         ./agent/heartbeat_server_test.cpp
@@ -765,8 +766,7 @@ add_executable(starrocks_dw_test test_main.cpp $<TARGET_OBJECTS:starrocks_dw_obj
 TARGET_LINK_LIBRARIES(starrocks_dw_test ${TEST_LINK_LIBS})
 
 
-# =================================================
-# test cases must be compiled as a standalone binary
+# ==========================================# test cases must be compiled as a standalone binary
 ADD_BE_TEST(storage/task/engine_storage_migration_task_test)
 ADD_BE_TEST(storage/lake/compaction_task_test)
 

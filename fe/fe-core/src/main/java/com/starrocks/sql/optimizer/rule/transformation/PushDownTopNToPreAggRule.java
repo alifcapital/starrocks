@@ -22,6 +22,7 @@ import com.starrocks.sql.optimizer.operator.AggType;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.SortPhase;
+import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
@@ -29,8 +30,11 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalTopNOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
+import com.starrocks.sql.optimizer.statistics.Statistics;
+import com.starrocks.sql.optimizer.statistics.TopNAggregationCost;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /*
  * When a top-n operator follows after a 2 phase aggregation, and the top-n order by columns do not depend
@@ -57,7 +61,7 @@ import java.util.List;
  *      Agg(Global)
  *           |
  *        Exchange
- *           | cardinality: dop * n
+ *           | cardinality: dop * (n + boundary ties)
  *     TopN(Partial) [without merge]
  *           |
  *      Agg(Local) [streaming_preaggregation_mode: "force_preaggregation"]
@@ -111,7 +115,7 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
         OptExpression aggGlobalChild = topnChild.inputAt(0);
         LogicalAggregationOperator aggLocal = (LogicalAggregationOperator) aggGlobalChild.getOp();
 
-        if (aggLocal.getType() != AggType.LOCAL || aggLocal.getPredicate() != null) {
+        if (aggLocal.getType() != AggType.LOCAL || aggLocal.getPredicate() != null || aggLocal.isTopNLocalAgg()) {
             return false;
         }
 
@@ -125,7 +129,8 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
         // verify aggregation result columns are not used in the order by columns of topN.
         List<Ordering> orderByElements = topn.getOrderByElements();
         List<ColumnRefOperator> groupingKeys = aggGlobal.getGroupingKeys();
-        return orderByElements.stream().allMatch(orderByElement -> groupingKeys.contains(orderByElement.getColumnRef()));
+        return topn.getTopNType() == TopNType.ROW_NUMBER && !orderByElements.isEmpty()
+                && orderByElements.stream().allMatch(orderByElement -> groupingKeys.contains(orderByElement.getColumnRef()));
     }
 
     @Override
@@ -136,7 +141,18 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
         OptExpression localAgg = agg.inputAt(0);
         LogicalAggregationOperator localAggOp = (LogicalAggregationOperator) localAgg.getOp();
 
-        OptExpression pushedDownAgg = buildPushedDownAgg(topn, aggOp, localAggOp, localAgg.getInputs(), context);
+        boolean needsTies = !topn.getOrderByElements().stream().map(Ordering::getColumnRef)
+                .collect(Collectors.toSet()).containsAll(aggOp.getGroupingKeys());
+        boolean filterOnly = needsTies && TopNAggregationCost.preferFilterOnly(
+                statistics(localAgg.inputAt(0)), statistics(localAgg), aggOp.getGroupingKeys(),
+                topn.getOrderByElements(), topn.getLimit());
+        // Without the aggregate RF, removing the local sort would provide no benefit.
+        if (filterOnly && (context.getSessionVariable().getTopNPushDownAggMode() < 1
+                || !context.getSessionVariable().getEnableTopNRuntimeFilter())) {
+            return Lists.newArrayList();
+        }
+        OptExpression pushedDownAgg = buildPushedDownAgg(topn, aggOp, localAggOp, localAgg.getInputs(), context,
+                needsTies, filterOnly);
         return Lists.newArrayList(OptExpression.create(topn, pushedDownAgg));
     }
 
@@ -144,11 +160,14 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
                                              LogicalAggregationOperator aggOp,
                                              LogicalAggregationOperator localAggOp,
                                              List<OptExpression> localAggInputs,
-                                             OptimizerContext context) {
+                                             OptimizerContext context, boolean needsTies, boolean filterOnly) {
+        // A partial group must never lose contributions merely because its ORDER BY prefix ties.
+        // RANK retains the complete boundary peer group; the user-facing TopN remains ROW_NUMBER.
         // Create a new TopN operator that will be placed above the local aggregate.
         LogicalTopNOperator localTopNOp = new LogicalTopNOperator.Builder()
                 .withOperator(topn)
                 .setSortPhase(SortPhase.PARTIAL)
+                .setTopNType(needsTies ? TopNType.RANK : TopNType.ROW_NUMBER)
                 .setIsSplit(false)
                 .setPerPipeline(true)
                 .build();
@@ -157,7 +176,7 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
         LogicalTopNOperator.TopNSortInfo localTopNSortInfo = null;
         if (context.getSessionVariable().getTopNPushDownAggMode() >= 1) {
             localTopNSortInfo = new LogicalTopNOperator.TopNSortInfo(
-                    topn.getOrderByElements(), localTopNOp.getSortPhase(), topn.getTopNType(),
+                    topn.getOrderByElements(), localTopNOp.getSortPhase(), localTopNOp.getTopNType(),
                     topn.getLimit(), topn.getOffset());
         }
 
@@ -166,8 +185,17 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
                 .setTopNLocalAgg(true)
                 .setAggTopnSortInfo(localTopNSortInfo)
                 .build(), localAggInputs);
-        OptExpression newLocalTopN = OptExpression.create(localTopNOp, newLocalAgg);
+        OptExpression newLocalTopN = filterOnly ? newLocalAgg : OptExpression.create(localTopNOp, newLocalAgg);
         return OptExpression.create(aggOp, newLocalTopN);
+    }
+
+    private static Statistics statistics(OptExpression expression) {
+        if (expression.getStatistics() != null) {
+            return expression.getStatistics();
+        }
+        // This transformation runs in the memo: matched expressions need not carry tree statistics.
+        return expression.getGroupExpression() == null ? null
+                : expression.getGroupExpression().getGroup().getStatistics();
     }
 
     private boolean isSupportedTopN(LogicalTopNOperator topn, boolean isExternalScan) {

@@ -122,7 +122,7 @@ OperatorPtr SpillablePartitionSortSinkOperatorFactory::create(int32_t degree_of_
     if (_limit > 0) {
         chunks_sorter = std::make_unique<SpillableChunksSorterTopN>(
                 runtime_state(), &(_sort_exec_exprs.lhs_ordering_expr_ctxs()), &_is_asc_order, &_is_null_first,
-                _sort_keys, 0, _limit + _offset);
+                _sort_keys, 0, _limit + _offset, _topn_type);
     } else {
         chunks_sorter = std::make_unique<SpillableChunksSorterFullSort>(
                 runtime_state(), &(_sort_exec_exprs.lhs_ordering_expr_ctxs()), &_is_asc_order, &_is_null_first,
