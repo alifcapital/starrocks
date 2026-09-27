@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +35,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AdaptiveDopCostGuardTest {
@@ -56,6 +58,16 @@ class AdaptiveDopCostGuardTest {
             names.add(matcher.group(1));
         }
         assertEquals(names, AdaptiveDopCostGuard.EXPENSIVE_FUNCTIONS);
+    }
+
+    @Test
+    void fragmentWithoutOutputOrDictionaryExpressions() {
+        EmptySetNode node = new EmptySetNode(new PlanNodeId(0), new ArrayList<>(List.of(new TupleId(0))));
+        PlanFragment fragment = new PlanFragment(new PlanFragmentId(0), node, DataPartition.UNPARTITIONED);
+        fragment.setSink(new NoopSink());
+        assertNull(fragment.getOutputExprs());
+        assertNull(fragment.getQueryGlobalDictExprs());
+        assertTrue(fragment.canUseRuntimeAdaptiveDop());
     }
 
     @Test
