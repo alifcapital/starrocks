@@ -33,14 +33,17 @@ public:
 
     // A full range result from ordinary zone-map pruning means "may match", not
     // "all match". Prove coverage only for understood predicates and metadata.
-    static bool zonemap_all_match(const std::vector<const ColumnPredicate*>& predicates,
-                                  const ZoneMapDetail& detail, CompoundNodeType relation) {
+    static bool zonemap_all_match(const std::vector<const ColumnPredicate*>& predicates, const ZoneMapDetail& detail,
+                                  CompoundNodeType relation) {
         if (predicates.empty() || (!detail.has_null() && !detail.has_not_null())) return false;
         auto covers = [&](const ColumnPredicate* pred, bool null_part) {
             switch (pred->type()) {
-            case PredicateType::kTrue: return true;
-            case PredicateType::kIsNull: return null_part;
-            case PredicateType::kNotNull: return !null_part;
+            case PredicateType::kTrue:
+                return true;
+            case PredicateType::kIsNull:
+                return null_part;
+            case PredicateType::kNotNull:
+                return !null_part;
             case PredicateType::kEQ:
             case PredicateType::kLT:
             case PredicateType::kLE:
@@ -55,16 +58,16 @@ public:
                 ZoneMapDetail hi(detail.max_value(), detail.max_value(), false);
                 return pred->zone_map_filter(lo) && pred->zone_map_filter(hi);
             }
-            default: return false;
+            default:
+                return false;
             }
         };
         auto covers_part = [&](bool null_part) {
             auto fn = [&](const auto* p) { return covers(p, null_part); };
             return relation == CompoundNodeType::AND ? std::ranges::all_of(predicates, fn)
-                                                      : std::ranges::any_of(predicates, fn);
+                                                     : std::ranges::any_of(predicates, fn);
         };
-        return (!detail.has_null() || covers_part(true)) &&
-               (!detail.has_not_null() || covers_part(false));
+        return (!detail.has_null() || covers_part(true)) && (!detail.has_not_null() || covers_part(false));
     }
 
     template <CompoundNodeType Type>
@@ -100,8 +103,10 @@ struct PredicateFilterEvaluator {
         bool visited = false;
         auto combine = [&](ZoneMapMatch match) {
             visited = true;
-            if constexpr (Type == CompoundNodeType::AND) all_match &= match == ZoneMapMatch::ALL;
-            else all_match |= match == ZoneMapMatch::ALL;
+            if constexpr (Type == CompoundNodeType::AND)
+                all_match &= match == ZoneMapMatch::ALL;
+            else
+                all_match |= match == ZoneMapMatch::ALL;
         };
         const auto& ctx = pred_tree.compound_node_context(node.id());
         for (const auto& [cid, preds] : ctx.cid_to_col_preds(node)) {
@@ -127,9 +132,9 @@ struct PredicateFilterEvaluator {
             combine(node_matches[child.id()]);
             if (range.has_value()) PredicateFilterEvaluatorUtils::merge_row_ranges<Type>(row_ranges, *range);
         }
-        node_matches[node.id()] = row_ranges.has_value() && row_ranges->span_size() == 0
-                                         ? ZoneMapMatch::NONE
-                                         : visited && all_match ? ZoneMapMatch::ALL : ZoneMapMatch::UNKNOWN;
+        node_matches[node.id()] = row_ranges.has_value() && row_ranges->span_size() == 0 ? ZoneMapMatch::NONE
+                                  : visited && all_match                                 ? ZoneMapMatch::ALL
+                                                                                         : ZoneMapMatch::UNKNOWN;
         return row_ranges;
     }
 
@@ -180,7 +185,8 @@ struct PredicateFilterEvaluator {
             if (cur_row_ranges_opt.has_value()) {
                 PredicateFilterEvaluatorUtils::merge_row_ranges<Type>(row_ranges, cur_row_ranges_opt.value());
                 if ((Type == CompoundNodeType::AND && row_ranges->span_size() == 0) ||
-                    (Type == CompoundNodeType::OR && row_ranges->span_size() == rg_num_rows)) return row_ranges;
+                    (Type == CompoundNodeType::OR && row_ranges->span_size() == rg_num_rows))
+                    return row_ranges;
             }
         }
         return row_ranges;
@@ -273,6 +279,9 @@ struct PredicateFilterEvaluator {
                 }
             }
         }
+        if (mode == Evaluator::ALL && row_ranges.has_value()) {
+            page_index_selected_rows = row_ranges->span_size();
+        }
         if (mode & Evaluator::BLOOM_FILTER) {
             if (enable_bloom_filter && !row_group_filtered) {
                 if (mode != Evaluator::BLOOM_FILTER) {
@@ -305,6 +314,7 @@ struct PredicateFilterEvaluator {
         int page_index_success_counter = 0;
     };
     FilterCounter counter;
+    std::optional<uint64_t> page_index_selected_rows;
     // Per evaluation/row group only: a later RF version gets a fresh evaluator.
     std::unordered_map<PredicateNodeId, ZoneMapMatch> node_matches;
     std::unordered_map<PredicateNodeId, std::unordered_map<ColumnId, ZoneMapMatch>> column_matches;

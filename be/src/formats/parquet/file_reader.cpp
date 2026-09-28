@@ -30,7 +30,9 @@
 #include "common/status.h"
 #include "exec/exec_node.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
+#include "exprs/runtime_filter_bank.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/page_index_read_advisor.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
 #include "formats/parquet/utils.h"
 #include "fs/fs.h"
@@ -55,6 +57,17 @@ FileReader::~FileReader() = default;
 
 Status FileReader::init(HdfsScannerContext* ctx, InitMode mode) {
     _scanner_ctx = ctx;
+    if (ctx->options.parquet_page_index_enable && ctx->page_index_read_advisor && ctx->runtime_filter_collector) {
+        for (const auto& [id, desc] : ctx->runtime_filter_collector->descriptors()) {
+            if (desc->is_stream_build_filter()) {
+                // Include the actual normalized bounds, NULL/AND/OR structure,
+                // and static conjuncts. A new bound starts with fresh feedback.
+                auto key = ctx->predicates.predicate_tree.root().debug_string();
+                if (key.size() <= 4096) _page_index_feedback_key = std::move(key);
+                break;
+            }
+        }
+    }
     if (ctx->options.use_file_metacache) {
         _cache = DataCache::GetInstance()->page_cache();
     }
@@ -171,10 +184,19 @@ Status FileReader::_build_split_tasks() {
 bool FileReader::_filter_group(const GroupReaderPtr& group_reader) {
     bool& filtered = group_reader->get_is_group_filtered();
     filtered = false;
-    auto visitor = PredicateFilterEvaluator{_scanner_ctx->predicates.predicate_tree, group_reader.get(),
-                                            _scanner_ctx->options.parquet_page_index_enable,
+    bool use_page_index = _scanner_ctx->options.parquet_page_index_enable;
+    if (use_page_index && !_page_index_feedback_key.empty()) {
+        use_page_index = _scanner_ctx->page_index_read_advisor->should_read(_page_index_feedback_key);
+    }
+    auto visitor = PredicateFilterEvaluator{_scanner_ctx->predicates.predicate_tree, group_reader.get(), use_page_index,
                                             _scanner_ctx->options.parquet_bloom_filter_enable};
     auto sparse_range = _scanner_ctx->predicates.predicate_tree.visit(visitor);
+    if (!_page_index_feedback_key.empty() && visitor.counter.page_index_tried_counter > 0 &&
+        visitor.page_index_selected_rows.has_value()) {
+        _scanner_ctx->page_index_read_advisor->observe(
+                _page_index_feedback_key,
+                *visitor.page_index_selected_rows < group_reader->get_row_group_metadata()->num_rows);
+    }
     _group_reader_param.stats->bloom_filter_tried_counter += visitor.counter.bloom_filter_tried_counter;
     _group_reader_param.stats->bloom_filter_success_counter += visitor.counter.bloom_filter_success_counter;
     _group_reader_param.stats->statistics_tried_counter += visitor.counter.statistics_tried_counter;

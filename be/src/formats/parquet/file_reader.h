@@ -130,6 +130,7 @@ private:
     // not exist column conjuncts eval false, file can be skipped
     bool _is_file_filtered = false;
     HdfsScannerContext* _scanner_ctx = nullptr;
+    std::string _page_index_feedback_key;
     io::SharedBufferedInputStream* _sb_stream = nullptr;
     GroupReaderParam _group_reader_param;
     std::shared_ptr<MetaHelper> _meta_helper = nullptr;

@@ -37,6 +37,10 @@
 
 namespace starrocks {
 
+namespace parquet {
+class PageIndexReadAdvisor;
+}
+
 class HiveTableDescriptor;
 class RuntimeFilterProbeCollector;
 
@@ -323,6 +327,7 @@ struct HdfsScannerContext {
     TableSpecificData table_specific;
 
     // ===== shared scan fields =====
+    std::shared_ptr<parquet::PageIndexReadAdvisor> page_index_read_advisor;
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
     const TupleDescriptor* tuple_desc = nullptr;
     HdfsScannerConjuncts conjuncts;

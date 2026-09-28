@@ -188,9 +188,9 @@ public:
         return false;
     }
 
-    virtual StatusOr<ZoneMapMatch> row_group_zone_map_match(
-            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType relation,
-            uint64_t first_row, uint64_t num_rows) const {
+    virtual StatusOr<ZoneMapMatch> row_group_zone_map_match(const std::vector<const ColumnPredicate*>& predicates,
+                                                            CompoundNodeType relation, uint64_t first_row,
+                                                            uint64_t num_rows) const {
         ASSIGN_OR_RETURN(bool rejected, row_group_zone_map_filter(predicates, relation, first_row, num_rows));
         return rejected ? ZoneMapMatch::NONE : ZoneMapMatch::UNKNOWN;
     }
