@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--reverse', action='store_true')
     parser.add_argument('--patched', action='store_true')
     parser.add_argument('--cases', nargs='*')
+    parser.add_argument('--reference-plans', type=Path,
+                        help='Require the same RANK/RF choice and statistics source as this baseline')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     conn = pymysql.connect(host='127.0.0.1', port=args.port, user='root',
@@ -98,12 +100,24 @@ def main():
 
         (args.out / (name + '.sql')).write_text(query + ';\n')
         routes = {}
+        stats_sources = {}
+        def statistics_sources(plan):
+            return [line.strip() for line in plan.splitlines() if 'stats source:' in line]
+
         for variant in variants:
             select_variant(variant)
             for _ in range(3):
                 check(sql(query))
             plan = '\n'.join(row[0] for row in sql('EXPLAIN VERBOSE ' + query))
             routes[variant[0]] = ('type: RANK' in plan, 'build runtime filters:' in plan)
+            stats_sources[variant[0]] = statistics_sources(plan)
+            if args.reference_plans:
+                reference_variant = 'optimized' if variant[0] == 'no_backpressure' else variant[0]
+                reference = (args.reference_plans / (name + '.' + reference_variant + '.plan')).read_text()
+                assert routes[variant[0]] == ('type: RANK' in reference, 'build runtime filters:' in reference), \
+                    name + ': RANK/RF differs from reference'
+                assert stats_sources[variant[0]] == statistics_sources(reference), \
+                    name + ': statistics source differs from reference'
             (args.out / (name + '.' + variant[0] + '.plan')).write_text(plan)
         print('BEGIN', name, flush=True)
         records = []
@@ -119,7 +133,8 @@ def main():
                 records.append(record)
                 with (args.out / 'timings.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
-        result = {'case': name, 'executions': len(records), 'routes': routes, 'variants': {}}
+        result = {'case': name, 'executions': len(records), 'routes': routes,
+                  'stats_sources': stats_sources, 'variants': {}}
         for variant in variants:
             values = [r['ms'] for r in records if r['variant'] == variant[0]]
             q = statistics.quantiles(values, n=4)
@@ -129,6 +144,8 @@ def main():
             final_plan = '\n'.join(row[0] for row in sql('EXPLAIN VERBOSE ' + query))
             assert routes[variant[0]] == ('type: RANK' in final_plan, 'build runtime filters:' in final_plan), \
                 name + ': plan choice changed during timing'
+            assert stats_sources[variant[0]] == statistics_sources(final_plan), \
+                name + ': statistics source changed during timing'
             sql('SET enable_profile=true')
             check(sql(query))
             qid = sql('SELECT last_query_id()')[0][0]
