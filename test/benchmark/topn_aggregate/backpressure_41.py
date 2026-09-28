@@ -96,12 +96,14 @@ def main():
             assert all(row[2:] == truth.get(row[:2]) for row in rows), name + ': incomplete aggregate'
 
         (args.out / (name + '.sql')).write_text(query + ';\n')
+        routes = {}
         for variant in variants:
             select_variant(variant)
-            plan = '\n'.join(row[0] for row in sql('EXPLAIN VERBOSE ' + query))
-            (args.out / (name + '.' + variant[0] + '.plan')).write_text(plan)
             for _ in range(3):
                 check(sql(query))
+            plan = '\n'.join(row[0] for row in sql('EXPLAIN VERBOSE ' + query))
+            routes[variant[0]] = ('type: RANK' in plan, 'build runtime filters:' in plan)
+            (args.out / (name + '.' + variant[0] + '.plan')).write_text(plan)
         print('BEGIN', name, flush=True)
         records = []
         for iteration in range(args.rounds):
@@ -116,13 +118,16 @@ def main():
                 records.append(record)
                 with (args.out / 'timings.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
-        result = {'case': name, 'executions': len(records), 'variants': {}}
+        result = {'case': name, 'executions': len(records), 'routes': routes, 'variants': {}}
         for variant in variants:
             values = [r['ms'] for r in records if r['variant'] == variant[0]]
             q = statistics.quantiles(values, n=4)
             result['variants'][variant[0]] = {'median_ms': statistics.median(values),
                                             'p25_ms': q[0], 'p75_ms': q[2]}
             select_variant(variant)
+            final_plan = '\n'.join(row[0] for row in sql('EXPLAIN VERBOSE ' + query))
+            assert routes[variant[0]] == ('type: RANK' in final_plan, 'build runtime filters:' in final_plan), \
+                name + ': plan choice changed during timing'
             sql('SET enable_profile=true')
             check(sql(query))
             qid = sql('SELECT last_query_id()')[0][0]
