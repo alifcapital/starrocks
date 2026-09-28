@@ -16,6 +16,7 @@
 
 #include <utility>
 
+#include "column/column.h"
 #include "exec/pipeline/source_operator.h"
 #include "runtime/types.h"
 
@@ -23,24 +24,16 @@ namespace starrocks::pipeline {
 
 // RawValuesSourceOperator is optimized for large constant lists.
 // Instead of evaluating expressions like UnionConstSourceOperator,
-// it directly constructs columns from typed raw data (List<Long> or List<String>)
-// to avoid expensive expression evaluation overhead.
+// it outputs slices of one column that the factory builds from the typed raw data.
 class RawValuesSourceOperator final : public SourceOperator {
 public:
     RawValuesSourceOperator(OperatorFactory* factory, int32_t id, int32_t plan_node_id, int32_t driver_sequence,
-                            const std::vector<SlotDescriptor*>& dst_slots, TypeDescriptor constant_type,
-                            const std::vector<int64_t>* long_values, const std::vector<std::string>* string_values,
-                            size_t start_index, size_t rows_count)
+                            SlotId slot_id, ColumnPtr values, size_t start_index, size_t rows_count)
             : SourceOperator(factory, id, "raw_values_source", plan_node_id, false, driver_sequence),
-              _dst_slots(dst_slots),
-              _constant_type(std::move(constant_type)),
-              _long_values(long_values),
-              _string_values(string_values),
+              _slot_id(slot_id),
+              _values(std::move(values)),
               _start_index(start_index),
-              _rows_total(rows_count) {
-        DCHECK(_dst_slots.size() == 1);
-        DCHECK((_long_values != nullptr) ^ (_string_values != nullptr));
-    }
+              _rows_total(rows_count) {}
 
     bool has_output() const override { return !is_finished(); }
 
@@ -54,11 +47,8 @@ public:
     StatusOr<ChunkPtr> pull_chunk(RuntimeState* state) override;
 
 private:
-    const std::vector<SlotDescriptor*>& _dst_slots;
-    const TypeDescriptor _constant_type;
-
-    const std::vector<int64_t>* const _long_values;
-    const std::vector<std::string>* const _string_values;
+    const SlotId _slot_id;
+    const ColumnPtr _values;
 
     const size_t _start_index;
     const size_t _rows_total;
@@ -68,12 +58,12 @@ private:
 
 class RawValuesSourceOperatorFactory final : public SourceOperatorFactory {
 public:
+    // FE sends integer values as long_values, and the values of the other types as string_values, each the text of
+    // a literal of the type.
     RawValuesSourceOperatorFactory(int32_t id, int32_t plan_node_id, const std::vector<SlotDescriptor*>& dst_slots,
-                                   const TypeDescriptor& value_type, std::vector<int64_t>&& long_values,
-                                   std::vector<std::string>&& string_values)
+                                   std::vector<int64_t>&& long_values, std::vector<std::string>&& string_values)
             : SourceOperatorFactory(id, "raw_values_source", plan_node_id),
               _dst_slots(dst_slots),
-              _constant_type(value_type),
               _long_values(std::move(long_values)),
               _string_values(std::move(string_values)) {
         DCHECK(_dst_slots.size() == 1);
@@ -89,29 +79,33 @@ public:
         size_t start_index = num_rows_per_driver * driver_sequence;
         DCHECK(_total_rows > start_index);
         size_t rows_count = std::min(num_rows_per_driver, _total_rows - start_index);
+        // prepare builds the column before the drivers are created
+        DCHECK(_values != nullptr);
 
-        const std::vector<int64_t>* long_values_ptr = _long_values.empty() ? nullptr : &_long_values;
-        const std::vector<std::string>* string_values_ptr = _string_values.empty() ? nullptr : &_string_values;
-
-        return std::make_shared<RawValuesSourceOperator>(this, _id, _plan_node_id, driver_sequence, _dst_slots,
-                                                         _constant_type, long_values_ptr, string_values_ptr,
-                                                         start_index, rows_count);
+        return std::make_shared<RawValuesSourceOperator>(this, _id, _plan_node_id, driver_sequence, _dst_slots[0]->id(),
+                                                         _values, start_index, rows_count);
     }
 
-    Status prepare(RuntimeState* state) override { return SourceOperatorFactory::prepare(state); }
+    Status prepare(RuntimeState* state) override;
 
     void close(RuntimeState* state) override { SourceOperatorFactory::close(state); }
 
     SourceOperatorFactory::AdaptiveState adaptive_initial_state() const override { return AdaptiveState::ACTIVE; }
 
+    // Builds a column of the type from the values: long_values for an integer type, string_values parsed as
+    // literals for a string, decimal, DATE or DATETIME type.
+    static StatusOr<ColumnPtr> build_column(const TypeDescriptor& type, bool nullable,
+                                            const std::vector<int64_t>& long_values,
+                                            const std::vector<std::string>& string_values);
+
 private:
     const std::vector<SlotDescriptor*>& _dst_slots;
-    const TypeDescriptor _constant_type;
 
     std::vector<int64_t> _long_values;
     std::vector<std::string> _string_values;
 
     size_t _total_rows;
+    ColumnPtr _values;
 };
 
 } // namespace starrocks::pipeline

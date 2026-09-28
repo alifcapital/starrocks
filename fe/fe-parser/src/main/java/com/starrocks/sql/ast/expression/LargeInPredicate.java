@@ -16,7 +16,6 @@ package com.starrocks.sql.ast.expression;
 
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.parser.NodePosition;
-import com.starrocks.type.Type;
 
 import java.util.List;
 import java.util.Objects;
@@ -41,18 +40,14 @@ import java.util.Objects;
  * LargeInPredicate is NOT directly executed by BE. It must be transformed to a Left semi/anti join
  * via {@link com.starrocks.sql.optimizer.rule.transformation.LargeInPredicateToJoinRule} before execution.
  * 
- * <p><b>Supported Type Combinations:</b>
- * <ol>
- *   <li>Compare column type is TINYINT/SMALLINT/INT/BIGINT, constantType is BIGINT</li>
- *   <li>Both compare column type and constantType are STRING</li>
- * </ol>
- *
+ * <p><b>Constants:</b>
+ * The list keeps integer values as Long, string values as String and other number values as the literals the
+ * parser built for them. The planner resolves their comparison type as for an InPredicate with the same list.
  */
 public class LargeInPredicate extends InPredicate {
     private final String rawText;
     private final List<Object> rawConstantList;
     private final int constantCount;
-    private Type constantType;
 
     public LargeInPredicate(Expr compareExpr, String rawText, List<?> rawConstantList, int constantCount,
                            boolean isNotIn, List<Expr> inList, NodePosition pos) {
@@ -91,12 +86,19 @@ public class LargeInPredicate extends InPredicate {
         return constantCount;
     }
 
-    public Type getConstantType() {
-        return constantType;
-    }
-
-    public void setConstantType(Type constantType) {
-        this.constantType = constantType;
+    /**
+     * The constant at the given position as the literal that the InPredicate form of this predicate holds.
+     */
+    public LiteralExpr getConstantLiteral(int index) {
+        Object value = rawConstantList.get(index);
+        if (value instanceof LiteralExpr literal) {
+            return literal;
+        } else if (value instanceof Long longValue) {
+            return new IntLiteral(longValue);
+        } else if (value instanceof String stringValue) {
+            return new StringLiteral(stringValue);
+        }
+        throw new IllegalStateException("Unexpected LargeInPredicate constant: " + value);
     }
 
     @Override
@@ -129,14 +131,12 @@ public class LargeInPredicate extends InPredicate {
 
         LargeInPredicate that = (LargeInPredicate) obj;
         return constantCount == that.constantCount &&
-               rawConstantList.equals(that.rawConstantList) &&
-               Objects.equals(constantType, that.constantType);
+               rawConstantList.equals(that.rawConstantList);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), rawConstantList,
-                                     constantCount, constantType);
+        return Objects.hash(super.hashCode(), rawConstantList, constantCount);
     }
 
     @Override
@@ -154,8 +154,8 @@ public class LargeInPredicate extends InPredicate {
 
     @Override
     public String toString() {
-        return String.format("LargeInPredicate{compareExpr=%s, constantCount=%d, isNotIn=%s, constantType=%s}",
-                           getChild(0), constantCount, isNotIn(), constantType);
+        return String.format("LargeInPredicate{compareExpr=%s, constantCount=%d, isNotIn=%s}",
+                           getChild(0), constantCount, isNotIn());
     }
 
 

@@ -34,14 +34,10 @@ Status RawValuesNode::init(const TPlanNode& tnode, RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::init(tnode, state));
 
     const auto& raw_values_node = tnode.raw_values_node;
-    _constant_type = TypeDescriptor::from_thrift(raw_values_node.constant_type);
-
     if (raw_values_node.__isset.long_values && !raw_values_node.long_values.empty()) {
         _long_values = raw_values_node.long_values;
-        DCHECK(_constant_type.is_integer_type() || _constant_type.type == TYPE_BIGINT);
     } else if (raw_values_node.__isset.string_values && !raw_values_node.string_values.empty()) {
         _string_values = raw_values_node.string_values;
-        DCHECK(_constant_type.is_string_type());
     } else {
         LOG(ERROR) << "RawValuesNode::init - ERROR: no valid typed values found!"
                    << " long_values isset: " << raw_values_node.__isset.long_values
@@ -85,8 +81,7 @@ pipeline::OpFactories RawValuesNode::decompose_to_pipeline(pipeline::PipelineBui
     size_t total_rows = _long_values.empty() ? _string_values.size() : _long_values.size();
 
     auto raw_values_source_op = std::make_shared<RawValuesSourceOperatorFactory>(
-            context->next_operator_id(), id(), dst_slots, _constant_type, std::move(_long_values),
-            std::move(_string_values));
+            context->next_operator_id(), id(), dst_slots, std::move(_long_values), std::move(_string_values));
 
     size_t parallelism = std::min(context->degree_of_parallelism(),
                                   (total_rows + runtime_state()->chunk_size() - 1) / runtime_state()->chunk_size());

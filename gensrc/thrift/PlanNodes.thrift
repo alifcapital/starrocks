@@ -1175,8 +1175,8 @@ struct TRawValuesNode {
     // The data type of the constants
     2: required Types.TTypeDesc constant_type
     // Typed constant lists for better compression
-    3: optional list<i64> long_values      // For BIGINT, INT types
-    4: optional list<string> string_values // For VARCHAR types
+    3: optional list<i64> long_values      // For TINYINT, SMALLINT, INT, BIGINT types
+    4: optional list<string> string_values // For VARCHAR, CHAR, DECIMAL32/64/128, DATE, DATETIME types: the text of a literal of the type
 }
 
 struct TIntersectNode {

@@ -14,41 +14,35 @@
 
 package com.starrocks.sql.optimizer.operator.scalar;
 
-import com.starrocks.type.Type;
-
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * An IN predicate whose constants are kept as values of the comparison type instead of operators. The children
+ * are the compared expression and the first constant. LargeInPredicateToJoinRule turns it into a join with the
+ * values.
+ */
 public class LargeInPredicateOperator extends InPredicateOperator {
     private final String rawText;
-    private final List<Object> rawConstantList;
-    private final int constantCount;
-    private final Type constantType;
+    private final LargeInConstants constants;
 
-    public LargeInPredicateOperator(String rawText, List<Object> rawConstantList,
-                                   int constantCount, boolean isNotIn, Type constantType,
-                                   List<ScalarOperator> children) {
+    public LargeInPredicateOperator(String rawText, LargeInConstants constants, boolean isNotIn,
+                                    List<ScalarOperator> children) {
         super(isNotIn, children.toArray(new ScalarOperator[0]));
         this.rawText = rawText;
-        this.rawConstantList = rawConstantList;
-        this.constantCount = constantCount;
-        this.constantType = constantType;
+        this.constants = constants;
     }
 
     public String getRawText() {
         return rawText;
     }
 
-    public List<Object> getRawConstantList() {
-        return rawConstantList;
+    public LargeInConstants getConstants() {
+        return constants;
     }
 
     public int getConstantCount() {
-        return constantCount;
-    }
-
-    public Type getConstantType() {
-        return constantType;
+        return constants.getValues().size();
     }
 
     public ScalarOperator getCompareExpr() {
@@ -58,8 +52,8 @@ public class LargeInPredicateOperator extends InPredicateOperator {
     @Override
     public String toString() {
         String inClause = isNotIn() ? " NOT IN " : " IN ";
-        if (constantCount > 100) {
-            return getCompareExpr() + inClause + "(<" + constantCount + " values>)";
+        if (getConstantCount() > 100) {
+            return getCompareExpr() + inClause + "(<" + getConstantCount() + " values>)";
         } else {
             return getCompareExpr() + inClause + "(" + rawText + ")";
         }
@@ -71,9 +65,7 @@ public class LargeInPredicateOperator extends InPredicateOperator {
             return false;
         }
         LargeInPredicateOperator that = (LargeInPredicateOperator) obj;
-        return constantCount == that.constantCount &&
-               Objects.equals(rawConstantList, that.rawConstantList) &&
-               Objects.equals(constantType, that.constantType);
+        return Objects.equals(constants, that.constants);
     }
 
     @Override
@@ -82,21 +74,18 @@ public class LargeInPredicateOperator extends InPredicateOperator {
             return false;
         }
         LargeInPredicateOperator that = (LargeInPredicateOperator) obj;
-        return constantCount == that.constantCount &&
-               Objects.equals(rawConstantList, that.rawConstantList) &&
-               Objects.equals(constantType, that.constantType);
+        return Objects.equals(constants, that.constants);
     }
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), rawConstantList, constantCount, constantType);
+        return Objects.hash(super.hashCodeSelf(), constants);
     }
 
     @Override
     public <R, C> R accept(ScalarOperatorVisitor<R, C> visitor, C context) {
         return visitor.visitLargeInPredicate(this, context);
     }
-
 
     @Override
     public boolean allValuesMatch(java.util.function.Predicate<? super ScalarOperator> lambda) {
@@ -105,6 +94,6 @@ public class LargeInPredicateOperator extends InPredicateOperator {
 
     @Override
     public boolean hasAnyNullValues() {
-        return false;
+        return constants.hasNull();
     }
 }

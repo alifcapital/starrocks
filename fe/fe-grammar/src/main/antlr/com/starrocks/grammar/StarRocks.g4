@@ -2712,6 +2712,7 @@ tupleInSubquery
 
 predicateOperations [ParserRuleContext value]
     : NOT? IN integerList                                                                 #inIntegerList
+    | NOT? IN numberList                                                                  #inNumberList
     | NOT? IN stringList                                                                  #inStringList
     | NOT? IN '(' queryRelation ')'                                                       #inSubquery
     | NOT? IN '(' expressionList ')'                                                      #inList
@@ -2992,6 +2993,14 @@ stringList
 
 integerList
     : '(' INTEGER_VALUE (',' INTEGER_VALUE)* ')'
+    ;
+
+numberList
+    : '(' signedNumber (',' signedNumber)* ')'
+    ;
+
+signedNumber
+    : MINUS_SYMBOL? number
     ;
 
 literalExpressionList

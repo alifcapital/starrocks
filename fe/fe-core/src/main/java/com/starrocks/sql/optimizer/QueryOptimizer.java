@@ -583,7 +583,9 @@ public class QueryOptimizer extends Optimizer {
             scheduler.rewriteOnce(tree, rootTaskContext, SplitWindowSkewToUnionRule.getInstance());
         }
         // This rule needs to be executed before PUSH_DOWN_PREDICATE_RULES
-        scheduler.rewriteOnce(tree, rootTaskContext, new LargeInPredicateToJoinRule());
+        LargeInPredicateToJoinRule largeInPredicateToJoinRule = new LargeInPredicateToJoinRule();
+        scheduler.rewriteOnce(tree, rootTaskContext, largeInPredicateToJoinRule);
+        largeInPredicateToJoinRule.checkAllTransformed(context);
 
         // Note: PUSH_DOWN_PREDICATE tasks should be executed before MERGE_LIMIT tasks
         // because of the Filter node needs to be merged first to avoid the Limit node

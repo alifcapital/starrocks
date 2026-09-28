@@ -7792,6 +7792,39 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         return new InPredicate(compareExpr, intList, isNotIn, createPos(context));
     }
     
+    @Override
+    public ParseNode visitInNumberList(com.starrocks.sql.parser.StarRocksParser.InNumberListContext context) {
+        boolean isNotIn = context.NOT() != null;
+        Expr compareExpr = (Expr) visit(context.value);
+
+        // Each value becomes the literal that the expression-list form produces: the number literal, with a
+        // leading minus applied in place as visitArithmeticUnary does.
+        List<com.starrocks.sql.parser.StarRocksParser.SignedNumberContext> numbers =
+                context.numberList().signedNumber();
+        List<Expr> literals = new ArrayList<>(numbers.size());
+        for (com.starrocks.sql.parser.StarRocksParser.SignedNumberContext number : numbers) {
+            Expr literal = (Expr) visit(number.number());
+            if (number.MINUS_SYMBOL() != null) {
+                try {
+                    ((LiteralExpr) literal).swapSign();
+                } catch (UnsupportedOperationException e) {
+                    throw new ParsingException(PARSER_ERROR_MSG.unsupportedExpr(ExprToSql.toSql(literal)),
+                            literal.getPos());
+                }
+            }
+            literals.add(literal);
+        }
+
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext != null && connectContext.getSessionVariable().enableLargeInPredicate() &&
+                literals.size() >= connectContext.getSessionVariable().getLargeInPredicateThreshold()) {
+            String rawText = extractRawText(context.numberList());
+            return new LargeInPredicate(compareExpr, rawText, literals, literals.size(), isNotIn,
+                    List.of(literals.get(0)), createPos(context));
+        }
+        return new InPredicate(compareExpr, literals, isNotIn, createPos(context));
+    }
+
     /**
      * Parse integer literal with the exact same logic as visitIntegerValue
      */

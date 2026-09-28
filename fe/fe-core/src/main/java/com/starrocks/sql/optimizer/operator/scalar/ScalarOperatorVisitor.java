@@ -79,8 +79,10 @@ public abstract class ScalarOperatorVisitor<R, C> {
         return visit(predicate, context);
     }
 
+    // A LargeInPredicateOperator keeps its constants outside its children, so a visitor of InPredicateOperator
+    // would take it for an IN with one constant.
     public R visitLargeInPredicate(LargeInPredicateOperator predicate, C context) {
-        return visitInPredicate(predicate, context);
+        return visit(predicate, context);
     }
 
     public R visitMultiInPredicate(MultiInPredicateOperator predicate, C context) {

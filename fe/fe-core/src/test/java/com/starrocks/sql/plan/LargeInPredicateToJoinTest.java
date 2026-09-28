@@ -16,29 +16,46 @@ package com.starrocks.sql.plan;
 
 import com.google.common.collect.Lists;
 import com.starrocks.common.ExceptionChecker;
+import com.starrocks.qe.SessionVariableConstants;
+import com.starrocks.sql.ast.expression.DecimalLiteral;
 import com.starrocks.sql.ast.expression.Expr;
+import com.starrocks.sql.ast.expression.FloatLiteral;
 import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.LargeInPredicate;
+import com.starrocks.sql.ast.expression.LiteralExpr;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.sql.optimizer.operator.logical.LogicalRawValuesOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalRawValuesOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LargeInConstants;
 import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
+import com.starrocks.type.BooleanType;
+import com.starrocks.type.DateType;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
+import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.Type;
+import com.starrocks.type.TypeFactory;
 import com.starrocks.type.VarcharType;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LargeInPredicateToJoinTest extends PlanTestBase {
 
@@ -98,6 +115,60 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
         // Test string types (varchar, char) with string constants
         assertLargeInTransformation("select * from tall where ta in ('a', 'b', 'c', 'd')"); // varchar
         assertLargeInTransformation("select * from tall where tt in ('str1', 'str2', 'str3', 'str4')"); // char
+
+        // Constants of another type compare as in the InPredicate with the same list
+        assertLargeInTransformation("select * from tall where ta in (1, 2, 3, 4)"); // varchar with integers
+        assertLargeInTransformation("select * from tall where tc in ('1', '2', '3', '4')"); // int with strings
+        assertLargeInTransformation(
+                "select * from tall where th in ('2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04')"); // datetime
+        assertLargeInTransformation(
+                "select * from tall where ti in ('2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04')"); // date
+        assertLargeInTransformation("select * from test_all_type where id_decimal in (1.5, 2.25, 3, 4)"); // decimal
+        assertLargeInTransformation("select * from tall where td in (-1, -2, 3, 4)"); // negative numbers
+    }
+
+    @Test
+    public void testComparisonType() throws Exception {
+        // The values have the type of the compared column, so the column is not cast
+        String plan = getFragmentPlan("select * from test_all_type where t1c in ('1', '2', '3', '4')");
+        assertContains(plan, "constant type: INT");
+        assertContains(plan, "equal join conjunct: 3: t1c = 11: const_value");
+
+        plan = getFragmentPlan("select * from test_all_type where t1a in (1, 2, 3, 4)");
+        assertContains(plan, "constant type: VARCHAR");
+        assertContains(plan, "equal join conjunct: 1: t1a = 11: const_value");
+
+        plan = getFragmentPlan("select * from test_all_type where t1b in (1, 2, 3, 4)");
+        assertContains(plan, "constant type: SMALLINT");
+        assertContains(plan, "equal join conjunct: 2: t1b = 11: const_value");
+
+        plan = getFragmentPlan("select * from test_all_type where id_date in " +
+                "('2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04')");
+        assertContains(plan, "constant type: DATE");
+        assertContains(plan, "equal join conjunct: 9: id_date = 11: const_value");
+
+        plan = getFragmentPlan("select * from test_all_type where id_decimal in (1.50, 2.25, 3.00, 4.00)");
+        assertContains(plan, "constant type: DECIMAL64(18,2)");
+        assertContains(plan, "equal join conjunct: 10: id_decimal = 11: const_value");
+
+        // A constant that is not an INT: the comparison is in the common type, as in the InPredicate
+        plan = getFragmentPlan("select * from test_all_type where t1c in ('01', '2', '3', '4')");
+        assertContains(plan, "constant type: DECIMAL128(38,9)");
+        assertContains(plan, "equal join conjunct: 12: cast = 11: const_value");
+    }
+
+    @Test
+    public void testValuesInThrift() throws Exception {
+        String plan = getThriftPlan("select * from test_all_type where id_decimal in (1.5, 2.25, 3, 4)");
+        assertContains(plan, "string_values:[1.50, 2.25, 3.00, 4.00]");
+
+        plan = getThriftPlan("select * from test_all_type where id_datetime in " +
+                "('2023-01-01', '2023-01-02 03:04:05', '2023-01-02 03:04:05.000007', '2023-01-04')");
+        assertContains(plan, "string_values:[2023-01-01 00:00:00, 2023-01-02 03:04:05, " +
+                "2023-01-02 03:04:05.000007, 2023-01-04 00:00:00]");
+
+        plan = getThriftPlan("select * from test_all_type where t1c in ('1', '2', '3', '4')");
+        assertContains(plan, "long_values:[1, 2, 3, 4]");
     }
 
     @Test
@@ -215,31 +286,190 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
 
     @Test
     public void testLimitationsAndExceptions() {
-        // Test multiple LargeInPredicates in one query
-        assertLargeInException(
-                "select * from t0 where v1 in (1, 2, 3, 4) and v2 in (10, 20, 30, 40)",
-                "LargeInPredicate does not support multiple LargeInPredicate in one query");
-        
-        // Test OR compound predicates
+        // A LargeInPredicate inside another expression of a filter
         assertLargeInException(
                 "select * from t0 where v1 in (1, 2, 3, 4) or v2 > 100",
-                "LargeInPredicate does not support OR compound predicates");
-        
-        // Test unsupported type combinations
+                "LargeInPredicate is supported only as a conjunct of a filter");
         assertLargeInException(
-                "select * from tall where ta in (1, 2, 3, 4)", // varchar with integers
-                "LargeInPredicate only supports");
-        
+                "select * from t0 where case when v1 in (1, 2, 3, 4) then v2 else v3 end > 100",
+                "LargeInPredicate is supported only as a conjunct of a filter");
+
+        // A LargeInPredicate out of a filter
         assertLargeInException(
-                "select * from tall where th in ('2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04')", // datetime
-                "LargeInPredicate only supports");
+                "select v1 in (1, 2, 3, 4) from t0",
+                "LargeInPredicate is supported only as a conjunct of a filter, transformed 0 of 1");
+        assertLargeInException(
+                "select * from t0 join t1 on t0.v1 = t1.v4 and t1.v5 in (1, 2, 3, 4)",
+                "LargeInPredicate is supported only as a conjunct of a filter, transformed 0 of 1");
+
+        // A comparison type that RAW VALUES does not hold
+        assertLargeInException(
+                "select * from tall where te in (1.1, 2.2, 3.3, 4.4)",
+                "LargeInPredicate does not support comparison type");
+
+        // A constant that the InPredicate leaves to BE as a CAST
+        assertLargeInException(
+                "select * from tall where tc in ('a', 'b', 'c', 'd')",
+                "does not fold to DECIMAL128(38,9)");
+    }
+
+    @Test
+    public void testEqBaseType() throws Exception {
+        String eqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.VARCHAR);
+        try {
+            String plan = getFragmentPlan("select * from test_all_type where t1c in ('a', '01', 'c', 'd')");
+            assertContains(plan, "constant type: VARCHAR");
+            assertContains(plan, "equal join conjunct: 12: cast = 11: const_value");
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
+        }
+    }
+
+    // LargeInConstants compares as the InPredicate with the same list after ImplicitCastRule and FoldConstantsRule:
+    // same comparison type and values, or a LargeInPredicateException where the InPredicate keeps a CAST for BE or
+    // compares in a type that RAW VALUES does not hold.
+    @Test
+    public void testConstantsAsInPredicate() throws Exception {
+        List<Type> columnTypes = List.of(IntegerType.TINYINT, IntegerType.SMALLINT, IntegerType.INT,
+                IntegerType.BIGINT, IntegerType.LARGEINT, TypeFactory.createVarcharType(20),
+                TypeFactory.createCharType(10), TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, 2),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL64, 10, 2),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL64, 18, 4),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL128, 38, 6), DateType.DATE, DateType.DATETIME,
+                FloatType.FLOAT, FloatType.DOUBLE, BooleanType.BOOLEAN);
+        List<List<LiteralExpr>> lists = List.of(
+                List.of(new IntLiteral(1), new IntLiteral(2), new IntLiteral(127)),
+                List.of(new IntLiteral(1), new IntLiteral(40000), new IntLiteral(3000000000L)),
+                List.of(new IntLiteral(-1), new IntLiteral(0), new IntLiteral(-128)),
+                List.of(new IntLiteral(20240102), new IntLiteral(20240103)),
+                List.of(new DecimalLiteral("1.5"), new DecimalLiteral("-2.25"), new IntLiteral(3)),
+                List.of(new DecimalLiteral("1.50"), new DecimalLiteral("2.00")),
+                List.of(new DecimalLiteral("1234567.891"), new DecimalLiteral("0.001")),
+                List.of(new DecimalLiteral("12345678901234567890.12"), new IntLiteral(1)),
+                List.of(new FloatLiteral("1.5"), new IntLiteral(2)),
+                List.of(new StringLiteral("1"), new StringLiteral("2"), new StringLiteral("127")),
+                List.of(new StringLiteral("01"), new StringLiteral("2")),
+                List.of(new StringLiteral("-5"), new StringLiteral("1.5"), new StringLiteral("2.25")),
+                List.of(new StringLiteral("a"), new StringLiteral("b")),
+                List.of(new StringLiteral(" 7"), new StringLiteral("8 ")),
+                List.of(new StringLiteral("2024-01-02"), new StringLiteral("20240103")),
+                List.of(new StringLiteral("2024-01-02 03:04:05"), new StringLiteral("2024-01-02 03:04:05.000007")),
+                List.of(new StringLiteral("2024-02-30"), new StringLiteral("2024-01-02")),
+                List.of(new StringLiteral("true"), new StringLiteral("0")));
+
+        String eqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        int resolved = 0;
+        int refused = 0;
+        try {
+            for (String base : List.of(SessionVariableConstants.DECIMAL, SessionVariableConstants.VARCHAR,
+                    SessionVariableConstants.DOUBLE)) {
+                connectContext.getSessionVariable().setCboEqBaseType(base);
+                for (Type columnType : columnTypes) {
+                    for (List<LiteralExpr> list : lists) {
+                        if (assertConstantsAsInPredicate(columnType, list, base)) {
+                            resolved++;
+                        } else {
+                            refused++;
+                        }
+                    }
+                }
+            }
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
+        }
+        assertTrue(resolved > 0 && refused > 0, resolved + " resolved, " + refused + " refused");
+    }
+
+    private static boolean assertConstantsAsInPredicate(Type columnType, List<LiteralExpr> list, String base) {
+        ColumnRefOperator column = new ColumnRefOperator(100, columnType, "c", true);
+        List<ConstantOperator> constants = list.stream()
+                .map(l -> ConstantOperator.createObject(l.getRealObjectValue(), l.getType()))
+                .collect(Collectors.toList());
+        String name = columnType.toSql() + " IN " + constants + " with " + base;
+
+        List<ScalarOperator> children = Lists.newArrayList(column);
+        children.addAll(constants);
+        ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();
+        ScalarOperator in = rewriter.rewrite(new InPredicateOperator(false, children),
+                ScalarOperatorRewriter.DEFAULT_TYPE_CAST_RULE);
+        in = rewriter.rewrite(in, ScalarOperatorRewriter.FOLD_CONSTANT_RULES);
+        assertTrue(in instanceof InPredicateOperator, name + ": " + in);
+        Type comparisonType = in.getChild(0).getType();
+        List<ScalarOperator> inConstants = in.getChildren().subList(1, in.getChildren().size());
+        PrimitiveType primitiveType = comparisonType.getPrimitiveType();
+        boolean held = primitiveType == PrimitiveType.TINYINT || primitiveType == PrimitiveType.SMALLINT
+                || primitiveType == PrimitiveType.INT || primitiveType == PrimitiveType.BIGINT
+                || primitiveType.isCharFamily() || primitiveType == PrimitiveType.DECIMAL32
+                || primitiveType == PrimitiveType.DECIMAL64 || primitiveType == PrimitiveType.DECIMAL128
+                || primitiveType == PrimitiveType.DATE || primitiveType == PrimitiveType.DATETIME;
+        boolean folded = inConstants.stream().allMatch(ScalarOperator::isConstantRef);
+        boolean allNull = inConstants.stream().allMatch(c -> c.isConstantRef() && ((ConstantOperator) c).isNull());
+
+        LargeInConstants values;
+        try {
+            values = LargeInConstants.resolve(column, constants);
+        } catch (LargeInPredicateException e) {
+            assertTrue(!held || !folded || allNull, name + " is refused: " + e.getMessage() + ", IN is " + in);
+            return false;
+        }
+        assertTrue(held && folded, name + " is resolved, IN is " + in);
+        assertTrue(values.getType().matchesType(comparisonType), name + ": " + values.getType().toSql());
+
+        List<Object> expected = new ArrayList<>();
+        boolean hasNull = false;
+        for (ScalarOperator operator : inConstants) {
+            ConstantOperator constant = (ConstantOperator) operator;
+            if (constant.isNull()) {
+                hasNull = true;
+            } else if (comparisonType.isIntegerType()) {
+                expected.add(((Number) constant.getValue()).longValue());
+            } else if (comparisonType.isStringType()) {
+                expected.add(constant.getVarchar());
+            } else if (comparisonType.isDecimalV3()) {
+                expected.add(constant.getDecimal());
+            } else {
+                expected.add(constant.getDatetime());
+            }
+        }
+        assertEquals(expected, values.getValues(), name);
+        assertEquals(hasNull, values.hasNull(), name);
+        return true;
+    }
+
+    @Test
+    public void testNullConstant() throws Exception {
+        // 10^38 - 1 does not fit the comparison type and folds to NULL, as in the InPredicate
+        String sql = "select * from test_all_type where id_decimal %s (99999999999999999999999999999999999999, 1.5, 2, 3)";
+        String plan = getFragmentPlan(String.format(sql, "in"));
+        assertContains(plan, "LEFT SEMI JOIN");
+        assertContains(plan, "constant count: 3");
+
+        // NOT IN with NULL is never true
+        plan = getFragmentPlan(String.format(sql, "not in"));
+        assertNotContains(plan, "RAW_VALUES");
+        assertContains(plan, "EMPTYSET");
+    }
+
+    @Test
+    public void testConjunctPositions() throws Exception {
+        // Every LargeInPredicate conjunct becomes a join
+        String plan = getFragmentPlan("select * from t0 where v1 in (1, 2, 3, 4) and v2 in (10, 20, 30, 40)");
+        assertEquals(2, StringUtils.countMatches(plan, "LEFT SEMI JOIN"));
+        assertEquals(2, StringUtils.countMatches(plan, "RAW_VALUES"));
+
+        // OR in another conjunct
+        plan = getFragmentPlan("select * from t0 where v1 in (1, 2, 3, 4) and (v2 > 1 or v3 < 2)");
+        assertContains(plan, "LEFT SEMI JOIN");
+        assertContains(plan, "PREDICATES: (2: v2 > 1) OR (3: v3 < 2)");
+
+        // NOT of IN is NOT IN
+        assertLargeNotInTransformation("select * from t0 where not (v1 in (1, 2, 3, 4))");
+        assertLargeInTransformation("select * from t0 where not (v1 not in (1, 2, 3, 4))");
     }
 
     @Test
     public void testFallbackScenarios() throws Exception {
-        // Test float types - should fallback to regular InPredicate
-        assertNoLargeInTransformation("select * from tall where te in (1.1, 2.2, 3.3, 4.4)");
-        
         // Test small IN list (below threshold)
         connectContext.getSessionVariable().setLargeInPredicateThreshold(10);
         try {
@@ -430,7 +660,6 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
     public void testLargeInPredicateMethods() {
 
         Type intType = IntegerType.BIGINT;
-        Type stringType = VarcharType.VARCHAR;
         String rawText1 = "1, 2, 3, 4";
         String rawText2 = "5, 6, 7, 8";
         List<Object> rawConstants1 = Lists.newArrayList(1L, 2L, 3L, 4L);
@@ -477,11 +706,12 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
         List<ScalarOperator> children1 = Lists.newArrayList(columnRef1);
         List<ScalarOperator> children2 = Lists.newArrayList(columnRef2);
         
-        LargeInPredicateOperator largeInOp1 = new LargeInPredicateOperator(rawText1, rawConstants1, 4, false, intType, children1);
-        LargeInPredicateOperator largeInOp2 = new LargeInPredicateOperator(rawText1, rawConstants1, 4, false, intType, children1);
-        LargeInPredicateOperator largeInOp3 = new LargeInPredicateOperator(rawText2, rawConstants2, 4, false, intType, children2);
-        LargeInPredicateOperator largeInOp4 = new LargeInPredicateOperator(
-                rawText1, stringConstants, 4, true, stringType, children1);
+        LargeInConstants constants1 = LargeInConstants.resolve(columnRef1, toConstants(rawConstants1));
+        LargeInConstants constants2 = LargeInConstants.resolve(columnRef2, toConstants(rawConstants2));
+        LargeInPredicateOperator largeInOp1 = new LargeInPredicateOperator(rawText1, constants1, false, children1);
+        LargeInPredicateOperator largeInOp2 = new LargeInPredicateOperator(rawText1, constants1, false, children1);
+        LargeInPredicateOperator largeInOp3 = new LargeInPredicateOperator(rawText2, constants2, false, children2);
+        LargeInPredicateOperator largeInOp4 = new LargeInPredicateOperator(rawText1, constants1, true, children1);
 
         // Test LargeInPredicateOperator equals method
         assertEquals(largeInOp1, largeInOp2);
@@ -500,9 +730,13 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
 
         // Test LargeInPredicateOperator getter methods
         assertEquals(rawText1, largeInOp1.getRawText());
-        assertEquals(rawConstants1, largeInOp1.getRawConstantList());
+        assertEquals(rawConstants1, largeInOp1.getConstants().getValues());
         assertEquals(4, largeInOp1.getConstantCount());
-        assertEquals(intType, largeInOp1.getConstantType());
+        assertEquals(intType, largeInOp1.getConstants().getType());
         assertFalse(largeInOp1.isNotIn());
+    }
+
+    private static List<ConstantOperator> toConstants(List<Object> values) {
+        return values.stream().map(v -> ConstantOperator.createBigint((Long) v)).collect(Collectors.toList());
     }
 }
