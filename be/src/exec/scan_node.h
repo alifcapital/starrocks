@@ -154,6 +154,8 @@ public:
 
     std::vector<ExprContext*>& get_heavy_expr_ctxs() { return _heavy_expr_ctxs; }
 
+    bool uses_heavy_expr_slot(ExprContext* context) const;
+
 protected:
     RuntimeProfile::Counter* _bytes_read_counter = nullptr; // # bytes read from the scanner
     // # rows/tuples read from the scanner (including those discarded by eval_conjucts())
