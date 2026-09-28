@@ -30,6 +30,9 @@ public class JoinStatisticsStmt extends StatementBase {
     private final boolean ifExists;
     private final Map<String, String> properties;
     private JoinStatisticsDefinition definition;
+    private boolean verbose;
+    private long inspectionOffset;
+    private long inspectionLimit = 100;
 
     public JoinStatisticsStmt(Action action, String name, QueryStatement query, boolean asynchronous,
                               boolean ifExists, Map<String, String> properties, NodePosition pos) {
@@ -40,6 +43,24 @@ public class JoinStatisticsStmt extends StatementBase {
         this.asynchronous = asynchronous;
         this.ifExists = ifExists;
         this.properties = Map.copyOf(properties);
+    }
+
+    public void setInspection(long offset, long limit) {
+        verbose = true;
+        inspectionOffset = offset;
+        inspectionLimit = limit;
+    }
+
+    public boolean isVerbose() {
+        return verbose;
+    }
+
+    public long getInspectionOffset() {
+        return inspectionOffset;
+    }
+
+    public long getInspectionLimit() {
+        return inspectionLimit;
     }
 
     public Action getAction() {

@@ -66,16 +66,20 @@ WHERE catalog_name = 'iceberg'
 
 ## Packed partition and JOIN payloads
 
-There is currently no SQL decoder for these two binary formats. `hll_cardinality(payload)` is not applicable: the payload is an entire compressed statistics object, not a single HLL. `to_base64(payload)` only transports the bytes and does not decode them.
+`hll_cardinality(payload)` is not applicable to either binary format: the payload is an entire compressed statistics object, not a single HLL. `to_base64(payload)` only transports the bytes and does not decode them.
 
-For a packed partition, use `external_column_statistics` above to inspect the same underlying column statistics. JOIN statistics have no equivalent readable duplicate table. Inspect their metadata with:
+For a packed partition, use `external_column_statistics` above to inspect the same underlying column statistics. JOIN statistics have no readable duplicate table, but FE provides a paginated SQL command:
 
 ```sql
+-- Short collection status and generation metadata.
 SHOW JOIN STATISTICS;
 SHOW JOIN STATISTICS transactions_users;
+-- Decoded distributions from the saved generation.
+SHOW VERBOSE JOIN STATISTICS transactions_users LIMIT 100;
+SHOW VERBOSE JOIN STATISTICS transactions_users LIMIT 100 OFFSET 100;
 ```
 
-SHOW reports the definition's collection state and generation metadata, not the head frequencies, moments or tail contents. Full JOIN contents require the matching Java `JoinStatisticsCodec` after reassembling parts in `part_id` order. The diagnostic script `inspect-statistics.py` on the test box wraps this path; it is not a SQL builtin.
+VERBOSE returns sections for source slices, degree moments, head keys/frequencies, tail norms and correlations. Details are readable JSON; SELECT is required on all source tables. The default page has 100 rows, the maximum is 1,000. See [JOIN statistics](join_statistics.md#inspect-collected-distributions) for field meanings and paging rules. No Java script or BE scalar decoder is needed for this command.
 
 ## Collection and deployment
 

@@ -275,6 +275,11 @@ public final class JoinStatisticsManager implements MemoryTrackable {
         return cache.get(meta, Config.enable_sync_statistics_load, timeoutMillis);
     }
 
+    /** Explicit administrative inspection may wait for the bounded shared load without changing optimizer policy. */
+    public Optional<JoinStatisticsData> inspect(JoinStatisticsMeta meta, long timeoutMillis) {
+        return cache.get(meta, true, timeoutMillis);
+    }
+
     /** Journal replay retires cached generations on follower FEs as well as on the collecting leader. */
     public void invalidateCache(long objectId) {
         cache.invalidate(objectId);

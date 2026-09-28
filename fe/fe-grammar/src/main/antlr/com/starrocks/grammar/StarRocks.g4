@@ -1461,6 +1461,7 @@ joinStatisticsStatement
     | ANALYZE JOIN STATISTICS name=identifier (WITH (SYNC | ASYNC) MODE)?
     | DROP JOIN STATISTICS (IF EXISTS)? name=identifier
     | SHOW JOIN STATISTICS name=identifier?
+    | SHOW VERBOSE JOIN STATISTICS name=identifier (LIMIT limit=INTEGER_VALUE (OFFSET offset=INTEGER_VALUE)?)?
     ;
 
 analyzeStatement

@@ -54,6 +54,10 @@ public final class JoinStatisticsAnalyzer {
             FeNameFormat.checkCommonName("JOIN statistics", statement.getName());
         }
         if (statement.getAction() == JoinStatisticsStmt.Action.SHOW) {
+            if (statement.isVerbose() && (statement.getName() == null || statement.getInspectionOffset() < 0
+                    || statement.getInspectionLimit() < 0 || statement.getInspectionLimit() > 1000)) {
+                throw new SemanticException("SHOW VERBOSE JOIN STATISTICS requires a name and LIMIT between 0 and 1000");
+            }
             return;
         }
         if (statement.getAction() != JoinStatisticsStmt.Action.CREATE) {
@@ -102,7 +106,8 @@ public final class JoinStatisticsAnalyzer {
             if ((!table.getTable().isIcebergTable() && !table.getTable().isNativeTableOrMaterializedView())
                     || table.getQueryPeriod() != null || table.getSampleClause() != null
                     || table.hasTableHints() || table.getPartitionPredicate() != null) {
-                throw new SemanticException("JOIN statistics require complete Iceberg or native tables without sampling or hints");
+                throw new SemanticException(
+                        "JOIN statistics require complete Iceberg or native tables without sampling or hints");
             }
             predicates.add(new LinkedHashSet<>());
         }

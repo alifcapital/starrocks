@@ -58,6 +58,20 @@ class JoinStatisticsAnalyzerTest {
     }
 
     @Test
+    void verboseInspectionParsesBoundedPagesWithoutChangingCollectionSyntax() {
+        var first = analyze("SHOW VERBOSE JOIN STATISTICS test");
+        Assertions.assertTrue(first.isVerbose());
+        Assertions.assertEquals(100, first.getInspectionLimit());
+        Assertions.assertEquals(0, first.getInspectionOffset());
+        var page = analyze("SHOW VERBOSE JOIN STATISTICS test LIMIT 7 OFFSET 12345");
+        Assertions.assertEquals(7, page.getInspectionLimit());
+        Assertions.assertEquals(12345, page.getInspectionOffset());
+        Assertions.assertFalse(analyze("SHOW JOIN STATISTICS test").isVerbose());
+        Assertions.assertThrows(Exception.class, () -> analyze("SHOW VERBOSE JOIN STATISTICS test LIMIT 1001"));
+        Assertions.assertThrows(Exception.class, () -> analyze("SHOW VERBOSE JOIN STATISTICS"));
+    }
+
+    @Test
     void nativeSelfJoinKeepsPhysicalIdentityAndSeparateRelationRoles() throws Exception {
         var tables = new com.starrocks.utframe.StarRocksAssert(context);
         tables.withDatabase("join_stats_native_test").useDatabase("join_stats_native_test");

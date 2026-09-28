@@ -48,6 +48,37 @@ JOIN iceberg.landing_mobi_tj.providers p ON t.provider_id = p.provider_id;
 
 Increasing this limit widens predicate coverage and increases collection work and retained size. It does not change the 16,384-key head budget. The accepted range is 1–4,096 predicate combinations, with at most 32 predicate columns per source. Creating, collecting and dropping an object require the same source-table privileges as ANALYZE. SHOW lists only objects for which the caller has SELECT on every source table.
 
+## Inspect collected distributions
+
+```sql
+SHOW VERBOSE JOIN STATISTICS transactions_users LIMIT 100;
+SHOW VERBOSE JOIN STATISTICS transactions_users LIMIT 100 OFFSET 100;
+```
+
+This command decodes the saved generation on FE using the existing binary codec. It does not scan the source tables or collect new statistics. It requires SELECT on **every** source table, including sources absent from the caller's other queries. Ordinary `SHOW JOIN STATISTICS` remains a short status listing.
+
+The default page is 100 rows; LIMIT accepts 0–1,000. OFFSET and the returned `Row` are zero-based. Output columns are `Generation`, `Row`, `Section`, `Source`, `Domain`, `Slice`, and `Details`. `Details` is readable JSON with named fields. Source, domain and slice identifiers are zero-based; an empty identifier means it is not applicable to that row.
+
+| Section | Contents |
+| --- | --- |
+| OBJECT | Object name, collection time, stored bytes and prepared memory estimate |
+| SOURCE | Source table/role, snapshot or version, row count, predicate columns and types |
+| SLICE | Predicate tuple and its row count; JSON null denotes SQL NULL |
+| DEGREE | Rows, NULL rows, NDV, maximum key frequency and frequency moments indexed by power |
+| DOMAIN | Equality-key columns by source and their types |
+| BASIS | Participating sources, number of head positions and tail dimensions |
+| HEAD_KEY | Shared head index and retained key value; `label_retained=false` means the key text was not retained, not that it is SQL NULL |
+| HEAD | Nonzero frequency for a head index in a source slice; zero entries are omitted |
+| TAIL | Occupied bucket in a tail layout and its stored Lp norms; empty buckets are omitted |
+| PAIR | Correlations for a pair of source slices, including JOIN and membership products |
+| INTRA | Support and moments for two key domains within one source slice |
+
+For DEGREE, moment `p` is the sum of key frequencies raised to `p`. TAIL exposes the prepared stored norms: order `0` is the bucket's key count, and positive order `p` is the p-th root of the corresponding frequency moment. The three layouts represent the same tail hashed differently; do not sum their totals together. A unit-frequency tail stores only its key count. PAIR's four `products_by_presence_mask` entries use frequency/frequency, presence/frequency, frequency/presence, and presence/presence, respectively.
+
+Pages are stable within one generation. Check `Generation` when fetching the next page; if ANALYZE published a new generation, restart at OFFSET 0. No historical generation is pinned across commands. Output is capped at 32 MiB per page; an oversized page reports an error asking for a smaller LIMIT instead of silently truncating values.
+
+A cached generation is reused. Otherwise this explicit inspection command waits for the shared statistics loader, bounded by the session `query_timeout`; failure, timeout or a concurrent generation change reports an error and can be retried. This does not change asynchronous statistics loading during ordinary query planning.
+
 ## What is collected
 
 Collection pins one snapshot of each Iceberg source before scanning. These are independent snapshots, not a transaction shared across tables. Native collection uses normal ANALYZE reads and does not block concurrent writes. A version fingerprint detects changes across collection passes; such an object remains usable on its own but does not claim a stable native version for composition with separately collected objects.

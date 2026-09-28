@@ -3220,9 +3220,15 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 : context.ANALYZE() != null ? JoinStatisticsStmt.Action.ANALYZE
                 : context.DROP() != null ? JoinStatisticsStmt.Action.DROP : JoinStatisticsStmt.Action.SHOW;
         QueryStatement query = context.queryStatement() == null ? null : (QueryStatement) visit(context.queryStatement());
-        return new JoinStatisticsStmt(action, context.name == null ? null : getIdentifierName(context.name), query,
+        JoinStatisticsStmt statement = new JoinStatisticsStmt(action,
+                context.name == null ? null : getIdentifierName(context.name), query,
                 context.ASYNC() != null, context.EXISTS() != null, getCaseSensitiveProperties(context.properties()),
                 createPos(context));
+        if (context.VERBOSE() != null) {
+            statement.setInspection(context.offset == null ? 0 : Long.parseLong(context.offset.getText()),
+                    context.limit == null ? 100 : Long.parseLong(context.limit.getText()));
+        }
+        return statement;
     }
 
     @Override

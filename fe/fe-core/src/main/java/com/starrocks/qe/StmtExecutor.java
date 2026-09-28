@@ -652,7 +652,8 @@ public class StmtExecutor {
                 }
             }
             return ConnectContext.get().getSessionVariable().getInsertTimeoutS();
-        } else if (parsedStmt instanceof AnalyzeStmt || parsedStmt instanceof JoinStatisticsStmt) {
+        } else if (parsedStmt instanceof AnalyzeStmt || (parsedStmt instanceof JoinStatisticsStmt joinStats
+                && joinStats.getAction() != JoinStatisticsStmt.Action.SHOW)) {
             return (int) Config.statistic_collect_query_timeout;
         } else {
             // For SELECT queries:
@@ -2193,6 +2194,33 @@ public class StmtExecutor {
                         generation -> joinStatisticsCollectionGeneration = generation);
                 case DROP -> manager.drop(statement.getName(), statement.isIfExists());
                 case SHOW -> {
+                    if (statement.isVerbose()) {
+                        var meta = analyze.getJoinStatisticsRegistry().get(statement.getName());
+                        if (meta == null) {
+                            throw new DdlException("Unknown JOIN statistics: " + statement.getName());
+                        }
+                        try {
+                            for (var source : meta.getDefinition().getSources()) {
+                                Authorizer.checkTableAction(context, source.getTableName(), PrivilegeType.SELECT);
+                            }
+                        } catch (AccessDeniedException e) {
+                            throw new DdlException("SELECT is required on every source of JOIN statistics");
+                        }
+                        if (meta.getGeneration() == 0) {
+                            throw new DdlException("JOIN statistics has no collected generation: " + statement.getName());
+                        }
+                        var data = manager.inspect(meta, java.util.concurrent.TimeUnit.SECONDS.toMillis(getExecTimeout()))
+                                .orElseThrow(() -> new DdlException(
+                                        "JOIN statistics generation is unavailable, changed, "
+                                                + "or did not load in time; retry SHOW"));
+                        try {
+                            sendShowResult(com.starrocks.sql.optimizer.statistics.JoinStatisticsInspection.show(
+                                    meta, data, statement.getInspectionOffset(), statement.getInspectionLimit()));
+                        } catch (IllegalArgumentException e) {
+                            throw new DdlException(e.getMessage());
+                        }
+                        return;
+                    }
                     ShowResultSetMetaData.Builder metadata = ShowResultSetMetaData.builder();
                     for (String column : List.of("Name", "State", "Generation", "CollectedAt", "DataBytes", "Error")) {
                         metadata.addColumn(new Column(column, TypeFactory.createVarcharType(65533)));
