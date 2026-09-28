@@ -79,14 +79,18 @@ TEST(AggTopNRuntimeFilterTest, ProbeUsesDynamicRangeWithoutBackpressure) {
     RuntimeFilterProbeCollector collector;
     collector._runtime_state = &state;
     collector._descriptors.emplace(0, &descriptor);
-    RuntimeMembershipFilterEvalContext context;
-    for (int i = 0; i < 2; ++i) {
-        Chunk chunk;
-        chunk.append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3, 4}), 1);
-        collector.do_evaluate(&chunk, context);
-        ASSERT_EQ(2, chunk.num_rows());
-        EXPECT_EQ(1, chunk.get_column_by_slot_id(1)->get(0).get_int32());
-        EXPECT_EQ(2, chunk.get_column_by_slot_id(1)->get(1).get_int32());
+    for (bool storage_pushdown : {false, true}) {
+        // A TopN range pushed into page pruning must still filter surviving rows.
+        descriptor.set_has_push_down_to_storage(storage_pushdown);
+        RuntimeMembershipFilterEvalContext context;
+        for (int i = 0; i < 2; ++i) {
+            Chunk chunk;
+            chunk.append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3, 4}), 1);
+            collector.do_evaluate(&chunk, context);
+            ASSERT_EQ(2, chunk.num_rows());
+            EXPECT_EQ(1, chunk.get_column_by_slot_id(1)->get(0).get_int32());
+            EXPECT_EQ(2, chunk.get_column_by_slot_id(1)->get(1).get_int32());
+        }
     }
     // Do not reinterpret an inactive membership filter, or evaluate TopN twice
     // when the caller explicitly runs the separate TopN-only pass.
