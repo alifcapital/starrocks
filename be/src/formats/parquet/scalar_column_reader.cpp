@@ -213,7 +213,16 @@ StatusOr<bool> RawColumnReader::_row_group_zone_map_filter(const std::vector<con
                                                            CompoundNodeType pred_relation,
                                                            const TypeDescriptor& col_type, const uint64_t rg_first_row,
                                                            const uint64_t rg_num_rows) const {
-    bool filtered = false;
+    ASSIGN_OR_RETURN(auto match, _row_group_zone_map_match(predicates, pred_relation, col_type,
+                                                          rg_first_row, rg_num_rows));
+    return match == ZoneMapMatch::NONE;
+}
+
+StatusOr<ZoneMapMatch> RawColumnReader::_row_group_zone_map_match(const std::vector<const ColumnPredicate*>& predicates,
+                                                           CompoundNodeType pred_relation,
+                                                           const TypeDescriptor& col_type, const uint64_t rg_first_row,
+                                                           const uint64_t rg_num_rows) const {
+    const auto filtered = ZoneMapMatch::UNKNOWN;
     if (!get_chunk_metadata()->meta_data.__isset.statistics || get_column_parquet_field() == nullptr) {
         // statistics is not existed, don't filter
         return filtered;
@@ -263,7 +272,11 @@ StatusOr<bool> RawColumnReader::_row_group_zone_map_filter(const std::vector<con
         return filtered;
     }
 
-    return !PredicateFilterEvaluatorUtils::zonemap_satisfy(predicates, zone_map_detail.value(), pred_relation);
+    if (!PredicateFilterEvaluatorUtils::zonemap_satisfy(predicates, *zone_map_detail, pred_relation)) {
+        return ZoneMapMatch::NONE;
+    }
+    return PredicateFilterEvaluatorUtils::zonemap_all_match(predicates, *zone_map_detail, pred_relation)
+                   ? ZoneMapMatch::ALL : ZoneMapMatch::UNKNOWN;
 }
 
 StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,

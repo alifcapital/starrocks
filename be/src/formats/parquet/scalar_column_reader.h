@@ -117,6 +117,10 @@ protected:
                                               CompoundNodeType pred_relation, const TypeDescriptor& col_type,
                                               uint64_t rg_first_row, uint64_t rg_num_rows) const;
 
+    StatusOr<ZoneMapMatch> _row_group_zone_map_match(
+            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType relation,
+            const TypeDescriptor& col_type, uint64_t first_row, uint64_t num_rows) const;
+
     StatusOr<bool> _page_index_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
                                                SparseRange<uint64_t>* row_ranges, CompoundNodeType pred_relation,
                                                const TypeDescriptor& col_type, const uint64_t rg_first_row,
@@ -208,6 +212,12 @@ public:
         return _row_group_zone_map_filter(predicates, pred_relation, *_col_type, rg_first_row, rg_num_rows);
     }
 
+    StatusOr<ZoneMapMatch> row_group_zone_map_match(
+            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType pred_relation,
+            uint64_t rg_first_row, uint64_t rg_num_rows) const override {
+        return _row_group_zone_map_match(predicates, pred_relation, *_col_type, rg_first_row, rg_num_rows);
+    }
+
     StatusOr<bool> page_index_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
                                               SparseRange<uint64_t>* row_ranges, CompoundNodeType pred_relation,
                                               const uint64_t rg_first_row, const uint64_t rg_num_rows) override {
@@ -289,6 +299,13 @@ public:
                                           rg_first_row, rg_num_rows);
     }
 
+    StatusOr<ZoneMapMatch> row_group_zone_map_match(
+            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType pred_relation,
+            uint64_t rg_first_row, uint64_t rg_num_rows) const override {
+        return _row_group_zone_map_match(predicates, pred_relation, TypeDescriptor(LogicalType::TYPE_VARCHAR),
+                                          rg_first_row, rg_num_rows);
+    }
+
     StatusOr<bool> page_index_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
                                               SparseRange<uint64_t>* row_ranges, CompoundNodeType pred_relation,
                                               const uint64_t rg_first_row, const uint64_t rg_num_rows) override {
@@ -339,6 +356,13 @@ public:
                                              CompoundNodeType pred_relation, const uint64_t rg_first_row,
                                              const uint64_t rg_num_rows) const override {
         return _row_group_zone_map_filter(predicates, pred_relation, TypeDescriptor(LogicalType::TYPE_VARCHAR),
+                                          rg_first_row, rg_num_rows);
+    }
+
+    StatusOr<ZoneMapMatch> row_group_zone_map_match(
+            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType pred_relation,
+            uint64_t rg_first_row, uint64_t rg_num_rows) const override {
+        return _row_group_zone_map_match(predicates, pred_relation, TypeDescriptor(LogicalType::TYPE_VARCHAR),
                                           rg_first_row, rg_num_rows);
     }
 

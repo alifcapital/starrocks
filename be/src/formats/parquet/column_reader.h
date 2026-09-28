@@ -59,6 +59,9 @@ struct ParquetField;
 
 namespace starrocks::parquet {
 
+// UNKNOWN means footer metadata cannot prove either outcome.
+enum class ZoneMapMatch { UNKNOWN, NONE, ALL };
+
 struct ColumnOffsetIndexCtx {
     tparquet::OffsetIndex offset_index;
     std::vector<bool> page_selected;
@@ -183,6 +186,13 @@ public:
                                                      const uint64_t rg_num_rows) const {
         // not implemented, don't filter
         return false;
+    }
+
+    virtual StatusOr<ZoneMapMatch> row_group_zone_map_match(
+            const std::vector<const ColumnPredicate*>& predicates, CompoundNodeType relation,
+            uint64_t first_row, uint64_t num_rows) const {
+        ASSIGN_OR_RETURN(bool rejected, row_group_zone_map_filter(predicates, relation, first_row, num_rows));
+        return rejected ? ZoneMapMatch::NONE : ZoneMapMatch::UNKNOWN;
     }
 
     // return true means page index filter happened

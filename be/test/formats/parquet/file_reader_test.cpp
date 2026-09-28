@@ -42,6 +42,7 @@
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
 #include "formats/parquet/parquet_test_util/util.h"
 #include "formats/parquet/parquet_ut_base.h"
+#include "formats/parquet/predicate_filter_evaluator.h"
 #include "fs/fs.h"
 #include "io/shared_buffered_input_stream.h"
 #include "runtime/descriptor_helper.h"
@@ -3838,6 +3839,78 @@ TEST_F(FileReaderTest, update_rf_and_filter_row_group) {
     chunk->reset();
     auto st = file_reader->get_next(&chunk);
     ASSERT_TRUE(st.is_end_of_file());
+}
+
+TEST(ParquetZoneMapCoverageTest, ComparisonBoundariesAndNulls) {
+    ObjectPool pool;
+    auto type = get_type_info(TYPE_INT);
+    auto* is_null = pool.add(new_column_null_predicate(type, 0, true));
+    auto* not_null = pool.add(new_column_null_predicate(type, 0, false));
+    using Utils = PredicateFilterEvaluatorUtils;
+    for (int bound = -4; bound <= 4; ++bound) {
+        auto value = std::to_string(bound);
+        std::vector<ColumnPredicate*> predicates = {
+                pool.add(new_column_eq_predicate(type, 0, value)),
+                pool.add(new_column_lt_predicate(type, 0, value)),
+                pool.add(new_column_le_predicate(type, 0, value)),
+                pool.add(new_column_gt_predicate(type, 0, value)),
+                pool.add(new_column_ge_predicate(type, 0, value))};
+        for (int lo = -3; lo <= 3; ++lo) {
+            for (int hi = lo; hi <= 3; ++hi) {
+                for (bool nulls : {false, true}) {
+                    ZoneMapDetail detail(Datum(lo), Datum(hi), nulls);
+                    for (auto* pred : predicates) {
+                        bool every = true;
+                        for (int x = lo; x <= hi; ++x) {
+                            bool pass = pred->type() == PredicateType::kEQ ? x == bound :
+                                        pred->type() == PredicateType::kLT ? x < bound :
+                                        pred->type() == PredicateType::kLE ? x <= bound :
+                                        pred->type() == PredicateType::kGT ? x > bound : x >= bound;
+                            every &= pass;
+                        }
+                        EXPECT_EQ(every && !nulls, Utils::zonemap_all_match({pred}, detail, CompoundNodeType::AND));
+                        EXPECT_EQ(every, Utils::zonemap_all_match({pred, is_null}, detail, CompoundNodeType::OR));
+                        EXPECT_FALSE(Utils::zonemap_all_match({pred, is_null}, detail, CompoundNodeType::AND));
+                    }
+                    EXPECT_EQ(!nulls, Utils::zonemap_all_match({not_null}, detail, CompoundNodeType::AND));
+                }
+            }
+        }
+    }
+    ZoneMapDetail nulls(Datum{}, Datum{}, true);
+    EXPECT_TRUE(Utils::zonemap_all_match({is_null}, nulls, CompoundNodeType::AND));
+    EXPECT_FALSE(Utils::zonemap_all_match({not_null}, nulls, CompoundNodeType::AND));
+    auto* ne = pool.add(new_column_ne_predicate(type, 0, "0"));
+    EXPECT_FALSE(Utils::zonemap_all_match({ne}, ZoneMapDetail(Datum(-1), Datum(1), false), CompoundNodeType::AND));
+    auto* float_le = pool.add(new_column_le_predicate(get_type_info(TYPE_FLOAT), 0, "10"));
+    EXPECT_FALSE(Utils::zonemap_all_match({float_le}, ZoneMapDetail(Datum(1.0f), Datum(2.0f), false), CompoundNodeType::AND));
+}
+
+TEST_F(FileReaderTest, footer_coverage_skips_page_index_and_rechecks_new_bounds) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    // Same file, a covering bound, then a useful narrowed bound, then covering again.
+    // Coverage must not persist across filter versions/evaluations.
+    for (int bound : {30000, 5000, 30000}) {
+        auto reader = _create_file_reader(path);
+        Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {""}};
+        auto* ctx = _create_scan_context(slots, path);
+        std::vector<TExpr> expressions;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LE, 0, bound, &expressions);
+        std::vector<ExprContext*> conjuncts;
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+        auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+        ParquetUTBase::setup_conjuncts_manager(conjuncts, _rf_probe_collector, tuple, _runtime_state, ctx);
+        const auto tried_before = g_hdfs_stats.page_index_tried_counter;
+        ASSERT_OK(reader->init(ctx));
+        if (bound == 30000) {
+            EXPECT_EQ(2, reader->row_group_size());
+            EXPECT_EQ(tried_before, g_hdfs_stats.page_index_tried_counter);
+        } else {
+            EXPECT_EQ(1, reader->row_group_size());
+            EXPECT_GT(g_hdfs_stats.page_index_tried_counter, tried_before);
+            EXPECT_LT(reader->group_readers()[0]->get_range().span_size(), 10000);
+        }
+    }
 }
 
 TEST_F(FileReaderTest, filter_page_index_with_rf_has_null) {
