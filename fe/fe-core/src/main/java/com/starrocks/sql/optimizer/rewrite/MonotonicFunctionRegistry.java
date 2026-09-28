@@ -76,16 +76,17 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.NEXT_DAY, Set.of(0))
             .put(FunctionSet.PREVIOUS_DAY, Set.of(0))
             // add/sub functions shift a date by a constant amount: monotonic in the date
-            // argument. The column is not allowed in the amount argument: for subs the result
-            // would decrease while the column grows.
+            // argument. Day shifts are also monotonic in the amount, days_add increasing and
+            // days_sub decreasing, so they admit an integer column in the amount argument too;
+            // other shifts admit the date argument only.
             .put(FunctionSet.YEARS_ADD, Set.of(0))
             .put(FunctionSet.QUARTERS_ADD, Set.of(0))
             .put(FunctionSet.MONTHS_ADD, Set.of(0))
             .put(FunctionSet.ADD_MONTHS, Set.of(0))
             .put(FunctionSet.WEEKS_ADD, Set.of(0))
-            .put(FunctionSet.DAYS_ADD, Set.of(0))
-            .put(FunctionSet.ADDDATE, Set.of(0))
-            .put(FunctionSet.DATE_ADD, Set.of(0))
+            .put(FunctionSet.DAYS_ADD, Set.of(0, 1))
+            .put(FunctionSet.ADDDATE, Set.of(0, 1))
+            .put(FunctionSet.DATE_ADD, Set.of(0, 1))
             .put(FunctionSet.HOURS_ADD, Set.of(0))
             .put(FunctionSet.MINUTES_ADD, Set.of(0))
             .put(FunctionSet.SECONDS_ADD, Set.of(0))
@@ -94,9 +95,9 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.QUARTERS_SUB, Set.of(0))
             .put(FunctionSet.MONTHS_SUB, Set.of(0))
             .put(FunctionSet.WEEKS_SUB, Set.of(0))
-            .put(FunctionSet.DAYS_SUB, Set.of(0))
-            .put(FunctionSet.SUBDATE, Set.of(0))
-            .put(FunctionSet.DATE_SUB, Set.of(0))
+            .put(FunctionSet.DAYS_SUB, Set.of(0, 1))
+            .put(FunctionSet.SUBDATE, Set.of(0, 1))
+            .put(FunctionSet.DATE_SUB, Set.of(0, 1))
             .put(FunctionSet.HOURS_SUB, Set.of(0))
             .put(FunctionSet.MINUTES_SUB, Set.of(0))
             .put(FunctionSet.SECONDS_SUB, Set.of(0))

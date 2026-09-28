@@ -36,8 +36,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -126,6 +129,97 @@ public class MonotonicFilterDerivationTest {
                 new CallOperator("unix_timestamp", IntegerType.INT, ImmutableList.of(ts)),
                 ConstantOperator.createInt(1700000000));
         assertSame(predicate, new InvertMonotonicPredicateRule().apply(predicate, null));
+    }
+
+    private static final LocalDateTime EPOCH_START = LocalDateTime.of(1970, 1, 1, 0, 0);
+
+    private static CallOperator dayShift(String fn, ColumnRefOperator days) {
+        return new CallOperator(fn, DateType.DATETIME,
+                ImmutableList.of(ConstantOperator.createDatetime(EPOCH_START), days));
+    }
+
+    private static boolean holds(BinaryType cmp, int c) {
+        switch (cmp) {
+            case EQ: return c == 0;
+            case GE: return c >= 0;
+            case GT: return c > 0;
+            case LE: return c <= 0;
+            case LT: return c < 0;
+            default: throw new IllegalStateException(cmp.toString());
+        }
+    }
+
+    // For every n around the bound, the bound on n holds exactly when base +/- n days compares true.
+    @Test
+    public void testDayShiftAmountBoundsMatchComparison() {
+        ColumnRefOperator days = new ColumnRefOperator(3, IntegerType.INT, "d", true);
+        List<LocalDateTime> values = List.of(
+                LocalDateTime.of(2024, 1, 1, 0, 0),
+                LocalDateTime.of(2024, 1, 1, 10, 30),
+                LocalDateTime.of(1969, 12, 30, 23, 59, 59),
+                LocalDateTime.of(1970, 1, 1, 0, 0, 0, 1000));
+        BinaryType[] comparisons = {BinaryType.EQ, BinaryType.GE, BinaryType.GT, BinaryType.LE, BinaryType.LT};
+        for (String fn : List.of("days_add", "date_add", "adddate", "days_sub", "date_sub", "subdate")) {
+            int sign = fn.contains("add") ? 1 : -1;
+            CallOperator call = dayShift(fn, days);
+            assertSame(days, MonotonicFunctionRegistry.dataChildOf(call));
+            MonotonicFunctionRegistry.PredicateInverse inverse = MonotonicFunctionRegistry.filterInverse(fn);
+            for (LocalDateTime value : values) {
+                ConstantOperator constant = ConstantOperator.createDatetime(value);
+                assertTrue(inverse.invert(call, days, BinaryType.NE, constant).isEmpty());
+                long center = sign * Math.floorDiv(
+                        Duration.between(EPOCH_START, value).toSeconds(), 86400L);
+                for (BinaryType cmp : comparisons) {
+                    Optional<ScalarOperator> bound = inverse.invert(call, days, cmp, constant);
+                    boolean aligned = value.toLocalTime().equals(LocalTime.MIDNIGHT);
+                    if (cmp == BinaryType.EQ && !aligned) {
+                        assertTrue(bound.isEmpty(), fn + " " + cmp + " " + value);
+                        continue;
+                    }
+                    BinaryPredicateOperator predicate = (BinaryPredicateOperator) bound.orElseThrow();
+                    assertSame(days, predicate.getChild(0));
+                    int k = ((ConstantOperator) predicate.getChild(1)).getInt();
+                    for (long n = center - 3; n <= center + 3; n++) {
+                        LocalDateTime shifted = EPOCH_START.plusDays(sign * n);
+                        boolean expected = holds(cmp, shifted.compareTo(value));
+                        boolean actual = holds(predicate.getBinaryType(), Long.compare(n, k));
+                        assertEquals(expected, actual, fn + " " + cmp + " " + value + " n=" + n + " -> " + predicate);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testDayShiftAmountBoundIsAddedToTheScan() {
+        ColumnRefOperator days = new ColumnRefOperator(3, IntegerType.INT, "d", true);
+        List<ScalarOperator> bounds = addedBounds(new BinaryPredicateOperator(BinaryType.GE,
+                dayShift("days_add", days), ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0))));
+        assertEquals("3: d >= 19723", Utils.compoundAnd(bounds).toString());
+    }
+
+    @Test
+    public void testDayFloorOfDayShiftBoundsTheAmount() {
+        // to_date('1970-01-01' + INTERVAL d DAY) BETWEEN '2024-01-01' AND '2024-01-31'
+        ColumnRefOperator days = new ColumnRefOperator(3, IntegerType.INT, "d", true);
+        CallOperator day = new CallOperator("to_date", DateType.DATE, ImmutableList.of(dayShift("days_add", days)));
+        ScalarOperator predicate = Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.GE, day,
+                        ConstantOperator.createDate(LocalDateTime.of(2024, 1, 1, 0, 0))),
+                new BinaryPredicateOperator(BinaryType.LE, day,
+                        ConstantOperator.createDate(LocalDateTime.of(2024, 1, 31, 0, 0))));
+        List<String> conjuncts = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(predicate)).stream()
+                .map(ScalarOperator::toString).toList();
+        assertTrue(conjuncts.contains("3: d >= 19723"), conjuncts.toString());
+        assertTrue(conjuncts.contains("3: d <= 19753"), conjuncts.toString());
+    }
+
+    @Test
+    public void testDayShiftAmountRequiresIntColumn() {
+        ConstantOperator value = ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0));
+        ColumnRefOperator bigDays = new ColumnRefOperator(4, IntegerType.BIGINT, "b", true);
+        assertTrue(MonotonicFunctionRegistry.filterInverse("days_add")
+                .invert(dayShift("days_add", bigDays), bigDays, BinaryType.GE, value).isEmpty());
     }
 
     @Test

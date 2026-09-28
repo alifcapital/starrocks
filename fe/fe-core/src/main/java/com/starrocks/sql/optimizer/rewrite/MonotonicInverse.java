@@ -40,6 +40,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoField;
+import java.time.temporal.ChronoUnit;
 import java.time.zone.ZoneOffsetTransition;
 import java.util.Map;
 import java.util.Optional;
@@ -889,6 +890,9 @@ public final class MonotonicInverse {
                                                         ScalarOperator dataChild, BinaryType cmp,
                                                         ConstantOperator value) {
         try {
+            if (call.getChildren().size() == 2 && call.getChild(1) == dataChild) {
+                return invertDayAmount(call, dataChild, cmp, value);
+            }
             ScalarOperator amount = call.getChild(1);
             if (!amount.isConstantRef() || ((ConstantOperator) amount).isNull()) {
                 return Optional.empty();
@@ -914,6 +918,75 @@ public final class MonotonicInverse {
         } catch (Exception e) {
             return Optional.empty();
         }
+    }
+
+    // Sign of the day shift in its amount argument, for the shifts that admit a column there.
+    private static final Map<String, Integer> DAY_SHIFT_SIGN = ImmutableMap.<String, Integer>builder()
+            .put(FunctionSet.DAYS_ADD, 1)
+            .put(FunctionSet.DATE_ADD, 1)
+            .put(FunctionSet.ADDDATE, 1)
+            .put(FunctionSet.DAYS_SUB, -1)
+            .put(FunctionSet.DATE_SUB, -1)
+            .put(FunctionSet.SUBDATE, -1)
+            .build();
+
+    private static final long MICROS_PER_DAY = 86_400_000_000L;
+
+    /**
+     * days_add(base, n) cmp value with an INT column n: base + n days cmp value bounds n by
+     * the number of whole days t = (value - base) / 1 day, e.g. n >= ceil(t) for GE and
+     * n <= floor(t) for LE. days_sub(base, n) is base - n days, the same with t = (base -
+     * value) / 1 day and the comparison flipped. The shift can overflow to NULL; like the
+     * date-argument inverse, the bound is only a necessary condition for TRUE and the
+     * original predicate stays. Refuses a bound that does not fit into INT, and EQ unless
+     * t is a whole number of days.
+     */
+    private static Optional<ScalarOperator> invertDayAmount(CallOperator call, ScalarOperator amount,
+                                                            BinaryType cmp, ConstantOperator value) {
+        Integer sign = DAY_SHIFT_SIGN.get(call.getFnName().toLowerCase());
+        ScalarOperator baseArg = call.getChild(0);
+        if (sign == null || !amount.getType().isInt() || !baseArg.isConstantRef()
+                || !baseArg.getType().isDateType() || !value.getType().isDateType()) {
+            return Optional.empty();
+        }
+        ConstantOperator base = (ConstantOperator) baseArg;
+        if (base.isNull() || value.isNull()) {
+            return Optional.empty();
+        }
+        long micros = ChronoUnit.MICROS.between(base.getDatetime(), value.getDatetime());
+        long t = sign > 0 ? micros : -micros;
+        BinaryType effective = sign > 0 ? cmp : flip(cmp);
+        long floor = Math.floorDiv(t, MICROS_PER_DAY);
+        long ceil = -Math.floorDiv(-t, MICROS_PER_DAY);
+        long bound;
+        switch (effective) {
+            case EQ:
+                if (floor != ceil) {
+                    return Optional.empty();
+                }
+                bound = floor;
+                break;
+            case GE:
+                bound = ceil;
+                break;
+            case GT:
+                bound = floor + 1;
+                effective = BinaryType.GE;
+                break;
+            case LE:
+                bound = floor;
+                break;
+            case LT:
+                bound = ceil - 1;
+                effective = BinaryType.LE;
+                break;
+            default:
+                return Optional.empty();
+        }
+        if (bound < Integer.MIN_VALUE || bound > Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+        return Optional.of(new BinaryPredicateOperator(effective, amount, ConstantOperator.createInt((int) bound)));
     }
 
     private static ConstantOperator foldOpposite(String oppositeFnName, ConstantOperator value,
