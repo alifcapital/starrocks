@@ -454,6 +454,7 @@ public class ExpressionStatisticCalculator {
                     distinctValue = 60;
                     break;
                 case FunctionSet.TO_DATE:
+                case FunctionSet.DATE:
                     if (minMaxValueInfinite) {
                         break;
                     }

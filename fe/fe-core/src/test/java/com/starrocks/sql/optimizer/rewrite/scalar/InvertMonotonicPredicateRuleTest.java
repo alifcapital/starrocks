@@ -33,6 +33,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -318,6 +319,28 @@ public class InvertMonotonicPredicateRuleTest {
         assertEquals("1: ts < 2024-03-06 00:00:00",
                 apply(new BinaryPredicateOperator(BinaryType.LE, call,
                         ConstantOperator.createDate(LocalDateTime.of(2024, 3, 5, 0, 0)))).toString());
+    }
+
+    @Test
+    public void testDateInvertsLikeToDate() {
+        // date(x) and to_date(x) are the same BE function
+        CallOperator date = new CallOperator("date", DateType.DATE, ImmutableList.of(dtCol));
+        CallOperator toDate = new CallOperator("to_date", DateType.DATE, ImmutableList.of(dtCol));
+        assertEquals("1: ts >= 2024-03-05 00:00:00 AND 1: ts < 2024-03-06 00:00:00",
+                apply(new BinaryPredicateOperator(BinaryType.EQ, date,
+                        ConstantOperator.createDate(LocalDateTime.of(2024, 3, 5, 0, 0)))).toString());
+        List<ConstantOperator> constants = List.of(
+                ConstantOperator.createDate(LocalDateTime.of(2024, 3, 5, 0, 0)),
+                ConstantOperator.createDatetime(LocalDateTime.of(2024, 3, 5, 10, 30)));
+        for (ConstantOperator constant : constants) {
+            for (BinaryType cmp : new BinaryType[] {BinaryType.EQ, BinaryType.NE, BinaryType.GE, BinaryType.GT,
+                    BinaryType.LE, BinaryType.LT}) {
+                ScalarOperator viaDate = apply(new BinaryPredicateOperator(cmp, date, constant));
+                ScalarOperator viaToDate = apply(new BinaryPredicateOperator(cmp, toDate, constant));
+                assertEquals(viaToDate.toString().replace("to_date(", "date("), viaDate.toString(),
+                        cmp + " " + constant);
+            }
+        }
     }
 
     @Test
