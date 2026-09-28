@@ -37,6 +37,7 @@ import com.starrocks.common.tvr.TvrTableDeltaTrait;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersion;
 import com.starrocks.common.tvr.TvrVersionRange;
+import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.ConnectorMetadataRequestContext;
 import com.starrocks.connector.ConnectorProperties;
@@ -353,6 +354,58 @@ public class IcebergMetadataTest extends TableTestBase {
         Table actual = metadata.getTable(new ConnectContext(), "db", "tbl");
         Assertions.assertEquals("tbl", actual.getName());
         Assertions.assertEquals(ICEBERG, actual.getType());
+    }
+
+    private static IcebergTable constraintTestTable(org.apache.iceberg.Table nativeTable) {
+        return IcebergTable.builder()
+                .setId(1000)
+                .setSrTableName("tbl")
+                .setCatalogName(CATALOG_NAME)
+                .setCatalogDBName("db")
+                .setCatalogTableName("tbl")
+                .setFullSchema(Lists.newArrayList(new Column("id", INT)))
+                .setNativeTable(nativeTable)
+                .setIcebergProperties(new HashMap<>())
+                .build();
+    }
+
+    @Test
+    public void testUpdateTablePropertyIgnoresInvalidConstraints(@Mocked org.apache.iceberg.Table nativeTable) {
+        new Expectations() {
+            {
+                nativeTable.properties();
+                result = ImmutableMap.of(
+                        PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT, "no_such_column",
+                        PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT, "(no_such_column) REFERENCES db.tbl2(id)");
+                minTimes = 0;
+            }
+        };
+        IcebergMetadata metadata = new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT, null,
+                Executors.newSingleThreadExecutor(), null);
+        IcebergTable table = constraintTestTable(nativeTable);
+        metadata.updateTableProperty(new Database(0, "db"), table);
+        Assertions.assertTrue(table.getUniqueConstraints().isEmpty());
+        Assertions.assertTrue(table.getForeignKeyConstraints().isEmpty());
+    }
+
+    @Test
+    public void testUpdateTablePropertyKeepsValidUniqueConstraint(@Mocked org.apache.iceberg.Table nativeTable) {
+        new Expectations() {
+            {
+                nativeTable.properties();
+                result = ImmutableMap.of(
+                        PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT, "id",
+                        PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT, "not a foreign key");
+                minTimes = 0;
+            }
+        };
+        IcebergMetadata metadata = new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT, null,
+                Executors.newSingleThreadExecutor(), null);
+        IcebergTable table = constraintTestTable(nativeTable);
+        metadata.updateTableProperty(new Database(0, "db"), table);
+        Assertions.assertEquals(1, table.getUniqueConstraints().size());
+        Assertions.assertEquals("id", table.getUniqueConstraints().get(0).getUniqueColumnNames(table).get(0));
+        Assertions.assertTrue(table.getForeignKeyConstraints().isEmpty());
     }
 
     @Test

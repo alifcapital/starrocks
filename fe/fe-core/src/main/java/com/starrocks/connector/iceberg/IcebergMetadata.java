@@ -219,6 +219,8 @@ import static org.apache.iceberg.TableProperties.ENCRYPTION_TABLE_KEY;
 public class IcebergMetadata implements ConnectorMetadata {
 
     private static final Logger LOG = LogManager.getLogger(IcebergMetadata.class);
+    // Last logged value of an invalid constraint property, keyed by table and property name.
+    private static final Map<String, String> LOGGED_INVALID_CONSTRAINTS = new ConcurrentHashMap<>();
     private static final long CLOSE_WARN_DELAY_SECONDS = 60;
 
     public static final String LOCATION_PROPERTY = "location";
@@ -842,13 +844,34 @@ public class IcebergMetadata implements ConnectorMetadata {
         analyzeMgr.dropAnalyzeJob(catalogName, dbName, tableName);
     }
 
+    // Constraints are optimizer hints that anyone who writes table properties can set. A constraint that does not
+    // resolve against the table disables the hint and must not fail the queries that read the table.
     public void updateTableProperty(Database db, IcebergTable icebergTable) {
         Map<String, String> properties = new HashMap(icebergTable.getNativeTable().properties());
-        List<UniqueConstraint> uniqueConstraints = PropertyAnalyzer.analyzeUniqueConstraint(properties, db, icebergTable);
+        List<UniqueConstraint> uniqueConstraints = Lists.newArrayList();
+        try {
+            uniqueConstraints = PropertyAnalyzer.analyzeUniqueConstraint(properties, db, icebergTable);
+        } catch (RuntimeException e) {
+            logInvalidConstraint(icebergTable, PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT, properties, e);
+        }
         icebergTable.setUniqueConstraints(uniqueConstraints);
-        List<ForeignKeyConstraint> foreignKeyConstraints =
-                PropertyAnalyzer.analyzeForeignKeyConstraint(properties, db, icebergTable);
+        List<ForeignKeyConstraint> foreignKeyConstraints = Lists.newArrayList();
+        try {
+            foreignKeyConstraints = PropertyAnalyzer.analyzeForeignKeyConstraint(properties, db, icebergTable);
+        } catch (RuntimeException e) {
+            logInvalidConstraint(icebergTable, PropertyAnalyzer.PROPERTIES_FOREIGN_KEY_CONSTRAINT, properties, e);
+        }
         icebergTable.setForeignKeyConstraints(foreignKeyConstraints);
+    }
+
+    // getTable runs for every query, so an invalid property is logged when it first appears or changes.
+    private static void logInvalidConstraint(IcebergTable table, String property, Map<String, String> properties,
+                                             RuntimeException e) {
+        String tableName = table.getCatalogName() + "." + table.getCatalogDBName() + "." + table.getCatalogTableName();
+        String value = String.valueOf(properties.get(property));
+        if (!value.equals(LOGGED_INVALID_CONSTRAINTS.put(tableName + "." + property, value))) {
+            LOG.warn("Ignore invalid {} '{}' of iceberg table {}", property, value, tableName, e);
+        }
     }
 
     @Override
