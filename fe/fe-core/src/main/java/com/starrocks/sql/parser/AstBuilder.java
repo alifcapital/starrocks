@@ -7759,27 +7759,25 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
         if (connectContext != null && connectContext.getSessionVariable().enableLargeInPredicate() &&
                 literalCount >= connectContext.getSessionVariable().getLargeInPredicateThreshold()) {
-            boolean shouldFallbackToNormal = false;
             List<Object> rawValueList = new ArrayList<>();
             try (Timer ignored = Tracers.watchScope(Tracers.Module.PARSER, "ParserInIntegerList")) {
                 for (TerminalNode integerNode : integerNodes) {
                     String intText = integerNode.getText();
                     try {
-                        long value = Long.parseLong(intText);
-                        rawValueList.add(value);
+                        rawValueList.add(Long.parseLong(intText));
                     } catch (NumberFormatException e) {
-                        shouldFallbackToNormal = true;
-                        break;
+                        // A value out of BIGINT is kept as the literal of the InPredicate
+                        rawValueList.add(parseIntegerWithVisitIntegerValueLogic(intText,
+                                createPos(integerNode.getSymbol(), integerNode.getSymbol())));
                     }
                 }
             }
 
-            if (!shouldFallbackToNormal) {
-                String rawText = extractRawText(context.integerList());
-                List<Expr> firstElementList = List.of(new IntLiteral((Long) rawValueList.get(0), IntegerType.BIGINT));
-                return new LargeInPredicate(compareExpr, rawText, rawValueList, literalCount,
-                        isNotIn, firstElementList, createPos(context));
-            }
+            String rawText = extractRawText(context.integerList());
+            Object first = rawValueList.get(0);
+            Expr firstElement = first instanceof Long value ? new IntLiteral(value, IntegerType.BIGINT) : (Expr) first;
+            return new LargeInPredicate(compareExpr, rawText, rawValueList, literalCount,
+                    isNotIn, List.of(firstElement), createPos(context));
         }
 
         List<Expr> intList = new ArrayList<>();

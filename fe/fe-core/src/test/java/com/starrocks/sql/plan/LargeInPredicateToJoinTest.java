@@ -22,6 +22,7 @@ import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.FloatLiteral;
 import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.LargeInPredicate;
+import com.starrocks.sql.ast.expression.LargeIntLiteral;
 import com.starrocks.sql.ast.expression.LiteralExpr;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
@@ -125,6 +126,8 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
                 "select * from tall where ti in ('2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04')"); // date
         assertLargeInTransformation("select * from test_all_type where id_decimal in (1.5, 2.25, 3, 4)"); // decimal
         assertLargeInTransformation("select * from tall where td in (-1, -2, 3, 4)"); // negative numbers
+        assertLargeInTransformation(
+                "select * from tall where ta in (20218840600116072801, 20218840600116072802, 3, 4)"); // out of BIGINT
     }
 
     @Test
@@ -347,6 +350,7 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
                 List.of(new DecimalLiteral("1.50"), new DecimalLiteral("2.00")),
                 List.of(new DecimalLiteral("1234567.891"), new DecimalLiteral("0.001")),
                 List.of(new DecimalLiteral("12345678901234567890.12"), new IntLiteral(1)),
+                List.of(new LargeIntLiteral("20218840600116072801"), new IntLiteral(1)),
                 List.of(new FloatLiteral("1.5"), new IntLiteral(2)),
                 List.of(new StringLiteral("1"), new StringLiteral("2"), new StringLiteral("127")),
                 List.of(new StringLiteral("01"), new StringLiteral("2")),
