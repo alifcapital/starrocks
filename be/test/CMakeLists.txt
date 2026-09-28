@@ -351,6 +351,7 @@ set(EXEC_FILES
         ./exec/pipeline/spillable_sort_source_lockstep_test.cpp
         ./exec/query_cache/cache_wrapper_forwarding_test.cpp
         ./io/spill_observable_test.cpp
+        ./io/spill_prefetch_test.cpp
         ./util/spill_metrics_test.cpp
         ./io/spill_test.cpp
         ./io/spill_block_manager_test.cpp
