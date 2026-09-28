@@ -36,6 +36,8 @@ import com.starrocks.memory.estimate.Estimator;
 import com.starrocks.metric.StatisticsCacheMetrics;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.statistic.BasicStatsMeta;
+import com.starrocks.statistic.ColumnStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.logging.log4j.LogManager;
@@ -464,8 +466,15 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     @VisibleForTesting
     public Map<String, PartitionStats> getColumnNDVForPartitions(Table table, List<String> columns) {
 
-        List<ColumnStatsCacheKey> cacheKeys = columns.stream()
-                .map(column -> new ColumnStatsCacheKey(table.getId(), column)).toList();
+        BasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                .getTableBasicStatsMeta(table.getId());
+        List<ColumnStatsCacheKey> cacheKeys = columns.stream().filter(column -> {
+            ColumnStatsMeta columnMeta = meta == null ? null : meta.getAnalyzedColumns().get(column);
+            return columnMeta == null || !columnMeta.usesSampleStatisticsTable();
+        }).map(column -> new ColumnStatsCacheKey(table.getId(), column)).toList();
+        if (cacheKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
 
         try {
             CompletableFuture<Map<ColumnStatsCacheKey, Optional<PartitionStats>>> resultFuture =

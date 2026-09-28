@@ -76,6 +76,27 @@ public abstract class NDVEstimator {
      */
     abstract String generateQuery(double sampleRatio);
 
+    static String estimateFromSample(long populationRows) {
+        return estimateFromSample(Math.max(1L, populationRows) + ".0");
+    }
+
+    static String estimateFromSample(String populationRows) {
+        String rows = "IFNULL(SUM(t1.count), 0)";
+        String nonNullRows = "IFNULL(SUM(IF(t1.column_key IS NULL, 0, t1.count)), 0)";
+        String distinct = "COUNT(t1.column_key)";
+        String singletons = "IFNULL(SUM(IF(t1.column_key IS NOT NULL AND t1.count = 1, 1, 0)), 0)";
+        String ratio = "LEAST(1.0, CAST(" + rows + " AS DOUBLE) / GREATEST(1.0, " + populationRows + "))";
+        String estimate = switch (NDVEstimatorDesc.get()) {
+            case DUJ1 -> nonNullRows + " * 1.0 * " + distinct + " / NULLIF(" + nonNullRows
+                    + " - " + singletons + " + " + singletons + " * " + ratio + ", 0)";
+            case GEE -> distinct + " + (SQRT(1.0 / NULLIF(" + ratio + ", 0)) - 1) * " + singletons;
+            case LINEAR -> distinct + " / NULLIF(" + ratio + ", 0)";
+            case POLYNOMIAL -> distinct + " / NULLIF(1 - POW(1 - " + ratio + ", 3), 0)";
+        };
+        return "LEAST(" + nonNullRows + " / NULLIF(" + ratio + ", 0), GREATEST(" + distinct
+                + ", IFNULL(" + estimate + ", " + distinct + ")))";
+    }
+
     /**
      * From PostgreSQL: n*d / (n - f1 + f1*n/N)
      * (https://github.com/postgres/postgres/blob/master/src/backend/commands/analyze.c)

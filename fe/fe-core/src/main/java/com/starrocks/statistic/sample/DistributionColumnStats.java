@@ -16,6 +16,9 @@ package com.starrocks.statistic.sample;
 
 import com.starrocks.type.Type;
 
+import java.util.Collection;
+import java.util.stream.Stream;
+
 public class DistributionColumnStats extends PrimitiveTypeColumnStats {
 
     private final SampleInfo sampleInfo;
@@ -23,6 +26,21 @@ public class DistributionColumnStats extends PrimitiveTypeColumnStats {
     public DistributionColumnStats(String columnName, Type columnType, SampleInfo sampleInfo) {
         super(columnName, columnType);
         this.sampleInfo = sampleInfo;
+    }
+
+    @Override
+    public String getDistinctCount(SampleInfo info) {
+        return getDistinctCount(info, Long.toString(info.getTotalRowCount()));
+    }
+
+    @Override
+    public String getDistinctCount(SampleInfo info, String populationRows) {
+        long selectedRows = Stream.of(info.getHighWeightTablets(), info.getMediumHighWeightTablets(),
+                        info.getMediumLowWeightTablets(), info.getLowWeightTablets())
+                .flatMap(Collection::stream).mapToLong(TabletStats::getRowCount).sum();
+        String estimate = NDVEstimator.estimateFromSample(selectedRows);
+        return "IFNULL(LEAST(" + populationRows + ", (" + estimate + ") / "
+                + Math.max(info.getTabletSampleRatio(), Double.MIN_NORMAL) + "), 0)";
     }
 
     @Override

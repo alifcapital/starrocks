@@ -15,6 +15,7 @@
 package com.starrocks.statistic;
 
 import com.google.gson.annotations.SerializedName;
+import com.starrocks.common.Config;
 
 import java.time.LocalDateTime;
 import java.util.HashSet;
@@ -31,6 +32,19 @@ public class ColumnStatsMeta {
 
     @SerializedName("type")
     private StatsConstants.AnalyzeType type;
+
+    // Null on pre-fix metadata: retain the legacy config-based lookup until recollection.
+    @SerializedName("sampleStatisticsTable")
+    private Boolean sampleStatisticsTable;
+
+    public boolean usesSampleStatisticsTable() {
+        return type == StatsConstants.AnalyzeType.SAMPLE && (sampleStatisticsTable != null
+                ? sampleStatisticsTable : !Config.statistic_use_meta_statistics);
+    }
+
+    public void setSampleStatisticsTable(boolean value) {
+        sampleStatisticsTable = value;
+    }
 
     @SerializedName("updateTime")
     private LocalDateTime updateTime;

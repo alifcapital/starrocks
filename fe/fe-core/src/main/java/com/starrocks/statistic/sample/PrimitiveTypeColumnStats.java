@@ -37,7 +37,7 @@ public class PrimitiveTypeColumnStats extends ColumnStats {
     public String getDataSize() {
         String typeSize;
         if (columnType.getPrimitiveType().isCharFamily()) {
-            typeSize = "IFNULL(SUM(CHAR_LENGTH(column_key)) / COUNT(1), 0)";
+            typeSize = "IFNULL(SUM(CHAR_LENGTH(column_key) * t1.count) / SUM(t1.count), 0)";
         } else {
             typeSize = columnType.getTypeSize() + "";
         }
@@ -71,6 +71,16 @@ public class PrimitiveTypeColumnStats extends ColumnStats {
         }
         fn = "IFNULL(" + fn + ", '')";
         return fn;
+    }
+
+    @Override
+    public String getDistinctCount(SampleInfo info, String populationRows) {
+        return "IFNULL(" + NDVEstimator.estimateFromSample(populationRows) + ", 0)";
+    }
+
+    @Override
+    public String getDistinctCount(SampleInfo info) {
+        return "IFNULL(" + NDVEstimator.estimateFromSample(info.getTotalRowCount()) + ", 0)";
     }
 
     @Override

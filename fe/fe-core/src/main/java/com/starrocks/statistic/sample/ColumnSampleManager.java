@@ -17,7 +17,9 @@ package com.starrocks.statistic.sample;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Table;
+import com.starrocks.common.Config;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.type.ScalarType;
 import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 
@@ -42,7 +44,11 @@ public class ColumnSampleManager {
 
     private void classifyColumnStats(List<String> columnNames, List<Type> columnTypes, Table table,
                                      SampleInfo sampleInfo) {
-        boolean onlyOneDistributionCol = table.getDistributionColumnNames().size() == 1;
+        // Hash buckets have disjoint supports within one partition. Across partitions the
+        // same distribution key can reappear, so tablet-count amplification is not valid.
+        boolean onlyOneDistributionCol = table.getDistributionColumnNames().size() == 1
+                && table.getPartitions().size() == 1
+                && table.getPartitions().iterator().next().getSubPartitions().size() == 1;
         for (int i = 0; i < columnNames.size(); i++) {
             String columnName = columnNames.get(i);
             Type columnType = columnTypes.get(i);
@@ -111,6 +117,22 @@ public class ColumnSampleManager {
         if (ConnectContext.get() != null) {
             dop = Math.max(dop, ConnectContext.get().getSessionVariable().getStatisticCollectParallelism());
         }
-        return Lists.partition(primitiveTypeStats, dop);
+        long threshold = Config.statistics_large_string_column_merge_threshold;
+        if (threshold <= 0) {
+            return Lists.partition(primitiveTypeStats, dop);
+        }
+        List<List<ColumnStats>> batches = Lists.newArrayList();
+        List<ColumnStats> normalColumns = Lists.newArrayList();
+        for (ColumnStats stats : primitiveTypeStats) {
+            Type type = stats.columnType;
+            if (type instanceof ScalarType && type.getPrimitiveType().isCharFamily()
+                    && ((ScalarType) type).getLength() > threshold) {
+                batches.add(List.of(stats));
+            } else {
+                normalColumns.add(stats);
+            }
+        }
+        batches.addAll(Lists.partition(normalColumns, dop));
+        return batches;
     }
 }

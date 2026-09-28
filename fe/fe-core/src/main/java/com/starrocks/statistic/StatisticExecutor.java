@@ -178,11 +178,12 @@ public class StatisticExecutor {
                                                            Table table) {
         List<ColumnStatsMeta> columnWithFullStats =
                 columnStatsMetaList.stream()
-                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.FULL)
+                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.FULL ||
+                                (x.getType() == StatsConstants.AnalyzeType.SAMPLE && !x.usesSampleStatisticsTable()))
                         .collect(Collectors.toList());
         List<ColumnStatsMeta> columnWithSampleStats =
                 columnStatsMetaList.stream()
-                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.SAMPLE)
+                        .filter(ColumnStatsMeta::usesSampleStatisticsTable)
                         .collect(Collectors.toList());
 
         List<Long> partitionIds = null;
@@ -211,19 +212,8 @@ public class StatisticExecutor {
         if (CollectionUtils.isNotEmpty(columnWithSampleStats)) {
             List<String> columnNamesForStats = columnWithSampleStats.stream().map(ColumnStatsMeta::getColumnName)
                     .collect(Collectors.toList());
-            if (Config.statistic_use_meta_statistics) {
-                List<Type> columnTypesForStats = columnWithSampleStats.stream()
-                        .map(x -> StatisticUtils.getQueryStatisticsColumnType(table, x.getColumnName()))
-                        .collect(Collectors.toList());
-                String statsSql = StatisticSQLBuilder.buildQueryFullStatisticsSQL(
-                        tableId, columnNamesForStats, columnTypesForStats, partitionIds);
-                List<TStatisticData> tStatisticData = executeStatisticDQL(context, statsSql);
-                columnStats.addAll(tStatisticData);
-            } else {
-                String statsSql = StatisticSQLBuilder.buildQuerySampleStatisticsSQL(dbId, tableId, columnNamesForStats);
-                List<TStatisticData> tStatisticData = executeStatisticDQL(context, statsSql);
-                columnStats.addAll(tStatisticData);
-            }
+            String statsSql = StatisticSQLBuilder.buildQuerySampleStatisticsSQL(dbId, tableId, columnNamesForStats);
+            columnStats.addAll(executeStatisticDQL(context, statsSql));
         }
         return columnStats;
     }
@@ -532,6 +522,16 @@ public class StatisticExecutor {
 
     public List<TStatisticData> queryPartitionLevelColumnNDV(ConnectContext context, long tableId,
                                                              List<Long> partitions, List<String> columns) {
+        BasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getTableBasicStatsMeta(tableId);
+        if (meta != null) {
+            columns = columns.stream().filter(column -> {
+                ColumnStatsMeta columnMeta = meta.getAnalyzedColumns().get(column);
+                return columnMeta == null || !columnMeta.usesSampleStatisticsTable();
+            }).collect(Collectors.toList());
+        }
+        if (columns.isEmpty()) {
+            return Collections.emptyList();
+        }
         String sql = StatisticSQLBuilder.buildQueryPartitionStatisticsSQL(tableId, partitions, columns);
         return executeStatisticDQL(context, sql);
     }
@@ -684,6 +684,9 @@ public class StatisticExecutor {
                     for (String column : ListUtils.emptyIfNull(statsJob.getColumnNames())) {
                         ColumnStatsMeta meta =
                                 new ColumnStatsMeta(column, statsJob.getAnalyzeType(), analyzeStatus.getEndTime());
+                        if (statsJob.getAnalyzeType() == StatsConstants.AnalyzeType.SAMPLE) {
+                            meta.setSampleStatisticsTable(statsJob.usesSampleStatisticsTable(column));
+                        }
                         basicStatsMeta.addColumnStatsMeta(meta);
                     }
                     analyzeMgr.addBasicStatsMeta(basicStatsMeta);

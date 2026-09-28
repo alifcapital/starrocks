@@ -44,6 +44,19 @@ public abstract class ColumnStats {
 
     public abstract String getMin();
 
+    public boolean supportsMetaBounds() {
+        return columnType.canStatistic() && !columnType.getPrimitiveType().isCharFamily()
+                && !(this instanceof SubFieldColumnStats);
+    }
+
     public abstract String getDistinctCount(double rowSampleRatio);
+
+    public String getDistinctCount(SampleInfo info, String populationRows) {
+        return getDistinctCount(info);
+    }
+
+    public String getDistinctCount(SampleInfo info) {
+        return getDistinctCount(info.getRowSampleRatio());
+    }
 
 }
