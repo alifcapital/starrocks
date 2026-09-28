@@ -21,11 +21,11 @@
 #include "common/statusor.h"
 #include "exec/olap_scan_node.h"
 #include "exec/pipeline/fragment_context.h"
-#include "exec/pipeline/schedule/timeout_tasks.h"
 #include "exec/pipeline/limit_operator.h"
 #include "exec/pipeline/pipeline_builder.h"
 #include "exec/pipeline/scan/connector_scan_operator.h"
 #include "exec/pipeline/schedule/common.h"
+#include "exec/pipeline/schedule/timeout_tasks.h"
 #include "exec/workgroup/scan_executor.h"
 #include "exec/workgroup/work_group.h"
 #include "runtime/current_thread.h"
@@ -102,6 +102,10 @@ Status ScanOperator::prepare(RuntimeState* state) {
     _prepare_chunk_source_timer = ADD_TIMER(_unique_metrics, "PrepareChunkSourceTime");
     _submit_io_task_timer = ADD_TIMER(_unique_metrics, "SubmitTaskTime");
 
+    const auto& query_options = state->query_options();
+    _topn_io_task_limit = query_options.__isset.topn_filter_back_pressure_io_tasks
+                                  ? query_options.topn_filter_back_pressure_io_tasks
+                                  : 1;
     const bool fe_enable_back_pressure = _scan_node->is_enable_topn_filter_back_pressure();
     // FE suppresses back-pressure for this scan when the TopN RF only reaches it across a
     // non-aggregation deterministic pipeline breaker (blocking sort, analytic/window): the RF can't
@@ -294,7 +298,11 @@ bool ScanOperator::has_output() const {
         return chunk_number > 0;
     }
 
-    if (is_running_all_io_tasks()) {
+    // Readiness and submission must agree on the temporary TopN IO cap. Otherwise
+    // an empty scan is runnable while submission cannot start another task, and
+    // the driver busy-spins until remote IO completes. Check before the connector's
+    // adaptive-IO policy, which can intentionally request more tasks than this cap.
+    if (_num_running_io_tasks >= _effective_io_task_limit() || is_running_all_io_tasks()) {
         return false;
     }
 
@@ -440,29 +448,25 @@ int64_t ScanOperator::global_rf_wait_timeout_ns() const {
 
     return 1000'000L * global_rf_collector->scan_wait_timeout_ms();
 }
+
+int ScanOperator::_effective_io_task_limit() const {
+    // Resume the normal limit when the RF arrives or the bounded wait gives up.
+    // Before the first nonempty chunk, no downstream builder can produce a filter.
+    // Allow normal IO startup (including remote-file open and split preparation)
+    // rather than serializing it behind a filter that has received no input yet.
+    if (_op_pull_rows > 0 && _topn_filter_back_pressure != nullptr && _topn_io_task_limit > 0 &&
+        !_topn_filter_back_pressure->is_pass_through() && !_topn_runtime_filter_arrived()) {
+        return std::min(_io_tasks_per_scan_operator, _topn_io_task_limit);
+    }
+    return _io_tasks_per_scan_operator;
+}
+
 Status ScanOperator::_try_to_trigger_next_scan(RuntimeState* state) {
     // to sure to put it here for updating state.
     // because we want to update state based on raw data.
     int total_cnt = available_pickup_morsel_count();
 
-    // TopN-RF back-pressure: until the runtime filter actually arrives at the scan, clamp
-    // read-ahead to a small number of IO tasks regardless of io_tasks_per_scan_operator. A burst
-    // of concurrent readers overshoots the back-pressure row budget (which is not concurrency-aware)
-    // and floods the downstream aggregation before the RF can prune. The clamp count is tunable via
-    // the topn_filter_back_pressure_io_tasks session variable (default 1; <=0 disables the clamp).
-    // Full DOP resumes once the RF arrives, OR once back-pressure gives up (PASS_THROUGH) after
-    // exhausting its round/time/row budget without the RF ever arriving -- otherwise a query whose
-    // TopN RF is never published (e.g. an aggregation whose group count stays below the limit) would
-    // stay clamped to a single IO task for its entire lifetime.
-    int effective_io_tasks = _io_tasks_per_scan_operator;
-    if (_topn_filter_back_pressure != nullptr && !_topn_runtime_filter_arrived() &&
-        !_topn_filter_back_pressure->is_pass_through()) {
-        const auto& opts = state->query_options();
-        const int clamp = opts.__isset.topn_filter_back_pressure_io_tasks ? opts.topn_filter_back_pressure_io_tasks : 1;
-        if (clamp > 0) {
-            effective_io_tasks = std::min(effective_io_tasks, clamp);
-        }
-    }
+    const int effective_io_tasks = _effective_io_task_limit();
     total_cnt = std::min(total_cnt, effective_io_tasks);
 
     if (_num_running_io_tasks >= effective_io_tasks) {

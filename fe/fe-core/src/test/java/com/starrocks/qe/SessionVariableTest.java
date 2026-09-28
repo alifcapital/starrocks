@@ -24,6 +24,33 @@ import java.util.Map;
 public class SessionVariableTest {
 
     @Test
+    public void testTopnBackpressureWireOptionsPreserveInlineAggregation() throws Exception {
+        SessionVariable variables = new SessionVariable();
+        TQueryOptions options = variables.toThrift();
+        Assertions.assertTrue(options.isEnable_topn_filter_back_pressure());
+        Assertions.assertEquals(1, options.getTopn_filter_back_pressure_io_tasks());
+        Assertions.assertEquals(8, options.getTopn_back_pressure_max_rounds());
+        Assertions.assertEquals(1024, options.getTopn_back_pressure_num_rows());
+        Assertions.assertEquals(8, options.getTopn_back_pressure_throttle_time_ms());
+        Assertions.assertEquals(100, options.getTopn_back_pressure_throttle_time_upper_bound_ms());
+        // The upstream IO cap used 219, which is already occupied in our 4.1 protocol.
+        Assertions.assertEquals(219, TQueryOptions._Fields.ENABLE_AGG_INLINE_ACCUMULATOR.getThriftFieldId());
+        Assertions.assertNotEquals(TQueryOptions._Fields.ENABLE_AGG_INLINE_ACCUMULATOR.getThriftFieldId(),
+                TQueryOptions._Fields.TOPN_FILTER_BACK_PRESSURE_IO_TASKS.getThriftFieldId());
+        boolean inline = options.isEnable_agg_inline_accumulator();
+        var cap = SessionVariable.class.getDeclaredField("topnFilterBackPressureIoTasks");
+        cap.setAccessible(true);
+        cap.setInt(variables, 0);
+        var enabled = SessionVariable.class.getDeclaredField("enableTopnFilterBackPressure");
+        enabled.setAccessible(true);
+        enabled.setBoolean(variables, false);
+        options = ((SessionVariable) variables.clone()).toThrift();
+        Assertions.assertFalse(options.isEnable_topn_filter_back_pressure());
+        Assertions.assertEquals(0, options.getTopn_filter_back_pressure_io_tasks());
+        Assertions.assertEquals(inline, options.isEnable_agg_inline_accumulator());
+    }
+
+    @Test
     public void testStringDatePredicateDefaultsAndClone() {
         SessionVariable variables = new SessionVariable();
         Assertions.assertFalse(variables.isEnableStringDatePredicatePushdown());

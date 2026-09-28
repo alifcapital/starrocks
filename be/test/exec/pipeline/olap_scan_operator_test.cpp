@@ -75,6 +75,56 @@ void OlapScanOperatorTest::SetUp() {
     _runtime_state.set_query_ctx(&_query_ctx);
 }
 
+// Reproduce remote IO outstanding while TopN temporarily permits only one task.
+// The driver must wait for IO instead of repeatedly calling pull_chunk with no
+// buffered input and no capacity to submit another task.
+TEST_F(OlapScanOperatorTest, topn_io_cap_controls_readiness) {
+    OlapScanNode scan_node(&_object_pool, _tnode, *_tbl);
+    scan_node._io_tasks_per_scan_operator = 4;
+    auto ctx_factory =
+            std::make_shared<OlapScanContextFactory>(&scan_node, 1, false, false, std::move(_chunk_buffer_limiter));
+    OlapScanOperatorFactory factory(1, &scan_node, ctx_factory);
+    auto op = std::make_shared<OlapScanOperator>(&factory, 1, 0, 1, &scan_node, ctx_factory->get_or_create(0));
+    Morsels morsels;
+    morsels.emplace_back(std::make_unique<ScanMorsel>(1, TScanRange{}));
+    OlapFixedMorselQueue queue(std::move(morsels));
+    op->add_morsel_queue(&queue);
+    op->_topn_filter_back_pressure = std::make_unique<TopnRfBackPressure>(0.1, 100, 8, 8, 1024);
+    op->_topn_io_task_limit = 1;
+    op->_num_running_io_tasks = 1;
+    EXPECT_TRUE(op->ScanOperator::has_output()); // No rows yet: allow remote IO startup.
+    op->_op_pull_rows = 4096;
+    EXPECT_FALSE(op->ScanOperator::has_output());
+
+    // Completion allows the driver to submit the next IO task.
+    op->_num_running_io_tasks = 0;
+    EXPECT_TRUE(op->ScanOperator::has_output());
+
+    // Respect configurable caps, including disabled and greater-than-normal caps.
+    op->_num_running_io_tasks = 1;
+    op->_topn_io_task_limit = 2;
+    EXPECT_TRUE(op->ScanOperator::has_output());
+    op->_num_running_io_tasks = 2;
+    EXPECT_FALSE(op->ScanOperator::has_output());
+    op->_topn_io_task_limit = 0;
+    EXPECT_TRUE(op->ScanOperator::has_output());
+    op->_topn_io_task_limit = 8;
+    op->_num_running_io_tasks = 4;
+    EXPECT_FALSE(op->ScanOperator::has_output());
+
+    // RF arrival releases the cap; bounded-wait exhaustion must do so as well.
+    op->_topn_io_task_limit = 1;
+    op->_num_running_io_tasks = 1;
+    op->_topn_filter_back_pressure->notify_rf_arrived();
+    EXPECT_TRUE(op->ScanOperator::has_output());
+    op->_topn_filter_back_pressure = std::make_unique<TopnRfBackPressure>(0.1, 100, 0, 8, 1024);
+    EXPECT_TRUE(op->ScanOperator::has_output());
+    op->_topn_filter_back_pressure.reset();
+    EXPECT_TRUE(op->ScanOperator::has_output());
+    op->_num_running_io_tasks = 0;
+    scan_node.close(&_runtime_state);
+}
+
 TEST_F(OlapScanOperatorTest, test_finish_sequence) {
     SyncPoint::GetInstance()->EnableProcessing();
     SyncPoint::GetInstance()->SetCallBack("OlapScanPrepareOperator::prepare",

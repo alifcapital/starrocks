@@ -323,6 +323,8 @@ private:
     // Back-pressure releases on this: throttling only exists to wait for the filter to arrive, and the
     // selectivity-based release goes stale once storage zonemap pruning empties the pulled chunks.
     bool _topn_runtime_filter_arrived() const;
+    int _effective_io_task_limit() const;
+    int _topn_io_task_limit = 1;
     // Wakes this driver when the throttle window ends; without it a throttled driver is only re-checked
     // by the fallback poller (the throttle was never wired into the event scheduler). Re-armed per window.
     mutable std::shared_ptr<RFScanWaitTimeout> _bp_throttle_timer;
