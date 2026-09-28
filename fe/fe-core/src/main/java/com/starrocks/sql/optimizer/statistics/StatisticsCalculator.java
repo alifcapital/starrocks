@@ -66,6 +66,7 @@ import com.starrocks.sql.optimizer.UKFKConstraintsCollector;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
+import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
 import com.starrocks.sql.optimizer.operator.Projection;
@@ -2260,8 +2261,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         return computeTopNNode(context, node);
     }
 
-    // A pushed rank limit bounds rank, not cardinality. Keeping the input estimate is
-    // conservative when conditional group NDV at the boundary is unavailable.
+    // A pushed rank limit bounds rank, not cardinality. Never apply the generic K-row cap.
     private static boolean isPeerPreservingAggTopN(Operator node) {
         if (node instanceof LogicalTopNOperator topn) {
             return topn.isTopNPushDownAgg() && topn.getTopNType() == TopNType.RANK;
@@ -2314,7 +2314,15 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                                     inputStatistics.getOutputRowCount())));
         }
 
-        if (isTopNPushDownAgg && !isPeerPreservingAggTopN(node)) {
+        if (isPeerPreservingAggTopN(node)) {
+            List<Ordering> ordering = node instanceof LogicalTopNOperator topn
+                    ? topn.getOrderByElements() : ((PhysicalTopNOperator) node).getOrderSpec().getOrderDescs();
+            double retained = TopNAggregationCost.estimateRetainedGroups(inputStatistics,
+                    inputStatistics.getOutputRowCount(), ordering, limit);
+            if (Double.isFinite(retained)) {
+                builder.setOutputRowCount(retained);
+            }
+        } else if (isTopNPushDownAgg) {
             double outputRowCount = inputStatistics.getOutputRowCount();
             if (limit != Operator.DEFAULT_LIMIT) {
                 double effectiveLimit = Math.max(1D, (double) limit + (double) offset);

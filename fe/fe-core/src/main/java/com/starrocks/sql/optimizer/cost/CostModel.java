@@ -35,6 +35,7 @@ import com.starrocks.sql.optimizer.base.HashDistributionSpec;
 import com.starrocks.sql.optimizer.base.PhysicalPropertySet;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
+import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalExceptOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalIntersectOperator;
@@ -62,7 +63,9 @@ import com.starrocks.sql.optimizer.skew.DataSkewInfo;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient;
+import com.starrocks.sql.optimizer.statistics.TopNAggregationCost;
 import com.starrocks.statistic.StatisticUtils;
+import com.starrocks.system.BackendResourceStat;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -201,9 +204,35 @@ public class CostModel {
 
         @Override
         public CostEstimate visitPhysicalTopN(PhysicalTopNOperator node, ExpressionContext context) {
-            // we always prefer topn push down agg.
             if (node.isTopNPushDownAgg()) {
-                return CostEstimate.zero();
+                if (node.getTopNType() != TopNType.RANK) {
+                    return CostEstimate.zero();
+                }
+                // WITH TIES can retain many groups. Charge comparisons and its buffer;
+                // it is not the bounded K-row sort used by the complete-key optimization.
+                Statistics input = context.getChildStatistics(0);
+                double keyBytes = node.getOrderSpec().getOrderDescs().stream()
+                        .mapToDouble(o -> Math.max(1, input.getColumnStatistic(o.getColumnRef()).getAverageRowSize()))
+                        .sum();
+                double cpu = TopNAggregationCost.sortCpu(input.getOutputRowCount(), input.getAvgRowSize(), keyBytes,
+                        context.getStatistics().getOutputRowCount());
+                // Each driver's partial groups also enter its own sorter. Global NDV alone
+                // undercounts this work when the same group occurs in several drivers.
+                double copies = 1;
+                ExpressionContext child = context.isGroupExprContext()
+                        ? new ExpressionContext(context.getGroupExpression().getInputs().get(0).getFirstLogicalExpression())
+                        : new ExpressionContext(context.getOptExpression().inputAt(0));
+                if (child.arity() == 1 && (child.getOp() instanceof LogicalAggregationOperator ||
+                        child.getOp() instanceof PhysicalHashAggregateOperator)) {
+                    ConnectContext connection = ConnectContext.get();
+                    double drivers = Math.max(1, BackendResourceStat.getInstance()
+                            .getNumBes(connection.getCurrentWarehouseId())) * (double) Math.max(1,
+                            connection.getSessionVariable().getDegreeOfParallelism(connection.getCurrentWarehouseId()));
+                    double groups = input.getOutputRowCount();
+                    copies = groups > 0 ? Math.max(1, TopNAggregationCost.concurrentLocalGroups(
+                            child.getChildStatistics(0).getOutputRowCount(), groups, drivers) / groups) : 1;
+                }
+                return CostEstimate.of(cpu * copies, context.getStatistics().getComputeSize() * copies, 0);
             }
 
             // Disable one phased sort, Currently, we always use two phase sort
@@ -281,8 +310,50 @@ public class CostModel {
                 factor = 0.1;
             }
 
-            return CostEstimate.of(inputStatistics.getComputeSize() * factor, statistics.getComputeSize() * factor,
-                    0);
+            // Forced preaggregation cannot switch to streaming passthrough for weak reduction.
+            // Apply the existing high-cardinality criterion also below projects/external scans,
+            // where preferLocalShuffleOnePhaseAgg does not recognize the scan shape.
+            if (node.getType().isLocal() && node.isTopNLocalAgg() &&
+                    statistics.getOutputRowCount() * 4 >= inputStatistics.getOutputRowCount()) {
+                factor = Math.max(1.0, factor);
+            }
+            double cpu = inputStatistics.getComputeSize();
+            var topn = node.getTopNSortInfo();
+            if (node.getType().isLocal() && topn != null && topn.topNType() == TopNType.RANK &&
+                    ConnectContext.get().getSessionVariable().getEnableTopNRuntimeFilter()) {
+                // Charge RF warmup before steady-state pruning. The normal BE probe collector
+                // reconsiders filters every 32 chunks; a short stream may finish before using its RF.
+                // Input order remains unknown. Do not change scan cardinality or derive a predicate.
+                ConnectContext connection = ConnectContext.get();
+                SessionVariable sv = connection.getSessionVariable();
+                double drivers = Math.max(1, BackendResourceStat.getInstance().getNumBes(connection.getCurrentWarehouseId())) *
+                        (double) Math.max(1, sv.getDegreeOfParallelism(connection.getCurrentWarehouseId()));
+                double selectivity = TopNAggregationCost.estimateFilterSelectivity(inputStatistics,
+                        node.getGroupBys(), topn.orderByElements(), topn.limit());
+                double effectiveSelectivity = TopNAggregationCost.includeFilterWarmup(selectivity,
+                        inputStatistics.getOutputRowCount(), drivers, sv.getChunkSize());
+                double keyBytes = inputStatistics.getColumnStatistic(topn.orderByElements().get(0).getColumnRef())
+                        .getAverageRowSize();
+                double compaction = TopNAggregationCost.filterCompactionWork(selectivity,
+                        inputStatistics.getOutputRowCount(), drivers, sv.getChunkSize());
+                cpu = cpu * (effectiveSelectivity + compaction) + inputStatistics.getOutputRowCount() *
+                        (Double.isFinite(keyBytes) ? Math.max(1, keyBytes) : 8);
+            }
+            // TopN aggregation forces preaggregation and retains admitted groups. It cannot
+            // use the streaming aggregate's memory discount, even when its RF rejects rows.
+            double memoryFactor = factor;
+            if (node.getType().isLocal() && node.isTopNLocalAgg()) {
+                ConnectContext connection = ConnectContext.get();
+                SessionVariable sv = connection.getSessionVariable();
+                double drivers = Math.max(1, BackendResourceStat.getInstance().getNumBes(connection.getCurrentWarehouseId())) *
+                        (double) Math.max(1, sv.getDegreeOfParallelism(connection.getCurrentWarehouseId()));
+                double groups = statistics.getOutputRowCount();
+                // Group NDV describes the union, not each driver's independent hash table.
+                // Account for duplicate states held concurrently before the hash exchange.
+                memoryFactor = groups > 0 ? Math.max(1, TopNAggregationCost.concurrentLocalGroups(
+                        inputStatistics.getOutputRowCount(), groups, drivers) / groups) : 1;
+            }
+            return CostEstimate.of(cpu * factor, statistics.getComputeSize() * memoryFactor, 0);
         }
 
         private List<ColumnRefOperator> getGroupBysWithoutDistinctColumn(List<ColumnRefOperator> groupByList,
