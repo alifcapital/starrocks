@@ -18,6 +18,9 @@
 
 #include "common/object_pool.h"
 #include "exec/agg_runtime_filter_builder.h"
+#include "exprs/column_ref.h"
+#include "exprs/expr_context.h"
+#include "runtime/runtime_state.h"
 #include "testutil/column_test_helper.h"
 
 namespace starrocks {
@@ -54,6 +57,47 @@ TEST(AggTopNRuntimeFilterTest, WaitsForKNonNullCandidates) {
         } else {
             EXPECT_EQ(10, rf->min());
         }
+    }
+}
+
+// A min/max-only filter marks its membership component always-true. Its range still
+// needs evaluation without TopN backpressure, both during resampling and between samples.
+TEST(AggTopNRuntimeFilterTest, ProbeUsesDynamicRangeWithoutBackpressure) {
+    ObjectPool pool;
+    RuntimeState state;
+    ColumnRef slot(TypeDescriptor(TYPE_INT), 1);
+    ExprContext expression(&slot);
+    ASSERT_TRUE(expression.prepare(&state).ok());
+    ASSERT_TRUE(expression.open(&state).ok());
+    RuntimeFilterProbeDescriptor descriptor;
+    descriptor._probe_expr_ctx = &expression;
+    descriptor._is_stream_build_filter = true;
+    auto* filter = MinMaxRuntimeFilter<TYPE_INT>::create_full_range_with_null(&pool);
+    filter->update_min_max<false>(2);
+    ASSERT_TRUE(filter->always_true());
+    descriptor._runtime_filter.store(filter);
+    RuntimeFilterProbeCollector collector;
+    collector._runtime_state = &state;
+    collector._descriptors.emplace(0, &descriptor);
+    RuntimeMembershipFilterEvalContext context;
+    for (int i = 0; i < 2; ++i) {
+        Chunk chunk;
+        chunk.append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3, 4}), 1);
+        collector.do_evaluate(&chunk, context);
+        ASSERT_EQ(2, chunk.num_rows());
+        EXPECT_EQ(1, chunk.get_column_by_slot_id(1)->get(0).get_int32());
+        EXPECT_EQ(2, chunk.get_column_by_slot_id(1)->get(1).get_int32());
+    }
+    // Do not reinterpret an inactive membership filter, or evaluate TopN twice
+    // when the caller explicitly runs the separate TopN-only pass.
+    for (bool stream : {false, true}) {
+        descriptor._is_stream_build_filter = stream;
+        RuntimeMembershipFilterEvalContext excluded;
+        if (stream) excluded.mode = RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
+        Chunk chunk;
+        chunk.append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3, 4}), 1);
+        collector.do_evaluate(&chunk, excluded);
+        EXPECT_EQ(4, chunk.num_rows());
     }
 }
 
