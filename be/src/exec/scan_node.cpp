@@ -34,8 +34,12 @@
 
 #include "exec/scan_node.h"
 
+#include <algorithm>
+
 #include "exec/pipeline/query_context.h"
 #include "exec/pipeline/scan/morsel.h"
+#include "exprs/expr.h"
+#include "exprs/expr_context.h"
 
 namespace starrocks {
 
@@ -49,6 +53,18 @@ const std::string ScanNode::_s_scanner_thread_counters_prefix = "ScannerThreads"
 const std::string ScanNode::_s_scanner_thread_total_wallclock_time = "ScannerThreadsTotalWallClockTime";
 
 const string ScanNode::_s_num_scanner_threads_started = "NumScannerThreadsStarted";
+
+bool ScanNode::uses_heavy_expr_slot(ExprContext* context) const {
+    if (_heavy_expr_slot_ids.empty()) {
+        return false;
+    }
+    bool found = false;
+    context->root()->for_each_slot_id([&](SlotId slot_id) {
+        found |= std::find(_heavy_expr_slot_ids.begin(), _heavy_expr_slot_ids.end(), slot_id) !=
+                 _heavy_expr_slot_ids.end();
+    });
+    return found;
+}
 
 Status ScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::init(tnode, state));
