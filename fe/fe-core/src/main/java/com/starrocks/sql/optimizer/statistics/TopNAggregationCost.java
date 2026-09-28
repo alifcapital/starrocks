@@ -14,13 +14,20 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
-import com.starrocks.common.Pair;
+import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.cost.CostEstimate;
 import com.starrocks.sql.optimizer.cost.CostModel;
+import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.statistic.StatisticUtils;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +45,7 @@ public final class TopNAggregationCost {
             return false; // Unknown costs retain the correct WITH TIES pushdown.
         }
         double groups = distinct(source, new HashSet<>(groupKeys));
-        double retained = estimateRetainedGroups(source, groups, ordering, limit);
+        double retained = estimateRetainedGroups(groupDistribution(source, groupKeys, groups), groups, ordering, limit);
         if (!Double.isFinite(retained)) {
             return false;
         }
@@ -65,6 +72,10 @@ public final class TopNAggregationCost {
         if (source == null || !Double.isFinite(groups) || groups <= 0 || ordering.isEmpty() || limit <= 0) {
             return Double.NaN;
         }
+        RankEstimate exact = mcvRank(source, groups, ordering, limit, false);
+        if (exact != null) {
+            return exact.retained();
+        }
         double prefix = distinct(source, ordering.stream().map(Ordering::getColumnRef).collect(Collectors.toSet()));
         if (!Double.isFinite(prefix)) {
             return Double.NaN;
@@ -88,27 +99,75 @@ public final class TopNAggregationCost {
         double groups = distinct(source, new HashSet<>(groupKeys));
         Ordering first = ordering.get(0);
         ColumnStatistic column = source.getColumnStatistics().get(first.getColumnRef());
-        if (column == null || column.isUnknown() || !Double.isFinite(groups)) {
+        if (!Double.isFinite(groups)) {
+            return 1;
+        }
+        // Row frequencies drive RF savings; distinct group frequencies drive the boundary.
+        // A million duplicates of one tuple still supply only one aggregate group to the heap.
+        Statistics grouped = groupDistribution(source, groupKeys, groups);
+        // A complete group dictionary locates the boundary, but RF selectivity must be evaluated
+        // on INPUT rows with their original multiplicities. NULLs pass the BE filter in either order.
+        RankEstimate boundary = mcvRank(grouped, groups, List.of(first), limit, true);
+        if (boundary != null) {
+            if (boundary.first() == null) {
+                return 1;
+            }
+            var range = new BinaryPredicateOperator(first.isAscending() ? BinaryType.LE : BinaryType.GE,
+                    first.getColumnRef(), boundary.first());
+            var predicate = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR, range,
+                    new IsNullPredicateOperator(false, first.getColumnRef()));
+            return Math.min(1, PredicateStatisticsCalculator.statisticsCalculate(predicate, source)
+                    .getOutputRowCount() / source.getOutputRowCount());
+        }
+        if (column == null || column.isUnknown()) {
             return 1;
         }
         double nulls = column.getNullsFraction();
         if (!Double.isFinite(nulls) || nulls < 0 || nulls >= 1) {
             return 1;
         }
-        // The BE heap excludes NULL, while its inclusive RF always lets NULL pass,
-        // including NULLS LAST. Estimate its non-NULL boundary separately from local RANK.
-        Statistics nonNull = Statistics.buildFrom(source).addColumnStatistic(first.getColumnRef(),
-                ColumnStatistic.buildFrom(column).setNullsFraction(0).build()).build();
-        double nonNullGroups = groups * (1 - nulls);
+        ColumnStatistic groupColumn = grouped.getColumnStatistics().get(first.getColumnRef());
+        double groupNulls = groupColumn.getNullsFraction();
+        if (!Double.isFinite(groupNulls) || groupNulls < 0 || groupNulls >= 1) {
+            return 1;
+        }
+        // The BE heap excludes NULL, while its inclusive RF always lets NULL pass.
+        Statistics nonNull = Statistics.buildFrom(grouped).addColumnStatistic(first.getColumnRef(),
+                ColumnStatistic.buildFrom(groupColumn).setNullsFraction(0).build()).build();
+        double nonNullGroups = groups * (1 - groupNulls);
         double retained = estimateRetainedGroups(nonNull, nonNullGroups, List.of(first), limit);
-        // A large boundary peer set need not contain many INPUT rows. When the leading
-        // value is expected to supply K candidates, use its histogram frequency for RF CPU
-        // selectivity, independently of the conservative peer-buffer size estimate.
-        double leading = estimateLeadingPeers(nonNull, first, nonNullGroups);
-        if (Double.isFinite(leading) && leading >= limit) {
-            retained = leading;
+        double leadingGroups = estimateLeadingPeers(nonNull, first, nonNullGroups);
+        // Distinct retained GROUP BY tuples give a lower bound on boundary peers, even with a tail.
+        // If that alone fills K, a saved input marginal can still estimate RF row selectivity.
+        double knownGroups = leadingMcvShare(nonNull, first,
+                nonNull.getColumnStatistic(first.getColumnRef()), true) * nonNullGroups;
+        if (Double.isFinite(knownGroups)) {
+            leadingGroups = Double.isFinite(leadingGroups) ? Math.max(leadingGroups, knownGroups) : knownGroups;
+        }
+        if (Double.isFinite(leadingGroups) && leadingGroups >= limit) {
+            double leadingRows = estimateLeadingPeers(source, new Ordering(first.getColumnRef(),
+                    first.isAscending(), false), source.getOutputRowCount());
+            if (Double.isFinite(leadingRows)) {
+                return Math.min(1, nulls + leadingRows / source.getOutputRowCount());
+            }
         }
         return Double.isFinite(retained) ? Math.min(1, nulls + (1 - nulls) * retained / nonNullGroups) : 1;
+    }
+
+    /** Union of GROUP BY tuples, before the cost model accounts for copies across local drivers. */
+    static Statistics groupDistribution(Statistics input, List<ColumnRefOperator> keys, double groups) {
+        if (!Double.isFinite(groups) || groups <= 0) {
+            return input;
+        }
+        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> ndvs = new HashMap<>();
+        input.getMultiColumnCombinedStats().forEach((columns, stats) -> {
+            if (stats.getColumns().isEmpty() && keys.containsAll(columns)) {
+                ndvs.put(columns, stats);
+            }
+        });
+        Statistics output = Statistics.buildFrom(input).setOutputRowCount(groups)
+                .setMultiColumnStatistics(ndvs).build();
+        return McvAggregateStatistics.derive(keys, input, output);
     }
 
     /** Conservative startup cost for the normal probe path (RuntimeFilterProbeCollector::do_evaluate). */
@@ -143,22 +202,51 @@ public final class TopNAggregationCost {
         if (!Double.isFinite(rows) || rows <= 0 || columns.isEmpty()) {
             return Double.NaN;
         }
-        Pair<Set<ColumnRefOperator>, MultiColumnCombinedStats> combined = statistics.getLargestSubsetMCStats(columns);
-        Set<ColumnRefOperator> remaining = new HashSet<>(columns);
-        double ndv = 1;
-        if (combined != null && combined.second.getNdv() > 0) {
-            ndv = Math.min(rows, combined.second.getNdv());
-            remaining.removeAll(combined.first);
-        }
-        for (ColumnRefOperator column : remaining) {
-            ColumnStatistic stat = statistics.getColumnStatistics().get(column);
-            if (stat == null || stat.isUnknown() || !Double.isFinite(stat.getDistinctValuesCount())) {
-                return Double.NaN;
+        // Use the same conditional/projected NDV as GROUP BY, including an MCV superset.
+        // Never multiply base-table NDVs again on top of an already estimated JOIN cardinality.
+        var combined = statistics.getLargestSubsetMCStats(columns);
+        var projected = MultiColumnMcvEstimator.projectedNdv(columns, statistics);
+        if (projected.isEmpty() && statistics.getJoinStatisticsPlanner() != null) {
+            Statistics.Builder conditional = null;
+            for (ColumnRefOperator column : columns) {
+                if (combined != null && combined.first.contains(column)) {
+                    continue;
+                }
+                var key = statistics.getJoinStatisticsPlanner().keyStatistics(statistics.getJoinStatisticsScope(), column);
+                var basic = statistics.getColumnStatistics().get(column);
+                if (key == null || key.degree() == null || basic == null) {
+                    continue;
+                }
+                if (conditional == null) {
+                    conditional = Statistics.buildFrom(statistics);
+                }
+                var degree = key.degree();
+                double nulls = degree.getRowCount() > 0 ? degree.getNullCount() / (double) degree.getRowCount() : 0;
+                conditional.addColumnStatistic(column, ColumnStatistic.buildFrom(basic)
+                        .setDistinctValuesCount(degree.getDistinctCount()).setNullsFraction(nulls)
+                        .setType(ColumnStatistic.StatisticType.ESTIMATE).build());
             }
-            double values = Math.max(1, stat.getDistinctValuesCount()) + (stat.getNullsFraction() > 0 ? 1 : 0);
-            ndv = Math.min(rows, ndv * values);
+            if (conditional != null) {
+                statistics = conditional.build();
+            }
         }
-        return Math.min(rows, ndv);
+        if (projected.isEmpty()) {
+            for (ColumnRefOperator column : columns) {
+                if (combined != null && combined.first.contains(column)) {
+                    continue;
+                }
+                ColumnStatistic stat = statistics.getColumnStatistics().get(column);
+                if (stat == null || stat.isUnknown() || !Double.isFinite(stat.getDistinctValuesCount())) {
+                    return Double.NaN;
+                }
+            }
+        }
+        if (!statistics.getColumnStatistics().keySet().containsAll(columns)) {
+            return Double.NaN;
+        }
+        return StatisticsCalculator.computeGroupByStatistics(
+                columns.stream().sorted(Comparator.comparingInt(ColumnRefOperator::getId)).toList(),
+                statistics, new HashMap<>());
     }
 
     // Model groups as distributed proportionally to source rows for a known leading value.
@@ -172,8 +260,12 @@ public final class TopNAggregationCost {
         if (ordering.isNullsFirst() && stat.getNullsFraction() > 0) {
             return groups * stat.getNullsFraction();
         }
+        double mcv = leadingMcvShare(source, ordering, stat, false);
+        if (Double.isFinite(mcv)) {
+            return groups * mcv;
+        }
         Histogram histogram = stat.getHistogram();
-        if (histogram == null) {
+        if (histogram == null || histogram.getTotalRows() <= 0) {
             return Double.NaN;
         }
         double edge = ordering.isAscending() ? stat.getMinValue() : stat.getMaxValue();
@@ -196,4 +288,146 @@ public final class TopNAggregationCost {
         }
         return groups * (1 - stat.getNullsFraction()) * frequency / histogram.getTotalRows();
     }
+    private record Peer(List<ConstantOperator> values, double groups) { }
+
+    /** A complete distribution of output groups locates the rank boundary in that statistics snapshot. */
+    private record RankEstimate(double retained, ConstantOperator first) { }
+
+    private static RankEstimate mcvRank(Statistics source, double groups, List<Ordering> ordering,
+                                        long limit, boolean skipNull) {
+        if (!MultiColumnMcvEstimator.isEnabled()) {
+            return null;
+        }
+        for (var distribution : source.getMultiColumnCombinedStats().values()) {
+            if (!distribution.hasMcv() || distribution.getRowCount() != groups
+                    || distribution.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum()
+                    != distribution.getRowCount()) {
+                continue;
+            }
+            int[] positions = ordering.stream().mapToInt(o -> distribution.getColumns().indexOf(o.getColumnRef()))
+                    .toArray();
+            if (java.util.Arrays.stream(positions).anyMatch(i -> i < 0)) {
+                continue;
+            }
+            List<Peer> peers = new ArrayList<>();
+            for (var entry : distribution.getMcv()) {
+                List<ConstantOperator> values = new ArrayList<>();
+                for (int i = 0; i < positions.length; i++) {
+                    String text = entry.getValues().get(positions[i]);
+                    var type = ordering.get(i).getColumnRef().getType();
+                    if (!type.isNumericType() && !type.isStringType() && !type.isDateType() && !type.isBoolean()) {
+                        return null;
+                    }
+                    var value = text == null ? ConstantOperator.createNull(type)
+                            : ConstantOperator.createVarchar(text).castTo(type).orElse(null);
+                    if (value == null || (text != null && value.isNull())) {
+                        return null;
+                    }
+                    values.add(value);
+                }
+                if (!skipNull || !values.get(0).isNull()) {
+                    peers.add(new Peer(values, entry.getCount()));
+                }
+            }
+            Comparator<Peer> comparator = (a, b) -> {
+                for (int i = 0; i < ordering.size(); i++) {
+                    var x = a.values().get(i);
+                    var y = b.values().get(i);
+                    var order = ordering.get(i);
+                    int comparison;
+                    if (x.isNull() || y.isNull()) {
+                        comparison = x.isNull() == y.isNull() ? 0 : x.isNull() == order.isNullsFirst() ? -1 : 1;
+                    } else {
+                        comparison = x.getType().isStringType() ? StringBucket.compare(x.getVarchar(), y.getVarchar())
+                                : x.compareTo(y);
+                        if (!order.isAscending()) {
+                            comparison = -Integer.signum(comparison);
+                        }
+                    }
+                    if (comparison != 0) {
+                        return comparison;
+                    }
+                }
+                return 0;
+            };
+            peers.sort(comparator);
+            double retained = 0;
+            Peer boundary = null;
+            for (Peer peer : peers) {
+                if (retained >= limit && comparator.compare(boundary, peer) != 0) {
+                    break;
+                }
+                retained += peer.groups();
+                boundary = peer;
+            }
+            return new RankEstimate(Math.min(groups, retained), boundary == null ? null : boundary.values().get(0));
+        }
+        return null;
+    }
+
+    // A component count describes the whole marginal, even when the joint head is partial.
+    // Summing only retained tuples is valid for a complete head or for a singleton distribution.
+    private static double leadingMcvShare(Statistics source, Ordering ordering, ColumnStatistic stat,
+                                          boolean allowLowerBound) {
+        if (!MultiColumnMcvEstimator.isEnabled()) {
+            return Double.NaN;
+        }
+        double best = Double.NaN;
+        int bestWidth = Integer.MAX_VALUE;
+        for (var group : source.getMultiColumnCombinedStats().values()) {
+            int position = group.getColumns().indexOf(ordering.getColumnRef());
+            if (!group.hasMcv() || position < 0 || group.getColumns().size() > bestWidth) {
+                continue;
+            }
+            double covered = 0;
+            double matched = 0;
+            double marginal = Double.NaN;
+            boolean found = false;
+            for (var entry : group.getMcv()) {
+                covered += entry.getCount();
+                String value = entry.getValues().get(position);
+                if (!matchesEdge(value, ordering, stat)) {
+                    continue;
+                }
+                found = true;
+                matched += entry.getCount();
+                if (entry.hasComponentCounts()) {
+                    marginal = entry.getComponentCounts().get(position);
+                }
+            }
+            if (!found) {
+                continue; // Missing from an MCV head does not mean absent from the distribution.
+            }
+            double frequency = Double.isFinite(marginal) ? marginal
+                    : allowLowerBound || group.getColumns().size() == 1 || covered >= group.getRowCount()
+                    ? matched : Double.NaN;
+            if (Double.isFinite(frequency)) {
+                double nullRows = group.getNullCounts().size() == group.getColumns().size()
+                        ? group.getNullCounts().get(position) : 0;
+                best = nullRows > 0 && group.getRowCount() > nullRows
+                        ? (1 - stat.getNullsFraction()) * frequency / (group.getRowCount() - nullRows)
+                        : frequency / group.getRowCount();
+                best = Math.min(1, best);
+                bestWidth = group.getColumns().size();
+            }
+        }
+        return best;
+    }
+
+    private static boolean matchesEdge(String value, Ordering ordering, ColumnStatistic stat) {
+        if (value == null) {
+            return false;
+        }
+        String text = ordering.isAscending() ? stat.getMinString() : stat.getMaxString();
+        if (text != null) {
+            return text.equals(value);
+        }
+        double edge = ordering.isAscending() ? stat.getMinValue() : stat.getMaxValue();
+        if (!Double.isFinite(edge) || !ordering.getColumnRef().getType().canStatistic()) {
+            return false;
+        }
+        var converted = StatisticUtils.convertStatisticsToDouble(ordering.getColumnRef().getType(), value);
+        return converted.isPresent() && Double.compare(converted.get(), edge) == 0;
+    }
+
 }

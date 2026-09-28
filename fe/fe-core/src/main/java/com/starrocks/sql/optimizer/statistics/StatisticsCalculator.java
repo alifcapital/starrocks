@@ -2317,7 +2317,20 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         if (isPeerPreservingAggTopN(node)) {
             List<Ordering> ordering = node instanceof LogicalTopNOperator topn
                     ? topn.getOrderByElements() : ((PhysicalTopNOperator) node).getOrderSpec().getOrderDescs();
-            double retained = TopNAggregationCost.estimateRetainedGroups(inputStatistics,
+            Statistics peers = inputStatistics;
+            ExpressionContext child = context.isGroupExprContext()
+                    ? new ExpressionContext(context.getGroupExpression().getInputs().get(0).getFirstLogicalExpression())
+                    : new ExpressionContext(context.getOptExpression().inputAt(0));
+            if (child.arity() == 1) {
+                List<ColumnRefOperator> keys = child.getOp() instanceof LogicalAggregationOperator agg
+                        ? agg.getGroupingKeys() : child.getOp() instanceof PhysicalHashAggregateOperator agg
+                        ? agg.getGroupBys() : List.of();
+                if (!keys.isEmpty()) {
+                    peers = TopNAggregationCost.groupDistribution(child.getChildStatistics(0), keys,
+                            inputStatistics.getOutputRowCount());
+                }
+            }
+            double retained = TopNAggregationCost.estimateRetainedGroups(peers,
                     inputStatistics.getOutputRowCount(), ordering, limit);
             if (Double.isFinite(retained)) {
                 builder.setOutputRowCount(retained);

@@ -121,6 +121,8 @@ The archive contains plans, timings, profiles, test logs, boundary summaries,
 validation runners and source checksums. A local copy is kept in
 handbook/plans/local/pr-72332-review/validated in the integration checkout.
 
-The main and 4.1 fix branches are independent of integration/statistics-4.1.
-Conditional multi-column statistics can improve estimates later without changing
-the peer-preserving correctness contract. No PR has been published.
+The measurements above were made on the standalone 4.1 fix branch. Its TopN changes
+were subsequently integrated into integration/statistics-4.1 with conditional MCV
+and JOIN-NDV support described in README.md. Those additions preserve the same
+peer-preserving correctness contract; the runtime matrix above has not been rerun
+for the statistics adaptation. No PR has been published.
