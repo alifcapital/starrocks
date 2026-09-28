@@ -43,6 +43,7 @@ def main():
         'pipeline_profile_level=2', 'pipeline_dop=8', 'chunk_size=4096',
         "streaming_preaggregation_mode='auto'", 'enable_topn_runtime_filter=true',
         'enable_parquet_reader_page_index=true', 'enable_agg_inline_accumulator=true',
+        'enable_pipeline_event_scheduler=true', 'topn_filter_back_pressure_mode=0',
     ]
     for setting in settings:
         sql('SET ' + setting)
