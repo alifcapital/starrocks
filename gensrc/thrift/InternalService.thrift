@@ -415,6 +415,25 @@ struct TQueryOptions {
   // and enabled only after a full cluster upgrade; see
   // SessionVariable.ENABLE_PERCENTILE_COMPACT_INTERMEDIATE.
   227: optional bool enable_percentile_compact_intermediate = false;
+
+  // Backport: preserve our inline accumulator field 219; use free IDs 245-250.
+  // ---- TopN runtime-filter back-pressure tuning (lake/connector self-enabled path) ----
+  // Max concurrent IO tasks a scan may submit while a TopN runtime filter is still pending.
+  // Caps read-ahead so concurrent readers cannot overshoot the (non-concurrency-aware) row
+  // budget before the filter arrives. Full DOP resumes once the filter lands. <=0 disables
+  // the clamp (legacy overshoot behavior). Default 1.
+  245: optional i32 topn_filter_back_pressure_io_tasks = 1;
+  // Master switch for scans (both shared-nothing olap and shared-data lake/connector) to
+  // self-enable TopN back-pressure even when the FE-side topn_filter_back_pressure_mode is 0.
+  // Default true.
+  246: optional bool enable_topn_filter_back_pressure = true;
+  // Back-pressure throttle window parameters used by the lake/connector self-enabled path
+  // (the FE-driven olap path keeps using the per-scan-node thrift values). Defaults match the
+  // tuned values: finer, exponentially-backing-off throttle quanta.
+  247: optional i32 topn_back_pressure_max_rounds = 8;
+  248: optional i64 topn_back_pressure_num_rows = 1024;
+  249: optional i64 topn_back_pressure_throttle_time_ms = 8;
+  250: optional i64 topn_back_pressure_throttle_time_upper_bound_ms = 100;
 }
 
 // A scan range plus the parameters needed to execute that scan.

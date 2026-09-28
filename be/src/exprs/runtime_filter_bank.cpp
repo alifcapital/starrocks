@@ -754,7 +754,13 @@ void RuntimeFilterProbeCollector::do_evaluate(Chunk* chunk, RuntimeMembershipFil
             (filter->always_true() && !dynamic_range)) {
             continue;
         }
-        if (rf_desc->has_push_down_to_storage()) {
+        // TopN range filters prune pages in storage, but still need row-level evaluation.
+        if (rf_desc->has_push_down_to_storage() &&
+            (!rf_desc->is_stream_build_filter() || rf_desc->probe_expr_ctx() == nullptr)) {
+            continue;
+        }
+        // Aggregate IN filters are evaluated through their storage/colocate path.
+        if (filter->type() == RuntimeFilterSerializeType::IN_FILTER) {
             continue;
         }
 
@@ -957,7 +963,13 @@ void RuntimeFilterProbeCollector::update_selectivity(Chunk* chunk, RuntimeMember
             continue;
         }
 
-        if (rf_desc->has_push_down_to_storage()) {
+        // TopN range filters prune pages in storage, but still need row-level evaluation.
+        if (rf_desc->has_push_down_to_storage() &&
+            (!rf_desc->is_stream_build_filter() || rf_desc->probe_expr_ctx() == nullptr)) {
+            continue;
+        }
+        // Aggregate IN filters are evaluated through their storage/colocate path.
+        if (filter->type() == RuntimeFilterSerializeType::IN_FILTER) {
             continue;
         }
         auto& selection = eval_context.running_context.use_merged_selection
