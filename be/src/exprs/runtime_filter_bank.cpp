@@ -753,7 +753,12 @@ void RuntimeFilterProbeCollector::do_evaluate(Chunk* chunk, RuntimeMembershipFil
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
         bool skip_topn = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
-        if ((skip_topn && rf_desc->is_stream_build_filter()) || filter == nullptr || filter->always_true()) {
+        // A dynamic min/max-only filter has no membership component to test. Its
+        // always_true flag does not make its narrowing range a no-op.
+        const bool dynamic_range = filter != nullptr && rf_desc->is_stream_build_filter() &&
+                                   filter->get_min_max_filter() == filter;
+        if ((skip_topn && rf_desc->is_stream_build_filter()) || filter == nullptr ||
+            (filter->always_true() && !dynamic_range)) {
             continue;
         }
         if (rf_desc->has_push_down_to_storage()) {
@@ -945,8 +950,9 @@ void RuntimeFilterProbeCollector::update_selectivity(Chunk* chunk, RuntimeMember
     for (auto& kv : _descriptors) {
         RuntimeFilterProbeDescriptor* rf_desc = kv.second;
         const RuntimeFilter* filter = rf_desc->runtime_filter(eval_context.driver_sequence);
-        bool should_use = eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN &&
-                          rf_desc->is_stream_build_filter();
+        bool should_use = filter != nullptr && rf_desc->is_stream_build_filter() &&
+                          (eval_context.mode == RuntimeMembershipFilterEvalContext::Mode::M_ONLY_TOPN ||
+                           filter->get_min_max_filter() == filter);
         if (filter == nullptr || (!should_use && filter->always_true())) {
             continue;
         }
