@@ -355,6 +355,7 @@ set(EXEC_FILES
         ./util/spill_metrics_test.cpp
         ./io/spill_test.cpp
         ./io/spill_block_manager_test.cpp
+        ./io/spill_restore_reader_test.cpp
         ./runtime/agg_state_desc_test.cpp
         ./runtime/arrow_result_writer_test.cpp
         ./runtime/buffer_control_block_test.cpp
