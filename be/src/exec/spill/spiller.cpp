@@ -48,6 +48,7 @@ DEFINE_FAIL_POINT(spill_restore_error);
 DEFINE_FAIL_POINT(spill_submit_error);
 DEFINE_FAIL_POINT(spill_flush_block);
 DEFINE_FAIL_POINT(spill_restore_block);
+DEFINE_FAIL_POINT(spill_prefetch_after_put);
 
 #ifdef FIU_ENABLE
 failpoint::OneToAnyBarrier& spill_flush_block_barrier() {
@@ -55,6 +56,10 @@ failpoint::OneToAnyBarrier& spill_flush_block_barrier() {
     return barrier;
 }
 failpoint::OneToAnyBarrier& spill_restore_block_barrier() {
+    static failpoint::OneToAnyBarrier barrier;
+    return barrier;
+}
+failpoint::OneToAnyBarrier& spill_prefetch_after_put_barrier() {
     static failpoint::OneToAnyBarrier barrier;
     return barrier;
 }

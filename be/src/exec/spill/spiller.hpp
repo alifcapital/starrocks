@@ -41,6 +41,7 @@ DECLARE_FAIL_POINT(spill_restore_error);
 DECLARE_FAIL_POINT(spill_submit_error);
 DECLARE_FAIL_POINT(spill_flush_block);
 DECLARE_FAIL_POINT(spill_restore_block);
+DECLARE_FAIL_POINT(spill_prefetch_after_put);
 
 #ifdef FIU_ENABLE
 // Test-only rendezvous points. A flush/restore IO task that hits the matching fail point waits at
@@ -48,6 +49,8 @@ DECLARE_FAIL_POINT(spill_restore_block);
 // open deterministically.
 failpoint::OneToAnyBarrier& spill_flush_block_barrier();
 failpoint::OneToAnyBarrier& spill_restore_block_barrier();
+// A buffered input stream prefetch waits here after it put a chunk and before it releases the prefetch.
+failpoint::OneToAnyBarrier& spill_prefetch_after_put_barrier();
 #endif
 
 // Compile-time proof that an IO task body decided the fate of its completion. The task lambdas declare

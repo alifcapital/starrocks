@@ -40,8 +40,13 @@
 #include "runtime/sorted_chunks_merger.h"
 #include "util/blocking_queue.hpp"
 #include "util/defer_op.h"
+#include "util/failpoint/fail_point.h"
 
 namespace starrocks::spill {
+
+#ifdef FIU_ENABLE
+failpoint::OneToAnyBarrier& spill_prefetch_after_put_barrier();
+#endif
 
 static const int chunk_buffer_max_size = 2;
 
@@ -336,26 +341,30 @@ StatusOr<ChunkUniquePtr> BufferedInputStream::get_next(workgroup::YieldContext& 
 }
 
 Status BufferedInputStream::prefetch(workgroup::YieldContext& yield_ctx, SerdeContext& ctx) {
-    if (is_buffer_full() || eof()) {
-        return Status::OK();
-    }
-    // concurrent prefetch is not allowed, should call _acquire and _release before and after prefetch
-    // to ensure that it doesn't happen.
-    if (!_acquire()) {
-        return Status::OK();
-    }
-    DeferOp defer([this]() { _release(); });
+    // Only one prefetch reads the input at a time. A prefetch that finds another one reading returns at once
+    // and leaves the refill to it, so the reading prefetch fills the buffer until it is full and checks the
+    // buffer again after every release: a consumer can take the chunk between the put and the release, and
+    // the consumer triggers no more prefetches while the stream is not ready.
+    while (!is_buffer_full() && !eof()) {
+        if (!_acquire()) {
+            return Status::OK();
+        }
+        DeferOp defer([this]() { _release(); });
 
-    auto res = _input_stream->get_next(yield_ctx, ctx);
-    if (res.ok()) {
-        COUNTER_ADD(_spiller->metrics().input_stream_peak_memory_usage, res.value()->memory_usage());
-        _chunk_buffer.put(std::move(res.value()));
-        return Status::OK();
-    } else if (res.status().is_end_of_file()) {
-        mark_is_eof();
-        return Status::OK();
+        auto res = _input_stream->get_next(yield_ctx, ctx);
+        if (res.ok()) {
+            COUNTER_ADD(_spiller->metrics().input_stream_peak_memory_usage, res.value()->memory_usage());
+            _chunk_buffer.put(std::move(res.value()));
+            FAIL_POINT_TRIGGER_EXECUTE(spill_prefetch_after_put, { spill_prefetch_after_put_barrier().arrive_A(); });
+            continue;
+        }
+        if (res.status().is_end_of_file()) {
+            mark_is_eof();
+            return Status::OK();
+        }
+        return res.status();
     }
-    return res.status();
+    return Status::OK();
 }
 
 class SequenceInputStream : public SpillInputStream {
