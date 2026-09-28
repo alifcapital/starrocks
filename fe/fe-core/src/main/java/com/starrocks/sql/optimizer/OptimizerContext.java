@@ -32,6 +32,7 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.tvr.common.TvrOptContext;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
+import com.starrocks.sql.optimizer.statistics.JoinStatisticsPlanner;
 import com.starrocks.sql.optimizer.task.TaskContext;
 import com.starrocks.sql.optimizer.task.TaskScheduler;
 import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
@@ -49,6 +50,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 public class OptimizerContext {
+    private final JoinStatisticsPlanner joinStatisticsPlanner = new JoinStatisticsPlanner();
+
+    public JoinStatisticsPlanner getJoinStatisticsPlanner() {
+        return joinStatisticsPlanner;
+    }
+
     private final Map<ExternalStatisticsRequest, Optional<ExternalStatisticsAggregate>> externalStatisticsSnapshots =
             new ConcurrentHashMap<>();
 

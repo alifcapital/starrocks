@@ -34,6 +34,12 @@ public:
      * @return BinaryColumn
      */
     DEFINE_VECTORIZED_FN(tuple_key);
+    DEFINE_VECTORIZED_FN(degree_info);
+    DEFINE_VECTORIZED_FN(degree_pair);
+    DEFINE_VECTORIZED_FN(degree_head);
+    DEFINE_VECTORIZED_FN(degree_tail);
+    DEFINE_VECTORIZED_FN(degree_project);
+    DEFINE_VECTORIZED_FN(degree_intra);
 };
 
 } // namespace starrocks

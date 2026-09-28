@@ -1649,6 +1649,11 @@ public class GlobalStateMgr {
 
     private void transferToNonLeader(FrontendNodeType newType) {
         isReady.set(false);
+        try {
+            analyzeMgr.revokeJoinStatisticsCollections();
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to cancel JOIN statistics collection during leader transition", e);
+        }
 
         if (feType == FrontendNodeType.OBSERVER || feType == FrontendNodeType.FOLLOWER) {
             Preconditions.checkState(newType == FrontendNodeType.UNKNOWN);

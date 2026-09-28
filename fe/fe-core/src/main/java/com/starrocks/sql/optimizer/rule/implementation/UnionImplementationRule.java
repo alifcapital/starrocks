@@ -41,7 +41,8 @@ public class UnionImplementationRule extends ImplementationRule {
                 union.isUnionAll(),
                 union.getLimit(),
                 union.getPredicate(),
-                union.getProjection());
+                union.getProjection(),
+                union.isFromIcebergEqualityDeleteRewrite());
         return Lists.newArrayList(OptExpression.create(physicalUnion, input.getInputs()));
     }
 }

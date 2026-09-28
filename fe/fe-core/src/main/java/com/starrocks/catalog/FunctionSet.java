@@ -1677,6 +1677,22 @@ public class FunctionSet {
                     VarbinaryType.VARBINARY, false, false, false));
         }
 
+        addBuiltin(AggregateFunction.createBuiltin("stats_degree_state",
+                Lists.newArrayList(IntegerType.BIGINT), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                false, false, false));
+        addBuiltin(AggregateFunction.createBuiltin("stats_degree_merge",
+                Lists.newArrayList(VarbinaryType.VARBINARY), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                false, false, false));
+
+        addBuiltin(AggregateFunction.createBuiltin("stats_degree_head_agg",
+                Lists.newArrayList(VarbinaryType.VARBINARY, VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                        VarbinaryType.VARBINARY, IntegerType.INT), VarbinaryType.VARBINARY,
+                VarbinaryType.VARBINARY, false, false, false));
+
+        addBuiltin(AggregateFunction.createBuiltin("stats_degree_finish",
+                Lists.newArrayList(VarbinaryType.VARBINARY, VarbinaryType.VARBINARY), VarcharType.VARCHAR,
+                VarbinaryType.VARBINARY, false, false, false));
+
         // causal inference functions.
         registerBuiltinHypothesisTestingFunctions();
     }

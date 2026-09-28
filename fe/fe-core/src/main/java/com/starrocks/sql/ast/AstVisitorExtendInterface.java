@@ -54,6 +54,10 @@ import com.starrocks.sql.ast.spm.ShowBaselinePlanStmt;
 
 public interface AstVisitorExtendInterface<R, C> extends AstVisitor<R, C> {
 
+    default R visitJoinStatisticsStatement(JoinStatisticsStmt statement, C context) {
+        return visitStatement(statement, context);
+    }
+
     // ---------------------------------------- Query Statement --------------------------------------------------------------
 
     default R visitQueryStatement(QueryStatement statement, C context) {

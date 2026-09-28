@@ -68,6 +68,36 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.stream.Collectors;
 
 public class AnalyzeMgr implements Writable {
+    private final JoinStatisticsRegistry joinStatisticsRegistry = new JoinStatisticsRegistry((meta, drop, apply) ->
+            GlobalStateMgr.getCurrentState().getEditLog().logJoinStatistics(meta, drop, wal -> apply.run()));
+    private volatile JoinStatisticsManager joinStatisticsManager;
+
+    public JoinStatisticsRegistry getJoinStatisticsRegistry() {
+        return joinStatisticsRegistry;
+    }
+
+    public void replayJoinStatistics(JoinStatisticsMeta meta, boolean drop) {
+        joinStatisticsRegistry.replay(meta, drop);
+        JoinStatisticsManager manager = joinStatisticsManager;
+        if (manager != null) {
+            manager.invalidateCache(meta.getId());
+        }
+    }
+
+    public synchronized JoinStatisticsManager getJoinStatisticsManager() {
+        if (joinStatisticsManager == null) {
+            joinStatisticsManager = new JoinStatisticsManager(joinStatisticsRegistry);
+            com.starrocks.memory.MemoryUsageTracker.registerMemoryTracker("Statistics", joinStatisticsManager);
+        }
+        return joinStatisticsManager;
+    }
+
+    public void revokeJoinStatisticsCollections() {
+        JoinStatisticsManager manager = joinStatisticsManager;
+        if (manager != null) {
+            manager.revokeCollections();
+        }
+    }
     private static final Logger LOG = LogManager.getLogger(AnalyzeMgr.class);
     public static final String USER_CANCEL_MESSAGE = "kill analyze";
     private static final Pair<Long, Long> CHECK_ALL_TABLES =
@@ -1168,6 +1198,7 @@ public class AnalyzeMgr implements Writable {
 
 
     public void save(ImageWriter imageWriter) throws IOException, SRMetaBlockException {
+        List<JoinStatisticsMeta> joinStatistics = joinStatisticsRegistry.snapshot();
         List<AnalyzeStatus> analyzeStatuses = getAnalyzeStatusMap().values().stream()
                 .distinct().collect(Collectors.toList());
 
@@ -1178,7 +1209,8 @@ public class AnalyzeMgr implements Writable {
                 + 1 + externalBasicStatsMetaMap.size()
                 + 1 + externalHistogramStatsMetaMap.size()
                 + 1 + multiColumnStatsMetaMap.size()
-                + 1 + externalMcvStatsMetaMap.size();
+                + 1 + externalMcvStatsMetaMap.size()
+                + 1 + joinStatistics.size();
 
         SRMetaBlockWriter writer = imageWriter.getBlockWriter(SRMetaBlockID.ANALYZE_MGR, numJson);
 
@@ -1223,6 +1255,11 @@ public class AnalyzeMgr implements Writable {
             writer.writeJson(meta);
         }
 
+        writer.writeInt(joinStatistics.size());
+        for (JoinStatisticsMeta meta : joinStatistics) {
+            writer.writeJson(meta);
+        }
+
         writer.close();
     }
 
@@ -1250,6 +1287,15 @@ public class AnalyzeMgr implements Writable {
                 LOG.error("Skipping invalid external MCV statistics metadata while loading image: {}.{}.{}",
                         meta == null ? null : meta.getCatalogName(), meta == null ? null : meta.getDbName(),
                         meta == null ? null : meta.getTableName(), e);
+            }
+        });
+        reader.readCollection(JoinStatisticsMeta.class, meta -> {
+            try {
+                replayJoinStatistics(meta, false);
+            } catch (RuntimeException e) {
+                LOG.error("Skipping invalid JOIN statistics metadata while loading image: id={}, name={}",
+                        meta == null ? null : meta.getId(),
+                        meta == null || meta.getDefinition() == null ? null : meta.getDefinition().getName(), e);
             }
         });
     }

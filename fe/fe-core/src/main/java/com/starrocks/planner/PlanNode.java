@@ -59,6 +59,8 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import com.starrocks.sql.optimizer.statistics.RuntimeFilterJointSelection;
+import com.starrocks.sql.optimizer.statistics.JoinStatisticsPlanner;
+import com.starrocks.sql.optimizer.statistics.JoinStatisticsScope;
 import com.starrocks.sql.optimizer.statistics.RuntimeFilterStatistics;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
@@ -133,6 +135,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     protected Statistics.StatsSource statsSource = Statistics.StatsSource.NONE;
 
     protected Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
+    private JoinStatisticsScope joinStatisticsScope;
+    private JoinStatisticsPlanner joinStatisticsPlanner;
+
 
     // For vector query engine
     // case 1: If agg node hash outer join child
@@ -291,7 +296,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
                         .addColumnStatistics(columnStatistics)
                         .setMultiColumnStatistics(multiColumnCombinedStats == null ? Map.of() : multiColumnCombinedStats)
                         .build();
-                return RuntimeFilterStatistics.fromExpression(expression, input).boundByRows(cardinality);
+                return RuntimeFilterStatistics.fromExpression(expression, input).boundByRows(cardinality)
+                        .withJoinStatistics(joinStatisticsPlanner, joinStatisticsScope,
+                                JoinStatisticsScope.sourceColumn(expression), cardinality);
             }
         }
         if (!(expr instanceof SlotRef)) {
@@ -310,7 +317,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
                     }
                     return RuntimeFilterStatistics.from(entry.getKey(), entry.getValue(),
                             multiColumnCombinedStats == null ? List.of() : multiColumnCombinedStats.values(),
-                            cardinality);
+                            cardinality).withJoinStatistics(joinStatisticsPlanner, joinStatisticsScope,
+                                    entry.getKey(), cardinality);
                 }
             }
         }
@@ -678,6 +686,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         avgRowSize = (float) statistics.getColumnStatistics().values().stream().
                 mapToDouble(columnStatistic -> columnStatistic.getAverageRowSize()).sum();
         columnStatistics = statistics.getColumnStatistics();
+        joinStatisticsScope = statistics.getJoinStatisticsScope();
+        joinStatisticsPlanner = statistics.getJoinStatisticsPlanner();
         multiColumnCombinedStats = statistics.getMultiColumnCombinedStats();
         statsSource = statistics.getStatsSource();
     }

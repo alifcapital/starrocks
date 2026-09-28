@@ -806,7 +806,7 @@ public class StatisticExecutor {
                 JsonArray data = JsonParser.parseString(json).getAsJsonObject().getAsJsonArray("data");
                 List<String> row = Lists.newArrayList();
                 for (JsonElement cell : data) {
-                    row.add(cell.isJsonNull() ? null : cell.getAsString());
+                    row.add(cell.isJsonNull() ? null : cell.isJsonPrimitive() ? cell.getAsString() : cell.toString());
                 }
                 rows.add(row);
             }

@@ -100,12 +100,23 @@ public class QueryDumpSerializer implements JsonSerializer<QueryDumpInfo> {
         if (Config.enable_desensitize_query_dump || dumpInfo.isDesensitizedInfo()) {
             try {
                 desensitizeContent(dumpInfo, dumpJson);
+                if (!dumpInfo.getJoinStatistics().entries().isEmpty()) {
+                    dumpInfo.addException("JOIN statistics omitted from anonymized dump: predicate values are sensitive");
+                }
                 return dumpJson;
             } catch (Exception e) {
                 LOG.info("failed to desensitize content, use the original content", e);
                 dumpInfo.addException(e.getMessage());
                 dumpJson = new JsonObject();
             }
+        }
+        try {
+            // An anonymization failure above must not restore the sensitive JOIN payload.
+            if (!Config.enable_desensitize_query_dump && !dumpInfo.isDesensitizedInfo()) {
+                dumpJson.add("join_statistics", dumpInfo.getJoinStatistics().toJson(dumpInfo::addException));
+            }
+        } catch (IOException e) {
+            dumpInfo.addException("Cannot capture JOIN statistics: " + e.getMessage());
         }
         // statement
         dumpJson.addProperty("statement", dumpInfo.getOriginStmt());

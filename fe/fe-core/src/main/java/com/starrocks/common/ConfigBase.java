@@ -237,6 +237,7 @@ public class ConfigBase {
                 }
                 break;
             case "statistic_mcv_cache_max_bytes":
+            case "statistic_join_cache_max_bytes":
                 if (Long.parseLong(confVal) <= 0) {
                     throw new InvalidConfException(f.getName() + " must be positive");
                 }

@@ -610,6 +610,15 @@ public class SkewJoinTest extends PlanTestBase {
         }
     }
 
+    @Test
+    public void nullSafeEqualityDoesNotUseNullRejectingSalting() throws Exception {
+        String plan = getFragmentPlan("select * from test.customer join test.part on c_mktsegment <=> p_name");
+        assertNotContains(plan, "rand_col");
+        plan = getFragmentPlan("select * from test.customer join[skew|customer.c_mktsegment('AUTOMOBILE')] "
+                + "test.part on c_mktsegment <=> p_name");
+        assertNotContains(plan, "rand_col");
+    }
+
     private static File newFolder(File root, String... subDirs) throws IOException {
         String subFolder = String.join("/", subDirs);
         File result = new File(root, subFolder);

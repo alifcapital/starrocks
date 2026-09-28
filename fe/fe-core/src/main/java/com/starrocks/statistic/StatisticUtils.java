@@ -464,6 +464,14 @@ public class StatisticUtils {
                     new ColumnDef("ndv",  new TypeDef(IntegerType.BIGINT)),
                     new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
             );
+        } else if (tableName.equals(StatsConstants.JOIN_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("object_id", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("generation", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("part_id", new TypeDef(IntegerType.INT)),
+                    new ColumnDef("payload", new TypeDef(TypeFactory.createVarbinary(1048576))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
         } else if (tableName.equals(StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
             // column_ids: a digest of the sorted column names, the key of the column set; column_names: the same
             // names as a JSON array, in the order of the MCV tuple components; row_count: rows at collection

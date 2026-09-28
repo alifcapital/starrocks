@@ -142,6 +142,7 @@ statement
     | showComputeNodesStatement
 
     // Analyze Statement
+    | joinStatisticsStatement
     | analyzeStatement
     | dropStatsStatement
     | createAnalyzeStatement
@@ -1454,6 +1455,13 @@ showStreamLoadStatement
         (FROM db=qualifiedName)? showPredicateClauses
     ;
 // ------------------------------------------- Analyze Statement -------------------------------------------------------
+
+joinStatisticsStatement
+    : CREATE JOIN STATISTICS name=identifier properties? (WITH (SYNC | ASYNC) MODE)? AS queryStatement
+    | ANALYZE JOIN STATISTICS name=identifier (WITH (SYNC | ASYNC) MODE)?
+    | DROP JOIN STATISTICS (IF EXISTS)? name=identifier
+    | SHOW JOIN STATISTICS name=identifier?
+    ;
 
 analyzeStatement
     : ANALYZE (FULL | SAMPLE)? TABLE tableName analyzeColumnClause? partitionNames?
@@ -3325,7 +3333,7 @@ nonReserved
     | RESOURCE | RESOURCES | RESTORE | RESUME | RETAIN | RETENTION | RETURNS | RETRY | REVERT | ROLE | ROLES | ROLLUP | ROLLBACK | ROUTINE | ROW | RUNNING | RULE | RULES
     | SAMPLE | SCHEDULE | SCHEDULER | SECOND | SECURITY | SEPARATOR | SERIALIZABLE |SEMI | SESSION | SETS | SIGNED | SNAPSHOT | SNAPSHOTS | SPLIT | SQL | SQLBLACKLIST | START | STARROCKS
     | STREAM | SUM | STATUS | STOP | SKIP_KW | SKIP_HEADER | SWAP
-    | STORAGE| STRING | STRUCT | STATS | SUBMIT | SUSPEND | SYNC | SYSTEM | SYSTEM_TIME
+    | STORAGE| STRING | STRUCT | STATS | STATISTICS | SUBMIT | SUSPEND | SYNC | SYSTEM | SYSTEM_TIME
     | TABLES | TABLET | TABLETS | TAG | TASK | TEMPORARY | TIMESTAMP | TIMESTAMPADD | TIMESTAMPDIFF | THAN | TIME | TIMES | TRANSACTION | TRACE | TRANSLATE
     | TRIM_SPACE
     | TRIGGERS | TRUNCATE | TYPE | TYPES

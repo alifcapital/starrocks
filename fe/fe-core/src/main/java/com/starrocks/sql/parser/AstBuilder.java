@@ -244,6 +244,7 @@ import com.starrocks.sql.ast.InstallPluginStmt;
 import com.starrocks.sql.ast.IntersectRelation;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.JoinRelation;
+import com.starrocks.sql.ast.JoinStatisticsStmt;
 import com.starrocks.sql.ast.KeyPartitionRef;
 import com.starrocks.sql.ast.KeysDesc;
 import com.starrocks.sql.ast.KeysType;
@@ -3210,6 +3211,18 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 context.ASYNC() != null,
                 analyzeColumn.first,
                 analyzeTypeDesc, createPos(context));
+    }
+
+    @Override
+    public ParseNode visitJoinStatisticsStatement(
+            com.starrocks.sql.parser.StarRocksParser.JoinStatisticsStatementContext context) {
+        JoinStatisticsStmt.Action action = context.CREATE() != null ? JoinStatisticsStmt.Action.CREATE
+                : context.ANALYZE() != null ? JoinStatisticsStmt.Action.ANALYZE
+                : context.DROP() != null ? JoinStatisticsStmt.Action.DROP : JoinStatisticsStmt.Action.SHOW;
+        QueryStatement query = context.queryStatement() == null ? null : (QueryStatement) visit(context.queryStatement());
+        return new JoinStatisticsStmt(action, context.name == null ? null : getIdentifierName(context.name), query,
+                context.ASYNC() != null, context.EXISTS() != null, getCaseSensitiveProperties(context.properties()),
+                createPos(context));
     }
 
     @Override
