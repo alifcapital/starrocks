@@ -87,7 +87,7 @@ TEST_F(OlapScanOperatorTest, topn_io_cap_controls_readiness) {
     auto op = std::make_shared<OlapScanOperator>(&factory, 1, 0, 1, &scan_node, ctx_factory->get_or_create(0));
     Morsels morsels;
     morsels.emplace_back(std::make_unique<ScanMorsel>(1, TScanRange{}));
-    OlapFixedMorselQueue queue(std::move(morsels));
+    FixedMorselQueue queue(std::move(morsels));
     op->add_morsel_queue(&queue);
     op->_topn_filter_back_pressure = std::make_unique<TopnRfBackPressure>(0.1, 100, 8, 8, 1024);
     op->_topn_io_task_limit = 1;
