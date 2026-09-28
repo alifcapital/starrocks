@@ -64,7 +64,7 @@ class StatisticSQLBuilderTest {
         Assertions.assertTrue(sql.contains("(partition_name IN ('p=1', 'p=2') AND column_name IN ('a')) OR "
                 + "(partition_name IN ('p=3') AND column_name IN ('b'))"), sql);
         Assertions.assertEquals(1, StringUtils.countMatches(sql, "FROM _statistics_.external_column_statistics"));
-        Assertions.assertTrue(sql.contains("WHERE rn = 1"));
+        Assertions.assertFalse(sql.contains("row_number()"));
         String escaped = StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID,
                 Map.of("p='x", Set.of("c'1")), false);
         Assertions.assertTrue(escaped.contains("'p=''x'"), escaped);
@@ -74,14 +74,14 @@ class StatisticSQLBuilderTest {
     }
 
     @Test
-    void unpartitionedRequestsUseOneLogicalRowPerColumnRegardlessOfStoredPartitionLabel() {
+    void unpartitionedRequestsUseCanonicalRowsWithoutRanking() {
         String sql = StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(TABLE_UUID,
                 Map.of("", Set.of("a")), true);
         Assertions.assertTrue(sql.contains("as INT), '', column_name, row_count, data_size, hll_serialize(ndv)"), sql);
-        Assertions.assertTrue(sql.contains("partition by column_name order by update_time desc"), sql);
+        Assertions.assertFalse(sql.contains("row_number()"), sql);
         Assertions.assertTrue(sql.contains("column_name IN ('a')"), sql);
         Assertions.assertFalse(sql.contains("partition_name"), sql);
-        Assertions.assertTrue(sql.contains("WHERE rn = 1"), sql);
+        Assertions.assertFalse(sql.contains("rn = 1"), sql);
     }
 
     @Test
@@ -93,20 +93,20 @@ class StatisticSQLBuilderTest {
     }
 
     @Test
-    void buildQueryExternalFullStatisticsSQLMatchesHashedAndRawUuid() {
+    void buildQueryExternalFullStatisticsSQLUsesCanonicalUuid() {
         String hashed = StatisticUtils.hashTableUuidForPkStorage(TABLE_UUID);
         String sql = StatisticSQLBuilder.buildQueryExternalFullStatisticsSQL(
                 TABLE_UUID, ImmutableList.of("col1"), ImmutableList.of(IntegerType.BIGINT));
-        Assertions.assertTrue(sql.contains("table_uuid in (\"" + hashed + "\", \"" + TABLE_UUID + "\")"),
-                "query predicate must match both hashed and raw table_uuid: " + sql);
+        Assertions.assertTrue(sql.contains("table_uuid = '" + hashed + "'"), sql);
+        Assertions.assertFalse(sql.contains(TABLE_UUID), sql);
     }
 
     @Test
-    void buildDropExternalStatSQLByUuidMatchesHashedAndRawUuid() {
+    void buildDropExternalStatSQLUsesCanonicalUuid() {
         String hashed = StatisticUtils.hashTableUuidForPkStorage(TABLE_UUID);
         String sql = StatisticSQLBuilder.buildDropExternalStatSQL(TABLE_UUID);
-        Assertions.assertTrue(sql.contains("table_uuid in ('" + hashed + "', '" + TABLE_UUID + "')"),
-                "delete predicate must match both hashed and raw table_uuid: " + sql);
+        Assertions.assertTrue(sql.contains("table_uuid = '" + hashed + "'"),
+                "delete predicate must match the canonical table_uuid: " + sql);
     }
 
     @Test
@@ -138,19 +138,6 @@ class StatisticSQLBuilderTest {
     }
 
     @Test
-    void buildDropExternalStatSQLForPartitionsOnlyMatchesRawUuid() {
-        String hashed = StatisticUtils.hashTableUuidForPkStorage(TABLE_UUID);
-        String sql = StatisticSQLBuilder.buildDropExternalStatSQLForPartitions(
-                TABLE_UUID, ImmutableList.of("p1", "p2"), ImmutableList.of("col1", "col2"));
-        Assertions.assertTrue(sql.contains("TABLE_UUID = '" + TABLE_UUID + "'"),
-                "cleanup delete must target only the raw uuid: " + sql);
-        Assertions.assertFalse(sql.contains(hashed),
-                "cleanup delete must never also match the hashed uuid (it holds the fresh data): " + sql);
-        Assertions.assertTrue(sql.contains("PARTITION_NAME IN ('p1', 'p2')"), sql);
-        Assertions.assertTrue(sql.contains("COLUMN_NAME IN ('col1', 'col2')"), sql);
-    }
-
-    @Test
     void buildDropExternalHistogramSQLForRawUuidOnlyMatchesRawUuid() {
         String hashed = StatisticUtils.hashTableUuidForPkStorage(TABLE_UUID);
         String sql = StatisticSQLBuilder.buildDropExternalHistogramSQLForRawUuid(TABLE_UUID, ImmutableList.of("col1"));
@@ -161,16 +148,11 @@ class StatisticSQLBuilderTest {
     }
 
     @Test
-    void buildQueryExternalFullStatisticsSQLDedupsByLatestUpdateTime() {
-        // Correctness must not depend on the write-side cleanup delete succeeding: if both a
-        // raw-keyed and hashed-keyed row are briefly alive for the same partition/column, the
-        // query must keep only the freshest one (by update_time) before aggregating, not double-
-        // count both.
+    void canonicalBasicStatisticsDoesNotRankDuplicateRepresentations() {
         String sql = StatisticSQLBuilder.buildQueryExternalFullStatisticsSQL(
                 TABLE_UUID, ImmutableList.of("col1"), ImmutableList.of(IntegerType.BIGINT));
-        Assertions.assertTrue(sql.contains(
-                "row_number() over ( partition by partition_name, column_name order by update_time desc) as rn"), sql);
-        Assertions.assertTrue(sql.contains(") dedup_t WHERE rn = 1 GROUP BY column_name"), sql);
+        Assertions.assertFalse(sql.contains("row_number()"), sql);
+        Assertions.assertTrue(sql.endsWith("GROUP BY column_name"), sql);
     }
 
     @Test
@@ -190,21 +172,11 @@ class StatisticSQLBuilderTest {
         String doubleQuoteTrickyUUID = "iceberg.db.o\"brien\\table.uuid"; // contains " and \
         String doubleQuoted = StatisticSQLBuilder.buildQueryExternalFullStatisticsSQL(
                 doubleQuoteTrickyUUID, ImmutableList.of("col1"), ImmutableList.of(IntegerType.BIGINT));
-        Assertions.assertTrue(doubleQuoted.contains("iceberg.db.o\\\"brien\\\\table.uuid\""), doubleQuoted);
+        Assertions.assertTrue(doubleQuoted.contains(StatisticUtils.hashTableUuidForPkStorage(doubleQuoteTrickyUUID)));
 
         String singleQuoteTrickyUUID = "iceberg.db.o'brien\\table.uuid"; // contains ' and \
-        String singleQuoted = StatisticSQLBuilder.buildDropExternalStatSQL(singleQuoteTrickyUUID);
+        String singleQuoted = StatisticSQLBuilder.buildDropExternalHistogramSQL(singleQuoteTrickyUUID, List.of("c"));
         Assertions.assertTrue(singleQuoted.contains("iceberg.db.o''brien\\\\table.uuid'"), singleQuoted);
-    }
-
-    @Test
-    void cleanupDeletesEscapeRawUuidAndNames() {
-        String trickyUUID = "iceberg.db.o'brien\\table.uuid";
-        String sql = StatisticSQLBuilder.buildDropExternalStatSQLForPartitions(
-                trickyUUID, ImmutableList.of("p'1"), ImmutableList.of("c\\1"));
-        Assertions.assertTrue(sql.contains("TABLE_UUID = 'iceberg.db.o''brien\\\\table.uuid'"), sql);
-        Assertions.assertTrue(sql.contains("PARTITION_NAME IN ('p''1')"), sql);
-        Assertions.assertTrue(sql.contains("COLUMN_NAME IN ('c\\\\1')"), sql);
     }
 
     @Test
@@ -231,12 +203,14 @@ class StatisticSQLBuilderTest {
                 Map.of("a", IntegerType.LARGEINT, "b", com.starrocks.type.DateType.DATETIME));
         Assertions.assertTrue(sql.contains("'p=''1', 'p=3'"), sql);
         Assertions.assertTrue(sql.contains("column_name IN ('b') AND partition_name IN ('p=2')"), sql);
-        Assertions.assertTrue(sql.contains("partition by partition_name, column_name order by update_time desc"), sql);
+        Assertions.assertFalse(sql.contains("row_number()"), sql);
         Assertions.assertTrue(sql.contains("min(cast(nullif(min, '') as " + IntegerType.LARGEINT.toSql() + "))"), sql);
         Assertions.assertTrue(sql.toLowerCase(java.util.Locale.ROOT).contains("as datetime"), sql);
         Assertions.assertTrue(sql.contains("json_array(partition_name, row_count)"), sql);
         Assertions.assertEquals(2, StringUtils.countMatches(sql, "hll_serialize(hll_union(ndv))"));
         Assertions.assertFalse(sql.contains("group_concat"), "coverage must not be truncated by group_concat_max_len");
+        Assertions.assertEquals(4, StringUtils.countMatches(sql, "coalesce("),
+                "All-NULL numeric/date blocks must emit empty bounds on the external statistics wire");
     }
 
 }

@@ -26,10 +26,23 @@ public final class ExternalStatisticsAggregate {
     public final Map<String, String> sourceTypes;
     public final int requestedPartitions;
     public final int knownPartitions;
+    private final boolean completeCoverage;
+    private final boolean unknownColumns;
 
     private ExternalStatisticsAggregate(double rowCount, Map<String, ColumnStatistic> columns,
                                         Map<String, Integer> coveredPartitions, Map<String, String> sourceTypes,
                                         int requestedPartitions, int knownPartitions) {
+        this(rowCount, columns, coveredPartitions, sourceTypes, requestedPartitions, knownPartitions,
+                coveredPartitions.values().stream().allMatch(count -> count == requestedPartitions),
+                columns.values().stream().anyMatch(ColumnStatistic::isUnknown));
+    }
+
+    private ExternalStatisticsAggregate(double rowCount, Map<String, ColumnStatistic> columns,
+                                        Map<String, Integer> coveredPartitions, Map<String, String> sourceTypes,
+                                        int requestedPartitions, int knownPartitions,
+                                        boolean completeCoverage, boolean unknownColumns) {
+        this.completeCoverage = completeCoverage;
+        this.unknownColumns = unknownColumns;
         this.rowCount = rowCount;
         this.columns = Map.copyOf(columns);
         this.coveredPartitions = Map.copyOf(coveredPartitions);
@@ -43,38 +56,36 @@ public final class ExternalStatisticsAggregate {
     }
 
     public boolean hasCompleteCoverage() {
-        return coveredPartitions.values().stream().allMatch(count -> count == requestedPartitions);
+        return completeCoverage;
     }
 
-    public static ExternalStatisticsAggregate fromTableSummaries(ExternalStatisticsRequest request,
-            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> cached) {
-        Map<String, ColumnStatistic> columns = new HashMap<>();
-        Map<String, Integer> coverage = new HashMap<>();
-        Map<String, String> types = new HashMap<>();
-        double rows = 0;
-        int known = 0;
-        int requested = 0;
-        for (String column : request.columns) {
-            ExternalColumnStatistics value = cached.getOrDefault(
-                    ExternalStatisticsCacheKey.table(request.tableUUID, column), Optional.empty()).orElse(null);
-            if (value == null) {
-                columns.put(column, ColumnStatistic.unknown());
-                coverage.put(column, 0);
-                continue;
-            }
-            if (!(value instanceof ExternalColumnStatistics.Summary summary)) {
-                throw new IllegalArgumentException("Expected prepared whole-table statistics");
-            }
-            columns.put(column, summary.statistic);
-            coverage.put(column, summary.coveredPartitions);
-            types.put(column, summary.sourceType);
-            rows = Math.max(rows, summary.rowCount);
-            known = Math.max(known, summary.coveredPartitions);
-            requested = Math.max(requested, summary.requestedPartitions);
+    public boolean hasUnknownColumns() {
+        return unknownColumns;
+    }
+
+    public static ExternalStatisticsAggregate fromTableRow(ExternalStatisticsRequest request,
+                                                           ExternalTableStatistics table) {
+        if (table == null) {
+            return new ExternalStatisticsAggregate(0, Map.of(), Map.of(), Map.of(), 1, 0, false, true);
         }
-        // Summaries follow the ordinary statistics refresh lifetime. A changed partition list alone
-        // does not force recomputation; keep their original coverage rather than claiming new coverage.
-        return new ExternalStatisticsAggregate(rows, columns, coverage, types, requested, known);
+        double rows = 0;
+        boolean missing = false;
+        boolean unknown = false;
+        boolean known = false;
+        for (String column : request.columns) {
+            ExternalColumnStatistics.Summary summary = table.summaries.get(column);
+            if (summary == null) {
+                missing = true;
+                unknown = true;
+            } else {
+                rows = Math.max(rows, summary.rowCount);
+                known = true;
+                unknown |= summary.statistic.isUnknown();
+            }
+        }
+        // Map.copyOf preserves these already immutable maps; no per-column repacking on the planner path.
+        return new ExternalStatisticsAggregate(rows, table.columns, table.coverage, table.sourceTypes,
+                1, known ? 1 : 0, !missing, unknown);
     }
 
     public static final class Builder {

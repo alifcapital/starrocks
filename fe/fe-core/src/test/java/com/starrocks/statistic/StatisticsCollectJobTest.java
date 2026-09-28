@@ -44,6 +44,7 @@ import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
 import org.apache.commons.lang3.StringUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -245,10 +246,29 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
         setTableStatistics(tempty, 0L);
     }
 
+    private boolean previousStaggeredSchedule;
+    private long previousSmallTableInterval;
+    private long previousLargeTableInterval;
+
     @BeforeEach
     public void setUp() {
         super.setUp();
+        // These tests exercise collection eligibility, not the calendar slot assigned to a job.
+        // The scheduling test below explicitly enables staggered scheduling with a fixed clock.
+        previousStaggeredSchedule = Config.enable_statistic_auto_collect_staggered_schedule;
+        Config.enable_statistic_auto_collect_staggered_schedule = false;
+        previousSmallTableInterval = Config.statistic_auto_collect_small_table_interval;
+        previousLargeTableInterval = Config.statistic_auto_collect_large_table_interval;
+        Config.statistic_auto_collect_small_table_interval = 3600;
+        Config.statistic_auto_collect_large_table_interval = 12 * 3600;
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().getBasicStatsMetaMap().clear();
+    }
+
+    @AfterEach
+    public void restoreScheduleConfig() {
+        Config.enable_statistic_auto_collect_staggered_schedule = previousStaggeredSchedule;
+        Config.statistic_auto_collect_small_table_interval = previousSmallTableInterval;
+        Config.statistic_auto_collect_large_table_interval = previousLargeTableInterval;
     }
 
     @Test
@@ -1394,6 +1414,18 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
             }
         };
 
+        java.util.concurrent.atomic.AtomicInteger publications = new java.util.concurrent.atomic.AtomicInteger();
+        new MockUp<StatisticExecutor>() {
+            @Mock
+            public void publishExternalTableStatistics(ConnectContext context, Table source, String catalog,
+                                                       String dbName, List<String> columns, List<String> partitions) {
+                Assertions.assertEquals(collectJob.getPartitionNames(), partitions);
+                Assertions.assertEquals(table, source);
+                Assertions.assertEquals(3, columns.size());
+                publications.incrementAndGet();
+            }
+        };
+
         // Existing (user-supplied) properties must be preserved alongside the merged-in collection metadata.
         Map<String, String> initialProperties = Maps.newHashMap();
         initialProperties.put("custom_key", "custom_value");
@@ -1402,6 +1434,7 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
                 StatsConstants.ScheduleType.ONCE, initialProperties, LocalDateTime.now());
         collectJob.collect(connectContext, analyzeStatus);
 
+        Assertions.assertEquals(1, publications.get());
         Map<String, String> properties = analyzeStatus.getProperties();
         Assertions.assertEquals("custom_value", properties.get("custom_key"));
         Assertions.assertEquals("hive", properties.get("table_format"));
@@ -1421,6 +1454,7 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
                 table.getUUID(), Lists.newArrayList("r_regionkey", "r_name", "r_comment"), StatsConstants.AnalyzeType.FULL,
                 StatsConstants.ScheduleType.ONCE, Maps.newHashMap(), LocalDateTime.now());
         Assertions.assertThrows(Exception.class, () -> collectJob.collect(connectContext, failedStatus));
+        Assertions.assertEquals(1, publications.get(), "Failed collection must not publish a replacement summary");
         Assertions.assertEquals("hive", failedStatus.getProperties().get("table_format"));
         Assertions.assertEquals("3", failedStatus.getProperties().get("column_count"));
     }

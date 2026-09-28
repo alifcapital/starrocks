@@ -122,7 +122,15 @@ class UnifiedExternalStatisticsCacheTest {
     }
 
     private void put(String partition, String column, long rows, int ndv) {
-        source.put(new ExternalStatisticsCacheKey(TABLE, partition, column), value(partition, column, rows, ndv));
+        var value = value(partition, column, rows, ndv);
+        source.put(new ExternalStatisticsCacheKey(TABLE, partition, column), value);
+        var key = ExternalStatisticsCacheKey.partitionRow(TABLE, partition);
+        Map<String, ExternalColumnStatistics.Partition> columns = new java.util.HashMap<>();
+        if (source.get(key) instanceof ExternalPartitionStatistics previous) {
+            columns.putAll(previous.columns);
+        }
+        columns.put(column, value);
+        source.put(key, new ExternalPartitionStatistics(columns));
     }
 
     private ExternalColumnStatistics.Summary summary(long rows, int ndv) {
@@ -132,8 +140,13 @@ class UnifiedExternalStatisticsCacheTest {
     }
 
     private void putTable(String column, long rows, int ndv) {
-        source.put(ExternalStatisticsCacheKey.table(TABLE, column),
-                summary(rows, ndv));
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(TABLE);
+        Map<String, ExternalColumnStatistics.Summary> columns = new java.util.HashMap<>();
+        if (source.containsKey(key)) {
+            columns.putAll(((ExternalTableStatistics) source.get(key)).summaries);
+        }
+        columns.put(column, summary(rows, ndv));
+        source.put(key, new ExternalTableStatistics(columns));
     }
 
     private ExternalStatisticsRequest whole(List<String> partitions, String... columns) {
@@ -153,6 +166,7 @@ class UnifiedExternalStatisticsCacheTest {
         put("p=1", "a", 100, 50);
         put("p=2", "a", 200, 80);
         putTable("a", 300, 80);
+        putTable("b", 300, 3);
         List<String> partitions = List.of("p=1", "p=2");
         ExternalStatisticsAggregate first = load(whole(partitions, "a"));
         Assertions.assertEquals(300, first.rowCount);
@@ -170,12 +184,11 @@ class UnifiedExternalStatisticsCacheTest {
         Assertions.assertEquals(2, cache().asMap().size(), "Both scopes share one cache");
         load(selectedRequest);
         Assertions.assertEquals(2, reads.size());
-        putTable("b", 300, 3);
         ExternalStatisticsAggregate extended = load(whole(partitions, "a", "b"));
         Assertions.assertSame(first.columns.get("a"), extended.columns.get("a"));
-        Assertions.assertEquals(3, reads.size());
-        Assertions.assertEquals(List.of(ExternalStatisticsCacheKey.table(TABLE, "b")), reads.stream().skip(2).findFirst().get());
-        Assertions.assertNotEquals(ExternalStatisticsCacheKey.table(TABLE, "a"),
+        Assertions.assertEquals(2, reads.size(), "Another column must reuse the whole-table load");
+        Assertions.assertEquals(3, extended.columns.get("b").getDistinctValuesCount());
+        Assertions.assertNotEquals(ExternalStatisticsCacheKey.tableRow(TABLE),
                 new ExternalStatisticsCacheKey(TABLE, "", "a"));
         var eviction = cache().synchronous().policy().eviction().orElseThrow();
         eviction.setMaximum(1000);
@@ -185,14 +198,14 @@ class UnifiedExternalStatisticsCacheTest {
 
     @Test
     void unpartitionedTableRetainsOnlyPreparedSummaries() throws Exception {
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table(TABLE, "a");
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(TABLE);
         putTable("a", 100, 50);
         ExternalStatisticsRequest request = new ExternalStatisticsRequest(TABLE, List.of(""), List.of("a"), true, true);
         ExternalStatisticsAggregate first = load(request);
         Assertions.assertEquals(50, first.columns.get("a").getDistinctValuesCount());
         Assertions.assertEquals(List.of(key), reads.peek());
         Assertions.assertEquals(1, cache().asMap().size());
-        Assertions.assertTrue(cache().asMap().get(key).join().orElseThrow() instanceof ExternalColumnStatistics.Summary);
+        Assertions.assertTrue(cache().asMap().get(key).join().orElseThrow() instanceof ExternalTableStatistics);
         Assertions.assertSame(first.columns.get("a"), load(request).columns.get("a"));
         Assertions.assertEquals(1, reads.size());
     }
@@ -261,9 +274,9 @@ class UnifiedExternalStatisticsCacheTest {
         Assertions.assertEquals(2, reads.size(), "Readers must share the pending scalar refresh");
         failed.completeExceptionally(new IllegalStateException("injected BE failure"));
         await(this::noRefreshes);
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table(TABLE, "a");
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(TABLE);
         Assertions.assertSame(first.columns.get("a"),
-                ((ExternalColumnStatistics.Summary) cache().asMap().get(key).join().orElseThrow()).statistic);
+                ((ExternalTableStatistics) cache().asMap().get(key).join().orElseThrow()).columns.get("a"));
         CompletableFuture<Void> succeeded = new CompletableFuture<>();
         gate.set(succeeded);
         Assertions.assertEquals(100, load(request).rowCount);
@@ -291,8 +304,8 @@ class UnifiedExternalStatisticsCacheTest {
         await(() -> reads.size() == 2);
         storage.invalidateConnectorTableColumnStatistics(TABLE, List.of("a"));
         Assertions.assertTrue(cache().asMap().isEmpty());
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table(TABLE, "a");
-        ExternalColumnStatistics.Summary newer = summary(900, 90);
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(TABLE);
+        ExternalTableStatistics newer = new ExternalTableStatistics(Map.of("a", summary(900, 90)));
         cache().synchronous().put(key, Optional.of(newer));
         pending.complete(null);
         // Drain dependent completions on the one-worker executor before checking the conditional publication.
@@ -393,7 +406,8 @@ class UnifiedExternalStatisticsCacheTest {
         assertSameEstimate(reference(broad), load(broad));
         Assertions.assertTrue(reads.isEmpty());
         // Remove the original singles: subsequent broad queries must now be served by the compact blocks.
-        cache().asMap().keySet().removeIf(key -> key.scope == ExternalStatisticsCacheKey.Scope.PARTITION);
+        cache().asMap().keySet().removeIf(key -> key.scope == ExternalStatisticsCacheKey.Scope.PARTITION
+                || key.scope == ExternalStatisticsCacheKey.Scope.PARTITION_ROW);
         assertSameEstimate(reference(broad), load(broad));
         Assertions.assertTrue(reads.isEmpty());
         ExternalStatisticsRequest narrow = new ExternalStatisticsRequest(TABLE, names.subList(3, 6), List.of("a"));
@@ -439,7 +453,7 @@ class UnifiedExternalStatisticsCacheTest {
 
     @Test
     void authoritativeMissingTableColumnAvoidsPartitionLoads() throws Exception {
-        cache().put(ExternalStatisticsCacheKey.table(TABLE, "absent"),
+        cache().put(ExternalStatisticsCacheKey.tableRow(TABLE),
                 CompletableFuture.completedFuture(Optional.empty()));
         ExternalStatisticsAggregate result = load(new ExternalStatisticsRequest(TABLE, names(0, 2000), List.of("absent")));
         Assertions.assertTrue(result.isEmpty());
@@ -487,6 +501,43 @@ class UnifiedExternalStatisticsCacheTest {
         pending.complete(null);
         await(() -> ((Map<?, ?>) Deencapsulation.getField(storage, "pendingBlocks")).isEmpty());
         assertSameEstimate(reference(request), load(request));
+    }
+
+    @Test
+    void packedRowsShareLoadsAcrossColumnsAndRefreshAsOneGeneration() throws Exception {
+        put("p=1", "a", 100, 10);
+        put("p=1", "b", 100, 20);
+        CompletableFuture<Void> pending = new CompletableFuture<>();
+        gate.set(pending);
+        var a = storage.loadExternalStatistics(new ExternalStatisticsRequest(TABLE, List.of("p=1"), List.of("a")));
+        var b = storage.loadExternalStatistics(new ExternalStatisticsRequest(TABLE, List.of("p=1"), List.of("b")));
+        Assertions.assertEquals(1, reads.size());
+        pending.complete(null);
+        Assertions.assertEquals(10, a.get(5, TimeUnit.SECONDS).columns.get("a").getDistinctValuesCount());
+        Assertions.assertEquals(20, b.get(5, TimeUnit.SECONDS).columns.get("b").getDistinctValuesCount());
+        Assertions.assertEquals(1, cache().asMap().size(), "No duplicate per-cell cache entries for packed data");
+        put("p=1", "a", 200, 30);
+        storage.invalidateConnectorTableColumnStatistics(TABLE, List.of("a"));
+        var updated = load(new ExternalStatisticsRequest(TABLE, List.of("p=1"), List.of("a", "b")));
+        Assertions.assertEquals(200, updated.rowCount);
+        Assertions.assertEquals(30, updated.columns.get("a").getDistinctValuesCount());
+        Assertions.assertEquals(20, updated.columns.get("b").getDistinctValuesCount());
+        Assertions.assertEquals(2, reads.size());
+    }
+
+    @Test
+    void missingPackedCopyUsesCellsAndReadFailuresAreNotCachedAsAbsence() throws Exception {
+        put("p=1", "a", 100, 10);
+        source.remove(ExternalStatisticsCacheKey.partitionRow(TABLE, "p=1"));
+        var request = new ExternalStatisticsRequest(TABLE, List.of("p=1"), List.of("a"));
+        gate.set(CompletableFuture.failedFuture(new IllegalStateException("unavailable")));
+        Assertions.assertThrows(java.util.concurrent.ExecutionException.class, () -> load(request));
+        await(() -> cache().getIfPresent(ExternalStatisticsCacheKey.partitionRow(TABLE, "p=1")) == null);
+        gate.set(null);
+        Assertions.assertEquals(100, load(request).rowCount);
+        int count = reads.size();
+        Assertions.assertEquals(100, load(request).rowCount);
+        Assertions.assertEquals(count, reads.size());
     }
 
 }

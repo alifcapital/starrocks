@@ -21,6 +21,7 @@ import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -42,24 +43,25 @@ class CachedConnectorTableStatisticTest {
         AtomicLong clock = new AtomicLong();
         AtomicInteger loads = new AtomicInteger();
         storage.externalStatisticsCache = Caffeine.newBuilder().executor(Runnable::run).ticker(clock::get)
-                .refreshAfterWrite(1, TimeUnit.SECONDS).expireAfterWrite(10, TimeUnit.SECONDS)
+                .recordStats().refreshAfterWrite(1, TimeUnit.SECONDS).expireAfterWrite(10, TimeUnit.SECONDS)
                 .buildAsync((key, executor) -> {
                     loads.incrementAndGet();
                     return CompletableFuture.completedFuture(Optional.empty());
                 });
         Table table = mock(Table.class);
         when(table.getUUID()).thenReturn("ice.db.sales");
-        var key = ExternalStatisticsCacheKey.table(table.getUUID(), "region");
+        var key = ExternalStatisticsCacheKey.tableRow(table.getUUID());
         var partition = new ExternalStatisticsCacheKey(table.getUUID(), "p", "region");
         var stat = ColumnStatistic.builder().setDistinctValuesCount(3).build();
         var raw = new ConnectorTableColumnStats(stat, 100, "2026-09-28 00:00:00");
-        var value = Optional.<ExternalColumnStatistics>of(new ExternalColumnStatistics.Summary(raw, raw, "ICEBERG"));
+        var summary = new ExternalColumnStatistics.Summary(raw, raw, "VARCHAR");
+        var value = Optional.<ExternalColumnStatistics>of(new ExternalTableStatistics(Map.of("region", summary)));
         boolean oldSync = Config.enable_sync_statistics_load;
         Config.enable_sync_statistics_load = true;
         try {
             assertTrue(storage.getCachedConnectorTableColumnStatistic(table, "region").isUnknown());
             assertTrue(storage.externalStatisticsCache.asMap().isEmpty());
-            storage.externalStatisticsCache.put(partition, CompletableFuture.completedFuture(value));
+            storage.externalStatisticsCache.put(partition, CompletableFuture.completedFuture(Optional.of(summary)));
             assertTrue(storage.getCachedConnectorTableColumnStatistic(table, "region").isUnknown());
             CompletableFuture<Optional<ExternalColumnStatistics>> pending = new CompletableFuture<>();
             storage.externalStatisticsCache.put(key, pending);
@@ -67,11 +69,14 @@ class CachedConnectorTableStatisticTest {
             assertFalse(pending.isDone());
             pending.complete(value);
             assertSame(stat, storage.getCachedConnectorTableColumnStatistic(table, "region"));
+            assertTrue(storage.getCachedConnectorTableColumnStatistic(table, "missing").isUnknown());
             clock.set(TimeUnit.SECONDS.toNanos(2));
             assertSame(stat, storage.getCachedConnectorTableColumnStatistic(table, "region"));
             clock.set(TimeUnit.SECONDS.toNanos(20));
             assertTrue(storage.getCachedConnectorTableColumnStatistic(table, "region").isUnknown());
             assertEquals(0, loads.get(), "No miss load or refresh, even when sync loading is enabled");
+            assertEquals(0, storage.externalStatisticsCache.synchronous().stats().requestCount(),
+                    "Quiet dictionary eligibility must not inflate cache hit/miss metrics");
             storage.externalStatisticsCache.put(key, CompletableFuture.completedFuture(Optional.empty()));
             assertTrue(storage.getCachedConnectorTableColumnStatistic(table, "region").isUnknown());
         } finally {

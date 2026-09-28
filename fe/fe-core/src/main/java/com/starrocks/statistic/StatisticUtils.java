@@ -413,6 +413,26 @@ public class StatisticUtils {
                             new TypeDef(IntegerType.BIGINT), false, null,
                             null, true, new ColumnDef.DefaultValueDef(true, new StringLiteral("-1")), "")
             );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("partition_name", new TypeDef(partitionNameType)),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("payload", new TypeDef(TypeFactory.createVarbinary(1048576))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("payload", new TypeDef(new com.starrocks.type.ArrayType(
+                            TypeFactory.createVarcharType(Config.max_varchar_length)))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
         } else if (tableName.equals(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME)) {
             return ImmutableList.of(
                     new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),

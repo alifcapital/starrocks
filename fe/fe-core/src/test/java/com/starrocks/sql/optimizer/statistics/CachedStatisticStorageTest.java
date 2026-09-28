@@ -292,10 +292,9 @@ public class CachedStatisticStorageTest {
         ColumnStatistic statistic = new ColumnStatistic(0, 10, 0, 20, 5);
         ConnectorTableColumnStats raw = new ConnectorTableColumnStats(statistic, 5, "2026-09-21 00:00:00");
         ConnectorTableColumnStats estimated = new ConnectorTableColumnStats(statistic, 50, raw.getUpdateTime());
-        storage.externalStatisticsCache.synchronous().put(ExternalStatisticsCacheKey.table(table.getUUID(), "c1"),
-                Optional.of(new ExternalColumnStatistics.Summary(raw, estimated, "INT")));
-        storage.externalStatisticsCache.synchronous().put(
-                ExternalStatisticsCacheKey.table(table.getUUID(), "c2"), Optional.empty());
+        storage.externalStatisticsCache.synchronous().put(ExternalStatisticsCacheKey.tableRow(table.getUUID()),
+                Optional.of(new ExternalTableStatistics(Map.of("c1",
+                        new ExternalColumnStatistics.Summary(raw, estimated, "INT")))));
         List<ConnectorTableColumnStats> result = storage.getConnectorTableStatisticsSync(table, List.of("c1", "c2"));
         Assertions.assertEquals(5, result.get(0).getRowCount(), "Collection uses the raw count, before sample extrapolation");
         Assertions.assertEquals(raw.getUpdateTime(), result.get(0).getUpdateTime());

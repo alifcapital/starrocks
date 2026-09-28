@@ -17,11 +17,9 @@ package com.starrocks.sql.optimizer.statistics;
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.FeConstants;
-import com.starrocks.connector.statistics.ConnectorColumnStatsCacheLoader;
-import com.starrocks.connector.statistics.ConnectorTableColumnKey;
-import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.connector.statistics.StatisticsUtils;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.statistic.StatisticExecutor;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.thrift.TStatisticData;
@@ -44,15 +42,13 @@ import java.util.concurrent.Executor;
 
 /**
  * Reads requested partition/column pairs from external_column_statistics in one query per table.
- * TABLE keys use BE aggregation and return prepared scalar summaries for every connector.
+ * TABLE keys load one persisted scalar summary for the entire table.
  * PARTITION keys transport individual sketches; BLOCK keys aggregate exact member sets on BE.
  * Both use a separate bounded executor so partition traffic cannot queue ahead of native loads.
  */
 public class ExternalStatisticsCacheLoader
         implements AsyncCacheLoader<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> {
     private static final Logger LOG = LogManager.getLogger(ExternalStatisticsCacheLoader.class);
-
-    private final ConnectorColumnStatsCacheLoader tableLoader = new ConnectorColumnStatsCacheLoader();
 
     private final StatisticExecutor statisticExecutor = new StatisticExecutor();
     private final Executor partitionExecutor;
@@ -75,15 +71,17 @@ public class ExternalStatisticsCacheLoader
     public @NonNull CompletableFuture<Map<@NonNull ExternalStatisticsCacheKey,
             @NonNull Optional<ExternalColumnStatistics>>> asyncLoadAll(
             @NonNull Iterable<? extends @NonNull ExternalStatisticsCacheKey> keys, @NonNull Executor executor) {
-        Map<String, List<ConnectorTableColumnKey>> tableKeys = new LinkedHashMap<>();
+        Set<String> tableKeys = new LinkedHashSet<>();
         List<ExternalStatisticsCacheKey> partitionKeys = new ArrayList<>();
+        Map<String, List<ExternalStatisticsCacheKey>> partitionRows = new LinkedHashMap<>();
         Map<String, List<ExternalStatisticsCacheKey>> blockKeys = new LinkedHashMap<>();
         for (ExternalStatisticsCacheKey key : keys) {
             if (key.isTable()) {
-                tableKeys.computeIfAbsent(key.tableUUID, ignored -> new ArrayList<>())
-                        .add(new ConnectorTableColumnKey(key.tableUUID, key.columnName));
+                tableKeys.add(key.tableUUID);
             } else if (key.scope == ExternalStatisticsCacheKey.Scope.BLOCK) {
                 blockKeys.computeIfAbsent(key.tableUUID, ignored -> new ArrayList<>()).add(key);
+            } else if (key.scope == ExternalStatisticsCacheKey.Scope.PARTITION_ROW) {
+                partitionRows.computeIfAbsent(key.tableUUID, ignored -> new ArrayList<>()).add(key);
             } else if (key.scope == ExternalStatisticsCacheKey.Scope.PARTITION) {
                 partitionKeys.add(key);
             } else {
@@ -91,29 +89,69 @@ public class ExternalStatisticsCacheLoader
             }
         }
         List<CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>>> loads = new ArrayList<>();
-        tableKeys.forEach((uuid, columns) -> loads.add(tableLoader.asyncLoadAll(columns, executor).thenApplyAsync(loaded -> {
-            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> result = new HashMap<>();
-            // Conversion occurs on the loader's worker, never on the warm planner path.
-            try (ConnectContext.ContextScope scope = ConnectContext.enterOnlyReadIcebergCacheScope(ConnectContext.get())) {
-                Table table = StatisticsUtils.getTableByUUID(scope.getContext(), uuid);
-                loaded.forEach((key, value) -> result.put(ExternalStatisticsCacheKey.table(uuid, key.column), value.map(raw -> {
-                    ConnectorTableColumnStats estimated = StatisticsUtils.estimateColumnStatistics(table, key.column, raw);
-                    return new ExternalColumnStatistics.Summary(raw, estimated,
-                            StatisticUtils.getQueryStatisticsColumnType(table, key.column).toSql());
-                })));
+        tableKeys.forEach(uuid -> loads.add(CompletableFuture.supplyAsync(() -> {
+            if (FeConstants.enableUnitStatistics) {
+                return Map.of();
             }
-            return result;
+            ConnectContext context = StatisticUtils.buildConnectContext();
+            context.setOnlyReadIcebergCache(true);
+            context.setThreadLocalInfo();
+            try {
+                List<String> chunks = statisticExecutor.queryExternalTableStatistics(context, uuid);
+                Optional<ExternalColumnStatistics> value = Optional.empty();
+                if (!chunks.isEmpty()) {
+                    Table table = StatisticsUtils.getTableByUUID(context, uuid);
+                    List<String> name = StatisticsUtils.getTableNameByUUID(uuid);
+                    var meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                            .getExternalTableBasicStatsMeta(name.get(0), name.get(1), name.get(2));
+                    value = Optional.of(ExternalTableStatistics.decode(chunks, table,
+                            meta == null ? Map.of() : meta.getColumnStatsMetaMap()));
+                }
+                return Map.of(ExternalStatisticsCacheKey.tableRow(uuid), value);
+            } catch (Exception error) {
+                throw new CompletionException(error);
+            } finally {
+                ConnectContext.remove();
+            }
         }, executor)));
         Executor loaderExecutor = partitionExecutor == null ? executor : partitionExecutor;
         if (!partitionKeys.isEmpty()) {
             loads.add(loadPartitions(partitionKeys, loaderExecutor));
         }
+        partitionRows.forEach((uuid, rows) -> loads.add(loadPartitionRows(uuid, rows, loaderExecutor)));
         blockKeys.forEach((uuid, blocks) -> loads.add(loadBlocks(uuid, blocks, loaderExecutor)));
         return CompletableFuture.allOf(loads.toArray(new CompletableFuture<?>[0])).thenApply(ignored -> {
             Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> result = new HashMap<>();
             loads.forEach(load -> result.putAll(load.join()));
             return result;
         });
+    }
+
+    private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> loadPartitionRows(
+            String uuid, List<ExternalStatisticsCacheKey> keys, Executor executor) {
+        return CompletableFuture.supplyAsync(() -> {
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> result = new HashMap<>();
+            keys.forEach(key -> result.put(key, Optional.empty()));
+            if (FeConstants.enableUnitStatistics) {
+                return result;
+            }
+            ConnectContext context = StatisticUtils.buildConnectContext();
+            context.setOnlyReadIcebergCache(true);
+            context.setThreadLocalInfo();
+            try {
+                for (TStatisticData row : statisticExecutor.queryExternalPartitionRows(context, uuid,
+                        keys.stream().map(key -> key.partitionName).toList())) {
+                    ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.partitionRow(uuid, row.partitionName);
+                    if (!result.containsKey(key) || result.get(key).isPresent()) {
+                        throw new IllegalArgumentException("Unexpected or duplicate external partition row");
+                    }
+                    result.put(key, Optional.of(ExternalPartitionStatistics.decode(row.getHll())));
+                }
+                return result;
+            } finally {
+                ConnectContext.remove();
+            }
+        }, executor);
     }
 
     private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> loadBlocks(

@@ -1029,7 +1029,7 @@ public class MetadataMgr {
         }
         Statistics connectorStats = null;
         if (aggregate == null || aggregate.isEmpty()
-                || aggregate.columns.values().stream().anyMatch(ColumnStatistic::isUnknown)) {
+                || aggregate.hasUnknownColumns()) {
             // Missing coverage is not an empty partition. Partial coverage already carries an
             // explicit extrapolation; consult connector metadata only when a column is entirely
             // unknown, without launching a second whole-table statistics SQL query.

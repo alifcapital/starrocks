@@ -68,6 +68,8 @@ public class StatsConstants {
     public static final String SAMPLE_STATISTICS_TABLE_NAME = "table_statistic_v1";
     public static final String FULL_STATISTICS_TABLE_NAME = "column_statistics";
     public static final String EXTERNAL_FULL_STATISTICS_TABLE_NAME = "external_column_statistics";
+    public static final String EXTERNAL_PARTITION_STATISTICS_TABLE_NAME = "external_partition_statistics";
+    public static final String EXTERNAL_TABLE_STATISTICS_TABLE_NAME = "external_table_statistics";
     public static final String HISTOGRAM_STATISTICS_TABLE_NAME = "histogram_statistics";
     public static final String EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME = "external_histogram_statistics";
     public static final String MULTI_COLUMN_STATISTICS_TABLE_NAME = "multi_column_statistics";
@@ -140,6 +142,8 @@ public class StatsConstants {
             FULL_STATISTICS_TABLE_NAME,
             SAMPLE_STATISTICS_TABLE_NAME,
             EXTERNAL_FULL_STATISTICS_TABLE_NAME,
+            EXTERNAL_TABLE_STATISTICS_TABLE_NAME,
+            EXTERNAL_PARTITION_STATISTICS_TABLE_NAME,
             MULTI_COLUMN_STATISTICS_TABLE_NAME,
             HISTOGRAM_STATISTICS_TABLE_NAME,
             EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME,

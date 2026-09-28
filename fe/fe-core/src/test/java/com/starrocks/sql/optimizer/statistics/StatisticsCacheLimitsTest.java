@@ -30,7 +30,7 @@ class StatisticsCacheLimitsTest {
     void basicCacheMetricsIncludeBothTableAndPartitionKeys() {
         CachedStatisticStorage storage = new CachedStatisticStorage();
         var cache = storage.externalStatisticsCache;
-        var table = ExternalStatisticsCacheKey.table("table", "column");
+        var table = ExternalStatisticsCacheKey.tableRow("table");
         var partition = new ExternalStatisticsCacheKey("table", "p", "column");
         Assertions.assertNull(cache.getIfPresent(table));
         Assertions.assertNull(cache.getIfPresent(partition));
@@ -60,7 +60,7 @@ class StatisticsCacheLimitsTest {
         ExternalMcvStatistics value = new ExternalMcvStatistics(List.of(new ExternalMcvStatistics.Group(
                 List.of("k"), 10, 1, List.of(new MultiColumnCombinedStats.McvEntry(List.of("x"), 10)),
                 List.of(), List.of(0L))));
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table("table", "k");
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow("table");
         try {
             state.setStatisticStorage(storage);
             external.put(key, CompletableFuture.completedFuture(Optional.empty()));

@@ -126,6 +126,23 @@ public class StatisticsCacheLoadFailureTest {
         };
         new MockUp<StatisticExecutor>() {
             @Mock
+            public List<TStatisticData> queryExternalPartitionRows(ConnectContext context, String uuid,
+                                                                  List<String> partitions) {
+                // Exercise the authoritative cell fallback when no optional packed copy was published.
+                return List.of();
+            }
+
+            @Mock
+            public List<String> queryExternalTableStatistics(ConnectContext context, String uuid) {
+                queries.incrementAndGet();
+                if (queryFails.get()) {
+                    throw new IllegalStateException("injected statistics query failure");
+                }
+                return partitionRows.isEmpty() ? List.of() : ExternalTableStatistics.encode(
+                        partitionRows, StatisticsUtils.getTableByUUID(context, uuid));
+            }
+
+            @Mock
             public List<TStatisticData> queryStatisticSync(ConnectContext context, Long dbId, Long tableId,
                                                            List<String> columns) {
                 queries.incrementAndGet();
@@ -190,7 +207,7 @@ public class StatisticsCacheLoadFailureTest {
     }
 
     @Test
-    public void testUnifiedTableLoaderUsesBeAggregatesAndGroupsDifferentTables() {
+    public void testUnifiedTableLoaderDecodesPreparedRowsAndGroupsDifferentTables() {
         Table table = org.mockito.Mockito.mock(Table.class);
         org.mockito.Mockito.when(table.getColumn(org.mockito.Mockito.anyString()))
                 .thenAnswer(call -> new Column(call.getArgument(0), IntegerType.BIGINT));
@@ -201,29 +218,36 @@ public class StatisticsCacheLoadFailureTest {
             }
 
             @Mock
-            public ConnectorTableColumnStats estimateColumnStatistics(Table t, String column, ConnectorTableColumnStats raw) {
+            public ConnectorTableColumnStats estimateColumnStatistics(
+                    com.starrocks.statistic.ColumnStatsMeta meta, ConnectorTableColumnStats raw) {
                 return new ConnectorTableColumnStats(raw.getColumnStatistic(), raw.getRowCount() * 2, raw.getUpdateTime());
             }
         };
         List<String> tables = new ArrayList<>();
-        new MockUp<ConnectorColumnStatsCacheLoader>() {
+        new MockUp<StatisticExecutor>() {
             @Mock
-            public List<TStatisticData> queryStatisticsData(ConnectContext context, String uuid, List<String> columns) {
+            public List<TStatisticData> queryExternalPartitionRows(ConnectContext context, String uuid,
+                                                                  List<String> partitions) {
+                // Exercise the authoritative cell fallback when no optional packed copy was published.
+                return List.of();
+            }
+
+            @Mock
+            public List<String> queryExternalTableStatistics(ConnectContext context, String uuid) {
                 tables.add(uuid);
-                // A scalar BE aggregate has no HLL payload or partition key.
-                return List.of(new TStatisticData().setColumnName("c").setRowCount(100).setDataSize(800)
-                        .setNullCount(10).setCountDistinct(7).setMin("1").setMax("9").setUpdateTime("2026-09-21 00:00:00"));
+                return ExternalTableStatistics.encode(List.of(new TStatisticData().setColumnName("c")
+                        .setRowCount(100).setDataSize(800).setNullCount(10).setCountDistinct(7)
+                        .setMin("1").setMax("9").setUpdateTime("2026-09-21 00:00:00")), table);
             }
         };
         String other = "iceberg.db.other.uuid";
-        var key = ExternalStatisticsCacheKey.table(UUID, "c");
-        var missing = ExternalStatisticsCacheKey.table(UUID, "missing");
-        var otherKey = ExternalStatisticsCacheKey.table(other, "c");
-        var loaded = new ExternalStatisticsCacheLoader().asyncLoadAll(List.of(key, missing, otherKey), Runnable::run).join();
+        var key = ExternalStatisticsCacheKey.tableRow(UUID);
+        var otherKey = ExternalStatisticsCacheKey.tableRow(other);
+        var loaded = new ExternalStatisticsCacheLoader().asyncLoadAll(List.of(key, key, otherKey), Runnable::run).join();
         Assertions.assertEquals(List.of(UUID, other), tables);
-        Assertions.assertEquals(Optional.empty(), loaded.get(missing));
+        Assertions.assertFalse(((ExternalTableStatistics) loaded.get(key).orElseThrow()).columns.containsKey("missing"));
         for (var present : List.of(key, otherKey)) {
-            var summary = (ExternalColumnStatistics.Summary) loaded.get(present).orElseThrow();
+            var summary = ((ExternalTableStatistics) loaded.get(present).orElseThrow()).summaries.get("c");
             Assertions.assertEquals(200, summary.rowCount);
             Assertions.assertEquals(100, summary.rawRowCount);
             Assertions.assertEquals(7, summary.statistic.getDistinctValuesCount());
@@ -425,7 +449,7 @@ public class StatisticsCacheLoadFailureTest {
         Assertions.assertEquals(1, queries.get());
         Assertions.assertEquals(1, storage.externalStatisticsCache.asMap().size());
         Assertions.assertTrue(storage.externalStatisticsCache.asMap().values().iterator().next().join().orElseThrow()
-                instanceof ExternalColumnStatistics.Summary);
+                instanceof ExternalTableStatistics);
     }
 
     @Test
@@ -579,6 +603,7 @@ public class StatisticsCacheLoadFailureTest {
                     ExternalPartitionStatisticsTest.row("p=1", "a", 100, 10, 0, "1", "10"), IntegerType.BIGINT));
             cache.synchronous().putAll(Map.of(a, old, b, old));
             nanos.set(TimeUnit.HOURS.toNanos(2));
+            cache.synchronous().put(ExternalStatisticsCacheKey.partitionRow(UUID, "p=1"), Optional.empty());
             List<List<ExternalStatisticsCacheKey>> batches = new ArrayList<>();
             List<CompletableFuture<Map<ExternalStatisticsCacheKey,
                     Optional<ExternalColumnStatistics>>>> pending = new ArrayList<>();
@@ -931,10 +956,11 @@ public class StatisticsCacheLoadFailureTest {
     @ValueSource(booleans = {false, true})
     public void testBasicHonorsSyncLoad(boolean sync, @Mocked Table table) throws Exception {
         Config.enable_sync_statistics_load = sync;
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table(UUID, "c");
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(UUID);
         ConnectorTableColumnStats value = new ConnectorTableColumnStats(
                 ColumnStatistic.builder().setDistinctValuesCount(5).build(), 100, "2026-09-22 00:00:00");
-        ExternalColumnStatistics stats = new ExternalColumnStatistics.Summary(value, value, "BIGINT");
+        ExternalColumnStatistics stats = new ExternalTableStatistics(
+                Map.of("c", new ExternalColumnStatistics.Summary(value, value, "BIGINT")));
         CompletableFuture<Optional<ExternalColumnStatistics>> pending = new CompletableFuture<>();
         new Expectations() {{
                 table.getUUID();
@@ -986,19 +1012,17 @@ public class StatisticsCacheLoadFailureTest {
                 return future;
             }
         };
-        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.table(UUID, "c");
-        ExternalStatisticsCacheKey missing = ExternalStatisticsCacheKey.table(UUID, "missing");
-        ExternalStatisticsCacheKey other = ExternalStatisticsCacheKey.table(secondUUID, "c");
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(UUID);
+        ExternalStatisticsCacheKey other = ExternalStatisticsCacheKey.tableRow(secondUUID);
         CachedStatisticStorage storage = new CachedStatisticStorage();
         var cache = storage.externalStatisticsCache;
-        cache.put(key, CompletableFuture.completedFuture(Optional.empty()));
         storage.prefetchConnectorTableStatistics(first, List.of("c", "missing"));
         storage.prefetchConnectorTableStatistics(second, List.of("c"));
         storage.prefetchConnectorTableStatistics(first, List.of("c", "missing"));
-        Assertions.assertEquals(List.of(List.of(missing), List.of(other)), batches);
+        Assertions.assertEquals(List.of(List.of(key), List.of(other)), batches);
         Assertions.assertFalse(pending.get(0).isDone());
         Assertions.assertFalse(pending.get(1).isDone());
-        pending.get(0).complete(Map.of(missing, Optional.empty()));
+        pending.get(0).complete(Map.of(key, Optional.empty()));
         pending.get(1).completeExceptionally(new IllegalStateException("read failed"));
         Assertions.assertNull(cache.getIfPresent(other));
         storage.prefetchConnectorTableStatistics(first, List.of("c", "missing"));

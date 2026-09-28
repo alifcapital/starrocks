@@ -143,11 +143,8 @@ public class StatisticsExecutorTest extends PlanTestBase {
     public void testQueryStatisticSync() throws AnalysisException {
         String tableUUID = connectContext.getGlobalStateMgr().getMetadataMgr()
                 .getTable(connectContext, "hive0", "partitioned_db", "t1").getUUID();
-        // table_uuid is stored hashed (StatisticUtils.hashTableUuidForPkStorage) to stay within
-        // BE's primary_key_limit_size; queries match both the hashed and raw value so historical
-        // rows written before hashing was introduced remain visible.
         String hashedTableUUID = StatisticUtils.hashTableUuidForPkStorage(tableUUID);
-        String tableUUIDPredicate = "table_uuid in (\"" + hashedTableUUID + "\", \"" + tableUUID + "\")";
+        String tableUUIDPredicate = "table_uuid = '" + hashedTableUUID + "'";
         new MockUp<StatisticExecutor>() {
             @Mock
             public List<TStatisticData> executeStatisticDQL(ConnectContext context, String sql) {
@@ -156,18 +153,14 @@ public class StatisticsExecutorTest extends PlanTestBase {
                                 "hll_union_agg(ndv), sum(null_count),  " +
                                 "cast(max(cast(nullif(max, '') as string)) as string), " +
                                 "cast(min(cast(nullif(min, '') as string)) as string), " +
-                                "max(update_time) FROM (SELECT *, row_number() " +
-                                "over ( partition by partition_name, column_name order by update_time desc) as rn " +
-                                "FROM external_column_statistics WHERE " + tableUUIDPredicate +
-                                " and column_name in (\"c2\")) dedup_t WHERE rn = 1 GROUP BY column_name UNION ALL " +
+                                "max(update_time) FROM external_column_statistics WHERE " + tableUUIDPredicate +
+                                " and column_name in (\"c2\") GROUP BY column_name UNION ALL " +
                                 "SELECT cast(8 as INT), column_name, sum(row_count), cast(sum(data_size) as bigint), " +
                                 "hll_union_agg(ndv), sum(null_count),  " +
                                 "cast(max(cast(nullif(max, '') as bigint)) as string), " +
                                 "cast(min(cast(nullif(min, '') as bigint)) as string), " +
-                                "max(update_time) FROM (SELECT *, row_number() " +
-                                "over ( partition by partition_name, column_name order by update_time desc) as rn " +
-                                "FROM external_column_statistics WHERE " + tableUUIDPredicate +
-                                " and column_name in (\"c1\")) dedup_t WHERE rn = 1 GROUP BY column_name", sql);
+                                "max(update_time) FROM external_column_statistics WHERE " + tableUUIDPredicate +
+                                " and column_name in (\"c1\") GROUP BY column_name", sql);
                 return Lists.newArrayList();
             }
         };
@@ -335,4 +328,32 @@ public class StatisticsExecutorTest extends PlanTestBase {
         statisticExecutor.dropExternalHistogram(context, "catalog", "db", "table", Lists.newArrayList());
         statisticExecutor.dropExternalHistogram(context, "catalog", "db", "table", null);
     }
+    @Test
+    public void dependentSummaryRequiresVisibleInsert() throws Exception {
+        var transaction = org.mockito.Mockito.mock(com.starrocks.transaction.TransactionState.class);
+        var statement = org.mockito.Mockito.mock(com.starrocks.sql.ast.InsertStmt.class);
+        org.mockito.Mockito.when(statement.getTxnId()).thenReturn(765L);
+        Database statisticsDatabase = new Database(987L, StatsConstants.STATISTICS_DB_NAME);
+        new MockUp<com.starrocks.server.LocalMetastore>() {
+            @Mock
+            public Database getDb(String name) {
+                return statisticsDatabase;
+            }
+        };
+        new MockUp<com.starrocks.transaction.GlobalTransactionMgr>() {
+            @Mock
+            public com.starrocks.transaction.TransactionState getTransactionState(long database, long id) {
+                Assertions.assertEquals(987L, database);
+                Assertions.assertEquals(765L, id);
+                return transaction;
+            }
+        };
+        org.mockito.Mockito.when(transaction.getTransactionStatus())
+                .thenReturn(com.starrocks.transaction.TransactionStatus.COMMITTED);
+        Assertions.assertThrows(DdlException.class, () -> StatisticExecutor.requireVisibleStatisticsInsert(statement));
+        org.mockito.Mockito.when(transaction.getTransactionStatus())
+                .thenReturn(com.starrocks.transaction.TransactionStatus.VISIBLE);
+        Assertions.assertDoesNotThrow(() -> StatisticExecutor.requireVisibleStatisticsInsert(statement));
+    }
+
 }

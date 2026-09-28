@@ -68,6 +68,8 @@ import static com.starrocks.catalog.InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAM
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.HISTOGRAM_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.MULTI_COLUMN_STATISTICS_TABLE_NAME;
@@ -303,6 +305,76 @@ public class StatisticsMetaManager extends FrontendDaemon {
         }
         LOG.info("create external full statistics table done");
         return checkTableExist(EXTERNAL_FULL_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createExternalTableStatisticsTable(ConnectContext context) {
+        LOG.info("create external table summary statistics table start");
+        KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
+        Map<String, String> properties = Maps.newHashMap();
+
+        try {
+            int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
+            properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
+            QualifiedName qualifiedName =
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_TABLE_STATISTICS_TABLE_NAME));
+            TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
+            CreateTableStmt stmt = new CreateTableStmt(false, false,
+                    tableRef,
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_TABLE_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    null,
+                    new KeysDesc(keysType, ImmutableList.of("table_uuid")),
+                    null,
+                    new HashDistributionDesc(10, ImmutableList.of("table_uuid")),
+                    properties,
+                    null,
+                    "", null, ImmutableList.of("table_uuid").stream()
+                            .map(column -> new OrderByElement(new SlotRef(null, column), true, null))
+                            .collect(Collectors.toList()));
+
+            Analyzer.analyze(stmt, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create table summary statistics table", e);
+            return false;
+        }
+        LOG.info("create external table summary statistics table done");
+        return checkTableExist(EXTERNAL_TABLE_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createExternalPartitionStatisticsTable(ConnectContext context) {
+        LOG.info("create external partition row statistics table start");
+        KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
+        Map<String, String> properties = Maps.newHashMap();
+
+        try {
+            int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
+            properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
+            QualifiedName qualifiedName =
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_PARTITION_STATISTICS_TABLE_NAME));
+            TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
+            CreateTableStmt stmt = new CreateTableStmt(false, false,
+                    tableRef,
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    null,
+                    new KeysDesc(keysType, ImmutableList.of("table_uuid", "partition_name")),
+                    null,
+                    new HashDistributionDesc(10, ImmutableList.of("table_uuid", "partition_name")),
+                    properties,
+                    null,
+                    "", null, ImmutableList.of("table_uuid", "partition_name").stream()
+                            .map(column -> new OrderByElement(new SlotRef(null, column), true, null))
+                            .collect(Collectors.toList()));
+
+            Analyzer.analyze(stmt, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create partition row statistics table", e);
+            return false;
+        }
+        LOG.info("create external partition row statistics table done");
+        return checkTableExist(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME);
     }
 
     private boolean createExternalHistogramStatisticsTable(ConnectContext context) {
@@ -555,6 +627,10 @@ public class StatisticsMetaManager extends FrontendDaemon {
                 return createHistogramStatisticsTable(context);
             } else if (tableName.equals(EXTERNAL_FULL_STATISTICS_TABLE_NAME)) {
                 return createExternalFullStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME)) {
+                return createExternalPartitionStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_TABLE_STATISTICS_TABLE_NAME)) {
+                return createExternalTableStatisticsTable(context);
             } else if (tableName.equals(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME)) {
                 return createExternalHistogramStatisticsTable(context);
             } else if (tableName.equals(MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
@@ -675,6 +751,8 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(FULL_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_FULL_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_TABLE_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(MULTI_COLUMN_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_MCV_STATISTICS_TABLE_NAME);

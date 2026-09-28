@@ -24,7 +24,8 @@ import java.util.OptionalDouble;
 
 /** Immutable values for the two scopes of the shared external statistics cache. */
 public sealed interface ExternalColumnStatistics permits ExternalColumnStatistics.Partition,
-        ExternalColumnStatistics.Summary, ExternalPartitionStatisticsBlocks.Block, ExternalPartitionStatisticsBlocks.Directory {
+        ExternalColumnStatistics.Summary, ExternalTableStatistics, ExternalPartitionStatistics,
+        ExternalPartitionStatisticsBlocks.Block, ExternalPartitionStatisticsBlocks.Directory {
     String getSourceType();
 
     int retainedBytes();
@@ -102,12 +103,16 @@ public sealed interface ExternalColumnStatistics permits ExternalColumnStatistic
         public final double rowCount;
         public final long rawRowCount;
         public final String updateTime;
+        public final ConnectorTableColumnStats raw;
+        public final ConnectorTableColumnStats estimated;
         public final ColumnStatistic statistic;
         public final String sourceType;
         public final int requestedPartitions;
         public final int coveredPartitions;
 
         public Summary(ConnectorTableColumnStats raw, ConnectorTableColumnStats estimated, String sourceType) {
+            this.raw = raw;
+            this.estimated = estimated;
             this.rowCount = estimated.getRowCount();
             this.rawRowCount = raw.getRowCount();
             this.updateTime = raw.getUpdateTime();
@@ -126,7 +131,7 @@ public sealed interface ExternalColumnStatistics permits ExternalColumnStatistic
         @Override
         public int retainedBytes() {
             // Includes the prepared ColumnStatistic, its empty collections, and source-type string.
-            return 280 + 2 * sourceType.length() + (updateTime == null ? 0 : 40 + 2 * updateTime.length());
+            return 392 + 2 * sourceType.length() + (updateTime == null ? 0 : 40 + 2 * updateTime.length());
         }
     }
 

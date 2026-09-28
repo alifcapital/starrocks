@@ -20,7 +20,7 @@ import java.util.Objects;
 /** Table summaries, partition cells and reusable block directories share the external statistics byte budget. */
 public final class ExternalStatisticsCacheKey {
     public enum Scope {
-        PARTITION, TABLE, BLOCK, BLOCK_DIRECTORY
+        PARTITION, PARTITION_ROW, TABLE, BLOCK, BLOCK_DIRECTORY
     }
 
     public final Scope scope;
@@ -47,8 +47,12 @@ public final class ExternalStatisticsCacheKey {
         this.columnName = columnName;
     }
 
-    public static ExternalStatisticsCacheKey table(String tableUUID, String columnName) {
-        return new ExternalStatisticsCacheKey(tableUUID, "", columnName, Scope.TABLE);
+    public static ExternalStatisticsCacheKey partitionRow(String tableUUID, String partitionName) {
+        return new ExternalStatisticsCacheKey(tableUUID, partitionName, "", Scope.PARTITION_ROW);
+    }
+
+    public static ExternalStatisticsCacheKey tableRow(String tableUUID) {
+        return new ExternalStatisticsCacheKey(tableUUID, "", "", Scope.TABLE);
     }
 
     public static ExternalStatisticsCacheKey block(String tableUUID, String columnName, List<String> partitions) {
