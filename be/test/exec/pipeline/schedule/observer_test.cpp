@@ -282,6 +282,80 @@ TEST_F(PipelineObserverTest, test_add_blocked_driver) {
     _dummy_fragment_ctx->event_scheduler()->add_blocked_driver(driver.get());
 }
 
+// A sink that keeps its driver in PENDING_FINISH while `pending` is true.
+class PendingFinishSinkOperator final : public Operator {
+public:
+    PendingFinishSinkOperator(OperatorFactory* factory, int32_t id, int32_t plan_node_id, int32_t driver_sequence)
+            : Operator(factory, id, "pending_finish_sink", plan_node_id, true, driver_sequence) {}
+
+    bool need_input() const override { return !_is_finished; }
+    bool has_output() const override { return false; }
+    bool is_finished() const override { return _is_finished; }
+    bool pending_finish() const override { return pending; }
+    Status set_finishing(RuntimeState* state) override {
+        _is_finished = true;
+        return Status::OK();
+    }
+    StatusOr<ChunkPtr> pull_chunk(RuntimeState* state) override {
+        return Status::InternalError("Shouldn't pull chunk from sink operator");
+    }
+    Status push_chunk(RuntimeState* state, const ChunkPtr& chunk) override { return Status::OK(); }
+
+    std::atomic_bool pending{true};
+
+private:
+    bool _is_finished{false};
+};
+
+class PendingFinishSinkOperatorFactory final : public OperatorFactory {
+public:
+    PendingFinishSinkOperatorFactory(int32_t id, int32_t plan_node_id)
+            : OperatorFactory(id, "pending_finish_sink", plan_node_id) {}
+
+    bool support_event_scheduler() const override { return true; }
+
+    OperatorPtr create(int32_t degree_of_parallelism, int32_t driver_sequence) override {
+        return std::make_shared<PendingFinishSinkOperator>(this, _id, _plan_node_id, driver_sequence);
+    }
+};
+
+// The executor handles a driver of a cancelled fragment on its cancel path, which does not report the profile, so
+// a due report stays due. A cancelled driver that waits in PENDING_FINISH must stay parked until its pending work
+// ends instead of being enqueued for the report on every wakeup.
+TEST_F(PipelineObserverTest, cancelled_pending_finish_driver_is_not_enqueued_for_report) {
+    OpFactories factories;
+    factories.emplace_back(std::make_shared<EmptySetOperatorFactory>(0, 1));
+    factories.emplace_back(std::make_shared<PendingFinishSinkOperatorFactory>(2, 3));
+
+    SimpleTestContext tx(factories, _exec_group.get(), _dummy_fragment_ctx.get(), _dummy_query_ctx.get());
+    ASSERT_OK(tx.driver->prepare(_runtime_state.get()));
+    ASSERT_OK(tx.driver->prepare_local_state(_runtime_state.get()));
+
+    const auto& driver = tx.driver;
+    auto* sink = down_cast<PendingFinishSinkOperator*>(driver->sink_operator());
+
+    _dummy_query_ctx->set_enable_profile();
+    _dummy_query_ctx->set_runtime_profile_report_interval(0);
+    _dummy_fragment_ctx->cancel(Status::InternalError("error"));
+    driver->cancel_operators(_runtime_state.get());
+    driver->set_driver_state(DriverState::PENDING_FINISH);
+    ASSERT_TRUE(driver->need_report_exec_state());
+
+    driver->set_in_blocked(true);
+    driver->observer()->cancel_trigger();
+    ASSERT_EQ(0, tx.driver_queue->size());
+    ASSERT_TRUE(driver->is_in_blocked());
+
+    sink->pending = false;
+    driver->observer()->source_trigger();
+    ASSERT_EQ(1, tx.driver_queue->size());
+    ASSERT_EQ(DriverState::CANCELED, driver->driver_state());
+
+    for (size_t i = 0; i < driver->_operator_stages.size(); ++i) {
+        driver->_operator_stages[i] = OperatorStage::CLOSED;
+    }
+}
+
 TEST_F(PipelineObserverTest, race_scheduler_observer) {
     OpFactories factories;
     factories.emplace_back(std::make_shared<EmptySetOperatorFactory>(0, 1));

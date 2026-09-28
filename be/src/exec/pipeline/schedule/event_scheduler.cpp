@@ -54,10 +54,12 @@ void EventScheduler::try_schedule(const DriverRawPtr driver) {
         if (!driver->is_still_pending_finish()) {
             driver->set_driver_state(fragment_ctx->is_canceled() ? DriverState::CANCELED : DriverState::FINISH);
             add_to_ready_queue = true;
-        } else if (driver->need_report_exec_state()) {
+        } else if (!fragment_ctx->is_canceled() && driver->need_report_exec_state()) {
             // Still waiting on pending I/O: don't change the driver state (it stays PENDING_FINISH), but keep
             // enqueuing it periodically so the executor's !is_ready() path fires report_exec_state_if_necessary().
             // Otherwise a long pending-finish driver stops sending runtime profiles until the final finish event.
+            // A cancelled fragment is excluded: the executor takes its cancel path, which does not report, so the
+            // report stays due and the driver would be enqueued again on every wakeup.
             add_to_ready_queue = true;
         }
     } else if (driver->is_finished()) {
