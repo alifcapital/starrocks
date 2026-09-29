@@ -564,6 +564,11 @@ Status HiveDataSource::_decompose_conjunct_ctxs(RuntimeState* state) {
     }
     // rewrite dict
     RETURN_IF_ERROR(state->mutable_dict_optimize_parser()->rewrite_conjuncts(&_scanner_ctx.conjuncts.scanner_ctxs));
+    // A reader that cannot filter a slot with a global dict by the dictionary of the file evaluates the conjuncts of
+    // the slot on its global dict codes
+    for (auto& entry : _scanner_ctx.conjuncts.by_slot) {
+        RETURN_IF_ERROR(state->mutable_dict_optimize_parser()->rewrite_conjuncts(&entry.second));
+    }
     return Status::OK();
 }
 

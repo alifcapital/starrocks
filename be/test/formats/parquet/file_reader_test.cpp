@@ -4211,6 +4211,147 @@ TEST_F(FileReaderTest, low_rows_reader) {
     EXPECT_EQ(100, total_row_nums);
 }
 
+// Reads c0 and c2 with a global dict for c2. Counts the rows and the rows whose c2 is code. With filtered set, every
+// row has c2 = code.
+static void read_with_global_dict(HdfsScannerContext* ctx, FileReader* file_reader, int32_t code, bool filtered,
+                                  size_t* num_rows, size_t* num_code_rows) {
+    auto chunk = std::make_shared<Chunk>();
+    chunk->append_column(ColumnHelper::create_column(TYPE_INT_DESC, true), chunk->num_columns());
+    chunk->append_column(ColumnHelper::create_column(TYPE_INT_DESC, true), chunk->num_columns());
+    *num_rows = 0;
+    *num_code_rows = 0;
+    Status status = file_reader->init(ctx);
+    ASSERT_TRUE(status.ok()) << status;
+    while (!status.is_end_of_file()) {
+        chunk->reset();
+        status = file_reader->get_next(&chunk);
+        ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status;
+        chunk->check_or_die();
+        *num_rows += chunk->num_rows();
+        ColumnPtr c2 = chunk->get_column_by_index(1);
+        for (size_t row = 0; row < chunk->num_rows(); row++) {
+            bool is_code = !c2->is_null(row) && c2->get(row).get_int32() == code;
+            *num_code_rows += is_code;
+            if (filtered) {
+                ASSERT_TRUE(is_code);
+            }
+        }
+    }
+}
+
+TEST_F(FileReaderTest, low_rows_reader_rewritten_dict_conjunct) {
+    const std::string low_rows_file = "./be/test/formats/parquet/test_data/low_rows_non_dict.parquet";
+    Utils::SlotDesc slot_descs[] = {{"c0", TYPE_INT_DESC}, {"c2", TYPE_INT_DESC}, {""}};
+
+    std::vector<std::string> values;
+    for (int i = 0; i < 100; ++i) {
+        values.push_back(std::to_string(i));
+    }
+    std::sort(values.begin(), values.end());
+    GlobalDictMap g_dict;
+    TGlobalDict t_dict;
+    t_dict.__set_columnId(1);
+    std::vector<int32_t> ids;
+    for (int i = 0; i < 100; ++i) {
+        g_dict[Slice(values[i])] = i + 1;
+        ids.push_back(i + 1);
+    }
+    t_dict.__set_ids(ids);
+    t_dict.__set_strings(values);
+    ColumnIdToGlobalDictMap dict_map;
+    dict_map[1] = &g_dict;
+    _runtime_state->init_instance_mem_tracker();
+    ASSERT_OK(_runtime_state->init_query_global_dict({t_dict}));
+
+    int32_t code = g_dict.at(Slice(std::string("7")));
+    size_t all_rows = 0;
+    size_t expected_rows = 0;
+    {
+        auto ctx = _create_file_random_read_context(low_rows_file, slot_descs);
+        ctx->global_dictmaps = &dict_map;
+        auto file_reader = _create_file_reader(low_rows_file);
+        read_with_global_dict(ctx, file_reader.get(), code, false, &all_rows, &expected_rows);
+    }
+    ASSERT_EQ(100, all_rows);
+    ASSERT_GT(expected_rows, 0);
+
+    // The column is not dictionary encoded, so the reader evaluates the conjunct on the global dict codes
+    std::vector<TExpr> t_conjuncts;
+    ParquetUTBase::create_dictmapping_string_conjunct(TExprOpcode::EQ, 1, "7", &t_conjuncts);
+    // FE types the DICT_EXPR of a predicate as BOOLEAN, which the rewrite checks
+    t_conjuncts[0].nodes[0].type = gen_type_desc(TPrimitiveType::BOOLEAN);
+    std::vector<ExprContext*> expr_ctxs;
+    ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &t_conjuncts, &expr_ctxs);
+    ASSERT_OK(_runtime_state->mutable_dict_optimize_parser()->rewrite_conjuncts(&expr_ctxs));
+    auto ctx = _create_file_random_read_context(low_rows_file, slot_descs);
+    ctx->conjunct_ctxs_by_slot.insert({1, expr_ctxs});
+    ctx->global_dictmaps = &dict_map;
+    TupleDescriptor* tuple_desc = Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+    ParquetUTBase::setup_conjuncts_manager(ctx->conjunct_ctxs_by_slot[1], nullptr, tuple_desc, _runtime_state, ctx);
+    auto file_reader = _create_file_reader(low_rows_file);
+    size_t rows = 0;
+    size_t code_rows = 0;
+    read_with_global_dict(ctx, file_reader.get(), code, true, &rows, &code_rows);
+    ASSERT_EQ(expected_rows, rows);
+}
+
+TEST_F(FileReaderTest, low_card_reader_rewritten_dict_conjunct) {
+    const std::string small_page_file = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    Utils::SlotDesc slot_descs[] = {{"c0", TYPE_INT_DESC}, {"c2", TYPE_INT_DESC}, {""}};
+
+    std::vector<std::string> values;
+    for (int i = 0; i < 100; ++i) {
+        values.push_back(std::to_string(i));
+    }
+    std::sort(values.begin(), values.end());
+    GlobalDictMap g_dict;
+    TGlobalDict t_dict;
+    t_dict.__set_columnId(1);
+    std::vector<int32_t> ids;
+    for (int i = 0; i < 100; ++i) {
+        g_dict[Slice(values[i])] = i + 1;
+        ids.push_back(i + 1);
+    }
+    t_dict.__set_ids(ids);
+    t_dict.__set_strings(values);
+    ColumnIdToGlobalDictMap dict_map;
+    dict_map[1] = &g_dict;
+    _runtime_state->init_instance_mem_tracker();
+    ASSERT_OK(_runtime_state->init_query_global_dict({t_dict}));
+
+    int32_t code = g_dict.at(Slice(std::string("2")));
+    size_t all_rows = 0;
+    size_t expected_rows = 0;
+    {
+        auto ctx = _create_file_random_read_context(small_page_file, slot_descs);
+        ctx->global_dictmaps = &dict_map;
+        auto file_reader = _create_file_reader(small_page_file);
+        read_with_global_dict(ctx, file_reader.get(), code, false, &all_rows, &expected_rows);
+    }
+    ASSERT_EQ(20000, all_rows);
+    ASSERT_GT(expected_rows, 0);
+
+    // The column is dictionary encoded, so the reader filters it by the rewritten conjunct evaluated on the strings
+    // of the dictionary of the file
+    std::vector<TExpr> t_conjuncts;
+    ParquetUTBase::create_dictmapping_string_conjunct(TExprOpcode::EQ, 1, "2", &t_conjuncts);
+    // FE types the DICT_EXPR of a predicate as BOOLEAN, which the rewrite checks
+    t_conjuncts[0].nodes[0].type = gen_type_desc(TPrimitiveType::BOOLEAN);
+    std::vector<ExprContext*> expr_ctxs;
+    ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &t_conjuncts, &expr_ctxs);
+    ASSERT_OK(_runtime_state->mutable_dict_optimize_parser()->rewrite_conjuncts(&expr_ctxs));
+    auto ctx = _create_file_random_read_context(small_page_file, slot_descs);
+    ctx->conjunct_ctxs_by_slot.insert({1, expr_ctxs});
+    ctx->global_dictmaps = &dict_map;
+    TupleDescriptor* tuple_desc = Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+    ParquetUTBase::setup_conjuncts_manager(ctx->conjunct_ctxs_by_slot[1], nullptr, tuple_desc, _runtime_state, ctx);
+    auto file_reader = _create_file_reader(small_page_file);
+    size_t rows = 0;
+    size_t code_rows = 0;
+    read_with_global_dict(ctx, file_reader.get(), code, true, &rows, &code_rows);
+    ASSERT_EQ(expected_rows, rows);
+}
+
 TEST_F(FileReaderTest, low_rows_reader_empty_not_null_not_match) {
     auto chunk = std::make_shared<Chunk>();
 
