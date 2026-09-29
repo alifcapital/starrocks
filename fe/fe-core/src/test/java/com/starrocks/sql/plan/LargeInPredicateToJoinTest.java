@@ -501,6 +501,12 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
         plan = getFragmentPlan("select * from t0 left join t1 on t0.v1 = t1.v4 where t1.v5 not in (1, 2, 3, 4)");
         assertContains(plan, "INNER JOIN");
         assertContains(plan, "NULL AWARE LEFT ANTI JOIN");
+
+        // IN on a join key is derived for the other key, as the InPredicate is
+        plan = getFragmentPlan("select * from t0 join t1 on t0.v1 = t1.v4 where t0.v1 in (1, 2, 3, 4)");
+        assertEquals(2, StringUtils.countMatches(plan, "RAW_VALUES"));
+        assertContains(plan, "equal join conjunct: 1: v1 = 8: const_value");
+        assertContains(plan, "equal join conjunct: 4: v4 = 7: const_value");
     }
 
     @Test
