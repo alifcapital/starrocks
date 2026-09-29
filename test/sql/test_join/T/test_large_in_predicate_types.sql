@@ -23,6 +23,7 @@ INSERT INTO lip VALUES
     (6, 0, 0, 20240102, -3000000000, '20218840600116072801', 'abc', 1.23, -1.2345, 0.000001, '2024-01-03', '2024-01-02 03:04:05', 1),
     (7, -128, 32767, 2147483647, 9223372036854775807, '-5', 'x', 9999999.99, 1.5, 1.5, '2024-03-01', '2024-03-01 00:00:01', -0.0);
 set large_in_predicate_threshold = 3;
+set cbo_eq_base_type = 'decimal';
 select k from lip where ti in (1, 2, -1, 127) order by k;
 select k from lip where ti not in (1, 2, -1, 127) order by k;
 select k from lip where si in (1, 300, -300, 70000) order by k;
@@ -34,6 +35,8 @@ select k from lip where i in ('1', '2', '40000', '-7') order by k;
 select k from lip where i in ('01', '2', '40000', '-7') order by k;
 select k from lip where i not in ('01', '2', '40000', '-7') order by k;
 select k from lip where i in ('01', '2', '40000', 'abc') order by k;
+select k from lip where i in ('01', '2', '100000000000000000000000000000000000000') order by k;
+select k from lip where i not in ('01', '2', '100000000000000000000000000000000000000') order by k;
 select k from lip where i in (1.0, 2.5, 40000, -7) order by k;
 select k from lip where i not in (1.0, 2.5, 40000, -7) order by k;
 select k from lip where v in (1, 7, -5, 20218840600116072801) order by k;
@@ -81,9 +84,10 @@ CREATE TABLE lip (
     dtt DATETIME,
     f DOUBLE
 ) DUPLICATE KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 3 PROPERTIES('replication_num'='1');
+INSERT INTO lip VALUES (1, 1, '1', 1.5, '2024-01-01', '2024-01-01 00:00:00', 1.5);
 set enable_large_in_predicate = true;
 set large_in_predicate_threshold = 3;
-set cbo_eq_base_type = decimal;
+set cbo_eq_base_type = 'decimal';
 function: assert_explain_contains("select k from lip where i in ('1', '2', '40000', '-7')", 'RAW VALUES', 'constant type: INT')
 function: assert_explain_contains("select k from lip where i in ('01', '2', '40000', '-7')", 'RAW VALUES', 'constant type: DECIMAL')
 function: assert_explain_contains("select k from lip where v in (1, 7, -5, 20218840600116072801)", 'RAW VALUES', 'constant type: VARCHAR')
@@ -92,10 +96,12 @@ function: assert_explain_contains("select k from lip where dt in ('2024-01-01', 
 function: assert_explain_contains("select k from lip where dtt in ('2024-01-01', '2024-02-29 12:34:56.000007', '9999-12-31 23:59:59')", 'RAW VALUES', 'constant type: DATETIME')
 function: assert_explain_contains("select k from lip where i in (1, 2, -7, 4) and (v = 'abc' or k = 1)", 'RAW VALUES', 'LEFT SEMI JOIN')
 function: assert_explain_contains("select k from lip where not (i in (1, 2, -7, 4))", 'RAW VALUES', 'LEFT ANTI JOIN')
-function: assert_explain_contains("select k from lip where d32 not in (99999999999999999999999999999999999999, 1.5, 7, 0)", 'EMPTYSET')
+function: assert_explain_contains("select k from lip where i in ('01', '2', '100000000000000000000000000000000000000')", 'RAW VALUES', 'constant count: 2')
+function: assert_explain_contains("select k from lip where i not in ('01', '2', '100000000000000000000000000000000000000')", 'EMPTYSET')
+function: assert_explain_not_contains("select k from lip where d32 in (99999999999999999999999999999999999999, 1.5, 7, 0)", 'RAW VALUES')
 function: assert_explain_not_contains("select k from lip where i in ('01', '2', '40000', 'abc')", 'RAW VALUES')
 function: assert_explain_not_contains("select k from lip where f in (1.5, -2.25, 0, 7)", 'RAW VALUES')
 function: assert_explain_not_contains("select k from lip where i in (1, 2, -7, 4) or k = 3", 'RAW VALUES')
 function: assert_explain_not_contains("select k, i in (1, 2, -7, 4) from lip", 'RAW VALUES')
-set cbo_eq_base_type = varchar;
+set cbo_eq_base_type = 'varchar';
 function: assert_explain_contains("select k from lip where i in ('01', '2', '40000', 'abc')", 'RAW VALUES', 'constant type: VARCHAR')

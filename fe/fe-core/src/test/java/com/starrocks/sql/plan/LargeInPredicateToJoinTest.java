@@ -156,7 +156,7 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
 
         // A constant that is not an INT: the comparison is in the common type, as in the InPredicate
         plan = getFragmentPlan("select * from test_all_type where t1c in ('01', '2', '3', '4')");
-        assertContains(plan, "constant type: DECIMAL128(38,9)");
+        assertContains(plan, "constant type: VARCHAR");
         assertContains(plan, "equal join conjunct: 12: cast = 11: const_value");
     }
 
@@ -302,6 +302,9 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
                 "select v1 in (1, 2, 3, 4) from t0",
                 "LargeInPredicate is supported only as a conjunct of the predicate of an operator, transformed 0 of 1");
         assertLargeInException(
+                "select sum(case when v1 in (1, 2, 3, 4) then v2 else 0 end) from t0",
+                "LargeInPredicate is supported only as a conjunct of the predicate of an operator, transformed 0 of 1");
+        assertLargeInException(
                 "select * from t0 join t1 on t0.v1 = t1.v4 and t0.v2 + t1.v5 in (1, 2, 3, 4)",
                 "LargeInPredicate is supported only as a conjunct of the predicate of an operator, transformed 0 of 1");
 
@@ -309,21 +312,24 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
         assertLargeInException(
                 "select * from tall where te in (1.1, 2.2, 3.3, 4.4)",
                 "LargeInPredicate does not support comparison type");
-
-        // A constant that the InPredicate leaves to BE as a CAST
-        assertLargeInException(
-                "select * from tall where tc in ('a', 'b', 'c', 'd')",
-                "does not fold to DECIMAL128(38,9)");
     }
 
     @Test
     public void testEqBaseType() throws Exception {
+        String plan = getFragmentPlan("select * from test_all_type where t1c in ('a', '01', 'c', 'd')");
+        assertContains(plan, "constant type: VARCHAR");
+        assertContains(plan, "equal join conjunct: 12: cast = 11: const_value");
+
         String eqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
-        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.VARCHAR);
+        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DECIMAL);
         try {
-            String plan = getFragmentPlan("select * from test_all_type where t1c in ('a', '01', 'c', 'd')");
-            assertContains(plan, "constant type: VARCHAR");
+            plan = getFragmentPlan("select * from test_all_type where t1c in ('01', '2', '3', '4')");
+            assertContains(plan, "constant type: DECIMAL128(38,9)");
             assertContains(plan, "equal join conjunct: 12: cast = 11: const_value");
+
+            // A constant that the InPredicate leaves to BE as a CAST
+            assertLargeInException("select * from tall where tc in ('a', 'b', 'c', 'd')",
+                    "does not fold to decimal(38, 9)");
         } finally {
             connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
         }
@@ -443,16 +449,22 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
 
     @Test
     public void testNullConstant() throws Exception {
-        // 10^38 - 1 does not fit the comparison type and folds to NULL, as in the InPredicate
-        String sql = "select * from test_all_type where id_decimal %s (99999999999999999999999999999999999999, 1.5, 2, 3)";
-        String plan = getFragmentPlan(String.format(sql, "in"));
-        assertContains(plan, "LEFT SEMI JOIN");
-        assertContains(plan, "constant count: 3");
+        String eqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DECIMAL);
+        try {
+            // 10^38 does not fit DECIMAL128(38,9) and folds to NULL, as in the InPredicate
+            String sql = "select * from test_all_type where t1c %s ('01', '2', '3', '100000000000000000000000000000000000000')";
+            String plan = getFragmentPlan(String.format(sql, "in"));
+            assertContains(plan, "LEFT SEMI JOIN");
+            assertContains(plan, "constant count: 3");
 
-        // NOT IN with NULL is never true
-        plan = getFragmentPlan(String.format(sql, "not in"));
-        assertNotContains(plan, "RAW_VALUES");
-        assertContains(plan, "EMPTYSET");
+            // NOT IN with NULL is never true
+            plan = getFragmentPlan(String.format(sql, "not in"));
+            assertNotContains(plan, "RAW_VALUES");
+            assertContains(plan, "EMPTYSET");
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
+        }
     }
 
     @Test
