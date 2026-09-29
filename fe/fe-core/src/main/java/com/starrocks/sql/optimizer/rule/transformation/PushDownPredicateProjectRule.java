@@ -19,6 +19,7 @@ import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
@@ -108,41 +109,56 @@ public class PushDownPredicateProjectRule extends TransformationRule {
         // Check if the filter's predicate contains non-deterministic functions
         // If it does, don't push down the predicate below project to avoid incorrect results
         List<ScalarOperator> compoundAndPredicates = Utils.extractConjuncts(filter.getPredicate());
-        Set<ScalarOperator> deterministicPredicates = new HashSet<>();
-        Set<ScalarOperator> nonDeterministicPredicates = new HashSet<>();
+        Set<ScalarOperator> pushedPredicates = new HashSet<>();
+        Set<ScalarOperator> keptPredicates = new HashSet<>();
         for (var entry : project.getColumnRefMap().entrySet()) {
             if (Utils.hasNonDeterministicFunc(entry.getValue())) {
                 compoundAndPredicates.forEach(scalarOperator -> {
                     if (scalarOperator.getUsedColumns().contains(entry.getKey())) {
-                        nonDeterministicPredicates.add(scalarOperator);
+                        keptPredicates.add(scalarOperator);
                     }
                 });
             }
         }
         compoundAndPredicates.forEach(predicate -> {
-            if (!nonDeterministicPredicates.contains(predicate)) {
-                deterministicPredicates.add(predicate);
+            if (!keptPredicates.contains(predicate)) {
+                pushedPredicates.add(predicate);
             }
         });
 
-        // if all non-deterministic predicate, do not push down!
-        if (deterministicPredicates.isEmpty()) {
+        // Below the project the predicate gets a copy of the expression of a column for each reference, as a merge of
+        // two projects does. When the copies are too large, we keep the predicates on the columns with expressions
+        // above the project and push only the predicates on the other columns.
+        if (!pushedPredicates.isEmpty() && ReplaceColumnRefRewriter.isTooLarge(
+                List.of(Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, pushedPredicates)),
+                project.getColumnRefMap())) {
+            for (ScalarOperator predicate : List.copyOf(pushedPredicates)) {
+                ColumnRefSet usedColumns = predicate.getUsedColumns();
+                if (project.getColumnRefMap().entrySet().stream().anyMatch(
+                        entry -> entry.getValue().getNumFlatChildren() > 1 && usedColumns.contains(entry.getKey()))) {
+                    pushedPredicates.remove(predicate);
+                    keptPredicates.add(predicate);
+                }
+            }
+        }
+
+        // Nothing to push down
+        if (pushedPredicates.isEmpty()) {
             return Lists.newArrayList();
         }
 
-        ScalarOperator deterministicPredicateTree;
-        if (nonDeterministicPredicates.isEmpty()) {
-            deterministicPredicateTree = filter.getPredicate();
+        ScalarOperator pushedPredicateTree;
+        if (keptPredicates.isEmpty()) {
+            pushedPredicateTree = filter.getPredicate();
         } else {
-            deterministicPredicateTree =
-                    Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, deterministicPredicates);
+            pushedPredicateTree = Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, pushedPredicates);
         }
 
-        ScalarOperator nonDeterministicPredicateTree =
-                Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, nonDeterministicPredicates);
+        ScalarOperator keptPredicateTree = Utils.createCompound(CompoundPredicateOperator.CompoundType.AND,
+                keptPredicates);
 
         ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(project.getColumnRefMap());
-        ScalarOperator newPredicate = rewriter.rewrite(deterministicPredicateTree);
+        ScalarOperator newPredicate = rewriter.rewrite(pushedPredicateTree);
 
         // try rewrite new predicate
         // e.g. : select 1 as b, MIN(v1) from t0 having (b + 1) != b;
@@ -154,10 +170,8 @@ public class PushDownPredicateProjectRule extends TransformationRule {
 
         OptExpression newProject = OptExpression.create(project, newFilter);
         OptExpression root;
-        if (!nonDeterministicPredicates.isEmpty()) {
-            OptExpression nonDeterministicFilter =
-                    OptExpression.create(new LogicalFilterOperator(nonDeterministicPredicateTree), newProject);
-            root = nonDeterministicFilter;
+        if (!keptPredicates.isEmpty()) {
+            root = OptExpression.create(new LogicalFilterOperator(keptPredicateTree), newProject);
         } else {
             root = newProject;
         }

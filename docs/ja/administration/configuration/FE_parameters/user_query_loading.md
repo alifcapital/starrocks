@@ -642,7 +642,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ### `max_scalar_operator_flat_children`
 
-- Default：10000
+- Default：100000
 - Type：Int
 - Unit：-
 - 変更可能：Yes

@@ -651,7 +651,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 
 ### `max_scalar_operator_flat_children`
 
-- 默认值: 10000
+- 默认值: 100000
 - 类型: Int
 - 单位: -
 - 是否可变: Yes

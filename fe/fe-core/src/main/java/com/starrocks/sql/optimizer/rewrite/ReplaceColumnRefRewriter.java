@@ -15,17 +15,24 @@
 package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.starrocks.common.Config;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 // Replace the corresponding ColumnRef with ScalarOperator
 public class ReplaceColumnRefRewriter {
+    // We skip an optional rewrite, such as a merge of two projections, when it copies more nodes than this: we expect
+    // a separate projection that computes the value once to cost less than that many copies. See isTooLarge.
+    public static final long MAX_COPIED_NODES = 10000;
+
     private final Rewriter rewriter = new Rewriter();
     private final Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap;
 
@@ -52,6 +59,67 @@ public class ReplaceColumnRefRewriter {
         // Use cached value (true) since clone() has already cleared the cache
         result.checkMaxFlatChildren(true);
         return result;
+    }
+
+    /**
+     * We want to know how much the replacement of the column refs of the operators with their values in the map
+     * grows the plan. A plan that computes a value once and refers to it has the value once. After the replacement
+     * every use of the column ref has its own copy, so we count the nodes of the value for each use after the first.
+     */
+    public static long copiedNodes(Collection<? extends ScalarOperator> operators,
+                                   Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap) {
+        Map<ColumnRefOperator, Integer> uses = Maps.newHashMap();
+        for (ScalarOperator operator : operators) {
+            countUses(operator, operatorMap, uses);
+        }
+        long copied = 0;
+        for (Map.Entry<ColumnRefOperator, Integer> entry : uses.entrySet()) {
+            // A value of one node only takes the place of the column ref, so we count the nodes after the first
+            copied += (long) (entry.getValue() - 1) * (operatorMap.get(entry.getKey()).getNumFlatChildren() - 1);
+        }
+        return copied;
+    }
+
+    /**
+     * The nodes of the operator after replacing its column refs with their values in the map.
+     */
+    public static long replacedNodes(ScalarOperator operator,
+                                     Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap) {
+        if (operator instanceof ColumnRefOperator && operatorMap.containsKey(operator)) {
+            return operatorMap.get(operator).getNumFlatChildren();
+        }
+        long nodes = 1;
+        for (ScalarOperator child : operator.getChildren()) {
+            nodes += replacedNodes(child, operatorMap);
+        }
+        return nodes;
+    }
+
+    /**
+     * We use this to skip an optional rewrite, such as a merge of two projections. We skip it when it copies more
+     * than MAX_COPIED_NODES nodes, or when it makes an operator larger than max_scalar_operator_flat_children: the
+     * rewrite would fail the query with "Expression too complex", while the plan without the rewrite is correct.
+     */
+    public static boolean isTooLarge(Collection<? extends ScalarOperator> operators,
+                                     Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap) {
+        if (copiedNodes(operators, operatorMap) > MAX_COPIED_NODES) {
+            return true;
+        }
+        int maxNodes = Config.max_scalar_operator_flat_children;
+        return maxNodes > 0 && operators.stream().anyMatch(operator -> replacedNodes(operator, operatorMap) > maxNodes);
+    }
+
+    private static void countUses(ScalarOperator operator, Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap,
+                                  Map<ColumnRefOperator, Integer> uses) {
+        if (operator instanceof ColumnRefOperator) {
+            if (operatorMap.containsKey(operator)) {
+                uses.merge((ColumnRefOperator) operator, 1, Integer::sum);
+            }
+            return;
+        }
+        for (ScalarOperator child : operator.getChildren()) {
+            countUses(child, operatorMap, uses);
+        }
     }
 
     public ScalarOperator rewriteWithoutClone(ScalarOperator origin) {

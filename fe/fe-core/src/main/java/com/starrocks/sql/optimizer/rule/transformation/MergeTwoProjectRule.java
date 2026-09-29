@@ -44,6 +44,15 @@ public class MergeTwoProjectRule extends TransformationRule {
         LogicalProjectOperator firstProject = (LogicalProjectOperator) input.getOp();
         LogicalProjectOperator secondProject = (LogicalProjectOperator) input.getInputs().get(0).getOp();
 
+        // The merge puts a copy of the expression of a column of the second project at each reference to it. When
+        // each level of nested projects refers to the level below more than once, as nested CASE WHEN do, the merged
+        // expressions grow exponentially with the levels, while two projects compute each expression once. So we
+        // keep the projects apart when the merge copies too much.
+        if (ReplaceColumnRefRewriter.isTooLarge(firstProject.getColumnRefMap().values(),
+                secondProject.getColumnRefMap())) {
+            return Lists.newArrayList();
+        }
+
         ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
         ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(secondProject.getColumnRefMap());
         Map<ColumnRefOperator, ScalarOperator> resultMap = Maps.newHashMap();

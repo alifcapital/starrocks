@@ -651,7 +651,7 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 
 ### `max_scalar_operator_flat_children`
 
-- Default: 10000
+- Default: 100000
 - Type: Int
 - Unit: -
 - Is mutable: Yes
