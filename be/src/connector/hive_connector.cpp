@@ -74,10 +74,12 @@ const TupleDescriptor* HiveDataSourceProvider::tuple_descriptor(RuntimeState* st
 // ================================
 
 HiveDataSource::HiveDataSource(const HiveDataSourceProvider* provider, const TScanRange& scan_range)
-        : _provider(provider), _scan_range(scan_range.hdfs_scan_range) {}
+        : HiveDataSource(provider, scan_range.hdfs_scan_range) {}
 
 HiveDataSource::HiveDataSource(const HiveDataSourceProvider* provider, const THdfsScanRange& hdfs_scan_range)
-        : _provider(provider), _scan_range(hdfs_scan_range) {}
+        : _provider(provider), _scan_range(hdfs_scan_range) {
+    _scanner_ctx.page_index_read_advisor = provider->_page_index_read_advisor;
+}
 
 Status HiveDataSource::_check_all_slots_nullable() {
     for (const auto* slot : _tuple_desc->slots()) {

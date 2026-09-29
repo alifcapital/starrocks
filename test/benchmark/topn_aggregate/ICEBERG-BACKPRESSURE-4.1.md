@@ -6,7 +6,7 @@ The large main-versus-our-4.1 difference cannot be attributed to #75444 from the
 results. Both builds here include our inline aggregation and the same aggregate
 TopN ties/cost implementation. Inline aggregation itself was not ablated.
 
-Branch `exp/topn-backpressure-4.1`, base `my41_tmp_0725` at `58b91f39734`.
+Branch `feature/topn-backpressure-4.1` (renamed from `exp/`), base `my41_tmp_0725` at `58b91f39734`.
 Backport `beb9223fded`, scan fix `78d10f01e07`; subsequent commits add tests and the
 benchmark harness. Tested source manifest ends at `46d321b81ad`. No merge into
 my41 or the statistics integration branch was performed.
@@ -140,3 +140,64 @@ Recommendation: keep the validated backport isolated for now. Correctness checks
 pass, but these workload measurements alone do not justify it as a performance
 improvement for our4.1. They also do not establish the earlier cross-version gap's
 cause; attribution to inline aggregation would need its own controlled ablation.
+
+## Parquet page index follow-up on 2026-09-30
+
+The accepted backpressure build above is the baseline for this separate fix,
+`fix/parquet-page-index-effectiveness-4.1`. The patch reuses footer coverage
+proofs and backs off unproductive page-index evaluation for streaming TopN RFs.
+It keeps residual row predicates and periodically retries; it does not disable RF.
+Both HiveDataSource constructors now initialize the scan-local feedback.
+
+A controlled patched/baseline/patched sequence kept the same FE process, snapshot
+IDs, settings, RANK/RF route and statistics source. No ANALYZE or production writes
+were performed. E2/A4r each ran 15 rounds of 11 queries in four rotating modes
+(660 timed SELECTs each); E3 repeated three queries for 31 rounds (372 SELECTs).
+Each result was checked against complete group aggregates, accounting for LIMIT
+boundary ties. One failed A4 startup occurred before measurements while the
+restarted BE was briefly blacklisted; A4r is the completed replacement.
+
+These are medians for the **same RF plan**, baseline A4r versus patched E2, in ms.
+The change column is elapsed time: negative is faster. Small differences are not
+claimed as improvements. Query and scan data caches were disabled; these are not
+promises for production cache conditions.
+
+| Query | Baseline | Patched | Time change |
+|---|---:|---:|---:|
+| transactions_operation_provider | 144.99 | 146.08 | +0.8% |
+| transactions_source_destination | 130.61 | 129.99 | -0.5% |
+| multi_accounts | 183.89 | 184.54 | +0.4% |
+| multi_accounts_history | 116.51 | 82.69 | -29.0% |
+| multi_analytica_transactions | 247.89 | 196.66 | -20.7% |
+| multi_autopayments | 34.69 | 33.79 | -2.6% |
+| multi_users | 227.42 | 219.03 | -3.7% |
+| multi_visa_histories | 229.57 | 224.20 | -2.3% |
+| high_accounts | 122.58 | 117.81 | -3.9% |
+| high_accounts_history | 117.08 | 92.35 | -21.1% |
+| high_analytica_transactions | 233.91 | 183.00 | -21.8% |
+
+On `multi_users`, patched ordinary/RF/RF-without-page-index medians were
+195.89/219.03/194.99 ms. The patch reduces attempted index work but does not
+eliminate the latency of initial trials and periodic retries. It does **not**
+solve the entire users slowdown. Do not attribute a zero PageIndexTime in earlier
+profiles to zero IO: that path failed to update the timer. The completion fix
+populates the existing PageIndexTime with index-read and decoding time.
+
+Validation: Release BE build and 317 focused BE tests passed, including NaN,
+infinities, signed zero, NULL, null-safe equality, AND/OR coverage, both source
+constructors, and a real indexed Parquet fixture that skips once, retries a useful
+index, and retains all matching rows. No ASAN run was performed for this follow-up.
+
+The benchmark now accepts `--page-index-ab` to add the no-index RF control.
+Raw timings, plans, profiles and build/test logs are preserved in the local
+handbook directory `pr-72332-review/parquet-page-index/evidence/` and under
+`/home/eshishkin/adaptive-dop-byte-limit/pidx/evidence/` on the retained test box.
+
+Final binary validation (F1, BE SHA-256
+`4a5d9104225adbfbddac3230c8653368420630e63c716d08743413c710785b3e`):
+180 more timed Iceberg SELECTs passed their result oracle and reference-plan
+checks. Native TopN boundary tests passed 17 SELECTs each with adaptive DOP off
+and on, including forced spill. On users, ordinary/RF/no-index medians were
+187.77/216.56/189.08 ms. The corrected profile reports 11.28–25.85 ms of index
+read/decode time per scan driver, consistent with the remaining latency from
+probe/retry work. Do not sum parallel driver times into query wall time.

@@ -23,6 +23,7 @@
 #include "connector/hive_chunk_sink.h"
 #include "exec/connector_scan_node.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
+#include "formats/parquet/page_index_read_advisor.h"
 
 namespace starrocks::connector {
 
@@ -77,6 +78,8 @@ protected:
     const THdfsScanNode _hdfs_scan_node;
     int64_t _max_file_length = 0;
     mutable std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
+    std::shared_ptr<parquet::PageIndexReadAdvisor> _page_index_read_advisor =
+            std::make_shared<parquet::PageIndexReadAdvisor>();
     // Shared footer-prefetch open context (one FileSystem per scan), built once and reused
     // across the initial and incremental build_footer_prefetch_items calls.
     std::shared_ptr<pipeline::FooterOpenContext> _footer_open_ctx;

@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <set>
 
@@ -30,6 +32,7 @@
 #include "column/nullable_column.h"
 #include "column/struct_column.h"
 #include "common/logging.h"
+#include "connector/hive_connector.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "exprs/binary_predicate.h"
 #include "exprs/expr_context.h"
@@ -38,10 +41,12 @@
 #include "formats/parquet/column_chunk_reader.h"
 #include "formats/parquet/column_materializer.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/page_index_read_advisor.h"
 #include "formats/parquet/page_reader.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
 #include "formats/parquet/parquet_test_util/util.h"
 #include "formats/parquet/parquet_ut_base.h"
+#include "formats/parquet/predicate_filter_evaluator.h"
 #include "fs/fs.h"
 #include "io/shared_buffered_input_stream.h"
 #include "runtime/descriptor_helper.h"
@@ -3838,6 +3843,324 @@ TEST_F(FileReaderTest, update_rf_and_filter_row_group) {
     chunk->reset();
     auto st = file_reader->get_next(&chunk);
     ASSERT_TRUE(st.is_end_of_file());
+}
+
+TEST(ParquetPageIndexAdvisorTest, BothDataSourceConstructorsShareScanFeedback) {
+    THdfsScanNode node;
+    connector::HiveDataSourceProvider provider(nullptr, node);
+    TScanRange full_range;
+    THdfsScanRange hdfs_range;
+    connector::HiveDataSource ordinary(&provider, full_range);
+    connector::HiveDataSource split(&provider, hdfs_range);
+    ASSERT_NE(nullptr, ordinary._scanner_ctx.page_index_read_advisor);
+    ASSERT_EQ(ordinary._scanner_ctx.page_index_read_advisor, split._scanner_ctx.page_index_read_advisor);
+    connector::HiveDataSourceProvider other_provider(nullptr, node);
+    connector::HiveDataSource other(&other_provider, full_range);
+    EXPECT_NE(ordinary._scanner_ctx.page_index_read_advisor, other._scanner_ctx.page_index_read_advisor);
+}
+
+TEST(ParquetPageIndexAdvisorTest, RechecksAndResetsAfterBenefit) {
+    PageIndexReadAdvisor advisor;
+    const std::string key = "v<=10 OR v IS NULL";
+    EXPECT_TRUE(advisor.should_read(key));
+    advisor.observe(key, false);
+    EXPECT_TRUE(advisor.should_read(key)); // one miss never suppresses index reads
+    advisor.observe(key, false);
+    EXPECT_FALSE(advisor.should_read(key));
+    EXPECT_TRUE(advisor.should_read(key)); // retry despite unchanged bounds
+    advisor.observe(key, false);
+    EXPECT_FALSE(advisor.should_read(key));
+    EXPECT_FALSE(advisor.should_read(key));
+    EXPECT_TRUE(advisor.should_read(key));
+    advisor.observe(key, true);
+    for (int i = 0; i < 100; ++i) EXPECT_TRUE(advisor.should_read(key));
+}
+
+TEST(ParquetPageIndexAdvisorTest, ChangedBoundsAndIndependentScans) {
+    PageIndexReadAdvisor advisor;
+    advisor.observe("v<=10", false);
+    advisor.observe("v<=10", false);
+    EXPECT_TRUE(advisor.should_read("v<=5"));
+    EXPECT_FALSE(advisor.should_read("v<=10"));
+    PageIndexReadAdvisor other;
+    EXPECT_TRUE(other.should_read("v<=10"));
+    // Unbounded changing predicates are safe to forget and must remain bounded.
+    for (int i = 0; i < 1000; ++i) advisor.observe(std::to_string(i), false);
+    EXPECT_TRUE(advisor.should_read("v<=10"));
+}
+
+TEST(ParquetZoneMapCoverageTest, ComparisonBoundariesAndNulls) {
+    ObjectPool pool;
+    auto type = get_type_info(TYPE_INT);
+    auto* is_null = pool.add(new_column_null_predicate(type, 0, true));
+    auto* not_null = pool.add(new_column_null_predicate(type, 0, false));
+    using Utils = PredicateFilterEvaluatorUtils;
+    for (int bound = -4; bound <= 4; ++bound) {
+        auto value = std::to_string(bound);
+        std::vector<ColumnPredicate*> predicates = {
+                pool.add(new_column_eq_predicate(type, 0, value)), pool.add(new_column_lt_predicate(type, 0, value)),
+                pool.add(new_column_le_predicate(type, 0, value)), pool.add(new_column_gt_predicate(type, 0, value)),
+                pool.add(new_column_ge_predicate(type, 0, value))};
+        for (int lo = -3; lo <= 3; ++lo) {
+            for (int hi = lo; hi <= 3; ++hi) {
+                for (bool nulls : {false, true}) {
+                    ZoneMapDetail detail(Datum(lo), Datum(hi), nulls);
+                    for (auto* pred : predicates) {
+                        bool every = true;
+                        for (int x = lo; x <= hi; ++x) {
+                            bool pass = pred->type() == PredicateType::kEQ   ? x == bound
+                                        : pred->type() == PredicateType::kLT ? x < bound
+                                        : pred->type() == PredicateType::kLE ? x <= bound
+                                        : pred->type() == PredicateType::kGT ? x > bound
+                                                                             : x >= bound;
+                            every &= pass;
+                        }
+                        EXPECT_EQ(every && !nulls, Utils::zonemap_all_match({pred}, detail, CompoundNodeType::AND));
+                        EXPECT_EQ(every, Utils::zonemap_all_match({pred, is_null}, detail, CompoundNodeType::OR));
+                        EXPECT_FALSE(Utils::zonemap_all_match({pred, is_null}, detail, CompoundNodeType::AND));
+                    }
+                    EXPECT_EQ(!nulls, Utils::zonemap_all_match({not_null}, detail, CompoundNodeType::AND));
+                }
+            }
+        }
+    }
+    ZoneMapDetail nulls(Datum{}, Datum{}, true);
+    EXPECT_TRUE(Utils::zonemap_all_match({is_null}, nulls, CompoundNodeType::AND));
+    EXPECT_FALSE(Utils::zonemap_all_match({not_null}, nulls, CompoundNodeType::AND));
+    auto* ne = pool.add(new_column_ne_predicate(type, 0, "0"));
+    EXPECT_FALSE(Utils::zonemap_all_match({ne}, ZoneMapDetail(Datum(-1), Datum(1), false), CompoundNodeType::AND));
+    auto* float_le = pool.add(new_column_le_predicate(get_type_info(TYPE_FLOAT), 0, "10"));
+    EXPECT_FALSE(Utils::zonemap_all_match({float_le}, ZoneMapDetail(Datum(1.0f), Datum(2.0f), false),
+                                          CompoundNodeType::AND));
+}
+
+TEST(ParquetZoneMapCoverageTest, FloatingSpecialValuesNeverProveCoverage) {
+    ObjectPool pool;
+    using Utils = PredicateFilterEvaluatorUtils;
+    auto check = [&]<typename T>(LogicalType logical_type) {
+        auto type = get_type_info(logical_type);
+        const T nan = std::numeric_limits<T>::quiet_NaN();
+        const T inf = std::numeric_limits<T>::infinity();
+        const std::vector<T> values = {nan, -inf, T(-1), T(-0.0), T(0.0), T(1), inf};
+        auto* is_null = pool.add(new_column_null_predicate(type, 0, true));
+        for (T value : values) {
+            const Datum operand(value);
+            const std::vector<ColumnPredicate*> preds = {
+                    pool.add(new_column_eq_predicate_from_datum(type, 0, operand)),
+                    pool.add(new_column_lt_predicate_from_datum(type, 0, operand)),
+                    pool.add(new_column_le_predicate_from_datum(type, 0, operand)),
+                    pool.add(new_column_gt_predicate_from_datum(type, 0, operand)),
+                    pool.add(new_column_ge_predicate_from_datum(type, 0, operand))};
+            for (T lo : values) {
+                for (T hi : values) {
+                    for (bool has_null : {false, true}) {
+                        const ZoneMapDetail detail(Datum(lo), Datum(hi), has_null);
+                        for (auto* pred : preds) {
+                            EXPECT_FALSE(Utils::zonemap_all_match({pred}, detail, CompoundNodeType::AND));
+                            EXPECT_FALSE(Utils::zonemap_all_match({pred, is_null}, detail, CompoundNodeType::OR));
+                        }
+                    }
+                }
+            }
+        }
+        // Nullness itself is exact, independent of NaN/Infinity in non-null rows.
+        const ZoneMapDetail nulls(Datum{}, Datum{}, true);
+        EXPECT_TRUE(Utils::zonemap_all_match({is_null}, nulls, CompoundNodeType::AND));
+    };
+    check.template operator()<float>(TYPE_FLOAT);
+    check.template operator()<double>(TYPE_DOUBLE);
+}
+
+TEST_F(FileReaderTest, null_safe_equality_retains_matching_parquet_rows) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    for (bool page_index : {false, true}) {
+        for (auto op : {TExprOpcode::EQ, TExprOpcode::EQ_FOR_NULL}) {
+            auto reader = _create_file_reader(path);
+            Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {""}};
+            auto* ctx = _create_scan_context(slots, path);
+            ctx->options.parquet_page_index_enable = page_index;
+            std::vector<TExpr> expressions;
+            ParquetUTBase::append_int_conjunct(op, 0, 5000, &expressions);
+            std::vector<ExprContext*> conjuncts;
+            ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+            auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+            ParquetUTBase::setup_conjuncts_manager(conjuncts, _rf_probe_collector, tuple, _runtime_state, ctx);
+            ASSERT_OK(reader->init(ctx));
+            ChunkPtr chunk = std::make_shared<Chunk>();
+            _append_column_for_chunk(TYPE_INT, &chunk);
+            size_t matches = 0;
+            while (true) {
+                chunk->reset();
+                auto st = reader->get_next(&chunk);
+                ASSERT_TRUE(st.ok() || st.is_end_of_file()) << st.to_string();
+                for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                    matches += chunk->get_column_by_slot_id(0)->get(i).get_int32() == 5000;
+                }
+                if (st.is_end_of_file()) break;
+            }
+            // Residual expression evaluation can happen above FileReader; this
+            // assertion checks that pruning never discards the matching row.
+            EXPECT_EQ(1, matches);
+        }
+    }
+}
+
+TEST_F(FileReaderTest, floating_null_safe_parquet_pruning) {
+    const std::string path = "./be/test/formats/parquet/test_data/coverage_special_values.parquet";
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::vector<std::optional<double>> values = {nan, -inf, -1, -0.0, 0.0, 1, inf, std::nullopt};
+    for (bool page_index : {false, true}) {
+        for (auto op : {TExprOpcode::EQ, TExprOpcode::EQ_FOR_NULL, TExprOpcode::LT, TExprOpcode::LE, TExprOpcode::GT,
+                        TExprOpcode::GE}) {
+            for (auto bound : values) {
+                if (!bound.has_value() && op != TExprOpcode::EQ_FOR_NULL) continue;
+                auto passes = [&](std::optional<double> v) {
+                    if (!v.has_value() || !bound.has_value()) {
+                        return op == TExprOpcode::EQ_FOR_NULL && v.has_value() == bound.has_value();
+                    }
+                    double x = *v;
+                    switch (op) {
+                    case TExprOpcode::EQ:
+                        return x == *bound;
+                    case TExprOpcode::EQ_FOR_NULL:
+                        return x == *bound || (std::isnan(x) && std::isnan(*bound));
+                    case TExprOpcode::LT:
+                        return x < *bound;
+                    case TExprOpcode::LE:
+                        return x <= *bound;
+                    case TExprOpcode::GT:
+                        return x > *bound;
+                    case TExprOpcode::GE:
+                        return x >= *bound;
+                    default:
+                        return false;
+                    }
+                };
+                auto reader = _create_file_reader(path);
+                Utils::SlotDesc slots[] = {{"v", TYPE_DOUBLE_DESC, 0}, {""}};
+                auto* ctx = _create_scan_context(slots, path);
+                ctx->options.parquet_page_index_enable = page_index;
+                TExprNode literal;
+                literal.__set_type(TYPE_DOUBLE_DESC.to_thrift());
+                literal.__set_num_children(0);
+                literal.__set_is_nullable(!bound.has_value());
+                literal.__set_node_type(bound.has_value() ? TExprNodeType::FLOAT_LITERAL : TExprNodeType::NULL_LITERAL);
+                if (bound.has_value()) {
+                    TFloatLiteral value;
+                    value.__set_value(*bound);
+                    literal.__set_float_literal(value);
+                }
+                TExpr expr;
+                expr.nodes = {ExprsTestHelper::create_binary_pred_node(TPrimitiveType::DOUBLE, op),
+                              ExprsTestHelper::create_slot_expr_node(0, 0, TYPE_DOUBLE_DESC.to_thrift(), true),
+                              literal};
+                std::vector<ExprContext*> conjuncts;
+                std::vector<TExpr> expressions{expr};
+                ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+                auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+                ParquetUTBase::setup_conjuncts_manager(conjuncts, _rf_probe_collector, tuple, _runtime_state, ctx);
+                ASSERT_OK(reader->init(ctx));
+                ChunkPtr chunk = std::make_shared<Chunk>();
+                _append_column_for_chunk(TYPE_DOUBLE, &chunk);
+                size_t matches = 0;
+                while (true) {
+                    chunk->reset();
+                    auto st = reader->get_next(&chunk);
+                    ASSERT_TRUE(st.ok() || st.is_end_of_file()) << st.to_string();
+                    for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                        auto v = chunk->get_column_by_slot_id(0)->get(i);
+                        matches += passes(v.is_null() ? std::nullopt : std::optional<double>(v.get_double()));
+                    }
+                    if (st.is_end_of_file()) break;
+                }
+                EXPECT_EQ(std::count_if(values.begin(), values.end(), passes), matches)
+                        << "opcode=" << op << " bound=" << (bound.has_value() ? std::to_string(*bound) : "NULL")
+                        << " page_index=" << page_index;
+            }
+        }
+    }
+}
+
+TEST_F(FileReaderTest, footer_coverage_skips_page_index_and_rechecks_new_bounds) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    // Same file, a covering bound, then a useful narrowed bound, then covering again.
+    // Coverage must not persist across filter versions/evaluations.
+    for (int bound : {30000, 5000, 30000}) {
+        auto reader = _create_file_reader(path);
+        Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {""}};
+        auto* ctx = _create_scan_context(slots, path);
+        std::vector<TExpr> expressions;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LE, 0, bound, &expressions);
+        std::vector<ExprContext*> conjuncts;
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+        auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+        ParquetUTBase::setup_conjuncts_manager(conjuncts, _rf_probe_collector, tuple, _runtime_state, ctx);
+        const auto tried_before = g_hdfs_stats.page_index_tried_counter;
+        ASSERT_OK(reader->init(ctx));
+        if (bound == 30000) {
+            EXPECT_EQ(2, reader->row_group_size());
+            EXPECT_EQ(tried_before, g_hdfs_stats.page_index_tried_counter);
+        } else {
+            EXPECT_EQ(1, reader->row_group_size());
+            EXPECT_GT(g_hdfs_stats.page_index_tried_counter, tried_before);
+            EXPECT_LT(reader->group_readers()[0]->get_range().span_size(), 10000);
+        }
+    }
+}
+
+TEST_F(FileReaderTest, page_index_feedback_retries_useful_index_without_losing_rows) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    auto advisor = std::make_shared<PageIndexReadAdvisor>();
+    auto descriptor = gen_runtime_filter_desc(0);
+    ASSERT_TRUE(descriptor.ok());
+    _rf_probe_collector->add_descriptor(descriptor.value());
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        auto reader = _create_file_reader(path);
+        Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {""}};
+        auto* ctx = _create_scan_context(slots, path);
+        std::vector<TExpr> expressions;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LE, 0, 5000, &expressions);
+        std::vector<ExprContext*> conjuncts;
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+        auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+        ParquetUTBase::setup_conjuncts_manager(conjuncts, nullptr, tuple, _runtime_state, ctx);
+        ctx->runtime_filter_collector = _rf_probe_collector;
+        ctx->page_index_read_advisor = advisor;
+        const auto key = ctx->predicates.predicate_tree.root().debug_string();
+        if (attempt == 0) {
+            // Previous files had no useful page index. Skip once, then retry on this
+            // file, whose index is useful, and retain it after observing that benefit.
+            advisor->observe(key, false);
+            advisor->observe(key, false);
+        }
+        const auto tried_before = g_hdfs_stats.page_index_tried_counter;
+        const auto index_ns_before = g_hdfs_stats.page_index_ns;
+        ASSERT_OK(reader->init(ctx));
+        ASSERT_EQ(1, reader->row_group_size());
+        if (attempt == 0) {
+            EXPECT_EQ(tried_before, g_hdfs_stats.page_index_tried_counter);
+            EXPECT_EQ(index_ns_before, g_hdfs_stats.page_index_ns);
+            EXPECT_EQ(10000, reader->group_readers()[0]->get_range().span_size());
+        } else {
+            EXPECT_GT(g_hdfs_stats.page_index_tried_counter, tried_before);
+            EXPECT_GT(g_hdfs_stats.page_index_ns, index_ns_before);
+            EXPECT_LT(reader->group_readers()[0]->get_range().span_size(), 10000);
+        }
+        ChunkPtr chunk = std::make_shared<Chunk>();
+        _append_column_for_chunk(TYPE_INT, &chunk);
+        size_t matches = 0;
+        while (true) {
+            chunk->reset();
+            auto status = reader->get_next(&chunk);
+            ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status.to_string();
+            for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                matches += chunk->get_column_by_slot_id(0)->get(i).get_int32() <= 5000;
+            }
+            if (status.is_end_of_file()) break;
+        }
+        EXPECT_EQ(5000, matches);
+    }
 }
 
 TEST_F(FileReaderTest, filter_page_index_with_rf_has_null) {

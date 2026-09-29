@@ -17,6 +17,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 
 #include "column/fixed_length_column.h"
@@ -805,6 +806,64 @@ TEST_F(VectorizedBinaryPredicateMapTest, mapEqExpr2) {
     for (int j = 0; j < v->size(); ++j) {
         ASSERT_FALSE(v->get_data()[j]);
     }
+}
+
+TEST_F(VectorizedBinaryPredicateTest, floatingSpecialValueComparisonMatrix) {
+    auto check = [&]<LogicalType LT>() {
+        using T = typename RunTimeTypeTraits<LT>::CppType;
+        const T nan = std::numeric_limits<T>::quiet_NaN();
+        const T inf = std::numeric_limits<T>::infinity();
+        const std::vector<T> values = {nan, -inf, T(-1), T(-0.0), T(0.0), T(1), inf};
+        for (auto op : {TExprOpcode::EQ, TExprOpcode::EQ_FOR_NULL, TExprOpcode::NE, TExprOpcode::LT, TExprOpcode::LE,
+                        TExprOpcode::GT, TExprOpcode::GE}) {
+            for (T a : values) {
+                for (T b : values) {
+                    auto node = expr_node;
+                    node.opcode = op;
+                    node.child_type = to_thrift(LT);
+                    std::unique_ptr<Expr> expr(VectorizedBinaryPredicateFactory::from_thrift(node));
+                    node.type = gen_type_desc(to_thrift(LT));
+                    MockVectorizedExpr<LT> left(node, 10, a);
+                    MockVectorizedExpr<LT> right(node, 10, b);
+                    expr->_children = {&left, &right};
+                    bool expected = false;
+                    switch (op) {
+                    case TExprOpcode::EQ:
+                        expected = a == b;
+                        break;
+                    case TExprOpcode::EQ_FOR_NULL:
+                        expected = a == b || (std::isnan(a) && std::isnan(b));
+                        break;
+                    case TExprOpcode::NE:
+                        expected = a != b;
+                        break;
+                    case TExprOpcode::LT:
+                        expected = a < b;
+                        break;
+                    case TExprOpcode::LE:
+                        expected = a <= b;
+                        break;
+                    case TExprOpcode::GT:
+                        expected = a > b;
+                        break;
+                    case TExprOpcode::GE:
+                        expected = a >= b;
+                        break;
+                    default:
+                        FAIL();
+                    }
+                    auto result = expr->evaluate(nullptr, nullptr);
+                    ASSERT_FALSE(result->is_nullable());
+                    auto column = BooleanColumn::static_pointer_cast(result);
+                    for (auto value : column->get_data()) {
+                        EXPECT_EQ(expected, value) << "type=" << LT << " op=" << op << " a=" << a << " b=" << b;
+                    }
+                }
+            }
+        }
+    };
+    check.template operator()<TYPE_FLOAT>();
+    check.template operator()<TYPE_DOUBLE>();
 }
 
 // Null-safe equal (<=>) treats NaN as not distinct from NaN for float/double, unlike a plain '=' which
