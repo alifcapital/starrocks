@@ -705,7 +705,7 @@ public class ScalarOperatorFunctions {
         return ConstantOperator.createTinyInt((byte) arg.getDatetime().getDayOfMonth());
     }
 
-    @ConstantFunction(name = "date", argTypes = {DATETIME}, returnType = DATE)
+    @ConstantFunction(name = "date", argTypes = {DATETIME}, returnType = DATE, isMonotonic = true)
     public static ConstantOperator date(ConstantOperator arg) {
         LocalDateTime datetime = LocalDateTime.of(arg.getDate().toLocalDate(), LocalTime.MIN);
         return ConstantOperator.createDateOrNull(datetime);
