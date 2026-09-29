@@ -19,6 +19,7 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
@@ -39,48 +40,84 @@ public final class MonotonicFilterDerivation {
         Set<ScalarOperator> conjuncts = new LinkedHashSet<>(originals);
         for (ScalarOperator original : originals) {
             // Do not descend into OR, NOT, IS NULL or other boolean/value expressions.
-            ScalarOperator bound = derive(original);
-            if (bound != original) {
-                bound = new ScalarOperatorRewriter().rewrite(bound,
+            Bound bound = derive(original);
+            if (bound.predicate() != original) {
+                ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(bound.predicate(),
                         ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
-                conjuncts.addAll(Utils.extractConjuncts(bound));
+                for (ScalarOperator conjunct : Utils.extractConjuncts(rewritten)) {
+                    // We want bounds that let the scan skip files and row groups by min/max, which works only for a
+                    // comparison of a column with a constant. A bound on an expression of a column skips nothing,
+                    // and the scan would evaluate it on every row next to the original conjunct.
+                    if (!isColumnBound(conjunct)) {
+                        continue;
+                    }
+                    if (bound.necessary()) {
+                        // A necessary bound only helps the scan to skip files, and the original conjunct stays
+                        // and decides the rows. We mark the bound redundant and not estimated: we want the
+                        // statistics to count the rows of the original once, and a materialized view rewrite
+                        // must not require the bound from the view.
+                        conjunct.setRedundant(true);
+                        conjunct.setNotEvalEstimate(true);
+                    }
+                    conjuncts.add(conjunct);
+                }
             }
         }
         return conjuncts.size() == new LinkedHashSet<>(originals).size()
                 ? predicate : Utils.compoundAnd(conjuncts);
     }
 
-    private static ScalarOperator derive(ScalarOperator predicate) {
+    // A comparison of a column with a constant, or AND and OR of such comparisons
+    private static boolean isColumnBound(ScalarOperator operator) {
+        if (operator instanceof BinaryPredicateOperator) {
+            return operator.getChild(0).isColumnRef() && operator.getChild(1).isConstantRef();
+        }
+        if (operator instanceof CompoundPredicateOperator compound && !compound.isNot()) {
+            return compound.getChildren().stream().allMatch(MonotonicFilterDerivation::isColumnBound);
+        }
+        return false;
+    }
+
+    // A predicate derived from a conjunct. When a function on the way has no exact inverse, the predicate only follows
+    // from the conjunct, and we call it necessary: the conjunct must stay next to it. Otherwise it is equivalent.
+    private record Bound(ScalarOperator predicate, boolean necessary) {
+    }
+
+    private static Bound derive(ScalarOperator predicate) {
+        Bound none = new Bound(predicate, false);
         if (!(predicate instanceof BinaryPredicateOperator)
                 || !(predicate.getChild(0) instanceof CallOperator)
                 || !(predicate.getChild(1) instanceof ConstantOperator)
                 || ((ConstantOperator) predicate.getChild(1)).isNull()) {
-            return predicate;
+            return none;
         }
         if (predicate.getChild(0) instanceof CastOperator) {
-            return StringDatePredicateDerivation.derive((BinaryPredicateOperator) predicate);
+            ScalarOperator bound = StringDatePredicateDerivation.derive((BinaryPredicateOperator) predicate);
+            return new Bound(bound, bound != predicate);
         }
         ConnectContext context = ConnectContext.get();
         if (context != null && !context.getSessionVariable().isEnableMonotonicPredicateRewrite()) {
-            return predicate;
+            return none;
         }
         CallOperator call = (CallOperator) predicate.getChild(0);
         MonotonicFunctionRegistry.PredicateInverse inverse = MonotonicFunctionRegistry.filterInverse(call.getFnName());
+        boolean necessary = inverse != null;
         if (inverse == null) {
             inverse = MonotonicFunctionRegistry.exactInverse(call.getFnName());
         }
         ScalarOperator dataChild = MonotonicFunctionRegistry.dataChildOf(call);
         if (inverse == null || dataChild == null) {
-            return predicate;
+            return none;
         }
         ScalarOperator bound = inverse.invert(call, dataChild,
                 ((BinaryPredicateOperator) predicate).getBinaryType(), (ConstantOperator) predicate.getChild(1))
                 .orElse(predicate);
         if (bound == predicate) {
-            return predicate;
+            return none;
         }
         // Each inverse removes one function layer; recursively derive bounds through a chain.
-        return Utils.compoundAnd(Utils.extractConjuncts(bound).stream()
-                .map(MonotonicFilterDerivation::derive).toList());
+        List<Bound> layers = Utils.extractConjuncts(bound).stream().map(MonotonicFilterDerivation::derive).toList();
+        return new Bound(Utils.compoundAnd(layers.stream().map(Bound::predicate).toList()),
+                necessary || layers.stream().anyMatch(Bound::necessary));
     }
 }

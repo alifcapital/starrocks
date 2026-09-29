@@ -227,18 +227,15 @@ public class FineGrainedRangePredicateTest extends DistributedEnvPlanTestBase {
         String sql = "select count(t1b + t1c) from test_all_type where id_date > '2021-01-02' and id_date < '2021-06-17'";
         list.add(Arguments.of(sql, ImmutableList.of("0:UNION",
                 "45: id_date >= '2021-06-01', 45: id_date < '2021-06-17'",
-                "date_trunc('month', 33: id_date) >= '2021-02-01', date_trunc('month', 33: id_date) < '2021-06-01'",
+                "33: id_date >= '2021-02-01', 33: id_date < '2021-06-01'",
                 "21: id_date > '2021-01-02', 21: id_date < '2021-02-01'")));
         sql = "select count(t1b + v1), max(v1) from test_all_type join t0 where id_datetime > '2021-01-02 12:11:02' " +
                 "and id_datetime< '2030-06-17 21:59:13'";
         list.add(Arguments.of(sql, ImmutableList.of("0:UNION",
                 "88: id_datetime >= '2030-06-01 00:00:00', 88: id_datetime < '2030-06-17 21:59:13'",
-                "date_trunc('month', 72: id_datetime) >= '2030-01-01 00:00:00', " +
-                        "date_trunc('month', 72: id_datetime) < '2030-06-01 00:00:00'",
-                "date_trunc('year', 56: id_datetime) >= '2022-01-01 00:00:00', " +
-                        "date_trunc('year', 56: id_datetime) < '2030-01-01 00:00:00'",
-                "date_trunc('month', 40: id_datetime) >= '2021-02-01 00:00:00', " +
-                        "date_trunc('month', 40: id_datetime) < '2022-01-01 00:00:00'",
+                "72: id_datetime >= '2030-01-01 00:00:00', 72: id_datetime < '2030-06-01 00:00:00'",
+                "56: id_datetime >= '2022-01-01 00:00:00', 56: id_datetime < '2030-01-01 00:00:00'",
+                "40: id_datetime >= '2021-02-01 00:00:00', 40: id_datetime < '2022-01-01 00:00:00'",
                 "24: id_datetime > '2021-01-02 12:11:02', 24: id_datetime < '2021-02-01 00:00:00'")));
         sql = "select count(t1b + v1), sum(t1c + v3), min(v1) from test_all_type join t0 " +
                 "where id_datetime > '2021-12-02 12:11:02' " +
@@ -246,10 +243,8 @@ public class FineGrainedRangePredicateTest extends DistributedEnvPlanTestBase {
         list.add(Arguments.of(sql, ImmutableList.of("0:UNION",
                 "other join predicates: CAST(85: v3 AS DOUBLE) + CAST(73: t1a AS DOUBLE) = 10.0",
                 "80: id_datetime >= '2023-06-01 00:00:00', 80: id_datetime < '2023-06-17 21:59:13'",
-                "date_trunc('month', 62: id_datetime) >= '2023-01-01 00:00:00', " +
-                        "date_trunc('month', 62: id_datetime) < '2023-06-01 00:00:00'",
-                "date_trunc('year', 44: id_datetime) >= '2022-01-01 00:00:00', " +
-                        "date_trunc('year', 44: id_datetime) < '2023-01-01 00:00:00'",
+                "62: id_datetime >= '2023-01-01 00:00:00', 62: id_datetime < '2023-06-01 00:00:00'",
+                "44: id_datetime >= '2022-01-01 00:00:00', 44: id_datetime < '2023-01-01 00:00:00'",
                 "26: id_datetime > '2021-12-02 12:11:02', 26: id_datetime < '2022-01-01 00:00:00'")));
 
         return list.stream();

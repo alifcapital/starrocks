@@ -192,15 +192,14 @@ public class MvTransparentUnionRewriteHiveTest extends MVTestBase {
                 String[] expects = {
                         "     TABLE: mv0\n" +
                                 "     PREAGGREGATION: ON\n" +
-                                "     PREDICATES: date_trunc('month', 22: l_shipdate) = '1998-01-01'\n" +
                                 "     partitions=3/4\n" +
                                 "     rollup: mv0\n" +
                                 "     tabletRatio=18/18",
                         "     TABLE: partitioned_db.lineitem_par\n" +
-                                "     PARTITION PREDICATES: date_trunc('month', 25: l_shipdate) = '1998-01-01', " +
-                                "(25: l_shipdate IN ('1998-01-02', '1998-01-05')) OR (25: l_shipdate IS NULL)\n" +
-                                "     NO EVAL-PARTITION PREDICATES: date_trunc('month', 25: l_shipdate) = '1998-01-01'\n" +
-                                "     partitions=3/6"
+                                "     PARTITION PREDICATES: 25: l_shipdate >= '1998-01-01', 25: l_shipdate < '1998-02-01', " +
+                                "(25: l_shipdate IN ('1998-01-02', '1998-01-05')) OR (25: l_shipdate IS NULL), " +
+                                "25: l_shipdate IN ('1998-01-02', '1998-01-05')\n" +
+                                "     partitions=2/6"
                 };
                 for (int i = 0; i < sqls.length; i++) {
                     String query = sqls[i];

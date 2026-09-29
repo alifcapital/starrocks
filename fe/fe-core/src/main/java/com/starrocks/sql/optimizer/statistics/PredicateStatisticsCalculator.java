@@ -478,10 +478,17 @@ public class PredicateStatisticsCalculator {
         }
 
         private ScalarOperator getChildForCastOperator(ScalarOperator operator) {
-            if (operator instanceof CastOperator) {
+            if (operator instanceof CastOperator && !castsNumberToDate((CastOperator) operator)) {
                 operator = getChildForCastOperator(operator.getChild(0));
             }
             return operator;
+        }
+
+        // We keep a cast of a number to a date and do not take the statistics of the number: the statistics of a date
+        // are seconds since the epoch, while a number such as 20240101 as an INT means something else.
+        // ExpressionStatisticCalculator converts the statistics for the cast.
+        private static boolean castsNumberToDate(CastOperator cast) {
+            return cast.getChild(0).getType().isNumericType() && cast.getType().isDateType();
         }
 
         private ColumnStatistic getExpressionStatistic(ScalarOperator operator) {

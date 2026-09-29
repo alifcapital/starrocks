@@ -226,4 +226,23 @@ public class ColumnRangePredicateTest {
         Assertions.assertEquals("1: col > 9223372036854775807", s, s);
     }
 
+    @Test
+    public void testEqualsOfExpressionsOfOneColumn() {
+        ColumnRefOperator columnRef = new ColumnRefOperator(1, DateType.DATE, "dt", true);
+        TreeRangeSet<ConstantOperator> dates = TreeRangeSet.create();
+        dates.add(Range.singleton(ConstantOperator.createDate(LocalDateTime.of(1991, 3, 30, 0, 0))));
+        ColumnRangePredicate onColumn = new ColumnRangePredicate(columnRef, dates);
+
+        // days_sub(cast(dt as datetime), 1) = '1991-03-29 00:00:00' has a DATETIME range on the same column
+        CastOperator cast = new CastOperator(DateType.DATETIME, columnRef);
+        CallOperator daysSub = new CallOperator(FunctionSet.DAYS_SUB, DateType.DATETIME,
+                List.<ScalarOperator>of(cast, ConstantOperator.createInt(1)));
+        TreeRangeSet<ConstantOperator> datetimes = TreeRangeSet.create();
+        datetimes.add(Range.singleton(ConstantOperator.createDatetime(LocalDateTime.of(1991, 3, 29, 0, 0))));
+        ColumnRangePredicate onExpression = new ColumnRangePredicate(daysSub, datetimes);
+
+        Assertions.assertNotEquals(onColumn, onExpression);
+        Assertions.assertNotEquals(onExpression, onColumn);
+        Assertions.assertEquals(onColumn, new ColumnRangePredicate(columnRef, dates));
+    }
 }

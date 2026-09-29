@@ -37,6 +37,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
@@ -944,6 +946,29 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 plan.contains("* L_SHIPDATE-->[6.941952E8, 6.941952E8, 0.0, 4.0, 360.85714285714283] ESTIMATE"));
     }
 
+    private static String scanCardinality(String plan) {
+        Matcher matcher = Pattern.compile("0:OlapScanNode\n(?:.*\n)*?\\s*cardinality: (\\d+)").matcher(plan);
+        Assertions.assertTrue(matcher.find(), plan);
+        return matcher.group(1);
+    }
+
+    @Test
+    public void testShiftedDatePredicateCountedOnce() throws Exception {
+        // The scan gets the bound L_SHIPDATE = '1995-01-02' from the predicate, and we expect the estimate to count
+        // the rows of the predicate once
+        String sql = "select L_ORDERKEY from lineitem where days_sub(L_SHIPDATE, 1) = '1995-01-01'";
+        String plan = getCostExplain(sql);
+        assertContains(plan, "L_SHIPDATE, DATE, false] = '1995-01-02'");
+        connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
+        try {
+            String planWithoutBound = getCostExplain(sql);
+            assertNotContains(planWithoutBound, "= '1995-01-02'");
+            Assertions.assertEquals(scanCardinality(planWithoutBound), scanCardinality(plan));
+        } finally {
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
+        }
+    }
+
     @Test
     public void testCastDatePredicate() throws Exception {
         OlapTable lineitem =
@@ -991,8 +1016,9 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         };
 
         plan = getCostExplain(sql);
+        // year(L_SHIPDATE) = 1998 is L_SHIPDATE in [1998-01-01, 1999-01-01), where the statistics have no rows
         assertContains(plan, "     column statistics: \n" +
-                "     * L_SHIPDATE-->[1.9921212E7, 1.9980202E7, 0.0, 8.0, 1.0] ESTIMATE");
+                "     * L_SHIPDATE-->[-Infinity, 9.1512E8, 0.0, 8.0, 1.0] ESTIMATE");
 
         // ===========================
         // To handle cast(date) in infinity range
@@ -1005,7 +1031,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
 
         plan = getCostExplain(sql);
         assertContains(plan, "     column statistics: \n" +
-                "     * L_SHIPDATE-->[-Infinity, Infinity, 0.0, 8.0, 20000.0] ESTIMATE");
+                "     * L_SHIPDATE-->[8.83584E8, 9.1512E8, 0.0, 8.0, 20000.0] ESTIMATE");
 
         connectContext.getGlobalStateMgr().setStatisticStorage(new MockTpchStatisticStorage(connectContext, 100));
     }

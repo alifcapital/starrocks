@@ -120,9 +120,8 @@ public class GreedyGeneralizedColumnReplacementTest {
 
         String plan = UtFrameUtils.getFragmentPlan(getStarRocksAssert().getCtx(), q);
         plan = plan.replaceAll("\\d+:\\s+(\\b\\w+\\b)", "$1");
-        String snippet1 = "date_trunc('hour', localEventTs) >= '2024-07-01 00:00:00', " +
-                "date_trunc('hour', localEventTs) < '2024-07-03 23:00:00'";
-        String snippet2 = "eventTs < '2024-07-06 00:00:00', eventTs >= '2024-06-29 00:00:00'";
+        String snippet1 = "localEventTs >= '2024-07-01 00:00:00', localEventTs < '2024-07-03 23:00:00'";
+        String snippet2 = "eventTs < '2024-07-05 23:00:00', eventTs >= '2024-06-29 00:00:00'";
         Assertions.assertTrue(plan.contains(snippet1), plan);
         Assertions.assertTrue(plan.contains(snippet2), plan);
     }

@@ -5744,12 +5744,12 @@ public class MaterializedViewTest extends MaterializedViewTestBase {
             }
 
             {
-                // TODO: we can support this later.
+                // date_col is in [2024-01-01, the start of the next time unit), which is a range of days of the mv
                 String query = "select tinyint_col,  " +
                         "   sum(float_col_1 * int_col) as sum_value from t0 " +
                         "where date_trunc('" + timeUnit + "',  date_col) = '2024-01-01' group by tinyint_col ";
                 String plan = sql(query).getExecPlan();
-                PlanTestBase.assertNotContains(plan, "date_mv");
+                PlanTestBase.assertContains(plan, "date_mv");
             }
 
             {

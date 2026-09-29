@@ -92,6 +92,41 @@ public class MonotonicFilterDerivationTest {
     }
 
     @Test
+    public void testBoundsAreRedundant() {
+        ScalarOperator comparison = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
+        List<ScalarOperator> bounds = addedBounds(comparison);
+        assertFalse(bounds.isEmpty());
+        // We expect the bounds to be redundant and not estimated: the original conjunct stays, the statistics count
+        // its rows, and a materialized view rewrite compares it
+        for (ScalarOperator bound : bounds) {
+            assertTrue(bound.isRedundant());
+            assertTrue(bound.isNotEvalEstimate());
+        }
+        assertFalse(comparison.isRedundant());
+        assertFalse(comparison.isNotEvalEstimate());
+    }
+
+    @Test
+    public void testBoundsOnExpressionsAreNotAdded() {
+        // from_unixtime(abs(ep)) gives a bound on abs(ep), which skips no files, so we expect no bound
+        CallOperator abs = new CallOperator("abs", IntegerType.BIGINT, ImmutableList.of(epoch),
+                new Function(new FunctionName("abs"), new Type[] {IntegerType.BIGINT}, IntegerType.BIGINT, false));
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.EQ,
+                new CallOperator("from_unixtime", VarcharType.VARCHAR, ImmutableList.of(abs),
+                        new Function(new FunctionName("from_unixtime"), new Type[] {IntegerType.BIGINT},
+                                VarcharType.VARCHAR, false)),
+                ConstantOperator.createVarchar("2024-03-05 10:30:00"));
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+
+        // Next to it a comparison of from_unixtime(ep) still gives the bound on ep
+        ScalarOperator columnBound = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
+        ScalarOperator both = Utils.compoundAnd(predicate, columnBound);
+        List<ScalarOperator> added = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(both)).stream()
+                .filter(p -> !p.equals(predicate) && !p.equals(columnBound)).toList();
+        assertEquals("1: ep >= 1709634600 AND 1: ep < 1709634601", Utils.compoundAnd(added).toString());
+    }
+
+    @Test
     public void testMillisecondsIncludeNegativeRemainder() {
         List<ScalarOperator> bounds = addedBounds(comparison("from_unixtime_ms", BinaryType.EQ,
                 "1970-01-01 00:00:00"));

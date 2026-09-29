@@ -679,7 +679,8 @@ public class MvRewritePartitionTest extends MVTestBase {
                                 PCompensateExpect.create("subdate(a.id_date, interval 1 day)='1991-03-29'", false, true),
                                 PCompensateExpect.create("adddate(a.id_date, interval 1 day)='1991-03-31'", false, true),
                                 // with partition expressions && partition expressions can be pruned
-                                PCompensateExpect.create("cast(a.id_date as string)='1991-03-30'", true, true),
+                                // the refreshed partition of the mv has all rows of the day
+                                PCompensateExpect.create("cast(a.id_date as string)='1991-03-30'", false, true),
                                 PCompensateExpect.create("cast(a.id_date as string) >='1991-03-30'", true, true)
                         )
                 ),
@@ -699,7 +700,8 @@ public class MvRewritePartitionTest extends MVTestBase {
                                 PCompensateExpect.create("subdate(a.id_date, interval 1 day)='1991-03-29'", false, true),
                                 PCompensateExpect.create("adddate(a.id_date, interval 1 day)='1991-03-31'", false, true),
                                 // with partition expressions && partition expressions can be pruned
-                                PCompensateExpect.create("cast(a.id_date as string)='1991-03-30'", true, true),
+                                // the refreshed partition of the mv has all rows of the day
+                                PCompensateExpect.create("cast(a.id_date as string)='1991-03-30'", false, true),
                                 PCompensateExpect.create("cast(a.id_date as string) >='1991-03-30'", true, true)
                         )
                 )
