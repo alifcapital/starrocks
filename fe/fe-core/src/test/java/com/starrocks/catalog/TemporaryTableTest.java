@@ -16,6 +16,7 @@
 package com.starrocks.catalog;
 
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.ExceptionChecker;
 import com.starrocks.common.FeConstants;
 import com.starrocks.ha.FrontendNodeType;
@@ -23,7 +24,9 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.ShowResultSet;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
+import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.CleanTemporaryTableStmt;
 import com.starrocks.sql.ast.ShowCreateTableStmt;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.utframe.StarRocksAssert;
@@ -37,6 +40,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class TemporaryTableTest {
@@ -369,5 +374,50 @@ public class TemporaryTableTest {
         GlobalStateMgr.getCurrentState().setFrontendNodeType(FrontendNodeType.FOLLOWER);
         localMetastore.replayDropTable(database, table.getId(), false);
         GlobalStateMgr.getCurrentState().setFrontendNodeType(FrontendNodeType.LEADER);
+    }
+
+    @Test
+    public void testDisconnectCleanupWithoutOperatePrivilege() throws Exception {
+        String ddl = "create temporary table t_disconnect (c1 int) distributed by hash(c1) buckets 1 " +
+                "properties(\"replication_num\"=\"1\")";
+        starRocksAssert.withTemporaryTable(ddl);
+        UUID session = connectContext.getSessionId();
+        ConnectContext other = UtFrameUtils.createDefaultCtx();
+        other.setDatabase("test");
+        new StarRocksAssert(other).withTemporaryTable(ddl);
+        UUID otherSession = other.getSessionId();
+        var manager = GlobalStateMgr.getCurrentState().getTemporaryTableMgr();
+        Assertions.assertTrue(manager.sessionExists(session));
+        Assertions.assertTrue(manager.sessionExists(otherSession));
+
+        starRocksAssert.withUser("disconnect_user");
+        UserIdentity user = new UserIdentity("disconnect_user", "%");
+        // Dropping privileges before disconnect also covers revoked permissions or roles.
+        connectContext.setCurrentUserIdentity(user);
+        connectContext.setQualifiedUser(user.getUser());
+        connectContext.setCurrentRoleIds(Set.of());
+        UUID queryId = connectContext.getQueryId();
+        var executor = connectContext.getExecutor();
+        try (var guard = connectContext.bindScope()) {
+            Assertions.assertThrows(ErrorReportException.class,
+                    () -> Authorizer.check(new CleanTemporaryTableStmt(otherSession), connectContext));
+            Assertions.assertThrows(ErrorReportException.class,
+                    () -> Authorizer.check(new CleanTemporaryTableStmt(session), connectContext));
+            connectContext.cleanTemporaryTable();
+            Assertions.assertFalse(manager.sessionExists(session));
+            Assertions.assertTrue(manager.sessionExists(otherSession));
+            Assertions.assertSame(connectContext, ConnectContext.get());
+            Assertions.assertEquals(user, connectContext.getCurrentUserIdentity());
+            Assertions.assertEquals(Set.of(), connectContext.getCurrentRoleIds());
+            Assertions.assertEquals(queryId, connectContext.getQueryId());
+            Assertions.assertSame(executor, connectContext.getExecutor());
+            // Already removed sessions are harmless and must not touch another session.
+            connectContext.cleanTemporaryTable();
+            Assertions.assertTrue(manager.sessionExists(otherSession));
+            Assertions.assertThrows(ErrorReportException.class,
+                    () -> Authorizer.check(new CleanTemporaryTableStmt(otherSession), connectContext));
+        } finally {
+            other.cleanTemporaryTable();
+        }
     }
 }

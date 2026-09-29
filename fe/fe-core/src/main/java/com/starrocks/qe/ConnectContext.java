@@ -46,6 +46,7 @@ import com.starrocks.authentication.AuthenticationProvider;
 import com.starrocks.authentication.UserProperty;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.authorization.ObjectType;
+import com.starrocks.authorization.PrivilegeBuiltinConstants;
 import com.starrocks.authorization.PrivilegeException;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.UserIdentity;
@@ -1713,12 +1714,23 @@ public class ConnectContext {
         }
         LOG.debug("clean temporary table on session {}", sessionId);
         try {
-            setQueryId(UUIDUtil.genUUID());
+            // Disconnect cleanup is a system operation, not a request made by the user.
+            // Keep its identity/state separate from the closing session, including when
+            // the statement must be forwarded to the leader. Explicit CLEAN still requires OPERATE.
+            ConnectContext cleanupContext = ConnectContext.buildInner();
+            cleanupContext.setGlobalStateMgr(globalStateMgr);
+            cleanupContext.setCurrentUserIdentity(UserIdentity.ROOT);
+            cleanupContext.setCurrentRoleIds(Set.of(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
+            cleanupContext.setQualifiedUser(UserIdentity.ROOT.getUser());
+            cleanupContext.setQueryId(UUIDUtil.genUUID());
             CleanTemporaryTableStmt cleanTemporaryTableStmt = new CleanTemporaryTableStmt(sessionId);
             cleanTemporaryTableStmt.setOrigStmt(
                     new OriginStatement("clean temporary table on session '" + sessionId.toString() + "'"));
-            executor = StmtExecutor.newInternalExecutor(this, cleanTemporaryTableStmt);
-            executor.execute();
+            try (var guard = cleanupContext.bindScope()) {
+                StmtExecutor cleanupExecutor = StmtExecutor.newInternalExecutor(cleanupContext, cleanTemporaryTableStmt);
+                cleanupContext.setExecutor(cleanupExecutor);
+                cleanupExecutor.execute();
+            }
         } catch (Throwable e) {
             LOG.warn("Failed to clean temporary table on session {}, {}", sessionId, e);
         }
