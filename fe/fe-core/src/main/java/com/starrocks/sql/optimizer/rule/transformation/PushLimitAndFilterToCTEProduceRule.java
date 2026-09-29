@@ -30,9 +30,12 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /*
  *                    CTEProduce
@@ -77,7 +80,7 @@ public class PushLimitAndFilterToCTEProduceRule extends TransformationRule {
 
         OptExpression child = input.getInputs().get(0);
         if (consumeNums == predicates.size()) {
-            ScalarOperator orPredicate = Utils.compoundOr(Lists.newArrayList(new LinkedHashSet<>(predicates)));
+            ScalarOperator orPredicate = Utils.compoundOr(removeAbsorbed(predicates));
             ScalarRangePredicateExtractor extractor = new ScalarRangePredicateExtractor();
             child = OptExpression.create(new LogicalFilterOperator(extractor.rewriteAll(orPredicate)), child);
         }
@@ -89,5 +92,27 @@ public class PushLimitAndFilterToCTEProduceRule extends TransformationRule {
         }
 
         return Lists.newArrayList(OptExpression.create(produce, child));
+    }
+
+    // P OR (P AND R) keeps the rows of P, so a predicate that has all conjuncts of another one is left out of the OR.
+    // Of predicates with the same conjuncts the first one is kept.
+    private static List<ScalarOperator> removeAbsorbed(List<ScalarOperator> predicates) {
+        List<ScalarOperator> distinct = new ArrayList<>(new LinkedHashSet<>(predicates));
+        List<Set<ScalarOperator>> conjuncts = new ArrayList<>(distinct.size());
+        for (ScalarOperator predicate : distinct) {
+            conjuncts.add(new HashSet<>(Utils.extractConjuncts(predicate)));
+        }
+        List<ScalarOperator> result = new ArrayList<>(distinct.size());
+        for (int i = 0; i < distinct.size(); i++) {
+            boolean absorbed = false;
+            for (int j = 0; j < distinct.size() && !absorbed; j++) {
+                absorbed = j != i && conjuncts.get(i).containsAll(conjuncts.get(j))
+                        && (conjuncts.get(i).size() > conjuncts.get(j).size() || j < i);
+            }
+            if (!absorbed) {
+                result.add(distinct.get(i));
+            }
+        }
+        return result;
     }
 }
