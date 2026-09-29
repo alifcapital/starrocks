@@ -29,6 +29,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public class CTEPlanTest extends PlanTestBase {
     private static class TestStorage extends EmptyStatisticStorage {
         @Override
@@ -250,6 +253,34 @@ public class CTEPlanTest extends PlanTestBase {
                 "     TABLE: t0\n" +
                 "     PREAGGREGATION: ON\n" +
                 "     PREDICATES: (2: v2 = 3) OR (3: v3 = 4)");
+    }
+
+    // The predicates of the scan of t0 in a plan
+    private static String scanPredicates(String plan) {
+        Matcher matcher = Pattern.compile("TABLE: t0\n     PREAGGREGATION: ON\n     PREDICATES: ([^\n]*)\n").matcher(plan);
+        Assertions.assertTrue(matcher.find(), plan);
+        return matcher.group(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    public void testCTEPredicateAbsorption(int forceReuseNodeCount) throws Exception {
+        connectContext.getSessionVariable().setCboCTEForceReuseNodeCount(forceReuseNodeCount);
+        // Without absorption the filter of the CTE would be (v1 IN (1, 2, 3) AND sum > 0) OR v1 IN (1, 2, 3), with
+        // the IN twice; we expect v1 IN (1, 2, 3). The IN of x2 comes from the join.
+        String sql = "with xx as (select v1, sum(v2) as s from t0 group by v1) " +
+                "select x1.v1 from xx x1 join (select * from xx where s > 0) x2 on x1.v1 = x2.v1 " +
+                "where x1.v1 in (1, 2, 3)";
+        String plan = getFragmentPlan(sql);
+        assertNotContains(plan, "having");
+        Assertions.assertEquals("1: v1 IN (1, 2, 3)", scanPredicates(plan));
+
+        sql = "with xx as (select v1, sum(v2) as s from t0 group by v1) " +
+                "select x1.v1 from (select * from xx where v1 in (1, 2, 3)) x1 " +
+                "join (select * from xx where v1 in (1, 2, 3) and s > 0) x2 on x1.v1 = x2.v1";
+        plan = getFragmentPlan(sql);
+        assertNotContains(plan, "having");
+        Assertions.assertEquals("1: v1 IS NOT NULL, 1: v1 IN (1, 2, 3)", scanPredicates(plan));
     }
 
     @ParameterizedTest
