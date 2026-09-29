@@ -223,6 +223,24 @@ public class MonotonicFilterDerivationTest {
     }
 
     @Test
+    public void testBoundsOnExpressionsAreNotAdded() {
+        CallOperator abs = new CallOperator("abs", IntegerType.BIGINT, ImmutableList.of(epoch),
+                new Function(new FunctionName("abs"), new Type[] {IntegerType.BIGINT}, IntegerType.BIGINT, false));
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.EQ,
+                new CallOperator("from_unixtime", VarcharType.VARCHAR, ImmutableList.of(abs),
+                        new Function(new FunctionName("from_unixtime"), new Type[] {IntegerType.BIGINT},
+                                VarcharType.VARCHAR, false)),
+                ConstantOperator.createVarchar("2024-03-05 10:30:00"));
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+
+        ScalarOperator columnBound = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
+        ScalarOperator both = Utils.compoundAnd(predicate, columnBound);
+        List<ScalarOperator> added = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(both)).stream()
+                .filter(p -> !p.equals(predicate) && !p.equals(columnBound)).toList();
+        assertEquals("1: ep >= 1709634600 AND 1: ep < 1709634601", Utils.compoundAnd(added).toString());
+    }
+
+    @Test
     public void testDisableLeavesPartialPredicatesAlone() {
         ctx.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
         ScalarOperator predicate = comparison("from_unixtime", BinaryType.GE, "2024-03-05 10:30:00");

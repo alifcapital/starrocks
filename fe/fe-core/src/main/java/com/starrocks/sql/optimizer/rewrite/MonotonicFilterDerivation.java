@@ -19,6 +19,7 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
@@ -43,11 +44,25 @@ public final class MonotonicFilterDerivation {
             if (bound != original) {
                 bound = new ScalarOperatorRewriter().rewrite(bound,
                         ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
-                conjuncts.addAll(Utils.extractConjuncts(bound));
+                // A bound on an expression of a column prunes nothing and only lowers the row estimate
+                Utils.extractConjuncts(bound).stream()
+                        .filter(MonotonicFilterDerivation::isColumnBound)
+                        .forEach(conjuncts::add);
             }
         }
         return conjuncts.size() == new LinkedHashSet<>(originals).size()
                 ? predicate : Utils.compoundAnd(conjuncts);
+    }
+
+    // A comparison of a column with a constant, or AND and OR of such comparisons
+    private static boolean isColumnBound(ScalarOperator operator) {
+        if (operator instanceof BinaryPredicateOperator) {
+            return operator.getChild(0).isColumnRef() && operator.getChild(1).isConstantRef();
+        }
+        if (operator instanceof CompoundPredicateOperator compound && !compound.isNot()) {
+            return compound.getChildren().stream().allMatch(MonotonicFilterDerivation::isColumnBound);
+        }
+        return false;
     }
 
     private static ScalarOperator derive(ScalarOperator predicate) {
