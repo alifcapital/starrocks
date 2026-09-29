@@ -37,6 +37,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
@@ -942,6 +944,29 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         plan = getCostExplain(sql);
         Assertions.assertTrue(
                 plan.contains("* L_SHIPDATE-->[6.941952E8, 6.941952E8, 0.0, 4.0, 360.85714285714283] ESTIMATE"));
+    }
+
+    private static String scanCardinality(String plan) {
+        Matcher matcher = Pattern.compile("0:OlapScanNode\n(?:.*\n)*?\\s*cardinality: (\\d+)").matcher(plan);
+        Assertions.assertTrue(matcher.find(), plan);
+        return matcher.group(1);
+    }
+
+    @Test
+    public void testShiftedDatePredicateCountedOnce() throws Exception {
+        // The scan gets the bound L_SHIPDATE = '1995-01-02' from the predicate, and we expect the estimate to count
+        // the rows of the predicate once
+        String sql = "select L_ORDERKEY from lineitem where days_sub(L_SHIPDATE, 1) = '1995-01-01'";
+        String plan = getCostExplain(sql);
+        assertContains(plan, "L_SHIPDATE, DATE, false] = '1995-01-02'");
+        connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
+        try {
+            String planWithoutBound = getCostExplain(sql);
+            assertNotContains(planWithoutBound, "= '1995-01-02'");
+            Assertions.assertEquals(scanCardinality(planWithoutBound), scanCardinality(plan));
+        } finally {
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
+        }
     }
 
     @Test

@@ -89,6 +89,21 @@ public class MonotonicFilterDerivationTest {
     }
 
     @Test
+    public void testBoundsAreRedundant() {
+        ScalarOperator comparison = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
+        List<ScalarOperator> bounds = addedBounds(comparison);
+        assertFalse(bounds.isEmpty());
+        // We expect the bounds to be redundant and not estimated: the original conjunct stays, the statistics count
+        // its rows, and a materialized view rewrite compares it
+        for (ScalarOperator bound : bounds) {
+            assertTrue(bound.isRedundant());
+            assertTrue(bound.isNotEvalEstimate());
+        }
+        assertFalse(comparison.isRedundant());
+        assertFalse(comparison.isNotEvalEstimate());
+    }
+
+    @Test
     public void testMillisecondsIncludeNegativeRemainder() {
         List<ScalarOperator> bounds = addedBounds(comparison("from_unixtime_ms", BinaryType.EQ,
                 "1970-01-01 00:00:00"));
