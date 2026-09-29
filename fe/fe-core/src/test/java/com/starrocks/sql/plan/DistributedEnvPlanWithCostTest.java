@@ -955,15 +955,25 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
     @Test
     public void testShiftedDatePredicateCountedOnce() throws Exception {
         // The scan gets the bound L_SHIPDATE = '1995-01-02' from the predicate, and we expect the estimate to count
-        // the rows of the predicate once
+        // the rows of the predicate once. With the monotonic rewrite off, the shift moves to the constant, and the
+        // scan has only the predicate on the column.
         String sql = "select L_ORDERKEY from lineitem where days_sub(L_SHIPDATE, 1) = '1995-01-01'";
         String plan = getCostExplain(sql);
         assertContains(plan, "L_SHIPDATE, DATE, false] = '1995-01-02'");
+        // A forward shift does not move for >, so with the rewrite off the scan has only the predicate
+        String rangeSql = "select L_ORDERKEY from lineitem where days_add(L_SHIPDATE, 1) > '1995-01-02'";
+        String rangePlan = getCostExplain(rangeSql);
+        assertContains(rangePlan, "L_SHIPDATE, DATE, false] >= '1995-01-02'");
         connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
         try {
-            String planWithoutBound = getCostExplain(sql);
-            assertNotContains(planWithoutBound, "= '1995-01-02'");
-            Assertions.assertEquals(scanCardinality(planWithoutBound), scanCardinality(plan));
+            String planWithMovedShift = getCostExplain(sql);
+            assertContains(planWithMovedShift, "Predicates: [11: L_SHIPDATE, DATE, false] = '1995-01-02'");
+            assertNotContains(planWithMovedShift, "days_sub");
+            Assertions.assertEquals(scanCardinality(planWithMovedShift), scanCardinality(plan));
+
+            String rangePlanWithoutBound = getCostExplain(rangeSql);
+            assertNotContains(rangePlanWithoutBound, ">= '1995-01-02'");
+            Assertions.assertEquals(scanCardinality(rangePlanWithoutBound), scanCardinality(rangePlan));
         } finally {
             connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
         }

@@ -1035,6 +1035,45 @@ public class ExpressionTest extends PlanTestBase {
     }
 
     @Test
+    public void testDateRewriteWithMonotonicRewriteOff() throws Exception {
+        // With the monotonic predicate rewrite off we expect the upstream day shift and date_format
+        // rewrites, except for the cases where they change the rows
+        connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
+        try {
+            String plan = getFragmentPlan(
+                    "select t1a from test_all_type where date_add(id_datetime, 2) = '2020-12-21'");
+            assertContains(plan, "PREDICATES: 8: id_datetime = '2020-12-19 00:00:00'");
+
+            plan = getFragmentPlan("select t1a from test_all_type where date_add(id_datetime, 2) < '2020-12-21'");
+            assertContains(plan, "PREDICATES: 8: id_datetime < '2020-12-19 00:00:00'");
+
+            // days_add(c, 2) is NULL for the last two days of year 9999, and these c pass c > '2020-12-19'
+            plan = getFragmentPlan("select t1a from test_all_type where date_add(id_datetime, 2) > '2020-12-21'");
+            assertContains(plan, "PREDICATES: days_add(8: id_datetime, 2) > '2020-12-21 00:00:00'");
+
+            plan = getFragmentPlan("select t1a from test_all_type where date_sub(id_datetime, 2) >= '2020-12-21'");
+            assertContains(plan, "PREDICATES: 8: id_datetime >= '2020-12-23 00:00:00'");
+
+            plan = getFragmentPlan("select t1a from test_all_type where date_sub(id_datetime, 2) <= '2020-12-21'");
+            assertContains(plan, "PREDICATES: days_sub(8: id_datetime, 2) <= '2020-12-21 00:00:00'");
+
+            plan = getFragmentPlan("select t1a from test_all_type where months_add(id_datetime, 1) = '2024-02-29'");
+            assertContains(plan, "PREDICATES: months_add(8: id_datetime, 1) = '2024-02-29 00:00:00'");
+
+            plan = getFragmentPlan(
+                    "select t1a from test_all_type where date_format(id_datetime, '%Y-%m-%d') > '2020-12-21'");
+            assertContains(plan, "PREDICATES: 8: id_datetime >= '2020-12-22 00:00:00'");
+
+            // days_add('9999-12-31', 1) is NULL, while this predicate is true for every date
+            plan = getFragmentPlan(
+                    "select t1a from test_all_type where date_format(id_datetime, '%Y-%m-%d') <= '9999-12-31'");
+            assertContains(plan, "PREDICATES: date_format(8: id_datetime, '%Y-%m-%d') <= '9999-12-31'");
+        } finally {
+            connectContext.getSessionVariable().setEnableMonotonicPredicateRewrite(true);
+        }
+    }
+
+    @Test
     public void testNotExpr() throws Exception {
         String sql = "select v1 from t0 where not (v1 in (1, 2))";
         String planFragment = getFragmentPlan(sql);
