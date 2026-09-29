@@ -19,6 +19,7 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
@@ -44,6 +45,12 @@ public final class MonotonicFilterDerivation {
                 ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(bound.predicate(),
                         ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
                 for (ScalarOperator conjunct : Utils.extractConjuncts(rewritten)) {
+                    // We want bounds that let the scan skip files and row groups by min/max, which works only for a
+                    // comparison of a column with a constant. A bound on an expression of a column skips nothing,
+                    // and the scan would evaluate it on every row next to the original conjunct.
+                    if (!isColumnBound(conjunct)) {
+                        continue;
+                    }
                     if (bound.necessary()) {
                         // A necessary bound only helps the scan to skip files, and the original conjunct stays
                         // and decides the rows. We mark the bound redundant and not estimated: we want the
@@ -58,6 +65,17 @@ public final class MonotonicFilterDerivation {
         }
         return conjuncts.size() == new LinkedHashSet<>(originals).size()
                 ? predicate : Utils.compoundAnd(conjuncts);
+    }
+
+    // A comparison of a column with a constant, or AND and OR of such comparisons
+    private static boolean isColumnBound(ScalarOperator operator) {
+        if (operator instanceof BinaryPredicateOperator) {
+            return operator.getChild(0).isColumnRef() && operator.getChild(1).isConstantRef();
+        }
+        if (operator instanceof CompoundPredicateOperator compound && !compound.isNot()) {
+            return compound.getChildren().stream().allMatch(MonotonicFilterDerivation::isColumnBound);
+        }
+        return false;
     }
 
     // A predicate derived from a conjunct. When a function on the way has no exact inverse, the predicate only follows
