@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionName;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -112,6 +113,51 @@ public class SimplifiedDateColumnPredicateRuleTest {
         Assertions.assertEquals("1: dt < 9999-12-31 00:00:00", rewriter.rewrite(
                 new BinaryPredicateOperator(BinaryType.LE, datetimeCall, ConstantOperator.createVarchar("99991230")),
                 ScalarOperatorRewriter.DEFAULT_REWRITE_RULES).toString());
+    }
+
+    @Test
+    public void testDateFormatWithMonotonicRewriteOff() {
+        ConnectContext context = new ConnectContext();
+        context.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
+        context.setThreadLocalInfo();
+        try {
+            ScalarOperator dateCall = new CallOperator("date_format", VarcharType.VARCHAR, ImmutableList.of(
+                    new ColumnRefOperator(1, DateType.DATE, "dt", true), ConstantOperator.createVarchar("%Y%m%d")));
+            verifyDate(new BinaryPredicateOperator(BinaryType.EQ, dateCall, DATE_BEGIN));
+            verifyDate(new BinaryPredicateOperator(BinaryType.GE, dateCall, DATE_BEGIN));
+            verifyNotDate(new BinaryPredicateOperator(BinaryType.EQ, dateCall, DATE_BEGIN2));
+
+            ScalarOperator datetimeColumn = new ColumnRefOperator(1, DateType.DATETIME, "dt", true);
+            Function func = new Function(new FunctionName("date_format"),
+                    new Type[] {DateType.DATETIME, VarcharType.VARCHAR}, VarcharType.VARCHAR, true);
+            ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();
+            ScalarOperator datetimeCall = new CallOperator("date_format", VarcharType.VARCHAR, ImmutableList.of(
+                    datetimeColumn, ConstantOperator.createVarchar("%Y%m%d")), func);
+            ScalarOperator result = rewriter.rewrite(new BinaryPredicateOperator(BinaryType.GT, datetimeCall,
+                    DATE_BEGIN), ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+            Assertions.assertEquals("1: dt >= 2024-05-07 00:00:00", result.toString());
+
+            // date_format(dt, ...) <= '9999-12-31' is true for every dt, but days_add('9999-12-31', 1) is NULL
+            String[][] formatsAndDates = new String[][] {
+                    new String[] {"%Y%m%d", "99991231"},
+                    new String[] {"%Y-%m-%d", "9999-12-31"}
+            };
+            for (String[] formatAndDate : formatsAndDates) {
+                ScalarOperator call = new CallOperator("date_format", VarcharType.VARCHAR, ImmutableList.of(
+                        datetimeColumn, ConstantOperator.createVarchar(formatAndDate[0])), func);
+                ConstantOperator lastDate = ConstantOperator.createVarchar(formatAndDate[1]);
+                result = rewriter.rewrite(new BinaryPredicateOperator(BinaryType.LE, call, lastDate),
+                        ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+                Assertions.assertEquals("date_format(1: dt, " + formatAndDate[0] + ") <= " + formatAndDate[1],
+                        result.toString());
+                result = rewriter.rewrite(new BinaryPredicateOperator(BinaryType.GT, call, lastDate),
+                        ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+                Assertions.assertEquals("date_format(1: dt, " + formatAndDate[0] + ") > " + formatAndDate[1],
+                        result.toString());
+            }
+        } finally {
+            ConnectContext.remove();
+        }
     }
 
     @Test
