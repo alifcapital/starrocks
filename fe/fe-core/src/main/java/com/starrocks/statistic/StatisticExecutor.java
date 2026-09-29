@@ -587,6 +587,20 @@ public class StatisticExecutor {
                                            AnalyzeStatus analyzeStatus,
                                            boolean refreshAsync,
                                            boolean resetWarehouse) {
+        if (statsJob instanceof ExternalMcvStatisticsCollectJob) {
+            var lock = ExtendedStatisticsSchedule.mcvLock(statsJob.getTable().getUUID());
+            lock.lock();
+            try {
+                return collectStatisticsImpl(statsConnectCtx, statsJob, analyzeStatus, refreshAsync, resetWarehouse);
+            } finally {
+                lock.unlock();
+            }
+        }
+        return collectStatisticsImpl(statsConnectCtx, statsJob, analyzeStatus, refreshAsync, resetWarehouse);
+    }
+
+    private AnalyzeStatus collectStatisticsImpl(ConnectContext statsConnectCtx, StatisticsCollectJob statsJob,
+                                                AnalyzeStatus analyzeStatus, boolean refreshAsync, boolean resetWarehouse) {
         Database db = statsJob.getDb();
         Table table = statsJob.getTable();
 

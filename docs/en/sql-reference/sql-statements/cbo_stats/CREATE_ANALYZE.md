@@ -87,3 +87,19 @@ CREATE ANALYZE SAMPLE TABLE tbl_name(c1, c2, c3) PROPERTIES(
 [KILL ANALYZE](KILL_ANALYZE.md): cancel a custom collection task that is running.
 
 For more information about collecting statistics for CBO, see [Gather statistics for CBO](../../../using_starrocks/Cost_based_optimizer.md).
+
+## Recurring MCV and JOIN statistics
+
+This fork also supports explicit schedules for an external MCV column group and an existing JOIN STATISTICS object:
+
+```sql
+CREATE ANALYZE FULL TABLE ice.db.transactions MCV (status, dest_acc_gate, dest_acc_type)
+PROPERTIES ("collect_interval_sec" = "86400");
+
+CREATE ANALYZE JOIN STATISTICS transactions_users
+PROPERTIES ("collect_interval_sec" = "86400");
+```
+
+MCV jobs additionally accept `mcv_size` and, for a single-column group, `mcv_bucket_num`. JOIN jobs use the collection settings of their existing JOIN object. Unsupported properties are rejected. One job is allowed per target, regardless of property differences.
+
+These jobs appear in `SHOW ANALYZE JOB` with type MCV or JOIN; executions appear in `SHOW ANALYZE STATUS`. They share the existing staggered calendar and collection windows. `DROP ANALYZE <job_id>` keeps collected data, while dropping the targeted MCV/JOIN statistics also removes the job. For first-run behavior, permissions, cancellation and restart semantics, see [JOIN statistics](../../../using_starrocks/join_statistics.md#refresh-useful-statistics-regularly).

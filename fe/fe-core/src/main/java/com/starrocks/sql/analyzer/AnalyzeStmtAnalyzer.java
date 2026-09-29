@@ -318,6 +318,26 @@ public class AnalyzeStmtAnalyzer {
 
         @Override
         public Void visitCreateAnalyzeJobStatement(CreateAnalyzeJobStmt statement, ConnectContext session) {
+            if (statement.getJoinStatisticsName() != null) {
+                var meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getJoinStatisticsRegistry()
+                        .get(statement.getJoinStatisticsName());
+                if (meta == null) {
+                    throw new SemanticException("Unknown JOIN statistics: " + statement.getJoinStatisticsName());
+                }
+                com.starrocks.statistic.ExtendedStatisticsSchedule.validateProperties(statement.getProperties(), false);
+                statement.setJoinStatistics(meta);
+                return null;
+            }
+            if (statement.getAnalyzeTypeDesc() instanceof AnalyzeMcvDesc) {
+                com.starrocks.statistic.ExtendedStatisticsSchedule.validateProperties(statement.getProperties(), true);
+                AnalyzeStmt manual = new AnalyzeStmt(statement.getTableRef(), statement.getColumns(), null,
+                        statement.getProperties(), false, false, false, statement.getAnalyzeTypeDesc(), statement.getPos());
+                visitAnalyzeStatement(manual, session);
+                statement.setTableRef(manual.getTableRef());
+                statement.setCatalogName(manual.getCatalogName());
+                statement.setColumnNames(manual.getColumnNames());
+                return null;
+            }
             TableRef tableRef = statement.getTableRef();
             // Resolved target table when the job targets a single table; stays null for database/catalog-wide
             // jobs. Used to validate table-scoped properties (see analyzeProperties).

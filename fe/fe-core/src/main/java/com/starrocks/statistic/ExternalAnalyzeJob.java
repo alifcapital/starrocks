@@ -29,6 +29,65 @@ import java.util.List;
 import java.util.Map;
 
 public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
+    @SerializedName("initialExtendedCollection")
+    private boolean initialExtendedCollection;
+
+    public void setInitialExtendedCollection(boolean pending) {
+        initialExtendedCollection = pending;
+    }
+
+    public boolean isInitialExtendedCollection() {
+        return initialExtendedCollection;
+    }
+
+    private transient boolean extendedRunActive;
+
+    synchronized boolean beginExtendedRun() {
+        if (extendedRunActive) {
+            return false;
+        }
+        extendedRunActive = true;
+        return true;
+    }
+
+    synchronized void endExtendedRun() {
+        extendedRunActive = false;
+    }
+
+    @SerializedName("joinStatisticsId")
+    private long joinStatisticsId;
+    @SerializedName("joinStatisticsName")
+    private String joinStatisticsName;
+    @SerializedName("targetUuid")
+    private String targetUuid;
+
+    // Named-source job envelope also accommodates JOIN objects containing native tables;
+    // unlike NativeAnalyzeJob, it does not identify the whole target by one numeric table ID.
+    public void setJoinStatisticsTarget(JoinStatisticsMeta meta) {
+        joinStatisticsId = meta.getId();
+        joinStatisticsName = meta.getDefinition().getName();
+    }
+
+    public long getJoinStatisticsId() {
+        return joinStatisticsId;
+    }
+
+    public String getJoinStatisticsName() {
+        return joinStatisticsName;
+    }
+
+    public void setTargetUuid(String uuid) {
+        targetUuid = uuid;
+    }
+
+    public String getTargetUuid() {
+        return targetUuid;
+    }
+
+    public boolean isExtendedStatistics() {
+        return type == AnalyzeType.MCV || type == AnalyzeType.JOIN;
+    }
+
     @SerializedName("id")
     private long id;
 
@@ -191,12 +250,19 @@ public class ExternalAnalyzeJob implements AnalyzeJob, Writable {
 
     @Override
     public List<StatisticsCollectJob> instantiateJobs() {
+        if (isExtendedStatistics()) {
+            return List.of();
+        }
         return StatisticsCollectJobFactory.buildExternalStatisticsCollectJob(this);
     }
 
     @Override
     public void run(ConnectContext statsConnectContext, StatisticExecutor statisticExecutor,
                     List<StatisticsCollectJob> jobs) {
+        if (isExtendedStatistics()) {
+            ExtendedStatisticsSchedule.run(this, statsConnectContext, statisticExecutor, false);
+            return;
+        }
         if (jobs.isEmpty()) {
             return;
         }

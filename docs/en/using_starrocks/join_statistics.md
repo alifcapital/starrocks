@@ -48,6 +48,45 @@ JOIN iceberg.landing_mobi_tj.providers p ON t.provider_id = p.provider_id;
 
 Increasing this limit widens predicate coverage and increases collection work and retained size. It does not change the 16,384-key head budget. The accepted range is 1–4,096 predicate combinations, with at most 32 predicate columns per source. Creating, collecting and dropping an object require the same source-table privileges as ANALYZE. SHOW lists only objects for which the caller has SELECT on every source table.
 
+## Refresh useful statistics regularly
+
+After verifying that an object improves plans, attach an ordinary ANALYZE job to it:
+
+```sql
+CREATE ANALYZE JOIN STATISTICS transactions_users
+PROPERTIES ("collect_interval_sec" = "86400");
+SHOW ANALYZE JOB;
+SHOW ANALYZE STATUS;
+```
+
+The job refreshes the existing object, including all its sources and configured predicate slices. It is bound to the object's ID, not just its name. Dropping and recreating an object with the same name does not transfer the old schedule. One recurring job is allowed per object; drop the old job before changing its interval.
+
+`collect_interval_sec` accepts 1–31,536,000 seconds. If omitted, the job follows `statistic_auto_collect_large_table_interval`. Jobs use the existing auto-statistics collector and permitted collection window. With `enable_statistic_auto_collect_staggered_schedule=true`, each target receives its own persisted calendar slot through `AutoStatisticsSchedule`, including initialization outside the collection window. Restart or leader promotion resumes future slots without replaying a backlog of missed runs. Failed attempts retain the published JOIN generation and retry on a later slot.
+
+`enable_trigger_analyze_job_immediate=true` requests the first collection immediately, subject to the permitted window and collection enablement. If the window is closed, the first collection remains pending until an allowed window. With the option disabled, the new job waits for its regular slot. To collect now independently of the recurring job, use:
+
+```sql
+ANALYZE JOIN STATISTICS transactions_users WITH ASYNC MODE;
+```
+
+Stop future refreshes while keeping the collected statistics:
+
+```sql
+DROP ANALYZE 12345; -- ID from SHOW ANALYZE JOB
+```
+
+Removing a job does not abort an already running refresh. Use `KILL ANALYZE <status_id>` from SHOW ANALYZE STATUS to cancel a scheduled run. `DROP JOIN STATISTICS transactions_users` removes the definition, its data and its recurring job, and revokes any in-flight publication. CREATE/DROP job and KILL require the appropriate ANALYZE privileges on every source. SHOW exposes a JOIN job/status only to users with SELECT on every source.
+
+MCV groups can use the same workflow:
+
+```sql
+CREATE ANALYZE FULL TABLE iceberg.landing_mobi_tj.transactions
+MCV (status, dest_acc_gate, dest_acc_type)
+PROPERTIES ("collect_interval_sec" = "86400");
+```
+
+This schedules that exact local column group, using the existing full MCV collector; it does not collect BASIC or a different predicate group. Native MCV and automatic selection of predicate groups are not added by this syntax. DROP MCV STATS for a group removes its recurring job; dropping all MCV for a table removes all its MCV jobs. Other statistics jobs are retained. MCV publication and deletion are serialized per table, so DROP may wait for an in-flight MCV collection before deleting its result. A normal BASIC DROP STATS does not remove these jobs.
+
 ## Inspect collected distributions
 
 ```sql

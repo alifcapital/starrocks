@@ -3256,6 +3256,14 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         }
         boolean isSample = context.FULL() == null;
 
+        if (context.JOIN() != null) {
+            CreateAnalyzeJobStmt statement = new CreateAnalyzeJobStmt(false, properties, pos);
+            statement.setJoinStatisticsName(getIdentifierName(context.joinName));
+            return statement;
+        }
+        if (context.MCV() != null) {
+            analyzeType = StatsConstants.AnalyzeType.MCV;
+        }
         if (context.DATABASE() != null) {
             return new CreateAnalyzeJobStmt(((Identifier) visit(context.db)).getValue(), isSample,
                     properties, pos);
@@ -3265,7 +3273,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             TableRef tableRef = new TableRef(normalizeName(qualifiedNames.get(0)), null, createPos(context));
             List<Expr> columns = getAnalyzeColumns(qualifiedNames.subList(1, qualifiedNames.size()));
             return new CreateAnalyzeJobStmt(tableRef, columns, context.IF() != null, isSample, properties,
-                    analyzeType, null, pos);
+                    analyzeType, context.MCV() != null ? new AnalyzeMcvDesc() : null, pos);
         } else if (context.histogramStatement() != null) {
             AnalyzeStmt analyzeStmt = histogramStatement(context.histogramStatement());
             return new CreateAnalyzeJobStmt(analyzeStmt.getTableRef(), analyzeStmt.getColumns(), false,

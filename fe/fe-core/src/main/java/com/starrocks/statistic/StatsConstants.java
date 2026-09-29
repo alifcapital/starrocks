@@ -155,6 +155,8 @@ public class StatsConstants {
         FULL,
         // For compatibility with older versions， we can't drop HISTOGRAM from this enum.
         HISTOGRAM,
+        MCV,
+        JOIN,
     }
 
     public enum ScheduleType {

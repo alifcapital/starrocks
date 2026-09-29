@@ -2595,6 +2595,12 @@ public class StmtExecutor {
         AnalyzeMgr analyzeManager = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
         AnalyzeStatus analyzeStatus = analyzeManager.getAnalyzeStatus(analyzeId);
         AnalyzeJob analyzeJob = analyzeManager.getAnalyzeJob(analyzeId);
+        if (analyzeStatus instanceof com.starrocks.statistic.ExternalAnalyzeStatus extended
+                && extended.getType() == StatsConstants.AnalyzeType.JOIN) {
+            com.starrocks.statistic.ExtendedStatisticsSchedule.checkJoinAnalyzePrivilege(context,
+                    extended.getJoinStatisticsName(), extended.getJoinStatisticsId());
+            return;
+        }
         if (analyzeStatus != null) {
             try {
                 String catalogName = analyzeStatus.getCatalogName();

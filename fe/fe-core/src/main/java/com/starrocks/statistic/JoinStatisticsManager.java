@@ -97,8 +97,14 @@ public final class JoinStatisticsManager implements MemoryTrackable {
     }
 
     public void analyze(String name, boolean asynchronous, LongConsumer started) throws DdlException {
+        analyze(name, asynchronous, started, null);
+    }
+
+    public void analyze(String name, boolean asynchronous, LongConsumer started, Long expectedObjectId) throws DdlException {
         checkLeader();
-        JoinStatisticsRegistry.Collection ticket = registry.begin(name, GlobalStateMgr.getCurrentState().getNextId());
+        long generation = GlobalStateMgr.getCurrentState().getNextId();
+        JoinStatisticsRegistry.Collection ticket = expectedObjectId == null ? registry.begin(name, generation)
+                : registry.begin(name, generation, expectedObjectId);
         ConnectContext context = StatisticUtils.buildConnectContext();
         Job job = new Job(ticket, context);
         job.task = () -> {
@@ -201,6 +207,7 @@ public final class JoinStatisticsManager implements MemoryTrackable {
         if (removed == null) {
             return;
         }
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().removeJoinAnalyzeJobs(removed.getId());
         cancel(removed.getId());
         cache.invalidate(removed.getId());
         statuses.remove(removed.getId());

@@ -149,8 +149,15 @@ public class AnalyzeMgr implements Writable {
         return analyzeStatusMap.get(id);
     }
 
-    public void addAnalyzeJob(AnalyzeJob job) throws AlreadyExistsException {
+    public synchronized void addAnalyzeJob(AnalyzeJob job) throws AlreadyExistsException {
         for (AnalyzeJob analyzeJob : analyzeJobMap.values()) {
+            if (job instanceof ExternalAnalyzeJob extended && extended.isExtendedStatistics()
+                    && analyzeJob instanceof ExternalAnalyzeJob existing && existing.isExtendedStatistics()) {
+                if (ExtendedStatisticsSchedule.sameTarget(extended, existing)) {
+                    throw new AlreadyExistsException("A schedule already exists for this statistics target; drop it first");
+                }
+                continue;
+            }
             try {
                 if (analyzeJob.getCatalogName().equals(job.getCatalogName()) &&
                         analyzeJob.getDbName().equals(job.getDbName()) &&
@@ -173,16 +180,23 @@ public class AnalyzeMgr implements Writable {
                 wal -> analyzeJobMap.put(id, job));
     }
 
-    public void updateAnalyzeJobWithoutLog(AnalyzeJob job) {
-        analyzeJobMap.put(job.getId(), job);
+    public synchronized void updateAnalyzeJobWithoutLog(AnalyzeJob job) {
+        if (!(job instanceof ExternalAnalyzeJob external && external.isExtendedStatistics())
+                || analyzeJobMap.containsKey(job.getId())) {
+            analyzeJobMap.put(job.getId(), job);
+        }
     }
 
-    public void updateAnalyzeJobWithLog(AnalyzeJob job) {
+    public synchronized void updateAnalyzeJobWithLog(AnalyzeJob job) {
+        if (job instanceof ExternalAnalyzeJob external && external.isExtendedStatistics()
+                && !analyzeJobMap.containsKey(job.getId())) {
+            return;
+        }
         GlobalStateMgr.getCurrentState().getEditLog().logAddAnalyzeJob(job,
                 wal -> analyzeJobMap.put(job.getId(), job));
     }
 
-    public void removeAnalyzeJob(long id) {
+    public synchronized void removeAnalyzeJob(long id) {
         if (id == -1) {
             List<Long> keysToRemove = new ArrayList<>(analyzeJobMap.keySet());
             for (Long key : keysToRemove) {
@@ -195,6 +209,24 @@ public class AnalyzeMgr implements Writable {
             AnalyzeJob job = analyzeJobMap.get(id);
             GlobalStateMgr.getCurrentState().getEditLog()
                     .logRemoveAnalyzeJob(job, wal -> analyzeJobMap.remove(id));
+        }
+    }
+
+    public void removeJoinAnalyzeJobs(long objectId) {
+        for (ExternalAnalyzeJob job : getAllExternalAnalyzeJobList()) {
+            if (job.getAnalyzeType() == StatsConstants.AnalyzeType.JOIN && job.getJoinStatisticsId() == objectId) {
+                removeAnalyzeJob(job.getId());
+            }
+        }
+    }
+
+    public void removeMcvAnalyzeJobs(String catalog, String db, String table, List<String> columns) {
+        for (ExternalAnalyzeJob job : getAllExternalAnalyzeJobList()) {
+            if (job.getAnalyzeType() == StatsConstants.AnalyzeType.MCV && job.getCatalogName().equals(catalog)
+                    && job.getDbName().equals(db) && job.getTableName().equals(table)
+                    && (columns == null || new java.util.HashSet<>(columns).equals(new java.util.HashSet<>(job.getColumns())))) {
+                removeAnalyzeJob(job.getId());
+            }
         }
     }
 
@@ -455,6 +487,7 @@ public class AnalyzeMgr implements Writable {
     }
 
     public void dropExternalMcvStatsMetaAndData(String catalogName, String dbName, String tableName) {
+        removeMcvAnalyzeJobs(catalogName, dbName, tableName, null);
         new StatisticExecutor().dropExternalMcvStatistics(StatisticUtils.buildConnectContext(), catalogName,
                 dbName, tableName);
         removeExternalMcvStatsMeta(catalogName, dbName, tableName);
@@ -462,19 +495,33 @@ public class AnalyzeMgr implements Writable {
 
     public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
                                                         Table table) {
-        new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID());
-        removeExternalMcvStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), null);
+        var lock = ExtendedStatisticsSchedule.mcvLock(table.getUUID());
+        lock.lock();
+        try {
+            new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID());
+            removeExternalMcvStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+        } finally {
+            lock.unlock();
+        }
     }
 
     public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
                                               Table table, List<String> columnNames) {
-        new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID(), columnNames);
-        ExternalMcvStatsKey key = new ExternalMcvStatsKey(tableName.getCatalog(), tableName.getDb(),
-                tableName.getTbl(), columnNames);
-        ExternalMcvStatsMeta meta = externalMcvStatsMetaMap.get(key);
-        if (meta != null) {
-            GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(meta,
-                    wal -> replayRemoveExternalMcvStatsMeta(meta));
+        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), columnNames);
+        var lock = ExtendedStatisticsSchedule.mcvLock(table.getUUID());
+        lock.lock();
+        try {
+            new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID(), columnNames);
+            ExternalMcvStatsKey key = new ExternalMcvStatsKey(tableName.getCatalog(), tableName.getDb(),
+                    tableName.getTbl(), columnNames);
+            ExternalMcvStatsMeta meta = externalMcvStatsMetaMap.get(key);
+            if (meta != null) {
+                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(meta,
+                        wal -> replayRemoveExternalMcvStatsMeta(meta));
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -1124,6 +1171,13 @@ public class AnalyzeMgr implements Writable {
     }
 
     public void killConnection(long analyzeID) {
+        AnalyzeStatus status = analyzeStatusMap.get(analyzeID);
+        if (status instanceof ExternalAnalyzeStatus external && external.getType() == StatsConstants.AnalyzeType.JOIN
+                && external.getStatus() == StatsConstants.ScheduleStatus.RUNNING
+                && external.getJoinCollectionGeneration() > 0) {
+            getJoinStatisticsManager().cancelCollection(external.getJoinCollectionGeneration());
+            return;
+        }
         ConnectContext context = connectionMap.get(analyzeID);
         if (context == null) {
             throw new SemanticException("There is no running task with analyzeId " + analyzeID);

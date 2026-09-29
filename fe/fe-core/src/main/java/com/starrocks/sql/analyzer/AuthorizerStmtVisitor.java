@@ -1092,8 +1092,35 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
 
     @Override
     public Void visitCreateAnalyzeJobStatement(CreateAnalyzeJobStmt statement, ConnectContext context) {
+        if (statement.getJoinStatistics() != null) {
+            statement.getJoinStatistics().getDefinition().getSources().forEach(source ->
+                    Authorizer.checkActionForAnalyzeStatement(context, source.getTableName()));
+            return null;
+        }
+        if (statement.getAnalyzeTypeDesc() instanceof com.starrocks.sql.ast.AnalyzeMcvDesc) {
+            Authorizer.checkActionForAnalyzeStatement(context,
+                    new TableName(statement.getCatalogName(), statement.getDbName(), statement.getTableName()));
+            return null;
+        }
         Set<TableName> tableNames = AnalyzerUtils.getAllTableNamesForAnalyzeJobStmt(statement.getDbId(), statement.getTableId());
         tableNames.forEach(tableName -> Authorizer.checkActionForAnalyzeStatement(context, tableName));
+        return null;
+    }
+
+    @Override
+    public Void visitDropAnalyzeStatement(com.starrocks.sql.ast.DropAnalyzeJobStmt statement, ConnectContext context) {
+        var mgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
+        for (var job : mgr.getAllExternalAnalyzeJobList()) {
+            if (job.isExtendedStatistics() && (statement.getId() == -1 || statement.getId() == job.getId())) {
+                if (job.getAnalyzeType() == com.starrocks.statistic.StatsConstants.AnalyzeType.JOIN) {
+                    com.starrocks.statistic.ExtendedStatisticsSchedule.checkJoinAnalyzePrivilege(context,
+                            job.getJoinStatisticsName(), job.getJoinStatisticsId());
+                } else {
+                    Authorizer.checkActionForAnalyzeStatement(context,
+                            new TableName(job.getCatalogName(), job.getDbName(), job.getTableName()));
+                }
+            }
+        }
         return null;
     }
 

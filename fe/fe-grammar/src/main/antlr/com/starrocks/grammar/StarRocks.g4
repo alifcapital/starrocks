@@ -1505,6 +1505,8 @@ createAnalyzeStatement
     : CREATE ANALYZE (FULL | SAMPLE)? ALL properties?
     | CREATE ANALYZE (FULL | SAMPLE)? DATABASE db=identifier properties?
     | CREATE ANALYZE (FULL | SAMPLE)? (IF NOT EXISTS)? TABLE qualifiedName ('(' qualifiedName (',' qualifiedName)* ')')? properties?
+    | CREATE ANALYZE FULL TABLE qualifiedName MCV '(' qualifiedName (',' qualifiedName)* ')' properties?
+    | CREATE ANALYZE JOIN STATISTICS joinName=identifier properties?
     | CREATE histogramStatement
     ;
 

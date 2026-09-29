@@ -74,6 +74,14 @@ public final class JoinStatisticsRegistry {
         journal.append(meta, false, () -> definitions.put(definition.getName(), meta));
     }
 
+    public synchronized Collection begin(String name, long generation, long expectedObjectId) {
+        JoinStatisticsMeta meta = get(name);
+        if (meta == null || meta.getId() != expectedObjectId) {
+            throw new IllegalStateException("Scheduled JOIN statistics target was dropped or replaced");
+        }
+        return begin(name, generation);
+    }
+
     public synchronized Collection begin(String name, long generation) {
         JoinStatisticsMeta current = get(name);
         if (current == null) {

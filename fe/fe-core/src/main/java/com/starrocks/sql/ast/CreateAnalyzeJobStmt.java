@@ -27,6 +27,25 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 public class CreateAnalyzeJobStmt extends DdlStmt {
+    private String joinStatisticsName;
+    private com.starrocks.statistic.JoinStatisticsMeta joinStatistics;
+
+    public void setJoinStatisticsName(String name) {
+        joinStatisticsName = name;
+    }
+
+    public String getJoinStatisticsName() {
+        return joinStatisticsName;
+    }
+
+    public void setJoinStatistics(com.starrocks.statistic.JoinStatisticsMeta meta) {
+        joinStatistics = meta;
+    }
+
+    public com.starrocks.statistic.JoinStatisticsMeta getJoinStatistics() {
+        return joinStatistics;
+    }
+
     private String catalogName;
     private long dbId;
     private long tableId;
