@@ -266,8 +266,8 @@ public class CTEPlanTest extends PlanTestBase {
     @ValueSource(ints = {0, 1})
     public void testCTEPredicateAbsorption(int forceReuseNodeCount) throws Exception {
         connectContext.getSessionVariable().setCboCTEForceReuseNodeCount(forceReuseNodeCount);
-        // The filter of the CTE is (v1 IN (1, 2, 3) AND sum > 0) OR v1 IN (1, 2, 3), which is v1 IN (1, 2, 3).
-        // The IN of x2 comes from the join.
+        // Without absorption the filter of the CTE would be (v1 IN (1, 2, 3) AND sum > 0) OR v1 IN (1, 2, 3), with
+        // the IN twice; we expect v1 IN (1, 2, 3). The IN of x2 comes from the join.
         String sql = "with xx as (select v1, sum(v2) as s from t0 group by v1) " +
                 "select x1.v1 from xx x1 join (select * from xx where s > 0) x2 on x1.v1 = x2.v1 " +
                 "where x1.v1 in (1, 2, 3)";

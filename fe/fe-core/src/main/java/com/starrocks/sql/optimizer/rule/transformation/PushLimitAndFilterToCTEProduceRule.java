@@ -94,8 +94,9 @@ public class PushLimitAndFilterToCTEProduceRule extends TransformationRule {
         return Lists.newArrayList(OptExpression.create(produce, child));
     }
 
-    // P OR (P AND R) keeps the rows of P, so a predicate that has all conjuncts of another one is left out of the OR.
-    // Of predicates with the same conjuncts the first one is kept.
+    // The filter pushed to the CTE is an OR of the predicates of its consumers, and we want it without copies:
+    // P OR (P AND R) keeps the same rows as P, so we leave out a predicate that has all conjuncts of another one.
+    // Of predicates with the same conjuncts we keep the first.
     private static List<ScalarOperator> removeAbsorbed(List<ScalarOperator> predicates) {
         List<ScalarOperator> distinct = new ArrayList<>(new LinkedHashSet<>(predicates));
         List<Set<ScalarOperator>> conjuncts = new ArrayList<>(distinct.size());
