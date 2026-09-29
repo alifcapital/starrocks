@@ -163,6 +163,68 @@ public class MonotonicInverseBruteForceTest {
     }
 
     @Test
+    public void testMonthShiftSweep() {
+        ConstantOperator one = ConstantOperator.createInt(1);
+        CallOperator monthsAdd = new CallOperator("months_add", DateType.DATE, ImmutableList.of(dateCol, one));
+        Function<ConstantOperator, ConstantOperator> addOne = x -> ScalarOperatorFunctions.monthsAdd(x, one);
+        // 2024-01-29, 2024-01-30 and 2024-01-31 all map to 2024-02-29
+        sweep(monthsAdd, addOne, date(2024, 2, 29), LocalDate.of(2024, 1, 30));
+        // no date maps to 2024-03-31: February ends on the 29th, March 1 maps to April 1
+        sweep(monthsAdd, addOne, date(2024, 3, 31), LocalDate.of(2024, 3, 1));
+        sweep(monthsAdd, addOne, date(2024, 3, 15), LocalDate.of(2024, 2, 15));
+
+        CallOperator monthsSub = new CallOperator("months_sub", DateType.DATE, ImmutableList.of(dateCol, one));
+        Function<ConstantOperator, ConstantOperator> subOne =
+                x -> ScalarOperatorFunctions.monthsAdd(x, ConstantOperator.createInt(-1));
+        // 2024-03-29, 2024-03-30 and 2024-03-31 all map to 2024-02-29
+        sweep(monthsSub, subOne, date(2024, 2, 29), LocalDate.of(2024, 3, 30));
+        // no date maps to 2024-03-31: April ends on the 30th
+        sweep(monthsSub, subOne, date(2024, 3, 31), LocalDate.of(2024, 5, 1));
+
+        CallOperator yearsAdd = new CallOperator("years_add", DateType.DATE, ImmutableList.of(dateCol, one));
+        // 2024-02-28 and 2024-02-29 both map to 2025-02-28
+        sweep(yearsAdd, x -> ScalarOperatorFunctions.yearsAdd(x, one), date(2025, 2, 28), LocalDate.of(2024, 2, 28));
+
+        CallOperator quartersAdd = new CallOperator("quarters_add", DateType.DATE, ImmutableList.of(dateCol, one));
+        // 2024-03-30 and 2024-03-31 both map to 2024-06-30
+        sweep(quartersAdd, x -> ScalarOperatorFunctions.monthsAdd(x, ConstantOperator.createInt(3)),
+                date(2024, 6, 30), LocalDate.of(2024, 3, 30));
+    }
+
+    @Test
+    public void testMonthShiftOnDatetimeKeepsEveryMatchingRow() {
+        // On DATETIME the time of day is kept, so the matching rows are not a range. The bound
+        // covers only the date part; we check that it keeps every row the predicate keeps.
+        ColumnRefOperator tsCol = new ColumnRefOperator(2, DateType.DATETIME, "ts", true);
+        CallOperator call = new CallOperator("months_add", DateType.DATETIME,
+                ImmutableList.of(tsCol, ConstantOperator.createInt(1)));
+        MonotonicFunctionRegistry.PredicateInverse inverse = MonotonicFunctionRegistry.filterInverse("months_add");
+        LocalDateTime[] constants = {LocalDateTime.of(2024, 2, 29, 12, 0), LocalDateTime.of(2024, 2, 29, 0, 0),
+                LocalDateTime.of(2024, 3, 31, 0, 0), LocalDateTime.of(2024, 3, 15, 6, 30)};
+        for (LocalDateTime constant : constants) {
+            ConstantOperator value = ConstantOperator.createDatetime(constant);
+            for (BinaryType cmp : ALL_CMP) {
+                ScalarOperator bound = inverse.invert(call, tsCol, cmp, value).orElse(null);
+                if (bound == null) {
+                    continue;
+                }
+                for (LocalDateTime x = LocalDateTime.of(2024, 1, 15, 0, 0); x.isBefore(LocalDateTime.of(2024, 4, 15, 0, 0));
+                        x = x.plusMinutes(30)) {
+                    ConstantOperator shifted = ConstantOperator.createDatetime(x.plusMonths(1));
+                    ConstantOperator row = ConstantOperator.createDatetime(x);
+                    if (evalOriginal(shifted, cmp, value)) {
+                        assertTrue(evalPredicate(bound, row), cmp + " " + constant + " at x=" + x + " -> " + bound);
+                    }
+                }
+            }
+        }
+    }
+
+    private static ConstantOperator date(int year, int month, int day) {
+        return ConstantOperator.createDate(LocalDateTime.of(year, month, day, 0, 0));
+    }
+
+    @Test
     public void testDateTruncMonthSweepSanity() {
         // the shared window machinery itself, pinned on the oldest inverter
         List<ScalarOperator> args = ImmutableList.of(ConstantOperator.createVarchar("month"), dateCol);

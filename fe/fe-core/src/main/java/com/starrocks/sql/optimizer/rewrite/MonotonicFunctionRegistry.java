@@ -116,9 +116,10 @@ public final class MonotonicFunctionRegistry {
      * Exact preimages. Only functions whose preimage boundary is computable from the
      * constant alone are listed, including calendar-period floors (date_trunc). Partial
      * functions are registered separately below. Month/quarter/year shifts clamp
-     * day-of-month and are NOT invertible (months_add('2024-01-31', 1) = '2024-02-29' =
-     * months_add('2024-01-30', 1)); time_slice buckets are multiples of an interval counted
-     * from year 1, not calendar periods, and also keep the image direction only.
+     * day-of-month (months_add('2024-01-31', 1) = '2024-02-29' = months_add('2024-01-30', 1))
+     * and are NULL past the date range, so they are filter inverses below; time_slice buckets
+     * are multiples of an interval counted from year 1, not calendar periods, and also keep
+     * the image direction only.
      * timediff stays out: its FE fold floors the fractional second (Duration.getSeconds)
      * while BE truncates toward zero (integer microsecond division), so no single preimage
      * matches both. to_datetime stays out: epoch-grid scales plus zone-transition windows
@@ -161,7 +162,23 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.SUBDATE, MonotonicInverse.shift(FunctionSet.ADDDATE))
             .put(FunctionSet.DATE_ADD, MonotonicInverse.shift(FunctionSet.DATE_SUB))
             .put(FunctionSet.DATE_SUB, MonotonicInverse.shift(FunctionSet.DATE_ADD))
+            .put(FunctionSet.MONTHS_ADD, MonotonicInverse.monthShift(1, true))
+            .put(FunctionSet.ADD_MONTHS, MonotonicInverse.monthShift(1, true))
+            .put(FunctionSet.MONTHS_SUB, MonotonicInverse.monthShift(1, false))
+            .put(FunctionSet.QUARTERS_ADD, MonotonicInverse.monthShift(3, true))
+            .put(FunctionSet.QUARTERS_SUB, MonotonicInverse.monthShift(3, false))
+            .put(FunctionSet.YEARS_ADD, MonotonicInverse.monthShift(12, true))
+            .put(FunctionSet.YEARS_SUB, MonotonicInverse.monthShift(12, false))
             .build();
+
+    private static final Set<String> MONTH_SHIFTS = Set.of(FunctionSet.MONTHS_ADD, FunctionSet.ADD_MONTHS,
+            FunctionSet.MONTHS_SUB, FunctionSet.QUARTERS_ADD, FunctionSet.QUARTERS_SUB, FunctionSet.YEARS_ADD,
+            FunctionSet.YEARS_SUB);
+
+    /** Shifts by whole months: they cut the day to the end of a shorter month and keep the time of day. */
+    public static boolean isMonthShift(String fnName) {
+        return MONTH_SHIFTS.contains(fnName.toLowerCase());
+    }
 
     /**
      * Argument positions the data column may occupy, or null when the function is not

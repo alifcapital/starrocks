@@ -64,6 +64,20 @@ public class MonotonicImageTest {
     }
 
     @Test
+    public void testMonthShiftOnDatetimeCoversWholeDays() {
+        Function fn = new Function(new FunctionName("months_add"),
+                new Type[] {DateType.DATETIME, IntegerType.INT}, DateType.DATETIME, false);
+        CallOperator expr = new CallOperator("months_add", DateType.DATETIME,
+                ImmutableList.of(dtCol, ConstantOperator.createInt(1)), fn);
+        // 2024-01-29 23:00 is inside the domain and maps to 2024-02-29 23:00, above the images
+        // of both endpoints (2024-02-29 12:00 and 2024-02-29 00:00)
+        Range<ConstantOperator> image = MonotonicImage.imageRange(expr, dtCol,
+                datetimeDomain(LocalDateTime.of(2024, 1, 29, 12, 0), LocalDateTime.of(2024, 1, 30, 0, 0))).get();
+        assertTrue(image.contains(ConstantOperator.createDatetime(LocalDateTime.of(2024, 2, 29, 23, 0))),
+                image.toString());
+    }
+
+    @Test
     public void testUnixTimestampClampEndpointRefused() {
         Function fn = new Function(new FunctionName("unix_timestamp"),
                 new Type[] {DateType.DATETIME}, IntegerType.BIGINT, false);
