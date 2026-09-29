@@ -7759,27 +7759,26 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
         if (connectContext != null && connectContext.getSessionVariable().enableLargeInPredicate() &&
                 literalCount >= connectContext.getSessionVariable().getLargeInPredicateThreshold()) {
-            boolean shouldFallbackToNormal = false;
             List<Object> rawValueList = new ArrayList<>();
             try (Timer ignored = Tracers.watchScope(Tracers.Module.PARSER, "ParserInIntegerList")) {
                 for (TerminalNode integerNode : integerNodes) {
                     String intText = integerNode.getText();
                     try {
-                        long value = Long.parseLong(intText);
-                        rawValueList.add(value);
+                        rawValueList.add(Long.parseLong(intText));
                     } catch (NumberFormatException e) {
-                        shouldFallbackToNormal = true;
-                        break;
+                        // We keep a value out of BIGINT as the literal of the InPredicate, so the planner compares it
+                        // as the IN would
+                        rawValueList.add(parseIntegerWithVisitIntegerValueLogic(intText,
+                                createPos(integerNode.getSymbol(), integerNode.getSymbol())));
                     }
                 }
             }
 
-            if (!shouldFallbackToNormal) {
-                String rawText = extractRawText(context.integerList());
-                List<Expr> firstElementList = List.of(new IntLiteral((Long) rawValueList.get(0), IntegerType.BIGINT));
-                return new LargeInPredicate(compareExpr, rawText, rawValueList, literalCount,
-                        isNotIn, firstElementList, createPos(context));
-            }
+            String rawText = extractRawText(context.integerList());
+            Object first = rawValueList.get(0);
+            Expr firstElement = first instanceof Long value ? new IntLiteral(value, IntegerType.BIGINT) : (Expr) first;
+            return new LargeInPredicate(compareExpr, rawText, rawValueList, literalCount,
+                    isNotIn, List.of(firstElement), createPos(context));
         }
 
         List<Expr> intList = new ArrayList<>();
@@ -7792,6 +7791,39 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         return new InPredicate(compareExpr, intList, isNotIn, createPos(context));
     }
     
+    @Override
+    public ParseNode visitInNumberList(com.starrocks.sql.parser.StarRocksParser.InNumberListContext context) {
+        boolean isNotIn = context.NOT() != null;
+        Expr compareExpr = (Expr) visit(context.value);
+
+        // Each value becomes the literal that the expression-list form produces: the number literal, with a
+        // leading minus applied in place as visitArithmeticUnary does.
+        List<com.starrocks.sql.parser.StarRocksParser.SignedNumberContext> numbers =
+                context.numberList().signedNumber();
+        List<Expr> literals = new ArrayList<>(numbers.size());
+        for (com.starrocks.sql.parser.StarRocksParser.SignedNumberContext number : numbers) {
+            Expr literal = (Expr) visit(number.number());
+            if (number.MINUS_SYMBOL() != null) {
+                try {
+                    ((LiteralExpr) literal).swapSign();
+                } catch (UnsupportedOperationException e) {
+                    throw new ParsingException(PARSER_ERROR_MSG.unsupportedExpr(ExprToSql.toSql(literal)),
+                            literal.getPos());
+                }
+            }
+            literals.add(literal);
+        }
+
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext != null && connectContext.getSessionVariable().enableLargeInPredicate() &&
+                literals.size() >= connectContext.getSessionVariable().getLargeInPredicateThreshold()) {
+            String rawText = extractRawText(context.numberList());
+            return new LargeInPredicate(compareExpr, rawText, literals, literals.size(), isNotIn,
+                    List.of(literals.get(0)), createPos(context));
+        }
+        return new InPredicate(compareExpr, literals, isNotIn, createPos(context));
+    }
+
     /**
      * Parse integer literal with the exact same logic as visitIntegerValue
      */

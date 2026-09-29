@@ -61,8 +61,21 @@ public class ColumnRefFactory {
     // do not reuse nextId because it will affect many UTs.
     private int id = 1;
 
+    // We count the LargeInPredicateOperators that SqlToScalarOperatorTranslator created with this factory: we want to
+    // notice one that ends up where the rule does not transform it. LargeInPredicateToJoinRule checks that it turned
+    // as many of them into joins.
+    private int largeInPredicateCount = 0;
+
     public Map<ColumnRefOperator, Column> getColumnRefToColumns() {
         return columnRefToColumns;
+    }
+
+    public void addLargeInPredicate() {
+        largeInPredicateCount++;
+    }
+
+    public int getLargeInPredicateCount() {
+        return largeInPredicateCount;
     }
 
     public ColumnRefOperator create(Expr expression, Type type, boolean nullable) {

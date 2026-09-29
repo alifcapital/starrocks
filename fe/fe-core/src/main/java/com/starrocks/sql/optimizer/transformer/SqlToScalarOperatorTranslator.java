@@ -100,6 +100,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ExistsPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LambdaFunctionOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LargeInConstants;
 import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.MapOperator;
@@ -619,18 +620,19 @@ public final class SqlToScalarOperatorTranslator {
             return outputPredicateRef;
         }
 
+        @Override
         public ScalarOperator visitLargeInPredicate(LargeInPredicate node, Context context) {
-            List<ScalarOperator> children = node.getChildren().stream()
-                    .map(child -> visit(child, context))
-                    .collect(Collectors.toList());
-
-            return new LargeInPredicateOperator(
-                    node.getRawText(),
-                    node.getRawConstantList(),
-                    node.getConstantCount(),
-                    node.isNotIn(),
-                    node.getConstantType(),
-                    children);
+            ScalarOperator compareExpr = visit(node.getCompareExpr(), context);
+            List<ConstantOperator> constants = new ArrayList<>(node.getConstantCount());
+            for (int i = 0; i < node.getConstantCount(); i++) {
+                constants.add((ConstantOperator) visit(node.getConstantLiteral(i), context));
+            }
+            LargeInConstants values = LargeInConstants.resolve(compareExpr, constants);
+            if (columnRefFactory != null) {
+                columnRefFactory.addLargeInPredicate();
+            }
+            return new LargeInPredicateOperator(node.getRawText(), values, node.isNotIn(),
+                    List.of(compareExpr, constants.get(0)));
         }
 
         @Override

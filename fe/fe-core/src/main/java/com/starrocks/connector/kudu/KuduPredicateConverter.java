@@ -138,7 +138,9 @@ public class KuduPredicateConverter extends ScalarOperatorVisitor<List<KuduPredi
 
     @Override
     public List<KuduPredicate> visitLargeInPredicate(LargeInPredicateOperator operator, Void context) {
-        throw new UnsupportedOperationException("not support large in predicate in the KuduPredicateConverter");
+        // We give Kudu no predicate for it, as for an IN that Kudu cannot evaluate: the join above the scan filters
+        // the rows
+        return Lists.newArrayList();
     }
 
     @Override

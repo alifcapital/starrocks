@@ -29,7 +29,6 @@ import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
@@ -299,11 +298,6 @@ public class ScalarOperatorToIcebergExpr {
                 default:
                     return null;
             }
-        }
-
-        @Override
-        public Expression visitLargeInPredicate(LargeInPredicateOperator operator, IcebergContext context) {
-            throw new UnsupportedOperationException("not support large in predicate in the ScalarOperatorToIcebergExpr");
         }
 
         @Override

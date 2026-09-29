@@ -22,7 +22,8 @@ namespace starrocks {
 
 // RawValuesNode is optimized for large constant lists.
 // It avoids expensive expression evaluation by directly constructing
-// columns from typed raw data (List<Long> or List<String>).
+// columns from typed raw data: long values for integer types, and the text of each value for
+// string, decimal and date types.
 class RawValuesNode final : public ExecNode {
 public:
     RawValuesNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
@@ -39,7 +40,6 @@ private:
     const int _tuple_id;
     const TupleDescriptor* _tuple_desc = nullptr;
 
-    TypeDescriptor _constant_type;
     std::vector<int64_t> _long_values;
     std::vector<std::string> _string_values;
 };

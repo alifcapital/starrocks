@@ -163,12 +163,15 @@ import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.type.DateType;
+import com.starrocks.type.Type;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -1698,20 +1701,51 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
     @Override
     public Void visitLogicalRawValues(LogicalRawValuesOperator node, ExpressionContext context) {
-        return computeRawValuesNode(context, node.getColumnRefSet(), node.getConstantCount());
+        return computeRawValuesNode(context, node.getColumnRefSet(), node.getConstantType(), node.getRawConstantList());
     }
 
     @Override
     public Void visitPhysicalRawValues(PhysicalRawValuesOperator node, ExpressionContext context) {
-        return computeRawValuesNode(context, node.getColumnRefSet(), node.getConstantCount());
+        return computeRawValuesNode(context, node.getColumnRefSet(), node.getConstantType(), node.getRawConstantList());
     }
 
-    private Void computeRawValuesNode(ExpressionContext context, List<ColumnRefOperator> columnRefs, int constantCount) {
+    // We give the values of a LargeInPredicate the statistics of the constants of the same InPredicate, because we
+    // want the estimate of a join with them to match the estimate of the IN. It is higher when all values are out of
+    // the range of the other column.
+    private Void computeRawValuesNode(ExpressionContext context, List<ColumnRefOperator> columnRefs, Type type,
+                                      List<Object> values) {
+        double minValue = POSITIVE_INFINITY;
+        double maxValue = Double.NEGATIVE_INFINITY;
+        if (type.isStringType()) {
+            minValue = Double.NEGATIVE_INFINITY;
+            maxValue = POSITIVE_INFINITY;
+        } else {
+            for (Object value : values) {
+                double number;
+                if (value instanceof Long longValue) {
+                    number = longValue;
+                } else if (value instanceof BigDecimal decimal) {
+                    number = decimal.doubleValue();
+                } else {
+                    number = Utils.getLongFromDateTime((LocalDateTime) value);
+                }
+                minValue = min(minValue, number);
+                maxValue = max(maxValue, number);
+            }
+        }
+        ColumnStatistic valueStatistic = ColumnStatistic.builder()
+                .setMinValue(minValue)
+                .setMaxValue(maxValue)
+                .setNullsFraction(0)
+                .setAverageRowSize(type.getTypeSize())
+                .setDistinctValuesCount(new HashSet<>(values).size())
+                .build();
+
         Statistics.Builder builder = Statistics.builder();
         for (ColumnRefOperator columnRef : columnRefs) {
-            builder.addColumnStatistic(columnRef, ColumnStatistic.unknown());
+            builder.addColumnStatistic(columnRef, valueStatistic);
         }
-        builder.setOutputRowCount(constantCount);
+        builder.setOutputRowCount(values.size());
         context.setStatistics(builder.build());
         return visitOperator(context.getOp(), context);
     }

@@ -24,6 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.PredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -41,7 +42,7 @@ import java.util.Set;
 //  a = b AND b = 1  ==>  a = 1
 //  a = b AND b > 1  ==>  a > 1
 //  a = cos(b) AND b = abs(c) AND c = 1  ==>  a = cos(abs(1))
-//  a = b AND abs(b) in (1, 2, 3)  ==>  abs(a) in (1, 2, 3)
+//  a = b AND abs(b) in (1, 2, 3)  ==>  abs(a) in (1, 2, 3), for a LargeInPredicate too
 //  a = abs(b) AND abs(b) IS NULL  ==>  a IS NULL
 public class ScalarEquivalenceExtractor {
     private final EquivalenceBuilder equivalenceBuilder = new EquivalenceBuilder();
@@ -258,6 +259,11 @@ public class ScalarEquivalenceExtractor {
 
         @Override
         public Void visitInPredicate(InPredicateOperator predicate, Void context) {
+            return buildEquivalenceValue(predicate);
+        }
+
+        @Override
+        public Void visitLargeInPredicate(LargeInPredicateOperator predicate, Void context) {
             return buildEquivalenceValue(predicate);
         }
 

@@ -22,11 +22,16 @@ import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
 import com.starrocks.thrift.TRawValuesNode;
 import com.starrocks.type.PrimitiveType;
+import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 import com.starrocks.type.TypeSerializer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -39,11 +44,11 @@ import java.util.List;
  * of constant values (e.g., WHERE id IN (1, 2, 3, ..., 100000)).
  * 
  * <p><b>Solution:</b>
- * RawValuesNode stores constant values in their raw text form and uses type-specific optimized 
- * serialization:
+ * RawValuesNode stores the constant values of one type and uses type-specific optimized serialization:
  * <ul>
  *   <li>For integer types (TINYINT/SMALLINT/INT/BIGINT): serialized as {@code List<Long>}</li>
- *   <li>For string types (VARCHAR/CHAR): serialized as {@code List<String>}</li>
+ *   <li>For string, decimal and date types (VARCHAR/CHAR, DECIMAL32/64/128, DATE/DATETIME): serialized as the
+ *   text of each value, which BE parses as a literal of the type</li>
  * </ul>
  * 
  * <p>This approach dramatically reduces:
@@ -62,6 +67,8 @@ import java.util.List;
  * <ol>
  *   <li>Integer types: TINYINT, SMALLINT, INT, BIGINT</li>
  *   <li>String types: VARCHAR, CHAR</li>
+ *   <li>Decimal types: DECIMAL32, DECIMAL64, DECIMAL128</li>
+ *   <li>Date types: DATE, DATETIME</li>
  * </ol>
  * 
  * <p><b>BE Execution:</b>
@@ -79,6 +86,7 @@ public class RawValuesNode extends PlanNode {
     private final Type constantType;
     private final List<Object> rawConstantList;
     private final int constantCount;
+    private List<String> stringValues;
 
     public RawValuesNode(PlanNodeId id, TupleId tupleId, Type constantType,
                          String rawText, List<Object> rawConstantList, int constantCount) {
@@ -99,11 +107,49 @@ public class RawValuesNode extends PlanNode {
 
         if (primitiveType.isIntegerType()) {
             msg.raw_values_node.setLong_values((List<Long>) (List<?>) rawConstantList);
-        } else if (primitiveType.isCharFamily()) {
-            msg.raw_values_node.setString_values((List<String>) (List<?>) rawConstantList);;
+        } else {
+            msg.raw_values_node.setString_values(getStringValues());
+        }
+    }
+
+    // We send each value as text, and we want BE to parse the same literal that the value becomes in an
+    // InPredicate: the text of its DecimalLiteral or DateLiteral. So we cut a decimal value to the scale of the type,
+    // as DecimalLiteral.packDecimal does.
+    private List<String> getStringValues() {
+        if (stringValues != null) {
+            return stringValues;
+        }
+        PrimitiveType primitiveType = constantType.getPrimitiveType();
+        if (primitiveType.isCharFamily()) {
+            stringValues = (List<String>) (List<?>) rawConstantList;
+        } else if (primitiveType == PrimitiveType.DECIMAL32 || primitiveType == PrimitiveType.DECIMAL64
+                || primitiveType == PrimitiveType.DECIMAL128) {
+            int scale = ((ScalarType) constantType).getScalarScale();
+            stringValues = new ArrayList<>(rawConstantList.size());
+            for (Object value : rawConstantList) {
+                stringValues.add(((BigDecimal) value).setScale(scale, RoundingMode.DOWN).toPlainString());
+            }
+        } else if (primitiveType == PrimitiveType.DATE || primitiveType == PrimitiveType.DATETIME) {
+            stringValues = new ArrayList<>(rawConstantList.size());
+            for (Object value : rawConstantList) {
+                LocalDateTime dateTime = (LocalDateTime) value;
+                if (primitiveType == PrimitiveType.DATE) {
+                    stringValues.add(String.format("%04d-%02d-%02d", dateTime.getYear(), dateTime.getMonthValue(),
+                            dateTime.getDayOfMonth()));
+                } else if (dateTime.getNano() / 1000 == 0) {
+                    stringValues.add(String.format("%04d-%02d-%02d %02d:%02d:%02d", dateTime.getYear(),
+                            dateTime.getMonthValue(), dateTime.getDayOfMonth(), dateTime.getHour(),
+                            dateTime.getMinute(), dateTime.getSecond()));
+                } else {
+                    stringValues.add(String.format("%04d-%02d-%02d %02d:%02d:%02d.%06d", dateTime.getYear(),
+                            dateTime.getMonthValue(), dateTime.getDayOfMonth(), dateTime.getHour(),
+                            dateTime.getMinute(), dateTime.getSecond(), dateTime.getNano() / 1000));
+                }
+            }
         } else {
             throw new UnsupportedOperationException("Unsupported type for RawValuesNode: " + primitiveType);
         }
+        return stringValues;
     }
 
 
@@ -138,10 +184,8 @@ public class RawValuesNode extends PlanNode {
         PrimitiveType primitiveType = constantType.getPrimitiveType();
         if (primitiveType.isIntegerType()) {
             rawValuesNode.setLong_values((List<Long>) (List<?>) rawConstantList);
-        } else if (primitiveType.isCharFamily()) {
-            rawValuesNode.setString_values((List<String>) (List<?>) rawConstantList);
         } else {
-            throw new UnsupportedOperationException("Unsupported type for RawValuesNode: " + primitiveType);
+            rawValuesNode.setString_values(getStringValues());
         }
         
         rawValuesNode.setConstant_count(constantCount);

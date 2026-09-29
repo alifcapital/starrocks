@@ -21,6 +21,8 @@ import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.Operator;
+import com.starrocks.sql.optimizer.operator.OperatorBuilderFactory;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
@@ -29,14 +31,11 @@ import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
-import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LargeInConstants;
 import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
-import com.starrocks.type.Type;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,215 +46,158 @@ import static com.starrocks.sql.ast.HintNode.HINT_JOIN_BROADCAST;
  * Transform large IN/NOT IN predicates to semi-join/anti-join for better performance.
  *
  * <p><b>Transformation:</b>
- * 
+ *
+ * <p>The rule runs after predicate pushdown, so a LargeInPredicate is where the InPredicate with the same list
+ * would be: in the predicate of the scan that it filters, or of the lowest operator that it can be pushed to.
+ *
  * <p>Before (IN):
  * <pre>
- *   Filter(col IN (v1, v2, ..., vN))
+ *   Operator(predicate: col IN (v1, v2, ..., vN) AND rest, projection)
  *     |
  *   Child
  * </pre>
  *
  * <p>After (IN):
  * <pre>
- *   LeftSemiJoin(col = const_col)
- *     |         |
- *   Child    RawValues(const_col: v1, v2, ..., vN)
- * </pre>
- *
- * <p>Before (NOT IN):
- * <pre>
- *   Filter(col NOT IN (v1, v2, ..., vN))
+ *   LeftSemiJoin(col = const_col, projection)
+ *     |                      |
+ *   Operator(predicate: rest)   RawValues(const_col: v1, v2, ..., vN)
  *     |
  *   Child
  * </pre>
  *
- * <p>After (NOT IN):
- * <pre>
- *   LeftAntiJoin(col = const_col)
- *     |         |
- *   Child    RawValues(const_col: v1, v2, ..., vN)
- * </pre>
- * 
+ * <p>NOT IN becomes a null-aware left anti join in the same way. NOT IN with a NULL constant is never true, so
+ * the predicate of the operator becomes FALSE.
+ *
  * <p><b>Transformation Restrictions:</b>
- * This rule has specific limitations to ensure correctness:
- * <ul>
- *   <li>Only ONE LargeInPredicate is allowed per query. If multiple LargeInPredicates are detected,
- *       transformation is rejected.</li>
- *   <li>OR compound predicates are NOT supported. LargeInPredicate cannot coexist with OR in the 
- *       same filter predicate tree.</li>
- * </ul>
- * 
+ * A LargeInPredicate is transformed only as a conjunct of the predicate of an operator: the join keeps the rows
+ * for which it is true, and the predicate keeps the same rows. A LargeInPredicate anywhere else, inside another
+ * expression of a predicate or in a projection, a join condition or an aggregation, cannot be transformed.
+ *
  * <p><b>Exception Handling and Query Retry:</b>
- * When the transformation cannot proceed due to unsupported scenarios (multiple LargeInPredicates, 
- * OR predicates, or type mismatches), it will throw {@link com.starrocks.sql.common.LargeInPredicateException}.
- * This exception is caught by upper layers (StmtExecutor), which triggers a query retry from the 
- * parser stage with {@code enable_large_in_predicate} disabled. The retry ensures the query executes 
- * via the normal IN predicate path, guaranteeing correctness at the cost of potentially higher 
- * FE processing overhead.
- * 
+ * When a LargeInPredicate cannot be transformed, the rule throws
+ * {@link com.starrocks.sql.common.LargeInPredicateException}. The translator counts the LargeInPredicates in
+ * ColumnRefFactory, and {@link #checkAllTransformed} throws it too when the rule transformed fewer. This exception
+ * is caught by upper layers (StmtExecutor), which triggers a query retry from the parser stage with
+ * {@code enable_large_in_predicate} disabled. The retry ensures the query executes via the normal IN predicate
+ * path, guaranteeing correctness at the cost of potentially higher FE processing overhead.
+ *
  * <p><b>Performance Benefits:</b>
  * For queries with extremely large IN lists (e.g., 100,000+ constants), this transformation significantly
  * reduces FE memory usage and planning time by using {@link com.starrocks.planner.RawValuesNode}
  * instead of creating individual expression nodes for each constant.
- * 
+ *
  * @see com.starrocks.sql.ast.expression.LargeInPredicate
  * @see com.starrocks.planner.RawValuesNode
  * @see com.starrocks.sql.common.LargeInPredicateException
  */
 public class LargeInPredicateToJoinRule extends TransformationRule {
-    private static final Logger LOG = LogManager.getLogger(LargeInPredicateToJoinRule.class);
-
-    private static class PredicateAnalysis {
-        boolean hasOrPredicate = false;
-        List<ScalarOperator> largeInPredicates = new ArrayList<>();
-    }
+    private int transformedCount = 0;
 
     public LargeInPredicateToJoinRule() {
-        super(RuleType.TF_LARGE_IN_PREDICATE_TO_JOIN, Pattern.create(OperatorType.LOGICAL_FILTER)
-                .addChildren(Pattern.create(OperatorType.PATTERN_LEAF)));
+        super(RuleType.TF_LARGE_IN_PREDICATE_TO_JOIN, Pattern.create(OperatorType.PATTERN_LEAF));
     }
 
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
-        if (!context.getSessionVariable().enableLargeInPredicate()) {
+        if (!context.getSessionVariable().enableLargeInPredicate() || input.getOp().getPredicate() == null) {
             return false;
         }
 
-        LogicalFilterOperator filterOp = (LogicalFilterOperator) input.getOp();
-        ScalarOperator predicate = filterOp.getPredicate();
-        
-        PredicateAnalysis analysis = analyzePredicate(predicate);
-        
-        if (analysis.largeInPredicates.isEmpty()) {
-            return false;
+        boolean found = false;
+        for (ScalarOperator conjunct : Utils.extractConjuncts(input.getOp().getPredicate())) {
+            ScalarOperator rest = conjunct;
+            if (conjunct instanceof LargeInPredicateOperator largeIn) {
+                found = true;
+                rest = largeIn.getCompareExpr();
+            }
+            if (containsLargeIn(rest)) {
+                throw new LargeInPredicateException(
+                        "LargeInPredicate is supported only as a conjunct of the predicate of an operator");
+            }
         }
-        
-        if (analysis.hasOrPredicate) {
-            throw new LargeInPredicateException("LargeInPredicate does not support OR compound predicates");
-        }
-        
-        if (analysis.largeInPredicates.size() > 1) {
-            throw new LargeInPredicateException(
-                    "LargeInPredicate does not support multiple LargeInPredicate in one query, found: %s",
-                    analysis.largeInPredicates.size());
-        }
-
-        return true;
+        return found;
     }
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
-        LogicalFilterOperator filterOp = input.getOp().cast();
-        ScalarOperator predicate = filterOp.getPredicate();
-
-        PredicateAnalysis analysis = analyzePredicate(predicate);
-        ScalarOperator inPredicate = analysis.largeInPredicates.get(0);
-
-        OptExpression result = convertToSemiJoin(input, inPredicate, context);
-
-        return Lists.newArrayList(result);
-    }
-
-    private PredicateAnalysis analyzePredicate(ScalarOperator predicate) {
-        PredicateAnalysis analysis = new PredicateAnalysis();
-        analyzePredicateRecursive(predicate, analysis);
-        return analysis;
-    }
-
-    private void analyzePredicateRecursive(ScalarOperator predicate, PredicateAnalysis analysis) {
-        if (predicate instanceof CompoundPredicateOperator compound) {
-            if (compound.getCompoundType() == CompoundPredicateOperator.CompoundType.OR) {
-                analysis.hasOrPredicate = true;
+        Operator op = input.getOp();
+        LargeInPredicateOperator largeIn = null;
+        List<ScalarOperator> remainingConjuncts = new ArrayList<>();
+        for (ScalarOperator conjunct : Utils.extractConjuncts(op.getPredicate())) {
+            if (largeIn == null && conjunct instanceof LargeInPredicateOperator) {
+                largeIn = (LargeInPredicateOperator) conjunct;
+            } else {
+                remainingConjuncts.add(conjunct);
             }
         }
+        transformedCount++;
 
-        if (predicate instanceof LargeInPredicateOperator) {
-            analysis.largeInPredicates.add(predicate);
+        if (largeIn.isNotIn() && largeIn.getConstants().hasNull()) {
+            Operator falseOp = OperatorBuilderFactory.build(op).withOperator(op)
+                    .setPredicate(ConstantOperator.FALSE).build();
+            return Lists.newArrayList(OptExpression.create(falseOp, input.getInputs()));
         }
 
-        for (ScalarOperator child : predicate.getChildren()) {
-            analyzePredicateRecursive(child, analysis);
-        }
-    }
-
-    private OptExpression convertToSemiJoin(OptExpression input, ScalarOperator largeInPredicate,
-                                           OptimizerContext context) {
-        LargeInPredicateOperator largeIn = largeInPredicate.cast();
-        LogicalRawValuesOperator rawValuesOp = createRawConstantTable(largeIn, context);
-        OptExpression valuesExpr = OptExpression.create(rawValuesOp);
-
-        ScalarOperator originalPredicate = input.getOp().getPredicate();
-        ScalarOperator remainingPredicate = removeLargeInPredicate(originalPredicate, largeInPredicate);
-
+        // We keep the other conjuncts on the operator under the join, so the rule finds the next LargeInPredicate
+        // there. The operator applies its projection and limit after its predicate, so we move them to the join.
         OptExpression leftChild;
-        if (remainingPredicate != null && !remainingPredicate.equals(ConstantOperator.TRUE)) {
-            LogicalFilterOperator newFilterOp = new LogicalFilterOperator(remainingPredicate);
-            leftChild = OptExpression.create(newFilterOp, input.getInputs().get(0));
+        if (op instanceof LogicalFilterOperator && remainingConjuncts.isEmpty()) {
+            leftChild = input.inputAt(0);
         } else {
-            leftChild = input.getInputs().get(0);
+            Operator newOp = OperatorBuilderFactory.build(op).withOperator(op)
+                    .setPredicate(Utils.compoundAnd(remainingConjuncts))
+                    .setProjection(null)
+                    .setLimit(Operator.DEFAULT_LIMIT)
+                    .build();
+            leftChild = OptExpression.create(newOp, input.getInputs());
         }
 
-        ScalarOperator leftExpression = largeInPredicate.getChild(0);
-        ColumnRefOperator rightColumn = rawValuesOp.getColumnRefSet().get(0);
+        LargeInConstants constants = largeIn.getConstants();
+        ColumnRefOperator rightColumn = context.getColumnRefFactory().create("const_value", constants.getType(), false);
+        LogicalRawValuesOperator rawValuesOp = new LogicalRawValuesOperator(Lists.newArrayList(rightColumn),
+                constants.getType(), largeIn.getRawText(), constants.getValues(), constants.getValues().size());
 
-        ScalarOperator finalLeftColumn = leftExpression;
+        ScalarOperator leftExpression = largeIn.getCompareExpr();
         if (!leftExpression.getType().matchesType(rightColumn.getType())) {
-            finalLeftColumn = new CastOperator(rightColumn.getType(), leftExpression, false);
+            leftExpression = new CastOperator(rightColumn.getType(), leftExpression, true);
         }
-
-        BinaryPredicateOperator joinPredicate = new BinaryPredicateOperator(BinaryType.EQ, finalLeftColumn, rightColumn);
+        BinaryPredicateOperator joinPredicate = new BinaryPredicateOperator(BinaryType.EQ, leftExpression, rightColumn);
 
         JoinOperator joinType = largeIn.isNotIn() ? JoinOperator.NULL_AWARE_LEFT_ANTI_JOIN : JoinOperator.LEFT_SEMI_JOIN;
-
         LogicalJoinOperator joinOp = new LogicalJoinOperator.Builder()
                 .setJoinType(joinType)
                 .setJoinHint(HINT_JOIN_BROADCAST)
                 .setOnPredicate(joinPredicate)
+                .setProjection(op.getProjection())
+                .setLimit(op.getLimit())
                 .build();
 
-        return OptExpression.create(joinOp, leftChild, valuesExpr);
+        return Lists.newArrayList(OptExpression.create(joinOp, leftChild, OptExpression.create(rawValuesOp)));
     }
 
-    private LogicalRawValuesOperator createRawConstantTable(LargeInPredicateOperator largeInPredicate,
-                                                            OptimizerContext context) {
-        Type constantType = largeInPredicate.getConstantType();
-        ColumnRefOperator column = context.getColumnRefFactory().create(
-                "const_value", constantType, false);
-
-        List<Object> rawConstantList = largeInPredicate.getRawConstantList();
-        String rawText = largeInPredicate.getRawText();
-        int constantCount = largeInPredicate.getConstantCount();
-        
-        return new LogicalRawValuesOperator(
-                Lists.newArrayList(column),
-                constantType,
-                rawText,
-                rawConstantList, 
-                constantCount);
-    }
-
-
-    private ScalarOperator removeLargeInPredicate(ScalarOperator predicate, ScalarOperator toRemove) {
-        if (predicate.equals(toRemove)) {
-            return null;
+    /**
+     * Throws LargeInPredicateException if the rule transformed fewer LargeInPredicates than the translator created
+     * for the plan: the others are in places that the rule does not transform.
+     */
+    public void checkAllTransformed(OptimizerContext context) {
+        int created = context.getColumnRefFactory().getLargeInPredicateCount();
+        if (transformedCount < created) {
+            throw new LargeInPredicateException(
+                    "LargeInPredicate is supported only as a conjunct of the predicate of an operator, " +
+                            "transformed %s of %s", transformedCount, created);
         }
+    }
 
-        List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
-        
-        List<ScalarOperator> remainingConjuncts = new ArrayList<>();
-        for (ScalarOperator conjunct : conjuncts) {
-            if (!conjunct.equals(toRemove)) {
-                remainingConjuncts.add(conjunct);
+    private static boolean containsLargeIn(ScalarOperator operator) {
+        if (operator instanceof LargeInPredicateOperator) {
+            return true;
+        }
+        for (ScalarOperator child : operator.getChildren()) {
+            if (containsLargeIn(child)) {
+                return true;
             }
         }
-        
-        if (remainingConjuncts.isEmpty()) {
-            return null;
-        } else if (remainingConjuncts.size() == 1) {
-            return remainingConjuncts.get(0);
-        } else {
-            return Utils.compoundAnd(remainingConjuncts);
-        }
+        return false;
     }
 }
-

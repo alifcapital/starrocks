@@ -185,7 +185,7 @@ struct TNormalRawValuesNode {
   1: optional Types.TTupleId tuple_id
   2: optional string constant_type_desc
   3: optional list<i64> long_values      // For integer types (TINYINT, SMALLINT, INT, BIGINT)
-  4: optional list<string> string_values // For string types (VARCHAR, CHAR)
+  4: optional list<string> string_values // For string, decimal and date types (VARCHAR, CHAR, DECIMAL32/64/128, DATE, DATETIME)
   5: optional i32 constant_count
 }
 
