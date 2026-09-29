@@ -1782,11 +1782,29 @@ public class ExpressionTest extends PlanTestBase {
 
         sql = "select years_add(years_sub(years_sub(v2, -1), -2), -3) from t0";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "<slot 4> : CAST(2: v2 AS DATETIME)");
+        assertContains(plan, "years_add(years_sub(years_sub(CAST(2: v2 AS DATETIME), -1), -2), -3)");
+
+        // months_add(months_add('2024-01-31', 1), 1) is '2024-03-29', months_add('2024-01-31', 2) is '2024-03-31'
+        sql = "select months_add(months_add(v2, 1), 1) from t0";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "months_add(months_add(CAST(2: v2 AS DATETIME), 1), 1)");
+
+        // days_sub(days_add('9999-12-31', 1), 1) is NULL
+        sql = "select date_sub(date_add(v2, 1), 1) from t0";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "days_sub(days_add(CAST(2: v2 AS DATETIME), 1), 1)");
 
         sql = "select date_add(date_add(date_sub(v2, -1), -2), -3) from t0";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "days_sub(CAST(2: v2 AS DATETIME), 4)");
+        assertContains(plan, "days_sub(days_sub(CAST(2: v2 AS DATETIME), -1), 5)");
+
+        sql = "select milliseconds_add(seconds_add(v2, 1), 1) from t0";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "milliseconds_add(seconds_add(CAST(2: v2 AS DATETIME), 1), 1)");
+
+        sql = "select microseconds_add(microseconds_add(v2, 2000000000), 2000000000) from t0";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "microseconds_add(microseconds_add(CAST(2: v2 AS DATETIME), 2000000000), 2000000000)");
 
         sql = "select date_add(weeks_add(date_sub(v2, -1), -2), 3) from t0";
         plan = getFragmentPlan(sql);

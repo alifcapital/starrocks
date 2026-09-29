@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Function;
@@ -47,7 +48,7 @@ import org.apache.commons.lang.text.StrTokenizer;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -66,6 +67,10 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
             .put("microseconds_", ImmutableList.of(FunctionSet.MICROSECONDS_ADD, FunctionSet.MICROSECONDS_SUB))
             .put("date", ImmutableList.of(FunctionSet.DATE_ADD, FunctionSet.DATE_SUB))
             .build();
+    // Shifts by years, quarters and months move the day to the end of a shorter month, so
+    // months_add(months_add('2024-01-31', 1), 1) is '2024-03-29' while months_add('2024-01-31', 2) is
+    // '2024-03-31'. We want a merged shift to give the same result for every date, so we do not merge these.
+    private static final Set<String> MONTH_BASED_TIME_FNS = ImmutableSet.of("years_", "quarters_", "months_");
     private static final List<String> TIME_FN_NAMES = ImmutableList.<String>builder()
             .add(FunctionSet.YEARS_ADD).add(FunctionSet.YEARS_SUB)
             .add(FunctionSet.QUARTERS_ADD).add(FunctionSet.QUARTERS_SUB)
@@ -441,8 +446,13 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
 
     // reduce `date_sub(date_add(x, 1), 2)` -> `date_sub(x, 1)`
     private ScalarOperator simplifiedTimeFns(CallOperator call) {
-        String fn = TIME_FNS.keySet().stream().filter(s -> call.getFnName().contains(s))
-                .findFirst().orElse("impossible");
+        // Both shifts must use the same unit. We match whole names: "milliseconds_add" contains "seconds_".
+        Map.Entry<String, List<String>> unit = TIME_FNS.entrySet().stream()
+                .filter(e -> e.getValue().contains(call.getFnName())).findFirst().orElse(null);
+        if (unit == null) {
+            return call;
+        }
+        List<String> unitFns = unit.getValue();
         if (!call.getChild(1).isConstantRef() || !IntegerType.INT.equals(call.getChild(1).getType())) {
             return call;
         }
@@ -451,7 +461,7 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
         }
 
         CallOperator child = call.getChild(0).cast();
-        if (!child.getFnName().contains(fn) || !TIME_FN_NAMES.contains(child.getFnName())) {
+        if (!unitFns.contains(child.getFnName())) {
             return call;
         }
         if (!child.getChild(1).isConstantRef() || !IntegerType.INT.equals(child.getChild(1).getType())) {
@@ -464,16 +474,27 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
         if (l1.isNull() || l2.isNull()) {
             return ConstantOperator.createNull(call.getType());
         }
+        if (MONTH_BASED_TIME_FNS.contains(unit.getKey())) {
+            return call;
+        }
 
-        int i1 = call.getFnName().contains("add") ? l1.getInt() : l1.getInt() * -1;
-        int i2 = child.getFnName().contains("add") ? l2.getInt() : l2.getInt() * -1;
+        long i1 = call.getFnName().contains("add") ? l1.getInt() : -(long) l1.getInt();
+        long i2 = child.getFnName().contains("add") ? l2.getInt() : -(long) l2.getInt();
 
-        int result = i1 + i2;
-        ConstantOperator interval = ConstantOperator.createInt(Math.abs(result));
+        // A shift out of the date range gives NULL. When both shifts go the same way, the first one goes out
+        // of the range only if the sum does too. With opposite shifts, days_sub(days_add('9999-12-31', 1), 1)
+        // is NULL while the date itself is not, so we do not merge them.
+        if ((i1 < 0 && i2 > 0) || (i1 > 0 && i2 < 0)) {
+            return call;
+        }
+        long result = i1 + i2;
+        if (Math.abs(result) > Integer.MAX_VALUE) {
+            return call;
+        }
+        ConstantOperator interval = ConstantOperator.createInt((int) Math.abs(result));
 
         if (result != 0) {
-            String fnName = result < 0 ? Objects.requireNonNull(TIME_FNS.get(fn)).get(1) :
-                    Objects.requireNonNull(TIME_FNS.get(fn)).get(0);
+            String fnName = result < 0 ? unitFns.get(1) : unitFns.get(0);
             Function newFn = ExprUtils.getBuiltinFunction(fnName, call.getFunction().getArgs(),
                     Function.CompareMode.IS_SUPERTYPE_OF);
             return new CallOperator(fnName, call.getType(), Lists.newArrayList(child.getChild(0), interval), newFn);
