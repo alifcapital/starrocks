@@ -372,12 +372,15 @@ public class ColumnRangePredicate extends RangePredicate {
             return false;
         }
         ColumnRangePredicate that = (ColumnRangePredicate) o;
-        return Objects.equals(columnRef, that.columnRef) && Objects.equals(columnRanges, that.columnRanges);
+        // We compare the expressions and not only their column: the ranges of different expressions of one column,
+        // such as a DATE column and a DATETIME function of it, have constants of different types, and comparing
+        // them throws
+        return Objects.equals(expression, that.expression) && Objects.equals(columnRanges, that.columnRanges);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(columnRef, columnRanges);
+        return Objects.hash(expression, columnRanges);
     }
 
     private boolean isEqualRange(Range<ConstantOperator> range) {
