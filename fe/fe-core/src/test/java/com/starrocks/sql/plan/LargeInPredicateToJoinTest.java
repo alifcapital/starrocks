@@ -572,7 +572,7 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
                 "     sample values: 1, 2, 3, 4, 5, 6, 7, 8, 9\n" +
                 "     cardinality: 9\n" +
                 "     column statistics: \n" +
-                "     * const_value-->[-Infinity, Infinity, 0.0, 1.0, 1.0] UNKNOWN");
+                "     * const_value-->[1.0, 9.0, 0.0, 8.0, 9.0] ESTIMATE");
     }
 
     @Test
