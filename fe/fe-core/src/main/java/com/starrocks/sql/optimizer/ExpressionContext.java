@@ -24,6 +24,7 @@ import com.starrocks.sql.optimizer.statistics.Statistics;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 /**
  * ExpressionContext to convey context wherever an expression is used in a shallow
@@ -129,6 +130,23 @@ public class ExpressionContext {
         } else {
             return groupExpression.getInputs().get(index).getFirstLogicalExpression().getOp();
         }
+    }
+
+    // The operator of the child at index, or, when `skip` accepts it and it has one input, the first operator below
+    // it that `skip` does not accept. In the memo it follows the first logical expression of each group.
+    public Operator getChildOperatorSkipping(int index, Predicate<Operator> skip) {
+        if (expression != null) {
+            OptExpression child = expression.getInputs().get(index);
+            while (skip.test(child.getOp()) && child.arity() == 1) {
+                child = child.inputAt(0);
+            }
+            return child.getOp();
+        }
+        GroupExpression child = groupExpression.getInputs().get(index).getFirstLogicalExpression();
+        while (skip.test(child.getOp()) && child.arity() == 1) {
+            child = child.getInputs().get(0).getFirstLogicalExpression();
+        }
+        return child.getOp();
     }
 
     public Statistics getStatistics() {

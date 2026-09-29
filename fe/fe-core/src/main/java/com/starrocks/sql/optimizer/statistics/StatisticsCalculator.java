@@ -1374,6 +1374,10 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         } else {
             innerJoinStats = crossJoinStats.withOutputRowCount(innerRowCount);
         }
+        if (isRawValuesJoinOutOfRange(context, joinType, eqOnPredicates, crossJoinStats)) {
+            innerRowCount = 1;
+            innerJoinStats = innerJoinStats.withOutputRowCount(innerRowCount);
+        }
 
         Statistics.Builder joinStatsBuilder;
         switch (joinType) {
@@ -1850,6 +1854,36 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
         context.setStatistics(builder.build());
         return visitOperator(context.getOp(), context);
+    }
+
+    // A LargeInPredicate becomes a semi or anti join with its values, and we want the join estimated as the IN with
+    // the same list. The estimate of an equi-join does not look at the ranges of the keys, while the IN keeps no rows
+    // when no value is in the range of the column. We know the values of RAW VALUES, so here we trust the range of the
+    // column as the IN does. Other joins keep the general estimate: there a stale range of a column could make the
+    // estimate far too low.
+    private boolean isRawValuesJoinOutOfRange(ExpressionContext context, JoinOperator joinType,
+                                              List<BinaryPredicateOperator> eqOnPredicates, Statistics statistics) {
+        if (!(joinType.isLeftSemiJoin() || joinType.isLeftAntiJoin()) || eqOnPredicates.size() != 1) {
+            return false;
+        }
+        // The join derives const_value IS NOT NULL for the values, so a filter can be between them and the join. The
+        // statistics of the key come from the filter, so they cover only the values that it keeps.
+        Operator values = context.getChildOperatorSkipping(1,
+                op -> op instanceof LogicalFilterOperator || op instanceof PhysicalFilterOperator);
+        if (!(values instanceof LogicalRawValuesOperator) && !(values instanceof PhysicalRawValuesOperator)) {
+            return false;
+        }
+        // The IN estimates a string column by the number of distinct values only, without a range
+        BinaryPredicateOperator eq = eqOnPredicates.get(0);
+        if (!eq.getChild(0).isColumnRef() || !eq.getChild(1).isColumnRef() || eq.getChild(0).getType().isStringType()) {
+            return false;
+        }
+        ColumnStatistic left = statistics.getColumnStatistic((ColumnRefOperator) eq.getChild(0));
+        ColumnStatistic right = statistics.getColumnStatistic((ColumnRefOperator) eq.getChild(1));
+        if (left.isUnknown() || right.isUnknown() || left.hasNaNValue() || right.hasNaNValue()) {
+            return false;
+        }
+        return max(left.getMinValue(), right.getMinValue()) > min(left.getMaxValue(), right.getMaxValue());
     }
 
     public Statistics estimateInnerJoinStatistics(Statistics statistics, List<BinaryPredicateOperator> eqOnPredicates) {
