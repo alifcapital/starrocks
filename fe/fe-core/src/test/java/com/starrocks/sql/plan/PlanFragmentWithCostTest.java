@@ -2301,6 +2301,40 @@ public class PlanFragmentWithCostTest extends PlanWithCostTestBase {
     }
 
     @Test
+    public void testRuntimeFilterBelowWindowOverExchange() throws Exception {
+        // lineitem is distributed by l_orderkey, so the window by l_partkey shuffles it. We expect the filter of the
+        // join on the partition key to go through the sort and the exchange to the scan, also through the partition
+        // TopN of rn = 1: it drops whole partitions, and the first rows of the others stay the same.
+        String scanFilter = "     cardinality: 100000000\n" +
+                "     probe runtime filters:\n" +
+                "     - filter_id = 0, probe_expr = (12: L_PARTKEY)";
+        String sql = "select p_name, lip.l_shipdate from part left join " +
+                "(select l_partkey, l_shipdate, row_number() over (partition by l_partkey " +
+                "order by l_shipdate desc) rn from lineitem) lip on p_partkey = lip.l_partkey and lip.rn = 1 " +
+                "where p_name = 'x'";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "PARTITION-TOP-N");
+        assertContains(plan, "build_expr = (1: P_PARTKEY), remote = true");
+        assertContains(plan, scanFilter);
+
+        sql = "select p_name, lip.s from part left join " +
+                "(select l_partkey, sum(l_quantity) over (partition by l_partkey) s from lineitem) lip " +
+                "on p_partkey = lip.l_partkey where p_name = 'x'";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "build_expr = (1: P_PARTKEY), remote = true");
+        assertContains(plan, scanFilter);
+
+        // A filter on another column would change the row numbers, so we expect it to stay above the window
+        sql = "select p_name, lip.l_shipdate from part join " +
+                "(select l_partkey, l_shipdate, l_extendedprice, row_number() over (partition by l_partkey " +
+                "order by l_shipdate desc) rn from lineitem) lip " +
+                "on p_retailprice = lip.l_extendedprice and lip.rn = 1 where p_name = 'x'";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "build_expr = (8: P_RETAILPRICE), remote = false");
+        assertNotContains(plan, "     cardinality: 100000000\n     probe runtime filters:");
+    }
+
+    @Test
     public void testPlanCost() throws Exception {
         final boolean prevShowFragmentCost = FeConstants.showFragmentCost;
         try {

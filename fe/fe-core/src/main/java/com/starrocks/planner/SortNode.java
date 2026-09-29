@@ -45,6 +45,8 @@ import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.ExprToSql;
+import com.starrocks.sql.ast.expression.ExprUtils;
+import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TLateMaterializeMode;
@@ -62,6 +64,8 @@ import org.apache.logging.log4j.Logger;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class SortNode extends PlanNode implements RuntimeFilterBuildNode {
@@ -407,10 +411,61 @@ public class SortNode extends PlanNode implements RuntimeFilterBuildNode {
         // back-pressure. (TopN sorts return false in canPushDownRuntimeFilter and never push below.)
         context.enterNonAggPipelineBreaker();
         try {
-            return super.pushDownRuntimeFilters(context, probeExpr, partitionByExprs);
+            RuntimeFilterDescription description = context.getDescription();
+            DescriptorTable descTbl = context.getDescTbl();
+            if (!canPushDownRuntimeFilter() || !couldBound(probeExpr, description, descTbl)) {
+                return false;
+            }
+            Optional<List<Expr>> probeExprCandidates = canFilterBelow(probeExpr)
+                    ? candidatesOfSlotExpr(probeExpr, couldBound(description, descTbl))
+                    : Optional.empty();
+            return pushdownRuntimeFilterForChildOrAccept(context, probeExpr, probeExprCandidates,
+                    partitionByExprs, candidatesOfSlotExprs(partitionByExprs, couldBound(description, descTbl)), 0,
+                    true);
         } finally {
             context.exitNonAggPipelineBreaker();
         }
+    }
+
+    // We want the runtime filter to reach the scan below the sort. A full sort keeps all rows, so any filter can go
+    // below it. A partition TopN keeps only the first rows of each partition, so we push only a filter on a
+    // partition key: we expect it to drop whole partitions and to leave the first rows of the other partitions as
+    // they are. A filter on another column would drop rows inside a partition, and the TopN would then pick other
+    // rows as the first ones, so such a filter stays above the node.
+    private boolean canFilterBelow(Expr probeExpr) {
+        List<Expr> partitionExprs = info.getPartitionExprs();
+        if (partitionExprs.isEmpty()) {
+            return true;
+        }
+        if (!(probeExpr instanceof SlotRef)) {
+            return false;
+        }
+        SlotId slotId = ((SlotRef) probeExpr).getSlotId();
+        return partitionExprs.stream().anyMatch(e -> e instanceof SlotRef && ((SlotRef) e).getSlotId().equals(slotId));
+    }
+
+    // The filter comes from above with the slots of the sort tuple, and we want it to go down to the input, often
+    // across an exchange into another fragment. The nodes below have their own tuples with the same slot ids, and
+    // they check the partition expressions of the filter by tuple, so they reject the slots of the sort tuple. We
+    // therefore replace a slot of the sort tuple with the input expression that fills it, as ProjectNode does with
+    // its slot map. We do not replace a slot filled by a dict mapping: a runtime filter probe must not contain one.
+    @Override
+    public Optional<List<Expr>> candidatesOfSlotExpr(Expr expr, Function<Expr, Boolean> couldBound) {
+        if (!(expr instanceof SlotRef) || !couldBound.apply(expr) || info.getSortTupleSlotExprs() == null) {
+            return Optional.empty();
+        }
+        SlotId slotId = ((SlotRef) expr).getSlotId();
+        List<SlotDescriptor> slots = info.getSortTupleDescriptor().getSlots();
+        for (int i = 0; i < slots.size(); i++) {
+            if (slots.get(i).getId().equals(slotId)) {
+                Expr input = info.getSortTupleSlotExprs().get(i);
+                if (ExprUtils.containsDictMappingExpr(input)) {
+                    return Optional.empty();
+                }
+                return Optional.of(Lists.newArrayList(input));
+            }
+        }
+        return Optional.empty();
     }
 
     @Override
