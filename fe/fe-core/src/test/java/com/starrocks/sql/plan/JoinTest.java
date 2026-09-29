@@ -26,6 +26,8 @@ import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.transformation.JoinAssociativityRule;
+import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResourceProvider;
 import mockit.Mock;
 import mockit.MockUp;
 import org.apache.commons.lang3.StringUtils;
@@ -2922,36 +2924,52 @@ public class JoinTest extends PlanTestBase {
                 "\n" +
                 "  0:OlapScanNode");
 
+        // The test environment has no compute nodes. We want the default warehouse to be available, so that the
+        // plans are checked both with and without multi-warehouse, where every query runs in the default warehouse.
+        new MockUp<WarehouseComputeResourceProvider>() {
+            @Mock
+            public boolean isResourceAvailable(ComputeResource computeResource) {
+                return true;
+            }
+        };
         Config.run_mode = RunMode.SHARED_DATA.getName();
         RunMode.detectRunMode();
+        boolean multiWarehouse = Config.enable_multi_warehouse;
         try {
-            sql = "select t0.v1 from t0 join[shuffle] t1 on t0.v2 = t1.v5";
-            plan = getFragmentPlan(sql);
-            assertContains(plan, "PLAN FRAGMENT 0\n" +
-                    " OUTPUT EXPRS:1: v1\n" +
-                    "  PARTITION: HASH_PARTITIONED: 2: v2\n" +
-                    "\n" +
-                    "  RESULT SINK");
+            for (boolean enabled : new boolean[] {false, true}) {
+                Config.enable_multi_warehouse = enabled;
+                connectContext.resetComputeResource();
 
-            sql = "select * from t0 where v1 = 10";
-            plan = getFragmentPlan(sql);
-            assertContains(plan, "PLAN FRAGMENT 0\n" +
-                    " OUTPUT EXPRS:1: v1 | 2: v2 | 3: v3\n" +
-                    "  PARTITION: RANDOM\n" +
-                    "\n" +
-                    "  RESULT SINK\n" +
-                    "\n" +
-                    "  0:OlapScanNode");
+                sql = "select t0.v1 from t0 join[shuffle] t1 on t0.v2 = t1.v5";
+                plan = getFragmentPlan(sql);
+                assertContains(plan, "PLAN FRAGMENT 0\n" +
+                        " OUTPUT EXPRS:1: v1\n" +
+                        "  PARTITION: HASH_PARTITIONED: 2: v2\n" +
+                        "\n" +
+                        "  RESULT SINK");
 
-            sql = "select v1 from t0 where v2 = 1 union select v4 from t1 where v5 = 2";
-            plan = getFragmentPlan(sql);
-            assertContains(plan, "RESULT SINK\n" +
-                    "\n" +
-                    "  9:AGGREGATE (merge finalize)\n" +
-                    "  |  group by: 7: v1\n" +
-                    "  |  \n" +
-                    "  8:EXCHANGE");
+                sql = "select * from t0 where v1 = 10";
+                plan = getFragmentPlan(sql);
+                assertContains(plan, "PLAN FRAGMENT 0\n" +
+                        " OUTPUT EXPRS:1: v1 | 2: v2 | 3: v3\n" +
+                        "  PARTITION: RANDOM\n" +
+                        "\n" +
+                        "  RESULT SINK\n" +
+                        "\n" +
+                        "  0:OlapScanNode");
+
+                sql = "select v1 from t0 where v2 = 1 union select v4 from t1 where v5 = 2";
+                plan = getFragmentPlan(sql);
+                assertContains(plan, "RESULT SINK\n" +
+                        "\n" +
+                        "  9:AGGREGATE (merge finalize)\n" +
+                        "  |  group by: 7: v1\n" +
+                        "  |  \n" +
+                        "  8:EXCHANGE");
+            }
         } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
+            connectContext.resetComputeResource();
             Config.run_mode = RunMode.SHARED_NOTHING.getName();
             RunMode.detectRunMode();
         }

@@ -24,6 +24,7 @@ import com.starrocks.qe.StmtExecutor;
 import com.starrocks.qe.VariableMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.DmlStmt;
 import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.StatementBase;
@@ -232,27 +233,27 @@ public class SetVarTest extends PlanTestBase {
     public void testChangeWarehouse() throws Exception {
         Config.run_mode = RunMode.SHARED_DATA.getName();
         RunMode.detectRunMode();
+        boolean multiWarehouse = Config.enable_multi_warehouse;
 
         try {
             GlobalStateMgr.getCurrentState().getWarehouseMgr().addWarehouse(new DefaultWarehouse(2, "wh2"));
             GlobalStateMgr.getCurrentState().getWarehouseMgr().addWarehouse(new DefaultWarehouse(3, "wh3"));
 
-            {
-                String sql = "set warehouse = wh2";
-                StatementBase stmt = SqlParser.parse(sql, starRocksAssert.getCtx().getSessionVariable()).get(0);
-                StmtExecutor executor = new StmtExecutor(starRocksAssert.getCtx(), stmt);
-                executor.execute();
-                Assertions.assertEquals(2, starRocksAssert.getCtx().getCurrentComputeResource().getWarehouseId());
-            }
-
-            {
-                String sql = "set warehouse = wh3";
-                StatementBase stmt = SqlParser.parse(sql, starRocksAssert.getCtx().getSessionVariable()).get(0);
-                StmtExecutor executor = new StmtExecutor(starRocksAssert.getCtx(), stmt);
-                executor.execute();
-                Assertions.assertEquals(3, starRocksAssert.getCtx().getCurrentComputeResource().getWarehouseId());
+            // With multi-warehouse a session runs in the warehouse that it sets; without it every session runs in
+            // the default warehouse
+            for (boolean enabled : new boolean[] {false, true}) {
+                Config.enable_multi_warehouse = enabled;
+                for (long warehouseId : new long[] {2, 3}) {
+                    String sql = "set warehouse = wh" + warehouseId;
+                    StatementBase stmt = SqlParser.parse(sql, starRocksAssert.getCtx().getSessionVariable()).get(0);
+                    StmtExecutor executor = new StmtExecutor(starRocksAssert.getCtx(), stmt);
+                    executor.execute();
+                    Assertions.assertEquals(enabled ? warehouseId : WarehouseManager.DEFAULT_WAREHOUSE_ID,
+                            starRocksAssert.getCtx().getCurrentComputeResource().getWarehouseId());
+                }
             }
         } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
             Config.run_mode = RunMode.SHARED_NOTHING.getName();
             RunMode.detectRunMode();
         }

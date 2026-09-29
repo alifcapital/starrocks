@@ -1138,34 +1138,29 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
 
     @Test
     public void testReplayBeCoreStat() throws Exception {
-        {
-            String dumpString = getDumpInfoFromFile("query_dump/test_replay_be_core_stat_v1");
-            QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
-            Pair<QueryDumpInfo, String> replayPair =
-                    getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(), TExplainLevel.NORMAL);
-            queryDumpInfo = replayPair.first;
-            int dop = queryDumpInfo.getSessionVariable().getDegreeOfParallelism(connectContext.getCurrentWarehouseId());
-            Assertions.assertEquals(6, dop);
-        }
-
-        {
-            String dumpString = getDumpInfoFromFile("query_dump/test_replay_be_core_stat_v2_0");
-            QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
-            Pair<QueryDumpInfo, String> replayPair =
-                    getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(), TExplainLevel.NORMAL);
-            queryDumpInfo = replayPair.first;
-            int dop = queryDumpInfo.getSessionVariable().getDegreeOfParallelism(connectContext.getCurrentWarehouseId());
-            Assertions.assertEquals(4, dop);
-        }
-
-        {
-            String dumpString = getDumpInfoFromFile("query_dump/test_replay_be_core_stat_v2_1");
-            QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
-            Pair<QueryDumpInfo, String> replayPair =
-                    getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(), TExplainLevel.NORMAL);
-            queryDumpInfo = replayPair.first;
-            int dop = queryDumpInfo.getSessionVariable().getDegreeOfParallelism(connectContext.getCurrentWarehouseId());
-            Assertions.assertEquals(8, dop);
+        // The degree of parallelism follows the cores of the warehouse that runs the query. The query of v2_1 is in
+        // wh1, whose nodes have 16 cores, while the nodes of the default warehouse have 8. With multi-warehouse the
+        // query runs in wh1; without it, in the default warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        try {
+            for (boolean enabled : new boolean[] {false, true}) {
+                Config.enable_multi_warehouse = enabled;
+                String[] dumps = {"query_dump/test_replay_be_core_stat_v1", "query_dump/test_replay_be_core_stat_v2_0",
+                        "query_dump/test_replay_be_core_stat_v2_1"};
+                int[] dops = {6, 4, enabled ? 8 : 4};
+                for (int i = 0; i < dumps.length; i++) {
+                    String dumpString = getDumpInfoFromFile(dumps[i]);
+                    QueryDumpInfo queryDumpInfo = getDumpInfoFromJson(dumpString);
+                    Pair<QueryDumpInfo, String> replayPair =
+                            getPlanFragment(dumpString, queryDumpInfo.getSessionVariable(), TExplainLevel.NORMAL);
+                    queryDumpInfo = replayPair.first;
+                    int dop = queryDumpInfo.getSessionVariable()
+                            .getDegreeOfParallelism(connectContext.getCurrentWarehouseId());
+                    Assertions.assertEquals(dops[i], dop, dumps[i] + " enable_multi_warehouse=" + enabled);
+                }
+            }
+        } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
         }
     }
 
