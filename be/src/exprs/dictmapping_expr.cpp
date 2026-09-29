@@ -43,7 +43,8 @@ StatusOr<ColumnPtr> DictMappingExpr::evaluate_checked(ExprContext* context, Chun
         auto data_column = ColumnHelper::get_data_column(target_column.get());
 
         if (data_column->is_binary()) {
-            DCHECK(dict_func_expr == nullptr);
+            // The strings of the column, such as the dictionary of a file, take the string expression. A rewritten
+            // expression is evaluated on them too.
             return get_child(1)->evaluate_checked(context, ptr);
         } else if (dict_func_expr != nullptr) {
             return dict_func_expr->evaluate_checked(context, ptr);
