@@ -293,6 +293,8 @@ StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<co
         return false;
     }
 
+    SCOPED_RAW_TIMER(&_opts.stats->page_index_ns);
+
     // get column index
     int64_t column_index_offset = chunk_meta->column_index_offset;
     uint32_t column_index_length = chunk_meta->column_index_length;

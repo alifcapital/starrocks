@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--rounds', type=int, default=21)
     parser.add_argument('--reverse', action='store_true')
     parser.add_argument('--patched', action='store_true')
+    parser.add_argument('--page-index-ab', action='store_true',
+                        help='Also measure the RF plan with Parquet page indexes disabled')
     parser.add_argument('--cases', nargs='*')
     parser.add_argument('--reference-plans', type=Path,
                         help='Require the same RANK/RF choice and statistics source as this baseline')
@@ -54,8 +56,13 @@ def main():
         variants.append(('no_backpressure', 1, False))
         sql('SET topn_filter_back_pressure_io_tasks=1')
 
+    if args.page_index_ab:
+        variants.append(('no_page_index', 1, True))
+
     def select_variant(variant):
         _, mode, backpressure = variant
+        sql('SET enable_parquet_reader_page_index=' +
+            ('false' if variant[0] == 'no_page_index' else 'true'))
         sql(f'SET topn_push_down_agg_mode={mode}')
         if args.patched:
             sql('SET enable_topn_filter_back_pressure=' + str(backpressure).lower())
@@ -112,7 +119,7 @@ def main():
             routes[variant[0]] = ('type: RANK' in plan, 'build runtime filters:' in plan)
             stats_sources[variant[0]] = statistics_sources(plan)
             if args.reference_plans:
-                reference_variant = 'optimized' if variant[0] == 'no_backpressure' else variant[0]
+                reference_variant = 'optimized' if variant[0] in ('no_backpressure', 'no_page_index') else variant[0]
                 reference = (args.reference_plans / (name + '.' + reference_variant + '.plan')).read_text()
                 assert routes[variant[0]] == ('type: RANK' in reference, 'build runtime filters:' in reference), \
                     name + ': RANK/RF differs from reference'

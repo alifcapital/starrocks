@@ -32,6 +32,7 @@
 #include "column/nullable_column.h"
 #include "column/struct_column.h"
 #include "common/logging.h"
+#include "connector/hive_connector.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "exprs/binary_predicate.h"
 #include "exprs/expr_context.h"
@@ -3844,6 +3845,20 @@ TEST_F(FileReaderTest, update_rf_and_filter_row_group) {
     ASSERT_TRUE(st.is_end_of_file());
 }
 
+TEST(ParquetPageIndexAdvisorTest, BothDataSourceConstructorsShareScanFeedback) {
+    THdfsScanNode node;
+    connector::HiveDataSourceProvider provider(nullptr, node);
+    TScanRange full_range;
+    THdfsScanRange hdfs_range;
+    connector::HiveDataSource ordinary(&provider, full_range);
+    connector::HiveDataSource split(&provider, hdfs_range);
+    ASSERT_NE(nullptr, ordinary._scanner_ctx.page_index_read_advisor);
+    ASSERT_EQ(ordinary._scanner_ctx.page_index_read_advisor, split._scanner_ctx.page_index_read_advisor);
+    connector::HiveDataSourceProvider other_provider(nullptr, node);
+    connector::HiveDataSource other(&other_provider, full_range);
+    EXPECT_NE(ordinary._scanner_ctx.page_index_read_advisor, other._scanner_ctx.page_index_read_advisor);
+}
+
 TEST(ParquetPageIndexAdvisorTest, RechecksAndResetsAfterBenefit) {
     PageIndexReadAdvisor advisor;
     const std::string key = "v<=10 OR v IS NULL";
@@ -4091,6 +4106,60 @@ TEST_F(FileReaderTest, footer_coverage_skips_page_index_and_rechecks_new_bounds)
             EXPECT_GT(g_hdfs_stats.page_index_tried_counter, tried_before);
             EXPECT_LT(reader->group_readers()[0]->get_range().span_size(), 10000);
         }
+    }
+}
+
+TEST_F(FileReaderTest, page_index_feedback_retries_useful_index_without_losing_rows) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    auto advisor = std::make_shared<PageIndexReadAdvisor>();
+    auto descriptor = gen_runtime_filter_desc(0);
+    ASSERT_TRUE(descriptor.ok());
+    _rf_probe_collector->add_descriptor(descriptor.value());
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        auto reader = _create_file_reader(path);
+        Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {""}};
+        auto* ctx = _create_scan_context(slots, path);
+        std::vector<TExpr> expressions;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LE, 0, 5000, &expressions);
+        std::vector<ExprContext*> conjuncts;
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &conjuncts);
+        auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+        ParquetUTBase::setup_conjuncts_manager(conjuncts, nullptr, tuple, _runtime_state, ctx);
+        ctx->runtime_filter_collector = _rf_probe_collector;
+        ctx->page_index_read_advisor = advisor;
+        const auto key = ctx->predicates.predicate_tree.root().debug_string();
+        if (attempt == 0) {
+            // Previous files had no useful page index. Skip once, then retry on this
+            // file, whose index is useful, and retain it after observing that benefit.
+            advisor->observe(key, false);
+            advisor->observe(key, false);
+        }
+        const auto tried_before = g_hdfs_stats.page_index_tried_counter;
+        const auto index_ns_before = g_hdfs_stats.page_index_ns;
+        ASSERT_OK(reader->init(ctx));
+        ASSERT_EQ(1, reader->row_group_size());
+        if (attempt == 0) {
+            EXPECT_EQ(tried_before, g_hdfs_stats.page_index_tried_counter);
+            EXPECT_EQ(index_ns_before, g_hdfs_stats.page_index_ns);
+            EXPECT_EQ(10000, reader->group_readers()[0]->get_range().span_size());
+        } else {
+            EXPECT_GT(g_hdfs_stats.page_index_tried_counter, tried_before);
+            EXPECT_GT(g_hdfs_stats.page_index_ns, index_ns_before);
+            EXPECT_LT(reader->group_readers()[0]->get_range().span_size(), 10000);
+        }
+        ChunkPtr chunk = std::make_shared<Chunk>();
+        _append_column_for_chunk(TYPE_INT, &chunk);
+        size_t matches = 0;
+        while (true) {
+            chunk->reset();
+            auto status = reader->get_next(&chunk);
+            ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status.to_string();
+            for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                matches += chunk->get_column_by_slot_id(0)->get(i).get_int32() <= 5000;
+            }
+            if (status.is_end_of_file()) break;
+        }
+        EXPECT_EQ(5000, matches);
     }
 }
 
