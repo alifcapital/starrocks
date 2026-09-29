@@ -20,6 +20,18 @@
     "poc.flat_consumptions":  {
       "flat_consumptions":  6810662401
     },
+    "poc.flat_consumptions_drinks":  {
+      "flat_consumptions_drinks":  1000000000
+    },
+    "poc.flat_consumptions_drinks_dates":  {
+      "flat_consumptions_drinks_dates":  50000000
+    },
+    "poc.flat_consumptions_drinks_dates_roll_month":  {
+      "flat_consumptions_drinks_dates_roll_month":  2000000
+    },
+    "poc.flat_consumptions_drinks_dates_roll_year":  {
+      "flat_consumptions_drinks_dates_roll_year":  200000
+    },
     "poc.table_c":  {
       "table_c":  5754
     }
