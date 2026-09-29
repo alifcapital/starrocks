@@ -130,7 +130,8 @@ Status RawValuesSourceOperatorFactory::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(SourceOperatorFactory::prepare(state));
     const SlotDescriptor* slot = _dst_slots[0];
     ASSIGN_OR_RETURN(_values, build_column(slot->type(), slot->is_nullable(), _long_values, _string_values));
-    // The lists are not used once the column holds the values
+    // We free the lists once the column holds the values: nothing reads them later, and a large IN list takes much
+    // memory
     std::vector<int64_t>().swap(_long_values);
     std::vector<std::string>().swap(_string_values);
     return Status::OK();

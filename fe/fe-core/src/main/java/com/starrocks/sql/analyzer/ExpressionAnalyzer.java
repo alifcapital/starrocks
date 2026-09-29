@@ -845,8 +845,8 @@ public class ExpressionAnalyzer {
         @Override
         public Void visitLargeInPredicate(LargeInPredicate node, Scope scope) {
             predicateBaseAndCheck(node);
-            // The type check of visitInPredicate, over the compared expression and every constant. The planner
-            // resolves the comparison type as it does for the same InPredicate.
+            // We want the same type errors as for the InPredicate with this list, so we run its type check over the
+            // compared expression and every constant. The planner resolves the comparison type as for that InPredicate.
             List<Type> list = new ArrayList<>(node.getConstantCount() + 1);
             list.add(node.getCompareExpr().getType());
             for (int i = 0; i < node.getConstantCount(); i++) {

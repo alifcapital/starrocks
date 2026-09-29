@@ -1709,8 +1709,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         return computeRawValuesNode(context, node.getColumnRefSet(), node.getConstantType(), node.getRawConstantList());
     }
 
-    // The statistics of the values of a LargeInPredicate, as of the constants of an InPredicate: a join with them
-    // keeps as many rows of the other side as the InPredicate does
+    // We give the values of a LargeInPredicate the statistics of the constants of the same InPredicate, because we
+    // want the estimate of a join with them to match the estimate of the IN. It is higher when all values are out of
+    // the range of the other column.
     private Void computeRawValuesNode(ExpressionContext context, List<ColumnRefOperator> columnRefs, Type type,
                                       List<Object> values) {
         double minValue = POSITIVE_INFINITY;

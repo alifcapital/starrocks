@@ -7766,7 +7766,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                     try {
                         rawValueList.add(Long.parseLong(intText));
                     } catch (NumberFormatException e) {
-                        // A value out of BIGINT is kept as the literal of the InPredicate
+                        // We keep a value out of BIGINT as the literal of the InPredicate, so the planner compares it
+                        // as the IN would
                         rawValueList.add(parseIntegerWithVisitIntegerValueLogic(intText,
                                 createPos(integerNode.getSymbol(), integerNode.getSymbol())));
                     }

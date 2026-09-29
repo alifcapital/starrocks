@@ -139,8 +139,8 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
             return Lists.newArrayList(OptExpression.create(falseOp, input.getInputs()));
         }
 
-        // The operator keeps the other conjuncts under the join, and the rule transforms the next LargeInPredicate
-        // there. The join applies the projection and the limit that the operator applies after its predicate.
+        // We keep the other conjuncts on the operator under the join, so the rule finds the next LargeInPredicate
+        // there. The operator applies its projection and limit after its predicate, so we move them to the join.
         OptExpression leftChild;
         if (op instanceof LogicalFilterOperator && remainingConjuncts.isEmpty()) {
             leftChild = input.inputAt(0);

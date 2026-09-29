@@ -86,7 +86,8 @@ public final class LargeInConstants {
         if (constants.stream().allMatch(c -> compareType.matchesType(c.getType()))) {
             resolved = constants;
         } else if (compareExpr.isVariable()) {
-            // A constant that already has the type fails tryCastConstant as well, as in ImplicitCastRule
+            // We follow ImplicitCastRule, which casts every constant with tryCastConstant. It fails also for a
+            // constant that already has the type, and then the list compares in the common type.
             resolved = new ArrayList<>(constants.size());
             for (ConstantOperator constant : constants) {
                 Optional<ScalarOperator> cast = Utils.tryCastConstant(constant, compareType);

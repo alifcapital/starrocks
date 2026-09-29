@@ -112,8 +112,9 @@ public class RawValuesNode extends PlanNode {
         }
     }
 
-    // The text of each value: the text of the DecimalLiteral or DateLiteral that the value becomes in an
-    // InPredicate. A decimal value is cut to the scale of the type as DecimalLiteral.packDecimal does.
+    // We send each value as text, and we want BE to parse the same literal that the value becomes in an
+    // InPredicate: the text of its DecimalLiteral or DateLiteral. So we cut a decimal value to the scale of the type,
+    // as DecimalLiteral.packDecimal does.
     private List<String> getStringValues() {
         if (stringValues != null) {
             return stringValues;

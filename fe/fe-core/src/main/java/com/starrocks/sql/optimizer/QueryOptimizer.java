@@ -587,8 +587,8 @@ public class QueryOptimizer extends Optimizer {
         // cannot merge
         scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_PREDICATE_RULES);
 
-        // After predicate pushdown, so that the join of a LargeInPredicate is on the operator that the InPredicate
-        // would filter
+        // We run the rule after predicate pushdown: we want the join of a LargeInPredicate on the operator that the
+        // InPredicate would filter, as low in the plan as the IN would go
         if (context.getColumnRefFactory().getLargeInPredicateCount() > 0) {
             LargeInPredicateToJoinRule largeInPredicateToJoinRule = new LargeInPredicateToJoinRule();
             scheduler.rewriteOnce(tree, rootTaskContext, largeInPredicateToJoinRule);
