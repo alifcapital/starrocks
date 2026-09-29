@@ -289,21 +289,21 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
 
     @Test
     public void testLimitationsAndExceptions() {
-        // A LargeInPredicate inside another expression of a filter
+        // A LargeInPredicate inside another expression of a predicate
         assertLargeInException(
                 "select * from t0 where v1 in (1, 2, 3, 4) or v2 > 100",
-                "LargeInPredicate is supported only as a conjunct of a filter");
+                "LargeInPredicate is supported only as a conjunct of the predicate of an operator");
         assertLargeInException(
                 "select * from t0 where case when v1 in (1, 2, 3, 4) then v2 else v3 end > 100",
-                "LargeInPredicate is supported only as a conjunct of a filter");
+                "LargeInPredicate is supported only as a conjunct of the predicate of an operator");
 
-        // A LargeInPredicate out of a filter
+        // A LargeInPredicate out of a predicate
         assertLargeInException(
                 "select v1 in (1, 2, 3, 4) from t0",
-                "LargeInPredicate is supported only as a conjunct of a filter, transformed 0 of 1");
+                "LargeInPredicate is supported only as a conjunct of the predicate of an operator, transformed 0 of 1");
         assertLargeInException(
-                "select * from t0 join t1 on t0.v1 = t1.v4 and t1.v5 in (1, 2, 3, 4)",
-                "LargeInPredicate is supported only as a conjunct of a filter, transformed 0 of 1");
+                "select * from t0 join t1 on t0.v1 = t1.v4 and t0.v2 + t1.v5 in (1, 2, 3, 4)",
+                "LargeInPredicate is supported only as a conjunct of the predicate of an operator, transformed 0 of 1");
 
         // A comparison type that RAW VALUES does not hold
         assertLargeInException(
@@ -470,6 +470,25 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
         // NOT of IN is NOT IN
         assertLargeNotInTransformation("select * from t0 where not (v1 in (1, 2, 3, 4))");
         assertLargeInTransformation("select * from t0 where not (v1 not in (1, 2, 3, 4))");
+
+        // A condition of a join on one side is pushed to its scan
+        plan = getFragmentPlan("select * from t0 join t1 on t0.v1 = t1.v4 and t1.v5 in (1, 2, 3, 4)");
+        assertContains(plan, "LEFT SEMI JOIN");
+        assertContains(plan, "equal join conjunct: 5: v5 = 7: const_value");
+    }
+
+    @Test
+    public void testJoinOverScan() throws Exception {
+        // IN on the null side of an outer join rejects NULL, so the outer join is an inner join, and the
+        // semi join is on the scan that the IN filters
+        String plan = getFragmentPlan("select * from t0 left join t1 on t0.v1 = t1.v4 where t1.v5 in (1, 2, 3, 4)");
+        assertContains(plan, "INNER JOIN");
+        assertNotContains(plan, "LEFT OUTER JOIN");
+        assertContains(plan, "equal join conjunct: 5: v5 = 7: const_value");
+
+        plan = getFragmentPlan("select * from t0 left join t1 on t0.v1 = t1.v4 where t1.v5 not in (1, 2, 3, 4)");
+        assertContains(plan, "INNER JOIN");
+        assertContains(plan, "NULL AWARE LEFT ANTI JOIN");
     }
 
     @Test

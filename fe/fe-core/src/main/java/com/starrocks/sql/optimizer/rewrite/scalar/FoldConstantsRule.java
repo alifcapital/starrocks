@@ -378,6 +378,11 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
 
     @Override
     public ScalarOperator visitLargeInPredicate(LargeInPredicateOperator predicate, ScalarOperatorRewriteContext context) {
+        // NULL IN and NULL NOT IN a list with values are NULL
+        ScalarOperator compareExpr = predicate.getCompareExpr();
+        if (compareExpr.isConstantRef() && ((ConstantOperator) compareExpr).isNull()) {
+            return ConstantOperator.createNull(BooleanType.BOOLEAN);
+        }
         return predicate;
     }
 

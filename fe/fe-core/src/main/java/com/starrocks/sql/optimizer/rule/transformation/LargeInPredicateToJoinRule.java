@@ -21,6 +21,8 @@ import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.Operator;
+import com.starrocks.sql.optimizer.operator.OperatorBuilderFactory;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
@@ -45,29 +47,32 @@ import static com.starrocks.sql.ast.HintNode.HINT_JOIN_BROADCAST;
  *
  * <p><b>Transformation:</b>
  *
+ * <p>The rule runs after predicate pushdown, so a LargeInPredicate is where the InPredicate with the same list
+ * would be: in the predicate of the scan that it filters, or of the lowest operator that it can be pushed to.
+ *
  * <p>Before (IN):
  * <pre>
- *   Filter(col IN (v1, v2, ..., vN) AND rest)
+ *   Operator(predicate: col IN (v1, v2, ..., vN) AND rest, projection)
  *     |
  *   Child
  * </pre>
  *
  * <p>After (IN):
  * <pre>
- *   LeftSemiJoin(col = const_col)
- *     |               |
- *   Filter(rest)   RawValues(const_col: v1, v2, ..., vN)
+ *   LeftSemiJoin(col = const_col, projection)
+ *     |                      |
+ *   Operator(predicate: rest)   RawValues(const_col: v1, v2, ..., vN)
  *     |
  *   Child
  * </pre>
  *
  * <p>NOT IN becomes a null-aware left anti join in the same way. NOT IN with a NULL constant is never true, so
- * the filter becomes FALSE.
+ * the predicate of the operator becomes FALSE.
  *
  * <p><b>Transformation Restrictions:</b>
- * A LargeInPredicate is transformed only as a conjunct of a filter: the join keeps the rows for which it is true,
- * and the filter keeps the same rows. A LargeInPredicate anywhere else, inside another expression of a filter or
- * in an operator that is not a filter, cannot be transformed.
+ * A LargeInPredicate is transformed only as a conjunct of the predicate of an operator: the join keeps the rows
+ * for which it is true, and the predicate keeps the same rows. A LargeInPredicate anywhere else, inside another
+ * expression of a predicate or in a projection, a join condition or an aggregation, cannot be transformed.
  *
  * <p><b>Exception Handling and Query Retry:</b>
  * When a LargeInPredicate cannot be transformed, the rule throws
@@ -90,13 +95,12 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
     private int transformedCount = 0;
 
     public LargeInPredicateToJoinRule() {
-        super(RuleType.TF_LARGE_IN_PREDICATE_TO_JOIN, Pattern.create(OperatorType.LOGICAL_FILTER)
-                .addChildren(Pattern.create(OperatorType.PATTERN_LEAF)));
+        super(RuleType.TF_LARGE_IN_PREDICATE_TO_JOIN, Pattern.create(OperatorType.PATTERN_LEAF));
     }
 
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
-        if (!context.getSessionVariable().enableLargeInPredicate()) {
+        if (!context.getSessionVariable().enableLargeInPredicate() || input.getOp().getPredicate() == null) {
             return false;
         }
 
@@ -108,7 +112,8 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
                 rest = largeIn.getCompareExpr();
             }
             if (containsLargeIn(rest)) {
-                throw new LargeInPredicateException("LargeInPredicate is supported only as a conjunct of a filter");
+                throw new LargeInPredicateException(
+                        "LargeInPredicate is supported only as a conjunct of the predicate of an operator");
             }
         }
         return found;
@@ -116,10 +121,10 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
-        LogicalFilterOperator filterOp = input.getOp().cast();
+        Operator op = input.getOp();
         LargeInPredicateOperator largeIn = null;
         List<ScalarOperator> remainingConjuncts = new ArrayList<>();
-        for (ScalarOperator conjunct : Utils.extractConjuncts(filterOp.getPredicate())) {
+        for (ScalarOperator conjunct : Utils.extractConjuncts(op.getPredicate())) {
             if (largeIn == null && conjunct instanceof LargeInPredicateOperator) {
                 largeIn = (LargeInPredicateOperator) conjunct;
             } else {
@@ -129,16 +134,23 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
         transformedCount++;
 
         if (largeIn.isNotIn() && largeIn.getConstants().hasNull()) {
-            LogicalFilterOperator falseFilter = new LogicalFilterOperator.Builder().withOperator(filterOp)
+            Operator falseOp = OperatorBuilderFactory.build(op).withOperator(op)
                     .setPredicate(ConstantOperator.FALSE).build();
-            return Lists.newArrayList(OptExpression.create(falseFilter, input.getInputs()));
+            return Lists.newArrayList(OptExpression.create(falseOp, input.getInputs()));
         }
 
-        // A filter keeps the other conjuncts under the join; the rule transforms the next LargeInPredicate there
-        OptExpression leftChild = input.inputAt(0);
-        if (!remainingConjuncts.isEmpty()) {
-            leftChild = OptExpression.create(new LogicalFilterOperator(Utils.compoundAnd(remainingConjuncts)),
-                    leftChild);
+        // The operator keeps the other conjuncts under the join, and the rule transforms the next LargeInPredicate
+        // there. The join applies the projection and the limit that the operator applies after its predicate.
+        OptExpression leftChild;
+        if (op instanceof LogicalFilterOperator && remainingConjuncts.isEmpty()) {
+            leftChild = input.inputAt(0);
+        } else {
+            Operator newOp = OperatorBuilderFactory.build(op).withOperator(op)
+                    .setPredicate(Utils.compoundAnd(remainingConjuncts))
+                    .setProjection(null)
+                    .setLimit(Operator.DEFAULT_LIMIT)
+                    .build();
+            leftChild = OptExpression.create(newOp, input.getInputs());
         }
 
         LargeInConstants constants = largeIn.getConstants();
@@ -157,8 +169,8 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
                 .setJoinType(joinType)
                 .setJoinHint(HINT_JOIN_BROADCAST)
                 .setOnPredicate(joinPredicate)
-                .setProjection(filterOp.getProjection())
-                .setLimit(filterOp.getLimit())
+                .setProjection(op.getProjection())
+                .setLimit(op.getLimit())
                 .build();
 
         return Lists.newArrayList(OptExpression.create(joinOp, leftChild, OptExpression.create(rawValuesOp)));
@@ -172,8 +184,8 @@ public class LargeInPredicateToJoinRule extends TransformationRule {
         int created = context.getColumnRefFactory().getLargeInPredicateCount();
         if (transformedCount < created) {
             throw new LargeInPredicateException(
-                    "LargeInPredicate is supported only as a conjunct of a filter, transformed %s of %s",
-                    transformedCount, created);
+                    "LargeInPredicate is supported only as a conjunct of the predicate of an operator, " +
+                            "transformed %s of %s", transformedCount, created);
         }
     }
 

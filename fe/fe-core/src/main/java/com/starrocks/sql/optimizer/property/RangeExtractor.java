@@ -22,14 +22,12 @@ import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
-import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.LargeInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 
@@ -122,11 +120,6 @@ public class RangeExtractor {
         private static boolean isNullAlternativeDeriveEnabled() {
             ConnectContext ctx = ConnectContext.get();
             return ctx != null && ctx.getSessionVariable().isCboDerivePredicateNullAlternative();
-        }
-
-        @Override
-        public Void visitLargeInPredicate(LargeInPredicateOperator predicate, Void context) {
-            throw new LargeInPredicateException("not support large in predicate in the RangeValueExtractor");
         }
 
         @Override
