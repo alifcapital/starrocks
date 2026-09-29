@@ -26,6 +26,7 @@ import com.starrocks.sql.common.TimeUnitUtils;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
@@ -874,7 +875,7 @@ public final class MonotonicInverse {
      * A fixed-duration shift inverts by applying the opposite shift to the constant:
      * {@code days_add(x, 3) cmp value} becomes {@code x cmp days_sub(value, 3)}, same
      * comparison. Only day-and-finer shifts (and weeks: a fixed 7 days) qualify; month and
-     * year shifts clamp day-of-month and have no such inverse.
+     * year shifts clamp day-of-month and go through {@link #monthShift}.
      * <p>
      * The shift is partial: near a type boundary it can produce NULL. Its inverse is
      * registered only for scan-bound derivation, where the original predicate remains to
@@ -987,6 +988,82 @@ public final class MonotonicInverse {
             return Optional.empty();
         }
         return Optional.of(new BinaryPredicateOperator(effective, amount, ConstantOperator.createInt((int) bound)));
+    }
+
+    /**
+     * A shift by whole months (months, quarters, years) cuts the day to the end of a shorter
+     * month: months_add of 2024-01-29, 2024-01-30 and 2024-01-31 is 2024-02-29, and no date
+     * maps to 2024-03-31. So we cannot shift the constant back. On dates the shift never goes
+     * down, so every comparison still selects a range of dates, and we compute its edges.
+     * On DATETIME the time of day is kept, 2024-01-29 23:00 maps above 2024-01-30 01:00, and
+     * the rows are not a range. There we bound only the date part, which every matching row
+     * passes; the original predicate stays and rejects the rest.
+     * <p>
+     * The shift is NULL past the date range, so this is a filter inverse like {@link #shift}.
+     */
+    public static MonotonicFunctionRegistry.PredicateInverse monthShift(int monthsPerUnit, boolean isAdd) {
+        return (call, dataChild, cmp, value) -> invertMonthShift(monthsPerUnit, isAdd, call, dataChild, cmp, value);
+    }
+
+    private static Optional<ScalarOperator> invertMonthShift(int monthsPerUnit, boolean isAdd, CallOperator call,
+                                                             ScalarOperator dataChild, BinaryType cmp,
+                                                             ConstantOperator value) {
+        try {
+            ScalarOperator amount = call.getChild(1);
+            if (!amount.isConstantRef() || ((ConstantOperator) amount).isNull() || !amount.getType().isIntegerType()
+                    || !value.getType().isDateType()) {
+                return Optional.empty();
+            }
+            long units = ((Number) ((ConstantOperator) amount).getValue()).longValue();
+            long months = Math.multiplyExact(units, (long) monthsPerUnit) * (isAdd ? 1 : -1);
+            LocalDate day = value.getDatetime().toLocalDate();
+            boolean midnight = value.getDatetime().equals(day.atStartOfDay());
+            // the first date whose shift reaches the day of the constant, and the first date past it
+            LocalDateTime reach = firstDateShiftedTo(day, months).atStartOfDay();
+            LocalDateTime pass = firstDateShiftedTo(day.plusDays(1), months).atStartOfDay();
+            boolean dateInput = dataChild.getType().isDate()
+                    || (dataChild instanceof CastOperator && dataChild.getChild(0).getType().isDate());
+            if (!dateInput) {
+                switch (cmp) {
+                    case EQ:
+                        return window(dataChild, reach, pass);
+                    case GE:
+                    case GT:
+                        return lowerBound(dataChild, reach);
+                    case LE:
+                    case LT:
+                        return upperBound(dataChild, pass);
+                    default:
+                        return Optional.empty();
+                }
+            }
+            // a shifted date is a midnight, so it can equal the constant only when the constant is one
+            switch (cmp) {
+                case EQ:
+                    return midnight ? window(dataChild, reach, pass) : window(dataChild, reach, reach);
+                case GE:
+                    return lowerBound(dataChild, midnight ? reach : pass);
+                case GT:
+                    return lowerBound(dataChild, pass);
+                case LE:
+                    return upperBound(dataChild, pass);
+                case LT:
+                    return upperBound(dataChild, midnight ? reach : pass);
+                default:
+                    return Optional.empty();
+            }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    // The first date x with x.plusMonths(months) >= day. Going back from the day gives y with
+    // y.plusMonths(months) <= day. When the day exists in the month of y, the shift of y is the
+    // day and no earlier date reaches it. Otherwise the day was cut to the end of the shorter
+    // month of y, the whole month maps below the day, and the first date is the next month start.
+    private static LocalDate firstDateShiftedTo(LocalDate day, long months) {
+        LocalDate y = day.minusMonths(months);
+        return y.plusMonths(months).equals(day) ? y : y.withDayOfMonth(1).plusMonths(1);
     }
 
     private static ConstantOperator foldOpposite(String oppositeFnName, ConstantOperator value,

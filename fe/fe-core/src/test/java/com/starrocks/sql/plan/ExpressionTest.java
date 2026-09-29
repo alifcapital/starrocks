@@ -1033,6 +1033,20 @@ public class ExpressionTest extends PlanTestBase {
         sql = "select t1a from test_all_type where months_sub(id_datetime, 1) >= '2024-01-31'";
         planFragment = getFragmentPlan(sql);
         assertContains(planFragment, "months_sub(8: id_datetime, 1) >= '2024-01-31 00:00:00'");
+
+        // the predicate stays, and the scan gets the dates that reach 2024-02-29: January 29 to 31
+        sql = "select t1a from test_all_type where months_add(id_date, 1) = '2024-02-29'";
+        planFragment = getFragmentPlan(sql);
+        assertContains(planFragment, "months_add(");
+        assertContains(planFragment, "9: id_date >= '2024-01-29'");
+        assertContains(planFragment, "9: id_date <= '2024-01-31'");
+
+        // on DATETIME the scan gets the same days, the predicate checks the time of day
+        sql = "select t1a from test_all_type where months_add(id_datetime, 1) = '2024-02-29'";
+        planFragment = getFragmentPlan(sql);
+        assertContains(planFragment, "months_add(8: id_datetime, 1) = '2024-02-29 00:00:00'");
+        assertContains(planFragment, "8: id_datetime >= '2024-01-29 00:00:00'");
+        assertContains(planFragment, "8: id_datetime < '2024-02-01 00:00:00'");
     }
 
     @Test

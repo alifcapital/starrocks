@@ -153,10 +153,30 @@ public class MonotonicImage {
                     && (a.isZero() || b.isZero())) {
                 return Optional.empty();
             }
-            return Optional.of(a.compareTo(b) <= 0 ? Range.closed(a, b) : Range.closed(b, a));
+            Range<ConstantOperator> image = a.compareTo(b) <= 0 ? Range.closed(a, b) : Range.closed(b, a);
+            if (MonotonicFunctionRegistry.isMonthShift(call.getFnName()) && !child.getType().isDate()) {
+                return wholeDays(image);
+            }
+            return Optional.of(image);
         } catch (Exception e) {
             return Optional.empty();
         }
+    }
+
+    // A shift by whole months keeps the time of day and cuts the day to the end of a shorter month,
+    // so on DATETIME it can go down: 2024-01-29 23:00 maps to 2024-02-29 23:00, above the image of
+    // 2024-01-30 01:00. The date part never goes down, so we widen the image to whole days.
+    private static Optional<Range<ConstantOperator>> wholeDays(Range<ConstantOperator> image) {
+        if (!image.lowerEndpoint().getType().isDatetime()) {
+            return Optional.empty();
+        }
+        LocalDateTime lo = image.lowerEndpoint().getDatetime().toLocalDate().atStartOfDay();
+        LocalDateTime hi = image.upperEndpoint().getDatetime().toLocalDate().plusDays(1).atStartOfDay()
+                .minusNanos(1000);
+        if (hi.isAfter(ConstantOperator.MAX_DATETIME)) {
+            return Optional.empty();
+        }
+        return Optional.of(Range.closed(ConstantOperator.createDatetime(lo), ConstantOperator.createDatetime(hi)));
     }
 
     private static boolean wallWindowHasNoTransition(Range<ConstantOperator> input) {
