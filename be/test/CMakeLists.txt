@@ -565,6 +565,7 @@ SET(DW_TEST_FILES
     ./storage/chunk_aggregator_test.cpp
     ./storage/choose_inverted_index_query_type_test.cpp
     ./storage/chunk_helper_test.cpp
+    ./storage/runtime_filter_predicate_test.cpp
     ./storage/column_aggregator_test.cpp
     ./storage/column_and_predicate_test.cpp
     ./storage/column_or_predicate_test.cpp

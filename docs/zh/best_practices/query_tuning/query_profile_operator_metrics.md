@@ -225,6 +225,9 @@ OLAP_SCAN Operator 负责从 StarRocks 内表中读取数据。
 | TopnReorderEligibleMorsels | 按排序列的可用 min/max 边界排序的扫描任务（morsel）数。 |
 | TopnReorderNoBoundMorsels | 未使用数值优先级的扫描任务数，包括按 NULLS FIRST 优先处理的任务。 |
 | TopnMinMaxFilteredScanRanges | 因 min/max 无法通过过滤条件而在读取 footer 前跳过的扫描范围数。 |
+| RuntimeFilterEvalTime | 在 Parquet Reader 内部对已解码数据行求值 Join Runtime Filter 所花费的时间。 |
+| RuntimeFilterInputRows | 进入 Parquet Reader Join Runtime Filter 求值的行数。 |
+| RuntimeFilterOutputRows | 通过 Parquet Reader Join Runtime Filter 求值的行数。与 `RuntimeFilterInputRows` 差距越大，说明在物化 Lazy 列之前过滤掉的行越多。 |
 
 ### Exchange Operator
 

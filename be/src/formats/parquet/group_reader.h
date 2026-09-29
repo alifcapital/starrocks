@@ -35,6 +35,7 @@
 #include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
 #include "storage/range.h"
+#include "storage/runtime_filter_predicate.h"
 
 namespace starrocks {
 class RandomAccessFile;
@@ -173,10 +174,19 @@ private:
     //    lazy_ctx must still be attached.  Returns true if rows survive.
     StatusOr<bool> _evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state);
 
+    // 3.1 Probe join runtime filters against decoded rows, ANDing into chunk_filter
+    //     so non-matching rows are dropped before lazy columns are materialized.
+    //     Returns true if rows survive.
+    StatusOr<bool> _evaluate_runtime_filters(const Range<uint64_t>& r, RowGroupScanState& state);
+
     // 4. Apply combined chunk_filter, compute post-filter range (internal),
     //    and backfill lazy physical columns.
     //    Returns true if rows survive filtering; false to skip this range.
     StatusOr<bool> _filter_and_backfill_lazy(const Range<uint64_t>& r, RowGroupScanState& state);
+
+    // Build the subset of scanner_ctx->runtime_filter_preds that this row group can
+    // actually serve. Called once per row group after column classification.
+    void _setup_runtime_filter_predicates();
 
     // 5. Emit output: physical columns into destination chunk.
     Status _emit_output_columns(RowGroupScanState& state, ChunkPtr* chunk, size_t* row_count);
@@ -197,6 +207,23 @@ private:
 
     // dict value is empty after conjunct eval, file group can be skipped
     bool _is_group_filtered = false;
+
+    // ── Join runtime filter pushdown ───────────────────────────────────────
+    // Per-row-group subset of scan_ctx->runtime_filter_preds, holding only the
+    // predicates whose probe column this row group can supply. The subset is
+    // required for correctness -- RuntimeFilterPredicates::evaluate() looks up every
+    // predicate's column, so a predicate we cannot serve must not be in the list, and
+    // which columns exist differs per file after schema evolution. The predicate
+    // objects themselves are shared with the scanner context; only this container
+    // (which carries the adaptive-sampling state) is per-GroupReader.
+    RuntimeFilterPredicates _rf_predicates;
+    // Probe columns, in predicate order. `is_active` selects where the decoded column
+    // comes from: the active chunk, or an on-demand materialize_slot() lazy read.
+    struct RuntimeFilterProbeColumn {
+        SlotId slot_id;
+        bool is_active;
+    };
+    std::vector<RuntimeFilterProbeColumn> _rf_probe_columns;
 
     // param for read row group
     const GroupReaderParam& _param;

@@ -233,6 +233,9 @@ It's similar to OLAP_SCAN operator but used for scan external tables like Iceber
 | TopnReorderEligibleMorsels | Scan tasks (morsels) ordered by a usable min/max bound on the sort column. |
 | TopnReorderNoBoundMorsels | Scan tasks without a numeric priority, including tasks prioritized by NULLS FIRST. |
 | TopnMinMaxFilteredScanRanges | Scan ranges skipped before reading their footer because their min/max cannot pass the filter. |
+| RuntimeFilterEvalTime | Time spent evaluating join runtime filters against decoded rows inside the Parquet reader. | 
+| RuntimeFilterInputRows | Number of rows fed into the Parquet reader's join runtime filter evaluation. | 
+| RuntimeFilterOutputRows | Number of rows surviving the Parquet reader's join runtime filter evaluation. A large gap from `RuntimeFilterInputRows` means the filter dropped rows before lazy columns were materialized. | 
 
 ### Exchange Operator
 
