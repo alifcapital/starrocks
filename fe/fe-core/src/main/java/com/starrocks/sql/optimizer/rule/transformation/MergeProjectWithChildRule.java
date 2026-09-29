@@ -80,6 +80,13 @@ public class MergeProjectWithChildRule extends TransformationRule {
             return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
         }
 
+        // MergeTwoProjectRule leaves two projects apart when the merge copies too much, and we want them to stay
+        // apart here too. We cannot put a project into a project: the implementation of a project drops its
+        // projection. We cannot put it into an operator with a projection either: an operator has one projection.
+        if (child instanceof LogicalProjectOperator || child.getProjection() != null) {
+            return Lists.newArrayList();
+        }
+
         builder.setProjection(new Projection(logicalProjectOperator.getColumnRefMap()));
 
         return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));

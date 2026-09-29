@@ -2493,7 +2493,7 @@ public class Config extends ConfigBase {
     public static int max_scalar_operator_optimize_depth = 256;
 
     @ConfField(mutable = true, comment = "scalar operator maximum number of flat children.")
-    public static int max_scalar_operator_flat_children = 10000;
+    public static int max_scalar_operator_flat_children = 100000;
 
     /**
      * statistic collect flag

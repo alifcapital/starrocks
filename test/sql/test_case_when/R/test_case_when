@@ -3788,5 +3788,20 @@ FROM (
     ) table_1
 ) table_2;
 -- result:
-E: (1064, 'Getting analyzing error. Detail message: Expression CaseWhen too complex, limit: 10000. Please simplify your expression or increase Config.max_scalar_operator_flat_children..')
+-- !result
+CREATE TABLE t_nested_case (k int, s varchar(20)) DUPLICATE KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 2 PROPERTIES('replication_num'='1');
+-- result:
+-- !result
+INSERT INTO t_nested_case VALUES (1, 'a'), (2, 'bcd'), (3, 'abcdef'), (4, 'xyzw12'), (5, ''), (6, NULL), (7, 'AbA');
+-- result:
+-- !result
+select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, case when c like '%a%' then concat(c, 'x') when length(c) > 4 then substr(c, 1, 4) else upper(c) end as c from (select k, s as c from t_nested_case) t0) t1) t2) t3) t4) t5) t6) t7 order by k;
+-- result:
+1	axxxxxxxx
+2	BCD
+3	abcdefxxxxxxxx
+4	XYZW
+5	
+6	None
+7	ABA
 -- !result
