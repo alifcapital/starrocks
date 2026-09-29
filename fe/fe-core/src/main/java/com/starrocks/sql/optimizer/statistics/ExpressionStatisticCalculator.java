@@ -246,7 +246,7 @@ public class ExpressionStatisticCalculator {
                     Optional<ConstantOperator> maxRes;
                     Optional<ConstantOperator> minRes;
                     maxRes = max.castTo(cast.getType());
-                    minRes = max.castTo(cast.getType());
+                    minRes = min.castTo(cast.getType());
                     if (maxRes.isPresent() && minRes.isPresent()) {
                         max = maxRes.get();
                         min = minRes.get();
@@ -257,6 +257,13 @@ public class ExpressionStatisticCalculator {
             } catch (Exception e) {
                 LOG.debug("expression statistic compute cast failed: max value: {}, min value: {}, to type {}",
                         max, min, cast.getType());
+                if (cast.getChild(0).getType().isNumericType()) {
+                    // A bound of the number is not a date, so we cannot turn the range into dates. We keep the
+                    // other statistics and leave the range unknown rather than read the numbers as dates.
+                    return ColumnStatistic.buildFrom(childStatistic).setMinValue(Double.NEGATIVE_INFINITY)
+                            .setMaxValue(Double.POSITIVE_INFINITY).setAverageRowSize(cast.getType().getTypeSize())
+                            .build();
+                }
                 return childStatistic;
             }
 
