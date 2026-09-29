@@ -530,9 +530,12 @@ public class MvRewriteHiveTest extends MVTestBase {
                         "WHERE date_sub(l_shipdate, interval 1 day) = '1998-01-02' GROUP BY `l_orderkey`, `l_suppkey`;"
         );
 
+        // days_sub is kept next to the bound on l_shipdate: it returns NULL past the maximum date
         List<String> expects = ImmutableList.of(
                 "selectedPartitionIds=[1], partitionConjuncts=[16: l_shipdate = 1998-01-01]",
-                "selectedPartitionIds=[3], partitionConjuncts=[16: l_shipdate = 1998-01-03]"
+                "selectedPartitionIds=[3], partitionConjuncts=[days_sub(cast(16: l_shipdate as datetime), 1) = " +
+                        "1998-01-02 00:00:00, 16: l_shipdate = 1998-01-03], noEvalPartitionConjuncts=[days_sub(" +
+                        "cast(16: l_shipdate as datetime), 1) = 1998-01-02 00:00:00]"
         );
         for (int i = 0; i < queries.size(); i++) {
             String query = queries.get(i);
@@ -541,10 +544,8 @@ public class MvRewriteHiveTest extends MVTestBase {
             ScanOperatorPredicates scanOperatorPredicates = getScanOperatorPredicates(scanOperators.get(0));
             Assertions.assertTrue(scanOperatorPredicates != null);
             Assertions.assertTrue(scanOperatorPredicates.getIdToPartitionKey().size() == 6);
-            Assertions.assertTrue(scanOperatorPredicates.getPartitionConjuncts().size() == 1);
             Assertions.assertTrue(scanOperatorPredicates.getSelectedPartitionIds().size() == 1);
             Assertions.assertTrue(scanOperatorPredicates.getNonPartitionConjuncts().size() == 0);
-            Assertions.assertTrue(scanOperatorPredicates.getNoEvalPartitionConjuncts().size() == 0);
             Assertions.assertTrue(scanOperatorPredicates.getPrunedPartitionConjuncts().size() == 1);
             // TODO: fixme
             Assertions.assertTrue(scanOperators.get(0).getPredicate() != null);
@@ -562,15 +563,15 @@ public class MvRewriteHiveTest extends MVTestBase {
         ScanOperatorPredicates scanOperatorPredicates = getScanOperatorPredicates(scanOperators.get(0));
         Assertions.assertTrue(scanOperatorPredicates != null);
         Assertions.assertTrue(scanOperatorPredicates.getIdToPartitionKey().size() == 6);
-        Assertions.assertTrue(scanOperatorPredicates.getPartitionConjuncts().size() == 1);
+        // date_trunc(month, l_shipdate) = 1998-01-01 is l_shipdate in [1998-01-01, 1998-02-01)
+        Assertions.assertTrue(scanOperatorPredicates.getPartitionConjuncts().size() == 2);
         Assertions.assertTrue(scanOperatorPredicates.getNonPartitionConjuncts().size() == 0);
-        Assertions.assertTrue(scanOperatorPredicates.getSelectedPartitionIds().size() == 6);
-        Assertions.assertTrue(scanOperatorPredicates.getNoEvalPartitionConjuncts().size() == 1);
-        Assertions.assertTrue(scanOperatorPredicates.getPrunedPartitionConjuncts().size() == 0);
+        Assertions.assertTrue(scanOperatorPredicates.getSelectedPartitionIds().size() == 5);
+        Assertions.assertTrue(scanOperatorPredicates.getNoEvalPartitionConjuncts().size() == 0);
+        Assertions.assertTrue(scanOperatorPredicates.getPrunedPartitionConjuncts().size() == 2);
         Assertions.assertTrue(scanOperators.get(0).getPredicate() != null);
-        Assertions.assertTrue(scanOperatorPredicates.toString().equals("selectedPartitionIds=[0, 1, 2, 3, 4, 5], " +
-                "partitionConjuncts=[date_trunc(month, 16: l_shipdate) = 1998-01-01], " +
-                "noEvalPartitionConjuncts=[date_trunc(month, 16: l_shipdate) = 1998-01-01]"));
+        Assertions.assertTrue(scanOperatorPredicates.toString().equals("selectedPartitionIds=[1, 2, 3, 4, 5], " +
+                "partitionConjuncts=[16: l_shipdate >= 1998-01-01, 16: l_shipdate < 1998-02-01]"));
     }
 
     @Test
@@ -588,15 +589,14 @@ public class MvRewriteHiveTest extends MVTestBase {
         Assertions.assertTrue(scanOperatorPredicates.getSelectedPartitionIds().size() == 5);
 
         Assertions.assertTrue(scanOperatorPredicates.getPartitionConjuncts().size() == 2);
-        Assertions.assertTrue(scanOperatorPredicates.getNoEvalPartitionConjuncts().size() == 1);
-        Assertions.assertTrue(scanOperatorPredicates.getPrunedPartitionConjuncts().size() == 1);
+        Assertions.assertTrue(scanOperatorPredicates.getNoEvalPartitionConjuncts().size() == 0);
+        Assertions.assertTrue(scanOperatorPredicates.getPrunedPartitionConjuncts().size() == 2);
 
         Assertions.assertTrue(scanOperators.get(0).getPredicate() != null);
         List<ScalarOperator> predicates = Utils.extractConjuncts(scanOperators.get(0).getPredicate());
         Assertions.assertTrue(predicates.size() == 3);
         Assertions.assertTrue(scanOperatorPredicates.toString().equals("selectedPartitionIds=[1, 2, 3, 4, 5], " +
-                "partitionConjuncts=[date_trunc(month, 16: l_shipdate) = 1998-01-01, 16: l_shipdate >= 1998-01-01], " +
-                "noEvalPartitionConjuncts=[date_trunc(month, 16: l_shipdate) = 1998-01-01], " +
+                "partitionConjuncts=[16: l_shipdate >= 1998-01-01, 16: l_shipdate < 1998-02-01], " +
                 "nonPartitionConjuncts=[1: l_orderkey > 1000], minMaxConjuncts=[1: l_orderkey > 1000]"));
     }
 

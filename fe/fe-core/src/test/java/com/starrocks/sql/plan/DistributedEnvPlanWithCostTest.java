@@ -1016,8 +1016,9 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         };
 
         plan = getCostExplain(sql);
+        // year(L_SHIPDATE) = 1998 is L_SHIPDATE in [1998-01-01, 1999-01-01), where the statistics have no rows
         assertContains(plan, "     column statistics: \n" +
-                "     * L_SHIPDATE-->[1.9921212E7, 1.9980202E7, 0.0, 8.0, 1.0] ESTIMATE");
+                "     * L_SHIPDATE-->[-Infinity, 9.1512E8, 0.0, 8.0, 1.0] ESTIMATE");
 
         // ===========================
         // To handle cast(date) in infinity range
@@ -1030,7 +1031,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
 
         plan = getCostExplain(sql);
         assertContains(plan, "     column statistics: \n" +
-                "     * L_SHIPDATE-->[-Infinity, Infinity, 0.0, 8.0, 20000.0] ESTIMATE");
+                "     * L_SHIPDATE-->[8.83584E8, 9.1512E8, 0.0, 8.0, 20000.0] ESTIMATE");
 
         connectContext.getGlobalStateMgr().setStatisticStorage(new MockTpchStatisticStorage(connectContext, 100));
     }

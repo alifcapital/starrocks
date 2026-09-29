@@ -305,7 +305,7 @@ public class MaterializedViewManualTest extends MaterializedViewTestBase {
                     "FROM `test_partition_expr_tbl1`\n" +
                     "WHERE date_trunc('month', `dt`) = '2023-04-01'\n" +
                     "group by ds")
-                    .nonMatch("test_partition_expr_mv1");
+                    .match("test_partition_expr_mv1");
         }
 
         {
@@ -364,7 +364,7 @@ public class MaterializedViewManualTest extends MaterializedViewTestBase {
                     "FROM `test_partition_expr_tbl1`\n" +
                     "WHERE date_trunc('day', `dt`) = '2023-04-01'\n" +
                     "group by ds")
-                    .nonMatch("test_partition_expr_mv1");
+                    .match("test_partition_expr_mv1");
         }
         UtFrameUtils.mockLogicalScanIsEmptyOutputRows(false);
         {
@@ -419,7 +419,7 @@ public class MaterializedViewManualTest extends MaterializedViewTestBase {
                     "FROM `test_partition_expr_tbl1`\n" +
                     "WHERE date_trunc('day', `dt`) = '2023-04-01'\n" +
                     "group by ds")
-                    .nonMatch("test_partition_expr_mv1");
+                    .match("test_partition_expr_mv1");
         }
 
         UtFrameUtils.mockLogicalScanIsEmptyOutputRows(false);

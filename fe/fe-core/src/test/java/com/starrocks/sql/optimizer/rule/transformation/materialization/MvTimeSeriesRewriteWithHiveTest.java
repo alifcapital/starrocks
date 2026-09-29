@@ -42,20 +42,11 @@ public class MvTimeSeriesRewriteWithHiveTest extends MVTestBase {
                     "WHERE l_shipdate >= '1998-01-02' GROUP BY l_orderkey, l_suppkey;";
 
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "     TABLE: test_mv1\n" +
-                    "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: 26: dt >= '1998-01-02'\n" +
-                    "     partitions=1/2");
+            // test_mv1 has no rows of the months from February that it would answer, so the query reads the base
+            // table only
+            PlanTestBase.assertNotContains(plan, "test_mv1");
             PlanTestBase.assertContains(plan, "     TABLE: lineitem_par\n" +
-                    "     PARTITION PREDICATES: ((date_trunc('month', 35: l_shipdate) < '1998-01-02') " +
-                    "OR (date_trunc('month', 35: l_shipdate) IS NULL)) " +
-                    "OR ((date_trunc('month', 35: l_shipdate) < '1998-01-02') " +
-                    "OR (date_trunc('month', 35: l_shipdate) IS NULL)), 35: l_shipdate >= '1998-01-02', " +
-                    "35: l_shipdate >= '1998-01-02'\n" +
-                    "     NO EVAL-PARTITION PREDICATES: ((date_trunc('month', 35: l_shipdate) < '1998-01-02') " +
-                    "OR (date_trunc('month', 35: l_shipdate) IS NULL)) " +
-                    "OR ((date_trunc('month', 35: l_shipdate) < '1998-01-02') " +
-                    "OR (date_trunc('month', 35: l_shipdate) IS NULL))\n" +
+                    "     PARTITION PREDICATES: 16: l_shipdate >= '1998-01-02'\n" +
                     "     partitions=4/6");
         }
 

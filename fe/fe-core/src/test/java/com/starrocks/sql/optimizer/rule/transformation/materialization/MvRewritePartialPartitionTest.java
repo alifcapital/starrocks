@@ -776,14 +776,14 @@ public class MvRewritePartialPartitionTest extends MVTestBase {
             String query = "select date_trunc('minute', `k1`) AS ds, sum(v1) " +
                     " FROM base_tbl1 where date_trunc('minute', `k1`) = '2020-02-11' group by ds";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "test_mv1", "ds = '2020-02-11 00:00:00'");
+            PlanTestBase.assertContains(plan, "test_mv1", "ds >= '2020-02-11 00:00:00', 6: ds < '2020-02-11 00:01:00'");
         }
 
         {
             String query = "select date_trunc('minute', `k1`) AS ds, sum(v1) " +
                     " FROM base_tbl1 where date_trunc('minute', `k1`) = '2020-02-11' group by ds";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "test_mv1", "ds = '2020-02-11 00:00:00'");
+            PlanTestBase.assertContains(plan, "test_mv1", "ds >= '2020-02-11 00:00:00', 6: ds < '2020-02-11 00:01:00'");
         }
 
         {
@@ -806,7 +806,7 @@ public class MvRewritePartialPartitionTest extends MVTestBase {
                     "     partitions=1/3");
             PlanTestBase.assertContains(plan, "     TABLE: base_tbl1\n" +
                     "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: date_trunc('minute', 10: k1) >= '2020-01-01 00:00:00'\n" +
+                    "     PREDICATES: 10: k1 >= '2020-01-01 00:00:00'\n" +
                     "     partitions=1/3");
         }
 
@@ -819,12 +819,11 @@ public class MvRewritePartialPartitionTest extends MVTestBase {
             String plan = getFragmentPlan(query);
             PlanTestBase.assertContains(plan, "     TABLE: base_tbl1\n" +
                     "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: date_trunc('minute', 10: k1) >= '2020-01-01 00:00:00', " +
-                    "date_trunc('minute', 10: k1) <= '2020-03-01 00:00:00'\n" +
+                    "     PREDICATES: 10: k1 >= '2020-01-01 00:00:00', 10: k1 < '2020-03-01 00:01:00'\n" +
                     "     partitions=1/3");
             PlanTestBase.assertContains(plan, "TABLE: test_mv1\n" +
                     "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: 8: ds >= '2020-01-01 00:00:00', 8: ds <= '2020-03-01 00:00:00'\n" +
+                    "     PREDICATES: 8: ds >= '2020-01-01 00:00:00', 8: ds < '2020-03-01 00:01:00'\n" +
                     "     partitions=1/3");
         }
 
@@ -862,14 +861,14 @@ public class MvRewritePartialPartitionTest extends MVTestBase {
             String query = "select date_trunc('minute', `k1`) AS ds, sum(v1) " +
                     " FROM base_tbl1 where date_trunc('minute', `k1`) = '2020-02-11' group by ds";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "test_mv1", "ds = '2020-02-11 00:00:00'");
+            PlanTestBase.assertContains(plan, "test_mv1", "ds >= '2020-02-11 00:00:00', 6: ds < '2020-02-11 00:01:00'");
         }
 
         {
             String query = "select date_trunc('minute', `k1`) AS ds, sum(v1) " +
                     " FROM base_tbl1 where date_trunc('minute', `k1`)  = '2020-02-11' group by ds";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "test_mv1", "ds = '2020-02-11 00:00:00'");
+            PlanTestBase.assertContains(plan, "test_mv1", "ds >= '2020-02-11 00:00:00', 6: ds < '2020-02-11 00:01:00'");
         }
 
         {
