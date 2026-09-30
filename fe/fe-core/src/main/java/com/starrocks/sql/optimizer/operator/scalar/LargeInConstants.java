@@ -23,11 +23,16 @@ import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 import com.starrocks.type.TypeFactory;
 import com.starrocks.type.VarcharType;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The constants of a LargeInPredicateOperator as values of one type, the type of the RAW VALUES column that
@@ -69,8 +74,9 @@ public final class LargeInConstants {
     }
 
     /**
-     * The values that are not NULL: Long for integer types, String for string types, BigDecimal for decimal types
-     * and LocalDateTime for DATE and DATETIME.
+     * The distinct values that are not NULL, in order of first occurrence: Long for integer types, String for
+     * string types, BigDecimal for decimal types and LocalDateTime for DATE and DATETIME. Decimal scale and datetime
+     * precision match the values sent to BE.
      */
     public List<Object> getValues() {
         return values;
@@ -149,18 +155,37 @@ public final class LargeInConstants {
         }
 
         List<Object> values = new ArrayList<>(constants.size());
+        // A semi join matches a value once, however often it occurs in the list. Removing duplicates here keeps
+        // its cardinality estimate independent of that multiplicity, and saves sending and building repeated keys.
+        // Statistics can then use values.size() as NDV without building another set on each estimate. The open
+        // hash set uses an array rather than allocating an entry for every value in an otherwise unique list.
+        Set<Object> seen = new ObjectOpenHashSet<>(constants.size());
         boolean hasNull = false;
         for (ConstantOperator constant : constants) {
             if (constant.isNull()) {
                 hasNull = true;
-            } else if (valueType.isIntegerType()) {
-                values.add(((Number) constant.getValue()).longValue());
+                continue;
+            }
+            Object value;
+            if (valueType.isIntegerType()) {
+                value = ((Number) constant.getValue()).longValue();
             } else if (valueType.isStringType()) {
-                values.add(constant.getVarchar());
+                value = constant.getVarchar();
             } else if (valueType.isDecimalV3()) {
-                values.add(constant.getDecimal());
+                // DecimalLiteral.packDecimal and RawValuesNode both truncate to the storage scale. BigDecimal
+                // equality includes scale, so normalize before hashing, including values folded from strings.
+                value = constant.getDecimal().setScale(((ScalarType) valueType).getScalarScale(), RoundingMode.DOWN);
             } else {
-                values.add(constant.getDatetime());
+                LocalDateTime dateTime = constant.getDatetime();
+                if (valueType.isDate()) {
+                    value = dateTime.toLocalTime().equals(LocalTime.MIDNIGHT)
+                            ? dateTime : dateTime.toLocalDate().atStartOfDay();
+                } else {
+                    value = dateTime.withNano(dateTime.getNano() / 1000 * 1000);
+                }
+            }
+            if (seen.add(value)) {
+                values.add(value);
             }
         }
         if (values.isEmpty()) {
