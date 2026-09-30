@@ -41,6 +41,7 @@ import com.starrocks.type.DateType;
 import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.PrimitiveType;
+import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 import com.starrocks.type.TypeFactory;
 import com.starrocks.type.VarcharType;
@@ -49,6 +50,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -437,12 +439,13 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
             } else if (comparisonType.isStringType()) {
                 expected.add(constant.getVarchar());
             } else if (comparisonType.isDecimalV3()) {
-                expected.add(constant.getDecimal());
+                expected.add(constant.getDecimal().setScale(((ScalarType) comparisonType).getScalarScale(),
+                        RoundingMode.DOWN));
             } else {
                 expected.add(constant.getDatetime());
             }
         }
-        assertEquals(expected, values.getValues(), name);
+        assertEquals(expected.stream().distinct().collect(Collectors.toList()), values.getValues(), name);
         assertEquals(hasNull, values.hasNull(), name);
         return true;
     }
@@ -462,6 +465,35 @@ public class LargeInPredicateToJoinTest extends PlanTestBase {
             plan = getFragmentPlan(String.format(sql, "not in"));
             assertNotContains(plan, "RAW_VALUES");
             assertContains(plan, "EMPTYSET");
+        } finally {
+            connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
+        }
+    }
+
+    @Test
+    public void testDuplicateValuesInThrift() throws Exception {
+        String plan = getThriftPlan("select * from t0 where v1 in (2, 1, 2, 1)");
+        assertContains(plan, "long_values:[2, 1]");
+
+        plan = getThriftPlan("select * from tall where ta in ('Aa', 'BB', 'Aa', 'BB')");
+        assertContains(plan, "string_values:[Aa, BB]");
+
+        // All four strings cast to two values of the DATE column before the set is built.
+        plan = getThriftPlan("select * from test_all_type where id_date in " +
+                "('2024-01-02', '20240102', '2024-01-03', '20240103')");
+        assertContains(plan, "string_values:[2024-01-02, 2024-01-03]");
+
+        plan = getThriftPlan("select * from test_all_type where id_decimal in (1.5, 1.50, 2.00, 2.0)");
+        assertContains(plan, "string_values:[1.50, 2.00]");
+
+        String eqBaseType = connectContext.getSessionVariable().getCboEqBaseType();
+        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DECIMAL);
+        try {
+            String sql = "select * from test_all_type where t1c %s " +
+                    "('01', '1', '2', '100000000000000000000000000000000000000')";
+            // Conversion makes 01 and 1 equal and the last value NULL. Deduplication must preserve the NULL flag.
+            assertContains(getFragmentPlan(String.format(sql, "in")), "constant count: 2");
+            assertContains(getFragmentPlan(String.format(sql, "not in")), "EMPTYSET");
         } finally {
             connectContext.getSessionVariable().setCboEqBaseType(eqBaseType);
         }

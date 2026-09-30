@@ -31,6 +31,7 @@ public class PhysicalRawValuesOperator extends PhysicalOperator {
     private final List<ColumnRefOperator> columnRefSet;
     private final Type constantType;
     private final String rawText;
+    // Keeps the normalized, distinct, non-NULL values of LogicalRawValuesOperator.
     private final List<Object> rawConstantList;
     private final int constantCount;
 

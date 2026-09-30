@@ -14,10 +14,13 @@
 
 package com.starrocks.sql.plan;
 
+import com.starrocks.common.Config;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -64,5 +67,25 @@ public class LargeInPredicateCardinalityTest extends PlanWithCostTestBase {
         rows = cardinalities(
                 "select l_comment from lineitem where l_orderkey not in (7000001, 7000002, 7000003, 7000004)");
         Assertions.assertEquals(rows[0], rows[1], 1);
+    }
+
+    @Test
+    public void testDuplicateValuesDoNotMultiplyMatches() throws Exception {
+        // The semi/anti join matches a distinct value once, even if the SQL list repeats it thousands of times.
+        int maxNodes = Config.max_scalar_operator_flat_children;
+        // Allow the ordinary IN reference plan to hold all 10000 constants on the standalone branch too.
+        Config.max_scalar_operator_flat_children = 100000;
+        try {
+            for (String values : List.of("1, 1, 1, 1", "1, 1, 2, 2",
+                    String.join(",", Collections.nCopies(10000, "1")))) {
+                for (String predicate : List.of("in", "not in")) {
+                    long[] rows = cardinalities("select l_comment from lineitem where l_orderkey " +
+                            predicate + " (" + values + ")");
+                    Assertions.assertEquals(rows[0], rows[1], 1, predicate + " must ignore repeated values");
+                }
+            }
+        } finally {
+            Config.max_scalar_operator_flat_children = maxNodes;
+        }
     }
 }

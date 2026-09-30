@@ -46,6 +46,7 @@ public class LogicalRawValuesOperator extends LogicalOperator {
     private final List<ColumnRefOperator> columnRefSet;
     private final Type constantType;
     private final String rawText;
+    // Normalized, distinct, non-NULL values supplied by LargeInConstants; statistics relies on this invariant.
     private final List<Object> rawConstantList;
     private final int constantCount;
 
