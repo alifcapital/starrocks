@@ -41,6 +41,9 @@ final class McvCastStatistics {
     /** One output group per input group, including repeated aliases; no alias Cartesian product. */
     static MultiColumnCombinedStats projectGroup(Map<ColumnRefOperator, ? extends ScalarOperator> projection,
                                                  MultiColumnCombinedStats group) {
+        if (!group.hasMcv() || !MultiColumnMcvEstimator.isEnabled()) {
+            return null;
+        }
         List<ColumnRefOperator> columns = new ArrayList<>();
         List<ScalarOperator> expressions = new ArrayList<>();
         List<Integer> positions = new ArrayList<>();
@@ -67,7 +70,7 @@ final class McvCastStatistics {
                 positions.add(i);
             }
         }
-        if (!cast || !MultiColumnMcvEstimator.isEnabled() || !group.hasMcv()) {
+        if (!cast) {
             return null;
         }
         Map<List<String>, Long> tuples = new java.util.LinkedHashMap<>();
@@ -121,8 +124,11 @@ final class McvCastStatistics {
     }
 
     static MultiColumnCombinedStats derive(ColumnRefOperator output, ScalarOperator expression, Statistics input) {
+        if (input.getMultiColumnCombinedStats().isEmpty() || !MultiColumnMcvEstimator.isEnabled()) {
+            return null;
+        }
         ColumnRefOperator source = sourceColumn(expression);
-        if (source == null || !MultiColumnMcvEstimator.isEnabled()) {
+        if (source == null) {
             return null;
         }
         MultiColumnCombinedStats best = null;

@@ -42,6 +42,9 @@ final class McvStatisticsPropagation {
 
     static Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> project(
             Map<ColumnRefOperator, ? extends ScalarOperator> projection, Statistics input) {
+        if (input.getMultiColumnCombinedStats().isEmpty()) {
+            return Map.of();
+        }
         Map<ColumnRefOperator, ColumnRefOperator> aliases = new HashMap<>();
         projection.forEach((output, expression) -> {
             if (expression instanceof ColumnRefOperator) {
@@ -90,6 +93,9 @@ final class McvStatisticsPropagation {
     }
 
     static Statistics afterJoin(Statistics input, Statistics statistics, boolean inner) {
+        if (statistics.getMultiColumnCombinedStats().isEmpty()) {
+            return statistics;
+        }
         Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = new HashMap<>();
         Statistics.Builder builder = Statistics.buildFrom(statistics);
         statistics.getMultiColumnCombinedStats().forEach((columns, group) -> {
@@ -114,7 +120,8 @@ final class McvStatisticsPropagation {
 
     /** A complete head is a finite distribution, including SQL's UNKNOWN truth value for NULLs. */
     static OptionalDouble completeHeadRows(ScalarOperator predicate, Statistics statistics) {
-        if (!MultiColumnMcvEstimator.isEnabled() || predicate.isNotEvalEstimate()) {
+        if (statistics.getMultiColumnCombinedStats().isEmpty()
+                || !MultiColumnMcvEstimator.isEnabled() || predicate.isNotEvalEstimate()) {
             return OptionalDouble.empty();
         }
         Set<ColumnRefOperator> used = new HashSet<>(Utils.extractColumnRef(predicate));

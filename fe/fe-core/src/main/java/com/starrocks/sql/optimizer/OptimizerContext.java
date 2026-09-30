@@ -32,7 +32,9 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.tvr.common.TvrOptContext;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsScanKey;
 import com.starrocks.sql.optimizer.statistics.JoinStatisticsPlanner;
+import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.task.TaskContext;
 import com.starrocks.sql.optimizer.task.TaskScheduler;
 import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
@@ -131,6 +133,17 @@ public class OptimizerContext {
         this.optimizerOptions = new OptimizerOptions();
         this.enableJoinIsNullPredicateDerive = getSessionVariable().isCboDeriveJoinIsNullPredicate();
         this.tvrOptContext = new TvrOptContext(getSessionVariable());
+    }
+
+    // Base scan fallbacks only: never cache filtered/projected operator statistics here.
+    private final Map<ExternalStatisticsScanKey, Statistics> externalStatisticsFallbacks = new ConcurrentHashMap<>();
+
+    public Statistics getExternalStatisticsFallback(ExternalStatisticsScanKey key) {
+        return externalStatisticsFallbacks.get(key);
+    }
+
+    public void cacheExternalStatisticsFallback(ExternalStatisticsScanKey key, Statistics statistics) {
+        externalStatisticsFallbacks.putIfAbsent(key.snapshot(), statistics);
     }
 
     // ============================ Query ============================

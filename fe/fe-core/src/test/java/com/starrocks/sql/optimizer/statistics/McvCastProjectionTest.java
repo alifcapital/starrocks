@@ -54,6 +54,34 @@ public class McvCastProjectionTest {
     }
 
     @Test
+    public void testAbsentGroupsSkipProjectionAndPredicateTraversal() {
+        Statistics empty = Statistics.builder().setOutputRowCount(123)
+                .addColumnStatistic(SOURCE, ColumnStatistic.unknown()).build();
+        Map<ColumnRefOperator, ScalarOperator> projection = org.mockito.Mockito.mock(Map.class);
+        ScalarOperator predicate = org.mockito.Mockito.mock(ScalarOperator.class);
+        Assertions.assertTrue(McvStatisticsPropagation.project(projection, empty).isEmpty());
+        Assertions.assertTrue(McvStatisticsPropagation.completeHeadRows(predicate, empty).isEmpty());
+        Assertions.assertNull(McvCastStatistics.derive(OUTPUT, predicate, empty));
+        org.mockito.Mockito.verifyNoInteractions(projection, predicate);
+        Assertions.assertSame(empty, McvStatisticsPropagation.afterJoin(empty, empty, true));
+        Assertions.assertSame(empty, McvStatisticsPropagation.afterJoin(empty, empty, false));
+    }
+
+    @Test
+    public void testNdvOnlyGroupsStillProjectWithoutCastPreparation() {
+        MultiColumnCombinedStats ndv = new MultiColumnCombinedStats(17);
+        Map<ColumnRefOperator, ScalarOperator> projection = org.mockito.Mockito.mock(Map.class);
+        Assertions.assertNull(McvCastStatistics.projectGroup(projection, ndv));
+        org.mockito.Mockito.verifyNoInteractions(projection);
+        Statistics input = Statistics.builder().setOutputRowCount(123)
+                .addMultiColumnStatistics(Set.of(SOURCE), ndv).build();
+        Assertions.assertSame(ndv, McvStatisticsPropagation.project(Map.of(OUTPUT, SOURCE), input)
+                .get(Set.of(OUTPUT)));
+        Assertions.assertSame(ndv, McvStatisticsPropagation.afterJoin(input, input, true)
+                .getMultiColumnCombinedStats().get(Set.of(SOURCE)));
+    }
+
+    @Test
     public void testOrdinaryStatsAgreeWithConvertedMcv() {
         ColumnStatistic complete = ExpressionStatisticCalculator.calculate(CAST, input(true));
         Assertions.assertEquals(1, complete.getDistinctValuesCount());

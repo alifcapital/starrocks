@@ -16,12 +16,14 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.tvr.TvrTableDelta;
 import com.starrocks.common.tvr.TvrTableSnapshot;
+import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
@@ -33,6 +35,7 @@ import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.UtFrameUtils;
@@ -44,10 +47,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -110,6 +116,115 @@ class ScopedExternalStatisticsTest {
                 Map.of(ref, new Column("c", IntegerType.BIGINT)), List.of(),
                 new BinaryPredicateOperator(BinaryType.GE, ref, ConstantOperator.createBigint(1)),
                 -1L, TvrTableSnapshot.empty(), request);
+    }
+
+    private Statistics baseEstimate(MetadataMgr metadata, OptimizerContext optimizer,
+                                    Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitions,
+                                    ScalarOperator predicate, long limit, TvrVersionRange version) {
+        return Deencapsulation.invoke(metadata, "computeTableStatistics", optimizer, "iceberg", table,
+                columns, partitions == null ? List.class : partitions, predicate, limit, version);
+    }
+
+    @Test
+    void absentStatisticsReuseBaseFallbackWithoutPreparingAnotherRequest() {
+        Config.enable_sync_statistics_load = false;
+        CompletableFuture<ExternalStatisticsAggregate> pending = new CompletableFuture<>();
+        when(storage.loadExternalStatistics(any())).thenReturn(pending);
+        when(table.isIcebergTable()).thenReturn(true);
+        when(table.isUnPartitioned()).thenReturn(true);
+        when(table.getId()).thenReturn(123456L);
+        when(table.getUUID()).thenReturn(request.tableUUID);
+        MetadataMgr metadata = mock(MetadataMgr.class, CALLS_REAL_METHODS);
+        ConnectorMetadata connector = mock(ConnectorMetadata.class);
+        doReturn(Optional.of(connector)).when(metadata).getOptionalMetadata("iceberg");
+        AtomicInteger fallbacks = new AtomicInteger();
+        when(connector.getTableStatistics(any(), any(), any(), any(), any(), anyLong(), any())).thenAnswer(call -> {
+            Statistics.Builder builder = Statistics.builder().setOutputRowCount(100 + fallbacks.incrementAndGet());
+            Map<ColumnRefOperator, Column> columns = call.getArgument(2);
+            columns.keySet().forEach(column -> builder.addColumnStatistic(column, ColumnStatistic.unknown()));
+            return builder.build();
+        });
+        boolean oldUnit = FeConstants.runningUnitTest;
+        try {
+            FeConstants.runningUnitTest = false;
+            OptimizerContext optimizer = OptimizerFactory.initContext(context, new ColumnRefFactory());
+            Map<ColumnRefOperator, Column> columns = new HashMap<>(Map.of(ref, new Column("c", IntegerType.BIGINT)));
+            BinaryPredicateOperator predicate = new BinaryPredicateOperator(BinaryType.GE, ref,
+                    ConstantOperator.createBigint(1));
+            Statistics first = baseEstimate(metadata, optimizer, columns, null, predicate, -1, TvrTableSnapshot.of(123L));
+            Assertions.assertEquals(101, first.getOutputRowCount());
+            // Deriving a filtered output must not replace the cached base scan.
+            Assertions.assertEquals(50, first.withOutputRowCount(50).getOutputRowCount());
+            optimizer.setObtainedFromInternalStatistics(true);
+            Assertions.assertSame(first, baseEstimate(metadata, optimizer, Map.copyOf(columns), null,
+                    predicate.clone(), -1, TvrTableSnapshot.of(123L)));
+            Assertions.assertFalse(optimizer.isObtainedFromInternalStatistics());
+            verify(metadata, times(1)).prepareExternalStatisticsRequest(any(), any(), any(), any(), any(),
+                    any(), anyLong(), any());
+            Assertions.assertEquals(1, fallbacks.get());
+
+            Assertions.assertNotSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(124L)));
+            Assertions.assertNotSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    10, TvrTableSnapshot.of(123L)));
+            // Mutating the caller's predicate cannot mutate an already stored key.
+            predicate.setChild(1, ConstantOperator.createBigint(2));
+            Assertions.assertNotSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(123L)));
+            predicate.setChild(1, ConstantOperator.createBigint(1));
+            Assertions.assertSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(123L)));
+            ColumnRefOperator alias = new ColumnRefOperator(2, IntegerType.BIGINT, "c", true);
+            columns.put(alias, columns.get(ref));
+            Statistics wider = baseEstimate(metadata, optimizer, columns, null, predicate, -1, TvrTableSnapshot.of(123L));
+            Assertions.assertTrue(wider.getColumnStatistic(alias).isUnknown());
+            Assertions.assertEquals(2, wider.getColumnStatistics().size());
+            columns.remove(alias);
+            Assertions.assertSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(123L)));
+            pending.complete(aggregate());
+            Assertions.assertSame(first, baseEstimate(metadata, optimizer, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(123L)));
+            OptimizerContext nextQuery = OptimizerFactory.initContext(context, new ColumnRefFactory());
+            Statistics collected = baseEstimate(metadata, nextQuery, columns, null, predicate,
+                    -1, TvrTableSnapshot.of(123L));
+            Assertions.assertEquals(10, collected.getColumnStatistic(ref).getDistinctValuesCount());
+            Assertions.assertTrue(nextQuery.isObtainedFromInternalStatistics());
+            Assertions.assertEquals(5, fallbacks.get());
+        } finally {
+            FeConstants.runningUnitTest = oldUnit;
+        }
+    }
+
+    @Test
+    void fallbackKeysKeepPartitionDomainsAndSettingsSeparate() {
+        Map<ColumnRefOperator, Column> columns = Map.of(ref, new Column("c", IntegerType.BIGINT));
+        PartitionKey partition = new PartitionKey();
+        partition.setNullPartitionValue("old_null");
+        List<PartitionKey> partitions = new ArrayList<>(List.of(partition));
+        OptimizerContext optimizer = OptimizerFactory.initContext(context, new ColumnRefFactory());
+        Statistics value = Statistics.builder().addColumnStatistic(ref, ColumnStatistic.unknown()).build();
+        ExternalStatisticsScanKey key = new ExternalStatisticsScanKey("iceberg", table, columns, partitions,
+                ConstantOperator.TRUE, -1, TvrTableSnapshot.of(123L), true, false);
+        optimizer.cacheExternalStatisticsFallback(key, value);
+        Assertions.assertSame(value, optimizer.getExternalStatisticsFallback(key));
+        partition.setNullPartitionValue("new_null");
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(key));
+        partition.setNullPartitionValue("old_null");
+        Assertions.assertSame(value, optimizer.getExternalStatisticsFallback(key));
+        partitions.add(new PartitionKey());
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(key));
+        partitions.remove(1);
+        Assertions.assertSame(value, optimizer.getExternalStatisticsFallback(key));
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(new ExternalStatisticsScanKey("iceberg", table,
+                columns, partitions, ConstantOperator.TRUE, -1, TvrTableSnapshot.of(123L), false, false)));
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(new ExternalStatisticsScanKey("iceberg", table,
+                columns, partitions, ConstantOperator.TRUE, -1, TvrTableSnapshot.of(123L), true, true)));
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(new ExternalStatisticsScanKey("other", table,
+                columns, partitions, ConstantOperator.TRUE, -1, TvrTableSnapshot.of(123L), true, false)));
+        Assertions.assertNull(optimizer.getExternalStatisticsFallback(new ExternalStatisticsScanKey("iceberg", table,
+                Map.of(ref, new Column("c", DateType.DATE)), partitions, ConstantOperator.TRUE, -1,
+                TvrTableSnapshot.of(123L), true, false)));
     }
 
     @Test

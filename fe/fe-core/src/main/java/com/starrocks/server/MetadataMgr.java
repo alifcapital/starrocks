@@ -93,6 +93,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsScanKey;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.statistic.StatisticUtils;
@@ -847,11 +848,28 @@ public class MetadataMgr {
                     .orElseGet(() -> StatisticsUtils.buildDefaultStatistics(columns.keySet()));
             return Statistics.buildFrom(delta).setPartitionRestricted(true).build();
         }
+        ExternalStatisticsScanKey fallbackKey = null;
+        if (!FeConstants.runningUnitTest && (table.isHiveTable() || table.isHudiTable() || table.isIcebergTable())
+                && !StatisticUtils.statisticTableBlackListCheck(table.getId())) {
+            fallbackKey = new ExternalStatisticsScanKey(catalogName, table, columns, partitionKeys, predicate,
+                    limit, versionRange, session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics(),
+                    session.getSessionVariable().disableTableStatsFromMetadataForSingleTable()
+                            && session.getSourceTablesCount() == 1);
+            Statistics cached = session.getExternalStatisticsFallback(fallbackKey);
+            if (cached != null) {
+                session.setObtainedFromInternalStatistics(false);
+                return cached;
+            }
+        }
         ExternalStatisticsRequest request = FeConstants.runningUnitTest ? null : prepareExternalStatisticsRequest(
                 session, catalogName, table, columns, partitionKeys, predicate, limit, versionRange);
         if (request != null) {
-            return computeScopedExternalStatistics(session, catalogName, table, columns, partitionKeys,
+            Statistics statistics = computeScopedExternalStatistics(session, catalogName, table, columns, partitionKeys,
                     predicate, limit, versionRange, request);
+            if (fallbackKey != null && !session.isObtainedFromInternalStatistics()) {
+                session.cacheExternalStatisticsFallback(fallbackKey, statistics);
+            }
+            return statistics;
         }
         if (!FeConstants.runningUnitTest && table.isIcebergTable() && !table.isUnPartitioned()
                 && session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics()
@@ -1043,7 +1061,8 @@ public class MetadataMgr {
             session.setObtainedFromInternalStatistics(false);
             Statistics fallback = connectorStats == null ?
                     StatisticsUtils.buildDefaultStatistics(columns.keySet()) : connectorStats;
-            return Statistics.buildFrom(fallback).setPartitionRestricted(restricted).build();
+            return fallback.isPartitionRestricted() == restricted ? fallback
+                    : Statistics.buildFrom(fallback).setPartitionRestricted(restricted).build();
         }
         session.setObtainedFromInternalStatistics(true);
         Statistics.Builder result = Statistics.builder().setOutputRowCount(aggregate.rowCount)
