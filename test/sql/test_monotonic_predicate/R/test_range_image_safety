@@ -1,0 +1,200 @@
+-- name: test_range_image_safety
+create database db_${uuid0};
+-- result:
+-- !result
+use db_${uuid0};
+-- result:
+-- !result
+set time_zone = '+00:00';
+-- result:
+-- !result
+set enable_monotonic_predicate_rewrite = true;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+set enable_string_date_predicate_pushdown = false;
+-- result:
+-- !result
+create table month_shift (ts datetime, id int) duplicate key(ts) partition by range(ts) (partition p values [('2024-01-29 12:00:00'), ('2024-01-30 00:00:00'))) distributed by hash(id) buckets 1 properties ('replication_num'='1');
+-- result:
+-- !result
+insert into month_shift values ('2024-01-29 12:00:00',1),('2024-01-29 21:00:00',2),('2024-01-29 23:00:00',3);
+-- result:
+-- !result
+set enable_expr_prune_partition = false;
+-- result:
+-- !result
+select id from month_shift where cast(months_add(ts,1) as varchar)>='2024-02-29 20:00:00' order by id;
+-- result:
+2
+3
+-- !result
+select id from month_shift where months_add(ts,1)>='2024-02-29 20:00:00' order by id;
+-- result:
+2
+3
+-- !result
+select id from month_shift where cast(months_add(ts,1) as varchar)>='2024-03-01 00:00:00' order by id;
+-- result:
+-- !result
+set enable_expr_prune_partition = true;
+-- result:
+-- !result
+select id from month_shift where cast(months_add(ts,1) as varchar)>='2024-02-29 20:00:00' order by id;
+-- result:
+2
+3
+-- !result
+select id from month_shift where months_add(ts,1)>='2024-02-29 20:00:00' order by id;
+-- result:
+2
+3
+-- !result
+select id from month_shift where cast(months_add(ts,1) as varchar)>='2024-03-01 00:00:00' order by id;
+-- result:
+-- !result
+create table ev (d date, id int) duplicate key(d) distributed by hash(id) buckets 1 properties ('replication_num'='1');
+-- result:
+-- !result
+create table fv (id int, v float) duplicate key(id) distributed by hash(id) buckets 1 properties ('replication_num'='1');
+-- result:
+-- !result
+insert into ev values ('2024-03-05',1),('2024-03-07',2);
+-- result:
+-- !result
+insert into fv values (1,20240304),(2,20240308);
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-06' and fv.v=cast(20240304 as float) order by ev.id;
+-- result:
+1
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-07' and '2024-03-08' and fv.v=cast(20240308 as float) order by ev.id;
+-- result:
+2
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-06' and fv.v=cast(20240303 as float) order by ev.id;
+-- result:
+1
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-05' and fv.v=cast(20240305 as float) order by ev.id;
+-- result:
+1
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-06' and fv.v=cast(20240304 as float) order by ev.id;
+-- result:
+1
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-07' and '2024-03-08' and fv.v=cast(20240308 as float) order by ev.id;
+-- result:
+2
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-06' and fv.v=cast(20240303 as float) order by ev.id;
+-- result:
+1
+-- !result
+select ev.id from ev join fv on ev.id=fv.id and fv.v=cast(date_format(ev.d,'%Y%m%d') as float) where ev.d between '2024-03-05' and '2024-03-05' and fv.v=cast(20240305 as float) order by ev.id;
+-- result:
+1
+-- !result
+create table sv (id int, s varchar(40)) duplicate key(id) distributed by hash(id) buckets 1 properties ('replication_num'='1');
+-- result:
+-- !result
+create table times (ts datetime, id int) duplicate key(ts) distributed by hash(id) buckets 1 properties ('replication_num'='1');
+-- result:
+-- !result
+insert into sv values (1,'2024-03-01T01:00:00'),(2,'2024-03-01T13:00:00'),(3,'2024-03-02T13:00:00'),(4,NULL);
+-- result:
+-- !result
+insert into times values ('2024-03-01 01:00:00',1),('2024-03-01 13:00:00',2),('2024-03-02 13:00:00',3),(NULL,4);
+-- result:
+-- !result
+set enable_string_date_join_pruning = true;
+-- result:
+-- !result
+set string_date_predicate_format = '';
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00' order by sv.id;
+-- result:
+1
+2
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01T12:00:00' and '2024-03-02T12:00:00' order by sv.id;
+-- result:
+2
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00' order by sv.id;
+-- result:
+1
+2
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01T12:00:00' and '2024-03-02T12:00:00' order by sv.id;
+-- result:
+2
+-- !result
+set string_date_predicate_format = '%Y-%m-%dT%H:%i:%s';
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = false;
+-- result:
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00' order by sv.id;
+-- result:
+1
+2
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01T12:00:00' and '2024-03-02T12:00:00' order by sv.id;
+-- result:
+2
+-- !result
+set enable_monotonic_predicate_move_around = true;
+-- result:
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00' order by sv.id;
+-- result:
+1
+2
+-- !result
+select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) where sv.s between '2024-03-01T12:00:00' and '2024-03-02T12:00:00' order by sv.id;
+-- result:
+2
+-- !result
+set time_zone = default;
+-- result:
+-- !result
+set enable_expr_prune_partition = default;
+-- result:
+-- !result
+set enable_monotonic_predicate_rewrite = default;
+-- result:
+-- !result
+set enable_monotonic_predicate_move_around = default;
+-- result:
+-- !result
+set enable_string_date_join_pruning = default;
+-- result:
+-- !result
+set enable_string_date_predicate_pushdown = default;
+-- result:
+-- !result
+set string_date_predicate_format = default;
+-- result:
+-- !result
+drop database db_${uuid0};
+-- result:
+-- !result

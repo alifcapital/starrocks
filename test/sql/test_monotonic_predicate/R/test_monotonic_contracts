@@ -48,6 +48,9 @@ delete from event_dates where booking_id=2;
 insert into event_dates values (2,'20201207');
 -- result:
 -- !result
+set string_date_predicate_format = '%Y%m%d';
+-- result:
+-- !result
 set enable_string_date_join_pruning = true;
 -- result:
 -- !result

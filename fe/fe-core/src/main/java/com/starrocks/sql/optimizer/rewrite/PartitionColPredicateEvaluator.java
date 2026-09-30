@@ -23,6 +23,7 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.PartitionKeyDiscreteDomain;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.Pair;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.DateLiteral;
 import com.starrocks.sql.ast.expression.IntLiteral;
@@ -53,7 +54,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.BiPredicate;
 import java.util.stream.Collectors;
 
 public class PartitionColPredicateEvaluator {
@@ -117,29 +117,19 @@ public class PartitionColPredicateEvaluator {
 
         @Override
         public BitSet visitCall(CallOperator call, Void context) {
-            mapCandidateRanges(call, null);
+            mapCandidateRanges(call);
             return null;
         }
 
         @Override
         public BitSet visitCastOperator(CastOperator cast, Void context) {
-            // cast(int as varchar) keeps order only between strings of the same length:
-            // '999' > '1001'. Inside a partition whose two bound images have the same length
-            // all values have that length too, so string order matches numeric order there
-            // and the mapped range is usable. A partition with bound images of different
-            // lengths (or a negative bound) gets a full-scope range and is never pruned.
-            if (PartitionColPredicateExtractor.isIntToStringCast(cast)) {
-                mapCandidateRanges(cast, PartitionColPredicateEvaluator::sameLengthNonNegative);
-            } else {
-                mapCandidateRanges(cast, null);
-            }
+            mapCandidateRanges(cast);
             return null;
         }
 
-        // maps every candidate partition's [lower, upper] through the expression; boundsCheck,
-        // when set, may reject the mapped pair, and the partition falls back to a full-scope
-        // range (kept, never pruned)
-        private void mapCandidateRanges(CallOperator call, BiPredicate<LiteralExpr, LiteralExpr> boundsCheck) {
+        // Map each partition to a covering range. If the expression cannot be bounded safely,
+        // keep that partition rather than using an incomplete image of its endpoints.
+        private void mapCandidateRanges(CallOperator call) {
             if (exprToCandidateRanges.containsKey(call)) {
                 return;
             }
@@ -155,13 +145,10 @@ public class PartitionColPredicateEvaluator {
                     LiteralExpr lowerBound = range.hasLowerBound() ? range.lowerEndpoint().getKeys().get(0)
                             : createInfinity(partitionColumn.getType(), false);
                     LiteralExpr upperBound = range.upperEndpoint().getKeys().get(0);
-                    Optional<LiteralExpr> mappingLowerBound = mapRangeBoundValue(call, lowerBound);
-                    Optional<LiteralExpr> mappingUpperBound = mapRangeBoundValue(call, upperBound);
-                    if (mappingLowerBound.isPresent() && mappingUpperBound.isPresent()
-                            && (boundsCheck == null
-                                || boundsCheck.test(mappingLowerBound.get(), mappingUpperBound.get()))) {
-                        LiteralExpr newLowerBound = mappingLowerBound.get();
-                        LiteralExpr newUpperBound = mappingUpperBound.get();
+                    Optional<Pair<LiteralExpr, LiteralExpr>> bounds = mapRangeBounds(call, lowerBound, upperBound);
+                    if (bounds.isPresent()) {
+                        LiteralExpr newLowerBound = bounds.get().first;
+                        LiteralExpr newUpperBound = bounds.get().second;
                         // switch bound value
                         if (newLowerBound.compareTo(newUpperBound) > 0) {
                             LiteralExpr tmp = newLowerBound;
@@ -179,6 +166,36 @@ public class PartitionColPredicateEvaluator {
             }
 
             exprToCandidateRanges.put(call, mappingRanges);
+        }
+
+        private Optional<Pair<LiteralExpr, LiteralExpr>> mapRangeBounds(CallOperator call,
+                                                                       LiteralExpr lower, LiteralExpr upper) {
+            if (call instanceof CastOperator || containsMonthShift(call)) {
+                // A monotonic outer CAST does not prove that the whole chain preserves order.
+                // In particular, months_add keeps the time when several dates clamp to one day.
+                // Use the same per-link envelopes as JOIN derivation, including whole-day bounds
+                // for those shifts and the equal-width check at each INT -> VARCHAR cast.
+                ColumnRefOperator column = call.getColumnRefs().get(0);
+                ScalarOperator lo = column.accept(new ColumnRefReplacer(lower), null);
+                ScalarOperator hi = column.accept(new ColumnRefReplacer(upper), null);
+                if (!(lo instanceof ConstantOperator) || !(hi instanceof ConstantOperator)) {
+                    return Optional.empty();
+                }
+                Optional<Range<ConstantOperator>> image = MonotonicImage.partitionImageRange(call, column,
+                        MinMax.of(Range.closed((ConstantOperator) lo, (ConstantOperator) hi)));
+                if (image.isEmpty()) {
+                    return Optional.empty();
+                }
+                try {
+                    return Optional.of(Pair.create(ColumnFilterConverter.convertLiteral(image.get().lowerEndpoint()),
+                            ColumnFilterConverter.convertLiteral(image.get().upperEndpoint())));
+                } catch (AnalysisException e) {
+                    return Optional.empty();
+                }
+            }
+            Optional<LiteralExpr> lo = mapRangeBoundValue(call, lower);
+            Optional<LiteralExpr> hi = mapRangeBoundValue(call, upper);
+            return lo.isPresent() && hi.isPresent() ? Optional.of(Pair.create(lo.get(), hi.get())) : Optional.empty();
         }
 
         @Override
@@ -437,11 +454,11 @@ public class PartitionColPredicateEvaluator {
         }
     }
 
-    private static boolean sameLengthNonNegative(LiteralExpr lower, LiteralExpr upper) {
-        String lowerStr = lower.getStringValue();
-        String upperStr = upper.getStringValue();
-        return lowerStr.length() == upperStr.length()
-                && !lowerStr.startsWith("-") && !upperStr.startsWith("-");
+    private static boolean containsMonthShift(ScalarOperator expression) {
+        if (expression instanceof CallOperator call && MonotonicFunctionRegistry.isMonthShift(call.getFnName())) {
+            return true;
+        }
+        return expression.getChildren().stream().anyMatch(PartitionColPredicateEvaluator::containsMonthShift);
     }
 
     private class ColumnRefReplacer extends BaseScalarOperatorShuttle {

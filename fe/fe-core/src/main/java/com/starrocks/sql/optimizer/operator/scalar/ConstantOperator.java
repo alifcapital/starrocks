@@ -574,7 +574,24 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
                 } else if (DateType.DATETIME.equals(type)) {
                     childString = DateUtils.convertDateTimeFormaterToSecondFormater(childString);
                 }
-                res = ConstantOperator.createFloat(Double.parseDouble(childString));
+                // The constant is carried in a Double, but the CAST result must have binary32
+                // precision, just like the BE column. Otherwise equal FLOAT values can compare
+                // unequal while intersecting predicate domains (20240303 and 20240305 both
+                // round to 20240304). Match the BE conversion path too: string parsing and
+                // decimal scaling use double intermediates, while integer casts round directly.
+                double rounded;
+                if (type.isFloatingPointType()) {
+                    rounded = (float) getDouble();
+                } else if (type.isStringType()) {
+                    rounded = (float) Double.parseDouble(childString);
+                } else if (type.isDecimalOfAnyVersion()) {
+                    int scale = type.isDecimalV2() ? 9 : ((ScalarType) type).getScalarScale();
+                    BigInteger unscaled = getDecimal().setScale(scale).unscaledValue();
+                    rounded = (float) (unscaled.doubleValue() / BigInteger.TEN.pow(scale).doubleValue());
+                } else {
+                    rounded = Float.parseFloat(childString);
+                }
+                res = ConstantOperator.createFloat(rounded);
             } else if (desc.isDouble()) {
                 if (DateType.DATE.equals(type)) {
                     childString = DateUtils.convertDateFormaterToDateKeyFormater(childString);

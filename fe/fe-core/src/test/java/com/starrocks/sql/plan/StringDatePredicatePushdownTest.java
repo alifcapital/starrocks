@@ -123,10 +123,9 @@ public class StringDatePredicatePushdownTest extends PlanTestBase {
                     + "on f.id=e.id and cast(f.s as date)=date_trunc('month', " + day + ") where " + filter;
             variables.setEnableStringDatePredicatePushdown(false);
             String off = getFragmentPlan(sql);
-            int expectedOff = source.equals("varchar") && (format.hasUtcSuffix()
-                    || format.getPrecision() == java.time.temporal.ChronoUnit.MICROS)
-                    ? 4 : 2;
-            assertContains(off, "partitions=" + expectedOff + "/4");
+            // The declared storage format also enables forward JOIN derivation for microseconds and UTC.
+            // Disabling the inverse rewrite must not disable that independent source of partition bounds.
+            assertContains(off, "partitions=2/4");
             variables.setEnableStringDatePredicatePushdown(true);
             String on = getFragmentPlan(sql);
             assertContains(on, "partitions=2/4");

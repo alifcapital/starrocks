@@ -112,7 +112,7 @@ public class PartitionColPredicateExtractor extends ScalarOperatorVisitor<Scalar
                 || cast.getColumnRefs().size() != 1 || !partitionColumnSet.containsAll(cast.getUsedColumns())) {
             return null;
         }
-        if (!MonotonicImage.isOrderPreservingCast(cast) && !isIntToStringCast(cast)) {
+        if (!MonotonicImage.isOrderPreservingCast(cast) && !MonotonicImage.isIntToStringCast(cast)) {
             return null;
         }
         // the operand must itself be accepted: a bare partition column, a monotonic call,
@@ -122,10 +122,6 @@ public class PartitionColPredicateExtractor extends ScalarOperatorVisitor<Scalar
             return null;
         }
         return foldsOnExampleValue(cast) ? cast : null;
-    }
-
-    static boolean isIntToStringCast(CastOperator cast) {
-        return cast.getChild(0).getType().isIntegerType() && cast.getType().isStringType();
     }
 
     // the evaluator can only work with expressions the FE can fold; check on an example value
