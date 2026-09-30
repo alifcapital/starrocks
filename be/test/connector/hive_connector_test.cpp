@@ -16,8 +16,18 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
+#include "column/chunk.h"
+#include "exec/pipeline/fragment_context.h"
+#include "exprs/expr_context.h"
+#include "fs/fs.h"
+#include "runtime/descriptor_helper.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
+#include "testutil/exprs_test_helper.h"
+#include "util/defer_op.h"
 
 namespace starrocks::connector {
 
@@ -26,8 +36,132 @@ public:
     void SetUp() override { _exec_env = ExecEnv::GetInstance(); }
 
 protected:
+    void check_global_dict_slot_conjunct(const std::string& file, size_t file_rows, const std::string& value);
+
     ExecEnv* _exec_env = nullptr;
 };
+
+void HiveConnectorTest::check_global_dict_slot_conjunct(const std::string& file, size_t file_rows,
+                                                        const std::string& value) {
+    TQueryOptions options;
+    options.__set_enable_scan_datacache(false);
+    options.__set_enable_connector_split_io_tasks(false);
+    RuntimeState state(TUniqueId{}, options, TQueryGlobals{}, _exec_env);
+    state.init_instance_mem_tracker();
+    auto* pool = state.obj_pool();
+    auto* fragment = pool->add(new pipeline::FragmentContext());
+    fragment->set_pred_tree_params({true, true});
+    state.set_fragment_ctx(fragment);
+
+    // Use lexicographically ordered codes, deliberately different from the numeric strings.
+    TGlobalDict dict;
+    dict.__set_columnId(1);
+    for (int i = 0; i < 100; ++i) {
+        dict.strings.emplace_back(std::to_string(i));
+    }
+    std::sort(dict.strings.begin(), dict.strings.end());
+    for (int i = 0; i < 100; ++i) {
+        dict.ids.emplace_back(i + 1);
+    }
+    ASSERT_OK(state.init_query_global_dict({dict}));
+    const int32_t expected_code = state.get_query_global_dict_map().at(1).first.at(Slice(value));
+
+    TDescriptorTableBuilder descriptors;
+    TTupleDescriptorBuilder tuple;
+    TSlotDescriptorBuilder slot;
+    tuple.add_slot(slot.type(TYPE_INT).column_name("c0").column_pos(0).nullable(true).build());
+    tuple.add_slot(slot.type(TYPE_INT).column_name("c2").column_pos(2).nullable(true).build());
+    tuple.build(&descriptors);
+    DescriptorTbl* desc_tbl = nullptr;
+    ASSERT_OK(DescriptorTbl::create(&state, pool, descriptors.desc_tbl(), &desc_tbl, state.chunk_size()));
+    TTableDescriptor table;
+    table.__set_fileTable(TFileTable{});
+    desc_tbl->get_tuple_descriptor(0)->set_table_desc(pool->add(new FileTableDescriptor(table, pool)));
+    state.set_desc_tbl(desc_tbl);
+
+    THdfsScanNode node;
+    node.__set_tuple_id(0);
+    node.__set_hive_column_names({"c0", "c2"});
+    HiveDataSourceProvider provider(nullptr, node);
+    auto size = FileSystem::Default()->get_file_size(file);
+    ASSERT_TRUE(size.ok()) << size.status();
+    THdfsScanRange range;
+    range.__set_full_path(file);
+    range.__set_file_format(THdfsFileFormat::PARQUET);
+    range.__set_offset(0);
+    range.__set_length(size.value());
+    range.__set_file_length(size.value());
+
+    auto read_codes = [&](const std::vector<ExprContext*>& predicates) -> StatusOr<std::vector<int32_t>> {
+        HiveDataSource source(&provider, range);
+        source.set_runtime_profile(state.runtime_profile());
+        source.set_predicates(predicates);
+        DeferOp close([&] { source.close(&state); });
+        RETURN_IF_ERROR(source.open(&state));
+        std::vector<int32_t> codes;
+        while (true) {
+            ChunkPtr chunk;
+            auto status = source.get_next(&state, &chunk);
+            if (status.is_end_of_file()) {
+                break;
+            }
+            RETURN_IF_ERROR(status);
+            const auto& column = chunk->get_column_by_slot_id(1);
+            for (size_t row = 0; row < chunk->num_rows(); ++row) {
+                // Code 0 represents NULL and cannot match this equality predicate.
+                codes.emplace_back(column->is_null(row) ? 0 : column->get(row).get_int32());
+            }
+        }
+        return codes;
+    };
+
+    auto all = read_codes({});
+    ASSERT_TRUE(all.ok()) << all.status();
+    ASSERT_EQ(file_rows, all->size());
+    const auto matches = std::count(all->begin(), all->end(), expected_code);
+    ASSERT_GT(matches, 0);
+    ASSERT_LT(matches, all->size());
+
+    TExprNode mapping;
+    mapping.__set_node_type(TExprNodeType::DICT_EXPR);
+    mapping.__set_type(gen_type_desc(TPrimitiveType::BOOLEAN));
+    mapping.__set_num_children(2);
+    mapping.__set_is_nullable(true);
+    mapping.__set_has_nullable_child(true);
+    TExprNode placeholder;
+    placeholder.__set_node_type(TExprNodeType::PLACEHOLDER_EXPR);
+    placeholder.__set_type(gen_type_desc(TPrimitiveType::VARCHAR));
+    placeholder.__set_num_children(0);
+    placeholder.__set_is_nullable(true);
+    TPlaceHolder ref;
+    ref.__set_slot_id(1);
+    ref.__set_nullable(true);
+    placeholder.__set_vslot_ref(ref);
+    TExpr predicate;
+    predicate.nodes = {mapping, ExprsTestHelper::create_slot_expr_node_t<TYPE_INT>(0, 1, true),
+                       ExprsTestHelper::create_binary_pred_node(TPrimitiveType::VARCHAR, TExprOpcode::EQ), placeholder,
+                       ExprsTestHelper::create_literal<TYPE_VARCHAR, std::string>(value, false)};
+    std::vector<ExprContext*> contexts;
+    ASSERT_OK(Expr::create_expr_trees(pool, {predicate}, &contexts, &state));
+    DeferOp close_contexts([&] { Expr::close(contexts, &state); });
+    ASSERT_OK(Expr::prepare(contexts, &state));
+    // Connector scans defer rewriting until the data source decomposes the predicates.
+    // Do not call rewrite_conjuncts here: removing the production by_slot loop must fail this test.
+    DictOptimizeParser::disable_open_rewrite(&contexts);
+    ASSERT_OK(Expr::open(contexts, &state));
+    auto filtered = read_codes(contexts);
+    ASSERT_TRUE(filtered.ok()) << filtered.status();
+    ASSERT_EQ(matches, filtered->size());
+    ASSERT_TRUE(std::all_of(filtered->begin(), filtered->end(), [&](int32_t code) { return code == expected_code; }));
+}
+
+TEST_F(HiveConnectorTest, global_dict_slot_conjunct_plain_parquet) {
+    check_global_dict_slot_conjunct("./be/test/formats/parquet/test_data/low_rows_non_dict.parquet", 100, "7");
+}
+
+TEST_F(HiveConnectorTest, global_dict_slot_conjunct_dictionary_parquet) {
+    check_global_dict_slot_conjunct("./be/test/formats/parquet/test_data/page_index_small_page.parquet", 20000, "2");
+}
 
 // Test HiveConnector type
 TEST_F(HiveConnectorTest, test_connector_type) {
