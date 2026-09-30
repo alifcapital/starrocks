@@ -24,6 +24,7 @@ import com.starrocks.connector.ConnectorMetadataRequestContext;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.CachingIcebergCatalog.IcebergTableName;
 import com.starrocks.connector.iceberg.rest.IcebergRESTCatalog;
+import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.utframe.UtFrameUtils;
@@ -512,6 +513,75 @@ public class CachingIcebergCatalogTest {
         Assertions.assertEquals(nativeTable, cachingIcebergCatalog.getTable(connectContext, "test", "table"));
         Assertions.assertEquals(nativeTable, cachingIcebergCatalog.getTable(connectContext, "test", "table"));
         cachingIcebergCatalog.invalidateCache("test", "table");
+    }
+
+    @Test
+    public void testMetadataOnlyMissIsCachedWithoutScanActivity() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable first = mockRefreshCandidate(1L, "first.json");
+            BaseTable second = mockRefreshCandidate(2L, "second.json");
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                    .thenReturn(first, second);
+            for (int i = 0; i < 3; i++) {
+                ConnectContext context = new ConnectContext();
+                context.setCommand(MysqlCommand.COM_QUERY);
+                context.setOnlyReadIcebergCache(true);
+                Assertions.assertSame(first, catalog.getTable(context, "db", "tbl"));
+                catalog.recordScanAccess(context, "db", "tbl");
+            }
+            Assertions.assertSame(first, catalog.getTable(new ConnectContext(), "db", "tbl"));
+            Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+            Map<IcebergTableName, Long> activity = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+            Assertions.assertTrue(activity.isEmpty(), "MV validation must not activate manifest refresh");
+            Mockito.verify(delegate, Mockito.never()).getPartitions(
+                    Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any());
+            catalog.invalidateCache("db", "tbl");
+            ConnectContext context = new ConnectContext();
+            context.setOnlyReadIcebergCache(true);
+            Assertions.assertSame(second, catalog.getTable(context, "db", "tbl"));
+            Mockito.verify(delegate, Mockito.times(2)).getTable(
+                    Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    public void testConcurrentMetadataOnlyMissesShareLoad() throws Exception {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable table = mockRefreshCandidate(1L, "first.json");
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                    .thenAnswer(inv -> {
+                        loading.countDown();
+                        Assertions.assertTrue(finish.await(5, TimeUnit.SECONDS));
+                        return table;
+                    });
+            java.util.concurrent.Callable<Table> read = () -> {
+                ConnectContext context = new ConnectContext();
+                context.setOnlyReadIcebergCache(true);
+                return catalog.getTable(context, "db", "tbl");
+            };
+            java.util.concurrent.Future<Table> first = workers.submit(read);
+            Assertions.assertTrue(loading.await(5, TimeUnit.SECONDS));
+            java.util.concurrent.Future<Table> second = workers.submit(read);
+            finish.countDown();
+            Assertions.assertSame(table, first.get(5, TimeUnit.SECONDS));
+            Assertions.assertSame(table, second.get(5, TimeUnit.SECONDS));
+            Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        } finally {
+            finish.countDown();
+            workers.shutdownNow();
+        }
     }
 
     @Test
