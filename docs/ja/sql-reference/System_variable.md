@@ -200,13 +200,14 @@ ALTER USER 'jack' SET PROPERTIES ('session.query_timeout' = '600');
 
 * **デフォルト**: false
 * **タイプ**: Boolean
-* **説明**: 対象となる各文字列カラムが単一の正規化された固定長の日付形式を使用するとユーザーが保証する場合、VARCHAR から DATE/DATETIME への CAST を通じた JOIN フィルターの導出を許可します。対応形式は `YYYYMMDD`、`YYYYMMDDHHMMSS`、`YYYY-MM-DD`、`YYYY-MM-DD HH:mm:ss`、`YYYY-MM-DDTHH:mm:ss` です。年は4桁、その他の要素はゼロ埋めが必要です。範囲の両端は同じ対応形式の有効な日付である必要があります。`enable_monotonic_predicate_move_around` を有効にする必要があります。
+* **説明**: VARCHAR から DATE/DATETIME への CAST を通じた JOIN フィルターの導出を許可します。`enable_monotonic_predicate_move_around` と、空でない `string_date_predicate_format` の明示的な指定が必要です。対象となるすべての文字列カラムは指定形式の有効な日付を格納する必要があります。フィルターの両端も指定形式に一致しなければ、範囲を導出しません。`enable_string_date_predicate_pushdown` の有効化は不要です。
 
-この設定はデータ形式に対する保証であり、保存された行の検証や CAST の解析規則の変更は行いません。形式の混在、2桁の年、タイムゾーン接尾辞、小数秒、不正な日付文字列を含むカラムでは有効にしないでください。保証に違反すると、導出されたフィルターが一致する行を除外する可能性があります。例えば、旧形式の文字列 `2012072` は文字列順で `20120701` と `20120731` の間にありますが、CAST は2020年12月の日付として解釈します。
+この設定はデータ形式に対する保証であり、保存された行の検証や CAST の解析規則の変更は行いません。形式が混在する列、短い年、無効な日付には使用しないでください。対応形式、小数桁数、`Z` 形式の UTC 要件は `string_date_predicate_format` を参照してください。
 
-対象の日付文字列カラムがこの条件を満たすクエリに限り有効にします。
+フィルターの定数だけから保存形式を推測することはできません。例えば `2024-03-01T01:00:00` は辞書順では `2024-03-01 12:00:00` より大きくなりますが、時刻は早くなります。保存形式の宣言により、異なる形式の境界を日付範囲として扱うことを防ぎます。
 
 ```sql
+SET string_date_predicate_format = '%Y%m%d';
 SET enable_string_date_join_pruning = true;
 ```
 
@@ -230,9 +231,9 @@ SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
 
 ### string_date_predicate_format
 
-* **デフォルト**: 空文字列（文字列日付の述語プッシュダウンを行わない）
+* **デフォルト**: 空文字列（両方向の文字列日付範囲の導出を無効にする）
 * **データ型**: String
-* **説明**: `enable_string_date_predicate_pushdown` で使用する日付の格納形式を宣言します。空文字列は導出を無効化します。以下の大文字小文字を区別する形式のみ対応し、それ以外の値は SET エラーになります。
+* **説明**: `enable_string_date_predicate_pushdown` と `enable_string_date_join_pruning` が共有する保存形式を指定します。空文字列では両方向の導出を無効にします。次の大文字小文字を区別する形式のみ受け付け、未対応の値は SET エラーになります。
 
 | 形式 | 例 |
 |---|---|
@@ -250,7 +251,7 @@ SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
 
 これらの形式に対する通常の DATE/DATETIME CAST はタイムゾーンを変換せず、セッションのタイムゾーンによって文字列範囲は変わりません。`unix_timestamp` や `from_unixtime` を含む式には既存のタイムゾーンと夏時間のチェックを適用し、安全性を証明できない場合は導出しません。`convert_tz` の変換元と変換先が定数なら、元のフィルターを保持して入力境界を導出します。数値オフセットと `UTC`、`Asia/Dushanbe` などのゾーン名に対応します。いずれかのゾーンの時刻変更から前後 72 時間以内の境界、曖昧な現地時刻、範囲外の境界は導出しません。それ以外では比較日付に対応するオフセットを使います。形式の宣言はタイムゾーンの指定や変更を意味しません。
 
-`enable_string_date_join_pruning` は独立した設定で、文字列の入力範囲を JOIN 経由で前方に転送します。両方を有効にして形式を指定すると、前方転送も固定六桁の小数を含む指定形式で境界を検証します。新しいオプションを無効にすると、従来の五形式の JOIN 契約を維持します。
+二つの最適化スイッチは独立していますが、どちらもこの形式を必要とします。逆方向の文字列述語プッシュダウンが無効でも、JOIN の入力境界を宣言された保存形式と照合します。
 
 ### auto_increment_increment
 

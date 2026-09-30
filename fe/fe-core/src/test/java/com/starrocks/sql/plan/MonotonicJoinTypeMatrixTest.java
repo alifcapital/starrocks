@@ -70,6 +70,7 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
         boolean oldMove = variables.isEnableMonotonicPredicateMoveAround();
         boolean oldRewrite = variables.isEnableMonotonicPredicateRewrite();
         boolean oldString = variables.isEnableStringDateJoinPruning();
+        String oldFormat = variables.getStringDatePredicateFormat();
         String date = source.equals("date") ? "e.k" : "cast(e.k as date)";
         String expression = target.equals("date") ? "date_trunc('month', " + date + ")"
                 : "date_format(" + date + ", '%Y%m')";
@@ -82,6 +83,7 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
             variables.setCboEqBaseType(comparison);
             variables.setEnableMonotonicPredicateRewrite(true);
             variables.setEnableStringDateJoinPruning(true);
+            variables.setStringDatePredicateFormat("%Y%m%d");
             variables.setEnableMonotonicPredicateMoveAround(false);
             String off = getFragmentPlan(sql);
             assertContains(off, "partitions=6/6");
@@ -100,6 +102,7 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
             variables.setEnableMonotonicPredicateMoveAround(oldMove);
             variables.setEnableMonotonicPredicateRewrite(oldRewrite);
             variables.setEnableStringDateJoinPruning(oldString);
+            variables.setStringDatePredicateFormat(oldFormat);
         }
     }
 

@@ -25,6 +25,7 @@ import com.starrocks.type.VarcharType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
@@ -137,10 +138,10 @@ public class ConstantOperatorTest {
         ConstantOperator datetimeLargeintNumber = ConstantOperator.createLargeInt(new BigInteger("20230101000000"));
         Assertions.assertEquals(datetimeLargeintNumber, datetime.castTo(IntegerType.LARGEINT).get());
 
-        ConstantOperator dateFloatNumber = ConstantOperator.createFloat(20230101);
+        ConstantOperator dateFloatNumber = ConstantOperator.createFloat((float) 20230101);
         Assertions.assertEquals(dateFloatNumber, date.castTo(FloatType.FLOAT).get());
 
-        ConstantOperator datetimeFloatNumber = ConstantOperator.createFloat(20230101000000L);
+        ConstantOperator datetimeFloatNumber = ConstantOperator.createFloat((float) 20230101000000L);
         Assertions.assertEquals(datetimeFloatNumber, datetime.castTo(FloatType.FLOAT).get());
 
         ConstantOperator dateDoubleNumber = ConstantOperator.createDouble(20230101);
@@ -156,6 +157,31 @@ public class ConstantOperatorTest {
         ConstantOperator time = ConstantOperator.createTime(now.getHour() * 3600D + now.getMinute() * 60D + now.getSecond());
         ConstantOperator datetime = ConstantOperator.createDatetime(now);
         Assertions.assertEquals(datetime, time.castTo(DateType.DATETIME).get());
+    }
+
+    @Test
+    public void testFloatCastUsesBinary32Precision() {
+        ConstantOperator expected = ConstantOperator.createFloat(20240304);
+        for (int value : new int[] {20240303, 20240304, 20240305}) {
+            Assertions.assertEquals(expected, ConstantOperator.createInt(value).castTo(FloatType.FLOAT).orElseThrow());
+            Assertions.assertEquals(expected, ConstantOperator.createVarchar(Integer.toString(value))
+                    .castTo(FloatType.FLOAT).orElseThrow());
+        }
+        // A DOUBLE exactly halfway between two FLOATs rounds to the even mantissa. The BE string
+        // parser also goes through DOUBLE, so the same decimal text must round down in that path.
+        ConstantOperator midpoint = ConstantOperator.createDouble(1.0 + Math.scalb(1.0, -24));
+        Assertions.assertEquals(1.0, midpoint.castTo(FloatType.FLOAT).orElseThrow().getFloat());
+        Assertions.assertEquals(1.0, ConstantOperator.createVarchar("1.0000000596046448")
+                .castTo(FloatType.FLOAT).orElseThrow().getFloat());
+        Assertions.assertEquals(1.0, ConstantOperator.createDecimal(new BigDecimal("1.0000000596046448"),
+                        TypeFactory.createDecimalV3NarrowestType(17, 16))
+                .castTo(FloatType.FLOAT).orElseThrow().getFloat());
+        // Integer casts do not use the string parser: the last bit above this midpoint must survive.
+        long aboveMidpoint = (1L << 60) + (1L << 36) + 1;
+        Assertions.assertEquals(Math.scalb(1.0, 60) + Math.scalb(1.0, 37),
+                ConstantOperator.createBigint(aboveMidpoint).castTo(FloatType.FLOAT).orElseThrow().getFloat());
+        Assertions.assertTrue(ConstantOperator.createVarchar("1e100").castTo(FloatType.FLOAT).isEmpty());
+        Assertions.assertTrue(ConstantOperator.createVarchar("NaN").castTo(FloatType.FLOAT).isEmpty());
     }
 
     @Test

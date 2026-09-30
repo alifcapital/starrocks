@@ -3242,12 +3242,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND)
     private boolean enableMonotonicPredicateMoveAround = true;
 
-    // Explicit data contract for VARCHAR -> date range derivation: each source column uses
-    // one canonical, fixed-width date format. Does not change CAST parsing or validate rows.
+    // Explicit data contract for VARCHAR -> date range derivation: all source columns use
+    // stringDatePredicateFormat. Does not change CAST parsing or validate rows.
     @VarAttr(name = ENABLE_STRING_DATE_JOIN_PRUNING)
     private boolean enableStringDateJoinPruning = false;
 
-    // A nonempty format declares the encoding of every VARCHAR date input used by this optimization.
+    // The format is shared by forward JOIN derivation and inverse string predicate pushdown.
     @VarAttr(name = ENABLE_STRING_DATE_PREDICATE_PUSHDOWN)
     private boolean enableStringDatePredicatePushdown = false;
 

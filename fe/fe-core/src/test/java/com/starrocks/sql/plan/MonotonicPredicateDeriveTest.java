@@ -110,7 +110,9 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
         var variables = connectContext.getSessionVariable();
         String oldMode = variables.getCboEqBaseType();
         boolean oldAssumption = variables.isEnableStringDateJoinPruning();
+        String oldFormat = variables.getStringDatePredicateFormat();
         try {
+            variables.setStringDatePredicateFormat("%Y%m%d");
             String sql = "select f.id from fact_month_int f join event_dates_text e "
                     + "on f.id=e.id and f.datamonth=date_format(cast(e.datadate as date), '%Y%m') "
                     + "where e.datadate between '20240305' and '20240410'";
@@ -124,6 +126,7 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
         } finally {
             variables.setCboEqBaseType(oldMode);
             variables.setEnableStringDateJoinPruning(oldAssumption);
+            variables.setStringDatePredicateFormat(oldFormat);
             starRocksAssert.dropTable("event_dates_text");
         }
     }

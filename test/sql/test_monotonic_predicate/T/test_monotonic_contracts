@@ -14,6 +14,7 @@ select f.booking_id, f.datamonth from fact_by_month f join event_dates e on f.bo
 set enable_monotonic_predicate_move_around = true;
 delete from event_dates where booking_id=2;
 insert into event_dates values (2,'20201207');
+set string_date_predicate_format = '%Y%m%d';
 set enable_string_date_join_pruning = true;
 select f.booking_id, f.datamonth from fact_by_month f join event_dates e on f.booking_id=e.booking_id and f.datamonth=date_format(cast(e.datadate as date),'%Y%m') where e.datadate between '20120701' and '20120731' order by f.booking_id;
 set cbo_eq_base_type = 'decimal';

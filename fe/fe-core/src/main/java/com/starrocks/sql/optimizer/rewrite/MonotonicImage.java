@@ -31,7 +31,6 @@ import com.starrocks.type.Type;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.time.temporal.ChronoUnit;
 import java.time.zone.ZoneOffsetTransition;
 import java.util.Optional;
 import java.util.Set;
@@ -76,6 +75,19 @@ public class MonotonicImage {
      */
     public static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
                                                                MinMax columnDomain) {
+        return imageRange(expr, column, columnDomain, false);
+    }
+
+    // Partition pruning also admits INT -> VARCHAR, after checking the intermediate range at that cast.
+    // Keep this separate from the JOIN admission rules: a cast is not globally monotonic just because
+    // it preserves order within one partition.
+    static Optional<Range<ConstantOperator>> partitionImageRange(ScalarOperator expr, ColumnRefOperator column,
+                                                                 MinMax columnDomain) {
+        return imageRange(expr, column, columnDomain, true);
+    }
+
+    private static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
+                                                                MinMax columnDomain, boolean partitionCasts) {
         // Need both endpoints. The registry does not say whether the function increases or
         // decreases, so a single endpoint could turn into either a lower or an upper bound.
         // With two endpoints we fold both and sort the results, so direction does not matter.
@@ -99,7 +111,7 @@ public class MonotonicImage {
             return Optional.empty();
         }
         ColumnRefOperator dateCastColumn = intDateCastAdmitted(column, columnDomain) || canonicalString ? column : null;
-        if (!isMonotonicExpression(expr, dateCastColumn)) {
+        if (!isMonotonicExpression(expr, dateCastColumn, partitionCasts)) {
             return Optional.empty();
         }
         return imageOf(expr, column, columnDomain);
@@ -149,6 +161,11 @@ public class MonotonicImage {
             }
             ConstantOperator a = first.get();
             ConstantOperator b = second.get();
+            if (call instanceof CastOperator cast && isIntToStringCast(cast)
+                    && (a.getVarchar().length() != b.getVarchar().length()
+                        || a.getVarchar().startsWith("-") || b.getVarchar().startsWith("-"))) {
+                return Optional.empty();
+            }
             if (FunctionSet.UNIX_TIMESTAMP.equalsIgnoreCase(call.getFnName())
                     && (a.isZero() || b.isZero())) {
                 return Optional.empty();
@@ -210,10 +227,11 @@ public class MonotonicImage {
      * </pre>
      */
     public static boolean isMonotonicExpression(ScalarOperator op) {
-        return isMonotonicExpression(op, null);
+        return isMonotonicExpression(op, null, false);
     }
 
-    private static boolean isMonotonicExpression(ScalarOperator op, ColumnRefOperator dateCastColumn) {
+    private static boolean isMonotonicExpression(ScalarOperator op, ColumnRefOperator dateCastColumn,
+                                                 boolean partitionCasts) {
         if (op.isColumnRef() || op.isConstantRef()) {
             return true;
         }
@@ -221,8 +239,9 @@ public class MonotonicImage {
         // the whitelist below, not through the registry: the registry accepts every cast.
         if (op instanceof CastOperator) {
             CastOperator cast = (CastOperator) op;
-            if (isOrderPreservingCast(cast)) {
-                return isMonotonicExpression(cast.getChild(0), dateCastColumn);
+            if (isOrderPreservingCast(cast)
+                    || (partitionCasts && isIntToStringCast(cast))) {
+                return isMonotonicExpression(cast.getChild(0), dateCastColumn, partitionCasts);
             }
             // Cast the domain column itself only after proving its INT segment or applying
             // the explicit canonical-VARCHAR assertion to matching validated endpoints.
@@ -242,7 +261,7 @@ public class MonotonicImage {
                         && !((ConstantOperator) inner.getChild(1)).isNull()
                         && MonotonicFunctionRegistry.isDigitsOnlyFormat(
                                 ((ConstantOperator) inner.getChild(1)).getVarchar())) {
-                    return isMonotonicExpression(inner, dateCastColumn);
+                    return isMonotonicExpression(inner, dateCastColumn, partitionCasts);
                 }
             }
             return false;
@@ -283,7 +302,7 @@ public class MonotonicImage {
                 }
                 nonConstant++;
                 if (nonConstant > 1 || !admittedArgs.contains(i)
-                        || !isMonotonicExpression(child, dateCastColumn)) {
+                        || !isMonotonicExpression(child, dateCastColumn, partitionCasts)) {
                     return false;
                 }
             }
@@ -315,20 +334,13 @@ public class MonotonicImage {
         }
         String lo = domain.getMin().orElseThrow().getVarchar();
         String hi = domain.getMax().orElseThrow().getVarchar();
-        if (context.getSessionVariable().isEnableStringDatePredicatePushdown()) {
-            StringDateFormat declared = StringDateFormat.fromFormat(
-                    context.getSessionVariable().getStringDatePredicateFormat());
-            if (declared != null) {
-                return declared.isSupportedInCurrentTimezone() && declared.matches(lo) && declared.matches(hi);
-            }
-        }
-        for (StringDateFormat format : StringDateFormat.values()) {
-            if (!format.hasUtcSuffix() && format.getPrecision() != ChronoUnit.MICROS
-                    && format.matches(lo) && format.matches(hi)) {
-                return true;
-            }
-        }
-        return false;
+        // The literals do not tell us the stored encoding. An ISO value '2024-03-01T01:00:00'
+        // passes a string lower bound '2024-03-01 12:00:00', but its date is earlier. Require
+        // the declared column format even when inverse string predicate pushdown is disabled.
+        StringDateFormat declared = StringDateFormat.fromFormat(
+                context.getSessionVariable().getStringDatePredicateFormat());
+        return declared != null && declared.isSupportedInCurrentTimezone()
+                && declared.matches(lo) && declared.matches(hi);
     }
 
     /**
@@ -393,6 +405,10 @@ public class MonotonicImage {
         // date order.
         return from.isDateType() && to.isStringType();
         // everything else is out, notably int -> varchar and floating point
+    }
+
+    static boolean isIntToStringCast(CastOperator cast) {
+        return cast.getChild(0).getType().isIntegerType() && cast.getType().isStringType();
     }
 
     private static Optional<ConstantOperator> foldArgument(CallOperator call, ScalarOperator child,

@@ -197,13 +197,14 @@ ALTER USER 'jack' SET PROPERTIES ('session.query_timeout' = '600');
 
 * **默认值**：false
 * **类型**：Boolean
-* **描述**：当用户保证参与推导的每个字符串列均使用一种规范、定长的日期格式时，允许通过 VARCHAR 到 DATE/DATETIME 的 CAST 推导 JOIN 过滤条件。支持 `YYYYMMDD`、`YYYYMMDDHHMMSS`、`YYYY-MM-DD`、`YYYY-MM-DD HH:mm:ss` 和 `YYYY-MM-DDTHH:mm:ss`；年份必须为四位，其他分量必须补零。过滤范围的两个边界必须使用同一种受支持的格式，且能够解析为有效日期。需要启用 `enable_monotonic_predicate_move_around`。
+* **描述**：允许通过 VARCHAR 到 DATE/DATETIME 的 CAST 推导 JOIN 过滤条件。需要启用 `enable_monotonic_predicate_move_around`，并明确指定非空的 `string_date_predicate_format`。所有参与的字符串列必须按指定格式存储有效日期，过滤范围的两个边界也必须符合该格式，否则不推导范围。无需启用 `enable_string_date_predicate_pushdown`。
 
-该变量表示用户对数据格式的保证，不会检查存储的行，也不会改变 CAST 的解析规则。对于混合格式、两位年份、时区后缀、小数秒或不规范的日期字符串，不要启用此变量。违反上述保证可能导致推导出的过滤条件丢弃本应匹配的行。例如，旧格式字符串 `2012072` 在字符串顺序上位于 `20120701` 和 `20120731` 之间，但 CAST 会将其解释为 2020 年 12 月的日期。
+该变量表示用户对数据格式的保证，不会检查存储的行，也不会改变 CAST 的解析规则。对于混合格式、两位年份或无效日期字符串，不要启用此变量。支持的格式、固定小数精度及 `Z` 后缀的 UTC 要求见 `string_date_predicate_format`。
 
-仅对参与的日期字符串列满足上述要求的查询启用此变量：
+不能从过滤边界推断存储格式。例如，`2024-03-01T01:00:00` 在字典序上大于 `2024-03-01 12:00:00`，但对应的时间更早。明确声明存储格式可防止优化器将不同格式的边界当作日期范围。
 
 ```sql
+SET string_date_predicate_format = '%Y%m%d';
 SET enable_string_date_join_pruning = true;
 ```
 
@@ -227,9 +228,9 @@ SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
 
 ### string_date_predicate_format
 
-* **默认值**：空字符串（不进行字符串日期谓词下推）
+* **默认值**：空字符串（禁用两个方向的字符串日期范围推导）
 * **数据类型**：String
-* **描述**：声明 `enable_string_date_predicate_pushdown` 使用的日期存储格式。空字符串禁用推导。仅接受以下区分大小写的格式，不支持的值会在 SET 时报错。
+* **描述**：声明 `enable_string_date_predicate_pushdown` 和 `enable_string_date_join_pruning` 共用的存储格式。空字符串禁用两个方向的推导。仅接受以下区分大小写的格式；不支持的值会导致 SET 报错。
 
 | 格式 | 示例 |
 |---|---|
@@ -247,7 +248,7 @@ SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
 
 这些格式的普通 DATE/DATETIME CAST 不转换时区，会话时区不会移动字符串范围。含 `unix_timestamp` 或 `from_unixtime` 的表达式仍使用原有时区和夏令时检查，无法证明范围安全时不进行推导。`convert_tz` 的来源和目标时区均为常量时，可以推导输入边界，同时保留原始过滤条件。支持数字偏移和 `UTC`、`Asia/Dushanbe` 等命名时区。任一时区在比较边界前后 72 小时内有时区切换、当地时间有歧义或边界越界时，不推导；其他情况下使用比较日期对应的时区偏移。指定格式不会指定或改变时区。
 
-此设置独立于 `enable_string_date_join_pruning`，后者控制从字符串源经过 JOIN 的正向范围传递。同时启用两个选项并指定格式后，正向传递也会按该格式检查边界，包括固定六位小数。未启用新选项时，原有的五种 JOIN 格式约束保持不变。
+两个优化开关相互独立，但都要求指定此格式。即使未启用反向字符串谓词下推，JOIN 路径仍会按照声明的存储格式检查输入边界。
 
 ### auto_increment_increment
 

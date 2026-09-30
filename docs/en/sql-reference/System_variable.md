@@ -225,13 +225,14 @@ If you want to activate the roles assigned to you in a session, use the [SET ROL
 
 * **Default**: false
 * **Data Type**: Boolean
-* **Description**: Allows join predicate derivation through a VARCHAR-to-DATE/DATETIME cast when the user guarantees that each participating string column uses one canonical, fixed-width format. Supported formats are `YYYYMMDD`, `YYYYMMDDHHMMSS`, `YYYY-MM-DD`, `YYYY-MM-DD HH:mm:ss`, and `YYYY-MM-DDTHH:mm:ss`, with four-digit years and zero-padded components. The two filter bounds must use the same supported format and parse as valid dates. Requires `enable_monotonic_predicate_move_around`.
+* **Description**: Allows join predicate derivation through a VARCHAR-to-DATE/DATETIME cast. Requires `enable_monotonic_predicate_move_around` and an explicit, nonempty `string_date_predicate_format`. Every participating string column must store valid calendar values in that declared format. Both filter bounds must also match the declared format; otherwise the range is not derived. `enable_string_date_predicate_pushdown` does not need to be enabled.
 
-This setting is a data-format assertion, not validation: it neither checks stored rows nor changes CAST parsing. Do not enable it for columns mixing formats, short years, timezone suffixes, fractional seconds, or malformed date strings. Violating the assertion can cause derived filters to discard matching rows. For example, the legacy string `2012072` lies between `20120701` and `20120731`, but CAST interprets it as a date in December 2020.
+This setting is a data-format assertion, not validation: it neither checks stored rows nor changes CAST parsing. Do not enable it for columns containing mixed formats, short years, or malformed values. Supported formats, fixed fractional precision, and the UTC requirement for `Z` suffixes are listed under `string_date_predicate_format`.
 
-Enable it only for queries whose participating date-string columns satisfy this contract:
+The format cannot be inferred from the filter literals. For example, `2024-03-01T01:00:00` is lexically greater than `2024-03-01 12:00:00`, although its timestamp is earlier. Declaring the stored format prevents the optimizer from treating those mismatched boundaries as a calendar range.
 
 ```sql
+SET string_date_predicate_format = '%Y%m%d';
 SET enable_string_date_join_pruning = true;
 ```
 
@@ -255,9 +256,9 @@ SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
 
 ### string_date_predicate_format
 
-* **Default**: empty string (no string-date predicate pushdown)
+* **Default**: empty string (disables string-date range derivation in both directions)
 * **Data Type**: String
-* **Description**: Declares the stored date encoding for `enable_string_date_predicate_pushdown`. The empty string disables derivation. Only the following case-sensitive formats are accepted; unsupported values produce a SET error.
+* **Description**: Declares the stored date encoding shared by `enable_string_date_predicate_pushdown` and `enable_string_date_join_pruning`. The empty string disables both derivations. Only the following case-sensitive formats are accepted; unsupported values produce a SET error.
 
 | Format | Example |
 |---|---|
@@ -275,7 +276,7 @@ All fields must be zero-padded, years must have four digits, and `%f` requires e
 
 Plain DATE/DATETIME casts do not apply a timezone conversion to these encodings. Session timezone therefore does not shift their string bounds. Expressions involving `unix_timestamp` or `from_unixtime` use the existing timezone and DST checks; the optimizer declines derivation where those checks cannot prove a safe range. `convert_tz` with constant source and destination zones can derive input bounds while retaining the original filter. Both numeric offsets and named zones are supported, for example `UTC` and `Asia/Dushanbe`. Boundaries within 72 hours of a transition in either zone are conservatively declined, as are ambiguous local times and unrepresentable bounds. Away from transitions, named zones use the offset for the comparison date, including seasonal offsets. Declaring an input format never declares or changes its timezone.
 
-This setting is independent of `enable_string_date_join_pruning`, which controls forward range transfer from a string source through a JOIN. When both options are enabled with an explicit format, that transfer also checks endpoints against the declared encoding, including fixed microseconds. Without the new option, the original five-format JOIN contract remains unchanged.
+The two optimization switches are independent, but both require this format. The JOIN path validates its input bounds against the declared encoding even when inverse string predicate pushdown is disabled.
 
 ### auto_increment_increment
 

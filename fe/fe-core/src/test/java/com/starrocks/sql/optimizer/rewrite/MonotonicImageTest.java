@@ -24,6 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.type.DateType;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
@@ -75,6 +76,21 @@ public class MonotonicImageTest {
                 datetimeDomain(LocalDateTime.of(2024, 1, 29, 12, 0), LocalDateTime.of(2024, 1, 30, 0, 0))).get();
         assertTrue(image.contains(ConstantOperator.createDatetime(LocalDateTime.of(2024, 2, 29, 23, 0))),
                 image.toString());
+    }
+
+    @Test
+    public void testFloatImageUsesBackendPrecision() {
+        Function fn = new Function(new FunctionName("date_format"),
+                new Type[] {DateType.DATETIME, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        CallOperator rendered = new CallOperator("date_format", VarcharType.VARCHAR,
+                ImmutableList.of(dtCol, ConstantOperator.createVarchar("%Y%m%d")), fn);
+        CastOperator expr = new CastOperator(FloatType.FLOAT, rendered);
+        Range<ConstantOperator> image = MonotonicImage.imageRange(expr, dtCol,
+                datetimeDomain(LocalDateTime.of(2024, 3, 5, 0, 0), LocalDateTime.of(2024, 3, 7, 0, 0)))
+                .orElseThrow();
+        // These integers straddle the spacing of binary32: one rounds down, the other up.
+        assertEquals(20240304.0, image.lowerEndpoint().getFloat());
+        assertEquals(20240308.0, image.upperEndpoint().getFloat());
     }
 
     @Test
@@ -153,6 +169,8 @@ public class MonotonicImageTest {
         assertFalse(ctx.getSessionVariable().isEnableStringDateJoinPruning());
         assertFalse(MonotonicImage.imageRange(cast, text, domain).isPresent());
         ctx.getSessionVariable().setEnableStringDateJoinPruning(true);
+        assertFalse(MonotonicImage.imageRange(cast, text, domain).isPresent());
+        ctx.getSessionVariable().setStringDatePredicateFormat("%Y%m%d");
         Range<ConstantOperator> image = MonotonicImage.imageRange(cast, text, domain).orElseThrow();
         assertEquals(LocalDateTime.of(2012, 7, 1, 0, 0), image.lowerEndpoint().getDatetime());
         assertEquals(LocalDateTime.of(2012, 7, 31, 0, 0), image.upperEndpoint().getDatetime());
@@ -165,8 +183,8 @@ public class MonotonicImageTest {
         CastOperator cast = new CastOperator(DateType.DATETIME, text);
         MinMax micros = stringDomain("2024-02-29T00:00:00.000001", "2024-03-01T00:00:00.999999");
         assertFalse(MonotonicImage.imageRange(cast, text, micros).isPresent());
-        ctx.getSessionVariable().setEnableStringDatePredicatePushdown(true);
         ctx.getSessionVariable().setStringDatePredicateFormat("%Y-%m-%dT%H:%i:%s.%f");
+        assertFalse(ctx.getSessionVariable().isEnableStringDatePredicatePushdown());
         assertTrue(MonotonicImage.imageRange(cast, text, micros).isPresent());
         assertFalse(MonotonicImage.imageRange(cast, text, stringDomain("20240229", "20240301")).isPresent());
         ctx.getSessionVariable().setEnableStringDateJoinPruning(false);
@@ -179,12 +197,14 @@ public class MonotonicImageTest {
         ColumnRefOperator text = new ColumnRefOperator(3, VarcharType.VARCHAR, "ds", true);
         CastOperator cast = new CastOperator(DateType.DATETIME, text);
         for (String[] bounds : new String[][] {
-                {"20120701000000", "20120731235959"},
-                {"2012-07-01", "2012-07-31"},
-                {"2012-07-01 00:00:00", "2012-07-31 23:59:59"},
-                {"2012-07-01T00:00:00", "2012-07-31T23:59:59"}}) {
-            assertTrue(MonotonicImage.imageRange(cast, text, stringDomain(bounds[0], bounds[1])).isPresent(), bounds[0]);
+                {"%Y%m%d%H%i%s", "20120701000000", "20120731235959"},
+                {"%Y-%m-%d", "2012-07-01", "2012-07-31"},
+                {"%Y-%m-%d %H:%i:%s", "2012-07-01 00:00:00", "2012-07-31 23:59:59"},
+                {"%Y-%m-%dT%H:%i:%s", "2012-07-01T00:00:00", "2012-07-31T23:59:59"}}) {
+            ctx.getSessionVariable().setStringDatePredicateFormat(bounds[0]);
+            assertTrue(MonotonicImage.imageRange(cast, text, stringDomain(bounds[1], bounds[2])).isPresent(), bounds[0]);
         }
+        ctx.getSessionVariable().setStringDatePredicateFormat("%Y%m%d");
         for (String[] bounds : new String[][] {
                 {"2012072", "2012073"}, {"201207061530", "201207071530"},
                 {"2012-07-01", "20120731"}, {"2012-7-01", "2012-7-31"},
