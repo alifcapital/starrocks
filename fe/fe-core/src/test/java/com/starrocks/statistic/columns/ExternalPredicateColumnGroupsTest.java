@@ -16,8 +16,11 @@ package com.starrocks.statistic.columns;
 
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
+import com.starrocks.connector.metadata.MetadataTable;
+import com.starrocks.connector.metadata.MetadataTableType;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.Utils;
@@ -73,7 +76,7 @@ class ExternalPredicateColumnGroupsTest {
         return table;
     }
 
-    private ColumnRefOperator column(IcebergTable table, int relation, String name) {
+    private ColumnRefOperator column(Table table, int relation, String name) {
         ColumnRefOperator ref = factory.create(name, IntegerType.INT, true);
         factory.updateColumnRefToColumns(ref, new Column(name, IntegerType.INT), table);
         factory.updateColumnToRelationIds(ref.getId(), relation);
@@ -86,6 +89,26 @@ class ExternalPredicateColumnGroupsTest {
 
     private BinaryPredicateOperator eq(ColumnRefOperator left, ColumnRefOperator right) {
         return new BinaryPredicateOperator(BinaryType.EQ, left, right);
+    }
+
+    @Test
+    void metadataRelationsAreNotRecordedAsAnalyzableTables() {
+        Column partition = new Column("partition_value", IntegerType.INT);
+        MetadataTable metadata = new MetadataTable("iceberg", 123, "t$partitions", Table.TableType.METADATA,
+                List.of(partition), "db", "t", MetadataTableType.PARTITIONS);
+        var ref = column(metadata, 1, "partition_value");
+        // Use the actual MetadataTable: its inherited catalog DB accessor throws.
+        for (ColumnUsage.UseCase useCase : ColumnUsage.UseCase.values()) {
+            groups.recordColumns(metadata, List.of("partition_value"), useCase);
+            groups.record(List.of(ref), useCase, factory, null);
+        }
+        manager.recordScanColumns(Map.of(ref, partition), metadata, null);
+        manager.recordPredicateColumns(eq(ref, ref), factory, null);
+        assertTrue(groups.snapshot().isEmpty());
+
+        var ordinary = column(table("transactions"), 2, "user_id");
+        groups.recordJoin(List.of(eq(ref, ordinary)), factory, null);
+        assertEquals(Set.of(List.of("user_id")), columns());
     }
 
     @Test

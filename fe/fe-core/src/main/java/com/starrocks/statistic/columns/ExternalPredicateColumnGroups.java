@@ -130,7 +130,10 @@ public class ExternalPredicateColumnGroups {
     }
 
     private void recordColumns(Table table, List<String> columns, ColumnUsage.UseCase useCase, LocalDateTime now) {
-        if (!enabled() || columns.isEmpty() || !CatalogMgr.isExternalCatalog(table.getCatalogName())
+        // Metadata relations describe connector internals, not tables we can ANALYZE.
+        // Their catalog database/table accessors need not be implemented.
+        if (!enabled() || columns.isEmpty() || table.isMetadataTable()
+                || !CatalogMgr.isExternalCatalog(table.getCatalogName())
                 || table.isTemporaryTable()) {
             return;
         }
