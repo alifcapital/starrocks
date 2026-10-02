@@ -19,7 +19,6 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -109,22 +108,23 @@ public class DataSkew {
             return new McvSkewInfo(false, AdditionalInfo.NO_HISTOGRAM);
         }
 
-        final var mcv = histogram.getMCV();
+        final var mcv = histogram.getMcvDistribution();
 
         if (mcv.isEmpty()) {
             return new McvSkewInfo(false, AdditionalInfo.NO_MCV);
         }
 
         int mcvLimit = Math.min(thresholds.mcvLimit, mcv.size());
-        List<Pair<String, Long>> mcvs = Lists.newArrayList();
-        mcv.entrySet().stream()
-                .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder())) //
-                .limit(mcvLimit)
-                .forEach(entry -> {
-                    mcvs.add(Pair.create(entry.getKey(), entry.getValue()));
-                });
-
-        long rowCountOfMcvs = mcvs.stream().mapToLong(pair -> pair.second).sum();
+        if (mcvLimit < 0) {
+            throw new IllegalArgumentException("Negative MCV limit: " + mcvLimit);
+        }
+        List<Pair<String, Long>> mcvs = Lists.newArrayListWithCapacity(mcvLimit);
+        long rowCountOfMcvs = 0;
+        for (int rank = 0; rank < mcvLimit; rank++) {
+            long count = mcv.getCountByFrequency(rank);
+            mcvs.add(Pair.create(mcv.getKeyByFrequency(rank), count));
+            rowCountOfMcvs += count;
+        }
         final var mcvSkewFactor = rowCountOfMcvs / rowCount;
 
         if (mcvSkewFactor > thresholds.relativeRowThreshold) {

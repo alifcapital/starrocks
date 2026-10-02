@@ -32,7 +32,7 @@ public final class StringHistogramEstimator {
     public static long rows(Histogram histogram) {
         long tail = histogram.getBuckets().isEmpty() ? 0
                 : histogram.getBuckets().get(histogram.getBuckets().size() - 1).getCount();
-        return tail + histogram.getMCV().values().stream().mapToLong(Long::longValue).sum();
+        return tail + histogram.getMcvDistribution().getTotalRows();
     }
 
     public static double pointRows(Histogram histogram, String value) {

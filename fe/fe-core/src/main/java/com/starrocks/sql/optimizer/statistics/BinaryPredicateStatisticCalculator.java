@@ -140,7 +140,7 @@ public class BinaryPredicateStatisticCalculator {
                 rows = Math.max(1.0, outputRows * nonNullFraction * factor);
             } else {
                 // The constant was not found in the column histogram.
-                Long mostCommonValuesCount = columnHist.getMCV().values().stream().reduce(Long::sum).orElse(0L);
+                Long mostCommonValuesCount = columnHist.getMcvDistribution().getTotalRows();
                 double remainingDistinctValues =
                         columnStatistic.getDistinctValuesCount() - columnHist.getMCV().size();
                 double remainingHistogramRows = columnHist.getTotalRows() - mostCommonValuesCount;

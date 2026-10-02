@@ -133,9 +133,13 @@ public class ConnectorHistogramColumnStatsCacheLoader implements
         if (buckets.isEmpty()) {
             LOG.warn("Stored histogram for column {} has no buckets; re-collect statistics to restore accurate "
                     + "row count estimation.", statisticData.columnName);
-            return new Histogram(mcv);
+            Histogram histogram = new Histogram(mcv);
+            histogram.getMcvDistribution().prepareFrequencyOrder();
+            return histogram;
         }
 
-        return new Histogram(buckets, mcv);
+        Histogram histogram = new Histogram(buckets, mcv);
+        histogram.getMcvDistribution().prepareFrequencyOrder();
+        return histogram;
     }
 }

@@ -383,7 +383,7 @@ public class HistogramStatisticsUtils {
             ConstantOperator constant,
             Histogram histogram) {
 
-        long mcvRowCount = histogram.getMCV().values().stream().mapToLong(Long::longValue).sum();
+        long mcvRowCount = histogram.getMcvDistribution().getTotalRows();
         long totalRows = histogram.getTotalRows();
         double ndv = columnStatistic.getDistinctValuesCount();
         double mcvCount = histogram.getMCV().size();
