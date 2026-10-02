@@ -165,26 +165,4 @@ class JoinStatisticsBindingsTest {
         }
         Mockito.verifyNoInteractions(scope);
     }
-    @Test
-    void preparedBindingsDoNotCacheIncompleteSearchesAndReuseCompleteAssignments() {
-        var scope = scope(3, "id");
-        var definitions = List.of(definition(1, 2));
-        var prepared = new JoinStatisticsBindings.Prepared();
-        AtomicLong clock = new AtomicLong();
-        Mockito.doAnswer(call -> {
-            clock.addAndGet(10);
-            return call.callRealMethod();
-        }).when(scope).restrict(Mockito.anySet());
-        Assertions.assertEquals(1, prepared.bind(definitions, scope, 15, clock::get).size());
-        clock.set(0);
-        var full = prepared.bind(definitions, scope, Long.MAX_VALUE, clock::get);
-        Assertions.assertEquals(6, full.size());
-        Mockito.clearInvocations(scope);
-        Assertions.assertSame(full, prepared.bind(definitions, scope, Long.MAX_VALUE, clock::get));
-        Mockito.verify(scope, Mockito.never()).restrict(Mockito.anySet());
-        Assertions.assertTrue(prepared.bind(definitions, scope, 0, clock::get).isEmpty());
-        prepared.clear();
-        Assertions.assertEquals(6, prepared.bind(definitions, scope, Long.MAX_VALUE, clock::get).size());
-    }
-
 }

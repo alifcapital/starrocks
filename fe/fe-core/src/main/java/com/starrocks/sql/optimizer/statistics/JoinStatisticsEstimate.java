@@ -24,21 +24,17 @@ import java.util.OptionalDouble;
 public final class JoinStatisticsEstimate {
     public static final class Selection {
         private final int[] slices;
-        private final JoinStatisticsSliceSet sliceSet;
-        private JoinStatisticsSliceSet extrapolatedSet;
-        private record DegreeKey(JoinStatisticsData.Source source, int domain) { }
-        private java.util.Map<DegreeKey, DegreeStatistics> degrees;
         private final long residualRows;
         private final double rowLimit;
         private final boolean exactRows;
         private int[] extrapolatedSlices = new int[0];
         private double extrapolatedWeight;
+        private java.util.Map<JoinStatisticsBasis, JoinStatisticsExtrapolation> extrapolations;
         private double[] weights;
 
         Selection(int[] slices, long residualRows, double rowLimit, int[] remaining, double weight) {
             this(slices, residualRows, rowLimit, false);
-            this.extrapolatedSet = JoinStatisticsSliceSet.copyOf(remaining);
-            this.extrapolatedSlices = extrapolatedSet.ids();
+            this.extrapolatedSlices = remaining.clone();
             this.extrapolatedWeight = weight;
         }
 
@@ -49,9 +45,16 @@ public final class JoinStatisticsEstimate {
         JoinStatisticsCorrelation.Slice project(JoinStatisticsBasis basis, int side,
                 JoinStatisticsCorrelation.Evaluation evaluation, int arity, int power, boolean presence) {
             if (!isExtrapolated()) {
-                return evaluation.project(evaluation.select(basis, side, sliceSet), arity, power, presence);
+                return evaluation.select(basis, side, slices).project(arity, power, presence);
             }
-            var distribution = evaluation.extrapolate(basis, side, sliceSet, extrapolatedSet, extrapolatedWeight);
+            if (extrapolations == null) {
+                extrapolations = new java.util.IdentityHashMap<>();
+            }
+            var distribution = extrapolations.computeIfAbsent(basis, ignored -> {
+                var known = evaluation.select(basis, side, slices);
+                var remaining = evaluation.select(basis, side, extrapolatedSlices);
+                return new JoinStatisticsExtrapolation(known, remaining, extrapolatedWeight);
+            });
             return distribution.project(arity, power, presence);
         }
 
@@ -74,39 +77,19 @@ public final class JoinStatisticsEstimate {
         }
 
         Selection(int[] slices, long residualRows, double rowLimit, boolean exactRows) {
-            this(JoinStatisticsSliceSet.copyOf(slices), residualRows, rowLimit, exactRows);
-        }
-
-        Selection(JoinStatisticsSliceSet sliceSet, long residualRows, double rowLimit, boolean exactRows) {
             if (residualRows < 0 || !Double.isFinite(rowLimit) || rowLimit < 0) {
                 throw new IllegalArgumentException("Invalid JOIN statistics selection");
             }
-            this.sliceSet = sliceSet;
-            this.slices = sliceSet.ids();
+            this.slices = slices.clone();
+            Arrays.sort(this.slices);
+            for (int i = 0; i < this.slices.length; i++) {
+                if (this.slices[i] < 0 || (i > 0 && this.slices[i] == this.slices[i - 1])) {
+                    throw new IllegalArgumentException("Invalid JOIN statistics slice selection");
+                }
+            }
             this.residualRows = residualRows;
             this.rowLimit = rowLimit;
             this.exactRows = exactRows;
-        }
-
-        DegreeStatistics degree(JoinStatisticsData.Source source, int domain) {
-            if (degrees == null) {
-                degrees = new java.util.HashMap<>();
-            }
-            DegreeKey key = new DegreeKey(source, domain);
-            DegreeStatistics prepared = degrees.get(key);
-            if (prepared == null) {
-                prepared = union(source, domain, this);
-                // A shared selection belongs to one source; cap defensive cross-source callers too.
-                if (degrees.size() < 32) {
-                    degrees.put(key, prepared);
-                }
-            }
-            return prepared;
-        }
-
-        long estimatedSize() {
-            // Reserve bounded lazy domain summaries and weights before memo admission.
-            return 16384L + sliceSet.estimatedSize() + 16L * (slices.length + extrapolatedSlices.length);
         }
 
         JoinStatisticsPlanner.KeyStatistics keyStatistics(JoinStatisticsData.Source source, int domain) {
@@ -143,8 +126,8 @@ public final class JoinStatisticsEstimate {
 
         double knownMatches(JoinStatisticsBasis basis, int side, Selection support, int supportSide,
                             JoinStatisticsCorrelation.Evaluation evaluation) {
-            double matched = evaluation.select(basis, side, sliceSet).getHead().product(
-                    evaluation.select(basis, supportSide, support.sliceSet).getHead(), false, true, 1);
+            double matched = evaluation.select(basis, side, slices).getHead().product(
+                    evaluation.select(basis, supportSide, support.slices).getHead(), false, true, 1);
             // A single build slice has exact membership in the stored pair matrix, including the tail.
             // With several build slices, memberships may overlap: subtract only the known head union.
             if (support.slices.length == 1) {
@@ -163,9 +146,9 @@ public final class JoinStatisticsEstimate {
             if (isExtrapolated()) {
                 return rowLimit; // Unknown rows cannot establish uniqueness or a hard fanout bound.
             }
-            var frequencies = evaluation.select(basis, side, sliceSet);
+            var frequencies = evaluation.select(basis, side, slices);
             double maximum = support != null && support.residualRows == 0
-                    ? frequencies.maximumOnSupport(evaluation.select(basis, supportSide, support.sliceSet))
+                    ? frequencies.maximumOnSupport(evaluation.select(basis, supportSide, support.slices))
                     : frequencies.maximumFrequencyBound();
             return maximum + residualRows;
         }
@@ -206,56 +189,6 @@ public final class JoinStatisticsEstimate {
                 : prepared.model.estimate(prepared.objective, budgetNanos - (System.nanoTime() - start));
     }
 
-    static final class Layout {
-        final int[] relations;
-        final boolean[] active;
-        final int[] keyMasks;
-        final int[] rowMasks;
-        final int attributes;
-        final boolean commonKeyStar;
-
-        Layout(int sourceCount, int sourceMask, int[] domainSources, boolean reduceCommonKey) {
-            int domains = domainSources.length;
-            relations = new int[sourceCount];
-            active = new boolean[domains];
-            for (int domain = 0; domain < domains; domain++) {
-                active[domain] = Integer.bitCount(domainSources[domain] & sourceMask) >= 2;
-            }
-            int count = 0;
-            keyMasks = new int[domains];
-            for (int domain = 0; domain < domains; domain++) {
-                if (active[domain]) {
-                    keyMasks[domain] = 1 << count++;
-                }
-            }
-            boolean common = reduceCommonKey && count == 1;
-            for (int domain = 0; domain < domains; domain++) {
-                if (active[domain] && (domainSources[domain] & sourceMask) != sourceMask) {
-                    common = false;
-                }
-            }
-            rowMasks = new int[sourceCount];
-            for (int source = 0; source < sourceCount; source++) {
-                if ((sourceMask & (1 << source)) != 0) {
-                    rowMasks[source] = 1 << count++;
-                }
-            }
-            for (int source = 0; source < sourceCount; source++) {
-                if ((sourceMask & (1 << source)) == 0) {
-                    continue;
-                }
-                relations[source] = rowMasks[source];
-                for (int domain = 0; domain < domains; domain++) {
-                    if (active[domain] && (domainSources[domain] & (1 << source)) != 0) {
-                        relations[source] |= keyMasks[domain];
-                    }
-                }
-            }
-            attributes = count;
-            commonKeyStar = common;
-        }
-    }
-
     record Prepared(JoinStatisticsEntropyModel model, int[] rows, int[] keys, int objective) { }
 
     static Prepared prepare(JoinStatisticsDefinition definition, JoinStatisticsData data,
@@ -265,16 +198,34 @@ public final class JoinStatisticsEstimate {
             throw new IllegalArgumentException("Invalid JOIN statistics subgraph");
         }
         long start = System.nanoTime();
-        Layout layout = evaluation.layout(selections.size(), sourceMask, domainSources, reduceCommonKey);
         int domains = definition.getDomains().size();
-        int[] relations = layout.relations;
-        boolean[] active = layout.active;
-        int[] keyMasks = layout.keyMasks;
-        int[] rowMasks = layout.rowMasks;
-        int attributes = layout.attributes;
-        boolean commonKeyStar = layout.commonKeyStar;
+        int[] relations = new int[selections.size()];
+        boolean[] active = new boolean[domains];
+        for (int domain = 0; domain < domains; domain++) {
+            active[domain] = Integer.bitCount(domainSources[domain] & sourceMask) >= 2;
+        }
+        int attributes = 0;
+        int[] keyMasks = new int[domains];
+        for (int domain = 0; domain < domains; domain++) {
+            if (active[domain]) {
+                keyMasks[domain] = 1 << attributes++;
+            }
+        }
+        boolean commonKeyStar = reduceCommonKey && attributes == 1;
+        for (int domain = 0; domain < domains; domain++) {
+            if (active[domain] && (domainSources[domain] & sourceMask) != sourceMask) {
+                commonKeyStar = false;
+            }
+        }
+        int[] rowMasks = new int[selections.size()];
+        for (int source = 0; source < selections.size(); source++) {
+            if ((sourceMask & (1 << source)) != 0) {
+                rowMasks[source] = 1 << attributes++;
+            }
+        }
         // A pair selected from a four-table definition must not pay for unused entropy attributes.
-        JoinStatisticsEntropyModel model = evaluation.model(attributes, commonKeyStar);
+        JoinStatisticsEntropyModel model = commonKeyStar ? JoinStatisticsEntropyModel.commonKeyStar(attributes)
+                : new JoinStatisticsEntropyModel(attributes);
         int objective = 0;
         for (int source = 0; source < selections.size(); source++) {
             if ((sourceMask & (1 << source)) == 0) {
@@ -285,6 +236,12 @@ public final class JoinStatisticsEstimate {
                 return null;
             }
             int row = rowMasks[source];
+            relations[source] = row;
+            for (int domain = 0; domain < domains; domain++) {
+                if (active[domain] && (domainSources[domain] & (1 << source)) != 0) {
+                    relations[source] |= keyMasks[domain];
+                }
+            }
             model.addFunctionalDependency(row, relations[source]);
             model.addCardinality(relations[source], Math.ceil(selected.rowLimit));
             if ((outputMask & (1 << source)) != 0) {
@@ -292,7 +249,7 @@ public final class JoinStatisticsEstimate {
             }
             for (int domain = 0; domain < domains; domain++) {
                 if (active[domain] && (relations[source] & keyMasks[domain]) != 0) {
-                    DegreeStatistics degree = selected.degree(data.getSources().get(source), domain);
+                    DegreeStatistics degree = union(data.getSources().get(source), domain, selected);
                     model.addDegree(keyMasks[domain], relations[source], degree);
                 }
             }
@@ -448,7 +405,7 @@ public final class JoinStatisticsEstimate {
             distinct = Math.addExact(distinct, degree.getDistinctCount());
             maximum = Math.addExact(maximum, degree.getMaximumFrequency());
             for (int power = 1; power <= 10; power++) {
-                roots[power - 1] += degree.root(power);
+                roots[power - 1] += Math.pow(degree.getMoment(power), 1.0 / power);
             }
         }
         double[] moments = new double[10];
@@ -484,8 +441,10 @@ public final class JoinStatisticsEstimate {
             double coveredRoot = 0;
             for (int slice : selected.slices) {
                 DegreeStatistics degree = data.getSources().get(source).getDegrees().get(correlation.getDomain()).get(slice);
-                coveredRoot += presence ? Math.pow(degree.getDistinctCount(), 1.0 / normPower)
-                        : degree.root(normPower);
+                double moment = presence ? degree.getDistinctCount() : normPower <= DegreeStatistics.MOMENT_COUNT
+                        ? degree.getMoment(normPower)
+                        : degree.getMoment(1) * Math.pow(degree.getMaximumFrequency(), normPower - 1);
+                coveredRoot += Math.pow(moment, 1.0 / normPower);
             }
             double missingRoot = presence ? Math.pow(unknown, 1.0 / size) : unknown;
             covered[side] = Math.pow(coveredRoot, exponent);

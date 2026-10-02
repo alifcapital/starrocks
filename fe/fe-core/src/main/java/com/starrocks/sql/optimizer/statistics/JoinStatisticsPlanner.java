@@ -76,9 +76,6 @@ public final class JoinStatisticsPlanner {
     private final Map<KeyRequest, KeyStatistics> keys = new HashMap<>();
     private final Map<OuterRequest, Boolean> outerPreservation = new HashMap<>();
     private final Map<OuterRequest, Optional<OuterEstimate>> outerEstimates = new HashMap<>();
-    private final JoinStatisticsBindings.Prepared bindings = new JoinStatisticsBindings.Prepared();
-    private final Map<JoinStatisticsMeta, JoinStatisticsData> boundSnapshots = new java.util.IdentityHashMap<>();
-    private final JoinStatisticsSelectionCache selectionCache = new JoinStatisticsSelectionCache();
     private final JoinStatisticsCorrelation.Evaluation correlations = new JoinStatisticsCorrelation.Evaluation();
     private List<JoinStatisticsMeta> definitions;
     private final Map<Long, JoinStatisticsMeta> definitionsById = new HashMap<>();
@@ -156,8 +153,6 @@ public final class JoinStatisticsPlanner {
     /** Executable plans retain scalar decisions, not all generations touched during join enumeration. */
     public synchronized void finishPlanning() {
         snapshots.clear();
-        boundSnapshots.clear();
-        bindings.clear();
         retainedSnapshotBytes = 0;
         estimates.clear();
         keys.clear();
@@ -165,7 +160,6 @@ public final class JoinStatisticsPlanner {
         outerPreservation.clear();
         outerEstimates.clear();
         correlations.clear();
-        selectionCache.clear();
         definitions = List.of();
         definitionsById.clear();
         definitionTables = null;
@@ -232,7 +226,7 @@ public final class JoinStatisticsPlanner {
         long[] loading = {0};
         boolean result = false;
         try {
-            for (var meta : bindings.bind(definitions, pair, budget)) {
+            for (var meta : JoinStatisticsBindings.bind(definitions, pair, budget)) {
                 if (System.nanoTime() - start - loading[0] >= budget || Thread.currentThread().isInterrupted()) {
                     break;
                 }
@@ -269,10 +263,8 @@ public final class JoinStatisticsPlanner {
                         || !pair.getSources().get(optionalId).tableState().matches(data.getSources().get(right))) {
                     continue;
                 }
-                var leftSelection = selectionCache.select(data.getSources().get(left),
-                        pair.getSources().get(preservedId), pair.getColumns());
-                var rightSelection = selectionCache.select(data.getSources().get(right),
-                        pair.getSources().get(optionalId), pair.getColumns());
+                var leftSelection = select(data.getSources().get(left), pair.getSources().get(preservedId), pair.getColumns());
+                var rightSelection = select(data.getSources().get(right), pair.getSources().get(optionalId), pair.getColumns());
                 if (rightSelection == null) {
                     continue;
                 }
@@ -347,7 +339,7 @@ public final class JoinStatisticsPlanner {
         long[] loading = {0};
         Optional<OuterEstimate> result = Optional.empty();
         try {
-            for (var meta : bindings.bind(definitions, scope, budget)) {
+            for (var meta : JoinStatisticsBindings.bind(definitions, scope, budget)) {
                 if (System.nanoTime() - start - loading[0] >= budget) {
                     break;
                 }
@@ -378,8 +370,8 @@ public final class JoinStatisticsPlanner {
                         || !scope.getSources().get(rightId).tableState().matches(data.getSources().get(right))) {
                     continue;
                 }
-                var l = selectionCache.select(data.getSources().get(left), scope.getSources().get(leftId), scope.getColumns());
-                var r = selectionCache.select(data.getSources().get(right), scope.getSources().get(rightId), scope.getColumns());
+                var l = select(data.getSources().get(left), scope.getSources().get(leftId), scope.getColumns());
+                var r = select(data.getSources().get(right), scope.getSources().get(rightId), scope.getColumns());
                 if (l == null || r == null || !l.hasExactRows() || !r.hasExactRows()) {
                     continue;
                 }
@@ -446,7 +438,7 @@ public final class JoinStatisticsPlanner {
         long[] loadNanos = {0};
         OptionalDouble result = OptionalDouble.empty();
         try {
-            for (JoinStatisticsMeta meta : bindings.bind(definitions, scope, budget)) {
+            for (JoinStatisticsMeta meta : JoinStatisticsBindings.bind(definitions, scope, budget)) {
                 if (System.nanoTime() - started - loadNanos[0] >= budget) {
                     break;
                 }
@@ -454,7 +446,10 @@ public final class JoinStatisticsPlanner {
                     continue;
                 }
                 JoinStatisticsDefinition definition = meta.getDefinition();
-                Map<String, Integer> positions = bindings.positions(meta);
+                Map<String, Integer> positions = new HashMap<>();
+                for (int i = 0; i < definition.getSources().size(); i++) {
+                    positions.put(definition.getSources().get(i).getUuid(), i);
+                }
                 if (!positions.keySet().containsAll(scope.getSources().keySet())) {
                     continue;
                 }
@@ -487,8 +482,7 @@ public final class JoinStatisticsPlanner {
                     if (scope.getOutputs().contains(uuid)) {
                         outputs |= 1 << source;
                     }
-                    JoinStatisticsEstimate.Selection selection = selectionCache.select(
-                            data.getSources().get(source), scan, scope.getColumns());
+                    JoinStatisticsEstimate.Selection selection = select(data.getSources().get(source), scan, scope.getColumns());
                     selections.add(selection);
                     usable &= selection != null;
                 }
@@ -546,7 +540,10 @@ public final class JoinStatisticsPlanner {
         Set<List<Object>> duplicates = new HashSet<>();
         // Gather bounded alternatives before choosing a snapshot cohort and a cover. One
         // recent object must not veto an otherwise usable older pair of definitions.
-        List<JoinStatisticsMeta> candidates = bindings.newest(definitions, scope, budget);
+        List<JoinStatisticsMeta> candidates = JoinStatisticsBindings.bind(definitions, scope, budget).stream()
+                .filter(meta -> meta.getGeneration() != 0)
+                .sorted(java.util.Comparator.comparingLong(JoinStatisticsMeta::getCollectedAt).reversed()
+                        .thenComparingLong(JoinStatisticsMeta::getId)).toList();
         for (JoinStatisticsMeta meta : candidates) {
             if (parts.size() >= 64 || System.nanoTime() - start - (loadNanos[0] - initialLoad) >= budget) {
                 break;
@@ -594,7 +591,7 @@ public final class JoinStatisticsPlanner {
                     usable = false;
                     Tracers.count(Tracers.Module.OPTIMIZER, "JoinStatistics.CompositionSnapshotConflicts", 1);
                 }
-                var selection = selectionCache.select(stored, scope.getSources().get(uuid), scope.getColumns());
+                var selection = select(stored, scope.getSources().get(uuid), scope.getColumns());
                 selected.add(selection);
                 usable &= selection != null;
                 sourceMask |= 1 << source;
@@ -621,7 +618,8 @@ public final class JoinStatisticsPlanner {
         if (parts.isEmpty()) {
             return OptionalDouble.empty();
         }
-        JoinStatisticsEntropyModel model = correlations.model(attributes, layout.domains.size() == 1);
+        JoinStatisticsEntropyModel model = layout.domains.size() == 1
+                ? JoinStatisticsEntropyModel.commonKeyStar(attributes) : new JoinStatisticsEntropyModel(attributes);
         int objective = 0;
         for (int source = 0; source < layout.sources.size(); source++) {
             if (scope.getOutputs().contains(layout.sources.get(source))) {
@@ -767,7 +765,7 @@ public final class JoinStatisticsPlanner {
         KeyStatistics result = null;
         long newest = -1;
         try {
-            for (JoinStatisticsMeta meta : bindings.bind(definitions, scope, budget)) {
+            for (JoinStatisticsMeta meta : JoinStatisticsBindings.bind(definitions, scope, budget)) {
                 if (System.nanoTime() - started - loadNanos[0] >= budget) {
                     break;
                 }
@@ -793,8 +791,7 @@ public final class JoinStatisticsPlanner {
                         if (!data.getTableUuid().equals(origin.tableUuid())) {
                             continue;
                         }
-                        var selection = selectionCache.select(data, scope.getSources().get(origin.tableUuid()),
-                                scope.getColumns());
+                        var selection = select(data, scope.getSources().get(origin.tableUuid()), scope.getColumns());
                         KeyStatistics candidate = selection == null ? null : selection.keyStatistics(data, domain);
                         if (candidate != null) {
                             result = new KeyStatistics(candidate.rows()
@@ -841,7 +838,7 @@ public final class JoinStatisticsPlanner {
         SkewJoinStatistics.Distribution result = null;
         long newest = -1;
         try {
-            for (var meta : bindings.bind(definitions, scope, budget)) {
+            for (var meta : JoinStatisticsBindings.bind(definitions, scope, budget)) {
                 if (System.nanoTime() - started - loading[0] >= budget || Thread.currentThread().isInterrupted()) {
                     break;
                 }
@@ -916,7 +913,7 @@ public final class JoinStatisticsPlanner {
                         }).toList();
                         var selectedScan = new JoinStatisticsScope.Source(role, scan.estimatedRows(), predicates,
                                 scan.physicalUuid(), scan.tableState());
-                        var selection = selectionCache.select(data.getSources().get(id), selectedScan, scope.getColumns());
+                        var selection = select(data.getSources().get(id), selectedScan, scope.getColumns());
                         if (selection == null || !selection.hasExactRows()) {
                             compatible = false;
                             break;
@@ -1048,17 +1045,8 @@ public final class JoinStatisticsPlanner {
                 loadNanos[0] += System.nanoTime() - loading;
             }
         });
-        return result.map(data -> {
-            JoinStatisticsData bound = boundSnapshots.get(meta);
-            if (bound == null) {
-                bound = data.withSourceRoles(meta.getDefinition().getSources().stream()
-                        .map(JoinStatisticsDefinition.Source::getUuid).toList());
-                if (boundSnapshots.size() < 512) {
-                    boundSnapshots.put(meta, bound);
-                }
-            }
-            return bound;
-        });
+        return result.map(data -> data.withSourceRoles(meta.getDefinition().getSources().stream()
+                .map(JoinStatisticsDefinition.Source::getUuid).toList()));
     }
 
     public OptionalDouble membership(JoinStatisticsScope build, ColumnRefOperator buildKey,
@@ -1114,12 +1102,6 @@ public final class JoinStatisticsPlanner {
             return null;
         }
         double estimatedRows = scale > 0 ? scan.estimatedRows() / scale : 0;
-        if (scan.predicates().isEmpty()) {
-            boolean exactCombination = data.getColumns().isEmpty() && data.allSlices().ids().length != 0;
-            long residual = exactCombination ? 0 : data.getRows() - data.coveredRows();
-            return new JoinStatisticsEstimate.Selection(data.allSlices(), residual,
-                    (double) data.coveredRows() + residual, exactCombination || data.coveredRows() == data.getRows());
-        }
         List<IntPredicate> tests = new ArrayList<>();
         Set<Integer> fixed = new HashSet<>();
         boolean extraPredicate = false;
@@ -1157,10 +1139,11 @@ public final class JoinStatisticsPlanner {
         }
         List<Integer> selected = new ArrayList<>();
         long covered = 0;
-        long allCovered = data.coveredRows();
+        long allCovered = 0;
         int[] failures = new int[data.getTuples().size()];
         int[] lastFailure = new int[failures.length];
         for (int slice = 0; slice < data.getTuples().size(); slice++) {
+            allCovered = Math.addExact(allCovered, data.getTupleRows(slice));
             for (int test = 0; test < tests.size(); test++) {
                 if (!tests.get(test).test(slice)) {
                     failures[slice]++;
@@ -1213,8 +1196,7 @@ public final class JoinStatisticsPlanner {
         if (extraPredicate) {
             rowLimit = Math.min(rowLimit, estimatedRows);
         }
-        return new JoinStatisticsEstimate.Selection(JoinStatisticsSliceSet.ordered(
-                selected.stream().mapToInt(Integer::intValue).toArray()), residual, rowLimit,
+        return new JoinStatisticsEstimate.Selection(selected.stream().mapToInt(Integer::intValue).toArray(), residual, rowLimit,
                 !extraPredicate && (exactCombination || allCovered == data.getRows()));
     }
 

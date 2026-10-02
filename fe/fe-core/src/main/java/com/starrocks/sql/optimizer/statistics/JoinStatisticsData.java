@@ -37,8 +37,6 @@ public final class JoinStatisticsData {
         private final List<List<String>> tuples;
         private final ConstantOperator[][] constants;
         private final long[] tupleRows;
-        private final long coveredRows;
-        private final JoinStatisticsSliceSet allSlices;
         private final Map<Integer, List<DegreeStatistics>> degrees;
 
         private Source(Source source, String role) {
@@ -50,8 +48,6 @@ public final class JoinStatisticsData {
             tuples = source.tuples;
             constants = source.constants;
             tupleRows = source.tupleRows;
-            coveredRows = source.coveredRows;
-            allSlices = source.allSlices;
             degrees = source.degrees;
         }
 
@@ -90,8 +86,6 @@ public final class JoinStatisticsData {
                 }
             }
             this.tuples = List.copyOf(copied);
-            this.coveredRows = coveredRows;
-            this.allSlices = JoinStatisticsSliceSet.ordered(java.util.stream.IntStream.range(0, tuples.size()).toArray());
             Map<Integer, List<DegreeStatistics>> copiedDegrees = new HashMap<>();
             degrees.forEach((domain, distributions) -> {
                 if (domain < 0 || distributions.size() != tuples.size()) {
@@ -131,14 +125,6 @@ public final class JoinStatisticsData {
             return tuples;
         }
 
-        long coveredRows() {
-            return coveredRows;
-        }
-
-        JoinStatisticsSliceSet allSlices() {
-            return allSlices;
-        }
-
         public long getTupleRows(int slice) {
             return tupleRows[slice];
         }
@@ -152,7 +138,7 @@ public final class JoinStatisticsData {
         }
 
         private long estimatedSize() {
-            long size = 528 + allSlices.estimatedSize() + 2L * tableUuid.length() + 48L * tuples.size();
+            long size = 512 + 2L * tableUuid.length() + 48L * tuples.size();
             for (String column : columns) {
                 size += 256 + 2L * column.length();
             }
