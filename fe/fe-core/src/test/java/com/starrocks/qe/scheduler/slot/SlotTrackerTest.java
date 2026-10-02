@@ -24,6 +24,8 @@ import com.starrocks.qe.GlobalVariable;
 import com.starrocks.server.WarehouseManager;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Optional;
 
@@ -109,6 +111,113 @@ public class SlotTrackerTest {
         return new LogicalSlot(UUIDUtil.genTUniqueId(), "fe", WarehouseManager.DEFAULT_WAREHOUSE_ID,
                 LogicalSlot.ABSENT_GROUP_ID, numSlots, 0, 0, 0,
                 0, 0);
+    }
+
+    private static LogicalSlot generateExpiringSlot(long pendingDeadline, long allocatedDeadline) {
+        return new LogicalSlot(UUIDUtil.genTUniqueId(), "fe", WarehouseManager.DEFAULT_WAREHOUSE_ID,
+                LogicalSlot.ABSENT_GROUP_ID, 1, pendingDeadline, allocatedDeadline, 0, 0, 0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAllocatedSlotDoesNotWakeAtPendingDeadline(boolean enableV2) {
+        boolean previousV2 = Config.enable_query_queue_v2;
+        Config.enable_query_queue_v2 = enableV2;
+        try {
+            SlotTracker tracker = new SlotTracker(slotManager, ImmutableList.of());
+            LogicalSlot slot = generateExpiringSlot(100, 1000);
+            assertThat(tracker.requireSlot(slot)).isTrue();
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(100);
+            // Match SlotManager: the slot state changes BEFORE the tracker is notified.
+            slot.onAllocate();
+            tracker.allocateSlot(slot);
+            tracker.allocateSlot(slot);
+            assertThat(tracker.requireSlot(slot)).isTrue();
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(1000);
+            assertThat(tracker.peakExpiredSlots(100)).isEmpty();
+            assertThat(tracker.peakExpiredSlots(999)).isEmpty();
+            assertThat(tracker.peakExpiredSlots(1000)).containsExactly(slot);
+            tracker.releaseSlot(slot.getSlotId());
+            assertThat(tracker.getMinExpiredTimeMs()).isZero();
+            assertThat(tracker.peakExpiredSlots(2000)).isEmpty();
+        } finally {
+            Config.enable_query_queue_v2 = previousV2;
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPendingTimeoutIsNotHiddenByRunningSlot(boolean enableV2) {
+        boolean previousV2 = Config.enable_query_queue_v2;
+        Config.enable_query_queue_v2 = enableV2;
+        try {
+            SlotTracker tracker = new SlotTracker(slotManager, ImmutableList.of());
+            LogicalSlot running = generateExpiringSlot(10, 1000);
+            LogicalSlot pending = generateExpiringSlot(20, 2000);
+            tracker.requireSlot(running);
+            tracker.requireSlot(pending);
+            tracker.allocateSlot(running);
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(20);
+            assertThat(tracker.peakExpiredSlots(19)).isEmpty();
+            assertThat(tracker.peakExpiredSlots(20)).containsExactly(pending);
+            tracker.releaseSlot(pending.getSlotId());
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(1000);
+            assertThat(tracker.peakExpiredSlots(999)).isEmpty();
+        } finally {
+            Config.enable_query_queue_v2 = previousV2;
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAllocatedSlotsUseExecutionDeadlineOrder(boolean enableV2) {
+        boolean previousV2 = Config.enable_query_queue_v2;
+        Config.enable_query_queue_v2 = enableV2;
+        try {
+            SlotTracker tracker = new SlotTracker(slotManager, ImmutableList.of());
+            LogicalSlot first = generateExpiringSlot(10, 1000);
+            LogicalSlot second = generateExpiringSlot(20, 500);
+            tracker.requireSlot(first);
+            tracker.requireSlot(second);
+            tracker.allocateSlot(first);
+            tracker.allocateSlot(second);
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(500);
+            assertThat(tracker.peakExpiredSlots(500)).containsExactly(second);
+            tracker.releaseSlot(second.getSlotId());
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(1000);
+            assertThat(tracker.peakExpiredSlots(1000)).containsExactly(first);
+        } finally {
+            Config.enable_query_queue_v2 = previousV2;
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testEqualDeadlinesAndReleaseBothIndexes(boolean enableV2) {
+        boolean previousV2 = Config.enable_query_queue_v2;
+        Config.enable_query_queue_v2 = enableV2;
+        try {
+            SlotTracker tracker = new SlotTracker(slotManager, ImmutableList.of());
+            LogicalSlot first = generateExpiringSlot(100, 200);
+            LogicalSlot second = generateExpiringSlot(100, 200);
+            LogicalSlot pending = generateExpiringSlot(200, 300);
+            tracker.requireSlot(first);
+            tracker.requireSlot(second);
+            tracker.requireSlot(pending);
+            assertThat(tracker.peakExpiredSlots(100)).containsExactlyInAnyOrder(first, second);
+            tracker.allocateSlot(first);
+            tracker.allocateSlot(second);
+            assertThat(tracker.getMinExpiredTimeMs()).isEqualTo(200);
+            assertThat(tracker.peakExpiredSlots(200)).containsExactlyInAnyOrder(first, second, pending);
+            for (LogicalSlot slot : tracker.peakExpiredSlots(200)) {
+                tracker.releaseSlot(slot.getSlotId());
+                assertThat(tracker.releaseSlot(slot.getSlotId())).isNull();
+            }
+            assertThat(tracker.getMinExpiredTimeMs()).isZero();
+            assertThat(tracker.peakExpiredSlots(300)).isEmpty();
+        } finally {
+            Config.enable_query_queue_v2 = previousV2;
+        }
     }
 
     @Test

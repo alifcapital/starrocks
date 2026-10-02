@@ -55,8 +55,13 @@ public abstract class BaseSlotTracker {
     private static final Logger LOG = LogManager.getLogger(BaseSlotTracker.class);
 
     protected final ConcurrentMap<TUniqueId, LogicalSlot> slots = new ConcurrentHashMap<>();
-    protected final Set<LogicalSlot> slotsOrderByExpiredTime = new TreeSet<>(
+    // Keep immutable ordering keys in separate indexes. SlotManager may call
+    // slot.onAllocate() before allocateSlot(), so ordering cannot depend on slot state.
+    private final Set<LogicalSlot> pendingSlotsOrderByExpiredTime = new TreeSet<>(
             Comparator.comparingLong(LogicalSlot::getExpiredPendingTimeMs)
+                    .thenComparing(LogicalSlot::getSlotId));
+    private final Set<LogicalSlot> allocatedSlotsOrderByExpiredTime = new TreeSet<>(
+            Comparator.comparingLong(LogicalSlot::getExpiredAllocatedTimeMs)
                     .thenComparing(LogicalSlot::getSlotId));
 
     protected final Map<TUniqueId, LogicalSlot> pendingSlots = new ConcurrentHashMap<>();
@@ -163,7 +168,7 @@ public abstract class BaseSlotTracker {
         }
 
         slots.put(slot.getSlotId(), slot);
-        slotsOrderByExpiredTime.add(slot);
+        pendingSlotsOrderByExpiredTime.add(slot);
         pendingSlots.put(slot.getSlotId(), slot);
 
         MetricRepo.COUNTER_QUERY_QUEUE_SLOT_PENDING.increase((long) slot.getNumPhysicalSlots());
@@ -196,6 +201,9 @@ public abstract class BaseSlotTracker {
         if (allocatedSlots.put(slotId, slot) != null) {
             return;
         }
+
+        pendingSlotsOrderByExpiredTime.remove(slot);
+        allocatedSlotsOrderByExpiredTime.add(slot);
 
         MetricRepo.COUNTER_QUERY_QUEUE_SLOT_RUNNING.increase((long) slot.getNumPhysicalSlots());
         numAllocatedSlots += slot.getNumPhysicalSlots();
@@ -258,7 +266,8 @@ public abstract class BaseSlotTracker {
             return null;
         }
 
-        slotsOrderByExpiredTime.remove(slot);
+        pendingSlotsOrderByExpiredTime.remove(slot);
+        allocatedSlotsOrderByExpiredTime.remove(slot);
 
         if (allocatedSlots.remove(slotId) != null) {
             numAllocatedSlots -= slot.getNumPhysicalSlots();
@@ -290,10 +299,20 @@ public abstract class BaseSlotTracker {
      * @return The expired slots.
      */
     public List<LogicalSlot> peakExpiredSlots() {
-        final long nowMs = System.currentTimeMillis();
+        return peakExpiredSlots(System.currentTimeMillis());
+    }
+
+    @VisibleForTesting
+    List<LogicalSlot> peakExpiredSlots(long nowMs) {
         List<LogicalSlot> expiredSlots = new ArrayList<>();
-        for (LogicalSlot slot : slotsOrderByExpiredTime) {
-            if (!slot.isAllocatedExpired(nowMs)) {
+        for (LogicalSlot slot : pendingSlotsOrderByExpiredTime) {
+            if (nowMs < slot.getExpiredPendingTimeMs()) {
+                break;
+            }
+            expiredSlots.add(slot);
+        }
+        for (LogicalSlot slot : allocatedSlotsOrderByExpiredTime) {
+            if (nowMs < slot.getExpiredAllocatedTimeMs()) {
                 break;
             }
             expiredSlots.add(slot);
@@ -302,10 +321,14 @@ public abstract class BaseSlotTracker {
     }
 
     public long getMinExpiredTimeMs() {
-        if (slotsOrderByExpiredTime.isEmpty()) {
+        if (pendingSlotsOrderByExpiredTime.isEmpty() && allocatedSlotsOrderByExpiredTime.isEmpty()) {
             return 0;
         }
-        return slotsOrderByExpiredTime.iterator().next().getExpiredPendingTimeMs();
+        long pendingDeadline = pendingSlotsOrderByExpiredTime.isEmpty() ? Long.MAX_VALUE
+                : pendingSlotsOrderByExpiredTime.iterator().next().getExpiredPendingTimeMs();
+        long allocatedDeadline = allocatedSlotsOrderByExpiredTime.isEmpty() ? Long.MAX_VALUE
+                : allocatedSlotsOrderByExpiredTime.iterator().next().getExpiredAllocatedTimeMs();
+        return Math.min(pendingDeadline, allocatedDeadline);
     }
 
     public double getEarliestQueryWaitTimeSecond() {
