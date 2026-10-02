@@ -41,7 +41,7 @@ public class ExternalMcvStatistics {
         private final List<MultiColumnCombinedStats.McvEntry> mcv;
         private final List<StoredBucket> buckets;
         private final List<Long> nullCounts;
-        private final Map<String, Long> singleColumnMcv;
+        private final McvDistribution singleColumnMcv;
         private final long headRows;
         // The distribution is immutable. This memoized immutable view is keyed by source type so
         // schema changes and dump replay cannot reuse string ordering for numeric/date columns.
@@ -106,7 +106,8 @@ public class ExternalMcvStatistics {
                     }
                 }
             }
-            this.singleColumnMcv = Collections.unmodifiableMap(values);
+            this.singleColumnMcv = McvDistribution.copyOf(values);
+            this.singleColumnMcv.prepareFrequencyOrder();
         }
 
         public List<String> getColumnNames() {
@@ -154,7 +155,7 @@ public class ExternalMcvStatistics {
                 // Map nodes/boxed counts refer to the strings already counted above. Reserve
                 // the prepared histogram even for dump replay, which builds it lazily: Caffeine
                 // does not reweigh a value when that memoized view is populated or replaced.
-                bytes += 128 + 96L * singleColumnMcv.size() + 128L + 96L * Math.max(1, buckets.size());
+                bytes += singleColumnMcv.retainedBytesExcludingKeys() + 128L + 96L * Math.max(1, buckets.size());
             }
             return bytes;
         }
@@ -221,7 +222,7 @@ public class ExternalMcvStatistics {
             Histogram histogram = immutableBuckets.isEmpty()
                     ? Histogram.ofSingleBucket(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY,
                             rowCount - nullRows, singleColumnMcv) : new Histogram(immutableBuckets, singleColumnMcv);
-            if (type.isStringType() && (singleColumnMcv.values().stream().mapToLong(Long::longValue).sum()
+            if (type.isStringType() && (singleColumnMcv.getTotalRows()
                     + nullRows == rowCount || !immutableBuckets.isEmpty())) {
                 histogram = Histogram.forStrings(immutableBuckets, singleColumnMcv);
             }
