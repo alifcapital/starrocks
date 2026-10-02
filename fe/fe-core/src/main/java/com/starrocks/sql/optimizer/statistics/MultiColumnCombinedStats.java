@@ -77,7 +77,9 @@ public class MultiColumnCombinedStats {
     // Order of the tuple components in the MCV list, null for a component whose column the query does
     // not read. Empty without an MCV list.
     private final List<ColumnRefOperator> columns;
-    private final List<McvEntry> mcv;
+    private final PreparedMcvTuples mcv;
+    private volatile MultiColumnMcvEstimator.ComponentShares componentShares;
+    private volatile MultiColumnJoinMcvEstimator.PreparedHead joinHead;
     private final List<Long> nullCounts;
     private final int readColumns;
 
@@ -94,7 +96,7 @@ public class MultiColumnCombinedStats {
         this.ndv = ndv;
         this.rowCount = rowCount;
         this.columns = Collections.unmodifiableList(new ArrayList<>(columns));
-        this.mcv = List.copyOf(mcv);
+        this.mcv = PreparedMcvTuples.copyOf(mcv, columns.size(), rowCount, nullCounts);
         this.nullCounts = List.copyOf(nullCounts);
         this.readColumns = (int) columns.stream().filter(Objects::nonNull).count();
     }
@@ -113,6 +115,32 @@ public class MultiColumnCombinedStats {
 
     public List<McvEntry> getMcv() {
         return mcv;
+    }
+
+    public PreparedMcvTuples getMcvDistribution() {
+        return mcv;
+    }
+
+    MultiColumnMcvEstimator.ComponentShares getComponentShares() {
+        MultiColumnMcvEstimator.ComponentShares prepared = componentShares;
+        if (prepared == null) {
+            synchronized (this) {
+                prepared = componentShares;
+                if (prepared == null) {
+                    prepared = new MultiColumnMcvEstimator.ComponentShares(this);
+                    componentShares = prepared;
+                }
+            }
+        }
+        return prepared;
+    }
+
+    // One query-bound slot, not an unbounded cache of key permutations in the external catalog.
+    synchronized MultiColumnJoinMcvEstimator.PreparedHead getJoinHead(List<ColumnRefOperator> key) {
+        if (joinHead == null || !joinHead.matches(this, key)) {
+            joinHead = new MultiColumnJoinMcvEstimator.PreparedHead(this, key);
+        }
+        return joinHead;
     }
 
     public List<Long> getNullCounts() {

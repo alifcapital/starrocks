@@ -127,7 +127,7 @@ final class McvStatisticsPropagation {
         Set<ColumnRefOperator> used = new HashSet<>(Utils.extractColumnRef(predicate));
         MultiColumnCombinedStats best = null;
         for (MultiColumnCombinedStats group : statistics.getMultiColumnCombinedStats().values()) {
-            double head = group.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum();
+            double head = group.getMcvDistribution().getTotalRows();
             if (group.hasMcv() && group.getColumns().containsAll(used) && head == group.getRowCount()
                     && (best == null || group.getColumns().size() < best.getColumns().size())) {
                 best = group;
@@ -203,11 +203,10 @@ final class McvStatisticsPropagation {
                 continue;
             }
             List<MultiColumnCombinedStats.McvEntry> surviving = new ArrayList<>();
-            double oldHead = 0;
+            double oldHead = group.getMcvDistribution().getSequentialTotalRows();
             double head = 0;
             boolean supported = true;
             for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {
-                oldHead += entry.getCount();
                 Optional<Truth> match = evaluate(groupPredicate, group.getColumns(), entry.getValues(), evaluator);
                 if (match.isEmpty()) {
                     supported = false;
@@ -232,7 +231,7 @@ final class McvStatisticsPropagation {
             long tailNdv = Math.max(0, group.getNdv() - group.getMcv().size());
             if (group.getColumns().size() == 1 && !group.getNullCounts().isEmpty()
                     && group.getNullCounts().get(0) > 0
-                    && group.getMcv().stream().noneMatch(entry -> entry.getValues().get(0) == null)
+                    && !group.getMcvDistribution().hasNull(0)
                     && evaluate(groupPredicate, group.getColumns(), java.util.Collections.singletonList(null), evaluator)
                             .filter(truth -> truth == Truth.TRUE).isEmpty()) {
                 // Global NDV includes NULL even when it was outside the retained head.
@@ -323,7 +322,7 @@ final class McvStatisticsPropagation {
             ColumnStatistic updated = ColumnStatistic.buildFrom(basic).setHistogram(null)
                     .setNullsFraction(nulls).setDistinctValuesCount(Math.max(0, marginal.getNdv() - (nulls > 0 ? 1 : 0)))
                     .build();
-            if (marginal.getMcv().stream().mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum()
+            if (marginal.getMcvDistribution().getTotalRowsLong()
                     == marginal.getRowCount()) {
                 updated = new ExternalMcvStatistics.Group(List.of(column.getName()), (long) marginal.getRowCount(),
                         marginal.getNdv(), marginal.getMcv(), List.of(), marginal.getNullCounts())
@@ -336,7 +335,7 @@ final class McvStatisticsPropagation {
 
     private static Optional<MultiColumnCombinedStats> conditionalMarginal(MultiColumnCombinedStats group,
             ColumnRefOperator column, ScalarOperator predicate, Statistics input) {
-        boolean completeHead = group.getMcv().stream().mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum()
+        boolean completeHead = group.getMcvDistribution().getTotalRowsLong()
                 == group.getRowCount();
         // If every other component is fixed, projecting the remaining component is one-to-one.
         // A retained tuple is its entire frequency: that value cannot occur again in the tail.

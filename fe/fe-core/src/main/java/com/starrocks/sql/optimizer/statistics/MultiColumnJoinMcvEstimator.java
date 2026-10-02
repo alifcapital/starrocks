@@ -21,6 +21,7 @@ import com.starrocks.type.Type;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -92,7 +93,7 @@ public class MultiColumnJoinMcvEstimator {
 
     private static class Side {
         // Head tuples without a NULL component, projected onto the key in predicate order.
-        final Map<List<String>, Double> head = new HashMap<>();
+        final Map<List<String>, Double> head;
         // Share of the head tuples without a NULL.
         final double headShare;
         // Share of the rows outside the head that hold no NULL in the key.
@@ -101,15 +102,33 @@ public class MultiColumnJoinMcvEstimator {
         final double headTuples;
 
         Side(MultiColumnCombinedStats stats, List<ColumnRefOperator> key, double nullsFraction) {
-            List<Integer> positions = new ArrayList<>(key.size());
+            PreparedHead prepared = stats.getJoinHead(key);
+            this.head = prepared.head;
+            this.headShare = prepared.nonNull;
+            this.tailShare = Math.max(0, Math.min(1.0 - stats.getMcvDistribution().getTotalShare(),
+                    1.0 - nullsFraction - prepared.nonNull));
+            this.ndv = stats.getNdv();
+            this.headTuples = stats.getMcv().size();
+        }
+    }
+
+    static final class PreparedHead {
+        private final List<Integer> positions;
+        private final List<Type> types;
+        private final Map<List<String>, Double> head;
+        private final double nonNull;
+
+        PreparedHead(MultiColumnCombinedStats stats, List<ColumnRefOperator> key) {
+            positions = new ArrayList<>(key.size());
+            types = new ArrayList<>(key.size());
             for (ColumnRefOperator column : key) {
                 positions.add(stats.getColumns().indexOf(column));
+                types.add(column.getType().clone());
             }
-            double total = 0;
-            double nonNull = 0;
-            for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
-                double share = entry.getCount() / (double) stats.getRowCount();
-                total += share;
+            Map<List<String>, Double> values = new HashMap<>();
+            double nonNullSum = 0;
+            for (int t = 0; t < stats.getMcv().size(); t++) {
+                MultiColumnCombinedStats.McvEntry entry = stats.getMcv().get(t);
                 List<String> projection = new ArrayList<>(key.size());
                 for (int i = 0; i < key.size(); i++) {
                     String value = entry.getValues().get(positions.get(i));
@@ -117,18 +136,29 @@ public class MultiColumnJoinMcvEstimator {
                         projection = null;
                         break;
                     }
-                    projection.add(canonical(key.get(i).getType(), value));
+                    projection.add(canonical(types.get(i), value));
                 }
                 if (projection != null) {
-                    head.merge(projection, share, Double::sum);
-                    nonNull += share;
+                    double share = stats.getMcvDistribution().getShare(t);
+                    values.merge(projection, share, Double::sum);
+                    nonNullSum += share;
                 }
             }
-            this.headShare = nonNull;
-            // The head tuples with a NULL are already out; the rest of the NULL rows are in the tail.
-            this.tailShare = Math.max(0, Math.min(1.0 - total, 1.0 - nullsFraction - nonNull));
-            this.ndv = stats.getNdv();
-            this.headTuples = stats.getMcv().size();
+            head = Collections.unmodifiableMap(values);
+            nonNull = nonNullSum;
+        }
+
+        boolean matches(MultiColumnCombinedStats stats, List<ColumnRefOperator> key) {
+            if (positions.size() != key.size()) {
+                return false;
+            }
+            for (int i = 0; i < key.size(); i++) {
+                if (positions.get(i) != stats.getColumns().indexOf(key.get(i))
+                        || !types.get(i).equals(key.get(i).getType())) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 

@@ -38,7 +38,7 @@ public class ExternalMcvStatistics {
         // Rows of the table when the statistics were collected; the MCV counts are shares of it.
         private final long rowCount;
         private final long ndv;
-        private final List<MultiColumnCombinedStats.McvEntry> mcv;
+        private final PreparedMcvTuples mcv;
         private final List<StoredBucket> buckets;
         private final List<Long> nullCounts;
         private final McvDistribution singleColumnMcv;
@@ -94,10 +94,11 @@ public class ExternalMcvStatistics {
             this.columnNames = List.copyOf(columnNames);
             this.rowCount = rowCount;
             this.ndv = ndv;
-            this.mcv = List.copyOf(mcv);
+            this.mcv = PreparedMcvTuples.copyOf(mcv, columnNames.size(), rowCount, nullCounts);
+            this.mcv.getComponentCounts();
             this.buckets = buckets.stream().map(StoredBucket::new).toList();
             this.nullCounts = List.copyOf(nullCounts);
-            this.headRows = mcv.stream().mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum();
+            this.headRows = this.mcv.getTotalRowsLong();
             Map<String, Long> values = new LinkedHashMap<>();
             if (columnNames.size() == 1) {
                 for (MultiColumnCombinedStats.McvEntry entry : mcv) {
@@ -137,7 +138,7 @@ public class ExternalMcvStatistics {
 
         private long retainedBytes() {
             long bytes = 192 + 32L + 8L * columnNames.size() + 32L + 32L * nullCounts.size()
-                    + 32L + 8L * mcv.size() + 32L + 8L * buckets.size();
+                    + 32L + 8L * mcv.size() + 32L + 8L * buckets.size() + mcv.retainedIndexBytes();
             for (String name : columnNames) {
                 bytes += stringBytes(name);
             }

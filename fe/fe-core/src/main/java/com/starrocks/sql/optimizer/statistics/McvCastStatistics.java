@@ -94,7 +94,7 @@ final class McvCastStatistics {
             }
             tuples.merge(values, entry.getCount(), Long::sum);
         }
-        boolean complete = group.getMcv().stream().mapToLong(MultiColumnCombinedStats.McvEntry::getCount).sum()
+        boolean complete = group.getMcvDistribution().getTotalRowsLong()
                 == group.getRowCount();
         List<Map<String, Long>> marginals = new ArrayList<>();
         for (int i = 0; i < columns.size(); i++) {
@@ -140,7 +140,7 @@ final class McvCastStatistics {
             if (position < 0 || !group.hasMcv()) {
                 continue;
             }
-            boolean full = group.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum()
+            boolean full = group.getMcvDistribution().getTotalRows()
                     == group.getRowCount();
             Map<String, Long> candidate = new HashMap<>();
             for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {

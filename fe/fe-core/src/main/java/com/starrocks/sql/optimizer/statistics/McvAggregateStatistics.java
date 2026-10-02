@@ -137,7 +137,7 @@ final class McvAggregateStatistics {
     }
 
     private static double coverage(MultiColumnCombinedStats group) {
-        return group.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum()
+        return group.getMcvDistribution().getTotalRows()
                 / group.getRowCount();
     }
 

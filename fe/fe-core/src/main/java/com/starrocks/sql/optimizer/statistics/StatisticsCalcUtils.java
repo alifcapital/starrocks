@@ -208,11 +208,7 @@ public class StatisticsCalcUtils {
         if (stats.getRowCount() <= 0) {
             return 0;
         }
-        double rows = 0;
-        for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
-            rows += entry.getCount();
-        }
-        return rows / stats.getRowCount();
+        return stats.getMcvDistribution().getSequentialTotalRows() / stats.getRowCount();
     }
 
     public static Statistics.Builder estimateMultiColumnCombinedStats(Table table,

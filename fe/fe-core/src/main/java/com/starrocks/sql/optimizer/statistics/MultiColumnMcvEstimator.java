@@ -246,11 +246,7 @@ public class MultiColumnMcvEstimator {
     }
 
     private static double mcvTotalRows(MultiColumnCombinedStats stats) {
-        double total = 0;
-        for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
-            total += entry.getCount();
-        }
-        return total;
+        return stats.getMcvDistribution().getSequentialTotalRows();
     }
 
     private static OptionalDouble groupSelectivity(MultiColumnCombinedStats stats, Set<ColumnRefOperator> covered,
@@ -260,13 +256,11 @@ public class MultiColumnMcvEstimator {
         List<ColumnRefOperator> columns = stats.getColumns();
         double rowCount = stats.getRowCount();
         double mcvSel = 0;
-        double mcvTotalSel = 0;
+        double mcvTotalSel = stats.getMcvDistribution().getTotalShare();
         double mcvBaseSel = 0;
-        double minHeadShare = 1.0;
+        double minHeadShare = stats.getMcvDistribution().getMinShare();
         for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
             double share = entry.getCount() / rowCount;
-            mcvTotalSel += share;
-            minHeadShare = Math.min(minHeadShare, share);
             Optional<Boolean> matches = matchesAll(entry, columns, conjuncts, evaluator);
             if (matches.isEmpty()) {
                 return OptionalDouble.empty();
@@ -282,7 +276,7 @@ public class MultiColumnMcvEstimator {
             mcvBaseSel += base.getAsDouble();
         }
 
-        ComponentShares shares = new ComponentShares(stats);
+        ComponentShares shares = stats.getComponentShares();
         double simpleSel = 1.0;
         double exactSel = 1.0;
         boolean hasExactSel = false;
@@ -414,28 +408,14 @@ public class MultiColumnMcvEstimator {
     static class ComponentShares {
         private final double rowCount;
         private final List<Map<String, Long>> counts;
-        private final Map<Integer, Map<Object, String>> equalityIndexes = new HashMap<>();
+        private final Map<Integer, EqualityIndex> equalityIndexes = new HashMap<>();
+
+        private record EqualityIndex(Type type, Map<Object, String> values) {
+        }
 
         ComponentShares(MultiColumnCombinedStats stats) {
             this.rowCount = stats.getRowCount();
-            int width = stats.getColumns().size();
-            this.counts = new ArrayList<>(width);
-            for (int i = 0; i < width; i++) {
-                counts.add(new HashMap<>());
-            }
-            for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
-                if (!entry.hasComponentCounts()) {
-                    continue;
-                }
-                for (int i = 0; i < width; i++) {
-                    counts.get(i).putIfAbsent(entry.getValues().get(i), entry.getComponentCounts().get(i));
-                }
-            }
-            if (stats.getNullCounts().size() == width) {
-                for (int i = 0; i < width; i++) {
-                    counts.get(i).put(null, stats.getNullCounts().get(i));
-                }
-            }
+            this.counts = stats.getMcvDistribution().getComponentCounts();
         }
 
         /**
@@ -496,19 +476,21 @@ public class MultiColumnMcvEstimator {
             return OptionalDouble.of(Math.max(0.0, 1.0 - share - nullShare));
         }
 
-        private Optional<String> findComponent(int position, Map<String, Long> known, Type type,
+        private synchronized Optional<String> findComponent(int position, Map<String, Long> known, Type type,
                                                ConstantOperator constant) {
-            Map<Object, String> index = equalityIndexes.computeIfAbsent(position, ignored -> {
+            EqualityIndex prepared = equalityIndexes.get(position);
+            if (prepared == null || !prepared.type().equals(type)) {
                 Map<Object, String> result = new HashMap<>();
                 for (String value : known.keySet()) {
                     Object key = McvPredicateEvaluator.equalityKey(type, type, value);
                     if (key != null) {
-                        // Preserve the first representative, just as the previous scan of known.keySet did.
                         result.putIfAbsent(key, value);
                     }
                 }
-                return result;
-            });
+                prepared = new EqualityIndex(type.clone(), result);
+                equalityIndexes.put(position, prepared);
+            }
+            Map<Object, String> index = prepared.values();
             Object key = McvPredicateEvaluator.equalityKey(type, constant.getType(), constantText(constant));
             return Optional.ofNullable(index.get(key));
         }
