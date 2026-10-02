@@ -59,7 +59,7 @@ public final class RuntimeFilterJointSelection {
             if (covered.size() < 2) {
                 continue;
             }
-            double mass = group.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum()
+            double mass = group.getMcvDistribution().getTotalRows()
                     / group.getRowCount();
             String order = group.getColumns().stream().map(c -> c == null ? "_" : Integer.toString(c.getId()))
                     .collect(java.util.stream.Collectors.joining(","));
@@ -78,7 +78,7 @@ public final class RuntimeFilterJointSelection {
         int tuples = best.getMcv().size();
         double[] weights = new double[tuples];
         for (int t = 0; t < tuples; t++) {
-            weights[t] = best.getMcv().get(t).getCount() / best.getRowCount();
+            weights[t] = best.getMcvDistribution().getShare(t);
         }
         // -1 is unknown. Never multiply marginal probabilities to invent tuple independence.
         byte[][] membership = new byte[positions.size()][tuples];

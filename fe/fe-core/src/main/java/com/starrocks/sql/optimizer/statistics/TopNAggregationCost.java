@@ -300,7 +300,7 @@ public final class TopNAggregationCost {
         }
         for (var distribution : source.getMultiColumnCombinedStats().values()) {
             if (!distribution.hasMcv() || distribution.getRowCount() != groups
-                    || distribution.getMcv().stream().mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum()
+                    || distribution.getMcvDistribution().getTotalRows()
                     != distribution.getRowCount()) {
                 continue;
             }

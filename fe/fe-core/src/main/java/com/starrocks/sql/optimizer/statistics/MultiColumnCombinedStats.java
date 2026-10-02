@@ -80,6 +80,7 @@ public class MultiColumnCombinedStats {
     private final PreparedMcvTuples mcv;
     private volatile MultiColumnMcvEstimator.ComponentShares componentShares;
     private volatile MultiColumnJoinMcvEstimator.PreparedHead joinHead;
+    private RuntimeFilterStatistics.PreparedHead[] runtimeFilterHeads;
     private final List<Long> nullCounts;
     private final int readColumns;
 
@@ -141,6 +142,19 @@ public class MultiColumnCombinedStats {
             joinHead = new MultiColumnJoinMcvEstimator.PreparedHead(this, key);
         }
         return joinHead;
+    }
+
+    synchronized RuntimeFilterStatistics.PreparedHead getRuntimeFilterHead(int position,
+                                                                           com.starrocks.type.Type type) {
+        if (runtimeFilterHeads == null) {
+            runtimeFilterHeads = new RuntimeFilterStatistics.PreparedHead[columns.size()];
+        }
+        RuntimeFilterStatistics.PreparedHead prepared = runtimeFilterHeads[position];
+        if (prepared == null || !prepared.matches(type)) {
+            prepared = new RuntimeFilterStatistics.PreparedHead(this, position, type);
+            runtimeFilterHeads[position] = prepared;
+        }
+        return prepared;
     }
 
     public List<Long> getNullCounts() {

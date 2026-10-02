@@ -19,6 +19,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.Type;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,7 @@ public final class RuntimeFilterStatistics {
     private final double nullFraction;
     private final Map<String, Double> head;
     private final boolean completeHead;
+    private final double headMass;
     private final JoinKey joinKey;
 
     private record JoinKey(JoinStatisticsPlanner planner, JoinStatisticsScope scope, ColumnRefOperator column, double rows) {
@@ -45,6 +47,7 @@ public final class RuntimeFilterStatistics {
         this.ndv = ndv;
         this.nullFraction = clamp(nullFraction);
         this.head = Map.copyOf(head);
+        this.headMass = mass(this.head);
         this.completeHead = mass(head) >= 1 - this.nullFraction - 1e-9;
         this.joinKey = joinKey;
     }
@@ -92,38 +95,28 @@ public final class RuntimeFilterStatistics {
                                                Collection<MultiColumnCombinedStats> groups, double rows) {
         double ndv = basic.isUnknown() ? -1 : basic.getDistinctValuesCount();
         double nulls = basic.isUnknown() || !Double.isFinite(basic.getNullsFraction()) ? 0 : basic.getNullsFraction();
-        Map<String, Double> head = new HashMap<>();
+        Map<String, Double> head = Map.of();
+        double headMass = 0;
         if (MultiColumnMcvEstimator.isEnabled()) {
             for (MultiColumnCombinedStats group : groups) {
                 int position = group.getColumns().indexOf(column);
                 if (position < 0 || !group.hasDistribution()) {
                     continue;
                 }
-                Map<String, Double> candidate = new HashMap<>();
+                PreparedHead prepared = group.getRuntimeFilterHead(position, column.getType());
+                Map<String, Double> candidate = prepared.head;
                 boolean single = group.getColumns().size() == 1;
-                boolean completeHead = group.getMcv().stream().mapToDouble(
-                        MultiColumnCombinedStats.McvEntry::getCount).sum() == group.getRowCount();
+                boolean completeHead = group.getMcvDistribution().getTotalRows() == group.getRowCount();
                 double groupNulls = nulls;
                 if (group.getNullCounts().size() == group.getColumns().size()) {
                     groupNulls = group.getNullCounts().get(position) / group.getRowCount();
                 }
                 if (completeHead) {
-                    groupNulls = group.getMcv().stream()
-                            .filter(entry -> entry.getValues().get(position) == null)
-                            .mapToDouble(MultiColumnCombinedStats.McvEntry::getCount).sum() / group.getRowCount();
+                    groupNulls = group.getMcvDistribution().getNullRows(position) / group.getRowCount();
                 }
-                for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {
-                    String value = entry.getValues().get(position);
-                    if (single || completeHead) {
-                        add(candidate, column.getType(), value, entry.getCount() / group.getRowCount());
-                    } else if (entry.hasComponentCounts() && value != null) {
-                        // A component can occur in several head tuples; its marginal is counted once.
-                        candidate.putIfAbsent(canonical(column.getType(), value),
-                                entry.getComponentCounts().get(position) / group.getRowCount());
-                    }
-                }
-                if (mass(candidate) > mass(head) || (head.isEmpty() && (single || completeHead))) {
+                if (prepared.mass > headMass || (head.isEmpty() && (single || completeHead))) {
                     head = candidate;
+                    headMass = prepared.mass;
                     nulls = groupNulls;
                     if (single) {
                         ndv = Math.max(0, group.getNdv() - (groupNulls > 0 ? 1 : 0));
@@ -138,12 +131,44 @@ public final class RuntimeFilterStatistics {
         } else {
             ndv = Math.max(head.size(), ndv);
         }
-        double mass = mass(head);
+        double mass = headMass;
         if (mass > 1 - nulls && mass > 0) {
             double scale = Math.max(0, 1 - nulls) / mass;
-            head.replaceAll((key, value) -> value * scale);
+            Map<String, Double> scaled = new HashMap<>();
+            head.forEach((key, value) -> scaled.put(key, value * scale));
+            head = scaled;
         }
         return new RuntimeFilterStatistics(column.getType(), ndv, nulls, head).boundByRows(rows);
+    }
+
+    /** A bounded, type-specific index on a planner binding; no query state enters the catalog cache. */
+    static final class PreparedHead {
+        private final Type type;
+        private final Map<String, Double> head;
+        private final double mass;
+
+        PreparedHead(MultiColumnCombinedStats group, int position, Type type) {
+            this.type = type.clone();
+            Map<String, Double> values = new HashMap<>();
+            boolean single = group.getColumns().size() == 1;
+            boolean complete = group.getMcvDistribution().getTotalRows() == group.getRowCount();
+            for (int t = 0; t < group.getMcv().size(); t++) {
+                MultiColumnCombinedStats.McvEntry entry = group.getMcv().get(t);
+                String value = entry.getValues().get(position);
+                if (single || complete) {
+                    add(values, type, value, group.getMcvDistribution().getShare(t));
+                } else if (entry.hasComponentCounts() && value != null) {
+                    values.putIfAbsent(canonical(type, value),
+                            entry.getComponentCounts().get(position) / group.getRowCount());
+                }
+            }
+            this.mass = mass(values);
+            this.head = Collections.unmodifiableMap(values);
+        }
+
+        boolean matches(Type candidate) {
+            return type.equals(candidate);
+        }
     }
 
     /** Estimates membership, so build-side duplicates do not multiply probe rows. */
@@ -169,15 +194,15 @@ public final class RuntimeFilterStatistics {
         }
         // Unlisted build keys are spread over the remaining probe domain. Known build head keys
         // can match only the probe tail or a matching probe head. These are containment estimates.
-        double buildTailNdv = mass(head) >= 1 - nullFraction - 1e-9 ? 0 : Math.max(0, ndv - head.size());
+        double buildTailNdv = headMass >= 1 - nullFraction - 1e-9 ? 0 : Math.max(0, ndv - head.size());
         double probeTailNdv = Math.max(0, probe.ndv - probe.head.size());
         double unmatchedProbeKeys = probe.head.size() - matches;
         double remainingProbeKeys = Math.max(0, probe.ndv - matches);
         double headPass = remainingProbeKeys > 0 ? clamp(buildTailNdv / remainingProbeKeys) : 0;
         double tailBuildKeys = Math.max(0, head.size() - matches + buildTailNdv - unmatchedProbeKeys * headPass);
         double tailPass = probeTailNdv > 0 ? clamp(tailBuildKeys / probeTailNdv) : 0;
-        double result = matchedMass + Math.max(0, mass(probe.head) - matchedMass) * headPass
-                + Math.max(0, 1 - probe.nullFraction - mass(probe.head)) * tailPass;
+        double result = matchedMass + Math.max(0, probe.headMass - matchedMass) * headPass
+                + Math.max(0, 1 - probe.nullFraction - probe.headMass) * tailPass;
         if (nullSafe && nullFraction > 0) {
             result += probe.nullFraction;
         }
