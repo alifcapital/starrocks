@@ -436,10 +436,9 @@ public final class JoinStatisticsBasis {
             return sides.get(side).get(ids[0]);
         }
         long[] head = new long[sides.get(side).get(0).head.size()];
-        double[][] roots = new double[ORDERS.length][WIDTH];
-        double[] totals = new double[ORDERS.length];
+        double[][] roots = null;
+        double[] totals = null;
         boolean[] seen = new boolean[sides.get(side).size()];
-        boolean nonempty = false;
         for (int id : ids) {
             if (id < 0 || id >= seen.length || seen[id]) {
                 throw new IllegalArgumentException("Invalid shared JOIN slice union");
@@ -447,18 +446,25 @@ public final class JoinStatisticsBasis {
             seen[id] = true;
             Slice slice = sides.get(side).get(id);
             slice.head.addTo(head);
-            nonempty |= slice.roots.length > 0;
+            if (slice.roots.length == 0) {
+                continue;
+            }
+            if (roots == null) {
+                roots = new double[ORDERS.length][WIDTH];
+                totals = new double[ORDERS.length];
+            }
             for (int p = 0; p < ORDERS.length; p++) {
-                // Minkowski for frequency moments. Presence union is bounded by the sum of distinct counts;
-                // counts must never be interpreted as an exact union when keys occur in multiple slices.
+                // Preserve slice summation order and Minkowski bounds. Sparse zeros need no work.
                 totals[p] += slice.root(ORDERS[p], -1);
                 for (int b = 0; b < WIDTH; b++) {
-                    roots[p][b] += slice.root(ORDERS[p], b);
+                    if (slice.bucketOffsets == null || slice.bucketOffsets[b] != 0) {
+                        roots[p][b] += slice.root(ORDERS[p], b);
+                    }
                 }
             }
         }
-        return new Slice(CompactDegreeVector.copyOf(head), nonempty ? roots : new double[0][],
-                nonempty ? totals : new double[0], false);
+        return new Slice(CompactDegreeVector.copyOf(head), roots == null ? new double[0][] : roots,
+                totals == null ? new double[0] : totals, false);
     }
 
     public long estimatedSize() {

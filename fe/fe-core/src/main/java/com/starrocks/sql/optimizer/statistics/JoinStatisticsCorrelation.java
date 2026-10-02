@@ -105,6 +105,14 @@ public final class JoinStatisticsCorrelation {
             return new Slice(shared, arity, power, presence);
         }
 
+        static Slice preparedProjection(JoinStatisticsBasis.Slice shared, int arity, int power, boolean presence) {
+            double[] buckets = new double[TAIL_LAYOUTS * TAIL_BUCKETS];
+            for (int i = 0; i < buckets.length; i++) {
+                buckets[i] = shared.projectedRoot(arity, power, presence, i);
+            }
+            return new Slice(shared.getHead(), shared.projectedRoot(arity, power, presence, -1), buckets, true);
+        }
+
         private double bucket(int index) {
             if (extrapolated != null) {
                 return extrapolated.root(extrapolatedArity, extrapolatedPresence, index);
@@ -199,30 +207,102 @@ public final class JoinStatisticsCorrelation {
 
     /** Bounded query-local memo shared by JOIN enumeration and RF projection; never retained in Caffeine. */
     static final class Evaluation {
+        private record LayoutKey(int sources, int mask, List<Integer> domains, boolean reduceCommonKey) { }
+        private final Map<LayoutKey, JoinStatisticsEstimate.Layout> layouts = new java.util.HashMap<>();
+
+        JoinStatisticsEstimate.Layout layout(int sources, int mask, int[] domains, boolean reduceCommonKey) {
+            LayoutKey key = new LayoutKey(sources, mask, Arrays.stream(domains).boxed().toList(), reduceCommonKey);
+            JoinStatisticsEstimate.Layout prepared = layouts.get(key);
+            if (prepared == null) {
+                prepared = new JoinStatisticsEstimate.Layout(sources, mask, domains, reduceCommonKey);
+                // At most 4 sources and 3 domains: <128KiB including primitive arrays and keys.
+                if (layouts.size() < 256) {
+                    layouts.put(key, prepared);
+                }
+            }
+            return prepared;
+        }
+
+        private final JoinStatisticsEntropyModel.ShapeCache entropyShapes = new JoinStatisticsEntropyModel.ShapeCache();
+
+        JoinStatisticsEntropyModel model(int attributes, boolean commonKeyStar) {
+            return new JoinStatisticsEntropyModel(attributes, commonKeyStar, entropyShapes);
+        }
+
         private static final long MEMO_BUDGET = 8L * 1024 * 1024 - 24 - 8L * HEAD_BUDGET;
         private record ProductKey(List<CompactDegreeVector> vectors, int presence) {
         }
 
-        private record BasisKey(JoinStatisticsBasis basis, int side, List<Integer> ids) {
+        private record BasisKey(JoinStatisticsBasis basis, int side, JoinStatisticsSliceSet ids) {
         }
 
         private final Map<BasisKey, JoinStatisticsBasis.Slice> sharedSelections = new java.util.HashMap<>();
 
         JoinStatisticsBasis.Slice select(JoinStatisticsBasis basis, int side, int[] ids) {
+            return select(basis, side, JoinStatisticsSliceSet.copyOf(ids));
+        }
+
+        JoinStatisticsBasis.Slice select(JoinStatisticsBasis basis, int side, JoinStatisticsSliceSet sliceSet) {
+            int[] ids = sliceSet.ids();
             if (ids.length == 1) {
                 return basis.getSlices(side).get(ids[0]);
             }
-            BasisKey key = new BasisKey(basis, side, Arrays.stream(ids).boxed().toList());
+            BasisKey key = new BasisKey(basis, side, sliceSet);
             JoinStatisticsBasis.Slice selected = sharedSelections.get(key);
             if (selected == null) {
                 selected = basis.union(side, ids);
-                long bytes = 192L + 24L * ids.length + selected.estimatedSize();
+                long bytes = 192L + sliceSet.estimatedSize() + selected.estimatedSize();
                 if (sharedSelections.size() < 1024 && boundBytes + bytes <= MEMO_BUDGET) {
                     sharedSelections.put(key, selected);
                     boundBytes += bytes;
                 }
             }
             return selected;
+        }
+
+        private record ExtrapolationKey(JoinStatisticsBasis basis, int side, JoinStatisticsSliceSet known,
+                                        JoinStatisticsSliceSet remaining, double weight) { }
+        private final Map<ExtrapolationKey, JoinStatisticsExtrapolation> extrapolations = new java.util.HashMap<>();
+
+        JoinStatisticsExtrapolation extrapolate(JoinStatisticsBasis basis, int side, JoinStatisticsSliceSet known,
+                                                JoinStatisticsSliceSet remaining, double weight) {
+            ExtrapolationKey key = new ExtrapolationKey(basis, side, known, remaining, weight);
+            JoinStatisticsExtrapolation prepared = extrapolations.get(key);
+            if (prepared != null) {
+                return prepared;
+            }
+            var a = select(basis, side, known);
+            var b = select(basis, side, remaining);
+            prepared = new JoinStatisticsExtrapolation(a, b, weight);
+            long bytes = 512L + 16L * a.getHead().size() + a.estimatedSize() + b.estimatedSize()
+                    + known.estimatedSize() + remaining.estimatedSize();
+            if (extrapolations.size() < 1024 && boundBytes + bytes <= MEMO_BUDGET) {
+                extrapolations.put(key, prepared);
+                boundBytes += bytes;
+            }
+            return prepared;
+        }
+
+        private record ProjectionKey(JoinStatisticsBasis.Slice slice, int arity, int power, boolean presence) { }
+        private final Map<ProjectionKey, Slice> projections = new java.util.HashMap<>();
+
+        Slice project(JoinStatisticsBasis.Slice slice, int arity, int power, boolean presence) {
+            if (!presence && !slice.hasUnitTail()) {
+                return slice.project(arity, power, false);
+            }
+            ProjectionKey key = new ProjectionKey(slice, arity, power, presence);
+            Slice prepared = projections.get(key);
+            if (prepared != null) {
+                return prepared;
+            }
+            long bytes = 256L + 8L * TAIL_LAYOUTS * TAIL_BUCKETS;
+            if (projections.size() >= 1024 || boundBytes + bytes > MEMO_BUDGET) {
+                return slice.project(arity, power, presence);
+            }
+            prepared = Slice.preparedProjection(slice, arity, power, presence);
+            projections.put(key, prepared);
+            boundBytes += bytes;
+            return prepared;
         }
 
         private final Map<ProductKey, double[]> products = new java.util.HashMap<>();
@@ -270,16 +350,24 @@ public final class JoinStatisticsCorrelation {
                     boundBytes += bytes;
                 }
             }
-            // Projected bucket arrays are temporary. Cache only the source selections and head products;
-            // never retain another tail for each arity, power or membership role.
+            // Ordinary projections borrow prepared source roots. Unit/presence projections are
+            // separately admitted by project() under the same bounded query-local budget.
             return distribution.estimateSlices(moments[distribution.power - 1], selected);
         }
 
         void clear() {
             sharedSelections.clear();
+            entropyShapes.clear();
+            layouts.clear();
             products.clear();
+            projections.clear();
+            extrapolations.clear();
             boundBytes = 0;
             work = null;
+        }
+
+        long entropyShapeBytes() {
+            return entropyShapes.estimatedSize();
         }
 
         long estimatedSize() {
