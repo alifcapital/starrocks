@@ -764,6 +764,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitShowDatabasesStatement(com.starrocks.sql.parser.StarRocksParser.ShowDatabasesStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         String catalog = null;
         NodePosition pos = createPos(context);
         if (context.catalog != null) {
@@ -1534,6 +1535,15 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         }
     }
 
+    // These SHOW statements apply either the LIKE pattern or the WHERE clause, so we reject both together, as
+    // MySQL does, instead of dropping one of them.
+    private void rejectLikeWithWhere(StarRocksParser.StringContext pattern,
+                                     StarRocksParser.ShowPredicateClausesContext clauses) {
+        if (pattern != null && clauses != null && clauses.WHERE() != null) {
+            throw new ParsingException("LIKE and WHERE cannot be used together", createPos(clauses.expression()));
+        }
+    }
+
     public Expr getWhereFrom(StarRocksParser.ShowPredicateClausesContext ctx) {
         if (ctx == null || ctx.WHERE() == null) {
             return null;
@@ -1557,6 +1567,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitShowTableStatement(com.starrocks.sql.parser.StarRocksParser.ShowTableStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         boolean isVerbose = context.FULL() != null;
         String database = null;
         String catalog = null;
@@ -1592,6 +1603,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitShowTemporaryTablesStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowTemporaryTablesStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         String database = null;
         String catalog = null;
         // catalog.db
@@ -1637,6 +1649,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitShowTableStatusStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowTableStatusStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         QualifiedName dbName = null;
         if (context.qualifiedName() != null) {
             dbName = getQualifiedName(context.db);
@@ -1660,6 +1673,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitShowColumnStatement(com.starrocks.sql.parser.StarRocksParser.ShowColumnStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         QualifiedName tableName = getQualifiedName(context.table);
         NodePosition tablePos = createPos(context.table.start, context.table.stop);
         TableRef tableRef = new TableRef(normalizeName(tableName), null, tablePos);
@@ -2431,6 +2445,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitShowMaterializedViewsStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowMaterializedViewsStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         String database = null;
         String catalog = null;
         NodePosition pos = createPos(context);
@@ -4057,6 +4072,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitShowVariablesStatement(com.starrocks.sql.parser.StarRocksParser.ShowVariablesStatementContext context) {
+        rejectLikeWithWhere(context.pattern, context.showPredicateClauses());
         String pattern = null;
         if (context.pattern != null) {
             StringLiteral stringLiteral = (StringLiteral) visit(context.pattern);
