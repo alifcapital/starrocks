@@ -30,7 +30,9 @@ import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalWindowOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -345,8 +347,27 @@ public class SplitJoinORToUnionRule extends TransformationRule {
         return false;
     }
 
+    // Every branch of the union evaluates the join and its inputs again, so a non-deterministic function would give
+    // each branch its own values. A branch also repeats the disjuncts of the earlier branches to exclude their rows,
+    // and that exclusion is right only when every evaluation returns the same value. So we look at every expression
+    // of the join and its inputs: predicates, projections, the ON predicate, aggregate and window calls.
     private boolean containsNonDeterministicFunction(OptExpression expr) {
         if (expr.getOp() instanceof LogicalOperator logicalOp) {
+            List<ScalarOperator> expressions = new ArrayList<>();
+            if (logicalOp instanceof LogicalJoinOperator join && join.getOnPredicate() != null) {
+                expressions.add(join.getOnPredicate());
+            } else if (logicalOp instanceof LogicalProjectOperator project) {
+                expressions.addAll(project.getColumnRefMap().values());
+            } else if (logicalOp instanceof LogicalAggregationOperator aggregation) {
+                expressions.addAll(aggregation.getAggregations().values());
+            } else if (logicalOp instanceof LogicalWindowOperator window) {
+                expressions.addAll(window.getWindowCall().values());
+            }
+            for (ScalarOperator expression : expressions) {
+                if (containsNonDeterministicFn(expression)) {
+                    return true;
+                }
+            }
 
             if (logicalOp.getPredicate() != null &&
                     containsNonDeterministicFn(logicalOp.getPredicate())) {

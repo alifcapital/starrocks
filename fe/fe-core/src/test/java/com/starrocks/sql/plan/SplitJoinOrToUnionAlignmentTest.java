@@ -147,4 +147,28 @@ public class SplitJoinOrToUnionAlignmentTest extends PlanTestBase {
             connectContext.getSessionVariable().setEnabledRewriteOrToUnionAllJoin(old);
         }
     }
+
+    @Test
+    public void nonDeterministicJoinOrInputIsNotSplit() throws Exception {
+        // Each union branch would evaluate random() again, and the later branch repeats the earlier disjunct to
+        // exclude its rows. With different values a row would be returned twice or not at all.
+        boolean old = connectContext.getSessionVariable().isEnabledRewriteOrToUnionAllJoin();
+        connectContext.getSessionVariable().setEnabledRewriteOrToUnionAllJoin(true);
+        try {
+            String[] queries = {
+                    "select t0.v1, t1.v4 from t0 join t1 on t0.v1 = t1.v4 + floor(random() * 2) or t0.v2 = t1.v5",
+                    "select a.v1, t1.v4 from (select v1 + floor(random() * 2) v1, v2 from t0) a join t1 " +
+                            "on a.v1 = t1.v4 or a.v2 = t1.v5",
+            };
+            for (String sql : queries) {
+                String plan = getFragmentPlan(sql);
+                Assertions.assertFalse(plan.contains("UNION"), sql + "\n" + plan);
+            }
+            // The same join without random() is still split.
+            String plan = getFragmentPlan("select t0.v1, t1.v4 from t0 join t1 on t0.v1 = t1.v4 or t0.v2 = t1.v5");
+            Assertions.assertTrue(plan.contains("UNION"), plan);
+        } finally {
+            connectContext.getSessionVariable().setEnabledRewriteOrToUnionAllJoin(old);
+        }
+    }
 }
