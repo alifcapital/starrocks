@@ -696,14 +696,22 @@ public class PartitionPruneTest extends PlanTestBase {
                 " partition p4 values in ('4', '5')" +
                 ")" +
                 "properties('replication_num'='1')");
-        starRocksAssert.query("select min(c1) from t1_list_multi_values")
-                .explainContains("     constant exprs: \n         1\n");
-        starRocksAssert.query("select max(c1) from t1_list_multi_values")
-                .explainContains("     constant exprs: \n         10\n");
-        starRocksAssert.query("select min(c1), max(c1) from t1_list_multi_values")
-                .explainContains("     constant exprs: \n         1 | 10\n");
-        starRocksAssert.query("select min(c1)+1, max(c1)-1 from t1_list_multi_values")
-                .explainContains("     constant exprs: \n         1 | 10\n");
+        boolean priorMetaScan = connectContext.getSessionVariable().isEnableRewriteSimpleAggToMetaScan();
+        try {
+            connectContext.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(false);
+            for (String query : java.util.List.of(
+                    "select min(c1) from t1_list_multi_values",
+                    "select max(c1) from t1_list_multi_values",
+                    "select min(c1), max(c1) from t1_list_multi_values",
+                    "select min(c1)+1, max(c1)-1 from t1_list_multi_values")) {
+                String plan = getFragmentPlan(query);
+                assertTrue(plan.contains("OlapScanNode"), query);
+                assertTrue(plan.contains("partitions=4/4"), query);
+                Assertions.assertFalse(plan.contains("constant exprs:"), query);
+            }
+        } finally {
+            connectContext.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(priorMetaScan);
+        }
         starRocksAssert.query("select min(c1-1)+1, max(c1-1)-1 from t1_list_multi_values")
                 .explainContains("OlapScanNode");
 
