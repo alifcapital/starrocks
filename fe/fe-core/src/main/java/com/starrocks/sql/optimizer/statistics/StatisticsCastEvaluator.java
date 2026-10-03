@@ -15,8 +15,8 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
-import com.starrocks.type.Type;
 import com.starrocks.type.ScalarType;
+import com.starrocks.type.Type;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;

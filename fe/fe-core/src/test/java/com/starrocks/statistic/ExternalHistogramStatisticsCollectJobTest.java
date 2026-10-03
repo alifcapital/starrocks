@@ -50,7 +50,10 @@ class ExternalHistogramStatisticsCollectJobTest {
                         schedule, Map.of(StatsConstants.HISTOGRAM_SAMPLE_RATIO, ratio,
                                 StatsConstants.HISTOGRAM_BUCKET_NUM, "64", StatsConstants.HISTOGRAM_MCV_SIZE, "20")));
                 var statements = new ArrayList<String>();
-                Mockito.doAnswer(call -> { statements.add(call.getArgument(0)); return null; })
+                Mockito.doAnswer(call -> {
+                    statements.add(call.getArgument(0));
+                    return null;
+                })
                         .when(job).collectStatisticSync(Mockito.anyString(), Mockito.eq(context), Mockito.eq(status));
                 var queries = new ArrayList<String>();
                 try (var executors = Mockito.mockConstruction(StatisticExecutor.class, (executor, ignored) -> {

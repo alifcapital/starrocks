@@ -18,24 +18,24 @@ import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.analyzer.Authorizer;
+import com.starrocks.sql.optimizer.dump.JoinStatisticsDump;
 import com.starrocks.sql.optimizer.dump.QueryDumpInfo;
 import com.starrocks.sql.optimizer.dump.QueryDumpSerializer;
+import com.starrocks.statistic.JoinStatisticsDefinition;
+import com.starrocks.statistic.JoinStatisticsMeta;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Mock;
 import mockit.MockUp;
-import org.junit.jupiter.api.BeforeEach;
-import com.starrocks.qe.ConnectContext;
-import com.starrocks.sql.optimizer.dump.JoinStatisticsDump;
-import com.starrocks.statistic.JoinStatisticsDefinition;
-import com.starrocks.statistic.JoinStatisticsMeta;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 class JoinStatisticsDumpTest {
     private final AtomicBoolean denied = new AtomicBoolean();

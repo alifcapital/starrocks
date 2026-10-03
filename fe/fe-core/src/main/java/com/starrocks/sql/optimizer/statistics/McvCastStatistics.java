@@ -168,7 +168,8 @@ final class McvCastStatistics {
         if (best.getNullCounts().size() == best.getColumns().size()) {
             nulls = best.getNullCounts().get(position);
         } else if (!complete && !input.getColumnStatistics().getOrDefault(source, ColumnStatistic.unknown()).isUnknown()) {
-            nulls = Math.max(nulls, Math.round(input.getColumnStatistics().getOrDefault(source, ColumnStatistic.unknown()).getNullsFraction() * best.getRowCount()));
+            nulls = Math.max(nulls, Math.round(input.getColumnStatistics().getOrDefault(source, ColumnStatistic.unknown())
+                    .getNullsFraction() * best.getRowCount()));
         }
         values.remove(null);
         nulls = Math.min(nulls, Math.max(0, Math.round(best.getRowCount())

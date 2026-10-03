@@ -15,8 +15,8 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Column;
-import com.starrocks.catalog.Table;
 import com.starrocks.catalog.OlapTable;
+import com.starrocks.catalog.Table;
 import com.starrocks.common.tvr.TvrTableDelta;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
@@ -27,19 +27,19 @@ import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.Projection;
-import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
-import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalDistributionOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashAggregateOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalIcebergScanOperator;
-import com.starrocks.sql.optimizer.operator.physical.PhysicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalJoinOperator;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalUnionOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -60,7 +60,8 @@ public final class JoinStatisticsScope {
     public record ColumnOrigin(String tableUuid, String name, Type type) {
     }
 
-    public record Source(String tableUuid, double estimatedRows, List<ScalarOperator> predicates, String physicalUuid, JoinStatisticsTableState tableState) {
+    public record Source(String tableUuid, double estimatedRows, List<ScalarOperator> predicates,
+                         String physicalUuid, JoinStatisticsTableState tableState) {
         public Source(String tableUuid, double estimatedRows, List<ScalarOperator> predicates) {
             this(tableUuid, estimatedRows, predicates, tableUuid, JoinStatisticsTableState.UNKNOWN);
         }
@@ -153,7 +154,8 @@ public final class JoinStatisticsScope {
         JoinStatisticsScope result;
         if (operator instanceof LogicalOlapScanOperator scan) {
             if (scan.getSample() != null || scan.getPartitionNames() != null || !scan.getHintsTabletIds().isEmpty()
-                    || scan.getGtid() != 0 || scan.getSelectedIndexMetaId() != ((OlapTable) scan.getTable()).getBaseIndexMetaId()) {
+                    || scan.getGtid() != 0
+                    || scan.getSelectedIndexMetaId() != ((OlapTable) scan.getTable()).getBaseIndexMetaId()) {
                 return null;
             }
             result = scan(scan.getTable(), scan.getColRefToColumnMetaMap(), context.getStatistics().getOutputRowCount());
@@ -321,7 +323,8 @@ public final class JoinStatisticsScope {
         String uuid = table.getUUID();
         Map<ColumnRefOperator, ColumnOrigin> columns = new HashMap<>();
         references.forEach((ref, column) -> columns.put(ref, new ColumnOrigin(uuid, column.getName(), column.getType())));
-        return new JoinStatisticsScope(Map.of(uuid, new Source(uuid, rows, List.of(), uuid, state)), columns, Set.of(), Set.of(uuid));
+        return new JoinStatisticsScope(Map.of(uuid, new Source(uuid, rows, List.of(), uuid, state)),
+                columns, Set.of(), Set.of(uuid));
     }
 
     static JoinStatisticsScope join(JoinStatisticsScope left, JoinStatisticsScope right, JoinOperator kind,
@@ -397,7 +400,8 @@ public final class JoinStatisticsScope {
         Map<String, Source> relations = new HashMap<>();
         sources.forEach((id, source) -> {
             String role = aliases.getOrDefault(id, id);
-            relations.put(role, new Source(role, source.estimatedRows, source.predicates, source.physicalUuid, source.tableState));
+            relations.put(role, new Source(role, source.estimatedRows, source.predicates,
+                    source.physicalUuid, source.tableState));
         });
         Map<ColumnRefOperator, ColumnOrigin> origins = new HashMap<>();
         columns.forEach((column, origin) -> origins.put(column, rename.apply(origin)));
