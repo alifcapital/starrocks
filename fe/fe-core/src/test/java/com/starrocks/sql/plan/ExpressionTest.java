@@ -986,7 +986,7 @@ public class ExpressionTest extends PlanTestBase {
 
         sql = "select v1 from t0 where  v1 / abs(-2) = 3";
         planFragment = getFragmentPlan(sql);
-        assertContains(planFragment, "PREDICATES: CAST(1: v1 AS DOUBLE) = 3.0 * CAST(abs(-2) AS DOUBLE)");
+        assertContains(planFragment, "PREDICATES: CAST(1: v1 AS DOUBLE) / CAST(abs(-2) AS DOUBLE) = 3.0");
 
         sql = "select v1 from t0 where 2 + v1 <= 3";
         planFragment = getFragmentPlan(sql);

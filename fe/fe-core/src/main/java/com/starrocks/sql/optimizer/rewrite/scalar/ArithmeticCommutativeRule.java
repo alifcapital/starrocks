@@ -23,9 +23,12 @@ import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.Map;
 
 import static com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil.findArithmeticFunction;
@@ -53,6 +56,20 @@ public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule
             .put(FunctionSet.SUBTRACT, FunctionSet.SUBTRACT)
             .build();
 
+    private static boolean isNonZeroNumber(ScalarOperator operator) {
+        if (!(operator instanceof ConstantOperator) || operator.isConstantNull()) {
+            return false;
+        }
+        Object value = ((ConstantOperator) operator).getValue();
+        if (value instanceof BigDecimal) {
+            return ((BigDecimal) value).signum() != 0;
+        }
+        if (value instanceof BigInteger) {
+            return ((BigInteger) value).signum() != 0;
+        }
+        return value instanceof Number && ((Number) value).doubleValue() != 0;
+    }
+
     @Override
     public ScalarOperator visitBinaryPredicate(BinaryPredicateOperator predicate,
                                                ScalarOperatorRewriteContext context) {
@@ -78,6 +95,11 @@ public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule
                 return predicate;
             }
             if (s2.isConstantNull() && predicate.getBinaryType() == BinaryType.EQ_FOR_NULL) {
+                return predicate;
+            }
+            // x / 0 is NULL, so a comparison with it is never true, while x = c * 0 is true for x = 0. We move a
+            // division to the other side only when the divisor is a constant that we can see is not zero.
+            if (FunctionSet.DIVIDE.equals(functionName) && !isNonZeroNumber(s2)) {
                 return predicate;
             }
             String fnName = LEFT_COMMUTATIVE_MAP.get(functionName);
