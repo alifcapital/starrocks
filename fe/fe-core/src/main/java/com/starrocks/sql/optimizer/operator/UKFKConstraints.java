@@ -26,7 +26,6 @@ import com.starrocks.sql.plan.ScalarOperatorToExpr;
 
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
 
 public class UKFKConstraints {
     // ColumnRefOperator::id -> UniqueConstraint
@@ -86,9 +85,7 @@ public class UKFKConstraints {
 
     public static UKFKConstraints inheritFrom(UKFKConstraints from, ColumnRefSet toOutputColumns) {
         UKFKConstraints clone = new UKFKConstraints();
-        from.uniqueKeys.entrySet().stream()
-                .filter(entry -> toOutputColumns.contains(entry.getKey()))
-                .forEach(entry -> clone.uniqueKeys.put(entry.getKey(), entry.getValue()));
+        inheritKeys(from.uniqueKeys, clone.uniqueKeys, toOutputColumns);
         clone.inheritForeignKey(from, toOutputColumns);
         clone.inheritRelaxedUniqueKey(from, toOutputColumns);
         clone.inheritAggUniqueKey(from, toOutputColumns);
@@ -96,22 +93,29 @@ public class UKFKConstraints {
         return clone;
     }
 
+    private static <T> void inheritKeys(Map<Integer, T> from, Map<Integer, T> to, ColumnRefSet outputColumns) {
+        for (Map.Entry<Integer, T> entry : from.entrySet()) {
+            if (outputColumns.contains(entry.getKey())) {
+                to.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
     public void inheritForeignKey(UKFKConstraints other, ColumnRefSet outputColumns) {
-        other.foreignKeys.entrySet().stream()
-                .filter(entry -> outputColumns.contains(entry.getKey()))
-                .forEach(entry -> foreignKeys.put(entry.getKey(), entry.getValue()));
+        inheritKeys(other.foreignKeys, foreignKeys, outputColumns);
     }
 
     public void inheritRelaxedUniqueKey(UKFKConstraints other, ColumnRefSet outputColumns) {
-        Stream.concat(other.uniqueKeys.entrySet().stream(), other.relaxedUniqueKeys.entrySet().stream())
-                .filter(entry -> outputColumns.contains(entry.getKey()))
-                .forEach(entry -> relaxedUniqueKeys.put(entry.getKey(), entry.getValue()));
+        inheritKeys(other.uniqueKeys, relaxedUniqueKeys, outputColumns);
+        inheritKeys(other.relaxedUniqueKeys, relaxedUniqueKeys, outputColumns);
     }
 
     public void inheritAggUniqueKey(UKFKConstraints other, ColumnRefSet outputColumns) {
-        other.aggUniqueKeys.stream()
-                .filter(uk -> outputColumns.containsAll(uk.ukColumnRefs))
-                .forEach(aggUniqueKeys::add);
+        for (UniqueConstraintWrapper uk : other.aggUniqueKeys) {
+            if (outputColumns.containsAll(uk.ukColumnRefs)) {
+                aggUniqueKeys.add(uk);
+            }
+        }
     }
 
     public static final class UniqueConstraintWrapper {

@@ -91,11 +91,13 @@ public class CostModel {
     private static double calculateCost(ExpressionContext expressionContext) {
         CostEstimate costEstimate = getCostEstimate(ImmutableList.of(), expressionContext);
         double realCost = getRealCost(costEstimate);
-        LOG.debug("operator: {}, outputRowCount: {}, outPutSize: {}, costEstimate: {}, realCost: {}",
-                expressionContext.getOp(),
-                expressionContext.getStatistics().getOutputRowCount(),
-                expressionContext.getStatistics().getComputeSize(),
-                costEstimate, realCost);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("operator: {}, outputRowCount: {}, outPutSize: {}, costEstimate: {}, realCost: {}",
+                    expressionContext.getOp(),
+                    expressionContext.getStatistics().getOutputRowCount(),
+                    expressionContext.getStatistics().getComputeSize(),
+                    costEstimate, realCost);
+        }
         return realCost;
     }
 
@@ -115,14 +117,16 @@ public class CostModel {
         CostEstimate costEstimate = getCostEstimate(childrenOutputProperties, expressionContext);
         double realCost = getRealCost(costEstimate);
 
-        LOG.debug("operator: {}, group id: {}, child group id: {}, " +
-                        "inputProperties: {}, outputRowCount: {}, outPutSize: {}, costEstimate: {}, realCost: {}",
-                expressionContext.getOp(), expression.getGroup().getId(),
-                expression.getInputs().stream().map(Group::getId).collect(Collectors.toList()),
-                childrenOutputProperties,
-                expressionContext.getStatistics().getOutputRowCount(),
-                expressionContext.getStatistics().getComputeSize(),
-                costEstimate, realCost);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("operator: {}, group id: {}, child group id: {}, " +
+                            "inputProperties: {}, outputRowCount: {}, outPutSize: {}, costEstimate: {}, realCost: {}",
+                    expressionContext.getOp(), expression.getGroup().getId(),
+                    expression.getInputs().stream().map(Group::getId).collect(Collectors.toList()),
+                    childrenOutputProperties,
+                    expressionContext.getStatistics().getOutputRowCount(),
+                    expressionContext.getStatistics().getComputeSize(),
+                    costEstimate, realCost);
+        }
         return realCost;
     }
 
@@ -558,10 +562,9 @@ public class CostModel {
             Statistics leftStatistics = context.getChildStatistics(0);
             Statistics rightStatistics = context.getChildStatistics(1);
 
-            List<BinaryPredicateOperator> eqOnPredicates =
-                    JoinHelper.getEqualsPredicate(leftStatistics.getUsedColumns(), rightStatistics.getUsedColumns(),
-                            Utils.extractConjuncts(join.getOnPredicate()));
-            if (join.getJoinType().isCrossJoin() || eqOnPredicates.isEmpty()) {
+            boolean hasEqualsPredicate = JoinHelper.hasEqualsPredicate(
+                    leftStatistics.getUsedColumns(), rightStatistics.getUsedColumns(), join.getOnPredicate());
+            if (join.getJoinType().isCrossJoin() || !hasEqualsPredicate) {
                 return CostEstimate.of(leftStatistics.getOutputSize(context.getChildOutputColumns(0))
                                 + rightStatistics.getOutputSize(context.getChildOutputColumns(1)),
                         rightStatistics.getOutputSize(context.getChildOutputColumns(1))
@@ -699,8 +702,10 @@ public class CostModel {
 
         // use cost to eliminate invalid one phase agg plan
         private Optional<CostEstimate> invalidOneStageAggCost(PhysicalHashAggregateOperator node, ExpressionContext context) {
-            boolean mustMultiStageAgg = Utils.mustGenerateMultiStageAggregate(node, context.getChildOperator(0));
-            if (mustMultiStageAgg && !node.isSplit() && node.getType().isGlobal()) {
+            if (node.isSplit() || !node.getType().isGlobal()) {
+                return Optional.empty();
+            }
+            if (Utils.mustGenerateMultiStageAggregate(node, context.getChildOperator(0))) {
                 return Optional.of(CostEstimate.infinite());
             }
             return Optional.empty();

@@ -15,16 +15,20 @@
 package com.starrocks.sql.optimizer.rule.implementation;
 
 import com.google.common.collect.Lists;
+import com.starrocks.catalog.TableFunction;
+import com.starrocks.common.Pair;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalTableFunctionOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalTableFunctionOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class TableFunctionImplementationRule extends ImplementationRule {
     public TableFunctionImplementationRule() {
@@ -35,10 +39,18 @@ public class TableFunctionImplementationRule extends ImplementationRule {
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalTableFunctionOperator logicalTableFunctionOperator = (LogicalTableFunctionOperator) input.getOp();
+        List<ColumnRefOperator> resultColRefs = logicalTableFunctionOperator.getFnResultColRefs();
+        TableFunction fn = logicalTableFunctionOperator.getFn();
+        List<Pair<ColumnRefOperator, ScalarOperator>> paramProjects =
+                logicalTableFunctionOperator.getFnParamColumnProject();
+        List<ColumnRefOperator> paramColRefs = new ArrayList<>(paramProjects.size());
+        for (Pair<ColumnRefOperator, ScalarOperator> paramProject : paramProjects) {
+            paramColRefs.add(paramProject.first);
+        }
         PhysicalTableFunctionOperator physicalLateral = new PhysicalTableFunctionOperator(
-                logicalTableFunctionOperator.getFnResultColRefs(),
-                logicalTableFunctionOperator.getFn(),
-                logicalTableFunctionOperator.getFnParamColumnProject().stream().map(p -> p.first).collect(Collectors.toList()),
+                resultColRefs,
+                fn,
+                paramColRefs,
                 logicalTableFunctionOperator.getOuterColRefs(),
                 logicalTableFunctionOperator.getLimit(),
                 logicalTableFunctionOperator.getPredicate(),

@@ -15,7 +15,7 @@
 
 package com.starrocks.sql.optimizer.operator.logical;
 
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.RowOutputInfo;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -54,7 +54,7 @@ public class MockOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         return new ColumnRefSet();
     }
 

@@ -24,7 +24,7 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.planner.PartitionColumnFilter;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -201,11 +201,11 @@ public abstract class LogicalScanOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(projection.getOutputColumns());
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         }
-        return new ColumnRefSet(new ArrayList<>(colRefToColumnMetaMap.keySet()));
+        return new ColumnRefSet(colRefToColumnMetaMap.keySet());
     }
 
     @Override

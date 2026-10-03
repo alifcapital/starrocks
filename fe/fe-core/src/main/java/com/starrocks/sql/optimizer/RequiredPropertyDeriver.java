@@ -89,19 +89,16 @@ public class RequiredPropertyDeriver extends PropertyDeriverBase<Void, Expressio
                 DistributionProperty oldDistribution = newProperty.getDistributionProperty();
                 newProperty.setDistributionProperty(DistributionProperty.createProperty(
                         oldDistribution.getSpec(), true));
-                Set<Integer> cteIds = Sets.newHashSet(requirementsFromParent.getCteProperty().getCteIds());
-                if (idx == 0) {
-                    cteIds.retainAll(groupExpression.inputAt(0).getLogicalProperty().getUsedCTEs().getCteIds());
-                } else {
-                    cteIds.retainAll(groupExpression.inputAt(1).getLogicalProperty().getUsedCTEs().getCteIds());
-                    cteIds.add(operator.getCteId());
+                CTEProperty ctes = requirementsFromParent.getCteProperty()
+                        .intersect(groupExpression.inputAt(idx == 0 ? 0 : 1).getLogicalProperty().getUsedCTEs());
+                if (idx != 0) {
+                    ctes = ctes.withCTE(operator.getCteId());
                 }
-                newProperty.setCteProperty(CTEProperty.createProperty(cteIds));
+                newProperty.setCteProperty(ctes);
                 requiredProperties.get(0).set(idx++, newProperty);
             }
         } else if (operatorType == OperatorType.PHYSICAL_NO_CTE) {
-            Set<Integer> cteIds = Sets.newHashSet(requirementsFromParent.getCteProperty().getCteIds());
-            CTEProperty cteProperty = CTEProperty.createProperty(cteIds);
+            CTEProperty cteProperty = requirementsFromParent.getCteProperty();
             PhysicalPropertySet newProperty = requiredProperties.get(0).get(0).copy();
             DistributionProperty oldDistribution = newProperty.getDistributionProperty();
             newProperty.setDistributionProperty(DistributionProperty.createProperty(oldDistribution.getSpec(), true));
@@ -116,9 +113,8 @@ public class RequiredPropertyDeriver extends PropertyDeriverBase<Void, Expressio
             for (List<PhysicalPropertySet> requiredProperty : requiredProperties) {
                 for (int i = 0; i < requiredProperty.size(); i++) {
                     PhysicalPropertySet property = requiredProperty.get(i).copy();
-                    Set<Integer> remainCteIds = Sets.newHashSet(requirementsFromParent.getCteProperty().getCteIds());
-                    remainCteIds.retainAll(groupExpression.inputAt(i).getLogicalProperty().getUsedCTEs().getCteIds());
-                    CTEProperty cteProperty = CTEProperty.createProperty(remainCteIds);
+                    CTEProperty cteProperty = requirementsFromParent.getCteProperty()
+                            .intersect(groupExpression.inputAt(i).getLogicalProperty().getUsedCTEs());
                     property.setCteProperty(cteProperty);
                     requiredProperty.set(i, property);
                 }

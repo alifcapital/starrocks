@@ -18,7 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.expression.AnalyticWindow;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -102,9 +102,9 @@ public class LogicalWindowOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(new ArrayList<>(projection.getColumnRefMap().keySet()));
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         } else {
             ColumnRefSet columns = new ColumnRefSet();
             columns.union(new ArrayList<>(windowCall.keySet()));

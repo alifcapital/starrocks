@@ -16,9 +16,9 @@ package com.starrocks.sql.optimizer.base;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
 import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
@@ -96,7 +96,23 @@ public class LogicalProperty implements Property {
         usedCTEs = other.usedCTEs;
     }
 
+    public static LogicalProperty deriveFrom(ExpressionContext expressionContext) {
+        return deriveFrom((LogicalPropertyContext) expressionContext);
+    }
+
+    public static LogicalProperty deriveFrom(LogicalPropertyContext expressionContext) {
+        // derive() replaces outputColumns before visiting children. Do not allocate an empty
+        // bitmap just to discard it; the regular constructor still provides an empty property.
+        LogicalProperty property = new LogicalProperty((ColumnRefSet) null);
+        property.derive(expressionContext);
+        return property;
+    }
+
     public void derive(ExpressionContext expressionContext) {
+        derive((LogicalPropertyContext) expressionContext);
+    }
+
+    public void derive(LogicalPropertyContext expressionContext) {
         LogicalOperator op = (LogicalOperator) expressionContext.getOp();
         outputColumns = op.getOutputColumns(expressionContext);
         oneTabletProperty = op.accept(new OneTabletExecutorVisitor(), expressionContext);
@@ -106,30 +122,30 @@ public class LogicalProperty implements Property {
         }
     }
 
-    private void deriveUsedCTEs(ExpressionContext expressionContext) {
+    private void deriveUsedCTEs(LogicalPropertyContext expressionContext) {
         OperatorType type = expressionContext.getOp().getOpType();
-        Set<Integer> cteIds = Sets.newHashSet();
+        CTEProperty ctes = EmptyCTEProperty.INSTANCE;
 
         if (type == LOGICAL_CTE_ANCHOR) {
             LogicalCTEAnchorOperator anchorOperator = (LogicalCTEAnchorOperator) expressionContext.getOp();
-            cteIds.addAll(expressionContext.getChildLogicalProperty(0).getUsedCTEs().getCteIds());
-            cteIds.addAll(expressionContext.getChildLogicalProperty(1).getUsedCTEs().getCteIds());
-            cteIds.remove(anchorOperator.getCteId());
+            ctes = expressionContext.getChildLogicalProperty(0).getUsedCTEs()
+                    .union(expressionContext.getChildLogicalProperty(1).getUsedCTEs())
+                    .withoutCTE(anchorOperator.getCteId());
         } else if (type == LOGICAL_CTE_PRODUCE) {
-            cteIds.addAll(expressionContext.getChildLogicalProperty(0).getUsedCTEs().getCteIds());
+            ctes = expressionContext.getChildLogicalProperty(0).getUsedCTEs();
         } else if (type == LOGICAL_CTE_CONSUME) {
             LogicalCTEConsumeOperator consumeOperator = (LogicalCTEConsumeOperator) expressionContext.getOp();
             if (expressionContext.arity() > 0) {
-                cteIds.addAll(expressionContext.getChildLogicalProperty(0).getUsedCTEs().getCteIds());
+                ctes = expressionContext.getChildLogicalProperty(0).getUsedCTEs();
             }
-            cteIds.add(consumeOperator.getCteId());
+            ctes = ctes.withCTE(consumeOperator.getCteId());
         } else {
             for (int i = 0; i < expressionContext.arity(); i++) {
-                cteIds.addAll(expressionContext.getChildLogicalProperty(i).getUsedCTEs().getCteIds());
+                ctes = ctes.union(expressionContext.getChildLogicalProperty(i).getUsedCTEs());
             }
         }
 
-        usedCTEs = CTEProperty.createProperty(cteIds);
+        usedCTEs = ctes;
     }
 
     public static final class OneTabletProperty {
@@ -157,25 +173,25 @@ public class LogicalProperty implements Property {
         }
     }
 
-    static class OneTabletExecutorVisitor extends OperatorVisitor<OneTabletProperty, ExpressionContext> {
+    static class OneTabletExecutorVisitor extends OperatorVisitor<OneTabletProperty, LogicalPropertyContext> {
         @Override
-        public OneTabletProperty visitOperator(Operator node, ExpressionContext context) {
+        public OneTabletProperty visitOperator(Operator node, LogicalPropertyContext context) {
             Preconditions.checkState(context.arity() != 0);
             return context.oneTabletProperty(0);
         }
 
         @Override
-        public OneTabletProperty visitMockOperator(MockOperator node, ExpressionContext context) {
+        public OneTabletProperty visitMockOperator(MockOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.supportWithoutChangeDistribution(new ColumnRefSet());
         }
 
         @Override
-        public OneTabletProperty visitLogicalViewScan(LogicalViewScanOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalViewScan(LogicalViewScanOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
-        public OneTabletProperty visitLogicalTableScan(LogicalScanOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalTableScan(LogicalScanOperator node, LogicalPropertyContext context) {
             if (node instanceof LogicalOlapScanOperator) {
                 LogicalOlapScanOperator olapScanOperator = (LogicalOlapScanOperator) node;
                 if (olapScanOperator.getSelectedTabletId() != null && olapScanOperator.getSelectedTabletId().size() <= 1) {
@@ -196,17 +212,17 @@ public class LogicalProperty implements Property {
         }
 
         @Override
-        public OneTabletProperty visitLogicalValues(LogicalValuesOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalValues(LogicalValuesOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.supportWithoutChangeDistribution(new ColumnRefSet());
         }
 
         @Override
-        public OneTabletProperty visitLogicalRawValues(LogicalRawValuesOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalRawValues(LogicalRawValuesOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.supportWithoutChangeDistribution(new ColumnRefSet());
         }
 
         @Override
-        public OneTabletProperty visitLogicalAnalytic(LogicalWindowOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalAnalytic(LogicalWindowOperator node, LogicalPropertyContext context) {
             OneTabletProperty isExecuteInOneTablet = context.oneTabletProperty(0);
             if (isExecuteInOneTablet.distributionIntact) {
                 List<Integer> partitionColumnRefSet = new ArrayList<>();
@@ -223,7 +239,7 @@ public class LogicalProperty implements Property {
 
         @Override
         public OneTabletProperty visitLogicalAggregation(LogicalAggregationOperator node,
-                                                         ExpressionContext context) {
+                                                         LogicalPropertyContext context) {
             OneTabletProperty isExecuteInOneTablet = context.oneTabletProperty(0);
             if (isExecuteInOneTablet.distributionIntact) {
                 ColumnRefSet groupByColumns = new ColumnRefSet(node.getGroupingKeys());
@@ -240,39 +256,39 @@ public class LogicalProperty implements Property {
         }
 
         @Override
-        public OneTabletProperty visitLogicalJoin(LogicalJoinOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalJoin(LogicalJoinOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
-        public OneTabletProperty visitLogicalUnion(LogicalUnionOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalUnion(LogicalUnionOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
-        public OneTabletProperty visitLogicalExcept(LogicalExceptOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalExcept(LogicalExceptOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
-        public OneTabletProperty visitLogicalIntersect(LogicalIntersectOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalIntersect(LogicalIntersectOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
         public OneTabletProperty visitLogicalTableFunction(LogicalTableFunctionOperator node,
-                                                           ExpressionContext context) {
+                                                           LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
 
         @Override
-        public OneTabletProperty visitLogicalCTEAnchor(LogicalCTEAnchorOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalCTEAnchor(LogicalCTEAnchorOperator node, LogicalPropertyContext context) {
             Preconditions.checkState(context.arity() == 2);
             return context.oneTabletProperty(1);
         }
 
         @Override
-        public OneTabletProperty visitLogicalCTEConsume(LogicalCTEConsumeOperator node, ExpressionContext context) {
+        public OneTabletProperty visitLogicalCTEConsume(LogicalCTEConsumeOperator node, LogicalPropertyContext context) {
             return OneTabletProperty.notSupport();
         }
     }

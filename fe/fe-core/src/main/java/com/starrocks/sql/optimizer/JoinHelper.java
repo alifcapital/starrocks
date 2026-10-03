@@ -24,15 +24,18 @@ import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.DistributionCol;
 import com.starrocks.sql.optimizer.operator.Operator;
+import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalNestLoopJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamJoinOperator;
 import com.starrocks.type.Type;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -284,6 +287,35 @@ public class JoinHelper {
 
         return (leftColumns.containsAll(leftOperandColumns) && rightColumns.containsAll(rightOperandColumns)) ||
                 (rightColumns.containsAll(leftOperandColumns) && leftColumns.containsAll(rightOperandColumns));
+    }
+
+    public static boolean hasEqualsPredicate(ColumnRefSet leftColumns, ColumnRefSet rightColumns,
+                                            ScalarOperator onPredicate) {
+        if (onPredicate == null) {
+            return false;
+        }
+        ArrayDeque<ScalarOperator> pending = null;
+        ScalarOperator predicate = onPredicate;
+        while (true) {
+            if (OperatorType.COMPOUND.equals(predicate.getOpType())) {
+                CompoundPredicateOperator compound = (CompoundPredicateOperator) predicate;
+                if (compound.isAnd()) {
+                    if (pending == null) {
+                        pending = new ArrayDeque<>();
+                    }
+                    pending.addLast(compound.getChild(1));
+                    predicate = compound.getChild(0);
+                    continue;
+                }
+            }
+            if (isEqualBinaryPredicate(leftColumns, rightColumns, predicate)) {
+                return true;
+            }
+            if (pending == null || pending.isEmpty()) {
+                return false;
+            }
+            predicate = pending.removeLast();
+        }
     }
 
     public static List<BinaryPredicateOperator> getEqualsPredicate(ColumnRefSet leftColumns, ColumnRefSet rightColumns,

@@ -14,8 +14,6 @@
 
 package com.starrocks.sql.optimizer.base;
 
-import java.util.Objects;
-
 public class DistributionCol {
 
     private final int colId;
@@ -113,7 +111,7 @@ public class DistributionCol {
 
     @Override
     public int hashCode() {
-        return Objects.hash(colId, nullStrict);
+        return 31 * (31 + Integer.hashCode(colId)) + Boolean.hashCode(nullStrict);
     }
 
     @Override

@@ -17,7 +17,7 @@ package com.starrocks.sql.optimizer.operator.logical;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.JoinOperator;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -35,7 +35,6 @@ import com.starrocks.sql.optimizer.property.DomainProperty;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -151,16 +150,16 @@ public class LogicalJoinOperator extends LogicalOperator {
     public ColumnRefSet getRequiredChildInputColumns() {
         ColumnRefSet result = new ColumnRefSet();
         if (onPredicate != null) {
-            result.union(onPredicate.getUsedColumns());
+            onPredicate.collectUsedColumns(result);
         }
         if (predicate != null) {
-            result.union(predicate.getUsedColumns());
+            predicate.collectUsedColumns(result);
         }
 
         if (projection != null) {
-            projection.getColumnRefMap().values().forEach(s -> result.union(s.getUsedColumns()));
-            result.except(new ColumnRefSet(new ArrayList<>(projection.getCommonSubOperatorMap().keySet())));
-            projection.getCommonSubOperatorMap().values().forEach(s -> result.union(s.getUsedColumns()));
+            projection.getColumnRefMap().values().forEach(s -> s.collectUsedColumns(result));
+            result.except(projection.getCommonSubOperatorMap().keySet());
+            projection.getCommonSubOperatorMap().values().forEach(s -> s.collectUsedColumns(result));
         }
         return result;
     }
@@ -174,7 +173,7 @@ public class LogicalJoinOperator extends LogicalOperator {
         } else if (joinType.isRightSemiAntiJoin()) {
             candidate = expr.getChildOutputColumns(1);
         } else {
-            candidate = getOutputColumns(new ExpressionContext(expr));
+            candidate = getOutputColumns(LogicalPropertyContext.of(expr));
         }
         if (required != null) {
             candidate.intersect(required);
@@ -184,9 +183,9 @@ public class LogicalJoinOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(projection.getOutputColumns());
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         } else {
             ColumnRefSet columns = new ColumnRefSet();
             for (int i = 0; i < expressionContext.arity(); ++i) {

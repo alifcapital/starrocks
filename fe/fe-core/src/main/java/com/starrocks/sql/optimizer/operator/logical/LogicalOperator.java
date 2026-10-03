@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.operator.logical;
 import com.google.common.collect.Maps;
 import com.starrocks.common.tvr.TvrTableDeltaTrait;
 import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -46,12 +47,16 @@ public abstract class LogicalOperator extends Operator {
         return true;
     }
 
-    public abstract ColumnRefSet getOutputColumns(ExpressionContext expressionContext);
+    public abstract ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext);
+
+    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+        return getOutputColumns((LogicalPropertyContext) expressionContext);
+    }
 
     public ColumnRefOperator getSmallestColumn(ColumnRefSet requiredCandidates,
                                                ColumnRefFactory columnRefFactory,
                                                OptExpression opt) {
-        ColumnRefSet outputCandidates = getOutputColumns(new ExpressionContext(opt));
+        ColumnRefSet outputCandidates = getOutputColumns(LogicalPropertyContext.of(opt));
         if (requiredCandidates != null) {
             outputCandidates.intersect(requiredCandidates);
         }

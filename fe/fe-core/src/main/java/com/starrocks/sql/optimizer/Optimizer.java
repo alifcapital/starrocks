@@ -14,6 +14,7 @@
 package com.starrocks.sql.optimizer;
 
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
+import com.starrocks.sql.optimizer.base.LogicalProperty;
 import com.starrocks.sql.optimizer.base.PhysicalPropertySet;
 
 public abstract class Optimizer {
@@ -39,8 +40,6 @@ public abstract class Optimizer {
             deriveLogicalProperty(child);
         }
 
-        ExpressionContext context = new ExpressionContext(root);
-        context.deriveLogicalProperty();
-        root.setLogicalProperty(context.getRootProperty());
+        root.setLogicalProperty(LogicalProperty.deriveFrom(LogicalPropertyContext.of(root)));
     }
 }

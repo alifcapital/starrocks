@@ -129,11 +129,14 @@ public class UKFKConstraintsCollector extends OptExpressionVisitor<Void, Void> {
             return null;
         }
         LogicalScanOperator scanOperator = optExpression.getOp().cast();
+        Table table = scanOperator.getTable();
+        if (collectEmptyTableConstraints(optExpression, table)) {
+            return null;
+        }
         ColumnRefSet usedColumns = new ColumnRefSet();
         if (scanOperator.getPredicate() != null) {
             usedColumns.union(scanOperator.getPredicate().getUsedColumns());
         }
-        Table table = scanOperator.getTable();
         Map<String, ColumnRefOperator> columnNameToColRefMap = scanOperator.getColumnNameToColRefMap();
 
         visitTable(optExpression, table, columnNameToColRefMap, usedColumns);
@@ -147,14 +150,25 @@ public class UKFKConstraintsCollector extends OptExpressionVisitor<Void, Void> {
             return null;
         }
         PhysicalScanOperator scanOperator = optExpression.getOp().cast();
-        ColumnRefSet usedColumns = scanOperator.getUsedColumns();
         Table table = scanOperator.getTable();
+        if (collectEmptyTableConstraints(optExpression, table)) {
+            return null;
+        }
+        ColumnRefSet usedColumns = scanOperator.getUsedColumns();
         Map<String, ColumnRefOperator> columnNameToColRefMap = scanOperator.getColRefToColumnMetaMap().entrySet()
                 .stream().collect(Collectors.toMap(entry -> entry.getValue().getName(), Map.Entry::getKey));
 
         visitTable(optExpression, table, columnNameToColRefMap, usedColumns);
 
         return null;
+    }
+
+    private boolean collectEmptyTableConstraints(OptExpression expression, Table table) {
+        if (!table.hasUniqueConstraints() && !table.hasForeignKeyConstraints()) {
+            expression.setConstraints(new UKFKConstraints());
+            return true;
+        }
+        return false;
     }
 
     private void visitTable(OptExpression optExpression, Table table,

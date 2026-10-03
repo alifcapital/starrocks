@@ -78,9 +78,13 @@ public class OptExpression {
         this.inputs = Lists.newArrayList();
     }
 
+    private OptExpression(Operator op, List<OptExpression> ownedInputs) {
+        this.op = op;
+        this.inputs = ownedInputs;
+    }
+
     public static OptExpression create(Operator op, TvrOptMeta tvrOptMeta, OptExpression... inputs) {
-        OptExpression expr = new OptExpression(op);
-        expr.inputs = Lists.newArrayList(inputs);
+        OptExpression expr = new OptExpression(op, Lists.newArrayList(inputs));
         expr.tvrOptMeta = tvrOptMeta;
         return expr;
     }
@@ -98,8 +102,7 @@ public class OptExpression {
     }
 
     public static OptExpression create(Operator op, TvrOptMeta tvrOptMeta, List<OptExpression> inputs) {
-        OptExpression expr = new OptExpression(op);
-        expr.inputs = Lists.newArrayList(inputs);
+        OptExpression expr = new OptExpression(op, Lists.newArrayList(inputs));
         expr.tvrOptMeta = tvrOptMeta;
         return expr;
     }
@@ -214,9 +217,7 @@ public class OptExpression {
 
     // This function assume the child expr logical property has been derived
     public void deriveLogicalPropertyItself() {
-        ExpressionContext context = new ExpressionContext(this);
-        context.deriveLogicalProperty();
-        setLogicalProperty(context.getRootProperty());
+        this.setLogicalProperty(LogicalProperty.deriveFrom(LogicalPropertyContext.of(this)));
     }
 
     public void deriveMVProperty() {

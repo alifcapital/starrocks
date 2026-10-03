@@ -17,7 +17,7 @@ package com.starrocks.sql.optimizer.operator.logical;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.TableFunction;
 import com.starrocks.common.Pair;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -30,7 +30,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.property.DomainProperty;
 import org.apache.commons.collections4.CollectionUtils;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -91,9 +90,9 @@ public class LogicalTableFunctionOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(new ArrayList<>(projection.getColumnRefMap().keySet()));
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         } else {
             ColumnRefSet outputColumns = new ColumnRefSet(outerColRefs);
             outputColumns.union(new ColumnRefSet(fnResultColRefs));
