@@ -345,6 +345,8 @@ public class SqlParser {
             Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction) {
         com.starrocks.sql.parser.StarRocksLexer lexer =
                 new com.starrocks.sql.parser.StarRocksLexer(new CaseInsensitiveStream(SqlTextStream.create(sql)));
+        lexer.removeErrorListeners();
+        lexer.addErrorListener(new ErrorHandler());
         lexer.setSqlMode(sessionVariable.getSqlMode());
         if (Config.enable_concurrent_parse_optimization) {
             DFA[] lexerDecisionDFA = new DFA[StarRocksLexer._ATN.getNumberOfDecisions()];

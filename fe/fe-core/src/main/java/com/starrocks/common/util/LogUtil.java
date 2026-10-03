@@ -162,7 +162,13 @@ public class LogUtil {
                 inStringStart = character;
                 appendChar(sb, inStringStart);
                 idx++;
-                while (idx < length && ((origStmt.charAt(idx) != inStringStart) || origStmt.charAt(idx - 1) == '\\')) {
+                // A backslash escapes the next character in a string, so an escaped backslash before the quote
+                // does not escape the quote. Backquoted identifiers have no backslash escapes.
+                while (idx < length && origStmt.charAt(idx) != inStringStart) {
+                    if (origStmt.charAt(idx) == '\\' && inStringStart != '`' && idx + 1 < length) {
+                        sb.append(origStmt.charAt(idx));
+                        ++idx;
+                    }
                     sb.append(origStmt.charAt(idx));
                     ++idx;
                 }
