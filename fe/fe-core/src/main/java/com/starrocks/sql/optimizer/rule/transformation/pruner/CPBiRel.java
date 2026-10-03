@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.rule.transformation.pruner;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.Pair;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
@@ -90,8 +91,11 @@ public class CPBiRel {
         if (!foreignKeyConstraint.getParentTableInfo().matchTable(referencedTable)) {
             return false;
         }
-        Set<String> referencedColumnNames =
-                foreignKeyConstraint.getColumnNameRefPairs(baseTable).stream().map(p -> p.second).collect(Collectors.toSet());
+        return isReferenceToUniqueKey(foreignKeyConstraint.getColumnNameRefPairs(baseTable), referencedTable);
+    }
+
+    private static boolean isReferenceToUniqueKey(List<Pair<String, String>> columnNamePairs, Table referencedTable) {
+        Set<String> referencedColumnNames = columnNamePairs.stream().map(p -> p.second).collect(Collectors.toSet());
         return referencedTable.getUniqueConstraints().stream()
                 .anyMatch(uk -> new HashSet<>(uk.getUniqueColumnNames(referencedTable)).equals(referencedColumnNames));
     }
@@ -110,38 +114,38 @@ public class CPBiRel {
                         .collect(Collectors.toMap(e -> e.getKey().getName(), Map.Entry::getValue));
         List<CPBiRel> biRels = Lists.newArrayList();
         if (lhsTable.hasForeignKeyConstraints() && rhsTable.hasUniqueConstraints()) {
-            lhsTable.getForeignKeyConstraints().stream()
-                    .filter(fk -> isForeignKeyConstraintReferenceToUniqueKey(lhsTable, fk, rhsTable)).forEach(fk -> {
-                        Set<String> lhsColumNames =
-                                fk.getColumnNameRefPairs(lhsTable).stream().map(p -> p.first).collect(Collectors.toSet());
-                        Set<String> rhsColumNames =
-                                fk.getColumnNameRefPairs(lhsTable).stream().map(p -> p.second).collect(Collectors.toSet());
-                        if (lhsColumnName2ColRef.keySet().containsAll(lhsColumNames) &&
-                                rhsColumnName2ColRef.keySet().containsAll(rhsColumNames)) {
-                            Set<Pair<ColumnRefOperator, ColumnRefOperator>> fkColumnRefPairs =
-                                    fk.getColumnNameRefPairs(lhsTable).stream()
-                                            .map(p ->
-                                                    Pair.create(
-                                                            lhsColumnName2ColRef.get(p.first),
-                                                            rhsColumnName2ColRef.get(p.second))
-                                            ).collect(Collectors.toSet());
-                            biRels.add(new CPBiRel(lhs, rhs, true, leftToRight, fkColumnRefPairs));
-                        }
-                    });
+            for (ForeignKeyConstraint fk : lhsTable.getForeignKeyConstraints()) {
+                if (!fk.getParentTableInfo().matchTable(rhsTable)) {
+                    continue;
+                }
+                // Resolve this constraint once for this extraction, including any dropped-column filtering.
+                // This local snapshot does not provide consistency across concurrent catalog changes.
+                List<Pair<String, String>> columnNamePairs = fk.getColumnNameRefPairs(lhsTable);
+                if (!isReferenceToUniqueKey(columnNamePairs, rhsTable)) {
+                    continue;
+                }
+                if (columnNamePairs.stream().allMatch(p -> lhsColumnName2ColRef.containsKey(p.first) &&
+                        rhsColumnName2ColRef.containsKey(p.second))) {
+                    Set<Pair<ColumnRefOperator, ColumnRefOperator>> fkColumnRefPairs = columnNamePairs.stream()
+                            .map(p -> Pair.create(lhsColumnName2ColRef.get(p.first), rhsColumnName2ColRef.get(p.second)))
+                            .collect(Collectors.toSet());
+                    biRels.add(new CPBiRel(lhs, rhs, true, leftToRight, fkColumnRefPairs));
+                }
+            }
         }
 
         if (lhsTable.getId() == rhsTable.getId() && lhsTable.hasUniqueConstraints()) {
-            lhsTable.getUniqueConstraints().stream().filter(uk ->
-                            lhsColumnName2ColRef.keySet().containsAll(uk.getUniqueColumnNames(lhsTable)) &&
-                                    rhsColumnName2ColRef.keySet().containsAll(uk.getUniqueColumnNames(lhsTable))
-                    ).map(uk ->
-                            uk.getUniqueColumnNames(lhsTable).stream().map(colName ->
-                                    Pair.create(
-                                            lhsColumnName2ColRef.get(colName),
-                                            rhsColumnName2ColRef.get(colName))
-                            ).collect(Collectors.toSet()))
-                    .forEach(ukColumnRefPairs ->
-                            biRels.add(new CPBiRel(lhs, rhs, false, leftToRight, ukColumnRefPairs)));
+            for (UniqueConstraint uk : lhsTable.getUniqueConstraints()) {
+                List<String> columnNames = uk.getUniqueColumnNames(lhsTable);
+                if (lhsColumnName2ColRef.keySet().containsAll(columnNames) &&
+                        rhsColumnName2ColRef.keySet().containsAll(columnNames)) {
+                    Set<Pair<ColumnRefOperator, ColumnRefOperator>> ukColumnRefPairs = columnNames.stream()
+                            .map(colName -> Pair.create(lhsColumnName2ColRef.get(colName),
+                                    rhsColumnName2ColRef.get(colName)))
+                            .collect(Collectors.toSet());
+                    biRels.add(new CPBiRel(lhs, rhs, false, leftToRight, ukColumnRefPairs));
+                }
+            }
         }
         return biRels;
     }
