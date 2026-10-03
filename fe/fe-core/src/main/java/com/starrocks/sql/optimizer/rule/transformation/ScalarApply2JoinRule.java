@@ -53,7 +53,6 @@ import com.starrocks.type.BooleanType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -91,7 +90,7 @@ public class ScalarApply2JoinRule extends TransformationRule {
     private List<OptExpression> transformCorrelate(OptExpression input, LogicalApplyOperator apply,
                                                    OptimizerContext context) {
         // check correlation filter
-        if (!SubqueryUtils.checkAllIsBinaryEQ(Utils.extractConjuncts(apply.getCorrelationConjuncts()))) {
+        if (!allConjunctsAreEq(apply.getCorrelationConjuncts())) {
             throw new SemanticException(SubqueryUtils.EXIST_NON_EQ_PREDICATE);
         }
 
@@ -100,6 +99,18 @@ public class ScalarApply2JoinRule extends TransformationRule {
         } else {
             return transformCorrelateWithoutCheckOneRows(input, apply, context);
         }
+    }
+
+    // Only AND is split into conjuncts: an OR or NOT is one leaf and is rejected even when its descendants are EQ.
+    private static boolean allConjunctsAreEq(ScalarOperator predicate) {
+        if (OperatorType.COMPOUND.equals(predicate.getOpType())) {
+            CompoundPredicateOperator compound = (CompoundPredicateOperator) predicate;
+            if (compound.isAnd()) {
+                return allConjunctsAreEq(compound.getChild(0)) && allConjunctsAreEq(compound.getChild(1));
+            }
+        }
+        return OperatorType.BINARY.equals(predicate.getOpType())
+                && BinaryType.EQ.equals(((BinaryPredicateOperator) predicate).getBinaryType());
     }
 
     /*
@@ -193,8 +204,10 @@ public class ScalarApply2JoinRule extends TransformationRule {
         // Other columns
         projectMap.put(countRows, countRows);
         projectMap.put(anyValue, anyValue);
-        Arrays.stream(input.inputAt(0).getOutputColumns().getColumnIds()).mapToObj(factory::getColumnRef)
-                .forEach(i -> projectMap.put(i, i));
+        for (int id : input.inputAt(0).getOutputColumns().getColumnIds()) {
+            ColumnRefOperator ref = factory.getColumnRef(id);
+            projectMap.put(ref, ref);
+        }
         // Mapping subquery's output to anyValue
         projectMap.put(apply.getOutput(), anyValue);
         // Add assertion column
@@ -235,8 +248,10 @@ public class ScalarApply2JoinRule extends TransformationRule {
 
         // add all left column
         ColumnRefFactory factory = context.getColumnRefFactory();
-        Arrays.stream(input.getInputs().get(0).getOutputColumns().getColumnIds()).mapToObj(factory::getColumnRef)
-                .forEach(d -> output.put(d, d));
+        for (int id : input.getInputs().get(0).getOutputColumns().getColumnIds()) {
+            ColumnRefOperator ref = factory.getColumnRef(id);
+            output.put(ref, ref);
+        }
 
         OptExpression projectExpression = new OptExpression(new LogicalProjectOperator(output));
         projectExpression.getInputs().add(joinOptExpression);
@@ -271,8 +286,10 @@ public class ScalarApply2JoinRule extends TransformationRule {
         allOutput.put(apply.getOutput(), apply.getSubqueryOperator());
 
         // add all left outer column
-        Arrays.stream(input.getInputs().get(0).getOutputColumns().getColumnIds()).mapToObj(factory::getColumnRef)
-                .forEach(d -> allOutput.put(d, d));
+        for (int id : input.getInputs().get(0).getOutputColumns().getColumnIds()) {
+            ColumnRefOperator ref = factory.getColumnRef(id);
+            allOutput.put(ref, ref);
+        }
 
         OptExpression projectExpression = new OptExpression(new LogicalProjectOperator(allOutput));
         projectExpression.getInputs().add(joinOptExpression);

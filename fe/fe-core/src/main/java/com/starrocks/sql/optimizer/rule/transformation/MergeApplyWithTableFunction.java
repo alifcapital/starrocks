@@ -56,18 +56,21 @@ public class MergeApplyWithTableFunction extends TransformationRule {
 
         OptExpression childOptExpression = input.inputAt(0);
 
-        Map<ColumnRefOperator, ScalarOperator> projectMap = new HashMap<>();
-        for (Pair<ColumnRefOperator, ScalarOperator> pair : tableFunctionOperator.getFnParamColumnProject()) {
-            projectMap.put(pair.first, pair.second);
-        }
-        if (!projectMap.values().stream().allMatch(ScalarOperator::isColumnRef)) {
-            for (int columnId : childOptExpression.getOutputColumns().getColumnIds()) {
-                ColumnRefOperator columnRefOperator = context.getColumnRefFactory().getColumnRef(columnId);
-                projectMap.put(columnRefOperator, columnRefOperator);
+        if (tableFunctionOperator.getFnParamColumnProject().stream().anyMatch(pair -> !pair.second.isColumnRef())) {
+            // Keep last-value-wins handling for duplicate parameter keys before deciding on a projection.
+            Map<ColumnRefOperator, ScalarOperator> projectMap = new HashMap<>();
+            for (Pair<ColumnRefOperator, ScalarOperator> pair : tableFunctionOperator.getFnParamColumnProject()) {
+                projectMap.put(pair.first, pair.second);
             }
+            if (!projectMap.values().stream().allMatch(ScalarOperator::isColumnRef)) {
+                for (int columnId : childOptExpression.getOutputColumns().getColumnIds()) {
+                    ColumnRefOperator columnRefOperator = context.getColumnRefFactory().getColumnRef(columnId);
+                    projectMap.put(columnRefOperator, columnRefOperator);
+                }
 
-            LogicalProjectOperator projectOperator = new LogicalProjectOperator(projectMap);
-            childOptExpression = OptExpression.create(projectOperator, input.inputAt(0));
+                LogicalProjectOperator projectOperator = new LogicalProjectOperator(projectMap);
+                childOptExpression = OptExpression.create(projectOperator, input.inputAt(0));
+            }
         }
 
         LogicalTableFunctionOperator newTableFunctionOperator = (new LogicalTableFunctionOperator.Builder())
