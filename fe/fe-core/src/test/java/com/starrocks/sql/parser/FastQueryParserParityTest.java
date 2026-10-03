@@ -180,6 +180,8 @@ class FastQueryParserParityTest {
                 }
                 acceptedInEveryMode &= compare(fixture, mode, report);
             }
+            // IN lists from two constants on are LargeInPredicates, as with a low large_in_predicate_threshold.
+            acceptedInEveryMode &= withLargeInThreshold(2, () -> compare(fixture, 0, report));
             if (fixture.gap() != null && acceptedInEveryMode) {
                 staleGaps.add(fixture.sql());
             }
@@ -215,9 +217,14 @@ class FastQueryParserParityTest {
         try (InputStream input = Files.newInputStream(path)) {
             fixtures = corpus.endsWith(".bin") ? readBinary(input) : readJsonLines(input);
         }
+        // -Dfast.parser.large_in_threshold sets large_in_predicate_threshold, as some sessions do.
+        String largeIn = System.getProperty("fast.parser.large_in_threshold");
+        int threshold = largeIn == null
+                ? ConnectContext.get().getSessionVariable().getLargeInPredicateThreshold()
+                : Integer.parseInt(largeIn);
         Report report = new Report();
         for (Fixture fixture : fixtures) {
-            compare(fixture, mode, report);
+            withLargeInThreshold(threshold, () -> compare(fixture, mode, report));
         }
         report.print(System.out);
         assertTrue(report.mismatches.isEmpty(), () -> "AST differs from ANTLR:\n" + String.join("\n", report.mismatches));
@@ -294,6 +301,18 @@ class FastQueryParserParityTest {
                             + "public entry cpu %.1f ms, max %.2f ms, allocated %.1f MiB%n", round, valid.size(),
                     cpu[0] / 1e6, max[0] / 1e6, bytes[0] / 1048576.0,
                     cpu[1] / 1e6, max[1] / 1e6, bytes[1] / 1048576.0);
+        }
+    }
+
+    // AstBuilder and the fast parser read the threshold from the session of the thread's ConnectContext.
+    private static boolean withLargeInThreshold(int threshold, java.util.function.BooleanSupplier comparison) {
+        SessionVariable session = ConnectContext.get().getSessionVariable();
+        int saved = session.getLargeInPredicateThreshold();
+        session.setLargeInPredicateThreshold(threshold);
+        try {
+            return comparison.getAsBoolean();
+        } finally {
+            session.setLargeInPredicateThreshold(saved);
         }
     }
 

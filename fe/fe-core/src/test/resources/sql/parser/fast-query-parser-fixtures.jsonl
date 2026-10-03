@@ -4043,3 +4043,18 @@
 {"sql": "SELECT * FROM (t), u"}
 {"sql": "SELECT SUM(a) OVER ([hash] PARTITION BY b) FROM t"}
 {"sql": "SELECT SUM(a) OVER ([sort] PARTITION BY b ORDER BY c) FROM t"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 2, 3)"}
+{"sql": "SELECT a FROM t WHERE a NOT IN (1, 2, 3)"}
+{"sql": "SELECT a FROM t WHERE b IN ('x', 'y', \"z\")"}
+{"sql": "SELECT a FROM t WHERE b NOT IN ('x', 'it''s')"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 99999999999999999999)"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 2 + 3)"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 'x')"}
+{"sql": "SELECT a FROM t WHERE a IN (1.5, 2.5)"}
+{"sql": "SELECT a FROM t WHERE a IN ( 1 ,\n 2 /* c */ , 3 )"}
+{"sql": "SELECT a FROM t WHERE (a + 1) IN (1, 2) AND b IN ('p', 'q')"}
+{"sql": "SELECT a IN (1, 2) FROM t"}
+{"sql": "SELECT * FROM t WHERE a IN (007, 8)"}
+{"sql": "SELECT a FROM t WHERE a IN (?, ?)"}
+{"sql": "UPDATE t SET v = 1 WHERE k IN (1, 2, 3)"}
+{"sql": "DELETE FROM t WHERE k NOT IN ('a', 'b')"}

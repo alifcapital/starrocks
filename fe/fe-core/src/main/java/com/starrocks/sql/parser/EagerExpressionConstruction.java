@@ -57,6 +57,7 @@ import com.starrocks.sql.ast.expression.IntervalLiteral;
 import com.starrocks.sql.ast.expression.IsNullPredicate;
 import com.starrocks.sql.ast.expression.LambdaArgument;
 import com.starrocks.sql.ast.expression.LambdaFunctionExpr;
+import com.starrocks.sql.ast.expression.LargeInPredicate;
 import com.starrocks.sql.ast.expression.LargeIntLiteral;
 import com.starrocks.sql.ast.expression.LikePredicate;
 import com.starrocks.sql.ast.expression.LiteralExpr;
@@ -1030,12 +1031,30 @@ final class EagerExpressionConstruction
         return new AnalyticWindowBoundary(type, amount);
     }
 
-    public void validateInList(List<Expr> values) {
+    public boolean largeInWanted(int count) {
         com.starrocks.qe.ConnectContext context = com.starrocks.qe.ConnectContext.get();
-        if (context != null
+        return context != null
                 && context.getSessionVariable().enableLargeInPredicate()
-                && values.size() >= context.getSessionVariable().getLargeInPredicateThreshold()) {
-            throw unsupported("session LargeInPredicate requires original syntax classification");
+                && count >= context.getSessionVariable().getLargeInPredicateThreshold();
+    }
+
+    public Expr largeIn(Expr value, List<Expr> values, boolean negative, NodePosition p, boolean integers,
+                        String rawText) {
+        List<Object> raw = new ArrayList<>(values.size());
+        if (integers) {
+            // AstBuilder parses each integer as a long and builds an ordinary IN when one does not fit.
+            for (Expr item : values) {
+                if (!(item instanceof IntLiteral literal)) {
+                    return null;
+                }
+                raw.add(literal.getValue());
+            }
+            List<Expr> first = List.of(new IntLiteral((Long) raw.get(0), IntegerType.BIGINT));
+            return new LargeInPredicate(value, rawText, raw, values.size(), negative, first, p);
         }
+        for (Expr item : values) {
+            raw.add(((StringLiteral) item).getStringValue());
+        }
+        return new LargeInPredicate(value, rawText, raw, values.size(), negative, values.subList(0, 1), p);
     }
 }

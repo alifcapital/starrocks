@@ -1178,6 +1178,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
             neg = true;
         }
         if (eat(IN)) {
+            int open = input.index();
             expect(OPEN);
             if (queryStartsHere()) {
                 E query = subquery();
@@ -1190,7 +1191,12 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
                 values.add(expression(0));
             }
             expect(CLOSE);
-            construction.validateInList(values);
+            if (construction.largeInWanted(values.size())) {
+                E large = largeIn(value, values, neg, pos(start), open, last);
+                if (large != null) {
+                    return large;
+                }
+            }
             return construction.inList(value, values, neg, pos(start));
         }
         if (eat(BETWEEN)) {
@@ -1204,6 +1210,30 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
             return neg ? construction.logicalNot(result, pos(start)) : result;
         }
         return value;
+    }
+
+    // The grammar reads IN (1, 2, ...) as integerList and IN ('a', 'b', ...) as stringList, and AstBuilder builds
+    // a LargeInPredicate only for those two shapes, so we check that the list is exactly such tokens.
+    private E largeIn(E value, List<E> values, boolean negative, NodePosition p, int open, int close) {
+        if (close - open != 2 * values.size()) {
+            return null;
+        }
+        int first = type(open + 1);
+        boolean integers = first == INTEGER_VALUE;
+        if (!integers && first != SINGLE_QUOTED_TEXT && first != DOUBLE_QUOTED_TEXT) {
+            return null;
+        }
+        for (int raw = open + 1; raw < close; raw += 2) {
+            int t = type(raw);
+            boolean literal = integers ? t == INTEGER_VALUE : t == SINGLE_QUOTED_TEXT || t == DOUBLE_QUOTED_TEXT;
+            if (!literal || (raw + 1 < close && type(raw + 1) != COMMA)) {
+                return null;
+            }
+        }
+        Token openToken = original.get(open);
+        String rawText = openToken.getInputStream()
+                .getText(Interval.of(openToken.getStartIndex(), original.get(close).getStopIndex()));
+        return construction.largeIn(value, values, negative, p, integers, rawText);
     }
 
     private static int precedence(int t) {

@@ -200,5 +200,12 @@ interface ExpressionConstruction<E, Q, T, F, O, W, B, C> {
 
     B windowBoundary(AnalyticWindowBoundary.BoundaryType type, E amount);
 
-    void validateInList(List<E> values);
+    /** Whether AstBuilder would build a LargeInPredicate for an IN list of this many constants. */
+    boolean largeInWanted(int count);
+
+    /**
+     * The LargeInPredicate that AstBuilder builds for IN (integer, ...) or IN ('string', ...), or null when it
+     * builds an ordinary InPredicate. rawText is the list with its parentheses as written.
+     */
+    E largeIn(E value, List<E> values, boolean negative, NodePosition p, boolean integers, String rawText);
 }
