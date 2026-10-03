@@ -3168,24 +3168,25 @@ public class PrivilegeCheckerTest extends StarRocksTestBase {
         ShowAuthenticationStmt stmt = new ShowAuthenticationStmt(user, false);
         ShowResultSet resultSet = ShowExecutor.execute(stmt, starRocksAssert.getCtx());
 
-        Assertions.assertEquals(4, resultSet.getMetaData().getColumnCount());
+        Assertions.assertEquals(5, resultSet.getMetaData().getColumnCount());
         Assertions.assertEquals("UserIdentity", resultSet.getMetaData().getColumn(0).getName());
         Assertions.assertEquals("Password", resultSet.getMetaData().getColumn(1).getName());
         Assertions.assertEquals("AuthPlugin", resultSet.getMetaData().getColumn(2).getName());
         Assertions.assertEquals("UserForAuthPlugin", resultSet.getMetaData().getColumn(3).getName());
-        Assertions.assertEquals("[['test'@'%', No, MYSQL_NATIVE_PASSWORD, null]]",
+        Assertions.assertEquals("IsLocked", resultSet.getMetaData().getColumn(4).getName());
+        Assertions.assertEquals("[['test'@'%', No, MYSQL_NATIVE_PASSWORD, null, No]]",
                 resultSet.getResultRows().toString());
 
         stmt = new ShowAuthenticationStmt(null, true);
         resultSet = ShowExecutor.execute(stmt, starRocksAssert.getCtx());
-        Assertions.assertEquals("[['root'@'%', No, MYSQL_NATIVE_PASSWORD, null], " +
-                        "['test2'@'%', Yes, MYSQL_NATIVE_PASSWORD, null], " +
-                        "['test'@'%', No, MYSQL_NATIVE_PASSWORD, null]]",
+        Assertions.assertEquals("[['root'@'%', No, MYSQL_NATIVE_PASSWORD, null, No], " +
+                        "['test2'@'%', Yes, MYSQL_NATIVE_PASSWORD, null, No], " +
+                        "['test'@'%', No, MYSQL_NATIVE_PASSWORD, null, No]]",
                 resultSet.getResultRows().toString());
 
         stmt = new ShowAuthenticationStmt(new UserRef(AuthenticationMgr.ROOT_USER, "%"), false);
         resultSet = ShowExecutor.execute(stmt, starRocksAssert.getCtx());
-        Assertions.assertEquals("[['root'@'%', No, MYSQL_NATIVE_PASSWORD, null]]",
+        Assertions.assertEquals("[['root'@'%', No, MYSQL_NATIVE_PASSWORD, null, No]]",
                 resultSet.getResultRows().toString());
     }
 
