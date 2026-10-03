@@ -96,7 +96,7 @@ public final class LargeInConstants {
             // constant that already has the type, and then the list compares in the common type.
             resolved = new ArrayList<>(constants.size());
             for (ConstantOperator constant : constants) {
-                Optional<ScalarOperator> cast = Utils.tryCastConstant(constant, compareType);
+                Optional<ScalarOperator> cast = tryCast(constant, compareType);
                 if (cast.isEmpty()) {
                     resolved = null;
                     break;
@@ -121,6 +121,17 @@ public final class LargeInConstants {
             }
         }
         return toValues(comparisonType, resolved);
+    }
+
+    // We expect lists of thousands of numbers compared with a string column, such as account numbers that a BI tool
+    // writes without quotes. For an integer or decimal constant and a CHAR or VARCHAR type, tryCastConstant returns
+    // a string constant with the text of toString, and its check that the text converts back always holds. So we
+    // build that constant directly and call toString once per constant.
+    private static Optional<ScalarOperator> tryCast(ConstantOperator constant, Type type) {
+        if ((type.isChar() || type.isVarchar()) && !constant.isNull() && constant.getType().isExactNumericType()) {
+            return Optional.of(ConstantOperator.createChar(constant.toString(), type));
+        }
+        return Utils.tryCastConstant(constant, type);
     }
 
     // FoldConstantsRule.visitCastOperator of a CAST of the constant to the type
