@@ -49,6 +49,9 @@ public class LogicalRawValuesOperator extends LogicalOperator {
     // Normalized, distinct, non-NULL values supplied by LargeInConstants; statistics relies on this invariant.
     private final List<Object> rawConstantList;
     private final int constantCount;
+    // The list holds thousands of values and the memo hashes this operator many times, so we hash the list once.
+    // LargeInConstants makes the list unmodifiable.
+    private final int rawConstantListHash;
 
     public LogicalRawValuesOperator(List<ColumnRefOperator> columnRefSet,
                                     Type constantType,
@@ -61,6 +64,7 @@ public class LogicalRawValuesOperator extends LogicalOperator {
         this.rawText = rawText;
         this.rawConstantList = rawConstantList;
         this.constantCount = constantCount;
+        this.rawConstantListHash = Objects.hashCode(rawConstantList);
     }
 
     public List<ColumnRefOperator> getColumnRefSet() {
@@ -121,6 +125,7 @@ public class LogicalRawValuesOperator extends LogicalOperator {
         }
         LogicalRawValuesOperator that = (LogicalRawValuesOperator) o;
         return constantCount == that.constantCount &&
+               rawConstantListHash == that.rawConstantListHash &&
                Objects.equals(columnRefSet, that.columnRefSet) &&
                Objects.equals(constantType, that.constantType) &&
                Objects.equals(rawConstantList, that.rawConstantList);
@@ -128,7 +133,7 @@ public class LogicalRawValuesOperator extends LogicalOperator {
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), columnRefSet, constantType, rawConstantList, constantCount);
+        return Objects.hash(super.hashCode(), columnRefSet, constantType, rawConstantListHash, constantCount);
     }
 
     @Override

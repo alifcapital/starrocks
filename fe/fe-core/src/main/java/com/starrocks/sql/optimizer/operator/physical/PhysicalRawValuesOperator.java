@@ -34,6 +34,9 @@ public class PhysicalRawValuesOperator extends PhysicalOperator {
     // Keeps the normalized, distinct, non-NULL values of LogicalRawValuesOperator.
     private final List<Object> rawConstantList;
     private final int constantCount;
+    // The list holds thousands of values and the memo hashes this operator many times, so we hash the list once.
+    // LargeInConstants makes the list unmodifiable.
+    private final int rawConstantListHash;
 
     public PhysicalRawValuesOperator(List<ColumnRefOperator> columnRefSet, 
                                           Type constantType,
@@ -46,6 +49,7 @@ public class PhysicalRawValuesOperator extends PhysicalOperator {
         this.rawText = rawText;
         this.rawConstantList = rawConstantList;
         this.constantCount = constantCount;
+        this.rawConstantListHash = Objects.hashCode(rawConstantList);
     }
 
     public List<ColumnRefOperator> getColumnRefSet() {
@@ -98,6 +102,7 @@ public class PhysicalRawValuesOperator extends PhysicalOperator {
 
         PhysicalRawValuesOperator that = (PhysicalRawValuesOperator) o;
         return constantCount == that.constantCount &&
+               rawConstantListHash == that.rawConstantListHash &&
                Objects.equals(columnRefSet, that.columnRefSet) &&
                Objects.equals(constantType, that.constantType) &&
                Objects.equals(rawConstantList, that.rawConstantList);
@@ -105,7 +110,7 @@ public class PhysicalRawValuesOperator extends PhysicalOperator {
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), columnRefSet, constantType, rawConstantList, constantCount);
+        return Objects.hash(super.hashCode(), columnRefSet, constantType, rawConstantListHash, constantCount);
     }
 
     @Override
