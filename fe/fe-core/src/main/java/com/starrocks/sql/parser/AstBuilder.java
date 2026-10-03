@@ -3626,7 +3626,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             properties = Maps.newHashMap();
             List<Property> propertyList = visit(context.props.property(), Property.class);
             for (Property property : propertyList) {
-                properties.put(property.getKey(), property.getValue());
+                putProperty(properties, property);
             }
         }
         if (context.resource != null) {
@@ -3748,7 +3748,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 properties = Maps.newHashMap();
                 List<Property> propertyList = visit(context.props.property(), Property.class);
                 for (Property property : propertyList) {
-                    properties.put(property.getKey(), property.getValue());
+                    putProperty(properties, property);
                 }
             }
             if (context.identifierOrString() != null) {
@@ -3770,7 +3770,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 properties = Maps.newHashMap();
                 List<Property> propertyList = visit(context.props.property(), Property.class);
                 for (Property property : propertyList) {
-                    properties.put(property.getKey(), property.getValue());
+                    putProperty(properties, property);
                 }
             }
             return new ResourceDesc(brokerName, properties, createPos(context));
@@ -7130,7 +7130,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             properties = new HashMap<>();
             List<Property> propertyList = visit(context.inlineProperties().inlineProperty(), Property.class);
             for (Property property : propertyList) {
-                properties.put(property.getKey(), property.getValue());
+                putProperty(properties, property);
             }
         }
         String inlineContent = null;
@@ -10142,10 +10142,18 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (contexts != null) {
             List<Property> propertyList = visit(contexts, Property.class);
             for (Property property : propertyList) {
-                properties.put(property.getKey(), property.getValue());
+                putProperty(properties, property);
             }
         }
         return properties;
+    }
+
+    // A repeated key would silently replace the value written before it, so we reject it.
+    private static void putProperty(Map<String, String> properties, Property property) {
+        if (properties.containsKey(property.getKey())) {
+            throw new ParsingException("Duplicate property key: " + property.getKey(), property.getPos());
+        }
+        properties.put(property.getKey(), property.getValue());
     }
 
     private List<ParseNode> getLoadPropertyList(
