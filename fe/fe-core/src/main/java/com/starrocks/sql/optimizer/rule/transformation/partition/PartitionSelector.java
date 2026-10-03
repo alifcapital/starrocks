@@ -715,6 +715,23 @@ public class PartitionSelector {
         return Optional.of(false);
     }
 
+    // The recorder keeps the result of the last value it evaluated, and one recorder serves all partitions. A
+    // partition without values, such as the shadow partition of an automatic partition table, has nothing to
+    // evaluate and would take the result of the partition before it. We never drop such a partition and always
+    // retain it. For a partition with values we clear the result, so the partition is judged by its own values.
+    private static boolean selectPartitionWithoutValues(long partitionId, boolean noValues,
+                                                        boolean isDropPartitionCondition,
+                                                        List<Long> selectedPartitionIds, Recorder recorder) {
+        recorder.isConstTrue = false;
+        if (!noValues) {
+            return false;
+        }
+        if (!isDropPartitionCondition) {
+            selectedPartitionIds.add(partitionId);
+        }
+        return true;
+    }
+
     /**
      * Fetch selected partition ids by using FE's constant evaluation ability.
      */
@@ -740,6 +757,10 @@ public class PartitionSelector {
         Map<Long, List<LiteralExpr>> listPartitions = listPartitionInfo.getLiteralExprValues();
         final Recorder recorder = new Recorder();
         for (Map.Entry<Long, List<LiteralExpr>> e : listPartitions.entrySet()) {
+            if (selectPartitionWithoutValues(e.getKey(), e.getValue().isEmpty(), isDropPartitionCondition,
+                    selectedPartitionIds, recorder)) {
+                continue;
+            }
             for (LiteralExpr literalExpr : e.getValue()) {
                 Map<ColumnRefOperator, ScalarOperator> replaceMap = Maps.newHashMap();
                 ConstantOperator replace = (ConstantOperator) SqlToScalarOperatorTranslator.translate(literalExpr);
@@ -766,6 +787,10 @@ public class PartitionSelector {
         // multi partition columns
         Map<Long, List<List<LiteralExpr>>> multiListPartitions = listPartitionInfo.getMultiLiteralExprValues();
         for (Map.Entry<Long, List<List<LiteralExpr>>> e : multiListPartitions.entrySet()) {
+            if (selectPartitionWithoutValues(e.getKey(), e.getValue().isEmpty(), isDropPartitionCondition,
+                    selectedPartitionIds, recorder)) {
+                continue;
+            }
             for (List<LiteralExpr> values : e.getValue()) {
                 final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMap(colRefIdxMap, values);
                 final ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
@@ -789,6 +814,10 @@ public class PartitionSelector {
         if (inputCells != null && !inputCells.isEmpty()) {
             for (Map.Entry<Long, PCell> e : inputCells.entrySet()) {
                 PListCell pListCell = (PListCell) e.getValue();
+                if (selectPartitionWithoutValues(e.getKey(), pListCell.getPartitionItems().isEmpty(),
+                        isDropPartitionCondition, selectedPartitionIds, recorder)) {
+                    continue;
+                }
                 for (List<String> values : pListCell.getPartitionItems()) {
                     final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMapWithCell(colRefIdxMap, values);
                     if (replaceMap == null) {
