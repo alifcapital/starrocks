@@ -642,7 +642,7 @@ public class QueryAnalyzer {
                         tableFunctionRelation.setTable(preResolved);
                     }
                     if (preResolved.isListFilesOnly()) {
-                        return convertFileTableFunctionRelation(preResolved);
+                        return convertFileTableFunctionRelation(preResolved, tableFunctionRelation.getAlias());
                     }
                     return relation;
                 }
@@ -651,7 +651,7 @@ public class QueryAnalyzer {
                         tableFunctionRelation.getProperties(), tableFunctionRelation.getPushDownSchemaFunc());
                 TableFunctionTable tableFunctionTable = (TableFunctionTable) table;
                 if (tableFunctionTable.isListFilesOnly()) {
-                    return convertFileTableFunctionRelation(tableFunctionTable);
+                    return convertFileTableFunctionRelation(tableFunctionTable, tableFunctionRelation.getAlias());
                 } else {
                     tableFunctionRelation.setTable(table);
                     return relation;
@@ -812,7 +812,7 @@ public class QueryAnalyzer {
         }
 
         // convert FileTableFunctionRelation to ValuesRelation if only list files
-        private ValuesRelation convertFileTableFunctionRelation(TableFunctionTable table) {
+        private ValuesRelation convertFileTableFunctionRelation(TableFunctionTable table, TableName alias) {
             List<Column> columns = table.getFullSchema();
             List<String> columnNames = columns.stream().map(Column::getName).collect(Collectors.toList());
             List<Type> outputColumnTypes = columns.stream().map(Column::getType).collect(Collectors.toList());
@@ -829,7 +829,10 @@ public class QueryAnalyzer {
                 }
                 rows.add(row);
             }
-            return new ValuesRelation(rows, columnNames, outputColumnTypes);
+            ValuesRelation relation = new ValuesRelation(rows, columnNames, outputColumnTypes);
+            // The listing replaces FILES(), so it keeps the alias that the query refers to.
+            relation.setAlias(alias);
+            return relation;
         }
 
         @Override
