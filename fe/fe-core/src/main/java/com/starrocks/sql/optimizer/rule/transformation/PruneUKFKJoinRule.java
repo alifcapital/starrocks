@@ -137,14 +137,13 @@ public class PruneUKFKJoinRule extends TransformationRule {
     private boolean isNonUKTableColumnUsedByUKSideChildren(UKFKConstraints.JoinProperty property,
                                                            OptExpression ukChildOpt,
                                                            boolean exceptUK) {
+        // The constraint is shared with later attempts of this rule, so we must not add the unique key to its
+        // column set. We check the unique key column separately.
         ColumnRefSet ukTableColumnRefs = property.ukConstraint.nonUKColumnRefs;
-        if (!exceptUK) {
-            ukTableColumnRefs.union(Collections.singletonList(property.ukColumnRef));
-        }
-
         ColumnRefSet childrenUsedColumns = UsedColumnRefCollector.collect(ukChildOpt);
 
-        return childrenUsedColumns.containsAny(ukTableColumnRefs);
+        return childrenUsedColumns.containsAny(ukTableColumnRefs) ||
+                (!exceptUK && childrenUsedColumns.contains(property.ukColumnRef));
     }
 
     private ScalarOperator collectUKPredicate(OptExpression ukChildOpt) {
