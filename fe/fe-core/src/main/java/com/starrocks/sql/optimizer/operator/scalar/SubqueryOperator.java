@@ -99,7 +99,7 @@ public class SubqueryOperator extends ScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        return new ColumnRefSet();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        // No visible column references.
     }
 }

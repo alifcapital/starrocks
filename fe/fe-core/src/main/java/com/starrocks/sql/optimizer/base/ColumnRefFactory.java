@@ -135,6 +135,16 @@ public class ColumnRefFactory {
         return columnRefOperators;
     }
 
+    // The map is a default HashMap filled in ascending id order, and its iteration order can reach plan projections.
+    public Map<ColumnRefOperator, ScalarOperator> getIdentityColumnRefMap(ColumnRefSet columnRefSet) {
+        Map<ColumnRefOperator, ScalarOperator> identityMap = Maps.newHashMap();
+        for (int idx : columnRefSet.getColumnIds()) {
+            ColumnRefOperator columnRef = getColumnRef(idx);
+            identityMap.put(columnRef, columnRef);
+        }
+        return identityMap;
+    }
+
     public List<ColumnRefOperator> getColumnRefs() {
         return columnRefs;
     }

@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.base.Objects;
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.type.Type;
 
 import java.util.List;
@@ -51,14 +49,6 @@ public class CollectionElementOperator extends ArgsScalarOperator {
         return arguments.stream().map(ScalarOperator::toString).collect(Collectors.joining(","));
     }
 
-    @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet used = new ColumnRefSet();
-        for (ScalarOperator child : arguments) {
-            used.union(child.getUsedColumns());
-        }
-        return used;
-    }
 
     @Override
     public ScalarOperator clone() {

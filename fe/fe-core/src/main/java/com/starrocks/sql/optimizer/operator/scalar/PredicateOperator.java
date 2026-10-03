@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.type.BooleanType;
 
@@ -46,22 +45,13 @@ public abstract class PredicateOperator extends ArgsScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet used = new ColumnRefSet();
-        for (ScalarOperator child : arguments) {
-            used.union(child.getUsedColumns());
-        }
-        return used;
-    }
-
-    @Override
     public int hashCode() {
-        return Objects.hash(hashCodeSelf(), opType, arguments);
+        return 31 * (31 * (31 + hashCodeSelf()) + Objects.hashCode(opType)) + Objects.hashCode(arguments);
     }
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(opType);
+        return 31 + Objects.hashCode(opType);
     }
 
     @Override

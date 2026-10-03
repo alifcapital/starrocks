@@ -18,7 +18,6 @@ import com.google.common.base.Preconditions;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 
 import java.util.List;
-import java.util.Objects;
 
 public class BetweenPredicateOperator extends PredicateOperator {
 
@@ -101,6 +100,6 @@ public class BetweenPredicateOperator extends PredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), notBetween);
+        return 31 * (31 + super.hashCodeSelf()) + Boolean.hashCode(notBetween);
     }
 }

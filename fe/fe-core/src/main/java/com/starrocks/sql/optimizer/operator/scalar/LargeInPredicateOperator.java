@@ -79,7 +79,7 @@ public class LargeInPredicateOperator extends InPredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), constants);
+        return 31 * (31 + super.hashCodeSelf()) + Objects.hashCode(constants);
     }
 
     @Override

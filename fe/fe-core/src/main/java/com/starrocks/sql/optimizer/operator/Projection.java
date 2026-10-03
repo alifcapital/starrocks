@@ -75,10 +75,14 @@ public class Projection {
 
     public ColumnRefSet getUsedColumns() {
         final ColumnRefSet usedColumns = new ColumnRefSet();
-        columnRefMap.values().stream().forEach(e -> usedColumns.union(e.getUsedColumns()));
-        commonSubOperatorMap.values().stream().forEach(e -> usedColumns.union(e.getUsedColumns()));
+        for (ScalarOperator e : columnRefMap.values()) {
+            e.collectUsedColumns(usedColumns);
+        }
+        for (ScalarOperator e : commonSubOperatorMap.values()) {
+            e.collectUsedColumns(usedColumns);
+        }
         // remove some of columnRefMap's used columns which are from commonSubOperatorMap's output column
-        commonSubOperatorMap.keySet().stream().forEach(e -> usedColumns.except(e.getUsedColumns()));
+        usedColumns.except(commonSubOperatorMap.keySet());
         return usedColumns;
     }
 

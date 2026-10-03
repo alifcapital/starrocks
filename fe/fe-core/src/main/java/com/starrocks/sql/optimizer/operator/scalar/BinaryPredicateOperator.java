@@ -127,7 +127,7 @@ public class BinaryPredicateOperator extends PredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), type);
+        return 31 * (31 + super.hashCodeSelf()) + Objects.hashCode(type);
     }
 
     @Override

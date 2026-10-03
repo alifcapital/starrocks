@@ -33,9 +33,7 @@ import com.starrocks.type.Type;
 import com.starrocks.type.TypeFactory;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.starrocks.catalog.Function.CompareMode.IS_IDENTICAL;
@@ -59,15 +57,22 @@ public class ScalarOperatorUtil {
     }
 
     public static CallOperator buildFusedMultiDistinct(List<CallOperator> calls, ColumnRefOperator arg) {
-        Map<String, List<CallOperator>> groups = calls.stream().collect(Collectors.groupingBy(CallOperator::getFnName));
-        List<CallOperator> sumGroup = groups.getOrDefault(FunctionSet.SUM, List.of());
-        List<CallOperator> avgGroup = groups.getOrDefault(FunctionSet.AVG, List.of());
+        CallOperator firstSum = null;
+        CallOperator firstAvg = null;
+        for (CallOperator call : calls) {
+            String name = Objects.requireNonNull(call.getFnName());
+            if (firstSum == null && FunctionSet.SUM.equals(name)) {
+                firstSum = call;
+            } else if (firstAvg == null && FunctionSet.AVG.equals(name)) {
+                firstAvg = call;
+            }
+        }
         String fusedFunName;
-        if (sumGroup.isEmpty() && avgGroup.isEmpty()) {
+        if (firstSum == null && firstAvg == null) {
             fusedFunName = FunctionSet.FUSED_MULTI_DISTINCT_COUNT;
-        } else if (avgGroup.isEmpty()) {
+        } else if (firstAvg == null) {
             fusedFunName = FunctionSet.FUSED_MULTI_DISTINCT_COUNT_SUM;
-        } else if (sumGroup.isEmpty()) {
+        } else if (firstSum == null) {
             fusedFunName = FunctionSet.FUSED_MULTI_DISTINCT_COUNT_AVG;
         } else {
             fusedFunName = FunctionSet.FUSED_MULTI_DISTINCT_COUNT_SUM_AVG;
@@ -83,12 +88,12 @@ public class ScalarOperatorUtil {
         List<StructField> fields = Lists.newArrayList();
         Type countType = type.getField(FunctionSet.COUNT).getType().clone();
         fields.add(new StructField(FunctionSet.COUNT, countType));
-        if (!sumGroup.isEmpty()) {
-            Type sumType = sumGroup.get(0).getType().clone();
+        if (firstSum != null) {
+            Type sumType = firstSum.getType().clone();
             fields.add(new StructField(FunctionSet.SUM, sumType));
         }
-        if (!avgGroup.isEmpty()) {
-            Type avgType = avgGroup.get(0).getType().clone();
+        if (firstAvg != null) {
+            Type avgType = firstAvg.getType().clone();
             fields.add(new StructField(FunctionSet.AVG, avgType));
         }
         newFn.setRetType(new StructType(fields, true));

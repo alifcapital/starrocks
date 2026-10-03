@@ -121,8 +121,8 @@ public class DictMappingOperator extends ScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        return dictColumn.getUsedColumns();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        dictColumn.collectUsedColumns(destination);
     }
 
     @Override

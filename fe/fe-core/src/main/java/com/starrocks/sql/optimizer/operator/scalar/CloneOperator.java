@@ -71,8 +71,8 @@ public class CloneOperator extends ArgsScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        return arguments.get(0).getUsedColumns();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        getChild(0).collectUsedColumns(destination);
     }
 
     @Override

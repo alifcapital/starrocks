@@ -307,8 +307,8 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
     public void setChild(int index, ScalarOperator child) {
     }
 
-    public ColumnRefSet getUsedColumns() {
-        return new ColumnRefSet();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        // No visible column references.
     }
 
     public boolean getBoolean() {
@@ -416,7 +416,8 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(value, type.getPrimitiveType(), isNull);
+        return 31 * (31 * (31 + Objects.hashCode(value)) + Objects.hashCode(type.getPrimitiveType()))
+                + Boolean.hashCode(isNull);
     }
 
     @Override

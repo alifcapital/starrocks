@@ -21,7 +21,6 @@ import com.starrocks.type.Type;
 
 import java.util.Collection;
 import java.util.List;
-import java.util.Objects;
 import java.util.StringJoiner;
 
 import static java.util.Collections.emptyList;
@@ -93,11 +92,10 @@ public final class ColumnRefOperator extends ScalarOperator {
     public void setChild(int index, ScalarOperator child) {
     }
 
-    public ColumnRefSet getUsedColumns() {
-        if (OperatorType.LAMBDA_ARGUMENT.equals(getOpType())) {
-            return new ColumnRefSet();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        if (!OperatorType.LAMBDA_ARGUMENT.equals(getOpType())) {
+            destination.union(id);
         }
-        return new ColumnRefSet(id);
     }
 
     @Override
@@ -123,7 +121,7 @@ public final class ColumnRefOperator extends ScalarOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(id);
+        return 31 + id;
     }
 
     @Override

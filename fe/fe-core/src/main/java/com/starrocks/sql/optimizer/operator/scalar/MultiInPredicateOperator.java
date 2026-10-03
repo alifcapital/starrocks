@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.operator.OperatorType.MULTI_IN;
@@ -100,7 +99,7 @@ public class MultiInPredicateOperator extends PredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), isNotIn);
+        return 31 * (31 + super.hashCodeSelf()) + Boolean.hashCode(isNotIn);
     }
 
     @Override

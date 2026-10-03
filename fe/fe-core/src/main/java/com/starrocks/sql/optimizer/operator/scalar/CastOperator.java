@@ -75,7 +75,7 @@ public class CastOperator extends CallOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), isImplicit, type);
+        return 31 * (31 * (31 + super.hashCodeSelf()) + Boolean.hashCode(isImplicit)) + Objects.hashCode(type);
     }
 
     @Override

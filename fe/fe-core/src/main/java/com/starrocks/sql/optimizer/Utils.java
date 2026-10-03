@@ -32,6 +32,7 @@ import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.KeysType;
 import com.starrocks.sql.common.TypeManager;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.LogicalProperty;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
@@ -96,7 +97,6 @@ import java.util.stream.StreamSupport;
 
 import static com.starrocks.qe.SessionVariableConstants.AggregationStage.AUTO;
 import static com.starrocks.qe.SessionVariableConstants.AggregationStage.ONE_STAGE;
-import static java.util.function.Function.identity;
 
 public class Utils {
     private static final Logger LOG = LogManager.getLogger(Utils.class);
@@ -312,43 +312,49 @@ public class Utils {
     // a  b c  d
     public static ScalarOperator createCompound(CompoundPredicateOperator.CompoundType type,
                                                 Collection<? extends ScalarOperator> nodes) {
-        LinkedList<ScalarOperator> link =
-                nodes.stream().filter(Objects::nonNull).collect(Collectors.toCollection(Lists::newLinkedList));
-
-        if (link.size() < 1) {
+        List<ScalarOperator> buffer = null;
+        for (ScalarOperator node : nodes) {
+            if (node != null) {
+                if (buffer == null) {
+                    buffer = new ArrayList<>(nodes.size());
+                }
+                buffer.add(node);
+            }
+        }
+        if (buffer == null) {
             return null;
         }
 
-        // for and predicate, filter redundant true
+        int size = buffer.size();
+        // Keep the null filtering and TRUE filtering as separate stages: all-null inputs return null.
         if (type == CompoundPredicateOperator.CompoundType.AND) {
-            link = link.stream()
-                    .filter(so -> !ConstantOperator.TRUE.equals(so))
-                    .collect(Collectors.toCollection(Lists::newLinkedList));
-            if (link.isEmpty()) {
+            int retained = 0;
+            for (int i = 0; i < size; i++) {
+                ScalarOperator node = buffer.get(i);
+                if (!ConstantOperator.TRUE.equals(node)) {
+                    buffer.set(retained++, node);
+                }
+            }
+            size = retained;
+            if (size == 0) {
                 return ConstantOperator.TRUE;
             }
         }
-        if (link.size() == 1) {
-            return link.get(0);
-        }
 
-        while (link.size() > 1) {
-            LinkedList<ScalarOperator> buffer = new LinkedList<>();
-
-            // combine pairs of elements
-            while (link.size() >= 2) {
-                buffer.add(new CompoundPredicateOperator(type, link.poll(), link.poll()));
+        // Compact each level into the same buffer. Write positions never overtake unread children,
+        // so pairing and carrying an odd final node keep the balanced tree shape.
+        while (size > 1) {
+            int nextSize = 0;
+            int i = 0;
+            for (; i + 1 < size; i += 2) {
+                buffer.set(nextSize++, new CompoundPredicateOperator(type, buffer.get(i), buffer.get(i + 1)));
             }
-
-            // if there's and odd number of elements, just append the last one
-            if (!link.isEmpty()) {
-                buffer.add(link.remove());
+            if (i < size) {
+                buffer.set(nextSize++, buffer.get(i));
             }
-
-            // continue processing the pairs that were just built
-            link = buffer;
+            size = nextSize;
         }
-        return link.remove();
+        return buffer.get(0);
     }
 
     public static int countJoinNodeSize(OptExpression root, Set<JoinOperator> joinTypes) {
@@ -676,9 +682,17 @@ public class Utils {
      */
     public static boolean canEliminateNull(Set<ColumnRefOperator> nullOutputColumnOps, ScalarOperator expression) {
         try {
-            Map<ColumnRefOperator, ScalarOperator> m = nullOutputColumnOps.stream()
-                    .map(op -> new ColumnRefOperator(op.getId(), op.getType(), op.getName(), true))
-                    .collect(Collectors.toMap(identity(), col -> ConstantOperator.createNull(col.getType())));
+            // The rewrite only replaces column refs it meets (lambda arguments included, they match by id),
+            // so we build the null entries only for the ids the expression refers to.
+            ColumnRefSet referencedIds = new ColumnRefSet();
+            collectReferencedColumnIds(expression, referencedIds);
+            Map<ColumnRefOperator, ScalarOperator> m = Maps.newHashMap();
+            for (ColumnRefOperator op : nullOutputColumnOps) {
+                if (referencedIds.contains(op.getId())) {
+                    ColumnRefOperator col = new ColumnRefOperator(op.getId(), op.getType(), op.getName(), true);
+                    m.put(col, ConstantOperator.createNull(col.getType()));
+                }
+            }
             for (ScalarOperator e : Utils.extractConjuncts(expression)) {
                 ScalarOperator nullEval = new ReplaceColumnRefRewriter(m).rewrite(e);
                 ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
@@ -698,6 +712,19 @@ public class Utils {
             return false;
         }
         return false;
+    }
+
+    private static void collectReferencedColumnIds(ScalarOperator operator, ColumnRefSet ids) {
+        if (operator == null) {
+            return;
+        }
+        if (operator instanceof ColumnRefOperator) {
+            ids.union(((ColumnRefOperator) operator).getId());
+            return;
+        }
+        for (ScalarOperator child : operator.getChildren()) {
+            collectReferencedColumnIds(child, ids);
+        }
     }
 
     public static boolean isNotAlwaysNullResultWithNullScalarOperator(ScalarOperator scalarOperator) {
@@ -792,7 +819,7 @@ public class Utils {
             return true;
         }
 
-        Map<ColumnRefOperator, CallOperator> aggs = Maps.newHashMap();
+        Map<ColumnRefOperator, CallOperator> aggs = Collections.emptyMap();
         if (OperatorType.LOGICAL_AGGR.equals(inputOp.getOpType())) {
             aggs = ((LogicalAggregationOperator) inputOp).getAggregations();
         } else if (OperatorType.PHYSICAL_HASH_AGG.equals(inputOp.getOpType())) {

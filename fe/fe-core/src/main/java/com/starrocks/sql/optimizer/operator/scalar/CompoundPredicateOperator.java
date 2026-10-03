@@ -15,18 +15,17 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import org.apache.commons.collections.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class CompoundPredicateOperator extends PredicateOperator {
     private final CompoundType type;
@@ -122,17 +121,30 @@ public class CompoundPredicateOperator extends PredicateOperator {
         List<ScalarOperator> sortedChildren;
         switch (type) {
             case AND:
-                sortedChildren = Utils.extractConjuncts(this).stream()
-                        .sorted(Comparator.comparingInt(ScalarOperator::hashCode)).collect(Collectors.toList());
-                break;
             case OR:
-                sortedChildren = Utils.extractDisjunctive(this).stream()
-                        .sorted(Comparator.comparingInt(ScalarOperator::hashCode)).collect(Collectors.toList());
+                sortedChildren = new ArrayList<>();
+                collectNormalizedChildren(this, type, sortedChildren);
+                // List.sort is stable, so children with equal hashes keep their encounter order.
+                sortedChildren.sort(Comparator.comparingInt(ScalarOperator::hashCode));
                 break;
             default:
-                sortedChildren = Lists.newArrayList(this.getChildren());
+                sortedChildren = new ArrayList<>(this.getChildren());
         }
         return sortedChildren;
+    }
+
+    private static void collectNormalizedChildren(ScalarOperator operator, CompoundType type,
+                                                   List<ScalarOperator> destination) {
+        if (OperatorType.COMPOUND.equals(operator.getOpType())) {
+            CompoundPredicateOperator compound = (CompoundPredicateOperator) operator;
+            if (type == CompoundType.AND ? compound.isAnd() : compound.isOr()) {
+                // Match Utils.extractConjuncts/extractDisjunctive: only the first two children are flattened.
+                collectNormalizedChildren(compound.getChild(0), type, destination);
+                collectNormalizedChildren(compound.getChild(1), type, destination);
+                return;
+            }
+        }
+        destination.add(operator);
     }
 
     @Override
@@ -179,12 +191,12 @@ public class CompoundPredicateOperator extends PredicateOperator {
                 h += scalarOperator.hashCode();
             }
         }
-        return Objects.hash(hashCodeSelf(), h);
+        return 31 * (31 + hashCodeSelf()) + h;
     }
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), type);
+        return 31 * (31 + super.hashCodeSelf()) + Objects.hashCode(type);
     }
 
     public static ScalarOperator or(Collection<ScalarOperator> nodes) {

@@ -19,29 +19,39 @@ import org.roaringbitmap.RoaringBitmap;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-// BitSet used to accelerate column processing
+// Small sets keep their only ID inline; larger sets retain Roaring's unsigned-ID representation.
 public class ColumnRefSet implements Cloneable {
-    public RoaringBitmap bitSet;
+    private static final RoaringBitmap EMPTY_BITMAP = new RoaringBitmap();
+    private RoaringBitmap bitSet;
+    // Used only when bitSet is null. No ID is reserved as a sentinel.
+    private int inlineSize;
+    private int singleId;
 
     public ColumnRefSet() {
-        bitSet = new RoaringBitmap();
     }
 
     public ColumnRefSet(int id) {
-        bitSet = new RoaringBitmap();
-        bitSet.add(id);
+        inlineSize = 1;
+        singleId = id;
     }
 
     public ColumnRefSet(Collection<ColumnRefOperator> refs) {
-        bitSet = new RoaringBitmap();
-        for (ColumnRefOperator ref : refs) {
-            bitSet.add(ref.getId());
+        if (refs.size() > 1) {
+            bitSet = new RoaringBitmap();
+            for (ColumnRefOperator ref : refs) {
+                bitSet.add(ref.getId());
+            }
+        } else {
+            for (ColumnRefOperator ref : refs) {
+                union(ref.getId());
+            }
         }
     }
 
@@ -60,32 +70,57 @@ public class ColumnRefSet implements Cloneable {
     }
 
     public int[] getColumnIds() {
-        return bitSet.toArray();
+        if (bitSet != null) {
+            return bitSet.toArray();
+        }
+        return inlineSize == 0 ? new int[0] : new int[] {singleId};
     }
 
     public Stream<Integer> getStream() {
+        if (bitSet == null) {
+            return inlineSize == 0 ? Stream.empty() : Stream.of(singleId);
+        }
         Spliterator<Integer> spliterator = Spliterators.spliteratorUnknownSize(bitSet.iterator(), Spliterator.ORDERED);
         return StreamSupport.stream(spliterator, false);
     }
 
     public int getFirstId() {
-        return bitSet.first();
+        if (bitSet != null) {
+            return bitSet.first();
+        }
+        return inlineSize == 1 ? singleId : EMPTY_BITMAP.first();
     }
 
     @Override
     public ColumnRefSet clone() {
         try {
             ColumnRefSet result = (ColumnRefSet) super.clone();
-            result.bitSet = bitSet.clone();
+            if (bitSet != null) {
+                result.bitSet = bitSet.clone();
+            }
             return result;
         } catch (CloneNotSupportedException e) {
             throw new InternalError(e);
         }
     }
 
+    // Keep exact library hashing/formatting rather than duplicating container-specific formulas.
+    // Reads do not change representation, and the shared empty bitmap is never mutated.
+    private RoaringBitmap bitmapForRead() {
+        if (bitSet != null) {
+            return bitSet;
+        }
+        if (inlineSize == 0) {
+            return EMPTY_BITMAP;
+        }
+        RoaringBitmap singleton = new RoaringBitmap();
+        singleton.add(singleId);
+        return singleton;
+    }
+
     @Override
     public int hashCode() {
-        return bitSet.hashCode();
+        return bitSet != null ? bitSet.hashCode() : bitmapForRead().hashCode();
     }
 
     @Override
@@ -94,28 +129,63 @@ public class ColumnRefSet implements Cloneable {
             return false;
         }
         ColumnRefSet rhs = (ColumnRefSet) obj;
-        return bitSet.equals(rhs.bitSet);
+        if (bitSet != null && rhs.bitSet != null) {
+            return bitSet.equals(rhs.bitSet);
+        }
+        return size() == rhs.size() && (isEmpty() || contains(rhs.getFirstId()));
     }
 
     public int size() {
-        return bitSet.getCardinality();
+        return bitSet == null ? inlineSize : bitSet.getCardinality();
     }
 
     // The meaning is same with SQL Union Operation
     public void union(int id) {
-        bitSet.add(id);
+        if (bitSet != null) {
+            bitSet.add(id);
+        } else {
+            unionInline(id);
+        }
+    }
+
+    private void unionInline(int id) {
+        if (inlineSize == 0) {
+            singleId = id;
+            inlineSize = 1;
+        } else if (singleId != id) {
+            bitSet = RoaringBitmap.bitmapOf(singleId, id);
+        }
     }
 
     public void union(ColumnRefOperator ref) {
-        bitSet.add(ref.getId());
+        union(ref.getId());
     }
 
     public void union(Collection<ColumnRefOperator> refs) {
-        union(new ColumnRefSet(refs));
+        if (bitSet != null) {
+            for (ColumnRefOperator ref : refs) {
+                bitSet.add(ref.getId());
+            }
+        } else {
+            for (ColumnRefOperator ref : refs) {
+                union(ref.getId());
+            }
+        }
     }
 
     public void union(ColumnRefSet set) {
-        bitSet.or(set.bitSet);
+        if (set.bitSet == null) {
+            if (set.inlineSize == 1) {
+                union(set.singleId);
+            }
+        } else if (bitSet != null) {
+            bitSet.or(set.bitSet);
+        } else {
+            bitSet = set.bitSet.clone();
+            if (inlineSize == 1) {
+                bitSet.add(singleId);
+            }
+        }
     }
 
     // The meaning is same with SQL Except Operation
@@ -124,7 +194,15 @@ public class ColumnRefSet implements Cloneable {
     }
 
     public void except(ColumnRefSet set) {
-        bitSet.andNot(set.bitSet);
+        if (bitSet == null) {
+            if (inlineSize == 1 && set.contains(singleId)) {
+                clear();
+            }
+        } else if (set.bitSet != null) {
+            bitSet.andNot(set.bitSet);
+        } else if (set.inlineSize == 1) {
+            bitSet.remove(set.singleId);
+        }
     }
 
     // The meaning is same with SQL Intersect Operation
@@ -133,59 +211,77 @@ public class ColumnRefSet implements Cloneable {
     }
 
     public void intersect(ColumnRefOperator column) {
-        intersect(new ColumnRefSet(column.getId()));
+        intersect(column.getId());
     }
 
     public void intersect(int id) {
-        intersect(new ColumnRefSet(id));
+        boolean present = contains(id);
+        bitSet = null;
+        inlineSize = present ? 1 : 0;
+        singleId = id;
     }
 
     public void intersect(ColumnRefSet set) {
-        bitSet.and(set.bitSet);
+        if (set.bitSet == null) {
+            if (set.inlineSize == 0) {
+                clear();
+            } else {
+                intersect(set.singleId);
+            }
+        } else if (bitSet != null) {
+            bitSet.and(set.bitSet);
+        } else if (inlineSize == 1 && !set.contains(singleId)) {
+            clear();
+        }
     }
 
     public boolean isIntersect(ColumnRefSet other) {
-        for (int id : other.bitSet) {
-            if (this.bitSet.contains(id)) {
-                return true;
-            }
+        if (bitSet == null) {
+            return inlineSize == 1 && other.contains(singleId);
         }
-        return false;
+        if (other.bitSet == null) {
+            return other.inlineSize == 1 && contains(other.singleId);
+        }
+        return RoaringBitmap.intersects(bitSet, other.bitSet);
     }
 
     public int cardinality() {
-        return bitSet.getCardinality();
+        return size();
     }
 
     public boolean isEmpty() {
-        return bitSet.isEmpty();
+        return bitSet == null ? inlineSize == 0 : bitSet.isEmpty();
     }
 
     public void and(ColumnRefSet set) {
-        bitSet.and(set.bitSet);
+        intersect(set);
     }
 
     public boolean isSame(ColumnRefSet columnRefSet) {
-        final ColumnRefSet tmp = new ColumnRefSet();
-        tmp.union(columnRefSet);
-        tmp.bitSet.xor(bitSet);
-        return tmp.cardinality() == 0;
+        return equals(Objects.requireNonNull(columnRefSet));
     }
 
     public void clear() {
-        bitSet.clear();
+        bitSet = null;
+        inlineSize = 0;
     }
 
     public boolean contains(ColumnRefOperator ref) {
-        return bitSet.contains(ref.getId());
+        return contains(ref.getId());
     }
 
     public boolean contains(int id) {
-        return bitSet.contains(id);
+        return bitSet == null ? inlineSize == 1 && singleId == id : bitSet.contains(id);
     }
 
     public boolean containsAll(ColumnRefSet rhs) {
-        return this.bitSet.contains(rhs.bitSet);
+        if (rhs.bitSet == null) {
+            return rhs.inlineSize == 0 || contains(rhs.singleId);
+        }
+        if (bitSet != null) {
+            return bitSet.contains(rhs.bitSet);
+        }
+        return rhs.isEmpty() || (inlineSize == 1 && rhs.size() == 1 && rhs.contains(singleId));
     }
 
     public boolean containsAny(ColumnRefSet rhs) {
@@ -193,11 +289,21 @@ public class ColumnRefSet implements Cloneable {
     }
 
     public boolean containsAny(Collection<ColumnRefOperator> rhs) {
-        return rhs.stream().anyMatch(this::contains);
+        for (ColumnRefOperator ref : rhs) {
+            if (contains(ref)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public boolean containsAll(Collection<Integer> rhs) {
-        return rhs.stream().allMatch(id -> bitSet.contains(id));
+        for (Integer id : rhs) {
+            if (!contains(id)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public List<ColumnRefOperator> getColumnRefOperators(ColumnRefFactory columnRefFactory) {
@@ -206,6 +312,6 @@ public class ColumnRefSet implements Cloneable {
 
     @Override
     public String toString() {
-        return bitSet.toString();
+        return bitSet != null ? bitSet.toString() : bitmapForRead().toString();
     }
 }

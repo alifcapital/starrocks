@@ -156,11 +156,14 @@ public class LambdaFunctionOperator extends ScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
+    public void collectUsedColumns(ColumnRefSet destination) {
+        // Binding removal must not erase columns already collected from an outer scope.
         ColumnRefSet usedCols = lambdaExpr.getUsedColumns();
-        columnRefMap.values().stream().forEach(e -> usedCols.union(e.getUsedColumns()));
+        for (ScalarOperator expression : columnRefMap.values()) {
+            expression.collectUsedColumns(usedCols);
+        }
         usedCols.except(new ColumnRefSet(columnRefMap.keySet()));
-        return usedCols;
+        destination.union(usedCols);
     }
 
     @Override
