@@ -139,9 +139,9 @@ public class ModifyInference extends OptExpressionVisitor<ModifyInference.Modify
 
         public static ModifyOp union(ModifyOp lhs, ModifyOp rhs) {
             EnumSet<ModifyKind> modifySet = lhs.modifySet.clone();
-            lhs.modifySet.addAll(rhs.modifySet);
+            modifySet.addAll(rhs.modifySet);
             EnumSet<UpdateKind> updateSet = lhs.updateSet.clone();
-            lhs.updateSet.addAll(rhs.updateSet);
+            updateSet.addAll(rhs.updateSet);
             return new ModifyOp(modifySet, updateSet);
         }
 
