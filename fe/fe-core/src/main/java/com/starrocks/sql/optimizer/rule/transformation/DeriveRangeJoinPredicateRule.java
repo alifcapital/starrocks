@@ -132,13 +132,14 @@ public class DeriveRangeJoinPredicateRule extends TransformationRule {
                 continue;
             }
 
-            ColumnStatistic columnStatistic;
+            // The anchor comes from either child. Statistics.getColumnStatistic throws for a column that the
+            // statistics do not have, so we look the anchor up in both maps.
             ColumnRefOperator anchor = optional.get();
-            if (leftStatics.getColumnStatistic(anchor) != null) {
-                columnStatistic = leftStatics.getColumnStatistic(anchor);
-            } else if (rightStatics.getColumnStatistic(anchor) != null) {
-                columnStatistic = rightStatics.getColumnStatistic(anchor);
-            } else {
+            ColumnStatistic columnStatistic = leftStatics.getColumnStatistics().get(anchor);
+            if (columnStatistic == null) {
+                columnStatistic = rightStatics.getColumnStatistics().get(anchor);
+            }
+            if (columnStatistic == null) {
                 continue;
             }
             if (StringUtils.isEmpty(columnStatistic.getMinString()) ||
