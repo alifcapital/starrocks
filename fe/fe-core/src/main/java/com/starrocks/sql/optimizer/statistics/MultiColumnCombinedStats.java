@@ -181,10 +181,12 @@ public class MultiColumnCombinedStats {
 
     @Override
     public String toString() {
-        return new StringJoiner(", ", "[", "]")
-                .add("ndv=" + ndv)
-                .add("rowCount=" + rowCount)
-                .add("mcv=" + mcv.size())
-                .toString();
+        // We print MCV details only when an MCV list exists, so plans with plain multi-column NDV statistics look the
+        // same with and without MCV collection.
+        StringJoiner joiner = new StringJoiner(", ", "[", "]").add("ndv=" + ndv);
+        if (!mcv.isEmpty()) {
+            joiner.add("rowCount=" + rowCount).add("mcv=" + mcv.size());
+        }
+        return joiner.toString();
     }
 }
