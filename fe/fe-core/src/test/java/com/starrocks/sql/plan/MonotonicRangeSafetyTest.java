@@ -77,8 +77,8 @@ public class MonotonicRangeSafetyTest extends PlanTestNoneDBBase {
     @CsvSource({"2024-03-05,2024-03-06,20240304", "2024-03-07,2024-03-08,20240308",
             "2024-03-05,2024-03-06,20240303", "2024-03-05,2024-03-05,20240305"})
     public void testFloatImageDoesNotContradictMatchingTarget(String lo, String hi, int value) throws Exception {
-        // Binary32 rounds 20240305 down and 20240307 up. The constant on the receiving side may
-        // need rounding too. All these matching rows must survive domain intersection.
+        // Binary32 rounds 20240305 down and 20240307 up, so these dates and constants meet only
+        // after rounding. All these matching rows must survive domain intersection.
         String plan = getFragmentPlan("select ev.id from ev join fv on ev.id=fv.id "
                 + "and fv.v=cast(date_format(ev.d, '%Y%m%d') as float) where ev.d between '" + lo
                 + "' and '" + hi + "' and fv.v=cast(" + value + " as float)");
