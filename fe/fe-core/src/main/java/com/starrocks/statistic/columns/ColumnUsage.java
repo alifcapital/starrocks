@@ -68,7 +68,7 @@ public class ColumnUsage implements GsonPostProcessable {
         this.tableName = tableName;
         this.useCase = useCase;
         this.lastUsed = TimeUtils.getSystemNow();
-        this.created = TimeUtils.getSystemNow();
+        this.created = this.lastUsed;
     }
 
     public static Optional<ColumnUsage> build(Column column, Table table, UseCase useCase) {
@@ -132,7 +132,7 @@ public class ColumnUsage implements GsonPostProcessable {
 
     // NOTE: mutable
     public void useNow(UseCase useCase) {
-        this.lastUsed = LocalDateTime.now(TimeUtils.getSystemTimeZone().toZoneId());
+        this.lastUsed = LocalDateTime.now(TimeUtils.getSystemZoneId());
         this.useCase.add(useCase);
     }
 

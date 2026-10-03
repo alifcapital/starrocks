@@ -57,6 +57,9 @@ public class ApplyMinMaxStatisticRule implements TreeRewriteRule {
         // collect aggregate operators
         List<PhysicalHashAggregateOperator> aggLists = Lists.newArrayList();
         Utils.extractOperator(root, aggLists, op -> OperatorType.PHYSICAL_HASH_AGG.equals(op.getOpType()));
+        if (aggLists.isEmpty()) {
+            return root;
+        }
         // collect
         ColumnRefSet groupByRefSets = new ColumnRefSet();
         for (PhysicalHashAggregateOperator agg : aggLists) {
@@ -67,8 +70,14 @@ public class ApplyMinMaxStatisticRule implements TreeRewriteRule {
 
         Map<Integer, Pair<ConstantOperator, ConstantOperator>> infos = Maps.newHashMap();
 
-        List<PhysicalOlapScanOperator> olapScans = Utils.extractPhysicalOlapScanOperator(root);
+        // Min/max infos are only recorded for scans that produce a group-by key, so without group-by keys
+        // the scans are not looked at.
+        List<PhysicalOlapScanOperator> olapScans = groupByRefSets.isEmpty()
+                ? Lists.newArrayList() : Utils.extractPhysicalOlapScanOperator(root);
         for (PhysicalOlapScanOperator scan : olapScans) {
+            if (!producesGroupByKey(scan, groupByRefSets)) {
+                continue;
+            }
             OlapTable table = (OlapTable) scan.getTable();
             final Long lastUpdateTime = StatisticUtils.getTableLastUpdateTimestamp(table);
             if (null == lastUpdateTime) {
@@ -101,9 +110,14 @@ public class ApplyMinMaxStatisticRule implements TreeRewriteRule {
         // the BE side. globalDicts is only populated for parquet scans (gated in
         // DecodeCollector.visitPhysicalIcebergScan), so non-parquet falls through naturally.
         List<PhysicalScanOperator> icebergScans = Lists.newArrayList();
-        Utils.extractOperator(root, icebergScans,
-                op -> OperatorType.PHYSICAL_ICEBERG_SCAN.equals(op.getOpType()));
+        if (!groupByRefSets.isEmpty()) {
+            Utils.extractOperator(root, icebergScans,
+                    op -> OperatorType.PHYSICAL_ICEBERG_SCAN.equals(op.getOpType()));
+        }
         for (PhysicalScanOperator scan : icebergScans) {
+            if (!producesGroupByKey(scan, groupByRefSets)) {
+                continue;
+            }
             PhysicalIcebergScanOperator iceberg = (PhysicalIcebergScanOperator) scan;
             IcebergTable table = (IcebergTable) iceberg.getTable();
             Map<Integer, ColumnDict> globalDicts = toGlobalDictMap(iceberg.getGlobalDicts());
@@ -147,6 +161,24 @@ public class ApplyMinMaxStatisticRule implements TreeRewriteRule {
         }
 
         return root;
+    }
+
+    // True when a projected or scanned column of the scan is a group-by key, the only columns the min/max infos
+    // are collected for.
+    private static boolean producesGroupByKey(PhysicalScanOperator scan, ColumnRefSet groupByRefSets) {
+        if (scan.getProjection() != null) {
+            for (ColumnRefOperator column : scan.getProjection().getColumnRefMap().keySet()) {
+                if (groupByRefSets.contains(column)) {
+                    return true;
+                }
+            }
+        }
+        for (ColumnRefOperator column : scan.getColRefToColumnMetaMap().keySet()) {
+            if (groupByRefSets.contains(column)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Numeric/date columns are the only ones whose dict codes form the contiguous [0, dictSize]

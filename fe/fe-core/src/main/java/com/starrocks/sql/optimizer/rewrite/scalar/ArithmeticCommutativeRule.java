@@ -94,7 +94,8 @@ public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule
         }
 
         String functionName = call.getFunction().getFunctionName().toString();
-        if (!LEFT_COMMUTATIVE_MAP.containsKey(functionName) && !RIGHT_COMMUTATIVE_MAP.containsKey(functionName)) {
+        if (!LEFT_COMMUTATIVE_MAP.containsKey(functionName) && !DAY_SHIFT_COMMUTATIVE_MAP.containsKey(functionName)
+                && !RIGHT_COMMUTATIVE_MAP.containsKey(functionName)) {
             return predicate;
         }
 

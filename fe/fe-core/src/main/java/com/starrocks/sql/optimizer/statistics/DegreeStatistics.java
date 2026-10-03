@@ -23,6 +23,7 @@ public final class DegreeStatistics {
     private final long distinctCount;
     private final long maximumFrequency;
     private final double[] moments;
+    private final double[] roots;
 
     public DegreeStatistics(long rowCount, long nullCount, long distinctCount, long maximumFrequency,
                             double[] moments) {
@@ -49,6 +50,13 @@ public final class DegreeStatistics {
         this.distinctCount = distinctCount;
         this.maximumFrequency = maximumFrequency;
         this.moments = moments.clone();
+        this.roots = new double[12];
+        for (int order = 1; order <= roots.length; order++) {
+            // Preserve the estimator's arithmetic, including its maximum-frequency extension.
+            double moment = order <= MOMENT_COUNT ? moments[order - 1]
+                    : moments[0] * Math.pow(maximumFrequency, order - 1);
+            roots[order - 1] = Math.pow(moment, 1.0 / order);
+        }
     }
 
     public long getRowCount() {
@@ -74,7 +82,11 @@ public final class DegreeStatistics {
         return moments[power - 1];
     }
 
+    double root(int order) {
+        return roots[order - 1];
+    }
+
     public long estimatedSize() {
-        return 160;
+        return 272;
     }
 }

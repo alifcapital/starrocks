@@ -26,6 +26,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -55,8 +56,8 @@ public class PredicateColumnsMgr {
 
     private final ExternalPredicateColumnGroups externalGroups = new ExternalPredicateColumnGroups();
 
-    // Why Map? To update the usage
-    private final Map<ColumnUsage, ColumnUsage> id2columnUsage = Maps.newConcurrentMap();
+    // Identity keys avoid allocating a timestamped usage record on each observation.
+    private final Map<ColumnFullId, ColumnUsage> id2columnUsage = Maps.newConcurrentMap();
 
     // Keyed by hashed table_uuid; negative results (empty list, e.g. a table never queried) are
     // cached too, since a wide external table with no predicate columns yet would otherwise hit
@@ -78,8 +79,15 @@ public class PredicateColumnsMgr {
             return;
         }
         if (table.isNativeTableOrMaterializedView()) {
+            if (scanColumns.isEmpty()) {
+                return;
+            }
+            Optional<Database> database = resolveUsageDatabase(table);
+            if (database.isEmpty()) {
+                return;
+            }
             for (Column column : scanColumns.values()) {
-                addOrUpdateNativeColumnUsage(table, column, ColumnUsage.UseCase.NORMAL);
+                addOrUpdateNativeColumnUsage(database.get(), table, column, ColumnUsage.UseCase.NORMAL);
             }
         } else {
             externalGroups.recordColumns(table, scanColumns.values().stream().map(Column::getName).toList(),
@@ -164,16 +172,34 @@ public class PredicateColumnsMgr {
     }
 
     private void addOrUpdateNativeColumnUsage(Table table, Column column, ColumnUsage.UseCase useCase) {
-        Optional<ColumnUsage> mayUsage = ColumnUsage.build(column, table, useCase);
-        if (mayUsage.isEmpty()) {
+        Optional<Database> database = resolveUsageDatabase(table);
+        if (database.isEmpty()) {
             return;
         }
-        if (Database.isSystemOrInternalDatabase(mayUsage.get().getTableName().getDb())) {
-            return;
+        addOrUpdateNativeColumnUsage(database.get(), table, column, useCase);
+    }
+
+    // Empty when the table has no database or the database is a system or internal one, which we never track.
+    private Optional<Database> resolveUsageDatabase(Table table) {
+        Optional<Database> database = table.mayGetDatabaseId()
+                .flatMap(GlobalStateMgr.getCurrentState().getLocalMetastore()::mayGetDb);
+        if (database.isEmpty() || Database.isSystemOrInternalDatabase(database.get().getFullName())) {
+            return Optional.empty();
         }
-        ColumnUsage usage = mayUsage.get();
-        ColumnUsage oldValue = id2columnUsage.computeIfAbsent(usage, k -> usage);
-        oldValue.useNow(useCase);
+        return database;
+    }
+
+    private void addOrUpdateNativeColumnUsage(Database database, Table table, Column column,
+                                              ColumnUsage.UseCase useCase) {
+        ColumnFullId id = ColumnFullId.create(database, table, column);
+        // Serialize observations for the same column, including its mutable use-case set.
+        id2columnUsage.compute(id, (key, usage) -> {
+            if (usage == null) {
+                return new ColumnUsage(key, new TableName(database.getFullName(), table.getName()), useCase);
+            }
+            usage.useNow(useCase);
+            return usage;
+        });
     }
 
     //==================================== Query ============================================ //
@@ -253,7 +279,7 @@ public class PredicateColumnsMgr {
     public void restore() {
         List<ColumnUsage> state = getStorage().restore();
         for (ColumnUsage usage : ListUtils.emptyIfNull(state)) {
-            id2columnUsage.merge(usage, usage, ColumnUsage::merge);
+            id2columnUsage.merge(usage.getColumnFullId(), usage, ColumnUsage::merge);
         }
     }
 

@@ -37,7 +37,8 @@ public final class MonotonicFilterDerivation {
             return predicate;
         }
         List<ScalarOperator> originals = Utils.extractConjuncts(predicate);
-        Set<ScalarOperator> conjuncts = new LinkedHashSet<>(originals);
+        Set<ScalarOperator> conjuncts = null;
+        boolean added = false;
         for (ScalarOperator original : originals) {
             // Do not descend into OR, NOT, IS NULL or other boolean/value expressions.
             Bound bound = derive(original);
@@ -59,12 +60,14 @@ public final class MonotonicFilterDerivation {
                         conjunct.setRedundant(true);
                         conjunct.setNotEvalEstimate(true);
                     }
-                    conjuncts.add(conjunct);
+                    if (conjuncts == null) {
+                        conjuncts = new LinkedHashSet<>(originals);
+                    }
+                    added |= conjuncts.add(conjunct);
                 }
             }
         }
-        return conjuncts.size() == new LinkedHashSet<>(originals).size()
-                ? predicate : Utils.compoundAnd(conjuncts);
+        return added ? Utils.compoundAnd(conjuncts) : predicate;
     }
 
     // A comparison of a column with a constant, or AND and OR of such comparisons
