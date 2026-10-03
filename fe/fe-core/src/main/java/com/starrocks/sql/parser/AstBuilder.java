@@ -1389,7 +1389,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         }
 
         QualifiedName qualifiedName = getQualifiedName(context.qualifiedName());
-        TableRef tableRef = new TableRef(qualifiedName, null, createPos(context.qualifiedName()));
+        TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, createPos(context.qualifiedName()));
         CreateTableStmt createTableStmt = new CreateTableStmt(
                 context.IF() != null,
                 false,
@@ -1515,14 +1515,14 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 KeyPartitionRef keyPartitionRef = new KeyPartitionRef(partitionNames.getPartitionColNames(),
                         partitionNames.getPartitionColValues(), createPos(context.partitionNames()));
                 NodePosition pos = createPos(start, stop);
-                return new TruncateTablePartitionStmt(new TableRef(qualifiedName, null, pos), keyPartitionRef);
+                return new TruncateTablePartitionStmt(new TableRef(normalizeName(qualifiedName), null, pos), keyPartitionRef);
             } else {
                 partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(),
                         createPos(context.partitionNames()));
             }
         }
         NodePosition pos = createPos(start, stop);
-        return new TruncateTableStmt(new TableRef(qualifiedName, partitionRef, pos));
+        return new TruncateTableStmt(new TableRef(normalizeName(qualifiedName), partitionRef, pos));
     }
 
     public void visitShowPredicateClauses(StarRocksParser.ShowPredicateClausesContext ctx, ShowStmt showStmt) {
@@ -2047,7 +2047,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     public ParseNode visitDropViewStatement(com.starrocks.sql.parser.StarRocksParser.DropViewStatementContext context) {
         boolean ifExists = context.IF() != null && context.EXISTS() != null;
         QualifiedName qualifiedName = getQualifiedName(context.qualifiedName());
-        TableRef tableRef = new TableRef(qualifiedName, null, createPos(context.qualifiedName()));
+        TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, createPos(context.qualifiedName()));
         return new DropTableStmt(ifExists, tableRef, true, false, createPos(context));
     }
 
@@ -2142,7 +2142,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 createPos(context.identifier()));
 
         QualifiedName qualifiedName = getQualifiedName(context.qualifiedName());
-        TableRef tableRef = new TableRef(qualifiedName, null, createPos(context.qualifiedName()));
+        TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, createPos(context.qualifiedName()));
         return new AlterTableStmt(tableRef, Lists.newArrayList(dropIndexClause), createPos(context));
     }
 

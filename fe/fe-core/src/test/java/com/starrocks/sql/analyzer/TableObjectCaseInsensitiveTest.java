@@ -36,9 +36,11 @@ import com.starrocks.sql.ast.CancelLoadStmt;
 import com.starrocks.sql.ast.CreateDbStmt;
 import com.starrocks.sql.ast.CreateFileStmt;
 import com.starrocks.sql.ast.CreateRoutineLoadStmt;
+import com.starrocks.sql.ast.CreateTableAsSelectStmt;
 import com.starrocks.sql.ast.CreateViewStmt;
 import com.starrocks.sql.ast.DropDbStmt;
 import com.starrocks.sql.ast.DropFileStmt;
+import com.starrocks.sql.ast.DropTableStmt;
 import com.starrocks.sql.ast.GrantPrivilegeStmt;
 import com.starrocks.sql.ast.LoadStmt;
 import com.starrocks.sql.ast.RecoverDbStmt;
@@ -64,6 +66,7 @@ import com.starrocks.sql.ast.ShowTableStmt;
 import com.starrocks.sql.ast.ShowTransactionStmt;
 import com.starrocks.sql.ast.SwapTableClause;
 import com.starrocks.sql.ast.TableRenameClause;
+import com.starrocks.sql.ast.TruncateTableStmt;
 import com.starrocks.sql.ast.UseDbStmt;
 import com.starrocks.sql.ast.pipe.DropPipeStmt;
 import com.starrocks.sql.ast.pipe.PipeName;
@@ -143,6 +146,23 @@ public class TableObjectCaseInsensitiveTest {
                 "show tables from test_DB", SqlModeHelper.MODE_DEFAULT);
         ShowResultSet res = ShowExecutor.execute(stmt, connectContext);
         Assertions.assertEquals("t0", res.getResultRows().get(0).get(0));
+    }
+
+    @Test
+    public void testDdlTableNamesCaseInsensitive() {
+        CreateTableAsSelectStmt ctas = (CreateTableAsSelectStmt) SqlParser.parseSingleStatement(
+                "create table TEST_db.CTAS_T as select * from t0", SqlModeHelper.MODE_DEFAULT);
+        Assertions.assertEquals("ctas_t", ctas.getCreateTableStmt().getTableRef().getTableName());
+        Assertions.assertEquals("test_db", ctas.getCreateTableStmt().getTableRef().getDbName());
+        TruncateTableStmt truncate = (TruncateTableStmt) SqlParser.parseSingleStatement(
+                "truncate table TEST_db.T0", SqlModeHelper.MODE_DEFAULT);
+        Assertions.assertEquals("t0", truncate.getTblRef().getTableName());
+        DropTableStmt dropView = (DropTableStmt) SqlParser.parseSingleStatement(
+                "drop view TEST_db.VIEW1", SqlModeHelper.MODE_DEFAULT);
+        Assertions.assertEquals("view1", dropView.getTableRef().getTableName());
+        AlterTableStmt dropIndex = (AlterTableStmt) SqlParser.parseSingleStatement(
+                "drop index idx on TEST_db.T0", SqlModeHelper.MODE_DEFAULT);
+        Assertions.assertEquals("t0", dropIndex.getTableRef().getTableName());
     }
 
     @Test
