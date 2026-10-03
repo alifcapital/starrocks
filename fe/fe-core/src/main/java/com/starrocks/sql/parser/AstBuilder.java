@@ -2928,9 +2928,18 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         return new PauseRoutineLoadStmt(createLabelName(context.db, context.name), createPos(context));
     }
 
+    // The grammar takes the database from FOR db.name and from FROM db, and keeps the last one. We reject the
+    // statement when both name a database, instead of dropping one of them.
+    private void rejectTwoDatabases(List<com.starrocks.sql.parser.StarRocksParser.QualifiedNameContext> databases) {
+        if (databases.size() > 1) {
+            throw new ParsingException("Specify the database either in FOR or in FROM", createPos(databases.get(1)));
+        }
+    }
+
     @Override
     public ParseNode visitShowRoutineLoadStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowRoutineLoadStatementContext context) {
+        rejectTwoDatabases(context.qualifiedName());
         boolean isVerbose = context.ALL() != null;
         String database = null;
         StarRocksParser.ShowPredicateClausesContext showPredicateClauses = context.showPredicateClauses();
@@ -2963,6 +2972,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitShowStreamLoadStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowStreamLoadStatementContext context) {
+        rejectTwoDatabases(context.qualifiedName());
         boolean isVerbose = context.ALL() != null;
         Expr where = getWhereFrom(context.showPredicateClauses());
         List<OrderByElement> orderByElements = getOrderByFrom(context.showPredicateClauses());
@@ -3790,6 +3800,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     public ParseNode visitShowLoadWarningsStatement(
             com.starrocks.sql.parser.StarRocksParser.ShowLoadWarningsStatementContext context) {
         if (context.ON() != null) {
+            // The warnings of a URL are read as they are, so we reject WHERE, ORDER BY and LIMIT, which nothing reads.
+            StarRocksParser.ShowPredicateClausesContext clauses = context.showPredicateClauses();
+            if (clauses.WHERE() != null || clauses.ORDER() != null || clauses.limitElement() != null) {
+                throw new ParsingException("SHOW LOAD WARNINGS ON a URL does not support WHERE, ORDER BY or LIMIT",
+                        createPos(clauses));
+            }
             String url = ((StringLiteral) visit(context.string())).getValue();
             return new ShowLoadWarningsStmt(null, url, null, null);
         }
@@ -5034,6 +5050,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             }
             return new UpdateFailPointStatusStatement(failpointName, true, backendList, createPos(ctx));
         } else {
+            // TIMES and PROBABILITY only describe how an enabled fail point triggers, so we reject them here.
+            if (ctx.times != null || ctx.prob != null) {
+                throw new ParsingException("DISABLE FAILPOINT does not support TIMES or PROBABILITY", createPos(ctx));
+            }
             return new UpdateFailPointStatusStatement(failpointName, false, backendList, createPos(ctx));
         }
     }
@@ -5749,6 +5769,11 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitModifyPartitionClause(com.starrocks.sql.parser.StarRocksParser.ModifyPartitionClauseContext context) {
+        // ModifyPartitionClause has no distribution, so DISTRIBUTED BY would be dropped. We reject it.
+        if (context.distributionDesc() != null) {
+            throw new ParsingException("MODIFY PARTITION does not support DISTRIBUTED BY",
+                    createPos(context.distributionDesc()));
+        }
         Map<String, String> properties = context.propertyList() == null ?
                 null : getCaseSensitivePropertyList(context.propertyList());
         NodePosition pos = createPos(context);
