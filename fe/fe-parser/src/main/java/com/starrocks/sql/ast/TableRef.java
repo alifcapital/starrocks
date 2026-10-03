@@ -15,6 +15,9 @@
 package com.starrocks.sql.ast;
 
 import com.starrocks.sql.parser.NodePosition;
+import com.starrocks.sql.parser.ParsingException;
+
+import static com.starrocks.sql.parser.ErrorMsgProxy.PARSER_ERROR_MSG;
 
 public class TableRef implements ParseNode {
     private final QualifiedName tableName;
@@ -27,6 +30,11 @@ public class TableRef implements ParseNode {
     }
 
     public TableRef(QualifiedName tableName, PartitionRef partitionRef, String alias, NodePosition pos) {
+        // A table name has at most three parts: catalog.db.table. The getters below read the first and the last
+        // two parts, so a longer name would silently drop the parts in between and name another table.
+        if (tableName != null && tableName.getParts().size() > 3) {
+            throw new ParsingException(PARSER_ERROR_MSG.invalidTableFormat(tableName.toString()), pos);
+        }
         this.tableName = tableName;
         this.partitionRef = partitionRef;
         this.alias = alias;
