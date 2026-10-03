@@ -426,10 +426,9 @@ public class StatisticsSQLTest extends PlanTestBase {
     @Test
     public void testCacheExternalQueryColumnStatics() {
         // table_uuid is stored hashed (StatisticUtils.hashTableUuidForPkStorage) to stay within
-        // BE's primary_key_limit_size; queries match both the hashed and raw value so historical
-        // rows written before hashing was introduced remain visible.
+        // BE's primary_key_limit_size. External BASIC statistics are stored with only the hashed key.
         String hashedTableUUID = StatisticUtils.hashTableUuidForPkStorage("a");
-        String tableUUIDPredicate = "table_uuid in (\"" + hashedTableUUID + "\", \"a\")";
+        String tableUUIDPredicate = "table_uuid = '" + hashedTableUUID + "'";
 
         String sql = StatisticSQLBuilder.buildQueryExternalFullStatisticsSQL("a", Lists.newArrayList("col1", "col2"),
                 Lists.newArrayList(IntegerType.INT, IntegerType.INT));
