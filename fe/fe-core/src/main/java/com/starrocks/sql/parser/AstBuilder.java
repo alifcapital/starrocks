@@ -4662,6 +4662,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitCancelExportStatement(com.starrocks.sql.parser.StarRocksParser.CancelExportStatementContext context) {
+        rejectExportPattern(context.pattern, "CANCEL EXPORT");
         String catalog = null;
         if (context.catalog != null) {
             QualifiedName dbName = getQualifiedName(context.catalog);
@@ -4677,6 +4678,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitShowExportStatement(com.starrocks.sql.parser.StarRocksParser.ShowExportStatementContext context) {
+        rejectExportPattern(context.pattern, "SHOW EXPORT");
         String catalog = null;
         if (context.catalog != null) {
             QualifiedName dbName = getQualifiedName(context.catalog);
@@ -4690,6 +4692,13 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         ShowExportStmt showExportStmt = new ShowExportStmt(catalog, whereExpr, orderByElements, le, createPos(context));
         showExportStmt.markSelfPredicateOrderLimit(true, true, true);
         return showExportStmt;
+    }
+
+    // The export statements have no LIKE filter, and SHOW EXPORT would list every job, so we reject the pattern.
+    private void rejectExportPattern(com.starrocks.sql.parser.StarRocksParser.StringContext pattern, String statement) {
+        if (pattern != null) {
+            throw new ParsingException("LIKE is not supported for " + statement + ", use WHERE", createPos(pattern));
+        }
     }
 
     // ------------------------------------------------- Plugin Statement --------------------------------------------------------
