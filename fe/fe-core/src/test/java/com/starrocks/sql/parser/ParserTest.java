@@ -76,6 +76,24 @@ class ParserTest {
         System.out.println();
     }
 
+    @ParameterizedTest
+    @MethodSource("tableNamesWithTooManyParts")
+    void testTableNameWithMoreThanThreeParts(String sql) {
+        // A fourth name part must be an error. Dropping a middle part would point the statement at another table.
+        ParsingException e = Assertions.assertThrows(ParsingException.class,
+                () -> SqlParser.parse(sql, new SessionVariable()));
+        assertContains(e.getMessage(), "Invalid table name format");
+    }
+
+    private static Stream<Arguments> tableNamesWithTooManyParts() {
+        return Stream.of(
+                Arguments.of("drop table c.db.extra.t"),
+                Arguments.of("insert into c.db.extra.t values (1)"),
+                Arguments.of("delete from c.db.extra.t where k = 1"),
+                Arguments.of("alter table c.db.extra.t add column k2 int"),
+                Arguments.of("refresh external table c.db.extra.t"));
+    }
+
     @Test
     void tokensExceedLimitTest() {
         String sql = "select 1";
