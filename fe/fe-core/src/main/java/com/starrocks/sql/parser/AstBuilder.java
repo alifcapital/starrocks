@@ -2737,6 +2737,11 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         } else {
             com.starrocks.sql.parser.StarRocksParser.FromContext fromContext =
                     (com.starrocks.sql.parser.StarRocksParser.FromContext) context.fromClause();
+            // UpdateStmt keeps the FROM relations only, so the update would read the rows before PIVOT.
+            if (fromContext.pivotClause() != null) {
+                throw new ParsingException("PIVOT is not supported in the FROM clause of UPDATE",
+                        createPos(fromContext.pivotClause()));
+            }
             if (fromContext.relations() != null) {
                 fromRelations = visit(fromContext.relations().relation(), Relation.class);
             }
