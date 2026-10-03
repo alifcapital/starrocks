@@ -3477,7 +3477,7 @@
 {"sql": "TRACE LOGS UPDATE t SET x=DATE 'broken'"}
 {"sql": "TRACE LOGS WITH c AS (SELECT DATE 'broken') DELETE FROM t WHERE x=1"}
 {"sql": "UPDATE dst SET v=1 FROM src PIVOT(sum(v) FOR k IN (1)) WHERE k=2"}
-{"sql": "UPDATE dst SET v=1 FROM src PIVOT(map(1) FOR k IN (1))", "gap": "AstBuilder never visits the PIVOT of an UPDATE, so MAP with odd arguments is valid there; the fast parser has no syntax-only expression mode and gives up when it must build this MAP"}
+{"sql": "UPDATE dst SET v=1 FROM src PIVOT(map(1) FOR k IN (1))"}
 {"sql": "DELETE FROM t TEMPORARY PARTITION(p1,p2) USING a,b WHERE t.x=a.x"}
 {"sql": "DELETE FROM t PARTITION(k=1) WHERE x=?"}
 {"sql": "EXPLAIN ANALYZE DELETE FROM t WHERE DATE 'broken'"}

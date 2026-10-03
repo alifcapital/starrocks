@@ -282,4 +282,4 @@
 {"sql": "SELECT * FROM t VERSION FROM CAST(date 'bad' AS date) TO 1"}
 {"sql": "SELECT * FROM (SELECT * FROM t VERSION FROM date 'bad' TO date 'bad') s"}
 {"sql": "SELECT * FROM t VERSION BETWEEN datetime 'bad' AND datetime 'bad' JOIN u FOR VERSION AS OF date 'bad'"}
-{"sql": "SELECT * FROM t VERSION FROM (SELECT date 'bad') TO 1", "gap": "an invalid date literal in a subquery inside a query period range goes through the query callback, which cannot ignore it"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT date 'bad') TO 1"}

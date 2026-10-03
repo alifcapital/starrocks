@@ -37,7 +37,7 @@ public final class DirectParseBudget {
 
         void charge(long work) {
             if (work < 0 || work > limit - spent) {
-                throw new DirectExpressionParser.UnsupportedExpression(
+                throw new DirectExpressionParser.ResourceLimit(
                         "interval speculative work requires original path");
             }
             spent += work;
@@ -66,7 +66,7 @@ public final class DirectParseBudget {
 
     void enterExpression() {
         if (expressions + queries >= 512) {
-            throw new DirectExpressionParser.UnsupportedExpression(
+            throw new DirectExpressionParser.ResourceLimit(
                     "shared query/expression nesting limit 512");
         }
         expressions++;
@@ -74,6 +74,24 @@ public final class DirectParseBudget {
 
     void exitExpression() {
         expressions--;
+    }
+
+    private int ignored;
+
+    /**
+     * Syntax that AstBuilder never visits is only checked for its grammar: while this is entered, an
+     * invalid date literal or a function that cannot be built does not stop the parse.
+     */
+    void enterIgnored() {
+        ignored++;
+    }
+
+    void exitIgnored() {
+        ignored--;
+    }
+
+    boolean ignoring() {
+        return ignored > 0;
     }
 
     void enterQuery() {
