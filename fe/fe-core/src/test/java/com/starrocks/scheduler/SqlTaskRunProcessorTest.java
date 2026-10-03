@@ -17,6 +17,7 @@ package com.starrocks.scheduler;
 import com.starrocks.alter.OptimizeTask;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.StmtExecutor;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.parser.SqlParser;
 import mockit.Expectations;
@@ -24,6 +25,7 @@ import mockit.Mock;
 import mockit.MockUp;
 import mockit.Mocked;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -34,6 +36,12 @@ import java.util.UUID;
  * and that TaskRunContext propagates the remote host:port from the submitter.
  */
 public class SqlTaskRunProcessorTest {
+
+    // Without multi-warehouse a task run selects the default warehouse by name, so it must exist.
+    @BeforeEach
+    public void setUp() {
+        GlobalStateMgr.getCurrentState().getWarehouseMgr().initDefaultWarehouse();
+    }
 
     @Test
     public void testOptimizeTaskMarksRewriteContext() {

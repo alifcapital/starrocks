@@ -595,126 +595,140 @@ public class ResourceGroupStmtTest {
 
     @Test
     public void testChooseResourceGroupFiltersByCurrentWarehouse() throws Exception {
-        WarehouseManager warehouseManager = installTestWarehouseManager();
-        warehouseManager.addWarehouse(new DefaultWarehouse(2, "wh2"));
-        BackendResourceStat.getInstance().setNumCoresOfBe(2, 2, 32);
-
-        ConnectContext ctx = starRocksAssert.getCtx();
-        String qualifiedUser = "rg1_user1";
-        ctx.setQualifiedUser(qualifiedUser);
-        ctx.setCurrentUserIdentity(new UserIdentity(qualifiedUser, "%"));
-        ctx.setCurrentRoleIds(
-                ctx.getGlobalStateMgr().getAuthorizationMgr().getRoleIdsByUser(new UserIdentity(qualifiedUser, "%"))
-        );
-        ctx.setRemoteIP("192.168.88.9");
-
+        // The session warehouse selects resource groups only with multi-warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         try {
-            // Case 1: no resource group has warehouses property, so normal classifier matching still works.
-            starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_global\n" +
-                    "TO (user='rg1_user1')\n" +
-                    "WITH (" +
-                    "   'mem_limit' = '20%'," +
-                    "   'cpu_weight' = '10'" +
-                    ");");
+            WarehouseManager warehouseManager = installTestWarehouseManager();
+            warehouseManager.addWarehouse(new DefaultWarehouse(2, "wh2"));
+            BackendResourceStat.getInstance().setNumCoresOfBe(2, 2, 32);
 
-            ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
-            TWorkGroup wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
-                    ctx, ResourceGroupClassifier.QueryType.SELECT, null);
-            Assertions.assertEquals("rg_auto_global", wg.getName());
+            ConnectContext ctx = starRocksAssert.getCtx();
+            String qualifiedUser = "rg1_user1";
+            ctx.setQualifiedUser(qualifiedUser);
+            ctx.setCurrentUserIdentity(new UserIdentity(qualifiedUser, "%"));
+            ctx.setCurrentRoleIds(
+                    ctx.getGlobalStateMgr().getAuthorizationMgr().getRoleIdsByUser(new UserIdentity(qualifiedUser, "%"))
+            );
+            ctx.setRemoteIP("192.168.88.9");
 
-            // Case 2: current warehouse is wh2, so a resource group whose warehouses contains wh2 is eligible.
-            starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_wh2\n" +
-                    "TO (user='rg1_user1', source_ip='192.168.88.1/24')\n" +
-                    "WITH (" +
-                    "   'mem_limit' = '20%'," +
-                    "   'warehouses' = 'wh2'," +
-                    "   'cpu_weight_percent' = '20'" +
-                    ");");
+            try {
+                // Case 1: no resource group has warehouses property, so normal classifier matching still works.
+                starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_global\n" +
+                        "TO (user='rg1_user1')\n" +
+                        "WITH (" +
+                        "   'mem_limit' = '20%'," +
+                        "   'cpu_weight' = '10'" +
+                        ");");
 
-            ctx.setCurrentWarehouse("wh2");
-            wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
-                    ctx, ResourceGroupClassifier.QueryType.SELECT, null);
-            Assertions.assertEquals("rg_auto_wh2", wg.getName());
+                ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                TWorkGroup wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
+                        ctx, ResourceGroupClassifier.QueryType.SELECT, null);
+                Assertions.assertEquals("rg_auto_global", wg.getName());
 
-            // Case 3: current warehouse is default_warehouse, so the wh2-only resource group is filtered out.
-            ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
-            wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
-                    ctx, ResourceGroupClassifier.QueryType.SELECT, null);
-            Assertions.assertEquals("rg_auto_global", wg.getName());
+                // Case 2: current warehouse is wh2, so a resource group whose warehouses contains wh2 is eligible.
+                starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_wh2\n" +
+                        "TO (user='rg1_user1', source_ip='192.168.88.1/24')\n" +
+                        "WITH (" +
+                        "   'mem_limit' = '20%'," +
+                        "   'warehouses' = 'wh2'," +
+                        "   'cpu_weight_percent' = '20'" +
+                        ");");
 
-            // Case 4: current warehouse is explicitly listed in warehouses, so that resource group is eligible.
-            starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_default_warehouse\n" +
-                    "TO (user='rg1_user1', source_ip='192.168.88.1/24')\n" +
-                    "WITH (" +
-                    "   'mem_limit' = '20%'," +
-                    "   'warehouses' = 'default_warehouse'," +
-                    "   'cpu_weight_percent' = '20'" +
-                    ");");
+                ctx.setCurrentWarehouse("wh2");
+                wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
+                        ctx, ResourceGroupClassifier.QueryType.SELECT, null);
+                Assertions.assertEquals("rg_auto_wh2", wg.getName());
 
-            wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
-                    ctx, ResourceGroupClassifier.QueryType.SELECT, null);
-            Assertions.assertEquals("rg_auto_default_warehouse", wg.getName());
+                // Case 3: current warehouse is default_warehouse, so the wh2-only resource group is filtered out.
+                ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
+                        ctx, ResourceGroupClassifier.QueryType.SELECT, null);
+                Assertions.assertEquals("rg_auto_global", wg.getName());
 
-            // Case 5: empty warehouses is treated as global and still participates in classifier ranking.
-            starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_empty_warehouses\n" +
-                    "TO (user='rg1_user1', source_ip='192.168.88.1/24', query_type in ('select'))\n" +
-                    "WITH (" +
-                    "   'mem_limit' = '20%'," +
-                    "   'warehouses' = ''," +
-                    "   'exclusive_cpu_percent' = '10'" +
-                    ");");
+                // Case 4: current warehouse is explicitly listed in warehouses, so that resource group is eligible.
+                starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_default_warehouse\n" +
+                        "TO (user='rg1_user1', source_ip='192.168.88.1/24')\n" +
+                        "WITH (" +
+                        "   'mem_limit' = '20%'," +
+                        "   'warehouses' = 'default_warehouse'," +
+                        "   'cpu_weight_percent' = '20'" +
+                        ");");
 
-            wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
-                    ctx, ResourceGroupClassifier.QueryType.SELECT, null);
-            Assertions.assertEquals("rg_auto_empty_warehouses", wg.getName());
+                wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
+                        ctx, ResourceGroupClassifier.QueryType.SELECT, null);
+                Assertions.assertEquals("rg_auto_default_warehouse", wg.getName());
+
+                // Case 5: empty warehouses is treated as global and still participates in classifier ranking.
+                starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_auto_empty_warehouses\n" +
+                        "TO (user='rg1_user1', source_ip='192.168.88.1/24', query_type in ('select'))\n" +
+                        "WITH (" +
+                        "   'mem_limit' = '20%'," +
+                        "   'warehouses' = ''," +
+                        "   'exclusive_cpu_percent' = '10'" +
+                        ");");
+
+                wg = GlobalStateMgr.getCurrentState().getResourceGroupMgr().chooseResourceGroup(
+                        ctx, ResourceGroupClassifier.QueryType.SELECT, null);
+                Assertions.assertEquals("rg_auto_empty_warehouses", wg.getName());
+            } finally {
+                starRocksAssert.getCtx().setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_empty_warehouses");
+                starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_default_warehouse");
+                starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_wh2");
+                starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_global");
+                warehouseManager.replayDropWarehouse(new DropWarehouseLog("wh2"));
+            }
         } finally {
-            starRocksAssert.getCtx().setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
-            starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_empty_warehouses");
-            starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_default_warehouse");
-            starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_wh2");
-            starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_auto_global");
-            warehouseManager.replayDropWarehouse(new DropWarehouseLog("wh2"));
+            Config.enable_multi_warehouse = multiWarehouse;
         }
     }
 
     @Test
     public void testChooseResourceGroupByNameAndIdFiltersByCurrentWarehouse() throws Exception {
-        WarehouseManager warehouseManager = installTestWarehouseManager();
-        warehouseManager.addWarehouse(new DefaultWarehouse(2, "wh2"));
-        BackendResourceStat.getInstance().setNumCoresOfBe(2, 2, 32);
-
+        // The session warehouse selects resource groups only with multi-warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         try {
-            ConnectContext ctx = starRocksAssert.getCtx();
-            ResourceGroupMgr resourceGroupMgr = GlobalStateMgr.getCurrentState().getResourceGroupMgr();
-            starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_by_name_id_wh2\n" +
-                    "TO (user='rg1_user1')\n" +
-                    "WITH (" +
-                    "   'mem_limit' = '20%'," +
-                    "   'warehouses' = 'wh2'," +
-                    "   'cpu_weight_percent' = '20'" +
-                    ");");
+            WarehouseManager warehouseManager = installTestWarehouseManager();
+            warehouseManager.addWarehouse(new DefaultWarehouse(2, "wh2"));
+            BackendResourceStat.getInstance().setNumCoresOfBe(2, 2, 32);
 
-            long rgId = resourceGroupMgr.getResourceGroup("rg_by_name_id_wh2").getId();
+            try {
+                ConnectContext ctx = starRocksAssert.getCtx();
+                ResourceGroupMgr resourceGroupMgr = GlobalStateMgr.getCurrentState().getResourceGroupMgr();
+                starRocksAssert.executeResourceGroupDdlSql("CREATE RESOURCE GROUP rg_by_name_id_wh2\n" +
+                        "TO (user='rg1_user1')\n" +
+                        "WITH (" +
+                        "   'mem_limit' = '20%'," +
+                        "   'warehouses' = 'wh2'," +
+                        "   'cpu_weight_percent' = '20'" +
+                        ");");
 
-            // Case 1: null ConnectContext ignores warehouses, matching SET resource_group analysis behavior.
-            Assertions.assertNotNull(resourceGroupMgr.chooseResourceGroupByName(null, "rg_by_name_id_wh2"));
-            Assertions.assertNotNull(resourceGroupMgr.chooseResourceGroupByID(null, rgId));
+                long rgId = resourceGroupMgr.getResourceGroup("rg_by_name_id_wh2").getId();
 
-            // Case 2: current warehouse is default_warehouse, so the wh2-only resource group is filtered out.
-            ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
-            Assertions.assertNull(resourceGroupMgr.chooseResourceGroupByName(ctx, "rg_by_name_id_wh2"));
-            Assertions.assertNull(resourceGroupMgr.chooseResourceGroupByID(ctx, rgId));
+                // Case 1: null ConnectContext ignores warehouses, matching SET resource_group analysis behavior.
+                Assertions.assertNotNull(resourceGroupMgr.chooseResourceGroupByName(null, "rg_by_name_id_wh2"));
+                Assertions.assertNotNull(resourceGroupMgr.chooseResourceGroupByID(null, rgId));
 
-            // Case 3: current warehouse is wh2, so the wh2-only resource group is eligible by name and id.
-            ctx.setCurrentWarehouse("wh2");
-            Assertions.assertEquals("rg_by_name_id_wh2",
-                    resourceGroupMgr.chooseResourceGroupByName(ctx, "rg_by_name_id_wh2").getName());
-            Assertions.assertEquals("rg_by_name_id_wh2",
-                    resourceGroupMgr.chooseResourceGroupByID(ctx, rgId).getName());
+                // Case 2: current warehouse is default_warehouse, so the wh2-only resource group is filtered out.
+                ctx.setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                Assertions.assertNull(resourceGroupMgr.chooseResourceGroupByName(ctx, "rg_by_name_id_wh2"));
+                Assertions.assertNull(resourceGroupMgr.chooseResourceGroupByID(ctx, rgId));
+
+                // Case 3: current warehouse is wh2, so the wh2-only resource group is eligible by name and id.
+                ctx.setCurrentWarehouse("wh2");
+                Assertions.assertEquals("rg_by_name_id_wh2",
+                        resourceGroupMgr.chooseResourceGroupByName(ctx, "rg_by_name_id_wh2").getName());
+                Assertions.assertEquals("rg_by_name_id_wh2",
+                        resourceGroupMgr.chooseResourceGroupByID(ctx, rgId).getName());
+            } finally {
+                starRocksAssert.getCtx().setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
+                starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_by_name_id_wh2");
+                warehouseManager.replayDropWarehouse(new DropWarehouseLog("wh2"));
+            }
         } finally {
-            starRocksAssert.getCtx().setCurrentWarehouse(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
-            starRocksAssert.executeResourceGroupDdlSql("DROP RESOURCE GROUP IF EXISTS rg_by_name_id_wh2");
-            warehouseManager.replayDropWarehouse(new DropWarehouseLog("wh2"));
+            Config.enable_multi_warehouse = multiWarehouse;
         }
     }
 
