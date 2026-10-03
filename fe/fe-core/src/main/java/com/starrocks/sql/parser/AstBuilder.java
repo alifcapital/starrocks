@@ -8047,8 +8047,15 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitOdbcFunctionCallExpression(
             com.starrocks.sql.parser.StarRocksParser.OdbcFunctionCallExpressionContext context) {
-        FunctionCallExpr functionCallExpr = (FunctionCallExpr) visit(context.functionCall());
-        OdbcScalarFunctionCall odbcScalarFunctionCall = new OdbcScalarFunctionCall(functionCallExpr);
+        Expr function = (Expr) visit(context.functionCall());
+        // Generic rewrites can return before OVER construction. ODBC accepts scalar calls only.
+        if (!(function instanceof FunctionCallExpr) &&
+                context.functionCall() instanceof StarRocksParser.SimpleFunctionCallContext call &&
+                call.over() != null) {
+            throw new ParsingException("ODBC scalar functions do not support OVER", createPos(call));
+        }
+        OdbcScalarFunctionCall odbcScalarFunctionCall =
+                new OdbcScalarFunctionCall(function, createPos(context.functionCall()));
         return odbcScalarFunctionCall.mappingFunction();
     }
 
@@ -9145,7 +9152,11 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         } else if (ctx.string() != null) {
             alias = ((StringLiteral) visit(ctx.string())).getStringValue();
         }
-        FunctionCallExpr functionCallExpr = (FunctionCallExpr) visit(ctx.functionCall());
+        Expr measure = (Expr) visit(ctx.functionCall());
+        if (!(measure instanceof FunctionCallExpr functionCallExpr)) {
+            throw new ParsingException("Measure expression in PIVOT must use aggregate function",
+                    createPos(ctx.functionCall()));
+        }
         return new PivotAggregation(functionCallExpr, alias, createPos(ctx));
     }
 
