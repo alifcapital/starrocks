@@ -147,7 +147,9 @@ public class PruneSubfieldsForComplexType implements TreeRewriteRule {
             }
             for (Map.Entry<ColumnRefOperator, Column> entry : physicalScanOperator.getColRefToColumnMetaMap()
                     .entrySet()) {
-                if (isPruneBoundary(physicalScanOperator, entry.getKey(), entry.getValue())) {
+                // scanRefs is only queried for complex-typed columns
+                if (entry.getKey().getType().isComplexType()
+                        && isPruneBoundary(physicalScanOperator, entry.getKey(), entry.getValue())) {
                     context.addScan(entry.getKey());
                 }
             }

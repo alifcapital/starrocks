@@ -146,7 +146,12 @@ public class SubfieldAccessPathNormalizer {
     }
 
     public boolean hasPath(ColumnRefOperator root) {
-        return allAccessPaths.stream().anyMatch(path -> path.root().equals(root));
+        for (AccessPath path : allAccessPaths) {
+            if (path.root().equals(root)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static class Collector extends ScalarOperatorVisitor<Optional<AccessPath>, List<Optional<AccessPath>>> {
@@ -291,12 +296,20 @@ public class SubfieldAccessPathNormalizer {
 
         private Optional<AccessPath> process(ScalarOperator scalarOperator, Deque<AccessPath> accessPaths) {
             // process children in post-order
-            List<Optional<AccessPath>> childAccessPaths = scalarOperator.getChildren().stream()
-                    .map(child -> process(child, accessPaths))
-                    .collect(Collectors.toList());
+            List<Optional<AccessPath>> childAccessPaths = Lists.newArrayList();
+            for (ScalarOperator child : scalarOperator.getChildren()) {
+                childAccessPaths.add(process(child, accessPaths));
+            }
             // no AccessPaths gathered from children of intermediate ScalarOperator means current
             // scalar operator contains not nested types.
-            if (!childAccessPaths.isEmpty() && childAccessPaths.stream().noneMatch(Optional::isPresent)) {
+            boolean hasChildPath = false;
+            for (Optional<AccessPath> childAccessPath : childAccessPaths) {
+                if (childAccessPath.isPresent()) {
+                    hasChildPath = true;
+                    break;
+                }
+            }
+            if (!childAccessPaths.isEmpty() && !hasChildPath) {
                 return Optional.empty();
             }
             Optional<AccessPath> currentPath = scalarOperator.accept(this, childAccessPaths);
@@ -306,8 +319,11 @@ public class SubfieldAccessPathNormalizer {
             // Since AccessPath is extended by appending path component in-place, so AccessPaths in
             // childAccessPaths that is not identical to AccessPath of the current ScalarOperator is
             // non-extendable.
-            childAccessPaths.stream().filter(p -> p.isPresent() && p.get() != path)
-                    .map(Optional::get).forEach(accessPaths::add);
+            for (Optional<AccessPath> childAccessPath : childAccessPaths) {
+                if (childAccessPath.isPresent() && childAccessPath.get() != path) {
+                    accessPaths.add(childAccessPath.get());
+                }
+            }
             return currentPath;
         }
     }

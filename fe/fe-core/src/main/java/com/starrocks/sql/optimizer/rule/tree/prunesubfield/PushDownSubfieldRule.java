@@ -103,11 +103,18 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
             if (predicate == null) {
                 return Optional.empty();
             }
-            boolean needRewritePredicate = false;
             SubfieldExpressionCollector collector = new SubfieldExpressionCollector();
             predicate.accept(collector, null);
+            return pushDownExpression(predicate, collector.getComplexExpressions(), context, checkColumns);
+        }
 
-            for (ScalarOperator expr : collector.getComplexExpressions()) {
+        // complexExpressions must be the result of collecting the predicate with a default SubfieldExpressionCollector
+        private Optional<ScalarOperator> pushDownExpression(ScalarOperator predicate,
+                                                            List<ScalarOperator> complexExpressions, Context context,
+                                                            ColumnRefSet checkColumns) {
+            boolean needRewritePredicate = false;
+
+            for (ScalarOperator expr : complexExpressions) {
                 if (expr.getUsedColumns().isIntersect(checkColumns)) {
                     // predicate use columns in on-predicate, so we can't rewrite it
                     continue;
@@ -148,7 +155,8 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
         @Override
         public OptExpression visit(OptExpression optExpression, Context context) {
             Optional<Operator> project = generatePushDownProject(optExpression, EMPTY_COLUMN_SET, context);
-            OptExpression result = visitChildren(optExpression, new Context());
+            // a leaf has no children to share a context with
+            OptExpression result = visitChildren(optExpression, optExpression.arity() == 0 ? null : new Context());
             return project.map(operator -> OptExpression.create(operator, result)).orElse(result);
         }
 
@@ -293,7 +301,8 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
             if (join.getOnPredicate() != null) {
                 SubfieldExpressionCollector collector = new SubfieldExpressionCollector();
                 join.getOnPredicate().accept(collector, null);
-                for (ScalarOperator expr : collector.getComplexExpressions()) {
+                List<ScalarOperator> onComplexExprs = collector.getComplexExpressions();
+                for (ScalarOperator expr : onComplexExprs) {
                     // the expression in on-predicate must was push down to children
                     ColumnRefSet complexUsedCols = expr.getUsedColumns();
                     if (expr.isColumnRef()) {
@@ -304,7 +313,7 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
                     }
                 }
 
-                onPredicate = pushDownExpression(join.getOnPredicate(), context, checkColumns);
+                onPredicate = pushDownExpression(join.getOnPredicate(), onComplexExprs, context, checkColumns);
             }
             // handle predicate
             Optional<ScalarOperator> predicate = pushDownPredicate(optExpression, context, checkColumns);
@@ -473,7 +482,11 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
             visitChild(optExpression, 1, context);
 
             LogicalCTEAnchorOperator anchor = optExpression.getOp().cast();
-            visitChild(optExpression, 0, cteContextMap.getOrDefault(anchor.getCteId(), new Context()));
+            Context cteContext = cteContextMap.get(anchor.getCteId());
+            if (cteContext == null) {
+                cteContext = new Context();
+            }
+            visitChild(optExpression, 0, cteContext);
             return optExpression;
         }
 
@@ -490,7 +503,10 @@ public class PushDownSubfieldRule implements TreeRewriteRule {
             Map<ColumnRefOperator, ColumnRefOperator> newCteRefMap = Maps.newHashMap();
 
             // cte context
-            Context cteContext = cteContextMap.getOrDefault(consume.getCteId(), new Context());
+            Context cteContext = cteContextMap.get(consume.getCteId());
+            if (cteContext == null) {
+                cteContext = new Context();
+            }
             ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(consume.getCteOutputColumnRefMap());
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : context.pushDownExprRefs.entrySet()) {
                 ColumnRefOperator key = entry.getKey();

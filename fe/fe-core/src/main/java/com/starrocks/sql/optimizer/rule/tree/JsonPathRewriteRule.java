@@ -348,7 +348,11 @@ public class JsonPathRewriteRule extends TransformationRule {
             if (scanOperator.getProjection() != null) {
                 jsonRoots.addAll(scanOperator.getProjection().getColumnRefMap().values());
             }
-            if (hasCaseCollidingJsonSubfields(jsonRoots, columnRefFactory, scanOperator.getTable())) {
+            JsonSubfieldScan jsonSubfieldScan =
+                    scanJsonSubfields(jsonRoots, columnRefFactory, scanOperator.getTable());
+            // Only a call that passes the same checks as JsonPathExpressionRewriter can be rewritten, so
+            // without one the rewrite below would hand back an equal copy of the scan.
+            if (jsonSubfieldScan != JsonSubfieldScan.HAS_REWRITABLE_CALL) {
                 return optExpr;
             }
 
@@ -439,9 +443,28 @@ public class JsonPathRewriteRule extends TransformationRule {
      */
     private static boolean hasCaseCollidingJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory,
                                                          Table scanTable) {
+        return scanJsonSubfields(roots, factory, scanTable) == JsonSubfieldScan.COLLISION;
+    }
+
+    private enum JsonSubfieldScan {
+        // two subfields collide case-insensitively
+        COLLISION,
+        // no call that JsonPathExpressionRewriter would rewrite
+        NO_REWRITABLE_CALL,
+        // at least one call that JsonPathExpressionRewriter would rewrite, and no collision
+        HAS_REWRITABLE_CALL
+    }
+
+    /**
+     * The pre-pass behind {@link #hasCaseCollidingJsonSubfields}. It also reports whether any call passes
+     * every check of {@link JsonPathExpressionRewriter}, which is the only kind of call the rewriter changes.
+     */
+    private static JsonSubfieldScan scanJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory,
+                                                      Table scanTable) {
         // key: case-folded extended-column name -> the actual (case-sensitive) name that first claimed it.
         // Used for collisions WITHIN this scan; cross-scan collisions are caught against the table below.
-        Map<String, String> claimed = Maps.newHashMap();
+        Map<String, String> claimed = null;
+        boolean hasRewritableCall = false;
         Deque<ScalarOperator> stack = new ArrayDeque<>();
         for (ScalarOperator root : roots) {
             if (root != null) {
@@ -481,10 +504,14 @@ public class JsonPathRewriteRule extends TransformationRule {
             fullPath.addAll(fields);
             String name = ColumnAccessPath.createLinearPath(fullPath, call.getType()).getLinearPath();
 
+            hasRewritableCall = true;
             // (a) collision within this scan: two subfields whose extended-column names differ only by case.
+            if (claimed == null) {
+                claimed = Maps.newHashMap();
+            }
             String prior = claimed.putIfAbsent(name.toLowerCase(Locale.ROOT), name);
             if (prior != null && !prior.equals(name)) {
-                return true;
+                return JsonSubfieldScan.COLLISION;
             }
             // (b) cross-scan collision: aliases of the same table share one analyzer table copy
             // (AnalyzerUtils.copyTable), so another scan may already have added a case-differing extended
@@ -493,10 +520,10 @@ public class JsonPathRewriteRule extends TransformationRule {
             Table targetTable = scanTable != null ? scanTable : tableAndColumn.first;
             Column existing = targetTable.getColumn(name);
             if (existing != null && !existing.getName().equals(name)) {
-                return true;
+                return JsonSubfieldScan.COLLISION;
             }
         }
-        return false;
+        return hasRewritableCall ? JsonSubfieldScan.HAS_REWRITABLE_CALL : JsonSubfieldScan.NO_REWRITABLE_CALL;
     }
 
     private static ScalarOperator rewriteScalar(ScalarOperator scalar,

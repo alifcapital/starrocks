@@ -109,6 +109,10 @@ public class PruneSubfieldRule extends TransformationRule {
             predicate.accept(collector, null);
         }
 
+        if (collector.getComplexExpressions().isEmpty()) {
+            return Lists.newArrayList(input);
+        }
+
         // normalize access path
         SubfieldAccessPathNormalizer normalizer = new SubfieldAccessPathNormalizer();
         normalizer.collect(collector.getComplexExpressions());
