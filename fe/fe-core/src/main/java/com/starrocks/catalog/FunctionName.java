@@ -18,6 +18,7 @@ import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Writable;
 import com.starrocks.thrift.TFunctionName;
 
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -37,12 +38,12 @@ public class FunctionName implements Writable {
 
     public FunctionName(String db, String fn) {
         this.db = db;
-        this.fn = fn.toLowerCase();
+        this.fn = fn.toLowerCase(Locale.ROOT);
     }
 
     public FunctionName(String fn) {
         db = null;
-        this.fn = fn.toLowerCase();
+        this.fn = fn.toLowerCase(Locale.ROOT);
     }
 
     public static FunctionName createFnName(String fn) {

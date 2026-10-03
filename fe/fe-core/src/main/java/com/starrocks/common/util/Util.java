@@ -69,6 +69,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
@@ -516,7 +517,7 @@ public class Util {
     }
 
     public static String normalizeName(String name) {
-        return GlobalVariable.enableTableNameCaseInsensitive && name != null ? name.toLowerCase() : name;
+        return GlobalVariable.enableTableNameCaseInsensitive && name != null ? name.toLowerCase(Locale.ROOT) : name;
     }
 
     public static GrantRevokePrivilegeObjects normalizeNames(String objectType, GrantRevokePrivilegeObjects objectsUnResolved) {
@@ -526,7 +527,7 @@ public class Util {
         }
 
         List<List<String>> privilegeObjectNameTokensList = objectsUnResolved.getPrivilegeObjectNameTokensList().stream()
-                .map(nameList -> nameList.stream().map(String::toLowerCase).toList())
+                .map(nameList -> nameList.stream().map(value -> value.toLowerCase(Locale.ROOT)).toList())
                 .toList();
         objectsUnResolved.setPrivilegeObjectNameTokensList(privilegeObjectNameTokensList);
         return objectsUnResolved;

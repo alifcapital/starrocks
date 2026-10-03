@@ -133,6 +133,16 @@ public class HintCollector extends StarRocksBaseVisitor<Void> {
     }
 
     @Override
+    public Void visitRootQueryOrDmlStatement(StarRocksParser.RootQueryOrDmlStatementContext context) {
+        // Keep the existing hint scope: query hints come from queryNoWith, while
+        // UPDATE/DELETE collect their own hints. Factoring WITH must not widen it.
+        if (context.queryNoWith() != null) {
+            return visit(context.queryNoWith());
+        }
+        return context.updateStatement() != null ? visit(context.updateStatement()) : visit(context.deleteStatement());
+    }
+
+    @Override
     public Void visitQueryStatement(StarRocksParser.QueryStatementContext context) {
         visit(context.queryRelation());
         return null;

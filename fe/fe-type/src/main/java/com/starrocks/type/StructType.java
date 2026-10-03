@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Describes a STRUCT type. STRUCT types have a list of named struct fields.
@@ -53,7 +54,7 @@ public class StructType extends Type {
         Preconditions.checkArgument(structFields.size() > 0);
         this.fields = new ArrayList<>();
         for (StructField field : structFields) {
-            String lowerFieldName = field.getName().toLowerCase();
+            String lowerFieldName = field.getName().toLowerCase(Locale.ROOT);
             if (fieldMap.containsKey(lowerFieldName)) {
                 throw new UnsupportedOperationException("struct contains duplicate subfield name: " + lowerFieldName);
             } else {
@@ -158,15 +159,15 @@ public class StructType extends Type {
     }
 
     public StructField getField(String fieldName) {
-        return fieldMap.get(StringUtils.lowerCase(fieldName));
+        return fieldMap.get(StringUtils.lowerCase(fieldName, Locale.ROOT));
     }
 
     public boolean containsField(String fieldName) {
-        return fieldMap.containsKey(StringUtils.lowerCase(fieldName));
+        return fieldMap.containsKey(StringUtils.lowerCase(fieldName, Locale.ROOT));
     }
 
     public int getFieldPos(String fieldName) {
-        return fieldMap.get(StringUtils.lowerCase(fieldName)).getPosition();
+        return fieldMap.get(StringUtils.lowerCase(fieldName, Locale.ROOT)).getPosition();
     }
 
     public StructField getField(int pos) {
@@ -179,7 +180,7 @@ public class StructType extends Type {
         fields.clear();
         fieldMap.clear();
         for (StructField field : structFields) {
-            String lowerFieldName = field.getName().toLowerCase();
+            String lowerFieldName = field.getName().toLowerCase(Locale.ROOT);
             if (fieldMap.containsKey(lowerFieldName)) {
                 throw new UnsupportedOperationException("struct contains duplicate subfield name: " + lowerFieldName);
             } else {
@@ -220,7 +221,7 @@ public class StructType extends Type {
             StructField structField = fields.get(pos);
             if (!selectedFields[pos]) {
                 fields.remove(pos);
-                fieldMap.remove(StringUtils.lowerCase(structField.getName()));
+                fieldMap.remove(StringUtils.lowerCase(structField.getName(), Locale.ROOT));
             }
         }
 
