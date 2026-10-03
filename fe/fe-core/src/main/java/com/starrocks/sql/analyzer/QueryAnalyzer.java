@@ -713,6 +713,18 @@ public class QueryAnalyzer {
                     table = resolveTable(tableRelation);
                 }
                 table = QueryPeriodResolver.resolveAndBindTable(tableRelation, table, session, metadataMgr);
+                // A view and a table that is not temporal would read their current data, so we reject the clause.
+                if (tableRelation.getQueryPeriodString() != null && !table.isTemporal()) {
+                    throw unsupportedException("Unsupported table type for temporal clauses, table type: " +
+                            table.getType());
+                }
+                // The parser builds a query period only for AS OF. A MySQL table sends the clause text to MySQL,
+                // but other temporal tables would read the current snapshot, so we reject the other forms there.
+                if (tableRelation.getQueryPeriodString() != null && tableRelation.getQueryPeriod() == null &&
+                        table.getType() != Table.TableType.MYSQL) {
+                    throw unsupportedException("Only the AS OF temporal clause is supported, table type: " +
+                            table.getType());
+                }
 
                 Relation r;
                 if (table instanceof View) {
@@ -742,11 +754,6 @@ public class QueryAnalyzer {
 
                     r = viewRelation;
                 } else {
-                    if (tableRelation.getQueryPeriodString() != null && !table.isTemporal()) {
-                        throw unsupportedException("Unsupported table type for temporal clauses, table type: " +
-                                table.getType());
-                    }
-
                     if (table.isSupported()) {
                         tableRelation.setTable(table);
                         r = tableRelation;
