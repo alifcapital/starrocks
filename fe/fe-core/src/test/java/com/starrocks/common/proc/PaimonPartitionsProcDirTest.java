@@ -78,6 +78,13 @@ public class PaimonPartitionsProcDirTest {
                 return new PaimonTable("paimon_catalog", "db1", "tb1", null, nativeTable);
             }
 
+            // SHOW PROC looks up external tables through the discovery path.
+            @Mock
+            public Table getTableForDiscovery(ConnectContext context, String catalogName, String dbName,
+                                              String tblName) {
+                return new PaimonTable("paimon_catalog", "db1", "tb1", null, nativeTable);
+            }
+
             @Mock
             public List<PartitionInfo> getPartitions(String catalogName, Table table, List<String> partitionNames) {
                 Partition p1 = new Partition("dt=20240903", 1727079167000L, 5L, 12112L, 11L);
