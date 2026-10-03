@@ -79,6 +79,10 @@ public class TypeParser {
         } else if (context.SIGNED() != null) {
             // Align with MySQL semantics: CAST(... AS SIGNED) returns a 64-bit signed integer (BIGINT).
             return IntegerType.BIGINT;
+        } else if (context.UNSIGNED() != null) {
+            // MySQL reads UNSIGNED as a 64-bit unsigned integer. A 32-bit INT would turn a value above 2^31 into
+            // NULL, so we use BIGINT, which holds every value of a 32-bit unsigned column.
+            return IntegerType.BIGINT;
         } else if (context.HLL() != null) {
             return HLLType.HLL;
         } else if (context.BINARY() != null || context.VARBINARY() != null) {
@@ -194,7 +198,7 @@ public class TypeParser {
             // Integer types
             case "TINYINT" -> IntegerType.TINYINT;
             case "SMALLINT" -> IntegerType.SMALLINT;
-            case "INTEGER", "UNSIGNED", "INT" -> IntegerType.INT;
+            case "INTEGER", "INT" -> IntegerType.INT;
             case "BIGINT" -> IntegerType.BIGINT;
             case "LARGEINT" -> IntegerType.LARGEINT;
 
