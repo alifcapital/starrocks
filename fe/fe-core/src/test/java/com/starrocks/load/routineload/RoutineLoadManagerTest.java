@@ -1012,32 +1012,39 @@ public class RoutineLoadManagerTest {
 
     @Test
     public void testGetRunningRoutingLoadCount() throws Exception {
-        KafkaRoutineLoadJob job1 = new KafkaRoutineLoadJob(1L, "job1", 1L, 1L, null, "topic1");
-        job1.warehouseId = 1;
-        job1.state = RoutineLoadJob.JobState.NEED_SCHEDULE;
+        // Jobs report their own warehouse only with multi-warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
+        try {
+            KafkaRoutineLoadJob job1 = new KafkaRoutineLoadJob(1L, "job1", 1L, 1L, null, "topic1");
+            job1.warehouseId = 1;
+            job1.state = RoutineLoadJob.JobState.NEED_SCHEDULE;
 
-        KafkaRoutineLoadJob job2 = new KafkaRoutineLoadJob(2L, "job2", 1L, 1L, null, "topic1");
-        job2.warehouseId = 1;
-        job2.state = RoutineLoadJob.JobState.CANCELLED;
+            KafkaRoutineLoadJob job2 = new KafkaRoutineLoadJob(2L, "job2", 1L, 1L, null, "topic1");
+            job2.warehouseId = 1;
+            job2.state = RoutineLoadJob.JobState.CANCELLED;
 
 
-        KafkaRoutineLoadJob job3 = new KafkaRoutineLoadJob(3L, "job3", 1L, 1L, null, "topic1");
-        job3.warehouseId = 2;
-        job3.state = RoutineLoadJob.JobState.NEED_SCHEDULE;
+            KafkaRoutineLoadJob job3 = new KafkaRoutineLoadJob(3L, "job3", 1L, 1L, null, "topic1");
+            job3.warehouseId = 2;
+            job3.state = RoutineLoadJob.JobState.NEED_SCHEDULE;
 
-        KafkaRoutineLoadJob job4 = new KafkaRoutineLoadJob(4L, "job4", 1L, 1L, null, "topic1");
-        job4.warehouseId = 2;
-        job4.state = RoutineLoadJob.JobState.CANCELLED;
+            KafkaRoutineLoadJob job4 = new KafkaRoutineLoadJob(4L, "job4", 1L, 1L, null, "topic1");
+            job4.warehouseId = 2;
+            job4.state = RoutineLoadJob.JobState.CANCELLED;
 
-        RoutineLoadMgr routineLoadMgr = new RoutineLoadMgr();
-        routineLoadMgr.addRoutineLoadJob(job1, "db");
-        routineLoadMgr.addRoutineLoadJob(job2, "db");
-        routineLoadMgr.addRoutineLoadJob(job3, "db");
-        routineLoadMgr.addRoutineLoadJob(job4, "db");
+            RoutineLoadMgr routineLoadMgr = new RoutineLoadMgr();
+            routineLoadMgr.addRoutineLoadJob(job1, "db");
+            routineLoadMgr.addRoutineLoadJob(job2, "db");
+            routineLoadMgr.addRoutineLoadJob(job3, "db");
+            routineLoadMgr.addRoutineLoadJob(job4, "db");
 
-        Map<Long, Long> result = routineLoadMgr.getRunningRoutingLoadCount();
-        Assertions.assertEquals(2, result.size());
-        Assertions.assertEquals(Long.valueOf(1), result.get(1L));
-        Assertions.assertEquals(Long.valueOf(1), result.get(2L));
+            Map<Long, Long> result = routineLoadMgr.getRunningRoutingLoadCount();
+            Assertions.assertEquals(2, result.size());
+            Assertions.assertEquals(Long.valueOf(1), result.get(1L));
+            Assertions.assertEquals(Long.valueOf(1), result.get(2L));
+        } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
+        }
     }
 }

@@ -36,6 +36,7 @@ import com.starrocks.qe.scheduler.slot.LogicalSlot;
 import com.starrocks.qe.scheduler.slot.SlotManager;
 import com.starrocks.qe.scheduler.slot.SlotSelectionStrategyV2;
 import com.starrocks.qe.scheduler.slot.SlotTracker;
+import com.starrocks.qe.scheduler.warehouse.WarehouseMetrics;
 import com.starrocks.scheduler.Constants;
 import com.starrocks.scheduler.Task;
 import com.starrocks.scheduler.TaskBuilder;
@@ -635,6 +636,8 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
                 return result;
             }
         };
+        // The slot tracker reports the remaining slots of the test environment's queue options.
+        String remainSlots = WarehouseMetrics.create(slotTracker).toThrift().getRemain_slots();
         // supported
         starRocksAssert.query("select count(1) from information_schema.warehouse_metrics")
                 .explainContains("     constant exprs: \n" +
@@ -644,7 +647,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
                         "         0");
         starRocksAssert.query("select WAREHOUSE_NAME, REMAIN_SLOTS from information_schema.warehouse_metrics")
                 .explainContains("constant exprs: \n" +
-                        "         'default_warehouse' | '0'");
+                        "         'default_warehouse' | '" + remainSlots + "'");
         starRocksAssert.query("select count(1) from information_schema.warehouse_metrics where warehouse_id = '0'")
                 .explainContains("     constant exprs: \n" +
                         "         0");
@@ -654,7 +657,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         starRocksAssert.query("select WAREHOUSE_NAME, REMAIN_SLOTS from information_schema.warehouse_metrics " +
                         "where WAREHOUSE_ID = 0")
                 .explainContains("constant exprs: \n" +
-                        "         'default_warehouse' | '0'");
+                        "         'default_warehouse' | '" + remainSlots + "'");
         starRocksAssert.query("select count(1) from information_schema.warehouse_metrics where WAREHOUSE_NAME = " +
                         "'default_warehouse'")
                 .explainContains("     constant exprs: \n" +
@@ -665,7 +668,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         starRocksAssert.query("select WAREHOUSE_NAME, REMAIN_SLOTS from information_schema.warehouse_metrics " +
                         "where WAREHOUSE_NAME = 'default_warehouse'")
                 .explainContains("constant exprs: \n" +
-                        "         'default_warehouse' | '0'");
+                        "         'default_warehouse' | '" + remainSlots + "'");
 
         // not supported
         starRocksAssert.query("select count(1) from information_schema.warehouse_metrics where WAREHOUSE_ID != '0'")

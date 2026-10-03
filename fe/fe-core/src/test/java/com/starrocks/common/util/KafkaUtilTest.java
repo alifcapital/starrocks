@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.StarRocksException;
+import com.starrocks.lake.StarOSAgent;
 import com.starrocks.proto.PKafkaMetaProxyResult;
 import com.starrocks.proto.PKafkaOffsetBatchProxyResult;
 import com.starrocks.proto.PKafkaOffsetProxyResult;
@@ -35,6 +36,7 @@ import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.utframe.MockedWarehouseManager;
 import com.starrocks.warehouse.cngroup.ComputeResource;
+import com.starrocks.warehouse.cngroup.WarehouseComputeResource;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -65,6 +67,13 @@ public class KafkaUtilTest {
 
     @BeforeEach
     public void before() throws StarRocksException {
+        // The mocked warehouse has no worker groups, and a shared-data compute resource without one is unavailable.
+        new MockUp<WarehouseComputeResource>() {
+            @Mock
+            public long getWorkerGroupId() {
+                return StarOSAgent.DEFAULT_WORKER_GROUP_ID;
+            }
+        };
         new MockUp<RunMode>() {
             @Mock
             public RunMode getCurrentRunMode() {
