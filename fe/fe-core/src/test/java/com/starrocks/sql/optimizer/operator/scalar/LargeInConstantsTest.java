@@ -15,7 +15,10 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.starrocks.sql.common.LargeInPredicateException;
+import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.type.CharType;
 import com.starrocks.type.DateType;
+import com.starrocks.type.DecimalType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.Type;
@@ -26,7 +29,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -89,6 +94,43 @@ public class LargeInConstantsTest {
                 ConstantOperator.createDatetime(day.withNano(2000)),
                 ConstantOperator.createDatetime(day.withNano(1000)));
         assertEquals(List.of(day.withNano(1000), day.withNano(2000)), timestamps.getValues());
+    }
+
+    @Test
+    public void testNumbersComparedWithStringsMatchTryCastConstant() {
+        List<ConstantOperator> numbers = new ArrayList<>();
+        numbers.add(ConstantOperator.createTinyInt((byte) -7));
+        numbers.add(ConstantOperator.createSmallInt((short) 300));
+        numbers.add(ConstantOperator.createInt(0));
+        numbers.add(ConstantOperator.createBigint(Long.MIN_VALUE));
+        numbers.add(ConstantOperator.createLargeInt(new BigInteger("170141183460469231731687303715884105727")));
+        numbers.add(ConstantOperator.createDecimal(new BigDecimal("12.3"), DecimalType.DECIMALV2));
+        String[] decimals = {"244731.20", "244736.106", "-0.50", "0", "0.000", "1E+3", "-12345678901234567.8"};
+        List<Type> decimalTypes = List.of(
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, 2),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, 3),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL64, 18, 2),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL128, 38, 3),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL128, 38, 0));
+        for (String decimal : decimals) {
+            for (Type type : decimalTypes) {
+                numbers.add(ConstantOperator.createDecimal(new BigDecimal(decimal), type));
+            }
+        }
+        for (Type stringType : List.of(VarcharType.VARCHAR, TypeFactory.createVarcharType(20),
+                TypeFactory.createCharType(30), CharType.CHAR)) {
+            List<Object> expected = new ArrayList<>();
+            for (ConstantOperator number : numbers) {
+                String text = ((ConstantOperator) Utils.tryCastConstant(number, stringType).get()).getVarchar();
+                if (!expected.contains(text)) {
+                    expected.add(text);
+                }
+            }
+            LargeInConstants constants = LargeInConstants.resolve(
+                    new ColumnRefOperator(1, stringType, "c", true), numbers);
+            assertEquals(VarcharType.VARCHAR, constants.getType());
+            assertEquals(expected, constants.getValues());
+        }
     }
 
     @Test
