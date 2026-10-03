@@ -2451,7 +2451,9 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "ORDER BY"),
                         orderByElements.get(0).getPos());
             }
-            return new CreateMaterializedViewStmt(tableRef, queryStatement, properties);
+            CreateMaterializedViewStmt syncStmt = new CreateMaterializedViewStmt(tableRef, queryStatement, properties);
+            syncStmt.setIfNotExists(ifNotExist);
+            return syncStmt;
         }
         if (refreshSchemeDesc instanceof AsyncRefreshSchemeDesc) {
             AsyncRefreshSchemeDesc asyncRefreshSchemeDesc = (AsyncRefreshSchemeDesc) refreshSchemeDesc;

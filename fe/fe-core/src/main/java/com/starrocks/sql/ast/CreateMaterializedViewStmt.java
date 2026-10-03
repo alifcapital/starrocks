@@ -159,6 +159,8 @@ public class CreateMaterializedViewStmt extends DdlStmt {
     // avoid throwing error during replay process, only in Rollup or MaterializedIndexMeta is true.
     private boolean isReplay = false;
 
+    private boolean ifNotExists = false;
+
     public static String WHERE_PREDICATE_COLUMN_NAME = "__WHERE_PREDICATION";
 
     public CreateMaterializedViewStmt(TableRef mvTableRef, QueryStatement queryStatement, Map<String, String> properties) {
@@ -170,6 +172,14 @@ public class CreateMaterializedViewStmt extends DdlStmt {
 
     public QueryStatement getQueryStatement() {
         return queryStatement;
+    }
+
+    public boolean isIfNotExists() {
+        return ifNotExists;
+    }
+
+    public void setIfNotExists(boolean ifNotExists) {
+        this.ifNotExists = ifNotExists;
     }
 
     public void setIsReplay(boolean isReplay) {
