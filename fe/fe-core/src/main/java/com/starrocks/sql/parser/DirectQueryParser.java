@@ -73,6 +73,7 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.UserVariableExpr;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.misc.Interval;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -881,17 +882,15 @@ public final class DirectQueryParser {
 
     QueryStatement insertSourceQuery() {
         QueryPrefix prefix = queryPrefix();
+        // AstBuilder rejects EXPLAIN, TRACE and INTO OUTFILE in an embedded query, so ANTLR reports the error.
+        if (prefix.explain() != null || prefix.traceMode() != null) {
+            throw unsupported("EXPLAIN or TRACE in an embedded query");
+        }
         int start = tokens.LT(1).getStartIndex();
         QueryStatement result = new QueryStatement(queryRelation());
         result.setQueryStartIndex(start);
         if (type() == INTO) {
-            result.setOutFileClause(outfile());
-        }
-        if (prefix.explain() != null) {
-            result.setIsExplain(true, prefix.explain());
-        }
-        if (prefix.traceMode() != null) {
-            result.setIsTrace(prefix.traceMode(), prefix.traceModule());
+            throw unsupported("INTO OUTFILE in an embedded query");
         }
         return result;
     }
@@ -912,7 +911,10 @@ public final class DirectQueryParser {
         do {
             String key = stringToken().trim();
             expect(EQUAL);
-            result.put(key, stringToken());
+            // AstBuilder rejects a repeated key, so ANTLR reports the error.
+            if (result.put(key, stringToken()) != null) {
+                throw unsupported("duplicate property key");
+            }
         } while (eat(COMMA));
         expect(CLOSE);
         return result;
@@ -1063,7 +1065,7 @@ public final class DirectQueryParser {
             } else {
                 from = relations();
                 if (type() == PIVOT) {
-                    from = pivot(from, false);
+                    from = pivot(from);
                 }
             }
         }
@@ -1365,17 +1367,7 @@ public final class DirectQueryParser {
         return t == QUALIFY || t == EXCEPT || t == MINUS || t == INTERSECT;
     }
 
-    /** UPDATE ... FROM never visits its PIVOT clause in AstBuilder, so only the syntax matters. */
-    void ignoredPivot() {
-        budget.enterIgnored();
-        try {
-            pivot(null, true);
-        } finally {
-            budget.exitIgnored();
-        }
-    }
-
-    private Relation pivot(Relation from, boolean ignored) {
+    private Relation pivot(Relation from) {
         int start = tokens.index();
         expect(PIVOT);
         expect(OPEN);
@@ -1396,9 +1388,6 @@ public final class DirectQueryParser {
                     || type() == SINGLE_QUOTED_TEXT
                     || type() == DOUBLE_QUOTED_TEXT) {
                 name = alias();
-            }
-            if (ignored) {
-                continue;
             }
             if (!(expression instanceof FunctionCallExpr function)) {
                 throw new ParsingException(
@@ -1424,13 +1413,13 @@ public final class DirectQueryParser {
             int valueStart = tokens.index();
             ImmutableList.Builder<LiteralExpr> literals = ImmutableList.builder();
             if (eat(OPEN)) {
-                pivotLiteral(literals, ignored);
+                pivotLiteral(literals);
                 while (eat(COMMA)) {
-                    pivotLiteral(literals, ignored);
+                    pivotLiteral(literals);
                 }
                 expect(CLOSE);
             } else {
-                pivotLiteral(literals, ignored);
+                pivotLiteral(literals);
             }
             String name = null;
             if (eat(AS)) {
@@ -1440,15 +1429,10 @@ public final class DirectQueryParser {
                     || type() == DOUBLE_QUOTED_TEXT) {
                 name = alias();
             }
-            if (!ignored) {
-                values.add(new PivotValue(literals.build(), name, pos(valueStart)));
-            }
+            values.add(new PivotValue(literals.build(), name, pos(valueStart)));
         } while (eat(COMMA));
         expect(CLOSE);
         expect(CLOSE);
-        if (ignored) {
-            return null;
-        }
         for (PivotValue value : values) {
             if (value.getExprs().size() != names.size()) {
                 throw unsupported("PIVOT arity requires original error");
@@ -1463,15 +1447,12 @@ public final class DirectQueryParser {
         return result;
     }
 
-    private void pivotLiteral(ImmutableList.Builder<LiteralExpr> literals, boolean ignored) {
+    private void pivotLiteral(ImmutableList.Builder<LiteralExpr> literals) {
         Expr result =
                 DirectExpressionParser.eager(
                                 tokens, mode, this::expressionSubquery, budget, parameters)
                         .parseLiteralPrefix();
         last = tokens.LT(-1).getTokenIndex();
-        if (ignored) {
-            return;
-        }
         if (!(result instanceof LiteralExpr literal)) {
             throw unsupported("PIVOT requires original literal cast");
         }
@@ -1756,19 +1737,21 @@ public final class DirectQueryParser {
         int start = tokens.index();
         if (eat(FILES)) {
             Map<String, String> properties = dmlProperties(true);
-            boolean aliased = false;
+            String alias = null;
             if (eat(AS)) {
-                identifier();
-                aliased = true;
+                alias = identifier();
             } else if (identifierType(type()) && !relationContinuation()) {
-                identifier();
-                aliased = true;
+                alias = identifier();
             }
-            if (aliased) {
-                columnAliases();
+            // AstBuilder rejects column aliases of FILES(), so ANTLR reports the error.
+            if (alias != null && type() == OPEN) {
+                throw unsupported("FILES() column aliases");
             }
-            // The pinned builder consumes FILES aliases but does not attach them to its relation.
-            return new FileTableFunctionRelation(properties, NodePosition.ZERO);
+            FileTableFunctionRelation files = new FileTableFunctionRelation(properties, NodePosition.ZERO);
+            if (alias != null) {
+                files.setAlias(new TableName(null, alias));
+            }
+            return files;
         }
         if (eat(TABLE)) {
             expect(OPEN);
@@ -1841,7 +1824,9 @@ public final class DirectQueryParser {
                 do {
                     String key = stringToken().trim();
                     expect(EQUAL);
-                    properties.put(key, stringToken());
+                    if (properties.put(key, stringToken()) != null) {
+                        throw unsupported("duplicate property key");
+                    }
                 } while (eat(COMMA));
                 expect(CLOSE);
             }
@@ -1911,16 +1896,6 @@ public final class DirectQueryParser {
 
     private record PeriodParts(String text, QueryPeriod value) {}
 
-    private String consumedText(int begin) {
-        StringBuilder text = new StringBuilder();
-        for (int i = begin; i <= last; i++) {
-            if (tokens.get(i).getChannel() == Token.DEFAULT_CHANNEL) {
-                text.append(tokens.get(i).getText());
-            }
-        }
-        return text.toString();
-    }
-
     // Only AS OF is visited by the reference builder; the other forms keep just their text.
     private Expr periodExpression(boolean valueOnly, boolean visited) {
         try {
@@ -1957,25 +1932,21 @@ public final class DirectQueryParser {
     }
 
     private PeriodParts tablePeriod() {
-        StringBuilder text = new StringBuilder();
-        if (type() == FOR) {
-            text.append(take().getText()).append(' ');
-        }
+        Token first = tokens.LT(1);
+        eat(FOR);
         int periodType = type();
         if (periodType != SYSTEM_TIME && periodType != TIMESTAMP && periodType != VERSION) {
             throw unsupported("query period type");
         }
-        text.append(take().getText()).append(' ');
+        take();
         QueryPeriod result = null;
         if (type() == AS) {
-            text.append(take().getText()).append(' ');
+            take();
             if (type() != OF) {
                 throw unsupported("query period AS OF");
             }
-            text.append(take().getText()).append(' ');
-            int begin = tokens.index();
+            take();
             Expr end = periodExpression(false, true);
-            text.append(consumedText(begin)).append(' ');
             result =
                     new QueryPeriod(
                             periodType == VERSION
@@ -1983,25 +1954,23 @@ public final class DirectQueryParser {
                                     : QueryPeriod.PeriodType.TIMESTAMP,
                             end);
         } else if (type() == ALL) {
-            text.append(take().getText()).append(' ');
+            take();
         } else if (type() == BETWEEN || type() == FROM) {
             boolean between = type() == BETWEEN;
-            text.append(take().getText()).append(' ');
-            int begin = tokens.index();
+            take();
             periodExpression(between, false);
-            text.append(consumedText(begin)).append(' ');
             int separator = between ? AND : TO;
             if (type() != separator) {
                 throw unsupported("query period separator");
             }
-            text.append(take().getText()).append(' ');
-            begin = tokens.index();
+            take();
             periodExpression(between, false);
-            text.append(consumedText(begin)).append(' ');
         } else {
             throw unsupported("query period range");
         }
-        return new PeriodParts(text.toString(), result);
+        String text = first.getInputStream()
+                .getText(Interval.of(first.getStartIndex(), tokens.get(last).getStopIndex()));
+        return new PeriodParts(text, result);
     }
 
     private List<Long> tableIds(boolean requireParentheses) {

@@ -118,6 +118,10 @@ class FastQueryParserParityTest {
             "primaryExpression token INTEGER_VALUE",
             // AstBuilder rejects a parameter as LIMIT or OFFSET.
             "limitConstExpr token '?'",
+            // AstBuilder rejects EXPLAIN, TRACE and INTO OUTFILE in the query that INSERT embeds.
+            "queryStatement calls explainDesc",
+            "queryStatement calls optimizerTrace",
+            "queryStatement calls outfile",
             // AstBuilder rejects a nested field path in a STRUCT type declaration.
             "subfieldDesc calls nestedFieldName",
             "nestedFieldName calls subfieldName",

@@ -784,7 +784,7 @@ final class EagerExpressionConstruction
     }
 
     public Type signedType(String name) {
-        return name.equals("SIGNED") ? IntegerType.BIGINT : IntegerType.INT;
+        return IntegerType.BIGINT;
     }
 
     public Expr binaryLiteral(String value, NodePosition p) {

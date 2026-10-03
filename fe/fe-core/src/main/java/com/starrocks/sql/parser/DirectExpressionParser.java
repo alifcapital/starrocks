@@ -1255,9 +1255,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
             case PLUS_SYMBOL, MINUS_SYMBOL -> 6;
             case BITAND -> 5;
             case BITOR -> 4;
-            case BIT_SHIFT_LEFT -> 3;
-            case BIT_SHIFT_RIGHT -> 2;
-            case BIT_SHIFT_RIGHT_LOGICAL -> 1;
+            case BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_LOGICAL -> 3;
             default -> 0;
         };
     }

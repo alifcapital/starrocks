@@ -190,8 +190,9 @@ final class DirectDmlParser {
                     from = new ArrayList<>(List.of(ValuesRelation.newDualRelation(pos(fromStart))));
                 } else {
                     from = owner.dmlRelations();
+                    // AstBuilder rejects PIVOT here, so ANTLR reports the error.
                     if (type() == PIVOT) {
-                        owner.ignoredPivot();
+                        throw unsupported("UPDATE FROM PIVOT");
                     }
                 }
             }
@@ -401,6 +402,11 @@ final class DirectDmlParser {
         }
         if (explain != null) {
             query.setIsExplain(true, explain);
+        }
+        // AstBuilder rejects these clauses for FILES() and BLACKHOLE(), so ANTLR reports the error.
+        if ((files != null || blackhole) && (overwrite || properties != null
+                || descriptors.stream().anyMatch(descriptor -> !descriptor.kind().equals("label")))) {
+            throw unsupported("FILES() or BLACKHOLE() clause");
         }
         if (blackhole) {
             InsertStmt result = new InsertStmt(query, pos(start));
