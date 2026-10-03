@@ -217,8 +217,15 @@ import static com.starrocks.sql.parser.StarRocksParser.YEAR;
 /** Deterministic token-stream expression subset; binary chains consume constant parser-stack depth. */
 public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         implements ExpressionConstruction.Errors {
-    public static final class UnsupportedExpression extends RuntimeException {
+    public static class UnsupportedExpression extends RuntimeException {
         UnsupportedExpression(String message) {
+            super(message);
+        }
+    }
+
+    /** A work or nesting bound was hit, which says nothing about the syntax of what was being read. */
+    static final class ResourceLimit extends UnsupportedExpression {
+        ResourceLimit(String message) {
             super(message);
         }
     }
@@ -232,7 +239,6 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
     private final DirectParseBudget budget;
     private int last = -1;
     private int depth;
-    private boolean ignoreInvalidDates;
     private int ignoredOvers;
     private DirectParseBudget.IntervalState standaloneIntervalState;
     private static final int OPEN = FrozenTokenCatalog.T_2;
@@ -749,6 +755,12 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         return pos(start);
     }
 
+    private ResourceLimit limit(String why) {
+        int t = input.index();
+        return new ResourceLimit(
+                why + " at " + cursor.lineAt(t) + ":" + cursor.columnAt(t) + " token=" + text(t));
+    }
+
     public UnsupportedExpression unsupported(String why) {
         int t = input.index();
         return new UnsupportedExpression(
@@ -832,7 +844,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         depth++;
         try {
             if (depth > 512) {
-                throw unsupported("prototype nesting limit 512");
+                throw limit("prototype nesting limit 512");
             }
             int start = input.index();
             expect(OPEN);
@@ -873,7 +885,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         depth++;
         try {
             if (depth > 512) {
-                throw unsupported("prototype nesting limit 512");
+                throw limit("prototype nesting limit 512");
             }
             int start = input.index();
             E left;
@@ -1523,7 +1535,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
                 expect(CLOSE);
             }
             value = construction.information(text(start).toUpperCase(Locale.ROOT), pos(start));
-        } else if (isWindowHead(t) && input.LA(2) == OPEN) {
+        } else if (isWindowHead(t) && input.LA(2) == OPEN && windowFormAhead(t)) {
             value = windowFunction(start);
         } else if (isIdentifier(t) || isSpecialFunction(t)) {
             List<String> parts = new ArrayList<>();
@@ -1591,7 +1603,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
                     // CONCAT with unary RHS can recursively enter another CONCAT: retain the
                     // nesting bound only here.
                     if (depth > 512) {
-                        throw unsupported("prototype nesting limit 512");
+                        throw limit("prototype nesting limit 512");
                     }
                     E right = primary(18);
                     value = construction.concat(value, right, pos(start));
@@ -1661,19 +1673,16 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
                 || t == MICROSECOND;
     }
 
-    /**
-     * For syntax whose expressions the reference builder never visits, so it never validates their
-     * date literals: an invalid date literal becomes NULL instead of requesting the original path.
-     */
-    void ignoreInvalidDates() {
-        ignoreInvalidDates = true;
+    private boolean ignoringBuilderErrors() {
+        return budget != null && budget.ignoring();
     }
 
+    // In syntax that AstBuilder never visits, an invalid date literal becomes NULL.
     private E dateLiteral(String value, boolean date, int start) {
         try {
             return construction.dateLiteral(value, date);
         } catch (UnsupportedExpression e) {
-            if (!ignoreInvalidDates) {
+            if (!ignoringBuilderErrors()) {
                 throw e;
             }
             return construction.nullLiteral(pos(start));
@@ -2301,25 +2310,33 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
             ignoredOvers++;
         }
         ExpressionConstruction.OverParts<E, O, W> over = analytic ? overClause() : null;
-        construction.validateDistinctArguments(distinct, aggregate, name, args);
-        return construction.finishFunction(
-                full,
-                name,
-                parts,
-                type(start),
-                isIdentifier(type(start)),
-                aggregate,
-                star,
-                distinct,
-                quantified,
-                hints,
-                args,
-                aggregateOrder,
-                separator,
-                filterPredicate,
-                analytic,
-                over,
-                pos(start));
+        try {
+            construction.validateDistinctArguments(distinct, aggregate, name, args);
+            return construction.finishFunction(
+                    full,
+                    name,
+                    parts,
+                    type(start),
+                    isIdentifier(type(start)),
+                    aggregate,
+                    star,
+                    distinct,
+                    quantified,
+                    hints,
+                    args,
+                    aggregateOrder,
+                    separator,
+                    filterPredicate,
+                    analytic,
+                    over,
+                    pos(start));
+        } catch (UnsupportedExpression e) {
+            // AstBuilder never builds this call, so a call it could not build is still valid here.
+            if (!ignoringBuilderErrors()) {
+                throw e;
+            }
+            return construction.nullLiteral(pos(start));
+        }
     }
 
     /** The PASSWORD '(' string ')' grammar alternative; null when the call is a generic one. */
@@ -2339,38 +2356,197 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
 
     /**
      * After DISTINCT or ALL, '[' starts either a hint or an array literal. ANTLR takes the hint
-     * whenever the tokens read as a hint and the rest of the call is valid, so we do the same and
-     * fall back when the next token does not tell the two readings apart. Returns null for an array.
+     * whenever the tokens read as a hint and the rest of the call is valid, so we do the same. When
+     * the next token does not tell the readings apart, we try the arguments of the hint reading and
+     * take the array when they do not parse. Returns null for an array.
      */
     private List<String> quantifierHint() {
         if (!isIdentifier(input.LA(2))) {
             return null;
         }
-        if (input.LA(3) == BITOR) {
-            throw unsupported("skew hint in aggregate call");
-        }
-        int k = 2;
-        while (isIdentifier(input.LA(k)) && input.LA(k + 1) == COMMA) {
-            k += 2;
-        }
-        if (!isIdentifier(input.LA(k)) || input.LA(k + 1) != CLOSE_BRACKET) {
-            return null;
-        }
-        int next = input.LA(k + 2);
-        boolean likeOperator = (next == LIKE || next == RLIKE || next == REGEXP) && input.LA(k + 3) != OPEN;
-        if (next == COMMA || likeOperator || isArrayOnlyContinuation(next)) {
-            return null;
-        }
-        if (next != CLOSE && !startsHintArgument(next)) {
-            throw unsupported("COUNT bracket-hint/array ambiguity requires original parser");
-        }
-        take();
+        int saved = input.index();
+        int savedLast = last;
         List<String> hints = new ArrayList<>();
-        do {
-            hints.add(text(take()));
-        } while (eat(COMMA));
+        if (input.LA(3) == BITOR) {
+            String name = skewHint();
+            if (name == null) {
+                return null;
+            }
+            hints.add(name);
+        } else {
+            int k = 2;
+            while (isIdentifier(input.LA(k)) && input.LA(k + 1) == COMMA) {
+                k += 2;
+            }
+            if (!isIdentifier(input.LA(k)) || input.LA(k + 1) != CLOSE_BRACKET) {
+                return null;
+            }
+            take();
+            do {
+                hints.add(text(take()));
+            } while (eat(COMMA));
+            expect(CLOSE_BRACKET);
+        }
+        int next = input.LA(1);
+        boolean likeOperator = (next == LIKE || next == RLIKE || next == REGEXP) && input.LA(2) != OPEN;
+        if (next != COMMA
+                && !likeOperator
+                && !isArrayOnlyContinuation(next)
+                && (next == CLOSE || startsHintArgument(next) || hintArgumentsParse())) {
+            return hints;
+        }
+        input.seek(saved);
+        last = savedLast;
+        return null;
+    }
+
+    /**
+     * Reads "[name | primary (literal, ...)]" and returns the name, or returns null with the input
+     * restored when the tokens are not that form. AstBuilder keeps only the name, so the primary and
+     * the literals are read for their syntax only.
+     */
+    private String skewHint() {
+        int saved = input.index();
+        int savedLast = last;
+        try {
+            return skewHintName();
+        } catch (ResourceLimit e) {
+            throw e;
+        } catch (UnsupportedExpression e) {
+            input.seek(saved);
+            last = savedLast;
+            return null;
+        } catch (ParsingException | SemanticException e) {
+            throw unsupported("skew hint requires original builder errors");
+        }
+    }
+
+    private String skewHintName() {
+        expect(BRACKET);
+        String name = text(take());
+        expect(BITOR);
+        int primaryStart = input.index();
+        DirectParseBudget.IntervalState state = intervalState();
+        int groupOpen = -1;
+        int groupClose = -1;
+        int raw = primaryStart;
+        // The last outer group before the closing bracket is the literal list, as in the join hint.
+        while (true) {
+            state.charge(1);
+            int t = cursor.typeAt(raw);
+            if (t == OPEN || t == BRACKET || t == OPEN_BRACE) {
+                int close = (int) ((delimiterBoundary(raw, state) >>> 1) - 1);
+                if (t == OPEN) {
+                    groupOpen = raw;
+                    groupClose = close;
+                }
+                raw = close + 1;
+            } else if (t == CLOSE_BRACKET) {
+                break;
+            } else if (t == CLOSE || t == CLOSE_BRACE || t == Token.EOF) {
+                throw unsupported("skew hint delimiter");
+            } else {
+                raw++;
+            }
+        }
+        int before = raw - 1;
+        while (before > primaryStart && original.get(before).getChannel() != Token.DEFAULT_CHANNEL) {
+            before--;
+        }
+        if (groupOpen <= primaryStart || groupClose != before) {
+            throw unsupported("skew hint requires a literal list");
+        }
+        DirectParseBudget bounds = budget != null ? budget : new DirectParseBudget();
+        bounds.enterIgnored();
+        try {
+            skewChild(bounds, primaryStart, groupOpen).parseBoundedPrimary();
+            skewChild(bounds, groupOpen, raw).skipLiteralList();
+        } finally {
+            bounds.exitIgnored();
+        }
+        input.seek(raw);
         expect(CLOSE_BRACKET);
-        return hints;
+        return name;
+    }
+
+    private DirectExpressionParser<E, Q, T, F, O, W, B, C> skewChild(DirectParseBudget bounds, int from, int to) {
+        BoundedExpressionTokenStream view = new BoundedExpressionTokenStream(original, from, to);
+        // The callback reads the shared stream, so we move it to the child position and back. A
+        // subquery is inside balanced parentheses here, so it cannot run past the bound.
+        Supplier<Q> subquery =
+                () -> {
+                    if (queryCallback == null) {
+                        throw new DirectQueryParser.UnsupportedQuery("subquery without a callback");
+                    }
+                    int saved = original.index();
+                    original.seek(view.index());
+                    try {
+                        Q relation = queryCallback.get();
+                        view.seek(original.index());
+                        return relation;
+                    } finally {
+                        original.seek(saved);
+                    }
+                };
+        return new DirectExpressionParser<>(view, mode, subquery, bounds, parameters, construction.fork());
+    }
+
+    /** The grammar generalLiteralExpressionList up to the end of a bounded stream. */
+    void skipLiteralList() {
+        expect(OPEN);
+        do {
+            parseGeneralLiteralPrefix();
+        } while (eat(COMMA));
+        expect(CLOSE);
+        if (input.LA(1) != Token.EOF) {
+            throw unsupported("skew literal list has unconsumed syntax");
+        }
+    }
+
+    /**
+     * Whether the tokens from here read as call arguments up to the closing parenthesis. A hint
+     * reading that does not parse means the bracket was an array literal.
+     */
+    private boolean hintArgumentsParse() {
+        int originalStart = original.index();
+        int cursorStart = cursor.index();
+        int savedLast = last;
+        try {
+            return new DirectExpressionParser<>(
+                            original,
+                            mode,
+                            queryCallback,
+                            budget,
+                            parameters,
+                            intervalState(),
+                            cursorStart,
+                            depth,
+                            construction.fork())
+                    .argumentsReachClose();
+        } finally {
+            cursor.seek(cursorStart);
+            original.seek(originalStart);
+            last = savedLast;
+        }
+    }
+
+    private boolean argumentsReachClose() {
+        int next;
+        try {
+            expression(0);
+            while (eat(COMMA)) {
+                expression(0);
+            }
+            next = input.LA(1);
+        } catch (ResourceLimit e) {
+            throw e;
+        } catch (UnsupportedExpression e) {
+            return false;
+        }
+        if (next == ORDER || next == SEPARATOR) {
+            throw unsupported("hint reading with ORDER BY or SEPARATOR");
+        }
+        return next == CLOSE;
     }
 
     // Tokens that continue an array literal but cannot start an argument after a hint.
@@ -2464,6 +2640,12 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         };
     }
 
+    // RANK, CUME_DIST and PERCENT_RANK are also non-reserved names, so we expect an ordinary call
+    // unless "( ) OVER" follows. The other heads are reserved and must take the window form.
+    private boolean windowFormAhead(int t) {
+        return !isIdentifier(t) || (input.LA(3) == CLOSE && input.LA(4) == OVER);
+    }
+
     private static boolean isNullAwareWindowHead(int t) {
         return t == LEAD || t == LAG || t == FIRST_VALUE || t == LAST_VALUE;
     }
@@ -2534,10 +2716,18 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         return new ExpressionConstruction.OverParts<>(partitions, order, window, hints);
     }
 
-    /** The identifiers of "[sort]" style hints before PARTITION BY; the skew-boundary form falls back. */
+    /** The identifiers of "[sort]" style hints before PARTITION BY, or the name of a skew hint. */
     private List<String> windowHints() {
-        expect(BRACKET);
         List<String> hints = new ArrayList<>();
+        if (isIdentifier(input.LA(2)) && input.LA(3) == BITOR) {
+            String name = skewHint();
+            if (name == null) {
+                throw unsupported("window hint skew form");
+            }
+            hints.add(name);
+            return hints;
+        }
+        expect(BRACKET);
         do {
             int t = input.LA(1);
             if (!isIdentifier(t)) {
@@ -2619,7 +2809,7 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         depth++;
         try {
             if (depth > 512) {
-                throw unsupported("prototype type nesting limit 512");
+                throw limit("prototype type nesting limit 512");
             }
             if (input.LA(1) == Token.EOF) {
                 throw unsupported("type at EOF");

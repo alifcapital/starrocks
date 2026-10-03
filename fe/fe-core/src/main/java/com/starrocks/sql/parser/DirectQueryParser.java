@@ -1912,9 +1912,16 @@ public final class DirectQueryParser {
                             DirectExpressionParser.eager(
                                     tokens, mode, this::expressionSubquery, budget, parameters);
             if (!visited) {
-                parser.ignoreInvalidDates();
+                budget.enterIgnored();
             }
-            Expr result = valueOnly ? parser.parseValuePrefix() : parser.parsePrefix();
+            Expr result;
+            try {
+                result = valueOnly ? parser.parseValuePrefix() : parser.parsePrefix();
+            } finally {
+                if (!visited) {
+                    budget.exitIgnored();
+                }
+            }
             last = tokens.LT(-1).getTokenIndex();
             return result;
         } catch (ParsingException e) {
