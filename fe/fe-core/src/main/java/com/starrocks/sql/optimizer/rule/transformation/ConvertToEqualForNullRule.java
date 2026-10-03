@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -31,7 +30,6 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 public class ConvertToEqualForNullRule extends TransformationRule {
     public ConvertToEqualForNullRule() {
@@ -73,19 +71,21 @@ public class ConvertToEqualForNullRule extends TransformationRule {
             return Optional.empty();
         }
 
-        if (compoundOp.getChild(0) instanceof CompoundPredicateOperator
-                || compoundOp.getChild(1) instanceof BinaryPredicateOperator) {
-            compoundOp = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
-                    compoundOp.getChild(1), compoundOp.getChild(0));
+        ScalarOperator equality = compoundOp.getChild(0);
+        ScalarOperator nullChecks = compoundOp.getChild(1);
+        if (equality instanceof CompoundPredicateOperator || nullChecks instanceof BinaryPredicateOperator) {
+            ScalarOperator swap = equality;
+            equality = nullChecks;
+            nullChecks = swap;
         }
 
-        if (!(compoundOp.getChild(0) instanceof BinaryPredicateOperator)
-                || !(compoundOp.getChild(1) instanceof CompoundPredicateOperator)) {
+        if (!(equality instanceof BinaryPredicateOperator)
+                || !(nullChecks instanceof CompoundPredicateOperator)) {
             return Optional.empty();
         }
 
-        BinaryPredicateOperator left = (BinaryPredicateOperator) compoundOp.getChild(0);
-        CompoundPredicateOperator right = (CompoundPredicateOperator) compoundOp.getChild(1);
+        BinaryPredicateOperator left = (BinaryPredicateOperator) equality;
+        CompoundPredicateOperator right = (CompoundPredicateOperator) nullChecks;
         if (!left.getBinaryType().isEqual() || !right.isAnd()) {
             return Optional.empty();
         }
@@ -101,10 +101,12 @@ public class ConvertToEqualForNullRule extends TransformationRule {
             return Optional.empty();
         }
 
-        Set<ScalarOperator> leftChildren = ImmutableSet.of(left.getChild(0), left.getChild(1));
-        Set<ScalarOperator> rightChildren = ImmutableSet.of(isNullLeft.getChild(0), isNullRight.getChild(0));
-
-        if (leftChildren.equals(rightChildren)) {
+        ScalarOperator a = left.getChild(0);
+        ScalarOperator b = left.getChild(1);
+        ScalarOperator x = isNullLeft.getChild(0);
+        ScalarOperator y = isNullRight.getChild(0);
+        // Two unordered pairs are equal in either orientation, including repeated operands.
+        if ((a.equals(x) && b.equals(y)) || (a.equals(y) && b.equals(x))) {
             return Optional.of(new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL, left.getChild(0), left.getChild(1)));
         } else {
             return Optional.empty();

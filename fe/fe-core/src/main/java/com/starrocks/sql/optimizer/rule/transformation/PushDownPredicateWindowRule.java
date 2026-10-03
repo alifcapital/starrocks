@@ -41,14 +41,16 @@ public class PushDownPredicateWindowRule extends TransformationRule {
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalFilterOperator filterOperator = (LogicalFilterOperator) input.getOp();
         List<ScalarOperator> filters = Utils.extractConjuncts(filterOperator.getPredicate());
+        int originalFilterCount = filters.size();
         LogicalWindowOperator windowOperator = (LogicalWindowOperator) input.inputAt(0).getOp();
 
         /*
          * Only push down column contained by partition columns
          */
         ColumnRefSet partitionColumns = new ColumnRefSet();
-        windowOperator.getPartitionExpressions().stream().map(ScalarOperator::getUsedColumns)
-                .forEach(partitionColumns::union);
+        for (ScalarOperator expression : windowOperator.getPartitionExpressions()) {
+            expression.collectUsedColumns(partitionColumns);
+        }
 
         List<ScalarOperator> pushDownPredicates = Lists.newArrayList();
         for (Iterator<ScalarOperator> iter = filters.iterator(); iter.hasNext(); ) {
@@ -61,6 +63,10 @@ public class PushDownPredicateWindowRule extends TransformationRule {
                 iter.remove();
                 pushDownPredicates.add(filter);
             }
+        }
+
+        if (!filters.isEmpty() && filters.size() == originalFilterCount) {
+            return Collections.emptyList();
         }
 
         //Create a new expression to ensure that the newly generated windowExpr are copied correctly
@@ -76,8 +82,6 @@ public class PushDownPredicateWindowRule extends TransformationRule {
 
         if (filters.isEmpty()) {
             return Lists.newArrayList(windowExpr);
-        } else if (filters.size() == Utils.extractConjuncts(filterOperator.getPredicate()).size()) {
-            return Collections.emptyList();
         } else {
             filterOperator.setPredicate(Utils.compoundAnd(filters));
             input.setChild(0, windowExpr);

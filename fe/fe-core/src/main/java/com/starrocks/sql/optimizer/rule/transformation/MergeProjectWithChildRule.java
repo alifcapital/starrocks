@@ -15,7 +15,7 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -61,23 +61,19 @@ public class MergeProjectWithChildRule extends TransformationRule {
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalProjectOperator logicalProjectOperator = (LogicalProjectOperator) input.getOp();
         LogicalOperator child = (LogicalOperator) input.inputAt(0).getOp();
-        boolean isPushLimit = logicalProjectOperator.hasLimit() && (!child.hasLimit() || child.getLimit() >
-                logicalProjectOperator.getLimit());
-        Operator.Builder builder = OperatorBuilderFactory.build(child);
-        builder.withOperator(child);
-        if (isPushLimit) {
-            builder.setLimit(logicalProjectOperator.getLimit());
-        }
-
         if (logicalProjectOperator.getColumnRefMap().isEmpty()) {
-            return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
+            return Lists.newArrayList(OptExpression.create(childBuilder(logicalProjectOperator, child).build(),
+                    input.inputAt(0).getInputs()));
         }
 
-        ColumnRefSet projectColumns = logicalProjectOperator.getOutputColumns(
-                new ExpressionContext(input));
-        ColumnRefSet childOutputColumns = child.getOutputColumns(new ExpressionContext(input.inputAt(0)));
-        if (projectColumns.equals(childOutputColumns) && eliminateUselessProject) {
-            return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
+        if (eliminateUselessProject) {
+            ColumnRefSet projectColumns = logicalProjectOperator.getOutputColumns(
+                    LogicalPropertyContext.of(input));
+            ColumnRefSet childOutputColumns = child.getOutputColumns(LogicalPropertyContext.of(input.inputAt(0)));
+            if (projectColumns.equals(childOutputColumns)) {
+                return Lists.newArrayList(OptExpression.create(childBuilder(logicalProjectOperator, child).build(),
+                        input.inputAt(0).getInputs()));
+            }
         }
 
         // MergeTwoProjectRule leaves two projects apart when the merge copies too much, and we want them to stay
@@ -87,8 +83,18 @@ public class MergeProjectWithChildRule extends TransformationRule {
             return Lists.newArrayList();
         }
 
+        Operator.Builder builder = childBuilder(logicalProjectOperator, child);
         builder.setProjection(new Projection(logicalProjectOperator.getColumnRefMap()));
 
         return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
+    }
+
+    private Operator.Builder childBuilder(LogicalProjectOperator project, LogicalOperator child) {
+        Operator.Builder builder = OperatorBuilderFactory.build(child);
+        builder.withOperator(child);
+        if (project.hasLimit() && (!child.hasLimit() || child.getLimit() > project.getLimit())) {
+            builder.setLimit(project.getLimit());
+        }
+        return builder;
     }
 }

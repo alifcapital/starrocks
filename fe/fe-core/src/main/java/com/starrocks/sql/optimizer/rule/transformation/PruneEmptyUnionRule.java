@@ -52,8 +52,12 @@ public class PruneEmptyUnionRule extends TransformationRule {
 
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
-        return input.getInputs().stream().map(OptExpression::getOp).filter(op -> op instanceof LogicalValuesOperator)
-                .anyMatch(op -> ((LogicalValuesOperator) op).getRows().isEmpty());
+        for (OptExpression child : input.getInputs()) {
+            if (child.getOp() instanceof LogicalValuesOperator values && values.getRows().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override

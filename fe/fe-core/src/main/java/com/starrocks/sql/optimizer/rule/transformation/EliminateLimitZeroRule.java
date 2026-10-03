@@ -16,7 +16,7 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -46,7 +46,7 @@ public class EliminateLimitZeroRule extends TransformationRule {
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         ColumnRefSet outputColumnIds =
-                ((LogicalLimitOperator) input.getOp()).getOutputColumns(new ExpressionContext(input));
+                ((LogicalLimitOperator) input.getOp()).getOutputColumns(LogicalPropertyContext.of(input));
 
         List<ColumnRefOperator> outputColumns = outputColumnIds.getStream().map(
                 id -> context.getColumnRefFactory().getColumnRef(id)).collect(Collectors.toList());

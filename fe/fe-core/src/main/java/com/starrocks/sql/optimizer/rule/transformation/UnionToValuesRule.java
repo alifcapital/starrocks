@@ -115,7 +115,6 @@ public class UnionToValuesRule extends TransformationRule {
                     .build();
             return List.of(OptExpression.create(newValuesOperator));
         } else {
-            List<OptExpression> inputs = new ArrayList<>(otherChildren);
             if (!newRows.isEmpty()) {
                 // use new ColumnRefOperator for the new child output columns to avoid conflicts
                 // eg:
@@ -143,7 +142,7 @@ public class UnionToValuesRule extends TransformationRule {
                         .setRows(newRows)
                         .setPredicate(null)
                         .build();
-                inputs.add(OptExpression.create(newValuesOperator));
+                otherChildren.add(OptExpression.create(newValuesOperator));
                 newChildOutputs.add(newValuesOperator.getColumnRefSet());
             }
 
@@ -151,7 +150,7 @@ public class UnionToValuesRule extends TransformationRule {
                     .withOperator(unionOp)
                     .setChildOutputColumns(newChildOutputs)
                     .build();
-            OptExpression newUnionExpr = OptExpression.create(newUnionOp, inputs);
+            OptExpression newUnionExpr = OptExpression.create(newUnionOp, otherChildren);
 
             return List.of(newUnionExpr);
         }
@@ -171,13 +170,16 @@ public class UnionToValuesRule extends TransformationRule {
     }
 
     private static boolean isConstantUnion(LogicalValuesOperator valuesOp) {
-        if (valuesOp.getProjection() == null ||
-                valuesOp.getProjection().getColumnRefMap().values().stream().anyMatch(expr -> !expr.isConstant())) {
+        if (valuesOp.getProjection() == null) {
             return false;
         }
 
         List<List<ScalarOperator>> rows = valuesOp.getRows();
         if (rows.size() != 1 || rows.get(0).size() != 1) {
+            return false;
+        }
+
+        if (valuesOp.getProjection().getColumnRefMap().values().stream().anyMatch(expr -> !expr.isConstant())) {
             return false;
         }
 

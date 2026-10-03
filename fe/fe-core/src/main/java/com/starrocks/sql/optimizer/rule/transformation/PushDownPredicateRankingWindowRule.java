@@ -156,25 +156,32 @@ public class PushDownPredicateRankingWindowRule extends TransformationRule {
         OptExpression rankRelatedOptExpr = input.inputAt(0);
         LogicalWindowOperator rankRelatedWindowOperator = rankRelatedOptExpr.getOp().cast();
 
-        ColumnRefOperator windowCol = Lists.newArrayList(rankRelatedWindowOperator.getWindowCall().keySet()).get(0);
+        ColumnRefOperator windowCol = rankRelatedWindowOperator.getWindowCall().isEmpty()
+                ? Lists.newArrayList(rankRelatedWindowOperator.getWindowCall().keySet()).get(0)
+                : rankRelatedWindowOperator.getWindowCall().keySet().iterator().next();
         CallOperator callOperator = rankRelatedWindowOperator.getWindowCall().get(windowCol);
 
         // find the rank related predicate like "rank <=1"
-        List<BinaryPredicateOperator> lessPredicates =
-                filters.stream().filter(op -> op instanceof BinaryPredicateOperator)
-                        .map(ScalarOperator::<BinaryPredicateOperator>cast)
-                        .filter(op -> Objects.equals(BinaryType.LE, op.getBinaryType()) ||
-                                Objects.equals(BinaryType.LT, op.getBinaryType()) ||
-                                Objects.equals(BinaryType.EQ, op.getBinaryType()))
-                        .filter(op -> Objects.equals(windowCol, op.getChild(0)))
-                        .filter(op -> op.getChild(1) instanceof ConstantOperator)
-                        .collect(Collectors.toList());
-
-        if (lessPredicates.size() != 1) {
-            return Collections.emptyList();
+        BinaryPredicateOperator lessPredicate = null;
+        int matchingPredicateCount = 0;
+        for (ScalarOperator filter : filters) {
+            if (!(filter instanceof BinaryPredicateOperator)) {
+                continue;
+            }
+            BinaryPredicateOperator predicate = filter.cast();
+            if ((Objects.equals(BinaryType.LE, predicate.getBinaryType()) ||
+                    Objects.equals(BinaryType.LT, predicate.getBinaryType()) ||
+                    Objects.equals(BinaryType.EQ, predicate.getBinaryType())) &&
+                    Objects.equals(windowCol, predicate.getChild(0)) &&
+                    predicate.getChild(1) instanceof ConstantOperator) {
+                lessPredicate = predicate;
+                matchingPredicateCount++;
+            }
         }
 
-        BinaryPredicateOperator lessPredicate = lessPredicates.get(0);
+        if (matchingPredicateCount != 1) {
+            return Collections.emptyList();
+        }
         ConstantOperator rightChild = lessPredicate.getChild(1).cast();
         long limitValue = rightChild.getBigint();
 

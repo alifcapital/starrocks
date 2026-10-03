@@ -68,7 +68,7 @@ public class RewriteUnnestBitmapRule extends TransformationRule {
                 return callOperator.getFnName().equals(FunctionSet.BITMAP_TO_ARRAY);
             }
             return false;
-        }).count() == 1;
+        }).limit(2).count() == 1;
 
         return existBitmapToArray;
     }

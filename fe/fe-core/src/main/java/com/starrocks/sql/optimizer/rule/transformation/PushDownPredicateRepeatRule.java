@@ -96,6 +96,7 @@ public class PushDownPredicateRepeatRule extends TransformationRule {
             return false;
         }
 
+        ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
         for (ColumnRefOperator repeatColumn : repeatColumns) {
             if (!usedRefs.contains(repeatColumn)) {
                 continue;
@@ -105,7 +106,6 @@ public class PushDownPredicateRepeatRule extends TransformationRule {
                     Maps.of(repeatColumn, ConstantOperator.createNull(repeatColumn.getType()));
             ScalarOperator nullEval = new ReplaceColumnRefRewriter(m).rewrite(predicate);
 
-            ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
             // The calculation of the null value is in the constant fold
             nullEval = scalarRewriter.rewrite(nullEval, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
             if (nullEval.equals(ConstantOperator.createBoolean(true))) {

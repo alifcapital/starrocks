@@ -132,8 +132,12 @@ public class SPMFunctions {
         if ((operator.getOpType() == OperatorType.IN) && operator.getChildren().size() == 2) {
             operator = operator.getChild(1);
         }
-        return (operator.getOpType() == OperatorType.CALL) && SPM_FUNCTIONS.contains(
-                ((CallOperator) operator).getFnName().toLowerCase());
+        if (operator.getOpType() != OperatorType.CALL) {
+            return false;
+        }
+        // every SPM function name starts with "_spm_", so other names skip the lower-case copy and set lookup
+        String fnName = ((CallOperator) operator).getFnName();
+        return fnName.regionMatches(true, 0, "_spm_", 0, 5) && SPM_FUNCTIONS.contains(fnName.toLowerCase());
     }
 
     public static ScalarOperator castSPMFunctions(ScalarOperator operator, Type type) {

@@ -382,4 +382,17 @@ public class EmptyValueTest extends PlanTestBase {
                 "  |  <slot 19> : 19: v2\n" +
                 "  |  <slot 21> : NULL");
     }
+    @Test
+    public void testExceptEmptyFirstAndLaterInputs() throws Exception {
+        String empty = "select v1 from t0 where false";
+        String nonempty = "select v1 from t0";
+        String plan = getFragmentPlan(empty + " except " + nonempty + " except " + nonempty);
+        assertContains(plan, "EMPTYSET");
+        assertNotContains(plan, "OlapScanNode");
+        plan = getFragmentPlan(nonempty + " except " + empty);
+        assertContains(plan, "OlapScanNode");
+        assertNotContains(plan, "EMPTYSET");
+        plan = getFragmentPlan(empty + " except " + empty);
+        assertContains(plan, "EMPTYSET");
+    }
 }
