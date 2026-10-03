@@ -412,7 +412,12 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
                     mm = new ConstantOperator(minMax.get().minValue(), VarcharType.VARCHAR);
                 }
                 Optional<ConstantOperator> re = mm.castTo(call.getType());
-                re.ifPresent(cc -> constantMap.put(entry.getKey(), cc));
+                // A min/max that cannot be cast to the result type stays an aggregate.
+                if (re.isPresent()) {
+                    constantMap.put(entry.getKey(), re.get());
+                } else {
+                    newAggCalls.put(entry.getKey(), call);
+                }
             } else if (call.getFnName().equals(FunctionSet.COUNT) && !call.isDistinct()
                     && call.getUsedColumns().size() <= 1 && provenRowCount.get().isPresent()) {
                 constantMap.put(entry.getKey(), ConstantOperator.createBigint(provenRowCount.get().get()));
@@ -438,6 +443,8 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
         }
 
         // some aggregations can be replaced, but not all
+        // The projection above the aggregate must still output the aggregates that stay.
+        newAggCalls.keySet().forEach(c -> constantMap.put(c, c));
         LogicalAggregationOperator newAgg = LogicalAggregationOperator.builder()
                 .withOperator(aggregationOperator)
                 .setAggregations(newAggCalls)
