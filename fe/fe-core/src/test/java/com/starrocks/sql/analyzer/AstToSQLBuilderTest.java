@@ -377,11 +377,10 @@ public class AstToSQLBuilderTest {
                 // as explicit list partitioning (a different table).
                 {"CREATE TABLE t4 PARTITION BY (dt) AS SELECT dt, v1 FROM t0",
                         "CREATE TABLE `t4` PARTITION BY (`dt`) AS SELECT `dt`, `v1`\nFROM `t0`"},
-                // An explicit LIST clause is folded into a RangePartitionDesc by AstBuilder#visitPartitionDesc
-                // (the LIST/RANGE branch), dropping the list definitions, so the deparse reflects that AST.
+                // The deparse keeps the LIST partition columns; it does not print the list definitions.
                 {"CREATE TABLE t4 PARTITION BY LIST(dt) (PARTITION p1 VALUES IN ('2021-01-01')) " +
                         "DISTRIBUTED BY HASH(dt) AS SELECT dt FROM t0",
-                        "CREATE TABLE `t4` PARTITION BY RANGE(`dt`) () DISTRIBUTED BY HASH(dt) AS SELECT `dt`\nFROM `t0`"},
+                        "CREATE TABLE `t4` PARTITION BY LIST(`dt`) DISTRIBUTED BY HASH(dt) AS SELECT `dt`\nFROM `t0`"},
                 {"CREATE TABLE t4 PARTITION BY date_trunc('day', dt) AS SELECT dt, v1 FROM t0",
                         "CREATE TABLE `t4` PARTITION BY date_trunc('day', `dt`) AS SELECT `dt`, `v1`\nFROM `t0`"},
                 // The grammar requires parentheses after RANGE(cols), so an empty pair is kept.
