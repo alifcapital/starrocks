@@ -144,12 +144,27 @@ public class TypeParser {
         List<com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext> subfields =
                 context.subfieldDescs().subfieldDesc();
         for (com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext type : subfields) {
-            Identifier fieldIdentifier = getIdentifier(type.identifier());
+            Identifier fieldIdentifier = getStructFieldIdentifier(type);
             String fieldName = fieldIdentifier.getValue();
             fields.add(new StructField(fieldName, getType(type.type()), null));
         }
 
         return new StructType(fields);
+    }
+
+    private static Identifier getStructFieldIdentifier(
+            com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext field) {
+        if (field.identifier() != null) {
+            return getIdentifier(field.identifier());
+        }
+        var nested = field.nestedFieldName();
+        if (nested.subfieldName().size() != 1 || !nested.DOT_IDENTIFIER().isEmpty()) {
+            throw new ParsingException("Nested field paths are not allowed in STRUCT type declarations; " +
+                    "quote a literal field name", createPos(nested));
+        }
+        var single = nested.subfieldName(0);
+        return single.identifier() != null ? getIdentifier(single.identifier())
+                : new Identifier(single.ARRAY_ELEMENT().getText(), createPos(single));
     }
 
     public static MapType getMapType(com.starrocks.sql.parser.StarRocksParser.MapTypeContext context) {
