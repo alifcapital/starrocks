@@ -6928,7 +6928,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitFileTableFunction(com.starrocks.sql.parser.StarRocksParser.FileTableFunctionContext context) {
-        return new FileTableFunctionRelation(getCaseInsensitivePropertyList(context.propertyList()), NodePosition.ZERO);
+        // The columns of FILES() come from the file schema, so we have no place for column aliases and reject them.
+        if (context.columnAliases() != null) {
+            throw new ParsingException("Column aliases are not supported for FILES()", createPos(context.columnAliases()));
+        }
+        FileTableFunctionRelation relation =
+                new FileTableFunctionRelation(getCaseInsensitivePropertyList(context.propertyList()), NodePosition.ZERO);
+        if (context.alias != null) {
+            relation.setAlias(new TableName(null, ((Identifier) visit(context.alias)).getValue()));
+        }
+        return relation;
     }
 
     @Override
