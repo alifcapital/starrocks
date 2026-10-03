@@ -90,10 +90,18 @@ final class DenseOwnedTokenStream extends CommonTokenStream {
     private int viewCount;
     private boolean filling;
     private Throwable failure;
+    private final boolean fastLexer;
+    private boolean lexedByFastLexer;
 
     /** Construct and fill before exposing the lexer or input; no custom callbacks accepted. */
     DenseOwnedTokenStream(String sql, long mode) {
+        this(sql, mode, true);
+    }
+
+    /** With fastLexer false the tokens always come from the generated lexer, which tests compare against. */
+    DenseOwnedTokenStream(String sql, long mode, boolean fastLexer) {
         super(new UnifiedBatchedLexer(SqlTextStream.create(sql)));
+        this.fastLexer = fastLexer;
         originalSql = sql;
         originalMode = mode;
         lexer = (UnifiedBatchedLexer) tokenSource;
@@ -108,6 +116,10 @@ final class DenseOwnedTokenStream extends CommonTokenStream {
         firstCapacity = length >= CHUNK_SIZE - 1 ? CHUNK_SIZE : Math.max(16, length + 1);
         tokens = Collections.unmodifiableList(new Views());
         fill();
+    }
+
+    boolean lexedByFastLexer() {
+        return lexedByFastLexer;
     }
 
     int materializedCount() {
@@ -325,6 +337,10 @@ final class DenseOwnedTokenStream extends CommonTokenStream {
         if (tokenChannel != Token.DEFAULT_CHANNEL) {
             throw new IllegalStateException("Owned EOF must use default channel");
         }
+        appendRecord(type, start, stop, line, column, text);
+    }
+
+    private void appendRecord(int type, int start, int stop, int line, int column, String text) {
         int slot = rawCount & MASK;
         if (slot == 0) {
             writeChunk = new Chunk(rawCount == 0 ? firstCapacity : CHUNK_SIZE);
@@ -374,6 +390,15 @@ final class DenseOwnedTokenStream extends CommonTokenStream {
         SinkFactory factory = new SinkFactory();
         filling = true;
         try {
+            if (fastLexer) {
+                source = new Pair<>(lexer, input);
+                if (FastSqlLexer.lex(originalSql, originalMode, new LexerSink())) {
+                    lexedByFastLexer = true;
+                    publish();
+                    return;
+                }
+                resetTokens();
+            }
             lexer.setTokenFactory(factory);
             if (!lexer.ownedFill(originalSql, this, NON_EOF_MARKER, EOF_MARKER)) {
                 for (; ; ) {
@@ -386,25 +411,81 @@ final class DenseOwnedTokenStream extends CommonTokenStream {
                     }
                 }
             }
-            allHints = Collections.unmodifiableList(allHintStorage);
-            hintsAfter.replaceAll((ordinal, list) -> Collections.unmodifiableList(list));
-            int[][] frozenRecords = new int[chunks.size()][];
-            for (int i = 0; i < frozenRecords.length; i++) {
-                frozenRecords[i] = chunks.get(i).records;
-            }
-            readRecords = frozenRecords; // Publish the complete table before any EOF View read.
-            fetchedEOF = true;
-            p = nextTokenOnChannel(0, channel);
-            lexer.emit(
-                    tokens.get(
-                            rawCount
-                                    - 1)); // Stable immutable EOF view, never the reusable carrier.
+            publish();
         } catch (RuntimeException | Error error) {
             failure = error;
             throw error;
         } finally {
             lexer.setTokenFactory(originalFactory);
             filling = false;
+        }
+    }
+
+    private void publish() {
+        allHints = Collections.unmodifiableList(allHintStorage);
+        hintsAfter.replaceAll((ordinal, list) -> Collections.unmodifiableList(list));
+        int[][] frozenRecords = new int[chunks.size()][];
+        for (int i = 0; i < frozenRecords.length; i++) {
+            frozenRecords[i] = chunks.get(i).records;
+        }
+        readRecords = frozenRecords; // Publish the complete table before any EOF View read.
+        fetchedEOF = true;
+        p = nextTokenOnChannel(0, channel);
+        lexer.emit(tokens.get(rawCount - 1)); // Stable immutable EOF view, never the reusable carrier.
+    }
+
+    // FastSqlLexer gave up after some tokens; the generated lexer starts again from an empty stream.
+    private void resetTokens() {
+        chunks.clear();
+        writeChunk = null;
+        writeRecords = null;
+        writeCapacity = 0;
+        rawCount = 0;
+        originalRawNonEOFCount = 0;
+        commas = 0;
+        semicolons = 0;
+        parameters = 0;
+        parameterOffsets = null;
+        allHintStorage.clear();
+        hintsAfter.clear();
+        explicitText = null;
+        source = null;
+    }
+
+    /** Counts tokens exactly as appendFields() does for the tokens of the generated lexer. */
+    private final class LexerSink implements FastSqlLexer.Sink {
+        @Override
+        public void token(int type, int start, int stop, int line, int column) {
+            if (type != Token.EOF) {
+                originalRawNonEOFCount++;
+                if (type == COMMA) {
+                    commas++;
+                } else if (type == StarRocksLexer.SEMICOLON) {
+                    semicolons++;
+                } else if (type == StarRocksLexer.PARAMETER) {
+                    if (parameterOffsets == null) {
+                        parameterOffsets = new int[8];
+                    }
+                    if (parameters == parameterOffsets.length) {
+                        parameterOffsets = java.util.Arrays.copyOf(parameterOffsets, parameters * 2);
+                    }
+                    parameterOffsets[parameters++] = start;
+                }
+            }
+            appendRecord(type, start, stop, line, column, null);
+        }
+
+        @Override
+        public void hidden() {
+            originalRawNonEOFCount++;
+        }
+
+        @Override
+        public void hint(int type, int start, int stop, int line, int column) {
+            Token hint = new HintView(type, originalRawNonEOFCount, start, stop, line, column, null);
+            originalRawNonEOFCount++;
+            allHintStorage.add(hint);
+            hintsAfter.computeIfAbsent(rawCount - 1, ignored -> new ArrayList<>()).add(hint);
         }
     }
 
