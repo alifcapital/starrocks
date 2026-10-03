@@ -642,15 +642,13 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         long hintSqlMode = 0L;
         for (Map.Entry<ParserRuleContext, List<HintNode>> entry : hintMap.entrySet()) {
             for (HintNode hint : entry.getValue()) {
-                if (hint instanceof SetVarHint) {
-                    SetVarHint setVarHint = (SetVarHint) hint;
+                // Only a hint that sets sql_mode changes it, so another SET_VAR hint does not clear it.
+                if (hint instanceof SetVarHint setVarHint && setVarHint.getValue().containsKey("sql_mode")) {
                     long mode = 0L;
-                    if (setVarHint.getValue().containsKey("sql_mode")) {
-                        try {
-                            mode = SqlModeHelper.encode(setVarHint.getValue().get("sql_mode"));
-                        } catch (Exception e) {
-                            // do nothing
-                        }
+                    try {
+                        mode = SqlModeHelper.encode(setVarHint.getValue().get("sql_mode"));
+                    } catch (Exception e) {
+                        // do nothing
                     }
                     hintSqlMode = mode;
                 }
