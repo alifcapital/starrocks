@@ -15,11 +15,9 @@
 package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.OperatorType;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -30,7 +28,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Derive a expression's value range. such as:
@@ -63,37 +60,41 @@ public class ScalarRangePredicateExtractor {
         Map<ScalarOperator, ValueDescriptor> extractMap = extractImpl(predicate);
 
         Set<ScalarOperator> result = Sets.newLinkedHashSet();
-        extractMap.keySet().stream().filter(k -> !onlyExtractColumnRef || k.isColumnRef())
-                .map(extractMap::get)
-                .filter(d -> d.getSourceCount() > 1)
-                .map(ValueDescriptor::toScalarOperator).forEach(result::addAll);
-
-        List<ScalarOperator> decimalKeys =
-                extractMap.keySet().stream().filter(k -> !onlyExtractColumnRef || k.isColumnRef())
-                        .filter(k -> k.getType().isDecimalOfAnyVersion()).collect(Collectors.toList());
-        if (!decimalKeys.isEmpty()) {
-            for (ScalarOperator key : decimalKeys) {
-                ValueDescriptor vd = extractMap.get(key);
-                vd.toScalarOperator().forEach(s -> checkDecimalTypes(s, key));
+        for (Map.Entry<ScalarOperator, ValueDescriptor> entry : extractMap.entrySet()) {
+            ScalarOperator key = entry.getKey();
+            if (onlyExtractColumnRef && !key.isColumnRef()) {
+                continue;
+            }
+            ValueDescriptor descriptor = entry.getValue();
+            boolean derive = descriptor.getSourceCount() > 1;
+            boolean decimal = key.getType().isDecimalOfAnyVersion();
+            if (!derive && !decimal) {
+                continue;
+            }
+            // Decimal validation consumes the same predicates as range derivation. Materialize
+            // them once, including descriptors used only for type validation.
+            List<ScalarOperator> operators = descriptor.toScalarOperator();
+            if (derive) {
+                result.addAll(operators);
+            }
+            if (decimal) {
+                operators.forEach(operator -> checkDecimalTypes(operator, key));
             }
         }
 
-        ScalarOperator extractExpr = Utils.compoundAnd(Lists.newArrayList(result));
-        if (extractExpr == null) {
+        if (result.isEmpty()) {
             return predicate;
         }
 
         if (isOnlyOrCompound(predicate)) {
-            Set<ColumnRefOperator> c = Sets.newHashSet(Utils.extractColumnRef(predicate));
-            if (c.size() == extractMap.size() &&
-                    extractMap.values().stream().allMatch(v -> v instanceof RangeExtractor.MultiValuesDescriptor)) {
-                return extractExpr;
+            if (extractMap.values().stream().allMatch(v -> v instanceof RangeExtractor.MultiValuesDescriptor)
+                    && Sets.newHashSet(Utils.extractColumnRef(predicate)).size() == extractMap.size()) {
+                return Utils.compoundAnd(result);
             }
         }
 
         if (isOnlyAndCompound(predicate)) {
             List<ScalarOperator> cs = Utils.extractConjuncts(predicate);
-            Set<ColumnRefOperator> cf = new HashSet<>(Utils.extractColumnRef(predicate));
 
             // getSourceCount = cs.size() means that all and components have the same column ref
             // and it can be merged into one range predicate. mistakenly, when the predicate is
@@ -107,12 +108,12 @@ public class ScalarRangePredicateExtractor {
             //
             // Components of AND/OR should be deduplicated at first to avoid this issue.
             if (extractMap.values().stream().allMatch(valueDescriptor -> valueDescriptor.getSourceCount() == cs.size())
-                    && extractMap.size() == cf.size()) {
+                    && extractMap.size() == new HashSet<>(Utils.extractColumnRef(predicate)).size()) {
                 if (result.size() == conjuncts.size()) {
                     // to keep the isPushdown/isRedundant of predicate
                     return predicate;
                 } else {
-                    return extractExpr;
+                    return Utils.compoundAnd(result);
                 }
             }
         }
@@ -120,14 +121,21 @@ public class ScalarRangePredicateExtractor {
         if (!conjuncts.containsAll(result)) {
             // remove duplicates
             result.removeAll(conjuncts);
-            extractExpr = Utils.compoundAnd(Lists.newArrayList(result));
+            ScalarOperator extractExpr = Utils.compoundAnd(result);
             result.forEach(f -> f.setFromPredicateRangeDerive(true));
-            result.stream().filter(predicateOperator -> !checkStatisticsEstimateValid(predicateOperator))
-                    .forEach(f -> f.setNotEvalEstimate(true));
+            boolean estimateValid = true;
+            for (ScalarOperator derivedPredicate : result) {
+                if (!checkStatisticsEstimateValid(derivedPredicate)) {
+                    derivedPredicate.setNotEvalEstimate(true);
+                    estimateValid = false;
+                }
+            }
             // The newly extracted predicate will not be used to estimate the statistics,
             // which will cause the cardinality to be too small
             extractExpr.setFromPredicateRangeDerive(true);
-            if (!checkStatisticsEstimateValid(extractExpr)) {
+            // compoundAnd only adds boolean AND nodes (and removes TRUE), so validity
+            // is the conjunction of the checks already performed on its operands.
+            if (!estimateValid) {
                 extractExpr.setNotEvalEstimate(true);
             }
             // TODO: merge `setFromPredicateRangeDerive` into `setRedundant`

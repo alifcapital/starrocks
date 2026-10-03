@@ -177,7 +177,7 @@ public enum ScalarOperatorEvaluator {
             }
         }
 
-        List<Type> argTypes = new ArrayList<>(Arrays.asList(fn.getArgs()));
+        List<Type> argTypes = Arrays.asList(fn.getArgs());
 
         FunctionSignature signature =
                 new FunctionSignature(fn.functionName().toUpperCase(), argTypes, fn.getReturnType());
@@ -439,20 +439,27 @@ public enum ScalarOperatorEvaluator {
 
             ScalarOperatorEvaluator.FunctionSignature signature = (ScalarOperatorEvaluator.FunctionSignature) o;
 
-            List<PrimitiveType> primitiveTypes =
-                    argTypes.stream().map(Type::getPrimitiveType).collect(Collectors.toList());
-            List<PrimitiveType> sigPrimitiveTypes =
-                    signature.argTypes.stream().map(Type::getPrimitiveType).collect(Collectors.toList());
-            return Objects.equals(name, signature.name) &&
-                    primitiveTypes.equals(sigPrimitiveTypes) &&
-                    returnType.matchesType(signature.returnType);
+            if (!Objects.equals(name, signature.name) || argTypes.size() != signature.argTypes.size()) {
+                return false;
+            }
+            for (int i = 0; i < argTypes.size(); i++) {
+                if (!Objects.equals(argTypes.get(i).getPrimitiveType(), signature.argTypes.get(i).getPrimitiveType())) {
+                    return false;
+                }
+            }
+            return returnType.matchesType(signature.returnType);
         }
 
         @Override
         public int hashCode() {
-            List<PrimitiveType> primitiveTypes =
-                    argTypes.stream().map(Type::getPrimitiveType).collect(Collectors.toList());
-            return Objects.hash(name, primitiveTypes, returnType.getPrimitiveType());
+            // same value as Objects.hash(name, <list of primitive types>, returnType.getPrimitiveType())
+            int argsHash = 1;
+            for (Type argType : argTypes) {
+                argsHash = 31 * argsHash + Objects.hashCode(argType.getPrimitiveType());
+            }
+            int hash = 31 + Objects.hashCode(name);
+            hash = 31 * hash + argsHash;
+            return 31 * hash + Objects.hashCode(returnType.getPrimitiveType());
         }
     }
 }

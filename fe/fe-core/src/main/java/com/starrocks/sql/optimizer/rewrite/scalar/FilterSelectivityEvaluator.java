@@ -130,8 +130,7 @@ public class FilterSelectivityEvaluator {
             ColumnStatistic columnStatistic = statistics.getColumnStatistic(column);
             double selectRatio;
             if (left.isColumnRef() && right.isConstantRef()) {
-                selectRatio =
-                        estimateColToConstSelectRatio(column, columnStatistic, predicate, (ConstantOperator) right);
+                selectRatio = estimateColToConstSelectRatio(columnStatistic, predicate, (ConstantOperator) right);
             } else if (left.isColumnRef() && right.isConstant()) {
                 selectRatio = estimateColumnToExprSelectRatio(columnStatistic, predicate);
             } else {
@@ -146,9 +145,9 @@ public class FilterSelectivityEvaluator {
             if (predicate.isNotIn()) {
                 return new ColumnFilter(NON_SELECTIVITY, predicate);
             } else {
-                Set<ScalarOperator> inSet = predicate.getChildren().stream().skip(1).collect(Collectors.toSet());
                 List<ColumnRefOperator> usedCols = predicate.getChild(0).getColumnRefs();
-                if (isOnlyRefOneCol(usedCols) && inSet.stream().allMatch(e -> e.isConstantRef() && !e.isNullable())) {
+                if (isOnlyRefOneCol(usedCols) && areAllNonNullConstants(predicate.getChildren())) {
+                    Set<ScalarOperator> inSet = predicate.getChildren().stream().skip(1).collect(Collectors.toSet());
                     ColumnRefOperator column = usedCols.get(0);
                     ColumnStatistic columnStatistic = statistics.getColumnStatistic(column);
                     double selectRatio;
@@ -174,6 +173,16 @@ public class FilterSelectivityEvaluator {
                     return new ColumnFilter(NON_SELECTIVITY, predicate);
                 }
             }
+        }
+
+        private boolean areAllNonNullConstants(List<ScalarOperator> inChildren) {
+            for (int i = 1; i < inChildren.size(); i++) {
+                ScalarOperator e = inChildren.get(i);
+                if (!e.isConstantRef() || e.isNullable()) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         @Override
@@ -209,8 +218,8 @@ public class FilterSelectivityEvaluator {
                 selectRatio = NON_SELECTIVITY;
             } else {
                 ColumnRefOperator column = (ColumnRefOperator) child;
-                if (!statistics.getColumnStatistic(column).isUnknown()) {
-                    ColumnStatistic columnStatistic = statistics.getColumnStatistic(column);
+                ColumnStatistic columnStatistic = statistics.getColumnStatistic(column);
+                if (!columnStatistic.isUnknown()) {
                     selectRatio = isNotNull ? 1 - columnStatistic.getNullsFraction() : columnStatistic.getNullsFraction();
                 } else {
                     selectRatio = NON_SELECTIVITY;
@@ -249,35 +258,39 @@ public class FilterSelectivityEvaluator {
             }
         }
 
-        private Pair<Double, Double> extractInSetValueRange(Set<ScalarOperator> inSet) {
-            List<Double> values = Lists.newArrayList();
+        private static Pair<Double, Double> extractInSetValueRange(Set<ScalarOperator> inSet) {
+            double minimum = Double.POSITIVE_INFINITY;
+            double maximum = Double.NEGATIVE_INFINITY;
+            boolean hasValue = false;
             for (ScalarOperator operator : inSet) {
                 ConstantOperator constant = (ConstantOperator) operator;
                 if (constant.isNull()) {
                     continue;
                 }
                 OptionalDouble optionalDouble = ConstantOperatorUtils.doubleValueFromConstant(constant);
-                if (optionalDouble.isPresent()) {
-                    values.add(optionalDouble.getAsDouble());
-                } else {
+                if (optionalDouble.isEmpty()) {
                     return Pair.create(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY);
                 }
+                double value = optionalDouble.getAsDouble();
+                // Match Double's natural sort order, including NaN and signed zero.
+                if (!hasValue || Double.compare(value, minimum) < 0) {
+                    minimum = value;
+                }
+                if (!hasValue || Double.compare(value, maximum) > 0) {
+                    maximum = value;
+                }
+                hasValue = true;
             }
-
-            if (values.isEmpty()) {
-                // return an empty range
-                return Pair.create(Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY);
-            } else {
-                values.sort(null);
-                return Pair.create(values.get(0), values.get(values.size() - 1));
-            }
+            // No converted values retain the empty range (+infinity, -infinity).
+            return Pair.create(minimum, maximum);
         }
 
-        private double estimateColToConstSelectRatio(ColumnRefOperator column, ColumnStatistic columnStatistic,
+        private double estimateColToConstSelectRatio(ColumnStatistic columnStatistic,
                                                      BinaryPredicateOperator predicate,
                                                      ConstantOperator constValue) {
+            // Only the row count is used, so we pass no column and do not build per-column statistics.
             Statistics binaryStats =
-                    BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(Optional.of(column),
+                    BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(Optional.empty(),
                             columnStatistic, predicate, Optional.of(constValue), statistics);
             return Math.min(NON_SELECTIVITY, binaryStats.getOutputRowCount() / statistics.getOutputRowCount());
         }

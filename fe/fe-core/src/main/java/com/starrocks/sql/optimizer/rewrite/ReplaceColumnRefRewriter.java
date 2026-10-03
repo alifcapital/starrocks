@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rewrite;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.common.Config;
@@ -23,7 +22,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 
 import java.util.Collection;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -102,11 +100,54 @@ public class ReplaceColumnRefRewriter {
      */
     public static boolean isTooLarge(Collection<? extends ScalarOperator> operators,
                                      Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap) {
-        if (copiedNodes(operators, operatorMap) > MAX_COPIED_NODES) {
-            return true;
+        ReplacementSize size = new ReplacementSize(operatorMap, Config.max_scalar_operator_flat_children);
+        for (ScalarOperator operator : operators) {
+            if (size.count(operator) > size.maxNodes || size.copied > MAX_COPIED_NODES) {
+                return true;
+            }
         }
-        int maxNodes = Config.max_scalar_operator_flat_children;
-        return maxNodes > 0 && operators.stream().anyMatch(operator -> replacedNodes(operator, operatorMap) > maxNodes);
+        return false;
+    }
+
+    // Count result size and additional copies together. Only a repeated non-leaf replacement
+    // grows the plan, so leaf mappings need neither a use counter nor a set entry.
+    private static final class ReplacementSize {
+        private final Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap;
+        private final long maxNodes;
+        private Set<ColumnRefOperator> seen;
+        private long copied;
+
+        private ReplacementSize(Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap, int maxNodes) {
+            this.operatorMap = operatorMap;
+            this.maxNodes = maxNodes > 0 ? maxNodes : Long.MAX_VALUE;
+        }
+
+        private long count(ScalarOperator operator) {
+            if (operator instanceof ColumnRefOperator column) {
+                ScalarOperator replacement = operatorMap.get(column);
+                if (replacement == null) {
+                    return 1;
+                }
+                int nodes = replacement.getNumFlatChildren();
+                if (nodes > 1) {
+                    if (seen == null) {
+                        seen = Sets.newHashSet();
+                    }
+                    if (!seen.add(column)) {
+                        copied += nodes - 1;
+                    }
+                }
+                return nodes;
+            }
+            long nodes = 1;
+            for (ScalarOperator child : operator.getChildren()) {
+                nodes += count(child);
+                if (nodes > maxNodes || copied > MAX_COPIED_NODES) {
+                    break;
+                }
+            }
+            return nodes;
+        }
     }
 
     private static void countUses(ScalarOperator operator, Map<ColumnRefOperator, ? extends ScalarOperator> operatorMap,
@@ -141,8 +182,8 @@ public class ReplaceColumnRefRewriter {
 
         @Override
         public ScalarOperator visit(ScalarOperator scalarOperator, Void context) {
-            List<ScalarOperator> children = Lists.newArrayList(scalarOperator.getChildren());
-            for (int i = 0; i < children.size(); ++i) {
+            int childCount = scalarOperator.getChildren().size();
+            for (int i = 0; i < childCount; ++i) {
                 scalarOperator.setChild(i, scalarOperator.getChild(i).accept(this, null));
             }
             return scalarOperator;

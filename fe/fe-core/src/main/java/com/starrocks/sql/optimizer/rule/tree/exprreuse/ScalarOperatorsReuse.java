@@ -44,21 +44,20 @@ import com.starrocks.sql.optimizer.operator.scalar.LambdaFunctionOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.MapOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
 import com.starrocks.sql.optimizer.rewrite.scalar.NormalizePredicateRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ReduceCastRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ScalarOperatorRewriteRule;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -104,13 +103,15 @@ public class ScalarOperatorsReuse {
             ColumnRefFactory columnRefFactory) {
         // 1. Recursively collect common sub operators for the input operators
         CommonSubScalarOperatorCollector operatorCollector = new CommonSubScalarOperatorCollector();
+        // The sets of a non-lambda context are never modified, so all root operators can share one context.
+        CommonOperatorContext rootContext = new CommonOperatorContext(false);
         for (ScalarOperator operator : scalarOperators) {
             // To avoid stack overflow if the operator tree is too deep(eg: contains too many `or` functions), set a
             // limit to the depth of the operator tree.
             if (operator.getDepth() > Config.max_scalar_operator_optimize_depth) {
                 continue;
             }
-            operator.accept(operatorCollector, new CommonOperatorContext(false));
+            operator.accept(operatorCollector, rootContext);
         }
         if (projection != null) {
             projection.setNeedReuseLambdaDependentExpr(operatorCollector.hasLambdaFunction());
@@ -119,21 +120,18 @@ public class ScalarOperatorsReuse {
             return ImmutableMap.of();
         }
 
-        Map<Integer, List<ScalarOperator>> sortedCommonOperatorsByDepth = new LinkedHashMap<>();
-        operatorCollector.commonOperatorsByDepth.entrySet().stream()
-                .filter(e -> e.getKey() > 0).forEach(
-                        e -> sortedCommonOperatorsByDepth.put(e.getKey(),
-                                e.getValue().stream().map(CommonSubScalarOperatorCollector.OperatorId::key).toList()));
-
         // 2. Rewrite high depth common operators with low depth common operators
         // 3. Create the result column ref for each common operators
         Map<ScalarOperator, ColumnRefOperator> rewriteWith = new HashMap<>();
         ImmutableMap.Builder<Integer, Map<ScalarOperator, ColumnRefOperator>> commonSubOperators =
                 ImmutableMap.builder();
-        for (Map.Entry<Integer, List<ScalarOperator>> kv : sortedCommonOperatorsByDepth.entrySet()) {
-            ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter(rewriteWith);
+        for (Map.Entry<Integer, Set<CommonSubScalarOperatorCollector.OperatorId>> kv :
+                operatorCollector.commonOperatorsByDepth.entrySet()) {
+            // rewriteWith is only changed after this depth is finished, so the rewriter can read it directly.
+            ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter(rewriteWith, false);
             ImmutableMap.Builder<ScalarOperator, ColumnRefOperator> operatorColumnMapBuilder = ImmutableMap.builder();
-            for (ScalarOperator operator : kv.getValue()) {
+            for (CommonSubScalarOperatorCollector.OperatorId id : kv.getValue()) {
+                ScalarOperator operator = id.key();
                 ScalarOperator rewrittenOperator = operator.accept(rewriter, null);
                 ColumnRefOperator op =
                         columnRefFactory.create(operator, rewrittenOperator.getType(), rewrittenOperator.isNullable());
@@ -150,7 +148,40 @@ public class ScalarOperatorsReuse {
         private final Map<ScalarOperator, ColumnRefOperator> commonOperatorsMap;
 
         public ScalarOperatorRewriter(Map<ScalarOperator, ColumnRefOperator> commonOperatorsMap) {
-            this.commonOperatorsMap = ImmutableMap.copyOf(commonOperatorsMap);
+            this(commonOperatorsMap, true);
+        }
+
+        // The caller must not modify a map passed with copy == false while this rewriter is in use.
+        private ScalarOperatorRewriter(Map<ScalarOperator, ColumnRefOperator> commonOperatorsMap, boolean copy) {
+            this.commonOperatorsMap = copy ? ImmutableMap.copyOf(commonOperatorsMap) : commonOperatorsMap;
+        }
+
+        private List<ScalarOperator> rewriteChildren(ScalarOperator operator) {
+            List<ScalarOperator> children = operator.getChildren();
+            List<ScalarOperator> rewritten = new ArrayList<>(children.size());
+            for (ScalarOperator child : children) {
+                rewritten.add(child.accept(this, null));
+            }
+            return rewritten;
+        }
+
+        private List<ScalarOperator> rewriteChildrenImmutable(ScalarOperator operator) {
+            List<ScalarOperator> children = operator.getChildren();
+            ImmutableList.Builder<ScalarOperator> rewritten = ImmutableList.builderWithExpectedSize(children.size());
+            for (ScalarOperator child : children) {
+                rewritten.add(child.accept(this, null));
+            }
+            return rewritten.build();
+        }
+
+        private ScalarOperator[] rewriteChildrenArray(ScalarOperator operator) {
+            List<ScalarOperator> children = operator.getChildren();
+            ScalarOperator[] rewritten = new ScalarOperator[children.size()];
+            int index = 0;
+            for (ScalarOperator child : children) {
+                rewritten[index++] = child.accept(this, null);
+            }
+            return rewritten;
         }
 
         @Override
@@ -168,17 +199,15 @@ public class ScalarOperatorsReuse {
         }
 
         private ScalarOperator tryRewrite(ScalarOperator operator) {
-            if (commonOperatorsMap.containsKey(operator)) {
-                return commonOperatorsMap.get(operator);
-            }
-            return operator;
+            ColumnRefOperator common = commonOperatorsMap.get(operator);
+            return common == null ? operator : common;
         }
 
         @Override
         public ScalarOperator visitCall(CallOperator call, Void context) {
             CallOperator operator = new CallOperator(call.getFnName(),
                     call.getType(),
-                    call.getChildren().stream().map(argument -> argument.accept(this, null)).collect(toImmutableList()),
+                    rewriteChildrenImmutable(call),
                     call.getFunction(),
                     call.isDistinct(), call.isRemovedDistinct());
             return tryRewrite(operator);
@@ -196,16 +225,14 @@ public class ScalarOperatorsReuse {
         @Override
         public ScalarOperator visitMap(MapOperator operator, Void context) {
             ScalarOperator newOperator = new MapOperator(operator.getType(),
-                    operator.getChildren().stream().map(argument -> argument.accept(this, null)).
-                            collect(Collectors.toList()));
+                    rewriteChildren(operator));
             return tryRewrite(newOperator);
         }
 
         @Override
         public ScalarOperator visitCaseWhenOperator(CaseWhenOperator operator, Void context) {
             List<ScalarOperator> newChildren =
-                    operator.getChildren().stream().map(argument -> argument.accept(this, null)).
-                            collect(Collectors.toList());
+                    rewriteChildren(operator);
             CaseWhenOperator newOperator = new CaseWhenOperator(operator, newChildren);
             return tryRewrite(newOperator);
         }
@@ -221,32 +248,28 @@ public class ScalarOperatorsReuse {
         @Override
         public ScalarOperator visitBinaryPredicate(BinaryPredicateOperator predicate, Void context) {
             ScalarOperator operator = new BinaryPredicateOperator(predicate.getBinaryType(),
-                    predicate.getChildren().stream().map(argument -> argument.accept(this, null))
-                            .collect(Collectors.toList()));
+                    rewriteChildren(predicate));
             return tryRewrite(operator);
         }
 
         @Override
         public ScalarOperator visitCompoundPredicate(CompoundPredicateOperator predicate, Void context) {
             ScalarOperator operator = new CompoundPredicateOperator(predicate.getCompoundType(),
-                    predicate.getChildren().stream().map(argument -> argument.accept(this, null))
-                            .toArray(ScalarOperator[]::new));
+                    rewriteChildrenArray(predicate));
             return tryRewrite(operator);
         }
 
         @Override
         public ScalarOperator visitExistsPredicate(ExistsPredicateOperator predicate, Void context) {
             ScalarOperator operator = new ExistsPredicateOperator(predicate.isNotExists(),
-                    predicate.getChildren().stream().map(argument -> argument.accept(this, null))
-                            .toArray(ScalarOperator[]::new));
+                    rewriteChildrenArray(predicate));
             return tryRewrite(operator);
         }
 
         @Override
         public ScalarOperator visitInPredicate(InPredicateOperator predicate, Void context) {
             ScalarOperator operator = new InPredicateOperator(predicate.isNotIn(),
-                    predicate.getChildren().stream().map(argument -> argument.accept(this, null))
-                            .toArray(ScalarOperator[]::new));
+                    rewriteChildrenArray(predicate));
             return tryRewrite(operator);
         }
 
@@ -260,8 +283,7 @@ public class ScalarOperatorsReuse {
         @Override
         public ScalarOperator visitLikePredicateOperator(LikePredicateOperator predicate, Void context) {
             ScalarOperator operator = new LikePredicateOperator(predicate.getLikeType(),
-                    predicate.getChildren().stream().map(argument -> argument.accept(this, null))
-                            .toArray(ScalarOperator[]::new));
+                    rewriteChildrenArray(predicate));
             return tryRewrite(operator);
         }
 
@@ -279,8 +301,7 @@ public class ScalarOperatorsReuse {
         @Override
         public ScalarOperator visitDictionaryGetOperator(DictionaryGetOperator predicate, Void context) {
             ScalarOperator operator = new DictionaryGetOperator(
-                    predicate.getChildren().stream().map(
-                        argument -> argument.accept(this, null)).collect(Collectors.toList()),
+                    rewriteChildren(predicate),
                             predicate.getType(), predicate.getDictionaryId(),
                                 predicate.getDictionaryTxnId(), predicate.getKeySize(), predicate.getNullIfNotExist());
             return tryRewrite(operator);
@@ -315,7 +336,26 @@ public class ScalarOperatorsReuse {
         public Set<ColumnRefOperator> outerLambdaArguments;
         public Set<ColumnRefOperator> currentLambdaLocalRefs;
         public Set<ColumnRefOperator> outerLambdaLocalRefs;
-        public ColumnRefSet usedColumns;
+        // Ordinary expressions never record lambda dependencies. Allocate a bitmap only
+        // when a lambda argument/local reference actually needs to propagate through this context.
+        private ColumnRefSet usedColumns;
+
+        private ColumnRefSet usedColumns() {
+            if (usedColumns == null) {
+                usedColumns = new ColumnRefSet();
+            }
+            return usedColumns;
+        }
+
+        private boolean usesAny(Set<ColumnRefOperator> columns) {
+            return usedColumns != null && !columns.isEmpty() && usedColumns.containsAny(columns);
+        }
+
+        private void addUsedColumns(CommonOperatorContext other) {
+            if (other.usedColumns != null && !other.usedColumns.isEmpty()) {
+                usedColumns().union(other.usedColumns);
+            }
+        }
 
         public CommonOperatorContext(boolean isPartOfLambdaExpr) {
             this.isPartOfLambdaExpr = isPartOfLambdaExpr;
@@ -323,7 +363,6 @@ public class ScalarOperatorsReuse {
             this.outerLambdaArguments = Sets.newHashSet();
             this.currentLambdaLocalRefs = Sets.newHashSet();
             this.outerLambdaLocalRefs = Sets.newHashSet();
-            this.usedColumns = new ColumnRefSet();
         }
 
         public CommonOperatorContext(boolean isPartOfLambdaExpr, Set<ColumnRefOperator> currentLambdaArguments,
@@ -335,7 +374,6 @@ public class ScalarOperatorsReuse {
             this.outerLambdaArguments = outerLambdaArguments;
             this.currentLambdaLocalRefs = currentLambdaLocalRefs;
             this.outerLambdaLocalRefs = outerLambdaLocalRefs;
-            this.usedColumns = new ColumnRefSet();
         }
     }
 
@@ -358,7 +396,7 @@ public class ScalarOperatorsReuse {
 
             @Override
             public int hashCode() {
-                return Objects.hash(key.hashCodeSelf(), childrenGroup);
+                return 31 * (31 + key.hashCodeSelf()) + childrenGroup.hashCode();
             }
         }
 
@@ -381,13 +419,24 @@ public class ScalarOperatorsReuse {
         // without this normalization, the two forms would be tracked as distinct common
         // subexpressions and later collide as a single key in the rewritten ImmutableMap.
         private static List<Integer> normalizeChildrenGroup(ScalarOperator operator, List<Integer> groups) {
-            if (operator instanceof CompoundPredicateOperator) {
+            if (groups.size() > 1 && operator instanceof CompoundPredicateOperator) {
                 CompoundPredicateOperator compound = (CompoundPredicateOperator) operator;
-                if (compound.isAnd() || compound.isOr()) {
-                    return groups.stream().sorted().toList();
+                if ((compound.isAnd() || compound.isOr()) && !isSorted(groups)) {
+                    List<Integer> sorted = new ArrayList<>(groups);
+                    Collections.sort(sorted);
+                    return sorted;
                 }
             }
             return groups;
+        }
+
+        private static boolean isSorted(List<Integer> groups) {
+            for (int i = 1; i < groups.size(); i++) {
+                if (groups.get(i - 1) > groups.get(i)) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static void collectAllRefs(ScalarOperator operator, ColumnRefSet result) {
@@ -410,19 +459,20 @@ public class ScalarOperatorsReuse {
             OperatorId id = new OperatorId(operator, normalizeChildrenGroup(operator, groups));
             Map<OperatorId, Integer> level = operatorsByDepth.computeIfAbsent(depth, c -> Maps.newHashMap());
 
-            boolean isDuplicated = level.containsKey(id);
-            int group = level.computeIfAbsent(id, k -> currentId++);
+            Integer existing = level.putIfAbsent(id, currentId);
+            boolean isDuplicated = existing != null;
+            int group = isDuplicated ? existing : currentId++;
             CommonResult result = new CommonResult(depth, List.of(group));
 
-            boolean isDependentOnOuterLambda = context.usedColumns.containsAny(context.outerLambdaArguments)
-                    || context.usedColumns.containsAny(context.outerLambdaLocalRefs);
+            boolean isDependentOnOuterLambda = context.usesAny(context.outerLambdaArguments)
+                    || context.usesAny(context.outerLambdaLocalRefs);
             if (isDependentOnOuterLambda) {
                 return result;
             }
 
             boolean isDependentOnCurrentLambdaArguments =
-                    context.usedColumns.containsAny(context.currentLambdaArguments)
-                            || context.usedColumns.containsAny(context.currentLambdaLocalRefs);
+                    context.usesAny(context.currentLambdaArguments)
+                            || context.usesAny(context.currentLambdaLocalRefs);
             if (isDuplicated && !isDependentOnCurrentLambdaArguments) {
                 Set<OperatorId> commonGroup =
                         commonOperatorsByDepth.computeIfAbsent(depth, c -> Sets.newLinkedHashSet());
@@ -445,8 +495,9 @@ public class ScalarOperatorsReuse {
             if (scalarOperator.isConstant() || scalarOperator.getChildren().isEmpty()) {
                 // leaf node
                 OperatorId id = new OperatorId(scalarOperator, List.of());
-                Map<OperatorId, Integer> level = operatorsByDepth.computeIfAbsent(0, c -> Maps.newLinkedHashMap());
-                int group = level.computeIfAbsent(id, k -> currentId++);
+                Map<OperatorId, Integer> level = operatorsByDepth.computeIfAbsent(0, c -> Maps.newHashMap());
+                Integer existing = level.putIfAbsent(id, currentId);
+                int group = existing != null ? existing : currentId++;
                 return new CommonResult(0, List.of(group));
             }
 
@@ -462,20 +513,27 @@ public class ScalarOperatorsReuse {
 
         private CommonResult visitChildren(ScalarOperator scalarOperator, CommonOperatorContext context) {
             int depth = 0;
-            List<Integer> groups = Lists.newArrayList();
+            List<Integer> groups = new ArrayList<>(scalarOperator.getChildren().size());
             if (!scalarOperator.getChildren().isEmpty()) {
                 CommonResult res = scalarOperator.getChild(0).accept(this, context);
                 depth = Math.max(depth, res.depth);
                 groups.addAll(res.childrenGroup);
             }
             for (int i = 1; i < scalarOperator.getChildren().size(); i++) {
-                CommonOperatorContext childContext = new CommonOperatorContext(context.isPartOfLambdaExpr,
-                        context.currentLambdaArguments, context.outerLambdaArguments,
-                        context.currentLambdaLocalRefs, context.outerLambdaLocalRefs);
+                // Outside a lambda body the lambda sets are empty, so the used columns are never read
+                // and the sibling context does not need to be isolated.
+                CommonOperatorContext childContext = context;
+                if (context.isPartOfLambdaExpr) {
+                    childContext = new CommonOperatorContext(true,
+                            context.currentLambdaArguments, context.outerLambdaArguments,
+                            context.currentLambdaLocalRefs, context.outerLambdaLocalRefs);
+                }
                 CommonResult res = scalarOperator.getChild(i).accept(this, childContext);
                 depth = Math.max(depth, res.depth);
                 groups.addAll(res.childrenGroup);
-                context.usedColumns.union(childContext.usedColumns);
+                if (childContext != context) {
+                    context.addUsedColumns(childContext);
+                }
             }
 
             return new CommonResult(depth, groups);
@@ -486,7 +544,7 @@ public class ScalarOperatorsReuse {
             if (variable.getOpType() == OperatorType.LAMBDA_ARGUMENT
                     || context.currentLambdaLocalRefs.contains(variable)
                     || context.outerLambdaLocalRefs.contains(variable)) {
-                context.usedColumns.union(variable);
+                context.usedColumns().union(variable);
             }
             return super.visitVariableReference(variable, context);
         }
@@ -504,9 +562,9 @@ public class ScalarOperatorsReuse {
             newContext.outerLambdaLocalRefs.addAll(context.currentLambdaLocalRefs);
             newContext.currentLambdaLocalRefs.addAll(scalarOperator.getColumnRefMap().keySet());
             CommonResult result = visit(scalarOperator.getLambdaExpr(), newContext);
-            context.usedColumns.union(newContext.usedColumns);
+            context.addUsedColumns(newContext);
             scalarOperator.getColumnRefMap().values()
-                    .forEach(value -> collectAllRefs(value, context.usedColumns));
+                    .forEach(value -> collectAllRefs(value, context.usedColumns()));
             return result;
         }
 
@@ -531,6 +589,23 @@ public class ScalarOperatorsReuse {
         }
     }
 
+    private static boolean shouldNotReplace(ScalarOperator operator) {
+        if (operator instanceof CallOperator call
+                && (call.getFnName().equals(FunctionSet.ARRAY_SORT_LAMBDA)
+                        || call.getFnName().equals(FunctionSet.ARRAY_MAP))
+                && Utils.hasNonDeterministicFunc(call)) {
+            return true;
+        }
+        // Same preorder and short circuit as getStream(...).filter(...).anyMatch(...),
+        // without nested stream/spliterator layers. Lambda local maps are not children.
+        for (ScalarOperator child : operator.getChildren()) {
+            if (shouldNotReplace(child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static Projection rewriteProjectionOrLambdaExpr(Projection projection, ColumnRefFactory columnRefFactory) {
         projection = JsonExtractFusionReuse.rewrite(projection);
         Map<ColumnRefOperator, ScalarOperator> columnRefMap = projection.getColumnRefMap();
@@ -538,6 +613,11 @@ public class ScalarOperatorsReuse {
         Map<Integer, Map<ScalarOperator, ColumnRefOperator>> commonSubOperatorsByDepth = ScalarOperatorsReuse
                 .collectCommonSubScalarOperators(projection, scalarOperators,
                         columnRefFactory);
+
+        if (commonSubOperatorsByDepth.isEmpty()) {
+            // no rewrite
+            return projection;
+        }
 
         Map<ScalarOperator, ColumnRefOperator> commonSubOperators =
                 commonSubOperatorsByDepth.values().stream()
@@ -549,19 +629,18 @@ public class ScalarOperatorsReuse {
             return projection;
         }
 
+        ScalarOperatorRewriter commonRewriter = new ScalarOperatorRewriter(commonSubOperators);
         boolean hasRewritten = false;
+        ScalarOperator firstRewrite = null;
         for (ScalarOperator operator : columnRefMap.values()) {
-            ScalarOperator rewriteOperator =
-                    ScalarOperatorsReuse.rewriteOperatorWithCommonOperator(operator, commonSubOperators);
+            ScalarOperator rewriteOperator = operator.accept(commonRewriter, null);
+            if (firstRewrite == null) {
+                firstRewrite = rewriteOperator;
+            }
 
             // array_sort_lambda/array_map contains non-deterministic functions like rand(), should not
             // be extracted CSE from.
-            boolean shouldNotReplace = ScalarOperatorUtil.getStream(operator)
-                    .filter(child -> (child instanceof CallOperator))
-                    .map(child -> (CallOperator) child)
-                    .filter(child -> child.getFnName().equals(FunctionSet.ARRAY_SORT_LAMBDA) ||
-                            child.getFnName().equals(FunctionSet.ARRAY_MAP))
-                    .anyMatch(Utils::hasNonDeterministicFunc);
+            boolean shouldNotReplace = shouldNotReplace(operator);
             if (shouldNotReplace) {
                 continue;
             }
@@ -584,17 +663,26 @@ public class ScalarOperatorsReuse {
                     new com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter();
             List<ScalarOperatorRewriteRule> rules =
                     ImmutableList.of(new NormalizePredicateRule(), new ReduceCastRule());
+            boolean firstEntry = true;
+            Set<ScalarOperator> columnRefValues = new HashSet<>();
             for (Map.Entry<ColumnRefOperator, ScalarOperator> kv : columnRefMap.entrySet()) {
-                ScalarOperator rewriteOperator =
-                        ScalarOperatorsReuse.rewriteOperatorWithCommonOperator(kv.getValue(), commonSubOperators);
+                // Only the first preflight result is safe to retain: normalizing an earlier output can
+                // mutate shared original descendants returned unchanged by unsupported visitor methods.
+                ScalarOperator rewriteOperator = firstEntry ? firstRewrite : kv.getValue().accept(commonRewriter, null);
+                firstEntry = false;
                 rewriteOperator = rewriter.rewrite(rewriteOperator, rules);
 
-                if (rewriteOperator.isColumnRef() && newMap.containsValue(rewriteOperator)) {
+                ScalarOperator value;
+                if (rewriteOperator.isColumnRef() && columnRefValues.contains(rewriteOperator)) {
                     // must avoid multi columnRef: columnRef
                     //@TODO(hechenfeng): remove it if BE support COW column
-                    newMap.put(kv.getKey(), kv.getValue());
+                    value = kv.getValue();
                 } else {
-                    newMap.put(kv.getKey(), rewriteOperator);
+                    value = rewriteOperator;
+                }
+                newMap.put(kv.getKey(), value);
+                if (value.isColumnRef()) {
+                    columnRefValues.add(value);
                 }
             }
 

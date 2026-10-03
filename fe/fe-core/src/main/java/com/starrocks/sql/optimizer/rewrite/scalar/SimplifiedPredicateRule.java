@@ -48,6 +48,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.text.StrTokenizer;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -71,7 +72,7 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
     // months_add(months_add('2024-01-31', 1), 1) is '2024-03-29' while months_add('2024-01-31', 2) is
     // '2024-03-31'. We want a merged shift to give the same result for every date, so we do not merge these.
     private static final Set<String> MONTH_BASED_TIME_FNS = ImmutableSet.of("years_", "quarters_", "months_");
-    private static final List<String> TIME_FN_NAMES = ImmutableList.<String>builder()
+    private static final Set<String> TIME_FN_NAMES = ImmutableSet.<String>builder()
             .add(FunctionSet.YEARS_ADD).add(FunctionSet.YEARS_SUB)
             .add(FunctionSet.QUARTERS_ADD).add(FunctionSet.QUARTERS_SUB)
             .add(FunctionSet.MONTHS_ADD).add(FunctionSet.MONTHS_SUB)
@@ -137,9 +138,26 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
         return new CallOperator(FunctionSet.IF, operator.getType(), args, fn);
     }
 
+    private static boolean allValuesEqualFirst(CaseWhenOperator operator) {
+        int whenSize = operator.getWhenClauseSize();
+        if (whenSize == 0) {
+            return true;
+        }
+        ScalarOperator first = operator.getThenClause(0);
+        for (int i = 1; i < whenSize; i++) {
+            if (!operator.getThenClause(i).equals(first)) {
+                return false;
+            }
+        }
+        return operator.getElseClause().equals(first);
+    }
+
     ScalarOperator simplifiedCaseWhenConstClause(CaseWhenOperator operator) {
         // 0. if all result is same, direct return
-        if (operator.hasElse()) {
+        // ConstantOperator.equals is looser than its hashCode (CHAR and VARCHAR), so we keep the hash set as the
+        // judge. We fear hashing every THEN deeply for nothing, so we first reject on the cheap necessary condition
+        // that every value equals the first one.
+        if (operator.hasElse() && allValuesEqualFirst(operator)) {
             Set<ScalarOperator> result = Sets.newHashSet();
             for (int i = 0; i < operator.getWhenClauseSize(); i++) {
                 result.add(operator.getThenClause(i));
@@ -173,7 +191,7 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
         }
 
         // 3. caseClause is constant, remove not equals when/Then Clause or return directly when equals
-        Set<Integer> removeArgumentsSet = Sets.newHashSet();
+        Set<Integer> removeArgumentsSet = null;
         int whenStart = operator.getWhenStart();
         boolean allWhenClausConstant = true;
         for (int i = 0; i < operator.getWhenClauseSize(); ++i) {
@@ -194,6 +212,9 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
                     }
                 } else {
                     // record argument index that should be removed.
+                    if (removeArgumentsSet == null) {
+                        removeArgumentsSet = Sets.newHashSet();
+                    }
                     removeArgumentsSet.add(2 * i + whenStart);
                     removeArgumentsSet.add(2 * i + whenStart + 1);
                 }
@@ -205,6 +226,9 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
         // ---> CASE WHEN random() > 1 THEN 1 ELSE 2 END
         for (int i = 0; i < operator.getWhenClauseSize(); ++i) {
             if (operator.getWhenClause(i).isConstantTrue()) {
+                if (removeArgumentsSet == null) {
+                    removeArgumentsSet = Sets.newHashSet();
+                }
                 for (int j = i; j < operator.getWhenClauseSize(); j++) {
                     removeArgumentsSet.add(2 * j + whenStart);
                     removeArgumentsSet.add(2 * j + whenStart + 1);
@@ -217,7 +241,9 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
             }
         }
 
-        operator.removeArguments(removeArgumentsSet);
+        // removeArguments also gives the operator its own argument list, and CaseWhenOperator(Type, other) can share
+        // one list between two operators, so we call it even when nothing is removed.
+        operator.removeArguments(removeArgumentsSet == null ? Collections.<Integer>emptySet() : removeArgumentsSet);
 
         // 4. if when isn't constant, return direct
         for (int i = 0; i < operator.getWhenClauseSize(); i++) {
@@ -255,66 +281,12 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
     @Override
     public ScalarOperator visitCompoundPredicate(CompoundPredicateOperator predicate,
                                                  ScalarOperatorRewriteContext context) {
-        // collect constant
-        List<ConstantOperator> constantChildren = predicate.getChildren().stream().filter(ScalarOperator::isConstantRef)
-                .map(d -> (ConstantOperator) d).collect(Collectors.toList());
-
         switch (predicate.getCompoundType()) {
             case AND: {
-                if (constantChildren.stream().anyMatch(d -> (!d.isNull() && !d.getBoolean()))) {
-                    // any false
-                    return ConstantOperator.createBoolean(false);
-                } else if (constantChildren.size() == 1) {
-                    if (constantChildren.get(0).isNull()) {
-                        // xxx and null
-                        return predicate;
-                    }
-
-                    // (true and xxx)/(xxx and true)
-                    ScalarOperator c0 = predicate.getChild(0);
-                    if (c0.isConstantRef() && ((ConstantOperator) c0).getBoolean()) {
-                        return predicate.getChild(1);
-                    }
-
-                    return predicate.getChild(0);
-                } else if (constantChildren.size() == 2) {
-                    if (constantChildren.stream().anyMatch(ConstantOperator::isNull)) {
-                        // (true and null) or (null and null)
-                        return ConstantOperator.createNull(BooleanType.BOOLEAN);
-                    }
-                    // true and true
-                    return ConstantOperator.createBoolean(true);
-                }
-
-                return predicate;
+                return simplifiedAndOr(predicate, false);
             }
             case OR: {
-                if (constantChildren.stream().anyMatch(d -> (!d.isNull() && d.getBoolean()))) {
-                    // any true
-                    return ConstantOperator.createBoolean(true);
-                } else if (constantChildren.size() == 1) {
-                    if (constantChildren.get(0).isNull()) {
-                        // xxx or null
-                        return predicate;
-                    }
-
-                    // (false or xxx)/(xxx or false)
-                    ScalarOperator c0 = predicate.getChild(0);
-                    if (c0.isConstantRef() && !((ConstantOperator) c0).getBoolean()) {
-                        return predicate.getChild(1);
-                    }
-
-                    return predicate.getChild(0);
-                } else if (constantChildren.size() == 2) {
-                    if (constantChildren.stream().anyMatch(ConstantOperator::isNull)) {
-                        // (false or null) or (null or null)
-                        return ConstantOperator.createNull(BooleanType.BOOLEAN);
-                    }
-                    // false or false
-                    return ConstantOperator.createBoolean(false);
-                }
-
-                return predicate;
+                return simplifiedAndOr(predicate, true);
             }
             case NOT: {
                 ScalarOperator child = predicate.getChild(0);
@@ -325,6 +297,53 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
 
                 return result;
             }
+        }
+
+        return predicate;
+    }
+
+    // absorbing is the constant that decides the whole predicate: false for AND, true for OR.
+    private static ScalarOperator simplifiedAndOr(CompoundPredicateOperator predicate, boolean absorbing) {
+        int constantCount = 0;
+        ConstantOperator firstConstant = null;
+        boolean anyNull = false;
+        for (ScalarOperator child : predicate.getChildren()) {
+            if (!child.isConstantRef()) {
+                continue;
+            }
+            ConstantOperator d = (ConstantOperator) child;
+            if (d.isNull()) {
+                anyNull = true;
+            } else if (d.getBoolean() == absorbing) {
+                // any false for AND, any true for OR
+                return ConstantOperator.createBoolean(absorbing);
+            }
+            if (constantCount == 0) {
+                firstConstant = d;
+            }
+            constantCount++;
+        }
+
+        if (constantCount == 1) {
+            if (firstConstant.isNull()) {
+                // xxx and null, xxx or null
+                return predicate;
+            }
+
+            // (true and xxx)/(xxx and true), (false or xxx)/(xxx or false)
+            ScalarOperator c0 = predicate.getChild(0);
+            if (c0.isConstantRef() && ((ConstantOperator) c0).getBoolean() != absorbing) {
+                return predicate.getChild(1);
+            }
+
+            return predicate.getChild(0);
+        } else if (constantCount == 2) {
+            if (anyNull) {
+                // (true and null) or (null and null), (false or null) or (null or null)
+                return ConstantOperator.createNull(BooleanType.BOOLEAN);
+            }
+            // true and true, false or false
+            return ConstantOperator.createBoolean(!absorbing);
         }
 
         return predicate;
@@ -372,10 +391,8 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
                                                ScalarOperatorRewriteContext context) {
         ScalarOperator left = predicate.getChild(0);
         ScalarOperator right = predicate.getChild(1);
-        if (left.isVariable() && left.equals(right)) {
-            if (predicate.getBinaryType().equals(BinaryType.EQ_FOR_NULL)) {
-                return ConstantOperator.createBoolean(true);
-            }
+        if (predicate.getBinaryType().equals(BinaryType.EQ_FOR_NULL) && left.isVariable() && left.equals(right)) {
+            return ConstantOperator.createBoolean(true);
         }
 
         if (predicate.getBinaryType().isEqual() && left.isConstantRef() && right.getType().isBoolean()) {
@@ -446,19 +463,25 @@ public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
 
     // reduce `date_sub(date_add(x, 1), 2)` -> `date_sub(x, 1)`
     private ScalarOperator simplifiedTimeFns(CallOperator call) {
-        // Both shifts must use the same unit. We match whole names: "milliseconds_add" contains "seconds_".
-        Map.Entry<String, List<String>> unit = TIME_FNS.entrySet().stream()
-                .filter(e -> e.getValue().contains(call.getFnName())).findFirst().orElse(null);
-        if (unit == null) {
-            return call;
-        }
-        List<String> unitFns = unit.getValue();
         if (!call.getChild(1).isConstantRef() || !IntegerType.INT.equals(call.getChild(1).getType())) {
             return call;
         }
         if (!(call.getChild(0) instanceof CallOperator)) {
             return call;
         }
+
+        // Both shifts must use the same unit. We match whole names: "milliseconds_add" contains "seconds_".
+        Map.Entry<String, List<String>> unit = null;
+        for (Map.Entry<String, List<String>> e : TIME_FNS.entrySet()) {
+            if (e.getValue().contains(call.getFnName())) {
+                unit = e;
+                break;
+            }
+        }
+        if (unit == null) {
+            return call;
+        }
+        List<String> unitFns = unit.getValue();
 
         CallOperator child = call.getChild(0).cast();
         if (!unitFns.contains(child.getFnName())) {

@@ -49,7 +49,13 @@ public class RangeExtractor {
     }
 
     public Map<ScalarOperator, ValueDescriptor> apply(ScalarOperator scalarOperator, Void context) {
-        Map<ScalarOperator, ValueDescriptor> values = new RangeValueExtractor(includeStringRanges).apply(scalarOperator, context);
+        RangeValueExtractor extractor = new RangeValueExtractor(includeStringRanges);
+        Map<ScalarOperator, ValueDescriptor> values = extractor.apply(scalarOperator, context);
+        // Relations can only derive bounds from existing values. Record candidate relations
+        // during the value traversal instead of traversing a constant-only predicate again.
+        if (values.isEmpty() || !extractor.hasRangeRelations) {
+            return values;
+        }
         Map<ScalarOperator, ValueDescriptor> relations =
                 new RangeRelationExtractor(values).apply(scalarOperator, context);
         if (!values.isEmpty() && !relations.isEmpty()) {
@@ -60,6 +66,7 @@ public class RangeExtractor {
 
     private static class RangeValueExtractor extends ScalarOperatorVisitor<Void, Void> {
         private final boolean includeStringRanges;
+        private boolean hasRangeRelations;
 
         RangeValueExtractor(boolean includeStringRanges) {
             this.includeStringRanges = includeStringRanges;
@@ -79,6 +86,7 @@ public class RangeExtractor {
 
         @Override
         public Void visitBinaryPredicate(BinaryPredicateOperator predicate, Void context) {
+            hasRangeRelations = isRangeRelation(predicate);
             if (predicate.getChild(1).isConstantRef() && predicate.getBinaryType() == BinaryType.EQ_FOR_NULL
                     && isNullAlternativeDeriveEnabled()) {
                 ConstantOperator value = (ConstantOperator) predicate.getChild(1);
@@ -138,10 +146,11 @@ public class RangeExtractor {
                 return visit(predicate, context);
             }
 
-            Map<ScalarOperator, ValueDescriptor> leftMap =
-                    new RangeValueExtractor(includeStringRanges).apply(predicate.getChild(0), context);
-            Map<ScalarOperator, ValueDescriptor> rightMap =
-                    new RangeValueExtractor(includeStringRanges).apply(predicate.getChild(1), context);
+            RangeValueExtractor left = new RangeValueExtractor(includeStringRanges);
+            RangeValueExtractor right = new RangeValueExtractor(includeStringRanges);
+            Map<ScalarOperator, ValueDescriptor> leftMap = left.apply(predicate.getChild(0), context);
+            Map<ScalarOperator, ValueDescriptor> rightMap = right.apply(predicate.getChild(1), context);
+            hasRangeRelations = left.hasRangeRelations || right.hasRangeRelations;
             descMap = mergeValues(predicate.isOr(), leftMap, rightMap);
             return null;
         }
@@ -151,27 +160,32 @@ public class RangeExtractor {
                                                                     Map<ScalarOperator, ValueDescriptor> leftMap,
                                                                     Map<ScalarOperator, ValueDescriptor> rightMap) {
         Map<ScalarOperator, ValueDescriptor> result = Maps.newHashMap();
-        HashMap<ScalarOperator, ValueDescriptor> intersectMap = Maps.newHashMap();
-        Set<ScalarOperator> intersectKeys = Sets.intersection(leftMap.keySet(), rightMap.keySet());
-
         if (isUnion) {
-            for (ScalarOperator s : intersectKeys) {
+            HashMap<ScalarOperator, ValueDescriptor> intersectMap = Maps.newHashMap();
+            for (ScalarOperator s : Sets.intersection(leftMap.keySet(), rightMap.keySet())) {
                 ValueDescriptor rangeDescriptor = leftMap.get(s);
                 intersectMap.put(s, rangeDescriptor.union(rightMap.get(s)));
             }
-
             result.putAll(intersectMap);
         } else {
-            for (ScalarOperator s : intersectKeys) {
-                ValueDescriptor rangeDescriptor = leftMap.get(s);
-                intersectMap.put(s, rangeDescriptor.intersect(rightMap.get(s)));
-            }
-
+            // Preserve the left/right insertion order, then replace common values in place.
+            // The temporary intersection map used to allocate a second entry for every
+            // common key, only to copy those entries over the same result keys again.
             result.putAll(leftMap);
             result.putAll(rightMap);
-            result.putAll(intersectMap);
+            for (Map.Entry<ScalarOperator, ValueDescriptor> entry : leftMap.entrySet()) {
+                ValueDescriptor right = rightMap.get(entry.getKey());
+                if (right != null) {
+                    result.put(entry.getKey(), entry.getValue().intersect(right));
+                }
+            }
         }
         return result;
+    }
+
+    private static boolean isRangeRelation(BinaryPredicateOperator predicate) {
+        return predicate.getBinaryType().isRange() && !predicate.getChild(0).getType().isStringType()
+                && !predicate.getChild(0).isConstant() && !predicate.getChild(1).isConstant();
     }
 
     private static class RangeRelationExtractor extends ScalarOperatorVisitor<Void, Void> {
@@ -194,15 +208,12 @@ public class RangeExtractor {
 
         @Override
         public Void visitBinaryPredicate(BinaryPredicateOperator predicate, Void context) {
-            if (!predicate.getBinaryType().isRange() || predicate.getChild(0).getType().isStringType()) {
+            if (!isRangeRelation(predicate)) {
                 return null;
             }
 
             ScalarOperator left = predicate.getChild(0);
             ScalarOperator right = predicate.getChild(1);
-            if (left.isConstant() || right.isConstant()) {
-                return null;
-            }
             BinaryType binaryType = predicate.getBinaryType();
             generateBound(left, binaryType, right);
             generateBound(right, binaryType.commutative(), left);
@@ -394,8 +405,12 @@ public class RangeExtractor {
         public ValueDescriptor intersect(ValueDescriptor other) {
             if (other instanceof MultiValuesDescriptor) {
                 MultiValuesDescriptor result = new MultiValuesDescriptor(this, other);
-                result.values.addAll(values);
-                result.values.retainAll(((MultiValuesDescriptor) other).values);
+                Set<ConstantOperator> otherValues = ((MultiValuesDescriptor) other).values;
+                for (ConstantOperator value : values) {
+                    if (otherValues.contains(value)) {
+                        result.values.add(value);
+                    }
+                }
                 result.admitsNull = admitsNull && other.admitsNull;
                 return result;
             }

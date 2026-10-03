@@ -15,8 +15,6 @@
 package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
@@ -62,6 +60,61 @@ import java.util.stream.IntStream;
 
 public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
     private static final Logger LOG = LogManager.getLogger(FoldConstantsRule.class);
+
+    private static final ImmutableSortedSet<String> NULL_PROPAGATING_FUNCTIONS =
+            new ImmutableSortedSet.Builder<String>(String.CASE_INSENSITIVE_ORDER)
+                    .add("split")
+                    .add("str_to_map")
+                    .add("regexp_extract_all")
+                    .add("regexp_split")
+                    .add("array_length")
+                    .add("array_sum")
+                    .add("array_avg")
+                    .add("array_min")
+                    .add("array_max")
+                    .add("array_distinct")
+                    .add("array_sort")
+                    .add("array_sort_lambda")
+                    .add("reverse")
+                    .add("array_join")
+                    .add("array_difference")
+                    .add("array_slice")
+                    .add("array_concat")
+                    .add("arrays_overlap")
+                    .add("array_intersect")
+                    .add("array_cum_sum")
+                    .add("array_contains_all")
+                    .add("array_contains_seq")
+                    .add("all_match")
+                    .add("any_match")
+                    .add("array_generate")
+                    .add("array_repeat")
+                    .add("array_flatten")
+                    .add("array_map")
+                    .add("map_size")
+                    .add("map_keys")
+                    .add("map_values")
+                    .add("map_from_arrays")
+                    .add("distinct_map_keys")
+                    .add("cardinality")
+                    .add("tokenize")
+                    .build();
+
+    private static final ImmutableSortedMap<String,
+            BiFunction<FoldConstantsRule, CallOperator, Optional<ScalarOperator>>> ARRAY_FUNCTION_HANDLERS =
+            new ImmutableSortedMap.Builder<String,
+                    BiFunction<FoldConstantsRule, CallOperator, Optional<ScalarOperator>>>(
+                    String.CASE_INSENSITIVE_ORDER)
+                    .put("array_length", FoldConstantsRule::constArrayLength)
+                    .put("array_sum", FoldConstantsRule::constArraySum)
+                    .put("array_min", FoldConstantsRule::constArrayMin)
+                    .put("array_max", FoldConstantsRule::constArrayMax)
+                    .put("array_avg", FoldConstantsRule::constArrayAvg)
+                    .put("array_contains", FoldConstantsRule::constArrayContains)
+                    .put("array_append", FoldConstantsRule::constArrayAppend)
+                    .put("array_remove", FoldConstantsRule::constArrayRemove)
+                    .put("array_position", FoldConstantsRule::constArrayPosition)
+                    .build();
 
     private final boolean needMonotonicFunc;
 
@@ -252,49 +305,20 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
     }
 
     private Optional<ScalarOperator> returnNullIfExistsNullArg(CallOperator call) {
-        ImmutableSet<String> functions = new ImmutableSortedSet.Builder<String>(String.CASE_INSENSITIVE_ORDER)
-                .add("split")
-                .add("str_to_map")
-                .add("regexp_extract_all")
-                .add("regexp_split")
-                .add("array_length")
-                .add("array_sum")
-                .add("array_avg")
-                .add("array_min")
-                .add("array_max")
-                .add("array_distinct")
-                .add("array_sort")
-                .add("array_sort_lambda")
-                .add("reverse")
-                .add("array_join")
-                .add("array_difference")
-                .add("array_slice")
-                .add("array_concat")
-                .add("arrays_overlap")
-                .add("array_intersect")
-                .add("array_cum_sum")
-                .add("array_contains_all")
-                .add("array_contains_seq")
-                .add("all_match")
-                .add("any_match")
-                .add("array_generate")
-                .add("array_repeat")
-                .add("array_flatten")
-                .add("array_map")
-                .add("map_size")
-                .add("map_keys")
-                .add("map_values")
-                .add("map_from_arrays")
-                .add("distinct_map_keys")
-                .add("cardinality")
-                .add("tokenize")
-                .build();
-        if (functions.contains(call.getFnName()) && call.getArguments().stream().anyMatch(
-                ScalarOperator::isConstantNull)) {
+        if (hasConstantNullArg(call) && NULL_PROPAGATING_FUNCTIONS.contains(call.getFnName())) {
             return Optional.of(ConstantOperator.createNull(call.getType()));
         } else {
             return Optional.empty();
         }
+    }
+
+    private static boolean hasConstantNullArg(CallOperator call) {
+        for (ScalarOperator arg : call.getArguments()) {
+            if (arg.isConstantNull()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Optional<ScalarOperator> tryToProcessConstantArrayFunctions(CallOperator call) {
@@ -302,21 +326,12 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
         if (result.isPresent()) {
             return result;
         }
-        ImmutableMap<String, Function<CallOperator, Optional<ScalarOperator>>> handlers =
-                new ImmutableSortedMap.Builder<String, Function<CallOperator, Optional<ScalarOperator>>>(
-                        String.CASE_INSENSITIVE_ORDER)
-                        .put("array_length", this::constArrayLength)
-                        .put("array_sum", this::constArraySum)
-                        .put("array_min", this::constArrayMin)
-                        .put("array_max", this::constArrayMax)
-                        .put("array_avg", this::constArrayAvg)
-                        .put("array_contains", this::constArrayContains)
-                        .put("array_append", this::constArrayAppend)
-                        .put("array_remove", this::constArrayRemove)
-                        .put("array_position", this::constArrayPosition)
-                        .build();
-        if (handlers.containsKey(call.getFnName())) {
-            Optional<ScalarOperator> optResult = handlers.get(call.getFnName()).apply(call);
+        // every key of ARRAY_FUNCTION_HANDLERS starts with "array_", so other names cannot have a handler
+        String fnName = call.getFnName();
+        BiFunction<FoldConstantsRule, CallOperator, Optional<ScalarOperator>> handler =
+                fnName.regionMatches(true, 0, "array_", 0, 6) ? ARRAY_FUNCTION_HANDLERS.get(fnName) : null;
+        if (handler != null) {
+            Optional<ScalarOperator> optResult = handler.apply(this, call);
             if (optResult.isPresent()) {
                 CastOperator castOp = new CastOperator(call.getType(), optResult.get());
                 ScalarOperator op =
@@ -542,7 +557,7 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
         if (hasNull(predicate.getChildren())) {
             return ConstantOperator.createNull(BooleanType.BOOLEAN);
         }
-        if (notAllConstant(predicate.getChildren()) || predicate.getLikeType() != LikePredicateOperator.LikeType.LIKE) {
+        if (predicate.getLikeType() != LikePredicateOperator.LikeType.LIKE || notAllConstant(predicate.getChildren())) {
             return predicate;
         }
 
@@ -591,10 +606,20 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
     }
 
     private boolean notAllConstant(List<ScalarOperator> operators) {
-        return !operators.stream().allMatch(ScalarOperator::isConstantRef);
+        for (ScalarOperator operator : operators) {
+            if (!operator.isConstantRef()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasNull(List<ScalarOperator> operators) {
-        return operators.stream().anyMatch(d -> (d.isConstantRef()) && ((ConstantOperator) d).isNull());
+        for (ScalarOperator operator : operators) {
+            if (operator.isConstantRef() && ((ConstantOperator) operator).isNull()) {
+                return true;
+            }
+        }
+        return false;
     }
 }

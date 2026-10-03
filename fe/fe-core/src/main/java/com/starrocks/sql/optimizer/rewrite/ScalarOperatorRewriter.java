@@ -150,8 +150,13 @@ public class ScalarOperatorRewriter {
     }
 
     private ScalarOperator applyRuleBottomUp(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
-        for (int i = 0; i < operator.getChildren().size(); i++) {
-            operator.setChild(i, applyRuleBottomUp(operator.getChild(i), rule));
+        int childNum = operator.getChildren().size();
+        for (int i = 0; i < childNum; i++) {
+            ScalarOperator child = operator.getChild(i);
+            ScalarOperator newChild = applyRuleBottomUp(child, rule);
+            if (newChild != child) {
+                operator.setChild(i, newChild);
+            }
         }
 
         ScalarOperator op = rule.apply(operator, context);
@@ -171,8 +176,13 @@ public class ScalarOperatorRewriter {
             context.change();
         }
 
-        for (int i = 0; i < op.getChildren().size(); i++) {
-            op.setChild(i, applyRuleTopDown(op.getChild(i), rule));
+        int childNum = op.getChildren().size();
+        for (int i = 0; i < childNum; i++) {
+            ScalarOperator child = op.getChild(i);
+            ScalarOperator newChild = applyRuleTopDown(child, rule);
+            if (newChild != child) {
+                op.setChild(i, newChild);
+            }
         }
         return op;
     }
@@ -187,6 +197,9 @@ public class ScalarOperatorRewriter {
 
     public static ScalarOperator replaceScalarOperatorByColumnRef(ScalarOperator operator,
                                                                   Map<ScalarOperator, ColumnRefOperator> translateMap) {
+        if (translateMap.isEmpty()) {
+            return operator;
+        }
         ReplaceScalarOperatorRule rule = new ReplaceScalarOperatorRule(translateMap);
         return new ScalarOperatorRewriter().rewrite(operator, Lists.newArrayList(rule));
     }

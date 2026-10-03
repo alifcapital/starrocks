@@ -41,6 +41,7 @@ import com.starrocks.sql.optimizer.operator.scalar.MultiInPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
 import com.starrocks.sql.optimizer.rewrite.scalar.NegateFilterShuttle;
+import com.starrocks.type.BooleanType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarcharType;
 import org.junit.jupiter.api.Test;
@@ -48,7 +49,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -58,6 +61,8 @@ import static com.starrocks.type.IntegerType.TINYINT;
 import static com.starrocks.type.StringType.STRING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class BaseScalarOperatorShuttleTest {
 
@@ -529,4 +534,104 @@ class BaseScalarOperatorShuttleTest {
         assertEquals(false, rewritten.getNullIfNotExist());
     }
 
+    // The shuttle copies only the nodes on the path to a changed leaf. Other rules still hold the input tree,
+    // so we check that the input is never changed and that each child of the result is in the right place.
+    private static class LeafReplaceShuttle extends BaseScalarOperatorShuttle {
+        final Map<ScalarOperator, ScalarOperator> replacements = new IdentityHashMap<>();
+
+        @Override
+        public ScalarOperator visitConstant(ConstantOperator literal, Void context) {
+            return replacements.getOrDefault(literal, literal);
+        }
+
+        @Override
+        public ScalarOperator visitVariableReference(ColumnRefOperator variable, Void context) {
+            return replacements.getOrDefault(variable, variable);
+        }
+    }
+
+    private final ConstantOperator leaf1 = ConstantOperator.createInt(1);
+    private final ConstantOperator leaf2 = ConstantOperator.createInt(2);
+    private final ConstantOperator leaf3 = ConstantOperator.createInt(3);
+    private final ColumnRefOperator leafColumn = new ColumnRefOperator(1, IntegerType.INT, "c", true);
+    // g(1, f(2, c), 3)
+    private final CallOperator inner = new CallOperator("f", IntegerType.INT, Lists.newArrayList(leaf2, leafColumn));
+    private final CallOperator outer = new CallOperator("g", IntegerType.INT, Lists.newArrayList(leaf1, inner, leaf3));
+
+    private void assertInputTreeUnchanged() {
+        assertSame(leaf1, outer.getChild(0));
+        assertSame(inner, outer.getChild(1));
+        assertSame(leaf3, outer.getChild(2));
+        assertSame(leaf2, inner.getChild(0));
+        assertSame(leafColumn, inner.getChild(1));
+    }
+
+    @Test
+    void nestedChangeCopiesOnlyTheAncestors() {
+        LeafReplaceShuttle replacer = new LeafReplaceShuttle();
+        ConstantOperator replacement = ConstantOperator.createInt(12);
+        replacer.replacements.put(leaf2, replacement);
+        ScalarOperator result = outer.accept(replacer, null);
+        assertNotSame(outer, result);
+        assertSame(leaf1, result.getChild(0));
+        assertNotSame(inner, result.getChild(1));
+        assertSame(leaf3, result.getChild(2));
+        ScalarOperator newInner = result.getChild(1);
+        assertEquals("f", ((CallOperator) newInner).getFnName());
+        assertSame(replacement, newInner.getChild(0));
+        assertSame(leafColumn, newInner.getChild(1));
+        assertInputTreeUnchanged();
+    }
+
+    @Test
+    void lastChildChangeKeepsEarlierChildren() {
+        // The copy starts only when the last child changes, so the earlier unchanged children must be filled in.
+        LeafReplaceShuttle replacer = new LeafReplaceShuttle();
+        ConstantOperator replacement = ConstantOperator.createInt(13);
+        replacer.replacements.put(leaf3, replacement);
+        ScalarOperator result = outer.accept(replacer, null);
+        assertNotSame(outer, result);
+        assertEquals(3, result.getChildren().size());
+        assertSame(leaf1, result.getChild(0));
+        assertSame(inner, result.getChild(1));
+        assertSame(replacement, result.getChild(2));
+        assertInputTreeUnchanged();
+    }
+
+    @Test
+    void caseWhenElseChange() {
+        ColumnRefOperator condition = new ColumnRefOperator(2, BooleanType.BOOLEAN, "b", true);
+        CaseWhenOperator caseWhen =
+                new CaseWhenOperator(IntegerType.INT, null, leaf3, Lists.newArrayList(condition, leaf1));
+        LeafReplaceShuttle replacer = new LeafReplaceShuttle();
+        ConstantOperator newElse = ConstantOperator.createInt(33);
+        replacer.replacements.put(leaf3, newElse);
+        CaseWhenOperator result = (CaseWhenOperator) caseWhen.accept(replacer, null);
+        assertNotSame(caseWhen, result);
+        assertSame(condition, result.getWhenClause(0));
+        assertSame(leaf1, result.getThenClause(0));
+        assertSame(newElse, result.getElseClause());
+        assertSame(leaf3, caseWhen.getElseClause());
+    }
+
+    @Test
+    void lambdaBodyChange() {
+        ColumnRefOperator argument = new ColumnRefOperator(5, IntegerType.INT, "x", true, true);
+        CallOperator body = new CallOperator("add", IntegerType.INT, Lists.newArrayList(argument, leaf1));
+        LambdaFunctionOperator lambda =
+                new LambdaFunctionOperator(Lists.newArrayList(argument), body, IntegerType.INT);
+
+        assertSame(lambda, lambda.accept(new LeafReplaceShuttle(), null));
+
+        LeafReplaceShuttle replacer = new LeafReplaceShuttle();
+        ConstantOperator replacement = ConstantOperator.createInt(21);
+        replacer.replacements.put(leaf1, replacement);
+        LambdaFunctionOperator result = (LambdaFunctionOperator) lambda.accept(replacer, null);
+        assertNotSame(lambda, result);
+        assertSame(body, lambda.getLambdaExpr());
+        assertSame(leaf1, body.getChild(1));
+        assertSame(argument, result.getLambdaExpr().getChild(0));
+        assertSame(replacement, result.getLambdaExpr().getChild(1));
+        assertEquals(lambda.getRefColumns(), result.getRefColumns());
+    }
 }

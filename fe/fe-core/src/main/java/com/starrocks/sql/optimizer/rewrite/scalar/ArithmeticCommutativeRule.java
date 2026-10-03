@@ -82,7 +82,7 @@ public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule
     public ScalarOperator visitBinaryPredicate(BinaryPredicateOperator predicate,
                                                ScalarOperatorRewriteContext context) {
         // Has been normalize, variable must be right
-        if (!predicate.getChild(1).isConstant() || !OperatorType.CALL.equals(predicate.getChild(0).getOpType())) {
+        if (!OperatorType.CALL.equals(predicate.getChild(0).getOpType()) || !predicate.getChild(1).isConstant()) {
             return predicate;
         }
 
@@ -93,10 +93,14 @@ public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule
             return predicate;
         }
 
+        String functionName = call.getFunction().getFunctionName().toString();
+        if (!LEFT_COMMUTATIVE_MAP.containsKey(functionName) && !RIGHT_COMMUTATIVE_MAP.containsKey(functionName)) {
+            return predicate;
+        }
+
         ScalarOperator s1 = call.getChild(0);
         ScalarOperator s2 = call.getChild(1);
         ScalarOperator result = predicate.getChild(1);
-        String functionName = call.getFunction().getFunctionName().toString();
 
         if (s1.isVariable() && s2.isConstant()) {
             String fnName = LEFT_COMMUTATIVE_MAP.get(functionName);

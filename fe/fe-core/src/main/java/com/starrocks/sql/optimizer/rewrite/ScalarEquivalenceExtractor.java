@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.operator.scalar.PredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -57,12 +58,10 @@ public class ScalarEquivalenceExtractor {
      * Derive equivalent predicate by column
      */
     public Set<ScalarOperator> getEquivalentScalar(ColumnRefOperator columnRef) {
-        Set<ScalarOperator> search = Sets.newLinkedHashSet();
-        search.add(columnRef);
-
-        Set<ScalarOperator> searchResult = Sets.newLinkedHashSet();
-        Set<ScalarOperator> memory = Sets.newHashSet();
-        searchEquivalentRefs(memory, search, searchResult);
+        if (!hasOutgoingEquivalence(columnRef)) {
+            return Sets.newLinkedHashSet();
+        }
+        Set<ScalarOperator> searchResult = searchEquivalentRefs(columnRef);
         Set<ScalarOperator> valueResult = searchEquivalentValues(searchResult, columnRef);
 
         // merge all equivalent result
@@ -80,15 +79,49 @@ public class ScalarEquivalenceExtractor {
      * Derive equivalent column by column
      */
     public Set<ScalarOperator> getEquivalentColumnRefs(ColumnRefOperator columnRef) {
-        Set<ScalarOperator> search = Sets.newLinkedHashSet();
-        search.add(columnRef);
-
-        Set<ScalarOperator> searchResult = Sets.newLinkedHashSet();
-        Set<ScalarOperator> memory = Sets.newHashSet();
-        searchEquivalentRefs(memory, search, searchResult);
+        if (!hasOutgoingEquivalence(columnRef)) {
+            return Sets.newLinkedHashSet();
+        }
+        Set<ScalarOperator> searchResult = searchEquivalentRefs(columnRef);
 
         searchResult.remove(columnRef);
         return searchResult;
+    }
+
+    private Set<ScalarOperator> searchEquivalentRefs(ColumnRefOperator start) {
+        Set<ScalarOperator> result = Sets.newLinkedHashSet();
+        List<ColumnRefOperator> pending = new ArrayList<>();
+        pending.add(start);
+        for (int index = 0; index < pending.size(); index++) {
+            Set<ScalarOperator> neighbors = columnRefEquivalenceMap.get(pending.get(index));
+            if (neighbors == null) {
+                continue;
+            }
+            for (ScalarOperator neighbor : neighbors) {
+                if (!neighbor.isColumnRef() && !neighbor.isConstant()) {
+                    // A function value needs the recursive search, which shares traversal state with the value
+                    // substitution. The walk above has only filled result, so we clear it and run that search.
+                    Set<ScalarOperator> search = Sets.newLinkedHashSet();
+                    search.add(start);
+                    result.clear();
+                    searchEquivalentRefs(Sets.newHashSet(), search, result);
+                    return result;
+                }
+                if (result.add(neighbor) && neighbor.isColumnRef() && !neighbor.equals(start)) {
+                    pending.add((ColumnRefOperator) neighbor);
+                }
+            }
+        }
+        // Discover in breadth-first order, including start only if an edge reaches it.
+        // Value derivation observes that ordering before the caller removes start.
+        return result;
+    }
+
+    private boolean hasOutgoingEquivalence(ColumnRefOperator columnRef) {
+        Set<ScalarOperator> equivalents = columnRefEquivalenceMap.get(columnRef);
+        // Without an outgoing edge, the search produces no references, so value search
+        // also has no input and returns nothing.
+        return equivalents != null && !equivalents.isEmpty();
     }
 
     private void searchEquivalentRefs(Set<ScalarOperator> memo, Set<ScalarOperator> search,
@@ -148,18 +181,7 @@ public class ScalarEquivalenceExtractor {
     private Set<ScalarOperator> searchEquivalentValues(Set<ScalarOperator> search,
                                                        ColumnRefOperator replaceColumnRef) {
         Set<ScalarOperator> result = Sets.newLinkedHashSet();
-        Map<ColumnRefOperator, ScalarOperator> rewriteMap = Maps.newHashMap();
-
-        for (ScalarOperator operator : search) {
-            // can't resolve function(columnRef)
-            if (!operator.isColumnRef()) {
-                continue;
-            }
-
-            rewriteMap.put((ColumnRefOperator) operator, replaceColumnRef);
-        }
-
-        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(rewriteMap);
+        ReplaceColumnRefRewriter rewriter = null;
 
         for (ScalarOperator operator : search) {
             if (!operator.isColumnRef()) {
@@ -168,8 +190,23 @@ public class ScalarEquivalenceExtractor {
 
             Set<ScalarOperator> values =
                     columnValuesMap.getOrDefault((ColumnRefOperator) operator, Collections.emptySet());
-            // avoid use Collection::toSet
-            values.stream().map(rewriter::rewrite).forEach(result::add);
+            if (values.isEmpty()) {
+                continue;
+            }
+            if (rewriter == null) {
+                // Map every searched column, not just those with values. A value expression
+                // can refer to other equivalent columns, and all substitutions must agree.
+                Map<ColumnRefOperator, ScalarOperator> rewriteMap = Maps.newHashMap();
+                for (ScalarOperator ref : search) {
+                    if (ref.isColumnRef()) {
+                        rewriteMap.put((ColumnRefOperator) ref, replaceColumnRef);
+                    }
+                }
+                rewriter = new ReplaceColumnRefRewriter(rewriteMap);
+            }
+            for (ScalarOperator value : values) {
+                result.add(rewriter.rewrite(value));
+            }
         }
 
         return result;
@@ -234,9 +271,8 @@ public class ScalarEquivalenceExtractor {
             ScalarOperator child2 = predicate.getChild(1);
             if (child2.isColumnRef()) {
                 ColumnRefOperator ref2 = (ColumnRefOperator) child2;
-                Set<ScalarOperator> child2Set = columnRefEquivalenceMap.getOrDefault(ref2, Sets.newLinkedHashSet());
-                child2Set.add(predicate.getChild(0));
-                columnRefEquivalenceMap.put(ref2, child2Set);
+                columnRefEquivalenceMap.computeIfAbsent(ref2, key -> Sets.newLinkedHashSet())
+                        .add(predicate.getChild(0));
             }
 
             if (!predicate.getChild(0).isColumnRef()) {
@@ -244,15 +280,12 @@ public class ScalarEquivalenceExtractor {
             }
 
             // columnRef-Function(columnRef) mapping
-            Set<ScalarOperator> child1Set = columnRefEquivalenceMap.getOrDefault(child1, Sets.newLinkedHashSet());
-
             // The search complexity will increase greatly with the number of columnRefs, so limit the number max 1
             if (Utils.countColumnRef(child2) > 1) {
                 return null;
             }
 
-            child1Set.add(child2);
-            columnRefEquivalenceMap.put(child1, child1Set);
+            columnRefEquivalenceMap.computeIfAbsent(child1, key -> Sets.newLinkedHashSet()).add(child2);
 
             return null;
         }
