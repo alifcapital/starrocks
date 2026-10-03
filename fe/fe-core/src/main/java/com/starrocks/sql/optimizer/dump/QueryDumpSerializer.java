@@ -112,7 +112,8 @@ public class QueryDumpSerializer implements JsonSerializer<QueryDumpInfo> {
         }
         try {
             // An anonymization failure above must not restore the sensitive JOIN payload.
-            if (!Config.enable_desensitize_query_dump && !dumpInfo.isDesensitizedInfo()) {
+            if (!Config.enable_desensitize_query_dump && !dumpInfo.isDesensitizedInfo()
+                    && !dumpInfo.getJoinStatistics().entries().isEmpty()) {
                 dumpJson.add("join_statistics", dumpInfo.getJoinStatistics().toJson(dumpInfo::addException));
             }
         } catch (IOException e) {
