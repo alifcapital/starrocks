@@ -79,18 +79,19 @@ public class MonotonicImageTest {
     }
 
     @Test
-    public void testFloatImageUsesBackendPrecision() {
+    public void testFloatCastHasNoImage() {
         Function fn = new Function(new FunctionName("date_format"),
                 new Type[] {DateType.DATETIME, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
         CallOperator rendered = new CallOperator("date_format", VarcharType.VARCHAR,
                 ImmutableList.of(dtCol, ConstantOperator.createVarchar("%Y%m%d")), fn);
-        CastOperator expr = new CastOperator(FloatType.FLOAT, rendered);
-        Range<ConstantOperator> image = MonotonicImage.imageRange(expr, dtCol,
-                datetimeDomain(LocalDateTime.of(2024, 3, 5, 0, 0), LocalDateTime.of(2024, 3, 7, 0, 0)))
-                .orElseThrow();
-        // These integers straddle the spacing of binary32: one rounds down, the other up.
-        assertEquals(20240304.0, image.lowerEndpoint().getFloat());
-        assertEquals(20240308.0, image.upperEndpoint().getFloat());
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 0, 0), LocalDateTime.of(2024, 3, 7, 0, 0));
+        // FLOAT rounds these 8-digit dates, so we expect no image. DOUBLE holds them exactly.
+        assertFalse(MonotonicImage.imageRange(new CastOperator(FloatType.FLOAT, rendered), dtCol, domain)
+                .isPresent());
+        Range<ConstantOperator> image = MonotonicImage.imageRange(new CastOperator(FloatType.DOUBLE, rendered),
+                dtCol, domain).orElseThrow();
+        assertEquals(20240305.0, image.lowerEndpoint().getDouble());
+        assertEquals(20240307.0, image.upperEndpoint().getDouble());
     }
 
     @Test

@@ -62,6 +62,11 @@ public class ScalarOperatorRewriter {
             new JsonExtractFusionRule()
     );
 
+    // Generated columns are matched by their normalized expression. An inverted monotonic predicate no longer
+    // contains that expression, so we normalize with these rules before the generated columns are substituted.
+    public static final List<ScalarOperatorRewriteRule> DEFAULT_REWRITE_RULES_WITHOUT_INVERSION =
+            DEFAULT_REWRITE_RULES.stream().filter(rule -> !(rule instanceof InvertMonotonicPredicateRule)).toList();
+
     public static final List<ScalarOperatorRewriteRule> FOLD_CONSTANT_RULES = Lists.newArrayList(
             new FoldConstantsRule()
     );

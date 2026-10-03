@@ -253,7 +253,10 @@ public class MonotonicImage {
             // date_format(x, '%Y%m') are fixed-width digit strings, so their numeric value
             // is ordered exactly like the dates. Comes up when an implicit comparison casts
             // date_format against an integer column (both sides land on DECIMAL).
-            if (cast.getType().isNumericType() && cast.getChild(0) instanceof CallOperator
+            // FLOAT is out: it holds 8-digit dates only approximately, so distinct dates
+            // collapse into one value and a derived range would need exact BE rounding.
+            if (cast.getType().isNumericType() && !cast.getType().isFloat()
+                    && cast.getChild(0) instanceof CallOperator
                     && !(cast.getChild(0) instanceof CastOperator)) {
                 CallOperator inner = (CallOperator) cast.getChild(0);
                 if (FunctionSet.DATE_FORMAT.equals(inner.getFnName().toLowerCase())

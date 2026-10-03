@@ -200,10 +200,16 @@ public final class SqlToScalarOperatorTranslator {
         ScalarOperator result = visitor.visit(expression, ctx);
 
         ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
-        result = scalarRewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
-
-        result = ScalarOperatorRewriter.replaceScalarOperatorByColumnRef(result,
-                expressionMapping.getGeneratedColumnExprOpToColumnRef());
+        Map<ScalarOperator, ColumnRefOperator> generatedColumns = expressionMapping.getGeneratedColumnExprOpToColumnRef();
+        if (generatedColumns.isEmpty()) {
+            result = scalarRewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+        } else {
+            // A predicate on a generated column expression must become a predicate on the generated column, and
+            // partition selection relies on that. So we invert monotonic predicates only after the substitution.
+            result = scalarRewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES_WITHOUT_INVERSION);
+            result = ScalarOperatorRewriter.replaceScalarOperatorByColumnRef(result, generatedColumns);
+            result = scalarRewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+        }
 
         requireNonNull(result, "translated expression is null");
         return result;
