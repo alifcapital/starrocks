@@ -43,8 +43,9 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
 public class ColumnHistogramStatsCacheLoader implements AsyncCacheLoader<ColumnStatsCacheKey, Optional<Histogram>> {
-    private static final Logger LOG = LogManager.getLogger(ColumnBasicStatsCacheLoader.class);
+    private static final Logger LOG = LogManager.getLogger(ColumnHistogramStatsCacheLoader.class);
     private final StatisticExecutor statisticExecutor = new StatisticExecutor();
+    final StatisticsLoadBackoff backoff = new StatisticsLoadBackoff();
 
     @Override
     public @NonNull
@@ -62,10 +63,9 @@ public class ColumnHistogramStatsCacheLoader implements AsyncCacheLoader<ColumnS
                 } else {
                     return Optional.empty();
                 }
-            } catch (RuntimeException e) {
-                LOG.error(e);
-                return Optional.empty();
             } catch (Exception e) {
+                backoff.failed();
+                // Caffeine reports the failed load. Do not log the same stack again here.
                 throw new CompletionException(e);
             } finally {
                 ConnectContext.remove();
@@ -98,10 +98,9 @@ public class ColumnHistogramStatsCacheLoader implements AsyncCacheLoader<ColumnS
                 }
 
                 return result;
-            } catch (RuntimeException e) {
-                LOG.error(e);
-                throw new CompletionException(e);
             } catch (Exception e) {
+                backoff.failed();
+                // Caffeine reports the failed load. Do not log the same stack again here.
                 throw new CompletionException(e);
             } finally {
                 ConnectContext.remove();
@@ -131,6 +130,16 @@ public class ColumnHistogramStatsCacheLoader implements AsyncCacheLoader<ColumnS
 
         List<Bucket> buckets = HistogramUtils.convertBuckets(statisticData.histogram, columnType);
         Map<String, Long> mcv = HistogramUtils.convertMCV(statisticData.histogram);
-        return new Histogram(buckets, mcv);
+        if (buckets.isEmpty()) {
+            LOG.warn("Stored histogram for column {} has no buckets; re-collect statistics to restore accurate "
+                    + "row count estimation.", statisticData.columnName);
+            Histogram histogram = new Histogram(mcv);
+            histogram.getMcvDistribution().prepareFrequencyOrder();
+            return histogram;
+        }
+
+        Histogram histogram = new Histogram(buckets, mcv);
+        histogram.getMcvDistribution().prepareFrequencyOrder();
+        return histogram;
     }
 }

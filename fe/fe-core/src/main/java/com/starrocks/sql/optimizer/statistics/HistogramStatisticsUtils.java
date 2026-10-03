@@ -19,6 +19,8 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.type.BooleanType;
 import org.apache.commons.math3.util.Precision;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -30,6 +32,8 @@ import java.util.Optional;
 import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.HISTOGRAM_UNREPRESENTED_VALUE_COEFFICIENT;
 
 public class HistogramStatisticsUtils {
+    private static final Logger LOG = LogManager.getLogger(HistogramStatisticsUtils.class);
+
 
     private static class MatchedConstantsInfo {
         long totalMatchedRows;
@@ -57,6 +61,9 @@ public class HistogramStatisticsUtils {
             Statistics statistics) {
 
         Histogram histogram = columnStatistic.getHistogram();
+        if (histogram.hasStringValues()) {
+            return StringHistogramEstimator.in(columnRefOperator, columnStatistic, constants, isNotIn, statistics);
+        }
         boolean isCharFamily = columnRefOperator.getType().getPrimitiveType().isCharFamily();
 
         MatchedConstantsInfo matchedInfo = collectMatchedConstantsInfo(
@@ -206,7 +213,7 @@ public class HistogramStatisticsUtils {
         List<Bucket> prunedBuckets = new ArrayList<>();
 
         if (originalBuckets.isEmpty()) {
-            return new Histogram(prunedBuckets, prunedMcv);
+            return new Histogram(prunedMcv);
         }
 
         long accumulatedCount = 0;
@@ -229,12 +236,8 @@ public class HistogramStatisticsUtils {
 
             accumulatedCount += adjustedBucketCount + adjustedUpperRepeats;
 
-            prunedBuckets.add(new Bucket(
-                    bucket.getLower(),
-                    bucket.getUpper(),
-                    accumulatedCount,
-                    adjustedUpperRepeats
-            ));
+            prunedBuckets.add(bucket instanceof UnknownRangeBucket ? new UnknownRangeBucket(accumulatedCount)
+                    : new Bucket(bucket.getLower(), bucket.getUpper(), accumulatedCount, adjustedUpperRepeats));
         }
 
         return new Histogram(prunedBuckets, prunedMcv);
@@ -281,16 +284,20 @@ public class HistogramStatisticsUtils {
     private static Histogram createInHistogram(Histogram originalHistogram, MatchedConstantsInfo matchedInfo) {
         Map<String, Long> prunedMcv = new HashMap<>(matchedInfo.matchedMcv);
 
-        List<Bucket> prunedBuckets = new ArrayList<>();
 
         if (matchedInfo.matchedBucketValues.isEmpty()) {
-            return new Histogram(prunedBuckets, prunedMcv);
+            if (!originalHistogram.getBuckets().isEmpty()) {
+                LOG.debug("No IN constant fell inside a histogram bucket, so the estimated histogram covers "
+                        + "its MCV rows only.");
+            }
+            return new Histogram(prunedMcv);
         }
 
         List<Bucket> originalBuckets = originalHistogram.getBuckets();
 
         long cumulativeCount = 0;
 
+        List<Bucket> prunedBuckets = new ArrayList<>();
         for (int i = 0; i < originalBuckets.size(); i++) {
             if (!matchedInfo.matchedBucketValues.containsKey(i)) {
                 continue;
@@ -376,14 +383,17 @@ public class HistogramStatisticsUtils {
             ConstantOperator constant,
             Histogram histogram) {
 
-        long mcvRowCount = histogram.getMCV().values().stream().mapToLong(Long::longValue).sum();
+        long mcvRowCount = histogram.getMcvDistribution().getTotalRows();
         long totalRows = histogram.getTotalRows();
         double ndv = columnStatistic.getDistinctValuesCount();
         double mcvCount = histogram.getMCV().size();
 
         if (columnRefOperator.getType().getPrimitiveType().isCharFamily()) {
-            double avgRowsPerValue = totalRows / ndv;
-            return Math.max(1, Math.round(avgRowsPerValue * HISTOGRAM_UNREPRESENTED_VALUE_COEFFICIENT));
+            // A string histogram has no buckets, so a value outside the MCV list is an ordinary value of
+            // the tail: the tail rows spread over the tail distinct values, as for column = constant.
+            long nonMcvRows = totalRows - mcvRowCount;
+            double nonMcvNdv = Math.max(1.0, ndv - mcvCount);
+            return Math.max(1, Math.round(nonMcvRows / nonMcvNdv));
         } else {
             Optional<Double> constantValueOpt = StatisticUtils.convertStatisticsToDouble(
                     constant.getType(), constant.toString());

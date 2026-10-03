@@ -33,6 +33,51 @@
 
 namespace SIMD {
 
+struct BitmapCounts {
+    size_t nonzero_bytes = 0;
+    size_t set_bits = 0;
+};
+
+// Collect byte occupancy and exact bit cardinality together, without rescanning the bitmap.
+inline BitmapCounts count_bitmap(const uint8_t* data, size_t size) {
+    BitmapCounts result;
+    size_t offset = 0;
+#if defined(__SSE2__) && defined(__POPCNT__)
+    const __m128i zero = _mm_setzero_si128();
+    for (; size - offset >= 64; offset += 64) {
+        uint64_t zero_bytes = 0;
+        for (size_t part = 0; part < 4; ++part) {
+            auto values = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + offset + part * 16));
+            zero_bytes |= uint64_t(uint16_t(_mm_movemask_epi8(_mm_cmpeq_epi8(values, zero)))) << (part * 16);
+        }
+        result.nonzero_bytes += 64 - __builtin_popcountll(zero_bytes);
+        uint64_t words[8];
+        memcpy(words, data + offset, sizeof(words));
+        result.set_bits += __builtin_popcountll(words[0]) + __builtin_popcountll(words[1]) +
+                           __builtin_popcountll(words[2]) + __builtin_popcountll(words[3]) +
+                           __builtin_popcountll(words[4]) + __builtin_popcountll(words[5]) +
+                           __builtin_popcountll(words[6]) + __builtin_popcountll(words[7]);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    for (; size - offset >= 16; offset += 16) {
+        uint8x16_t values = vld1q_u8(data + offset);
+        result.nonzero_bytes += 16 - vaddvq_u8(vandq_u8(vceqq_u8(values, vdupq_n_u8(0)), vdupq_n_u8(1)));
+        result.set_bits += vaddvq_u8(vcntq_u8(values));
+    }
+#endif
+    for (; size - offset >= 8; offset += 8) {
+        uint64_t word;
+        memcpy(&word, data + offset, sizeof(word));
+        result.set_bits += __builtin_popcountll(word);
+        for (size_t byte = 0; byte < 8; ++byte) result.nonzero_bytes += data[offset + byte] != 0;
+    }
+    for (; offset < size; ++offset) {
+        result.nonzero_bytes += data[offset] != 0;
+        result.set_bits += __builtin_popcount(data[offset]);
+    }
+    return result;
+}
+
 template <typename T>
 concept Integer8BitType = std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>;
 

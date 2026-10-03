@@ -373,6 +373,11 @@ size_t Chunk::filter(const Buffer<uint8_t>& selection, bool force) {
 }
 
 size_t Chunk::filter_range(const Buffer<uint8_t>& selection, size_t from, size_t to) {
+    // Only a full-chunk range can be skipped: a partial range also truncates
+    // the suffix after `to`, even when every selected row passes.
+    if (from == 0 && to == num_rows() && SIMD::count_zero(selection.data(), to) == 0) {
+        return to;
+    }
     for (auto& column : _columns) {
         column->as_mutable_raw_ptr()->filter_range(selection, from, to);
     }
@@ -911,6 +916,10 @@ size_t MutableChunk::filter(const Buffer<uint8_t>& selection, bool force) {
 }
 
 size_t MutableChunk::filter_range(const Buffer<uint8_t>& selection, size_t from, size_t to) {
+    // Match Chunk::filter_range, including truncation for partial ranges.
+    if (from == 0 && to == num_rows() && SIMD::count_zero(selection.data(), to) == 0) {
+        return to;
+    }
     for (auto& column : _columns) {
         column->filter_range(selection, from, to);
     }

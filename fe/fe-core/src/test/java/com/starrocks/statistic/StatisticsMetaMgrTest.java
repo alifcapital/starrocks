@@ -17,8 +17,10 @@ package com.starrocks.statistic;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
+import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Analyzer;
@@ -38,6 +40,7 @@ import com.starrocks.type.TypeFactory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static com.starrocks.statistic.StatsConstants.FULL_STATISTICS_TABLE_NAME;
@@ -45,6 +48,20 @@ import static com.starrocks.statistic.StatsConstants.STATISTICS_DB_NAME;
 
 
 public class StatisticsMetaMgrTest extends PlanTestBase  {
+    @Test
+    public void externalStatisticsSortByColumnWithoutChangingTheWriteSchema() throws Exception {
+        PlanTestBase.beforeClass();
+        StatisticsMetaManager manager = new StatisticsMetaManager();
+        manager.createStatisticsTablesForTest();
+        Assertions.assertTrue((Boolean) Deencapsulation.invoke(manager, "createTable",
+                StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME));
+        OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(
+                STATISTICS_DB_NAME, StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME);
+        Assertions.assertEquals(List.of(0, 2, 1), table.getIndexMetaByMetaId(table.getBaseIndexMetaId()).getSortKeyIdxes());
+        Assertions.assertEquals("partition_name", table.getBaseSchema().get(1).getName());
+        Assertions.assertEquals("column_name", table.getBaseSchema().get(2).getName());
+    }
+
     @Test
     public void alterMetaTable() throws Exception {
         PlanTestBase.beforeClass();

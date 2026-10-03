@@ -99,6 +99,8 @@ public:
         return Status::OK();
     }
 
+    size_t values_count() const { return _hash_set.size(); }
+
     Status merge(Predicate* predicate) override {
         if (auto* that = dynamic_cast<typeof(this)>(predicate)) {
             const auto& hash_set = that->hash_set();
@@ -553,9 +555,10 @@ public:
             : _state(state), _pool(pool), _expr(expr) {}
 
     Status create();
+    static size_t values_count(Expr* predicate);
     // For string type, this interface will only copy the slice array, not add ColumnPtr,
     // so be careful to manage the life cycle of source ColumnPtr.
-    void add_values(const ColumnPtr& column, size_t column_offset);
+    bool add_values(const ColumnPtr& column, size_t column_offset, size_t max_values = SIZE_MAX);
     void use_array_set(size_t array_size) { _array_size = array_size; }
     void use_as_join_runtime_filter() { _is_join_runtime_filter = true; }
     void set_eq_null(bool v) { _eq_null = v; }

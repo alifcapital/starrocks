@@ -165,7 +165,7 @@ public class IVMBasedMvRefreshProcessorIcebergTest extends MVIVMIcebergTestBase 
                 plan -> {
                     String planStr = plan.getExplainString(TExplainLevel.NORMAL);
                     PlanTestBase.assertContains(planStr, "TABLE: test_mv1");
-                    PlanTestBase.assertContains(planStr, "__ROW_ID__ = ");
+                    assertRowIdJoin(planStr);
                     PlanTestBase.assertContains(planStr, "from_binary");
                 }
         );
@@ -184,7 +184,7 @@ public class IVMBasedMvRefreshProcessorIcebergTest extends MVIVMIcebergTestBase 
                 plan -> {
                     String planStr = plan.getExplainString(TExplainLevel.NORMAL);
                     PlanTestBase.assertContains(planStr, "TABLE: test_mv1");
-                    PlanTestBase.assertContains(planStr, "__ROW_ID__ = ");
+                    assertRowIdJoin(planStr);
                     PlanTestBase.assertContains(planStr, "from_binary");
                 }
         );
@@ -432,25 +432,15 @@ public class IVMBasedMvRefreshProcessorIcebergTest extends MVIVMIcebergTestBase 
                             "  0:IcebergScanNode\n" +
                                     "     TABLE: partitioned_db.t1\n" +
                                     "     TABLE VERSION: Delta@[0,1]");
-                    PlanTestBase.assertContains(plan.getExplainString(TExplainLevel.NORMAL),
-                            "  7:HASH JOIN\n" +
-                                    "  |  join op: RIGHT OUTER JOIN (BUCKET_SHUFFLE)\n" +
-                                    "  |  colocate: false, reason: \n" +
-                                    "  |  equal join conjunct: 9: __ROW_ID__ = 17: from_binary");
+                    assertRowIdJoin(plan.getExplainString(TExplainLevel.NORMAL));
                 },
                 plan -> {
                     PlanTestBase.assertContains(plan.getExplainString(TExplainLevel.NORMAL),
                             "  0:IcebergScanNode\n" +
                                     "     TABLE: partitioned_db.t1\n" +
                                     "     TABLE VERSION: Delta@[1,2]");
-                    PlanTestBase.assertContains(plan.getExplainString(TExplainLevel.NORMAL),
-                            "  6:OlapScanNode\n" +
-                                    "     TABLE: test_mv1");
-                    PlanTestBase.assertContains(plan.getExplainString(TExplainLevel.NORMAL),
-                            "  7:HASH JOIN\n" +
-                                    "  |  join op: RIGHT OUTER JOIN (BUCKET_SHUFFLE)\n" +
-                                    "  |  colocate: false, reason: \n" +
-                                    "  |  equal join conjunct: 9: __ROW_ID__ = 17: from_binary");
+                    PlanTestBase.assertContains(plan.getExplainString(TExplainLevel.NORMAL), "TABLE: test_mv1");
+                    assertRowIdJoin(plan.getExplainString(TExplainLevel.NORMAL));
                 }
         );
     }
@@ -1738,5 +1728,12 @@ public class IVMBasedMvRefreshProcessorIcebergTest extends MVIVMIcebergTestBase 
                 "ancestry-broken framing must not apply to non-ancestry connector failures, got: " + chain);
         Assertions.assertFalse(chain.contains("INCREMENTAL materialized views do not support partition-shape"),
                 "partition-shape framing must not apply to non-ancestry connector failures, got: " + chain);
+    }
+
+    // The delta joins the MV state on the row id. The cost model picks the join side and distribution from the
+    // estimated delta size, so we check only the join keys, in either order.
+    private static void assertRowIdJoin(String plan) {
+        Assertions.assertTrue(plan.matches("(?s).*equal join conjunct: "
+                + "(\\d+: __ROW_ID__ = \\d+: from_binary|\\d+: from_binary = \\d+: __ROW_ID__).*"), plan);
     }
 }

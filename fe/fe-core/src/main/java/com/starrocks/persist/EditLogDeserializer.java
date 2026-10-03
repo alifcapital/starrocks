@@ -60,7 +60,9 @@ import com.starrocks.statistic.ExternalAnalyzeJob;
 import com.starrocks.statistic.ExternalAnalyzeStatus;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
+import com.starrocks.statistic.JoinStatisticsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.NativeAnalyzeJob;
 import com.starrocks.statistic.NativeAnalyzeStatus;
@@ -224,6 +226,10 @@ public class EditLogDeserializer {
             .put(OperationType.OP_REMOVE_EXTERNAL_BASIC_STATS_META, ExternalBasicStatsMeta.class)
             .put(OperationType.OP_ADD_EXTERNAL_HISTOGRAM_STATS_META, ExternalHistogramStatsMeta.class)
             .put(OperationType.OP_REMOVE_EXTERNAL_HISTOGRAM_STATS_META, ExternalHistogramStatsMeta.class)
+            .put(OperationType.OP_ADD_EXTERNAL_MCV_STATS_META, ExternalMcvStatsMeta.class)
+            .put(OperationType.OP_UPSERT_JOIN_STATISTICS, JoinStatisticsMeta.class)
+            .put(OperationType.OP_DROP_JOIN_STATISTICS, JoinStatisticsMeta.class)
+            .put(OperationType.OP_REMOVE_EXTERNAL_MCV_STATS_META, ExternalMcvStatsMeta.class)
             .put(OperationType.OP_ADD_MULTI_COLUMN_STATS_META, MultiColumnStatsMeta.class)
             .put(OperationType.OP_REMOVE_MULTI_COLUMN_STATS_META, MultiColumnStatsMeta.class)
             .put(OperationType.OP_REMOVE_MULTI_COLUMN_STATS_META_BATCH, BatchRemoveMultiColumnStatsMetaLog.class)

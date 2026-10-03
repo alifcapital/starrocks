@@ -869,6 +869,14 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Description: The row count threshold for deciding between SAMPLE and FULL statistics collection during loading-triggered statistics operations. If the number of loaded or changed rows exceeds this threshold (default 200,000), SAMPLE statistics collection is used; otherwise, FULL statistics collection is used. This setting works in conjunction with `enable_statistic_collect_on_first_load` and `statistic_sample_collect_ratio_threshold_of_first_load`.
 - Introduced in: -
 
+### `enable_sync_statistics_load`
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Controls whether query planning waits for statistics cache loads, including external-table basic, MCV, and partition statistics. When `false`, planning can use fallback estimates while the statistics load asynchronously. When `true`, planning waits for the load and uses its result; a failed load still falls back to available estimates. This can increase planning latency. The setting reads already collected statistics and does not run `ANALYZE`. It takes effect dynamically on the FE where it is set.
+
 ### `statistic_update_interval_sec`
 
 - Default: 24 * 60 * 60
@@ -1442,3 +1450,19 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Is mutable: No
 - Description: The directory that stores the Yarn configuration file.
 - Introduced in: -
+
+### `statistic_mcv_size`
+
+- Default: 100
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: Default maximum number of frequent tuples for external ANALYZE MCV. Override per collection with mcv_size.
+
+### `statistic_mcv_bucket_num`
+
+- Default: 64
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: Default target number of residual buckets for single-column external ANALYZE MCV. Valid range: 1–10,000. Override with mcv_bucket_num.

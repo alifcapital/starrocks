@@ -66,6 +66,7 @@ class StatisticsMaintenanceTest {
         when(metadata.getOptionalMetadata(anyString())).thenReturn(Optional.of(connector));
         doNothing().when(analyze).dropExternalBasicStatsMetaAndData(anyString(), anyString(), anyString());
         doNothing().when(analyze).dropExternalHistogramStatsMetaAndData(anyString(), anyString(), anyString());
+        doNothing().when(analyze).dropExternalMcvStatsMetaAndData(anyString(), anyString(), anyString());
     }
 
     private void tracked(String catalog, String db, String table) {

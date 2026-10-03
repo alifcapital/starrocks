@@ -413,6 +413,26 @@ public class StatisticUtils {
                             new TypeDef(IntegerType.BIGINT), false, null,
                             null, true, new ColumnDef.DefaultValueDef(true, new StringLiteral("-1")), "")
             );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("partition_name", new TypeDef(partitionNameType)),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("payload", new TypeDef(TypeFactory.createVarbinary(1048576))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("payload", new TypeDef(new com.starrocks.type.ArrayType(
+                            TypeFactory.createVarcharType(Config.max_varchar_length)))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
         } else if (tableName.equals(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME)) {
             return ImmutableList.of(
                     new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
@@ -462,6 +482,36 @@ public class StatisticUtils {
                     new ColumnDef("table_name", new TypeDef(tableNameType)),
                     new ColumnDef("column_names", new TypeDef(columnNameType)),
                     new ColumnDef("ndv",  new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
+        } else if (tableName.equals(StatsConstants.JOIN_STATISTICS_TABLE_NAME)) {
+            return ImmutableList.of(
+                    new ColumnDef("object_id", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("generation", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("part_id", new TypeDef(IntegerType.INT)),
+                    new ColumnDef("payload", new TypeDef(TypeFactory.createVarbinary(1048576))),
+                    new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
+            );
+        } else if (tableName.equals(StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
+            // column_ids: a digest of the sorted column names, the key of the column set; column_names: the same
+            // names as a JSON array, in the order of the MCV tuple components; row_count: rows at collection
+            // time; mcv: [[[value, ...], "count", ["component count", ...]], ...] with JSON null for NULL
+            // values and, per component, the rows holding that value in its column.
+            return ImmutableList.of(
+                    new ColumnDef("table_uuid", new TypeDef(tableUUIDType)),
+                    new ColumnDef("column_ids", new TypeDef(TypeFactory.createVarcharType(65530))),
+                    new ColumnDef("catalog_name", new TypeDef(catalogNameType)),
+                    new ColumnDef("db_name", new TypeDef(dbNameType)),
+                    new ColumnDef("table_name", new TypeDef(tableNameType)),
+                    new ColumnDef("column_names", new TypeDef(columnNameType)),
+                    new ColumnDef("row_count", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("ndv", new TypeDef(IntegerType.BIGINT)),
+                    new ColumnDef("mcv", new TypeDef(mostCommonValueType), false, null, null,
+                            true, ColumnDef.DefaultValueDef.NOT_SET, ""),
+                    new ColumnDef("buckets", new TypeDef(bucketsType), false, null, null,
+                            true, ColumnDef.DefaultValueDef.NOT_SET, ""),
+                    new ColumnDef("null_counts", new TypeDef(mostCommonValueType), false, null, null,
+                            true, ColumnDef.DefaultValueDef.NOT_SET, ""),
                     new ColumnDef("update_time", new TypeDef(DateType.DATETIME))
             );
         } else {

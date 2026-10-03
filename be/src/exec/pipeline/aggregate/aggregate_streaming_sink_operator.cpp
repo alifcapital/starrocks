@@ -85,6 +85,19 @@ Status AggregateStreamingSinkOperator::push_chunk(RuntimeState* state, const Chu
     RETURN_IF_ERROR(_aggregator->evaluate_groupby_exprs(chunk.get()));
     if (_aggregator->streaming_preaggregation_mode() == TStreamingPreaggregationMode::FORCE_STREAMING) {
         RETURN_IF_ERROR(_push_chunk_by_force_streaming(chunk));
+    } else if (!_aggregator->is_none_group_by_exprs() && _aggregator->has_compact_statistics_aggregate()) {
+        // These states compress many input keys. Row-count reduction alone is not a
+        // useful bypass test: serializing one state per input row defeats compression.
+        // Preaggregate within a bounded budget, then drain/reset through the existing
+        // streaming source. Final aggregation merges the exact partial states.
+        RETURN_IF_ERROR(_push_chunk_by_force_preaggregation(state, chunk, chunk_size));
+        int64_t budget = config::streaming_agg_limited_memory_size;
+        int64_t query_limit = state->query_options().query_mem_limit;
+        if (query_limit > 0) budget = std::min(budget, std::max<int64_t>(1, query_limit / 16));
+        if (_aggregator->memory_usage() >= std::max<int64_t>(1, budget)) {
+            auto notify = _aggregator->defer_notify_source();
+            _aggregator->set_streaming_all_states(true);
+        }
     } else if (_aggregator->streaming_preaggregation_mode() == TStreamingPreaggregationMode::FORCE_PREAGGREGATION) {
         RETURN_IF_ERROR(_push_chunk_by_force_preaggregation(state, chunk, chunk_size));
     } else if (_aggregator->streaming_preaggregation_mode() == TStreamingPreaggregationMode::LIMITED_MEM) {

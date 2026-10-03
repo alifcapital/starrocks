@@ -1541,6 +1541,16 @@ public final class MetricRepo {
             }
         }
 
+        Map<String, StatisticsCacheMetrics> statisticsCaches = new java.util.TreeMap<>();
+        var state = GlobalStateMgr.getCurrentState();
+        if (state.getStatisticStorage() != null) {
+            statisticsCaches.putAll(state.getStatisticStorage().getCacheMetrics());
+        }
+        if (state.getAnalyzeMgr() != null && state.getAnalyzeMgr().getJoinStatisticsManager() != null) {
+            statisticsCaches.put("join", state.getAnalyzeMgr().getJoinStatisticsManager().getCacheMetrics());
+        }
+        StatisticsCacheMetrics.visit(visitor, statisticsCaches);
+
         // database metrics
         collectDatabaseMetrics(visitor);
 

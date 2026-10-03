@@ -1013,7 +1013,9 @@ public class DDLStmtExecutor {
         public ShowResultSet visitCreateAnalyzeJobStatement(CreateAnalyzeJobStmt stmt, ConnectContext context) {
             ErrorReport.wrapWithRuntimeException(() -> {
                 AnalyzeJob analyzeJob;
-                if (stmt.isNative()) {
+                if (stmt.getJoinStatistics() != null || stmt.getAnalyzeType() == StatsConstants.AnalyzeType.MCV) {
+                    analyzeJob = com.starrocks.statistic.ExtendedStatisticsSchedule.create(stmt, context);
+                } else if (stmt.isNative()) {
                     analyzeJob = new NativeAnalyzeJob(stmt.getDbId(),
                             stmt.getTableId(),
                             stmt.getColumnNames(),
@@ -1042,6 +1044,10 @@ public class DDLStmtExecutor {
                     }
                 }
 
+                if (analyzeJob instanceof ExternalAnalyzeJob extended && extended.isExtendedStatistics()) {
+                    com.starrocks.statistic.ExtendedStatisticsSchedule.trigger(extended);
+                    return;
+                }
                 if (Config.enable_trigger_analyze_job_immediate) {
                     ConnectContext statsConnectCtx = StatisticUtils.buildStatisticsCollectContext();
                     // from current session, may execute analyze stmt

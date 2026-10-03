@@ -1004,7 +1004,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     }
 
     private Pair<Boolean, Optional<ColumnDict>> checkConnectorGlobalDict(PhysicalScanOperator scan, Table table,
-                                                                         ColumnRefOperator column) {
+                                                                         ColumnRefOperator column, OptExpression expression) {
         // Condition 1:
         if (!supportAndEnabledLowCardinality(column.getType())) {
             return new Pair<>(false, Optional.empty());
@@ -1015,9 +1015,26 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             return new Pair<>(false, Optional.empty());
         }
 
-        // Condition 2: the varchar column is low cardinality string column
-        ColumnStatistic columnStatistic = GlobalStateMgr.getCurrentState().getStatisticStorage()
-                .getConnectorTableStatistics(table, List.of(column.getName())).get(0).getColumnStatistic();
+        // Reuse an available dictionary without collecting global basic statistics just for eligibility.
+        Optional<ColumnDict> cached = IRelaxDictManager.getInstance().getCachedGlobalDict(table.getUUID(), column.getName());
+        if (cached.isPresent() && cached.get().getVersion() <= CacheRelaxDictManager.PERIOD_VERSION_THRESHOLD) {
+            return new Pair<>(true, cached);
+        }
+        ColumnStatistic columnStatistic;
+        if (sessionVariable.isCboEnablePartitionAwareExternalStatistics()) {
+            columnStatistic = GlobalStateMgr.getCurrentState().getStatisticStorage()
+                    .getCachedConnectorTableColumnStatistic(table, column.getName());
+            if (columnStatistic.isUnknown() && expression.getStatistics() != null) {
+                // A scoped NDV is an admission hint, not proof that a global dictionary fits.
+                // The lake dictionary loader checks its size; missing values use the existing
+                // retry/update path. Do not suppress initial collection merely because of WHERE.
+                columnStatistic = expression.getStatistics().getColumnStatistics()
+                        .getOrDefault(column, ColumnStatistic.unknown());
+            }
+        } else {
+            columnStatistic = GlobalStateMgr.getCurrentState().getStatisticStorage()
+                    .getConnectorTableStatistics(table, List.of(column.getName())).get(0).getColumnStatistic();
+        }
 
         if (!columnStatistic.isUnknown() &&
                 columnStatistic.getDistinctValuesCount() > CacheDictManager.LOW_CARDINALITY_THRESHOLD) {
@@ -1068,7 +1085,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 continue;
             }
 
-            Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column);
+            Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column, optExpression);
             if (!res.first) {
                 continue;
             }
@@ -1105,7 +1122,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 continue;
             }
 
-            Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column);
+            Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column, optExpression);
             if (!res.first) {
                 continue;
             }

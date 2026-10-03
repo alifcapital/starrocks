@@ -137,6 +137,7 @@ import com.starrocks.sql.optimizer.rule.tree.exprreuse.ScalarOperatorsReuseRule;
 import com.starrocks.sql.optimizer.rule.tree.lowcardinality.LowCardinalityRewriteRule;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.PruneSubfieldRule;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.PushDownSubfieldRule;
+import com.starrocks.sql.optimizer.statistics.StatisticsPrefetcher;
 import com.starrocks.sql.optimizer.task.OptimizeGroupTask;
 import com.starrocks.sql.optimizer.task.PrepareCollectMetaTask;
 import com.starrocks.sql.optimizer.task.TaskContext;
@@ -396,6 +397,7 @@ public class QueryOptimizer extends Optimizer {
             // PARTITION_PRUNE is required to run before ReorderJoinRule because ReorderJoinRule's
             // Statistics calculation on Operators depends on row count yielded by the PARTITION_PRUNE.
             scheduler.rewriteOnce(tree, rootTaskContext, RuleSet.PARTITION_PRUNE_RULES);
+            StatisticsPrefetcher.prefetch(tree, context);
             // ReorderJoinRule is a in-memo rule, when it is used outside memo, we must apply
             // MergeProjectWithChildRule to merge LogicalProjectionOperator into its child's
             // projection before ReorderJoinRule's application, after that, we must separate operator's
@@ -700,6 +702,7 @@ public class QueryOptimizer extends Optimizer {
         scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_PREDICATE_RULES);
         scheduler.rewriteIterative(tree, rootTaskContext, new PartitionColumnMinMaxRewriteRule());
         scheduler.rewriteOnce(tree, rootTaskContext, RuleSet.PARTITION_PRUNE_RULES);
+        StatisticsPrefetcher.prefetch(tree, context);
         scheduler.rewriteIterative(tree, rootTaskContext, new RewriteMultiDistinctRule());
         scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_PREDICATE_RULES);
         scheduler.rewriteOnce(tree, rootTaskContext, new PushDownJoinOnExpressionToChildProject());
@@ -919,6 +922,7 @@ public class QueryOptimizer extends Optimizer {
 
     private void logicalJoinReorder(OptExpression tree, TaskContext rootTaskContext) {
         scheduler.rewriteOnce(tree, rootTaskContext, RuleSet.PARTITION_PRUNE_RULES);
+        StatisticsPrefetcher.prefetch(tree, context);
         scheduler.rewriteIterative(tree, rootTaskContext, new MergeTwoProjectRule());
         scheduler.rewriteIterative(tree, rootTaskContext, new MergeProjectWithChildRule(false));
         CTEUtils.collectForceCteStatisticsOutsideMemo(tree, context);

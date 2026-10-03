@@ -30,6 +30,8 @@ public:
     ~HashJoinProbeOperator() override = default;
 
     Status prepare(RuntimeState* state) override;
+    static void configure_local_runtime_filter_feedback(const Operators& operators);
+    static Status drain_local_runtime_filter_input(RuntimeState* state, Operator* op);
 
     void close(RuntimeState* state) override;
 
@@ -55,6 +57,23 @@ public:
 protected:
     /// Reference the read-only hash table from builder in the first pull_chunk.
     Status _reference_builder_hash_table_once();
+
+private:
+    void _observe_local_rf_lookup();
+    void _publish_local_rf_feedback();
+    std::shared_ptr<LocalRuntimeFilterFeedback> _probe_rf_feedback;
+    int64_t _feedback_completed_rows = 0;
+    int64_t _feedback_lookup_ns = 0;
+    int64_t _feedback_key_ns = 0;
+    int64_t _feedback_partition_ns = 0;
+    int64_t _feedback_intermediate_ns = 0;
+    std::vector<RuntimeProfile::Counter*> _feedback_intermediate_timers;
+    RuntimeProfile::Counter* _feedback_input_rows[2] = {};
+    RuntimeProfile::Counter* _feedback_filter_time[2] = {};
+    RuntimeProfile::Counter* _feedback_lookup_time[2] = {};
+    RuntimeProfile::Counter* _feedback_intermediate_time[2] = {};
+    RuntimeProfile::Counter* _feedback_decisions = nullptr;
+    RuntimeProfile::Counter* _feedback_switches = nullptr;
 
 protected:
     const HashJoinerPtr _join_prober;

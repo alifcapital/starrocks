@@ -78,9 +78,6 @@ OutPut Exchange Id: 21
 |  join op: INNER JOIN (BROADCAST)
 |  equal join conjunct: [45: N_NATIONKEY, INT, false] = [4: S_NATIONKEY, INT, false]
 |  equal join conjunct: [11: L_SUPPKEY, INT, false] = [1: S_SUPPKEY, INT, false]
-|  build runtime filters:
-|  - filter_id = 3, build_expr = (4: S_NATIONKEY), remote = true
-|  - filter_id = 4, build_expr = (1: S_SUPPKEY), remote = false
 |  output columns: 14, 15, 19, 46, 51
 |  cardinality: 584181
 |  column statistics:
@@ -139,8 +136,6 @@ OutPut Exchange Id: 21
 |       distribution type: SHUFFLE
 |       partition exprs: [26: O_ORDERKEY, INT, false]
 |       cardinality: 6000000
-|       probe runtime filters:
-|       - filter_id = 3, probe_expr = (45: N_NATIONKEY)
 |
 0:OlapScanNode
 table: lineitem, rollup: lineitem
@@ -151,7 +146,6 @@ actualRows=0, avgRowSize=32.0
 cardinality: 182702669
 probe runtime filters:
 - filter_id = 2, probe_expr = (9: L_ORDERKEY)
-- filter_id = 4, probe_expr = (11: L_SUPPKEY)
 column statistics:
 * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 1.5E8] ESTIMATE
 * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
@@ -262,8 +256,6 @@ OutPut Exchange Id: 10
 |----7:EXCHANGE
 |       distribution type: BROADCAST
 |       cardinality: 1
-|       probe runtime filters:
-|       - filter_id = 3, probe_expr = (45: N_NATIONKEY)
 |
 2:OlapScanNode
 table: customer, rollup: customer

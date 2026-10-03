@@ -22,21 +22,22 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.Striped;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
-import com.starrocks.connector.statistics.ConnectorColumnStatsCacheLoader;
 import com.starrocks.connector.statistics.ConnectorHistogramColumnStatsCacheLoader;
 import com.starrocks.connector.statistics.ConnectorTableColumnKey;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
-import com.starrocks.connector.statistics.StatisticsUtils;
 import com.starrocks.memory.MemoryTrackable;
 import com.starrocks.memory.estimate.Estimator;
+import com.starrocks.metric.StatisticsCacheMetrics;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.statistic.BasicStatsMeta;
+import com.starrocks.statistic.ColumnStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.logging.log4j.LogManager;
@@ -46,18 +47,25 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 
 public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable {
     private static final Logger LOG = LogManager.getLogger(CachedStatisticStorage.class);
+    private static final int EXTERNAL_STATS_BATCH_SIZE = 4096;
 
     private final Executor statsCacheRefresherExecutor = Executors.newFixedThreadPool(Config.statistic_cache_thread_pool_size,
             new ThreadFactoryBuilder().setDaemon(true).setNameFormat("stats-cache-refresher-%d").build());
@@ -71,17 +79,57 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     AsyncLoadingCache<ColumnStatsCacheKey, Optional<PartitionStats>> partitionStatistics =
             createAsyncLoadingCache(new PartitionStatsCacheLoader());
 
-    AsyncLoadingCache<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> connectorTableCachedStatistics =
-            createAsyncLoadingCache(new ConnectorColumnStatsCacheLoader());
-
+    private final ColumnHistogramStatsCacheLoader histogramLoader = new ColumnHistogramStatsCacheLoader();
     AsyncLoadingCache<ColumnStatsCacheKey, Optional<Histogram>> histogramCache =
-            createAsyncLoadingCache(new ColumnHistogramStatsCacheLoader());
+            createAsyncLoadingCache(histogramLoader);
 
     AsyncLoadingCache<ConnectorTableColumnKey, Optional<Histogram>> connectorHistogramCache =
             createAsyncLoadingCache(new ConnectorHistogramColumnStatsCacheLoader());
 
     AsyncLoadingCache<Long, Optional<MultiColumnCombinedStatistics>> multiColumnStats =
             createAsyncLoadingCache(new MultiColumnCombinedStatsCacheLoader());
+
+    private final ExternalMcvStatsCacheLoader externalMcvLoader = new ExternalMcvStatsCacheLoader();
+    // Keyed by table UUID.
+    AsyncLoadingCache<String, Optional<ExternalMcvStatistics>> externalMcvStats =
+            createExternalMcvStatisticsCache(Config.statistic_mcv_cache_max_bytes,
+                    statsCacheRefresherExecutor, externalMcvLoader);
+
+    private final Executor externalPartitionStatsExecutor =
+            com.starrocks.common.ThreadPoolManager.newDaemonFixedThreadPoolWithAbortPolicy(
+                    Math.max(1, Config.external_statistics_partition_load_threads),
+                    Math.max(1, Config.external_statistics_partition_load_queue_size), "external-partition-stats", false);
+
+    private record BlockLoadKey(ExternalStatisticsCacheKey key, Object generation) {
+    }
+
+    private final Map<BlockLoadKey, CompletableFuture<Optional<ExternalColumnStatistics>>> pendingBlocks =
+            new ConcurrentHashMap<>();
+
+    private final Striped<Lock> externalStatisticsLoadLocks = Striped.lock(64);
+
+    private final Semaphore externalStatisticsRefreshPermits =
+            new Semaphore(Math.max(1, Config.statistic_cache_thread_pool_size));
+
+    private final Map<ExternalStatisticsCacheKey, ExternalStatisticsRefresh>
+            refreshingExternalStatistics = new ConcurrentHashMap<>();
+
+    AsyncLoadingCache<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>
+            externalStatisticsCache = createExternalStatisticsCache();
+
+    @Override
+    public void refreshCacheLimits() {
+        updateCacheMaximum(externalStatisticsCache, Config.external_statistics_cache_max_bytes);
+        updateCacheMaximum(externalMcvStats, Config.statistic_mcv_cache_max_bytes);
+    }
+
+    private static void updateCacheMaximum(AsyncLoadingCache<?, ?> cache, long maximumBytes) {
+        cache.synchronous().policy().eviction().ifPresent(eviction -> {
+            if (eviction.getMaximum() != maximumBytes) {
+                eviction.setMaximum(maximumBytes);
+            }
+        });
+    }
 
     @Override
     public Map<Long, Optional<Long>> getTableStatistics(Long tableId, Collection<Partition> partitions) {
@@ -127,7 +175,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Map<TableStatsCacheKey, Optional<Long>> result = future.get();
                 tableStatsCache.synchronous().putAll(result);
             } else {
-                future.whenComplete((result, e) -> tableStatsCache.synchronous().putAll(result));
+                refreshCacheOnSuccess(future, result -> tableStatsCache.synchronous().putAll(result));
             }
         } catch (InterruptedException e) {
             LOG.warn("Failed to execute refreshTableStatistic", e);
@@ -161,7 +209,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Map<ColumnStatsCacheKey, Optional<ColumnStatistic>> result = future.get();
                 columnStatistics.synchronous().putAll(result);
             } else {
-                future.whenComplete((res, e) -> columnStatistics.synchronous().putAll(res));
+                refreshCacheOnSuccess(future, result -> columnStatistics.synchronous().putAll(result));
             }
         } catch (Exception e) {
             LOG.warn("Failed to refresh getColumnStatistics", e);
@@ -191,7 +239,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Map<ColumnStatsCacheKey, Optional<Histogram>> result = future.get();
                 histogramCache.synchronous().putAll(result);
             } else {
-                future.whenComplete((res, e) -> histogramCache.synchronous().putAll(res));
+                refreshCacheOnSuccess(future, result -> histogramCache.synchronous().putAll(result));
             }
         } catch (Exception e) {
             LOG.warn("Failed to refresh histogram", e);
@@ -199,149 +247,127 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
-    public List<ConnectorTableColumnStats> getConnectorTableStatistics(Table table, List<String> columns) {
-        Preconditions.checkState(table != null);
-
-        // get Statistics Table column info, just return default column statistics
-        if (StatisticUtils.statisticTableBlackListCheck(table.getId())) {
-            return getDefaultConnectorTableStatistics(columns);
+    public void prefetchConnectorTableStatistics(Table table, List<String> columns) {
+        if (columns.isEmpty() || StatisticUtils.statisticTableBlackListCheck(table.getId())
+                || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return;
         }
-
-        if (!StatisticUtils.checkStatisticTableStateNormal()) {
-            return getDefaultConnectorTableStatistics(columns);
-        }
-
-        List<ConnectorTableColumnKey> cacheKeys = new ArrayList<>();
-        for (String column : columns) {
-            cacheKeys.add(new ConnectorTableColumnKey(table.getUUID(), column));
-        }
-
         try {
-            CompletableFuture<Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>>> result =
-                    connectorTableCachedStatistics.getAll(cacheKeys);
-
-            SessionVariable sessionVariable = ConnectContext.get() == null ?
-                    GlobalStateMgr.getCurrentState().getVariableMgr().newSessionVariable() :
-                    ConnectContext.get().getSessionVariable();
-            result.whenCompleteAsync((res, e) -> {
-                if (e != null) {
-                    LOG.warn("Get connector table column statistics filed, exception: ", e);
-                    return;
-                }
-                if (sessionVariable.isEnableQueryTriggerAnalyze() && GlobalStateMgr.getCurrentState().isLeader()) {
-                    GlobalStateMgr.getCurrentState().getConnectorTableTriggerAnalyzeMgr().checkAndUpdateTableStats(res);
-                }
-            }, statsCacheRefresherExecutor);
-            if (result.isDone()) {
-                List<ConnectorTableColumnStats> columnStatistics = new ArrayList<>();
-                Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> realResult;
-                realResult = result.get();
-                for (String column : columns) {
-                    Optional<ConnectorTableColumnStats> columnStatistic =
-                            realResult.getOrDefault(new ConnectorTableColumnKey(table.getUUID(), column),
-                                    Optional.empty());
-                    if (columnStatistic.isPresent()) {
-                        columnStatistics.add(
-                                StatisticsUtils.estimateColumnStatistics(table, column, columnStatistic.get()));
-                    } else {
-                        columnStatistics.add(ConnectorTableColumnStats.unknown());
-                    }
-                }
-                return columnStatistics;
-            } else {
-                return getDefaultConnectorTableStatistics(columns);
-            }
+            loadExternalStatistics(tableRequest(table, columns));
         } catch (Exception e) {
-            LOG.warn("Failed to execute connectorTableCachedStatistics.getAll", e);
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            return getDefaultConnectorTableStatistics(columns);
+            LOG.warn("Failed to prefetch connector column statistics for {}", table.getName(), e);
         }
+    }
+
+    @Override
+    public void prefetchExternalMcvStatistics(Table table) {
+        if (!GlobalStateMgr.getCurrentState().getAnalyzeMgr().hasExternalMcvStatsMeta(table)
+                || externalMcvLoader.backoff.active()) {
+            return;
+        }
+        if (StatisticUtils.statisticTableBlackListCheck(table.getId()) || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return;
+        }
+        try {
+            externalMcvStats.get(table.getUUID());
+        } catch (Exception e) {
+            LOG.warn("Failed to prefetch external MCV statistics for {}", table.getName(), e);
+        }
+    }
+
+    private static ExternalStatisticsRequest tableRequest(Table table, List<String> columns) {
+        // TABLE is a distinct scope, not a synthetic partition. No partition enumeration is needed.
+        return new ExternalStatisticsRequest(table.getUUID(), List.of(), columns, true, table.isUnPartitioned());
+    }
+
+    @Override
+    public List<ConnectorTableColumnStats> getConnectorTableStatistics(Table table, List<String> columns) {
+        return getConnectorTableStatistics(table, columns, Config.enable_sync_statistics_load, false);
+    }
+
+    @Override
+    public ColumnStatistic getCachedConnectorTableColumnStatistic(Table table, String column) {
+        Optional<ExternalColumnStatistics> cached = externalStatisticsCache.synchronous().policy()
+                .getIfPresentQuietly(ExternalStatisticsCacheKey.tableRow(table.getUUID()));
+        return cached != null && cached.orElse(null) instanceof ExternalTableStatistics summary
+                ? summary.columns.getOrDefault(column, ColumnStatistic.unknown()) : ColumnStatistic.unknown();
     }
 
     @Override
     public List<ConnectorTableColumnStats> getConnectorTableStatisticsSync(Table table, List<String> columns) {
-        Preconditions.checkState(table != null);
+        return getConnectorTableStatistics(table, columns, true, true);
+    }
 
-        if (!StatisticUtils.checkStatisticTableStateNormal()) {
+    private List<ConnectorTableColumnStats> getConnectorTableStatistics(Table table, List<String> columns,
+                                                                       boolean sync, boolean rawRowCount) {
+        Preconditions.checkNotNull(table);
+        if ((!rawRowCount && StatisticUtils.statisticTableBlackListCheck(table.getId()))
+                || !StatisticUtils.checkStatisticTableStateNormal()) {
             return getDefaultConnectorTableStatistics(columns);
         }
-
-        List<ConnectorTableColumnKey> cacheKeys = new ArrayList<>();
-        for (String column : columns) {
-            cacheKeys.add(new ConnectorTableColumnKey(table.getUUID(), column));
-        }
-
         try {
-            Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> result =
-                    connectorTableCachedStatistics.synchronous().getAll(cacheKeys);
-            List<ConnectorTableColumnStats> columnStatistics = new ArrayList<>();
-
-            for (String column : columns) {
-                Optional<ConnectorTableColumnStats> columnStatistic =
-                        result.getOrDefault(new ConnectorTableColumnKey(table.getUUID(), column), Optional.empty());
-                if (columnStatistic.isPresent()) {
-                    columnStatistics.add(columnStatistic.get());
-                } else {
-                    columnStatistics.add(ConnectorTableColumnStats.unknown());
-                }
+            ExternalStatisticsRequest request = tableRequest(table, columns);
+            CompletableFuture<Optional<ExternalTableStatistics>> future = loadExternalTableSummary(request);
+            observeExternalStatisticsLoad(request, future.thenApply(value ->
+                    ExternalStatisticsAggregate.fromTableRow(request, value.orElse(null))));
+            Optional<ExternalTableStatistics> value = sync ? future.get() : future.getNow(null);
+            if (value == null || value.isEmpty()) {
+                return getDefaultConnectorTableStatistics(columns);
             }
-            return columnStatistics;
+            List<ConnectorTableColumnStats> result = new ArrayList<>(columns.size());
+            for (String column : columns) {
+                ExternalColumnStatistics.Summary summary = value.get().summaries.get(column);
+                result.add(summary == null ? ConnectorTableColumnStats.unknown()
+                        : rawRowCount ? summary.raw : summary.estimated);
+            }
+            return result;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Interrupted loading external table statistics", e);
         } catch (Exception e) {
-            LOG.warn("Failed to execute getConnectorTableStatisticsSync", e);
-            return getDefaultConnectorTableStatistics(columns);
+            LOG.warn("Failed to load external table statistics", e);
         }
+        return getDefaultConnectorTableStatistics(columns);
     }
 
     @Override
     public void expireConnectorTableColumnStatistics(Table table, List<String> columns) {
-        if (table == null || columns == null) {
-            return;
+        if (table != null && columns != null) {
+            expireExternalPartitionStatistics(table.getUUID(), columns);
         }
-        List<ConnectorTableColumnKey> allKeys = Lists.newArrayList();
-        for (String column : columns) {
-            ConnectorTableColumnKey key = new ConnectorTableColumnKey(table.getUUID(), column);
-            allKeys.add(key);
-        }
-        connectorTableCachedStatistics.synchronous().invalidateAll(allKeys);
     }
 
     @Override
     public void invalidateConnectorTableColumnStatistics(String tableUUID, List<String> columns) {
-        if (tableUUID == null || tableUUID.isEmpty() || columns == null) {
-            return;
+        if (columns != null) {
+            expireExternalPartitionStatistics(tableUUID, columns);
         }
-        List<ConnectorTableColumnKey> allKeys = columns.stream()
-                .map(column -> new ConnectorTableColumnKey(tableUUID, column))
-                .collect(Collectors.toList());
-        connectorTableCachedStatistics.synchronous().invalidateAll(allKeys);
     }
 
     @Override
     public void refreshConnectorTableColumnStatistics(Table table, List<String> columns, boolean isSync) {
-        Preconditions.checkState(table != null);
+        Preconditions.checkNotNull(table);
+        expireExternalPartitionStatistics(table.getUUID(), columns);
         if (!StatisticUtils.checkStatisticTableStateNormal()) {
             return;
         }
-
-        List<ConnectorTableColumnKey> cacheKeys = new ArrayList<>();
-        for (String column : columns) {
-            cacheKeys.add(new ConnectorTableColumnKey(table.getUUID(), column));
-        }
-
+        // Reserve the replacement in the same cache. Caffeine prevents an invalidated in-flight
+        // load from publishing itself again after a later ANALYZE or DROP.
         try {
-            ConnectorColumnStatsCacheLoader loader = new ConnectorColumnStatsCacheLoader();
-            CompletableFuture<Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>>> future =
-                    loader.asyncLoadAll(cacheKeys, statsCacheRefresherExecutor);
+            CompletableFuture<ExternalStatisticsAggregate> load = loadExternalStatistics(tableRequest(table, columns));
             if (isSync) {
-                Map<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> result = future.get();
-                connectorTableCachedStatistics.synchronous().putAll(result);
+                load.get();
             } else {
-                future.whenComplete((res, e) -> connectorTableCachedStatistics.synchronous().putAll(res));
+                load.exceptionally(error -> {
+                    LOG.warn("Failed to refresh external table statistics", error);
+                    return null;
+                });
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Interrupted refreshing external table statistics", e);
         } catch (Exception e) {
-            LOG.warn("Failed to refresh getConnectorTableStatistics", e);
+            LOG.warn("Failed to refresh external table statistics", e);
         }
     }
 
@@ -437,8 +463,15 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     @VisibleForTesting
     public Map<String, PartitionStats> getColumnNDVForPartitions(Table table, List<String> columns) {
 
-        List<ColumnStatsCacheKey> cacheKeys = columns.stream()
-                .map(column -> new ColumnStatsCacheKey(table.getId(), column)).toList();
+        BasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                .getTableBasicStatsMeta(table.getId());
+        List<ColumnStatsCacheKey> cacheKeys = columns.stream().filter(column -> {
+            ColumnStatsMeta columnMeta = meta == null ? null : meta.getAnalyzedColumns().get(column);
+            return columnMeta == null || !columnMeta.usesSampleStatisticsTable();
+        }).map(column -> new ColumnStatsCacheKey(table.getId(), column)).toList();
+        if (cacheKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
 
         try {
             CompletableFuture<Map<ColumnStatsCacheKey, Optional<PartitionStats>>> resultFuture =
@@ -542,8 +575,37 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
+    public void addHistogramStatistics(Table table, String column, Histogram histogram) {
+        this.histogramCache.synchronous()
+                .put(new ColumnStatsCacheKey(table.getId(), column), Optional.of(histogram));
+    }
+
+    @Override
+    public void addMultiColumnStatistics(Table table, MultiColumnCombinedStatistics statistics) {
+        this.multiColumnStats.synchronous().put(table.getId(), Optional.of(statistics));
+    }
+
+    @Override
+    public void addExternalMcvStatistics(Table table, ExternalMcvStatistics statistics) {
+        this.externalMcvStats.synchronous().put(table.getUUID(), Optional.of(statistics));
+    }
+
+    @Override
     public Map<String, Histogram> getHistogramStatistics(Table table, List<String> columns) {
         Preconditions.checkState(table != null);
+
+        // Skip loading histogram statistics when we are inside a statistics-collect connection
+        // (recursion guard) or when the target is a statistics-internal table, or when the
+        // statistics tables are not in a healthy state. Without this guard a histogram-collect
+        // INSERT that holds the histogram_statistics READ lock would synchronously load the
+        // histogram of its own source table, and that loader re-acquires the histogram_statistics
+        // READ lock -> self-deadlock. This mirrors the guard already present in getColumnStatistics.
+        if (StatisticUtils.statisticTableBlackListCheck(table.getId())) {
+            return Maps.newHashMap();
+        }
+        if (!StatisticUtils.checkStatisticTableStateNormal()) {
+            return Maps.newHashMap();
+        }
 
         List<String> columnHasHistogram = new ArrayList<>();
         for (String columnName : columns) {
@@ -557,6 +619,19 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
         long tableId = table.getId();
         for (String columnName : columnHasHistogram) {
             cacheKeys.add(new ColumnStatsCacheKey(tableId, columnName));
+        }
+
+        // Quiet reads are important: ordinary getIfPresent can trigger another failed refresh.
+        // Explicit refresh after ANALYZE bypasses this short pause and can recover immediately.
+        if (histogramLoader.backoff.active()) {
+            Map<String, Histogram> cached = new HashMap<>();
+            for (ColumnStatsCacheKey key : cacheKeys) {
+                Optional<Histogram> value = histogramCache.synchronous().policy().getIfPresentQuietly(key);
+                if (value != null) {
+                    value.ifPresent(histogram -> cached.put(key.column, histogram));
+                }
+            }
+            return cached;
         }
 
         try {
@@ -579,7 +654,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 return Maps.newHashMap();
             }
         } catch (Exception e) {
-            LOG.warn("Failed to execute getHistogramStatistics", e);
+            LOG.debug("Failed to execute getHistogramStatistics", e);
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
@@ -713,8 +788,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 Optional<MultiColumnCombinedStatistics> result = future.get();
                 multiColumnStats.synchronous().put(tableId, result);
             } else {
-                future.whenComplete((res, e) ->
-                        multiColumnStats.synchronous().put(tableId, res));
+                refreshCacheOnSuccess(future, result -> multiColumnStats.synchronous().put(tableId, result));
             }
         } catch (InterruptedException e) {
             LOG.warn("Failed to execute refresh multi-column combined statistics", e);
@@ -730,14 +804,602 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     @Override
+    public ExternalMcvStatistics getExternalMcvStatistics(Table table) {
+        if (table == null || !GlobalStateMgr.getCurrentState().getAnalyzeMgr().hasExternalMcvStatsMeta(table)
+                || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return ExternalMcvStatistics.EMPTY;
+        }
+        if (externalMcvLoader.backoff.active()) {
+            Optional<ExternalMcvStatistics> cached = externalMcvStats.synchronous().policy()
+                    .getIfPresentQuietly(table.getUUID());
+            return cached == null ? ExternalMcvStatistics.EMPTY : cached.orElse(ExternalMcvStatistics.EMPTY);
+        }
+        try {
+            CompletableFuture<Optional<ExternalMcvStatistics>> result =
+                    externalMcvStats.get(table.getUUID());
+            if (Config.enable_sync_statistics_load) {
+                result.get();
+            }
+            if (result.isDone()) {
+                return result.get().orElse(ExternalMcvStatistics.EMPTY);
+            }
+        } catch (InterruptedException e) {
+            LOG.debug("Failed to load external multi-column statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.debug("Failed to load external multi-column statistics", e);
+        }
+        return ExternalMcvStatistics.EMPTY;
+    }
+
+    @Override
+    public CompletableFuture<ExternalStatisticsAggregate> loadExternalStatistics(ExternalStatisticsRequest request) {
+        if (!StatisticUtils.checkStatisticTableStateNormal()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("External statistics table is not ready"));
+        }
+        if (!request.wholeTable) {
+            return observeExternalStatisticsLoad(request, loadExternalPartitions(request));
+        }
+        return observeExternalStatisticsLoad(request, loadExternalTableSummary(request).thenApply(value ->
+                ExternalStatisticsAggregate.fromTableRow(request, value.orElse(null))));
+    }
+
+    private CompletableFuture<Optional<ExternalTableStatistics>> loadExternalTableSummary(
+            ExternalStatisticsRequest request) {
+        if (request.columns.isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.tableRow(request.tableUUID);
+        return externalStatisticsCache.get(key).thenApply(value -> {
+            refreshExternalStatisticsBatch(List.of(key));
+            return value.map(ExternalTableStatistics.class::cast);
+        });
+    }
+
+    private CompletableFuture<ExternalStatisticsAggregate> observeExternalStatisticsLoad(ExternalStatisticsRequest request,
+            CompletableFuture<ExternalStatisticsAggregate> load) {
+        ConnectContext context = ConnectContext.get();
+        if (context != null && !context.isStatisticsConnection() && !context.isStatisticsJob()
+                && context.getSessionVariable().isEnableQueryTriggerAnalyze()) {
+            load.thenAcceptAsync(aggregate -> {
+                if (GlobalStateMgr.getCurrentState().isLeader()) {
+                    Map<String, ColumnStatistic> requested = new HashMap<>();
+                    for (String column : request.columns) {
+                        requested.put(column, aggregate.columns.getOrDefault(column, ColumnStatistic.unknown()));
+                    }
+                    GlobalStateMgr.getCurrentState().getConnectorTableTriggerAnalyzeMgr().checkAndUpdateScopedTableStats(
+                            request.tableUUID, requested, aggregate.rowCount, request.wholeTable);
+                }
+            }, statsCacheRefresherExecutor).exceptionally(error -> {
+                if (!load.isCompletedExceptionally()) {
+                    LOG.warn("Failed to check scoped statistics for query-triggered ANALYZE", error);
+                }
+                return null;
+            });
+        }
+        return load;
+    }
+
+    private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> loadExternalStatisticsBatches(
+            Iterable<? extends ExternalStatisticsCacheKey> keys) {
+        List<ExternalStatisticsCacheKey> all = new ArrayList<>();
+        keys.forEach(all::add);
+        Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> result = new ConcurrentHashMap<>();
+        List<CompletableFuture<Void>> lanes = new ArrayList<>(List.of(
+                CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null)));
+        int lane = 0;
+        for (int offset = 0; offset < all.size(); offset += EXTERNAL_STATS_BATCH_SIZE) {
+            List<ExternalStatisticsCacheKey> batch =
+                    all.subList(offset, Math.min(all.size(), offset + EXTERNAL_STATS_BATCH_SIZE));
+            lanes.set(lane, lanes.get(lane).thenCompose(ignored ->
+                    new ExternalStatisticsCacheLoader(externalPartitionStatsExecutor)
+                            .asyncLoadAll(batch, statsCacheRefresherExecutor)).thenAccept(result::putAll));
+            lane = (lane + 1) % lanes.size();
+        }
+        return CompletableFuture.allOf(lanes.toArray(new CompletableFuture<?>[0])).thenApply(ignored -> result);
+    }
+
+    private CompletableFuture<ExternalStatisticsAggregate> loadExternalPartitions(ExternalStatisticsRequest request) {
+        int blockSize = Math.max(1, Math.min(EXTERNAL_STATS_BATCH_SIZE, Config.external_statistics_partition_block_size));
+        if (request.partitions.size() <= 64) {
+            return loadExternalPartitionRows(request);
+        }
+        if (blockSize <= 1) {
+            return loadExternalPartitionsIndividually(request);
+        }
+        ExternalStatisticsAggregate.Builder aggregate = new ExternalStatisticsAggregate.Builder(request);
+        Set<String> membership = Set.copyOf(request.partitions);
+        Map<ExternalStatisticsCacheKey, Object> generations = new HashMap<>();
+        List<ExternalStatisticsCacheKey> rawLoads = new ArrayList<>();
+        List<ExternalStatisticsCacheKey> blockLoads = new ArrayList<>();
+        List<ExternalStatisticsCacheKey> refreshBlocks = new ArrayList<>();
+        int refreshMembers = 0;
+        long now = System.nanoTime();
+        Map<String, ExternalPartitionStatistics> packed = new HashMap<>();
+        List<ExternalStatisticsCacheKey> packedKeys = new ArrayList<>();
+        for (String partition : request.partitions) {
+            ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.partitionRow(request.tableUUID, partition);
+            var future = externalStatisticsCache.getIfPresent(key);
+            if (future != null && future.isDone() && !future.isCompletedExceptionally() && future.join().isPresent()) {
+                packed.put(partition, (ExternalPartitionStatistics) future.join().get());
+                packedKeys.add(key);
+            }
+        }
+        for (String column : request.columns) {
+            CompletableFuture<Optional<ExternalColumnStatistics>> tableSummary = externalStatisticsCache.getIfPresent(
+                    ExternalStatisticsCacheKey.tableRow(request.tableUUID));
+            if (tableSummary != null && tableSummary.isDone() && !tableSummary.isCompletedExceptionally()
+                    && (tableSummary.join().isEmpty() || !((ExternalTableStatistics) tableSummary.join().get())
+                            .summaries.containsKey(column))) {
+                // A successful table-wide read found no statistics for this column. Do not issue
+                // thousands of known-empty partition lookups. ANALYZE invalidates this absence too.
+                continue;
+            }
+            ExternalStatisticsCacheKey directoryKey = ExternalStatisticsCacheKey.directory(request.tableUUID, column);
+            CompletableFuture<Optional<ExternalColumnStatistics>> directoryFuture = externalStatisticsCache.asMap()
+                    .compute(directoryKey, (ignored, previous) -> {
+                        ExternalPartitionStatisticsBlocks.Directory old = previous == null
+                                ? new ExternalPartitionStatisticsBlocks.Directory()
+                                : (ExternalPartitionStatisticsBlocks.Directory) previous.join().orElseThrow();
+                        ExternalPartitionStatisticsBlocks.Directory refined = old.refine(request.partitions);
+                        return previous != null && old == refined ? previous
+                                : CompletableFuture.completedFuture(Optional.of(refined));
+                    });
+            ExternalPartitionStatisticsBlocks.Directory directory =
+                    (ExternalPartitionStatisticsBlocks.Directory) directoryFuture.join().orElseThrow();
+            generations.put(directoryKey, directory.generation);
+            Set<String> covered = new java.util.HashSet<>();
+            for (ExternalPartitionStatisticsBlocks.Block block : directory.covering(request.partitions, membership, now)) {
+                aggregate.add(Map.of(block.key, Optional.of(block)));
+                covered.addAll(block.key.partitions);
+                if (block.needsRefresh(now) && refreshMembers + block.key.partitions.size() <= EXTERNAL_STATS_BATCH_SIZE) {
+                    refreshBlocks.add(block.key);
+                    refreshMembers += block.key.partitions.size();
+                }
+            }
+            List<String> missing = new ArrayList<>();
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> warm = new LinkedHashMap<>();
+            for (String partition : request.partitions) {
+                if (covered.contains(partition)) {
+                    continue;
+                }
+                ExternalStatisticsCacheKey key = new ExternalStatisticsCacheKey(request.tableUUID, partition, column);
+                ExternalPartitionStatistics row = packed.get(partition);
+                if (row != null) {
+                    warm.put(key, Optional.ofNullable(row.columns.get(column)));
+                    continue;
+                }
+                CompletableFuture<Optional<ExternalColumnStatistics>> cached = externalStatisticsCache.getIfPresent(key);
+                if (cached != null && !cached.isCompletedExceptionally()) {
+                    if (cached.isDone()) {
+                        warm.put(key, cached.join());
+                    } else {
+                        // Reuse an already running per-partition load instead of issuing a block query for it.
+                        rawLoads.add(key);
+                    }
+                } else {
+                    missing.add(partition);
+                }
+            }
+            // Compact existing singles once on a wide request. This reuses their HLLs without SQL;
+            // later wide requests merge a few blocks instead of thousands of individual sketches.
+            List<String> warmNames = warm.keySet().stream().map(key -> key.partitionName).toList();
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> compacted = new HashMap<>();
+            for (List<String> names : partitionRuns(request.partitions, warmNames, blockSize)) {
+                if (names.size() <= 8) {
+                    for (String name : names) {
+                        ExternalStatisticsCacheKey key = new ExternalStatisticsCacheKey(request.tableUUID, name, column);
+                        aggregate.add(Map.of(key, warm.get(key)));
+                    }
+                } else {
+                    ExternalStatisticsCacheKey key = ExternalStatisticsCacheKey.block(request.tableUUID, column, names);
+                    long oldestAge = 0;
+                    for (String name : names) {
+                        ExternalStatisticsCacheKey cell = new ExternalStatisticsCacheKey(request.tableUUID, name, column);
+                        if (packed.containsKey(name)) {
+                            cell = ExternalStatisticsCacheKey.partitionRow(request.tableUUID, name);
+                        }
+                        ExternalStatisticsCacheKey ageKey = cell;
+                        long age = externalStatisticsCache.synchronous().policy().expireAfterWrite()
+                                .flatMap(policy -> policy.ageOf(ageKey)).map(java.time.Duration::toNanos).orElse(0L);
+                        oldestAge = Math.max(oldestAge, age);
+                    }
+                    ExternalPartitionStatisticsBlocks.Block block =
+                            ExternalPartitionStatisticsBlocks.Block.merge(key, warm, now - oldestAge);
+                    compacted.put(key, Optional.of(block));
+                    aggregate.add(Map.of(key, Optional.of(block)));
+                }
+            }
+            publishBlocks(generations, compacted);
+            refreshExternalStatisticsBatch(new ArrayList<>(warm.keySet()));
+            if (missing.size() <= 8) {
+                missing.forEach(name -> rawLoads.add(new ExternalStatisticsCacheKey(request.tableUUID, name, column)));
+            } else {
+                for (List<String> names : partitionRuns(request.partitions, missing, blockSize)) {
+                    blockLoads.add(ExternalStatisticsCacheKey.block(request.tableUUID, column, names));
+                }
+            }
+        }
+        refreshExternalStatisticsBatch(packedKeys);
+        if (!refreshBlocks.isEmpty() && externalStatisticsRefreshPermits.tryAcquire()) {
+            loadBlockBatch(refreshBlocks, generations).whenComplete((ignored, error) -> {
+                externalStatisticsRefreshPermits.release();
+                if (error != null) {
+                    LOG.debug("Failed to refresh external statistics blocks for {}", request.tableUUID, error);
+                }
+            });
+        }
+        List<CompletableFuture<Void>> lanes = new ArrayList<>(List.of(
+                CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null)));
+        int lane = 0;
+        for (int offset = 0; offset < rawLoads.size(); offset += EXTERNAL_STATS_BATCH_SIZE) {
+            schedulePartitionBatch(lanes, lane, rawLoads.subList(offset,
+                    Math.min(rawLoads.size(), offset + EXTERNAL_STATS_BATCH_SIZE)), aggregate);
+            lane = (lane + 1) % lanes.size();
+        }
+        List<ExternalStatisticsCacheKey> batch = new ArrayList<>();
+        int members = 0;
+        for (ExternalStatisticsCacheKey key : blockLoads) {
+            if (members + key.partitions.size() > EXTERNAL_STATS_BATCH_SIZE && !batch.isEmpty()) {
+                scheduleBlockBatch(lanes, lane, List.copyOf(batch), generations, aggregate);
+                lane = (lane + 1) % lanes.size();
+                batch.clear();
+                members = 0;
+            }
+            batch.add(key);
+            members += key.partitions.size();
+        }
+        if (!batch.isEmpty()) {
+            scheduleBlockBatch(lanes, lane, List.copyOf(batch), generations, aggregate);
+        }
+        return CompletableFuture.allOf(lanes.toArray(new CompletableFuture<?>[0])).thenApply(ignored -> aggregate.build());
+    }
+
+    private static List<List<String>> partitionRuns(List<String> requested, List<String> selected, int blockSize) {
+        Set<String> membership = Set.copyOf(selected);
+        List<List<String>> runs = new ArrayList<>();
+        List<String> run = new ArrayList<>();
+        for (String partition : requested) {
+            if (!membership.contains(partition)) {
+                if (!run.isEmpty()) {
+                    runs.add(List.copyOf(run));
+                    run.clear();
+                }
+            } else {
+                run.add(partition);
+                if (run.size() == blockSize) {
+                    runs.add(List.copyOf(run));
+                    run.clear();
+                }
+            }
+        }
+        if (!run.isEmpty()) {
+            runs.add(List.copyOf(run));
+        }
+        return runs;
+    }
+
+    private void scheduleBlockBatch(List<CompletableFuture<Void>> lanes, int lane,
+            List<ExternalStatisticsCacheKey> batch, Map<ExternalStatisticsCacheKey, Object> generations,
+            ExternalStatisticsAggregate.Builder aggregate) {
+        lanes.set(lane, lanes.get(lane).thenCompose(ignored -> loadBlockBatch(batch, generations))
+                .thenAccept(aggregate::add));
+    }
+
+    private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> loadBlockBatch(
+            List<ExternalStatisticsCacheKey> batch, Map<ExternalStatisticsCacheKey, Object> generations) {
+        Map<ExternalStatisticsCacheKey, CompletableFuture<Optional<ExternalColumnStatistics>>> requested = new HashMap<>();
+        Map<BlockLoadKey, CompletableFuture<Optional<ExternalColumnStatistics>>> owned = new HashMap<>();
+        Lock reservation = externalStatisticsLoadLocks.get(batch.get(0).tableUUID);
+        reservation.lock();
+        try {
+            for (ExternalStatisticsCacheKey key : batch) {
+                Object generation = generations.get(ExternalStatisticsCacheKey.directory(key.tableUUID, key.columnName));
+                BlockLoadKey loadKey = new BlockLoadKey(key, generation);
+                CompletableFuture<Optional<ExternalColumnStatistics>> future = new CompletableFuture<>();
+                CompletableFuture<Optional<ExternalColumnStatistics>> previous = pendingBlocks.putIfAbsent(loadKey, future);
+                requested.put(key, previous == null ? future : previous);
+                if (previous == null) {
+                    owned.put(loadKey, future);
+                }
+            }
+        } finally {
+            reservation.unlock();
+        }
+        if (!owned.isEmpty()) {
+            CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> load;
+            try {
+                load = new ExternalStatisticsCacheLoader(externalPartitionStatsExecutor).asyncLoadAll(
+                        owned.keySet().stream().map(BlockLoadKey::key).toList(), externalPartitionStatsExecutor);
+            } catch (RuntimeException e) {
+                load = CompletableFuture.failedFuture(e);
+            }
+            load.whenComplete((values, error) -> {
+                try {
+                    if (error == null) {
+                        publishBlocks(generations, values);
+                    }
+                    owned.forEach((key, future) -> {
+                        pendingBlocks.remove(key, future);
+                        if (error == null) {
+                            future.complete(values.getOrDefault(key.key(), Optional.empty()));
+                        } else {
+                            future.completeExceptionally(error);
+                        }
+                    });
+                } catch (Throwable failure) {
+                    owned.values().forEach(future -> future.completeExceptionally(failure));
+                } finally {
+                    owned.forEach((key, future) -> pendingBlocks.remove(key, future));
+                }
+            });
+        }
+        return CompletableFuture.allOf(requested.values().toArray(new CompletableFuture<?>[0])).thenApply(ignored -> {
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> result = new HashMap<>();
+            requested.forEach((key, future) -> result.put(key, future.join()));
+            return result;
+        });
+    }
+
+    private void publishBlocks(Map<ExternalStatisticsCacheKey, Object> generations,
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> values) {
+        Map<ExternalStatisticsCacheKey, List<ExternalPartitionStatisticsBlocks.Block>> columns = new HashMap<>();
+        values.forEach((key, value) -> value.ifPresent(stats -> {
+            ExternalStatisticsCacheKey directory = ExternalStatisticsCacheKey.directory(key.tableUUID, key.columnName);
+            columns.computeIfAbsent(directory, ignored -> new ArrayList<>())
+                    .add((ExternalPartitionStatisticsBlocks.Block) stats);
+        }));
+        columns.forEach((key, blocks) -> externalStatisticsCache.asMap().computeIfPresent(key, (ignored, previous) -> {
+            ExternalPartitionStatisticsBlocks.Directory directory =
+                    (ExternalPartitionStatisticsBlocks.Directory) previous.join().orElseThrow();
+            // ANALYZE/DROP/schema invalidation or eviction must not allow old loads to repopulate the cache.
+            if (directory.generation != generations.get(key)) {
+                return previous;
+            }
+            return CompletableFuture.completedFuture(Optional.of(directory.withBlocks(blocks, System.nanoTime())));
+        }));
+    }
+
+    private CompletableFuture<ExternalStatisticsAggregate> loadExternalPartitionRows(ExternalStatisticsRequest request) {
+        ExternalStatisticsAggregate.Builder aggregate = new ExternalStatisticsAggregate.Builder(request);
+        CompletableFuture<Void> lane = CompletableFuture.completedFuture(null);
+        // Eight rows cap a transport batch at 8 MiB compressed / 128 MiB decoded on unusually
+        // wide schemas; ordinary requests use one SQL. The shared byte budget bounds retained objects.
+        for (int offset = 0; offset < request.partitions.size(); offset += 8) {
+            List<String> partitions = request.partitions.subList(offset, Math.min(offset + 8, request.partitions.size()));
+            List<ExternalStatisticsCacheKey> keys = partitions.stream()
+                    .map(name -> ExternalStatisticsCacheKey.partitionRow(request.tableUUID, name)).toList();
+            lane = lane.thenCompose(ignored -> loadExternalPartitionBatch(keys).thenCompose(rows -> {
+                Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> values = new HashMap<>();
+                List<ExternalStatisticsCacheKey> fallback = new ArrayList<>();
+                for (var key : keys) {
+                    Optional<ExternalColumnStatistics> value = rows.getOrDefault(key, Optional.empty());
+                    ExternalPartitionStatistics row = (ExternalPartitionStatistics) value.orElse(null);
+                    for (String column : request.columns) {
+                        var cell = new ExternalStatisticsCacheKey(request.tableUUID, key.partitionName, column);
+                        if (row == null) {
+                            // No packed copy (including an oversized row). The original cell store remains authoritative.
+                            fallback.add(cell);
+                        } else {
+                            values.put(cell, Optional.ofNullable(row.columns.get(column)));
+                        }
+                    }
+                }
+                aggregate.add(values);
+                refreshExternalStatisticsBatch(keys);
+                List<CompletableFuture<Void>> fallbackLanes = new ArrayList<>(List.of(
+                        CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null)));
+                for (int i = 0; i < fallback.size(); i += EXTERNAL_STATS_BATCH_SIZE) {
+                    schedulePartitionBatch(fallbackLanes, (i / EXTERNAL_STATS_BATCH_SIZE) % 2,
+                            fallback.subList(i, Math.min(i + EXTERNAL_STATS_BATCH_SIZE, fallback.size())), aggregate);
+                }
+                return CompletableFuture.allOf(fallbackLanes.toArray(new CompletableFuture<?>[0]));
+            }));
+        }
+        return lane.thenApply(ignored -> aggregate.build());
+    }
+
+    private CompletableFuture<ExternalStatisticsAggregate> loadExternalPartitionsIndividually(ExternalStatisticsRequest request) {
+        ExternalStatisticsAggregate.Builder aggregate = new ExternalStatisticsAggregate.Builder(request);
+        // Bound both transport batches and simultaneously retained load results despite cache eviction.
+        // At most about 64 MiB of full HLL payload per batch; ordinary multi-column requests stay together.
+        List<CompletableFuture<Void>> lanes = new ArrayList<>(List.of(
+                CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null)));
+        List<ExternalStatisticsCacheKey> batch = new ArrayList<>(EXTERNAL_STATS_BATCH_SIZE);
+        int lane = 0;
+        for (String column : request.columns) {
+            for (String partition : request.partitions) {
+                batch.add(new ExternalStatisticsCacheKey(request.tableUUID, partition, column));
+                if (batch.size() == EXTERNAL_STATS_BATCH_SIZE) {
+                    schedulePartitionBatch(lanes, lane, batch, aggregate);
+                    lane = (lane + 1) % lanes.size();
+                    batch = new ArrayList<>(EXTERNAL_STATS_BATCH_SIZE);
+                }
+            }
+        }
+        if (!batch.isEmpty()) {
+            schedulePartitionBatch(lanes, lane, batch, aggregate);
+        }
+        return CompletableFuture.allOf(lanes.toArray(new CompletableFuture<?>[0])).thenApply(ignored -> aggregate.build());
+    }
+
+    private void schedulePartitionBatch(List<CompletableFuture<Void>> lanes, int lane,
+            List<ExternalStatisticsCacheKey> batch, ExternalStatisticsAggregate.Builder aggregate) {
+        lanes.set(lane, lanes.get(lane).thenCompose(ignored -> loadExternalPartitionBatch(batch))
+                .thenAccept(loaded -> {
+                    refreshExternalStatisticsBatch(batch);
+                    aggregate.add(loaded);
+                }));
+    }
+
+    private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>>
+            loadExternalPartitionBatch(List<ExternalStatisticsCacheKey> batch) {
+        // Caffeine claims missing keys individually. Serialize only key reservation, not I/O or union.
+        Lock lock = externalStatisticsLoadLocks.get(batch.get(0).tableUUID);
+        lock.lock();
+        try {
+            return externalStatisticsCache.getAll(batch);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private static final class ExternalStatisticsRefresh {
+        private final CompletableFuture<Optional<ExternalColumnStatistics>> previous;
+
+        private ExternalStatisticsRefresh(CompletableFuture<Optional<ExternalColumnStatistics>> previous) {
+            this.previous = previous;
+        }
+    }
+
+    private void refreshExternalStatisticsBatch(List<ExternalStatisticsCacheKey> keys) {
+        if (!Config.enable_statistic_cache_refresh_after_write || keys.isEmpty()) {
+            return;
+        }
+        Map<ExternalStatisticsCacheKey, ExternalStatisticsRefresh> claimed = new HashMap<>();
+        Lock lock = externalStatisticsLoadLocks.get(keys.get(0).tableUUID);
+        lock.lock();
+        try {
+            for (ExternalStatisticsCacheKey key : keys) {
+                CompletableFuture<Optional<ExternalColumnStatistics>> previous = externalStatisticsCache.asMap().get(key);
+                if (previous == null || !previous.isDone() || previous.isCompletedExceptionally()) {
+                    continue;
+                }
+                ExternalStatisticsRefresh existing = refreshingExternalStatistics.get(key);
+                if (existing != null && existing.previous == previous) {
+                    continue;
+                }
+                long age = externalStatisticsCache.synchronous().policy().expireAfterWrite()
+                        .map(policy -> policy.ageOf(key, TimeUnit.SECONDS).orElse(-1)).orElse(-1L);
+                if (age < Config.statistic_update_interval_sec) {
+                    continue;
+                }
+                ExternalStatisticsRefresh refresh = new ExternalStatisticsRefresh(previous);
+                refreshingExternalStatistics.put(key, refresh);
+                claimed.put(key, refresh);
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (!claimed.isEmpty()) {
+            scheduleExternalStatisticsRefresh(claimed);
+        }
+    }
+
+    private void scheduleExternalStatisticsRefresh(Map<ExternalStatisticsCacheKey, ExternalStatisticsRefresh> refreshing) {
+        if (!externalStatisticsRefreshPermits.tryAcquire()) {
+            completeExternalStatisticsRefresh(refreshing, null,
+                    new java.util.concurrent.RejectedExecutionException("Statistics refresh capacity is in use"), false);
+            return;
+        }
+        try {
+            CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>> load =
+                    loadExternalStatisticsBatches(refreshing.keySet());
+            load.whenComplete((loaded, error) ->
+                    completeExternalStatisticsRefresh(refreshing, loaded, error, true));
+        } catch (RuntimeException e) {
+            completeExternalStatisticsRefresh(refreshing, null, e, true);
+        }
+    }
+
+    private void completeExternalStatisticsRefresh(Map<ExternalStatisticsCacheKey, ExternalStatisticsRefresh> refreshing,
+            Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> loaded, Throwable error, boolean releasePermit) {
+        if (error != null) {
+            LOG.warn("Failed to refresh external statistics batch", error);
+        }
+        refreshing.forEach((key, refresh) -> {
+            if (error == null && loaded.containsKey(key)) {
+                // Do not undo ANALYZE invalidation, eviction or a newer concurrent load.
+                externalStatisticsCache.asMap().replace(key, refresh.previous,
+                        CompletableFuture.completedFuture(loaded.get(key)));
+            }
+            refreshingExternalStatistics.remove(key, refresh);
+        });
+        if (releasePermit) {
+            externalStatisticsRefreshPermits.release();
+        }
+    }
+
+    private AsyncLoadingCache<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> createExternalStatisticsCache() {
+        Caffeine<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>> builder = Caffeine.newBuilder()
+                .expireAfterWrite(Config.statistic_update_interval_sec * 2, TimeUnit.SECONDS)
+                .maximumWeight(Config.external_statistics_cache_max_bytes)
+                .recordStats()
+                .weigher((ExternalStatisticsCacheKey key, Optional<ExternalColumnStatistics> value) -> {
+                    long bytes = 192L + 2L * (key.tableUUID.length() + key.columnName.length() + key.partitionName.length())
+                            + value.map(ExternalColumnStatistics::retainedBytes).orElse(0);
+                    return (int) Math.min(Integer.MAX_VALUE, bytes);
+                })
+                .executor(statsCacheRefresherExecutor);
+        // Automatic per-key refresh would generate SQL per cell. Both scopes use batched refresh above.
+        return builder.buildAsync(new ExternalStatisticsCacheLoader(externalPartitionStatsExecutor));
+    }
+
+    @Override
+    public void expireExternalPartitionStatistics(String tableUUID) {
+        expireExternalPartitionStatistics(tableUUID, null);
+    }
+
+    private void expireExternalPartitionStatistics(String tableUUID, List<String> columns) {
+        if (tableUUID == null || tableUUID.isEmpty()) {
+            return;
+        }
+        Set<String> selected = columns == null ? null : Set.copyOf(columns);
+        externalStatisticsCache.asMap().keySet().removeIf(key -> key.tableUUID.equals(tableUUID)
+                && (selected == null || key.isTable() || key.scope == ExternalStatisticsCacheKey.Scope.PARTITION_ROW
+                        || selected.contains(key.columnName)));
+        refreshingExternalStatistics.keySet().removeIf(key -> key.tableUUID.equals(tableUUID)
+                && (selected == null || key.isTable() || key.scope == ExternalStatisticsCacheKey.Scope.PARTITION_ROW
+                        || selected.contains(key.columnName)));
+    }
+
+    @Override
+    public void expireExternalMcvStatistics(String tableUUID) {
+        if (tableUUID == null || tableUUID.isEmpty()) {
+            return;
+        }
+        externalMcvStats.synchronous().invalidate(tableUUID);
+    }
+
+    @Override
+    public void refreshExternalMcvStatistics(String tableUUID, boolean isSync) {
+        if (tableUUID == null || tableUUID.isEmpty() || !StatisticUtils.checkStatisticTableStateNormal()) {
+            return;
+        }
+        try {
+            ExternalMcvStatsCacheLoader loader = new ExternalMcvStatsCacheLoader();
+            CompletableFuture<Optional<ExternalMcvStatistics>> future =
+                    loader.asyncLoad(tableUUID, statsCacheRefresherExecutor);
+            if (isSync) {
+                externalMcvStats.synchronous().put(tableUUID, future.get());
+            } else {
+                refreshCacheOnSuccess(future, result -> externalMcvStats.synchronous().put(tableUUID, result));
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("Failed to refresh external multi-column statistics", e);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Failed to refresh external multi-column statistics", e);
+        }
+    }
+
+    @Override
+    public Map<String, StatisticsCacheMetrics> getCacheMetrics() {
+        return Map.of("external_basic", StatisticsCacheMetrics.snapshot(
+                        externalStatisticsCache.synchronous()),
+                "external_mcv", StatisticsCacheMetrics.snapshot(externalMcvStats.synchronous()));
+    }
+
+    @Override
     public long estimateSize() {
         return Estimator.estimate(tableStatsCache.synchronous().asMap(), 20) +
                 Estimator.estimate(columnStatistics.synchronous().asMap(), 20) +
                 Estimator.estimate(partitionStatistics.synchronous().asMap(), 20) +
                 Estimator.estimate(histogramCache.synchronous().asMap(), 20) +
-                Estimator.estimate(connectorTableCachedStatistics.synchronous().asMap(), 20) +
                 Estimator.estimate(connectorHistogramCache.synchronous().asMap(), 20) +
-                Estimator.estimate(multiColumnStats.synchronous().asMap(), 20);
+                Estimator.estimate(multiColumnStats.synchronous().asMap(), 20) +
+                Estimator.estimate(externalMcvStats.synchronous().asMap(), 20) +
+                externalStatisticsCache.synchronous().policy().eviction().map(e -> e.weightedSize().orElse(0)).orElse(0L);
     }
 
     @Override
@@ -747,10 +1409,44 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 .put("ColumnStats", columnStatistics.synchronous().estimatedSize())
                 .put("PartitionStats", partitionStatistics.synchronous().estimatedSize())
                 .put("HistogramStats", histogramCache.synchronous().estimatedSize())
-                .put("ConnectorTableStats", connectorTableCachedStatistics.synchronous().estimatedSize())
                 .put("ConnectorHistogramStats", connectorHistogramCache.synchronous().estimatedSize())
                 .put("MultiColumnCombinedStats", multiColumnStats.synchronous().estimatedSize())
+                .put("ExternalMcvStats", externalMcvStats.synchronous().estimatedSize())
+                .put("ExternalColumnStats", externalStatisticsCache.synchronous().estimatedSize())
                 .build();
+    }
+
+    private <T> void refreshCacheOnSuccess(CompletableFuture<T> future, Consumer<T> updateCache) {
+        future.whenComplete((result, error) -> {
+            if (error != null) {
+                // Preserve the last successful value; a failed read does not establish absence.
+                LOG.warn("Failed to refresh statistics cache", error);
+                return;
+            }
+            updateCache.accept(result);
+        });
+    }
+
+    static AsyncLoadingCache<String, Optional<ExternalMcvStatistics>> createExternalMcvStatisticsCache(
+            long maximumBytes, Executor executor, AsyncCacheLoader<String, Optional<ExternalMcvStatistics>> loader) {
+        if (maximumBytes <= 0) {
+            throw new IllegalArgumentException("MCV statistics cache byte limit must be positive");
+        }
+        Caffeine<String, Optional<ExternalMcvStatistics>> builder = Caffeine.newBuilder()
+                .expireAfterWrite(Config.statistic_update_interval_sec * 2, TimeUnit.SECONDS)
+                .maximumWeight(maximumBytes)
+                .recordStats()
+                .weigher((String key, Optional<ExternalMcvStatistics> value) -> externalMcvCacheWeight(key, value))
+                .executor(executor);
+        if (Config.enable_statistic_cache_refresh_after_write) {
+            builder.refreshAfterWrite(Config.statistic_update_interval_sec, TimeUnit.SECONDS);
+        }
+        return builder.buildAsync(loader);
+    }
+
+    static int externalMcvCacheWeight(String key, Optional<ExternalMcvStatistics> value) {
+        long bytes = 192L + 2L * key.length() + value.map(ExternalMcvStatistics::retainedBytes).orElse(0L);
+        return (int) Math.min(Integer.MAX_VALUE, bytes);
     }
 
     private <K, V> AsyncLoadingCache<K, V> createAsyncLoadingCache(AsyncCacheLoader<K, V> cacheLoader) {

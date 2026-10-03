@@ -295,6 +295,12 @@ public:
     // mem limit; the caller treats that as non-fatal and falls back to growth.
     Status reserve_hash_table_from_estimate();
 
+    bool has_compact_statistics_aggregate() const {
+        return std::any_of(_fns.begin(), _fns.end(), [](const auto& fn) {
+            const auto& name = fn.name.function_name;
+            return name == "stats_degree_state" || name == "stats_degree_merge" || name == "stats_degree_finish";
+        });
+    }
     const MemPool* mem_pool() const { return _mem_pool.get(); }
     bool is_none_group_by_exprs() { return _group_by_expr_ctxs.empty(); }
     bool only_group_by_exprs() { return _is_only_group_by_columns; }

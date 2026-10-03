@@ -492,6 +492,11 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_ENABLE_REPLICATED_JOIN = "cbo_enable_replicated_join";
     public static final String CBO_USE_CORRELATED_JOIN_ESTIMATE = "cbo_use_correlated_join_estimate";
     public static final String CBO_USE_CORRELATED_PREDICATE_ESTIMATE = "cbo_use_correlated_predicate_estimate";
+    public static final String CBO_ENABLE_MCV_ESTIMATE = "cbo_enable_mcv_estimate";
+    public static final String CBO_ENABLE_JOIN_STATISTICS = "cbo_enable_join_statistics";
+    public static final String CBO_ENABLE_JOIN_STATISTICS_COMPOSITION = "cbo_enable_join_statistics_composition";
+    public static final String CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS =
+            "cbo_enable_partition_aware_external_statistics";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT = "always_collect_low_card_dict";
     public static final String ALWAYS_COLLECT_LOW_CARD_DICT_ON_LAKE = "always_collect_low_card_dict_on_lake";
     public static final String CBO_ENABLE_LOW_CARDINALITY_OPTIMIZE = "cbo_enable_low_cardinality_optimize";
@@ -555,8 +560,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String ENABLE_STATS_TO_OPTIMIZE_SKEW_JOIN = "enable_stats_to_optimize_skew_join";
     public static final String SKEW_JOIN_OPTIMIZE_USE_MCV_COUNT = "skew_join_use_mcv_count";
     public static final String SKEW_JOIN_DATA_SKEW_THRESHOLD = "skew_join_data_skew_threshold";
+    public static final String SKEW_JOIN_MAX_OTHER_SIDE_OVERLAP_ROW_COUNT = "skew_join_max_other_side_overlap_row_count";
     public static final String SKEW_JOIN_MCV_SINGLE_THRESHOLD = "skew_join_mcv_single_threshold";
     public static final String SKEW_JOIN_MCV_MIN_INPUT_ROWS = "skew_join_mcv_min_input_rows";
+    public static final String ENABLE_SKEW_DETECT_WITH_INACCURATE_STATS = "enable_skew_detect_with_inaccurate_stats";
 
     public static final String CHOOSE_EXECUTE_INSTANCES_MODE = "choose_execute_instances_mode";
 
@@ -1571,6 +1578,28 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = CBO_USE_CORRELATED_PREDICATE_ESTIMATE)
     private boolean useCorrelatedPredicateEstimate = true;
 
+    // Estimate predicates with the most common value lists of the MCV statistics when they exist.
+    @VariableMgr.VarAttr(name = CBO_ENABLE_MCV_ESTIMATE)
+    private boolean cboEnableMcvEstimate = true;
+
+    @VariableMgr.VarAttr(name = CBO_ENABLE_JOIN_STATISTICS)
+    private boolean cboEnableJoinStatistics = true;
+
+    @VariableMgr.VarAttr(name = CBO_ENABLE_JOIN_STATISTICS_COMPOSITION)
+    private boolean cboEnableJoinStatisticsComposition = true;
+
+    public boolean isCboEnableJoinStatisticsComposition() {
+        return cboEnableJoinStatisticsComposition;
+    }
+
+    public boolean isCboEnableJoinStatistics() {
+        return cboEnableJoinStatistics;
+    }
+
+    // Restrict the internal statistics of an external table to the partitions a scan reads.
+    @VariableMgr.VarAttr(name = CBO_ENABLE_PARTITION_AWARE_EXTERNAL_STATISTICS)
+    private boolean cboEnablePartitionAwareExternalStatistics = true;
+
     @VariableMgr.VarAttr(name = CBO_USE_NTH_EXEC_PLAN, flag = VariableMgr.INVISIBLE)
     private int useNthExecPlan = 0;
 
@@ -2060,6 +2089,18 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_PIPELINE_LEVEL_MULTI_PARTITIONED_RF)
     private boolean enablePipelineLevelMultiPartitionedRf = false;
+
+    @VarAttr(name = "enable_joint_runtime_filter_selection")
+    private boolean enableJointRuntimeFilterSelection = true;
+
+    public void setEnableJointRuntimeFilterSelection(boolean enabled) {
+        enableJointRuntimeFilterSelection = enabled;
+    }
+
+    public boolean isEnableJointRuntimeFilterSelection() {
+        return enableJointRuntimeFilterSelection;
+    }
+
 
     //In order to be compatible with the logic of the old planner,
     //When the column name is the same as the alias name,
@@ -3294,6 +3335,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = SKEW_JOIN_DATA_SKEW_THRESHOLD, flag = VariableMgr.INVISIBLE)
     private double skewJoinDataSkewThreshold = 0.2;
 
+    // Maximum number of overlapping MCV rows on the other side of the join. When exceeding the overlap,
+    // the skew join optimization is skipped as this can lead to a row explosion.
+    // With the default value of `skewJoinRandRange` = 1000, an overlap of 1M leads to 1Bn rows.
+    @VarAttr(name = SKEW_JOIN_MAX_OTHER_SIDE_OVERLAP_ROW_COUNT, flag = VariableMgr.INVISIBLE)
+    private long skewJoinMaxOtherSideOverlapRowCount = 1_000_000;
+
     // A single MCV value must exceed this total-domain ratio to be considered as a skew value candidate.
     @VarAttr(name = SKEW_JOIN_MCV_SINGLE_THRESHOLD, flag = VariableMgr.INVISIBLE)
     private double skewJoinMcvSingleThreshold = 0.1;
@@ -3301,6 +3348,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // Minimal input rows (estimated) to enable MCV-based skew join elimination rewrite.
     @VarAttr(name = SKEW_JOIN_MCV_MIN_INPUT_ROWS, flag = VariableMgr.INVISIBLE)
     private long skewJoinMcvMinInputRows = 10000000;
+
+    // When enabled, skew detection proceeds even when table row count is marked as potentially inaccurate (isTableRowCountMayInaccurate).
+    // This allows rules consuming skew info (joins, aggregations, window functions) to fire based on
+    // histogram/MCV data regardless of row count reliability.
+    @VarAttr(name = ENABLE_SKEW_DETECT_WITH_INACCURATE_STATS, flag = VariableMgr.INVISIBLE)
+    private boolean enableSkewDetectWithInaccurateStats = false;
 
     @VarAttr(name = LARGE_DECIMAL_UNDERLYING_TYPE)
     private String largeDecimalUnderlyingType = SessionVariableConstants.PANIC;
@@ -4963,6 +5016,22 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         this.useCorrelatedPredicateEstimate = useCorrelatedPredicateEstimate;
     }
 
+    public boolean isCboEnableMcvEstimate() {
+        return cboEnableMcvEstimate;
+    }
+
+    public void setCboEnableMcvEstimate(boolean cboEnableMcvEstimate) {
+        this.cboEnableMcvEstimate = cboEnableMcvEstimate;
+    }
+
+    public boolean isCboEnablePartitionAwareExternalStatistics() {
+        return cboEnablePartitionAwareExternalStatistics;
+    }
+
+    public void setCboEnablePartitionAwareExternalStatistics(boolean cboEnablePartitionAwareExternalStatistics) {
+        this.cboEnablePartitionAwareExternalStatistics = cboEnablePartitionAwareExternalStatistics;
+    }
+
     public boolean isAlwaysCollectDict() {
         return alwaysCollectDict;
     }
@@ -5973,6 +6042,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         this.enableStatsToOptimizeSkewJoin = enableStatsToOptimizeSkewJoin;
     }
 
+    public boolean isEnableSkewDetectWithInaccurateStats() {
+        return enableSkewDetectWithInaccurateStats;
+    }
+
+    public void setEnableSkewDetectWithInaccurateStats(boolean enableSkewDetectWithInaccurateStats) {
+        this.enableSkewDetectWithInaccurateStats = enableSkewDetectWithInaccurateStats;
+    }
+
     public int getSkewJoinOptimizeUseMCVCount() {
         return skewJoinOptimizeUseMCVCount;
     }
@@ -5987,6 +6064,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setSkewJoinDataSkewThreshold(double skewJoinDataSkewThreshold) {
         this.skewJoinDataSkewThreshold = skewJoinDataSkewThreshold;
+    }
+
+    public long getSkewJoinMaxOtherSideOverlapRowCount() {
+        return skewJoinMaxOtherSideOverlapRowCount;
+    }
+
+    public void setSkewJoinMaxOtherSideOverlapRowCount(long skewJoinMaxOtherSideOverlapRowCount) {
+        this.skewJoinMaxOtherSideOverlapRowCount = skewJoinMaxOtherSideOverlapRowCount;
     }
 
     public double getSkewJoinMcvSingleThreshold() {

@@ -132,8 +132,16 @@ class MemLimitedChunkQueue;
 
 class SpillableMultiCastLocalExchanger : public MultiCastLocalExchanger {
 public:
-    SpillableMultiCastLocalExchanger(RuntimeState* runtime_state, size_t consumer_number, int32_t plan_node_id);
+    SpillableMultiCastLocalExchanger(RuntimeState* runtime_state, size_t consumer_number, int32_t plan_node_id,
+                                     size_t producer_dop);
     ~SpillableMultiCastLocalExchanger() override = default;
+
+    // The bytes the queue keeps in memory before it flushes the chunks the slowest consumer has not taken
+    // yet to disk: local_exchange_buffer_mem_limit_per_driver per producer driver, like the other local
+    // exchangers; a fixed small size when spilling is forced. The fastest consumer alone does not bound
+    // the queue (see MemLimitedChunkQueue::can_push), so without this limit a consumer that lags behind
+    // another keeps the whole gap in memory.
+    static size_t memory_limit(bool force_spill, size_t producer_dop);
     bool support_event_scheduler() const override { return false; }
 
     Status init_metrics(RuntimeProfile* profile, bool is_first_sink_driver) override;

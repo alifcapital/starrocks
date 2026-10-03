@@ -142,6 +142,19 @@ This topic introduces the following types of BE configurations:
 - Description: Whether to enable Lazy Dyamic Flat JSON when a query misses Flat JSON schema in read process. When this item is set to `true`, StarRocks will postpone the Flat JSON operation to calculation process instead of read process.
 - Introduced in: v3.3.3
 
+### enable_local_runtime_filter_feedback
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Enables cost-based adaptation of local runtime membership filters when the scan and its consuming INNER or LEFT SEMI JOIN execute in the same pipeline driver. The driver compares filter evaluation, intervening operator work, and hash-table lookup work in bounded measurement windows. It can bypass an expensive filter and periodically recheck the decision with increasing intervals. Changes to this setting apply to newly prepared drivers.
+- Introduced in: -
+
+The supported path can contain projection and chunk accumulation between the scan and JOIN. All managed filters must belong to that JOIN. Global filters, exchange boundaries, spillable JOIN operators, query cache, streaming pipelines, and filters applied entirely by storage retain their existing behavior. Exact IN filters, storage min/max predicates, and filter construction limits are preserved.
+
+The JOIN profile reports `LocalRfFeedbackState`, `LocalRfDecisions`, `LocalRfSwitches`, and `LocalRfOn*`/`LocalRfOff*` row and work counters. If the filter is unavailable or accounting becomes inconsistent, execution falls back to ordinary filter evaluation; `LocalRfFallbackReason` records the reason in the scan or JOIN profile. Setting this parameter to `false` disables feedback for newly prepared drivers.
+
 ### enable_ordinal_index_memory_page_cache
 
 - Default: true

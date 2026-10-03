@@ -41,8 +41,10 @@ import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.ast.HashDistributionDesc;
 import com.starrocks.sql.ast.KeysDesc;
 import com.starrocks.sql.ast.KeysType;
+import com.starrocks.sql.ast.OrderByElement;
 import com.starrocks.sql.ast.QualifiedName;
 import com.starrocks.sql.ast.TableRef;
+import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.ast.expression.TypeDef;
 import com.starrocks.sql.common.EngineType;
@@ -60,10 +62,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static com.starrocks.catalog.InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME;
+import static com.starrocks.statistic.StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.FULL_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.HISTOGRAM_STATISTICS_TABLE_NAME;
 import static com.starrocks.statistic.StatsConstants.MULTI_COLUMN_STATISTICS_TABLE_NAME;
@@ -141,6 +147,10 @@ public class StatisticsMetaManager extends FrontendDaemon {
             "table_uuid", "partition_name", "column_name"
     );
 
+    private static final List<String> EXTERNAL_FULL_STATISTICS_SORT_COLUMNS = ImmutableList.of(
+            "table_uuid", "column_name", "partition_name"
+    );
+
     private static final List<String> EXTERNAL_HISTOGRAM_KEY_COLUMNS = ImmutableList.of(
             "table_uuid", "column_name"
     );
@@ -151,6 +161,10 @@ public class StatisticsMetaManager extends FrontendDaemon {
 
     private static final List<String> MULTI_COLUMN_STATISTICS_KEY_COLUMNS = ImmutableList.of(
             "table_id", "column_ids"
+    );
+
+    private static final List<String> EXTERNAL_MCV_STATISTICS_KEY_COLUMNS = ImmutableList.of(
+            "table_uuid", "column_ids"
     );
 
     private boolean createSampleStatisticsTable(ConnectContext context) {
@@ -273,12 +287,15 @@ public class StatisticsMetaManager extends FrontendDaemon {
                     tableRef,
                     StatisticUtils.buildStatsColumnDef(EXTERNAL_FULL_STATISTICS_TABLE_NAME),
                     EngineType.defaultEngine().name(),
+                    null,
                     new KeysDesc(keysType, EXTERNAL_FULL_STATISTICS_KEY_COLUMNS),
                     null,
                     new HashDistributionDesc(10, EXTERNAL_FULL_STATISTICS_KEY_COLUMNS),
                     properties,
                     null,
-                    "");
+                    "", null, EXTERNAL_FULL_STATISTICS_SORT_COLUMNS.stream()
+                            .map(column -> new OrderByElement(new SlotRef(null, column), true, null))
+                            .collect(Collectors.toList()));
 
             Analyzer.analyze(stmt, context);
             GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
@@ -288,6 +305,76 @@ public class StatisticsMetaManager extends FrontendDaemon {
         }
         LOG.info("create external full statistics table done");
         return checkTableExist(EXTERNAL_FULL_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createExternalTableStatisticsTable(ConnectContext context) {
+        LOG.info("create external table summary statistics table start");
+        KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
+        Map<String, String> properties = Maps.newHashMap();
+
+        try {
+            int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
+            properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
+            QualifiedName qualifiedName =
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_TABLE_STATISTICS_TABLE_NAME));
+            TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
+            CreateTableStmt stmt = new CreateTableStmt(false, false,
+                    tableRef,
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_TABLE_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    null,
+                    new KeysDesc(keysType, ImmutableList.of("table_uuid")),
+                    null,
+                    new HashDistributionDesc(10, ImmutableList.of("table_uuid")),
+                    properties,
+                    null,
+                    "", null, ImmutableList.of("table_uuid").stream()
+                            .map(column -> new OrderByElement(new SlotRef(null, column), true, null))
+                            .collect(Collectors.toList()));
+
+            Analyzer.analyze(stmt, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create table summary statistics table", e);
+            return false;
+        }
+        LOG.info("create external table summary statistics table done");
+        return checkTableExist(EXTERNAL_TABLE_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createExternalPartitionStatisticsTable(ConnectContext context) {
+        LOG.info("create external partition row statistics table start");
+        KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
+        Map<String, String> properties = Maps.newHashMap();
+
+        try {
+            int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
+            properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
+            QualifiedName qualifiedName =
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_PARTITION_STATISTICS_TABLE_NAME));
+            TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
+            CreateTableStmt stmt = new CreateTableStmt(false, false,
+                    tableRef,
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    null,
+                    new KeysDesc(keysType, ImmutableList.of("table_uuid", "partition_name")),
+                    null,
+                    new HashDistributionDesc(10, ImmutableList.of("table_uuid", "partition_name")),
+                    properties,
+                    null,
+                    "", null, ImmutableList.of("table_uuid", "partition_name").stream()
+                            .map(column -> new OrderByElement(new SlotRef(null, column), true, null))
+                            .collect(Collectors.toList()));
+
+            Analyzer.analyze(stmt, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create partition row statistics table", e);
+            return false;
+        }
+        LOG.info("create external partition row statistics table done");
+        return checkTableExist(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME);
     }
 
     private boolean createExternalHistogramStatisticsTable(ConnectContext context) {
@@ -367,6 +454,67 @@ public class StatisticsMetaManager extends FrontendDaemon {
                     meta.getStatsTypes(), LocalDateTime.MIN, meta.getProperties()));
         }
         return checkTableExist(MULTI_COLUMN_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createExternalMcvStatisticsTable(ConnectContext context) {
+        LOG.info("create external MCV statistics table start");
+        KeysType keysType = RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS;
+        Map<String, String> properties = Maps.newHashMap();
+
+        try {
+            int defaultReplicationNum = AutoInferUtil.calDefaultReplicationNum();
+            properties.put(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM, Integer.toString(defaultReplicationNum));
+            QualifiedName qualifiedName =
+                    QualifiedName.of(Arrays.asList(STATISTICS_DB_NAME, EXTERNAL_MCV_STATISTICS_TABLE_NAME));
+            TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
+            CreateTableStmt stmt = new CreateTableStmt(false, false,
+                    tableRef,
+                    StatisticUtils.buildStatsColumnDef(EXTERNAL_MCV_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    new KeysDesc(keysType, EXTERNAL_MCV_STATISTICS_KEY_COLUMNS),
+                    null,
+                    new HashDistributionDesc(10, EXTERNAL_MCV_STATISTICS_KEY_COLUMNS),
+                    properties,
+                    null,
+                    "");
+
+            Analyzer.analyze(stmt, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(stmt);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create external MCV statistics table", e);
+            return false;
+        }
+        LOG.info("create external MCV statistics table done");
+        for (ExternalMcvStatsMeta meta : GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                .getExternalMcvStatsMetaMap().values()) {
+            ExternalMcvStatsMeta reInitMeta = new ExternalMcvStatsMeta(meta.getCatalogName(),
+                    meta.getDbName(), meta.getTableName(), meta.getColumnNames(), meta.getAnalyzeType(),
+                    meta.getStatisticsTypes(), LocalDateTime.MIN, meta.getProperties());
+            reInitMeta.setTableUUID(meta.getTableUUID());
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addExternalMcvStatsMeta(reInitMeta);
+        }
+        return checkTableExist(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
+    }
+
+    private boolean createJoinStatisticsTable(ConnectContext context) {
+        List<String> keys = List.of("object_id", "generation", "part_id");
+        try {
+            TableRef table = new TableRef(QualifiedName.of(List.of(STATISTICS_DB_NAME,
+                    StatsConstants.JOIN_STATISTICS_TABLE_NAME)), null, NodePosition.ZERO);
+            CreateTableStmt statement = new CreateTableStmt(false, false, table,
+                    StatisticUtils.buildStatsColumnDef(StatsConstants.JOIN_STATISTICS_TABLE_NAME),
+                    EngineType.defaultEngine().name(),
+                    new KeysDesc(RunMode.isSharedDataMode() ? KeysType.UNIQUE_KEYS : KeysType.PRIMARY_KEYS, keys),
+                    null, new HashDistributionDesc(10, List.of("object_id")),
+                    new HashMap<>(Map.of(PropertyAnalyzer.PROPERTIES_REPLICATION_NUM,
+                            Integer.toString(AutoInferUtil.calDefaultReplicationNum()))), null, "");
+            Analyzer.analyze(statement, context);
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createTable(statement);
+        } catch (StarRocksException e) {
+            LOG.warn("Failed to create JOIN statistics table", e);
+            return false;
+        }
+        return checkTableExist(StatsConstants.JOIN_STATISTICS_TABLE_NAME);
     }
 
     private boolean createSPMBaselinesTable(ConnectContext context) {
@@ -479,10 +627,18 @@ public class StatisticsMetaManager extends FrontendDaemon {
                 return createHistogramStatisticsTable(context);
             } else if (tableName.equals(EXTERNAL_FULL_STATISTICS_TABLE_NAME)) {
                 return createExternalFullStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME)) {
+                return createExternalPartitionStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_TABLE_STATISTICS_TABLE_NAME)) {
+                return createExternalTableStatisticsTable(context);
             } else if (tableName.equals(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME)) {
                 return createExternalHistogramStatisticsTable(context);
             } else if (tableName.equals(MULTI_COLUMN_STATISTICS_TABLE_NAME)) {
                 return createMultiColumnStatisticsTable(context);
+            } else if (tableName.equals(EXTERNAL_MCV_STATISTICS_TABLE_NAME)) {
+                return createExternalMcvStatisticsTable(context);
+            } else if (tableName.equals(StatsConstants.JOIN_STATISTICS_TABLE_NAME)) {
+                return createJoinStatisticsTable(context);
             } else if (SPM_BASELINE_TABLE_NAME.equals(tableName)) {
                 return createSPMBaselinesTable(context);
             } else if (QUERY_HISTORY_TABLE_NAME.equals(tableName)) {
@@ -595,8 +751,12 @@ public class StatisticsMetaManager extends FrontendDaemon {
         refreshStatisticsTable(FULL_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_FULL_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_TABLE_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_PARTITION_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(EXTERNAL_HISTOGRAM_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(MULTI_COLUMN_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(EXTERNAL_MCV_STATISTICS_TABLE_NAME);
+        refreshStatisticsTable(StatsConstants.JOIN_STATISTICS_TABLE_NAME);
         refreshStatisticsTable(SPM_BASELINE_TABLE_NAME);
         refreshStatisticsTable(QUERY_HISTORY_TABLE_NAME);
 
@@ -606,6 +766,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearExpiredAnalyzeStatus();
             lastAnalyzeStatusCleanupNanos = System.nanoTime();
         }
+        GlobalStateMgr.getCurrentState().getAnalyzeMgr().getJoinStatisticsManager().cleanOrphans();
         GlobalStateMgr.getCurrentState().getQueryHistoryMgr().clearExpiredQueryHistory();
 
         RepoCreator.getInstance().run();

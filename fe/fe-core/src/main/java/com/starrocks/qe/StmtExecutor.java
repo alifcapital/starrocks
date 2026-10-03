@@ -173,6 +173,7 @@ import com.starrocks.sql.ast.AddComputeNodeBlackListStmt;
 import com.starrocks.sql.ast.AddSqlBlackListStmt;
 import com.starrocks.sql.ast.AddSqlDigestBlackListStmt;
 import com.starrocks.sql.ast.AdminSetConfigStmt;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
 import com.starrocks.sql.ast.AnalyzeStmt;
 import com.starrocks.sql.ast.AnalyzeTypeDesc;
@@ -199,6 +200,7 @@ import com.starrocks.sql.ast.ExportStmt;
 import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.IcebergRewriteStmt;
 import com.starrocks.sql.ast.InsertStmt;
+import com.starrocks.sql.ast.JoinStatisticsStmt;
 import com.starrocks.sql.ast.KillAnalyzeStmt;
 import com.starrocks.sql.ast.KillStmt;
 import com.starrocks.sql.ast.LoadStmt;
@@ -332,6 +334,8 @@ import static com.starrocks.statistic.AnalyzeMgr.IS_MULTI_COLUMN_STATS;
 // first: Parse receive byte array to statement struct.
 // second: Do handle function for statement.
 public class StmtExecutor {
+    private volatile long joinStatisticsCollectionGeneration;
+
     private static final Logger LOG = LogManager.getLogger(StmtExecutor.class);
     private static final Logger PROFILE_LOG = LogManager.getLogger("profile");
     private static final Gson GSON = new Gson();
@@ -648,7 +652,8 @@ public class StmtExecutor {
                 }
             }
             return ConnectContext.get().getSessionVariable().getInsertTimeoutS();
-        } else if (parsedStmt instanceof AnalyzeStmt) {
+        } else if (parsedStmt instanceof AnalyzeStmt || (parsedStmt instanceof JoinStatisticsStmt joinStats
+                && joinStats.getAction() != JoinStatisticsStmt.Action.SHOW)) {
             return (int) Config.statistic_collect_query_timeout;
         } else {
             // For SELECT queries:
@@ -1185,6 +1190,8 @@ public class StmtExecutor {
                 handleExportStmt(context.getQueryId());
             } else if (parsedStmt instanceof UnsupportedStmt) {
                 handleUnsupportedStmt();
+            } else if (parsedStmt instanceof JoinStatisticsStmt) {
+                handleJoinStatisticsStmt();
             } else if (parsedStmt instanceof AnalyzeStmt) {
                 handleAnalyzeStmt();
             } else if (parsedStmt instanceof AnalyzeProfileStmt) {
@@ -1724,6 +1731,10 @@ public class StmtExecutor {
 
     // Because this is called by other thread
     public void cancel(String cancelledMessage) {
+        long collectionGeneration = joinStatisticsCollectionGeneration;
+        if (collectionGeneration != 0) {
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().getJoinStatisticsManager().cancelCollection(collectionGeneration);
+        }
         if (parsedStmt instanceof DeleteStmt && ((DeleteStmt) parsedStmt).shouldHandledByDeleteHandler()) {
             DeleteStmt deleteStmt = (DeleteStmt) parsedStmt;
             long jobId = deleteStmt.getJobId();
@@ -2171,6 +2182,79 @@ public class StmtExecutor {
         }
     }
 
+    private void handleJoinStatisticsStmt() throws IOException, DdlException {
+        JoinStatisticsStmt statement = (JoinStatisticsStmt) parsedStmt;
+        var analyze = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
+        var manager = analyze.getJoinStatisticsManager();
+        try {
+            switch (statement.getAction()) {
+                case CREATE -> manager.create(statement.getDefinition(), statement.isAsynchronous(),
+                        generation -> joinStatisticsCollectionGeneration = generation);
+                case ANALYZE -> manager.analyze(statement.getName(), statement.isAsynchronous(),
+                        generation -> joinStatisticsCollectionGeneration = generation);
+                case DROP -> manager.drop(statement.getName(), statement.isIfExists());
+                case SHOW -> {
+                    if (statement.isVerbose()) {
+                        var meta = analyze.getJoinStatisticsRegistry().get(statement.getName());
+                        if (meta == null) {
+                            throw new DdlException("Unknown JOIN statistics: " + statement.getName());
+                        }
+                        try {
+                            for (var source : meta.getDefinition().getSources()) {
+                                Authorizer.checkTableAction(context, source.getTableName(), PrivilegeType.SELECT);
+                            }
+                        } catch (AccessDeniedException e) {
+                            throw new DdlException("SELECT is required on every source of JOIN statistics");
+                        }
+                        if (meta.getGeneration() == 0) {
+                            throw new DdlException("JOIN statistics has no collected generation: " + statement.getName());
+                        }
+                        var data = manager.inspect(meta, java.util.concurrent.TimeUnit.SECONDS.toMillis(getExecTimeout()))
+                                .orElseThrow(() -> new DdlException(
+                                        "JOIN statistics generation is unavailable, changed, "
+                                                + "or did not load in time; retry SHOW"));
+                        try {
+                            sendShowResult(com.starrocks.sql.optimizer.statistics.JoinStatisticsInspection.show(
+                                    meta, data, statement.getInspectionOffset(), statement.getInspectionLimit()));
+                        } catch (IllegalArgumentException e) {
+                            throw new DdlException(e.getMessage());
+                        }
+                        return;
+                    }
+                    ShowResultSetMetaData.Builder metadata = ShowResultSetMetaData.builder();
+                    for (String column : List.of("Name", "State", "Generation", "CollectedAt", "DataBytes", "Error")) {
+                        metadata.addColumn(new Column(column, TypeFactory.createVarcharType(65533)));
+                    }
+                    List<List<String>> rows = new ArrayList<>();
+                    for (var meta : analyze.getJoinStatisticsRegistry().snapshot()) {
+                        if (statement.getName() != null && !statement.getName().equals(meta.getDefinition().getName())) {
+                            continue;
+                        }
+                        try {
+                            for (var source : meta.getDefinition().getSources()) {
+                                Authorizer.checkTableAction(context, source.getTableName(), PrivilegeType.SELECT);
+                            }
+                        } catch (AccessDeniedException | SemanticException e) {
+                            continue;
+                        }
+                        var status = manager.status(meta);
+                        rows.add(List.of(meta.getDefinition().getName(), status.state(), Long.toString(meta.getGeneration()),
+                                meta.getCollectedAt() == 0 ? "" :
+                                        java.time.Instant.ofEpochMilli(meta.getCollectedAt()).toString(),
+                                Long.toString(meta.getPayloadBytes()), status.error()));
+                    }
+                    rows.sort(java.util.Comparator.comparing(row -> row.get(0)));
+                    sendShowResult(new ShowResultSet(metadata.build(), rows));
+                    return;
+                }
+                default -> throw new IllegalStateException("Unknown JOIN statistics action");
+            }
+            context.getState().setOk();
+        } finally {
+            joinStatisticsCollectionGeneration = 0;
+        }
+    }
+
     // TODO: move to DdlExecutor
     private void handleAnalyzeStmt() throws IOException {
         AnalyzeStmt analyzeStmt = (AnalyzeStmt) parsedStmt;
@@ -2323,6 +2407,19 @@ public class StmtExecutor {
                                 analyzeStmt.getProperties()),
                         analyzeStatus,
                         false, false /* resetWarehouse */);
+            } else if (!analyzeTypeDesc.getStatsTypes().isEmpty()) {
+                statisticExecutor.collectStatistics(statsConnectCtx,
+                        StatisticsCollectJobFactory.buildExternalMcvStatisticsCollectJob(
+                                analyzeStmt.getCatalogName(),
+                                db, table,
+                                analyzeStmt.getColumnNames(),
+                                analyzeStmt.getColumnTypes(),
+                                StatsConstants.AnalyzeType.FULL,
+                                StatsConstants.ScheduleType.ONCE, analyzeStmt.getProperties(),
+                                analyzeTypeDesc.getStatsTypes(),
+                                ((AnalyzeMcvDesc) analyzeTypeDesc).getColumnGroups()),
+                        analyzeStatus,
+                        false, false /* resetWarehouse */);
             } else {
                 StatsConstants.AnalyzeType analyzeType = analyzeStmt.isSample() ? StatsConstants.AnalyzeType.SAMPLE :
                         StatsConstants.AnalyzeType.FULL;
@@ -2388,23 +2485,32 @@ public class StmtExecutor {
         AnalyzeMgr analyzeMgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
         StatisticStorage statisticStorage = GlobalStateMgr.getCurrentState().getStatisticStorage();
         if (dropStatsStmt.isExternal()) {
-            analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
-            analyzeMgr.dropExternalBasicStatsData(table.getUUID());
-            analyzeMgr.removeExternalBasicStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
-            List<String> columns = table.getBaseSchema().stream().map(Column::getName).collect(Collectors.toList());
-            statisticStorage.expireConnectorTableColumnStatistics(table, columns);
+            if (dropStatsStmt.isMcv()) {
+                if (dropStatsStmt.getColumnNames().isEmpty()) {
+                    analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
+                    analyzeMgr.dropExternalMcvStatsMetaAndData(StatisticUtils.buildConnectContext(), tableName, table);
+                } else {
+                    analyzeMgr.dropExternalMcvStatsMetaAndData(StatisticUtils.buildConnectContext(), tableName, table,
+                            dropStatsStmt.getColumnNames());
+                }
+                statisticStorage.expireExternalMcvStatistics(table.getUUID());
+            } else {
+                analyzeMgr.dropExternalAnalyzeStatus(table.getUUID());
+                analyzeMgr.dropExternalBasicStatsData(table.getUUID());
+                analyzeMgr.removeExternalBasicStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+                List<String> columns = table.getBaseSchema().stream().map(Column::getName).collect(Collectors.toList());
+                statisticStorage.expireConnectorTableColumnStatistics(table, columns);
+            }
         } else {
-            List<String> columns = table.getBaseSchema().stream().filter(d -> !d.isAggregated()).map(Column::getName)
-                    .collect(Collectors.toList());
-            analyzeMgr.dropMultiColumnStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
-            statisticStorage.expireMultiColumnStatistics(table.getId());
-            GlobalStateMgr.getCurrentState().getAnalyzeMgr().dropAnalyzeStatus(table.getId());
-
-            if (!dropStatsStmt.isMultiColumn()) {
-                GlobalStateMgr.getCurrentState().getAnalyzeMgr().dropAnalyzeStatus(table.getId());
-                GlobalStateMgr.getCurrentState().getAnalyzeMgr()
-                        .dropBasicStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
-                GlobalStateMgr.getCurrentState().getStatisticStorage().expireTableAndColumnStatistics(table, columns);
+            analyzeMgr.dropAnalyzeStatus(table.getId());
+            if (dropStatsStmt.isMultiColumn()) {
+                analyzeMgr.dropMultiColumnStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
+                statisticStorage.expireMultiColumnStatistics(table.getId());
+            } else {
+                List<String> columns = table.getBaseSchema().stream().filter(d -> !d.isAggregated()).map(Column::getName)
+                        .collect(Collectors.toList());
+                analyzeMgr.dropBasicStatsMetaAndData(StatisticUtils.buildConnectContext(), List.of(table.getId()));
+                statisticStorage.expireTableAndColumnStatistics(table, columns);
             }
         }
     }
@@ -2489,6 +2595,12 @@ public class StmtExecutor {
         AnalyzeMgr analyzeManager = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
         AnalyzeStatus analyzeStatus = analyzeManager.getAnalyzeStatus(analyzeId);
         AnalyzeJob analyzeJob = analyzeManager.getAnalyzeJob(analyzeId);
+        if (analyzeStatus instanceof com.starrocks.statistic.ExternalAnalyzeStatus extended
+                && extended.getType() == StatsConstants.AnalyzeType.JOIN) {
+            com.starrocks.statistic.ExtendedStatisticsSchedule.checkJoinAnalyzePrivilege(context,
+                    extended.getJoinStatisticsName(), extended.getJoinStatisticsId());
+            return;
+        }
         if (analyzeStatus != null) {
             try {
                 String catalogName = analyzeStatus.getCatalogName();

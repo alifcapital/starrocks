@@ -19,6 +19,7 @@ import com.starrocks.common.LocalExchangerType;
 import com.starrocks.common.Pair;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.ast.HintNode;
+import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.JoinHelper;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
@@ -54,6 +55,7 @@ import com.starrocks.sql.optimizer.rewrite.scalar.ImplicitCastRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ReduceCastRule;
 import com.starrocks.sql.optimizer.skew.DataSkew;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.SkewJoinStatistics;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.task.TaskContext;
 
@@ -119,7 +121,8 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             this.columnRefFactory = columnRefFactory;
         }
 
-        private record OutputExchangeTemplate(DistributionSpec distributionSpec, ColumnRefSet usedColumns) {
+        private record OutputExchangeTemplate(DistributionSpec distributionSpec, ColumnRefSet usedColumns,
+                                              PhysicalDistributionOperator exchangeOp) {
         }
 
         @Override
@@ -191,7 +194,7 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             OptExpression rightChild = opt.inputAt(1);
 
             // Map join key exprs from (skew side / non-skew side) into (left input / right input).
-            // This keeps the shuffle-join input order unchanged.
+            // Split predicates stay attached to their original inputs, even if the JOIN is commuted below.
             ScalarOperator leftInputJoinKeyExpr =
                     (skewSideChildIndex == 0) ? skewSideJoinKeyExpr : nonSkewSideJoinKeyExpr;
             ScalarOperator rightInputJoinKeyExpr =
@@ -244,8 +247,10 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             final boolean requireOutputDistribution = outputExchangeTemplate != null;
             LocalExchangerType localExchangerType =
                     requireOutputDistribution ? LocalExchangerType.PASS_THROUGH : LocalExchangerType.DIRECT;
+            // Physical expression extraction can change the JOIN projection after logical properties
+            // were derived. The concatenate must expose the live projection, not those stale columns.
             List<ColumnRefOperator> outputColumns =
-                    opt.getOutputColumns().getColumnRefOperators(columnRefFactory);
+                    new ColumnRefSet(opt.getRowOutputInfo().getOutputColRefs()).getColumnRefOperators(columnRefFactory);
             if (originalShuffleJoinOperator.getJoinType().isAnyLeftOuterJoin()) {
                 ColumnRefSet rightOutputColumns = opt.inputAt(1).getOutputColumns();
                 for (ColumnRefOperator outputColumn : outputColumns) {
@@ -259,10 +264,19 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
 
             OptExpression rightInputOfShuffleJoin =
                     nullOnlyLeftOuterJoinFastPath ? rightChild : rightSplit.splitConsumerOptForShuffleJoin;
-            OptExpression newShuffleJoin = OptExpression.builder().setOp(newShuffleJoinOpt).setInputs(
-                            newArrayList(leftSplit.splitConsumerOptForShuffleJoin, rightInputOfShuffleJoin))
+            // Both branches must consume the same table as build. With opposite orientations,
+            // each split can fill its probe queue while its build consumer awaits the other split:
+            // a bounded-buffer cycle that never completes on sufficiently large inputs.
+            List<OptExpression> shuffleInputs = skewOnLeft
+                    ? newArrayList(leftSplit.splitConsumerOptForShuffleJoin, rightInputOfShuffleJoin)
+                    : newArrayList(rightInputOfShuffleJoin, leftSplit.splitConsumerOptForShuffleJoin);
+            List<PhysicalPropertySet> shuffleRequirements = opt.getRequiredProperties();
+            if (!skewOnLeft && shuffleRequirements != null && shuffleRequirements.size() == 2) {
+                shuffleRequirements = newArrayList(shuffleRequirements.get(1), shuffleRequirements.get(0));
+            }
+            OptExpression newShuffleJoin = OptExpression.builder().setOp(newShuffleJoinOpt).setInputs(shuffleInputs)
                     .setLogicalProperty(opt.getLogicalProperty()).setStatistics(opt.getStatistics())
-                    .setRequiredProperties(opt.getRequiredProperties()).setCost(opt.getCost()).build();
+                    .setRequiredProperties(shuffleRequirements).setCost(opt.getCost()).build();
 
             PhysicalPropertySet rightBroadcastProperty = new PhysicalPropertySet(
                     DistributionProperty.createProperty(DistributionSpec.createReplicatedDistributionSpec()));
@@ -282,6 +296,11 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             if (requireOutputDistribution) {
                 PhysicalDistributionOperator newExchangeForBroadcastJoin =
                         new PhysicalDistributionOperator(outputExchangeTemplate.distributionSpec());
+                // the fragment above this exchange decodes the same dict columns as above the original
+                // join's exchanges, so it needs the same global dicts and derived-dict expressions
+                newExchangeForBroadcastJoin.setGlobalDicts(outputExchangeTemplate.exchangeOp().getGlobalDicts());
+                newExchangeForBroadcastJoin.setGlobalDictsExpr(
+                        outputExchangeTemplate.exchangeOp().getGlobalDictsExpr());
                 // we need add exchange node to make broadcast join's output distribution can be same as shuffle join's
                 rightChildOfConcatenate = OptExpression.builder().setOp(newExchangeForBroadcastJoin)
                         .setInputs(Collections.singletonList(skewBranch))
@@ -347,7 +366,8 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
                     .build();
 
             List<ColumnRefOperator> splitOutputColumns =
-                    exchangeOptExp.getOutputColumns().getColumnRefOperators(columnRefFactory);
+                    new ColumnRefSet(exchangeOptExp.getRowOutputInfo().getOutputColRefs())
+                            .getColumnRefOperators(columnRefFactory);
 
             DistributionSpec distributionSpecForBroadCastJoin =
                     isLeftInputInBroadcastJoin ? new RoundRobinDistributionSpec()
@@ -359,6 +379,13 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             PhysicalSplitConsumeOperator splitConsumerOptForBroadcastJoin =
                     new PhysicalSplitConsumeOperator(splitProduceOperator.getSplitId(), skewPredicate,
                             distributionSpecForBroadCastJoin, splitOutputColumns);
+            // Both consumers stand where the original exchange stood: the fragments built above them
+            // evaluate the same dict expressions the low-cardinality rewrite attached to that exchange.
+            for (PhysicalSplitConsumeOperator consumer : List.of(splitConsumerOptForShuffleJoin,
+                    splitConsumerOptForBroadcastJoin)) {
+                consumer.setGlobalDicts(exchangeOpOfOriginalShuffleJoin.getGlobalDicts());
+                consumer.setGlobalDictsExpr(exchangeOpOfOriginalShuffleJoin.getGlobalDictsExpr());
+            }
 
             OptExpression splitConsumerOptExpForShuffleJoin =
                     OptExpression.builder().setOp(splitConsumerOptForShuffleJoin).setInputs(Collections.emptyList())
@@ -432,7 +459,7 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             OptExpression template = joinOpt.inputAt(1 - skewSideChildIndex);
             PhysicalDistributionOperator exchangeOp = template.getOp().cast();
             ColumnRefSet used = exchangeOp.getRowOutputInfo(template.getInputs()).getUsedColumnRefSet();
-            return new OutputExchangeTemplate(exchangeOp.getDistributionSpec(), used);
+            return new OutputExchangeTemplate(exchangeOp.getDistributionSpec(), used, exchangeOp);
         }
 
         private void addIdentityColumnsToProjectionIfMissing(Projection projection,
@@ -671,7 +698,10 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
         }
 
         private boolean canOptimize(PhysicalHashJoinOperator joinOp, OptExpression opt) {
-            return isValidJoinType(joinOp) && isShuffleJoin(opt);
+            return isValidJoinType(joinOp) && isShuffleJoin(opt)
+                    && Utils.extractConjuncts(joinOp.getOnPredicate()).stream().noneMatch(predicate ->
+                            predicate instanceof BinaryPredicateOperator binary
+                                    && binary.getBinaryType() == BinaryType.EQ_FOR_NULL);
         }
 
         // currently only support inner join and left outer join
@@ -711,23 +741,28 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             List<BinaryPredicateOperator> equalConjs =
                     JoinHelper.getEqualsPredicate(leftOutputColumns, rightOutputColumns,
                             Utils.extractConjuncts(joinOperator.getOnPredicate()));
-            if (equalConjs.size() != 1) {
+            if (equalConjs.isEmpty()) {
                 return Optional.empty();
             }
-
-            BinaryPredicateOperator eq = equalConjs.get(0);
-            if (!eq.getChild(0).isColumnRef() || !eq.getChild(1).isColumnRef()) {
-                return Optional.empty();
+            List<ColumnRefOperator> leftKeys = new ArrayList<>();
+            List<ColumnRefOperator> rightKeys = new ArrayList<>();
+            for (BinaryPredicateOperator eq : equalConjs) {
+                if (eq.getBinaryType() != BinaryType.EQ || !eq.getChild(0).isColumnRef()
+                        || !eq.getChild(1).isColumnRef()) {
+                    return Optional.empty();
+                }
+                ColumnRefOperator c0 = eq.getChild(0).cast();
+                ColumnRefOperator c1 = eq.getChild(1).cast();
+                ColumnRefOperator leftKey = leftOutputColumns.contains(c0) ? c0 : c1;
+                ColumnRefOperator rightKey = leftKey.equals(c0) ? c1 : c0;
+                if (!leftOutputColumns.contains(leftKey) || !rightOutputColumns.contains(rightKey)) {
+                    return Optional.empty();
+                }
+                leftKeys.add(leftKey);
+                rightKeys.add(rightKey);
             }
-
-            ColumnRefOperator c0 = eq.getChild(0).cast();
-            ColumnRefOperator c1 = eq.getChild(1).cast();
-            ColumnRefOperator leftKey = leftOutputColumns.contains(c0) ? c0 :
-                    (leftOutputColumns.contains(c1) ? c1 : null);
-            ColumnRefOperator rightKey = (leftKey == null) ? null : (leftKey.equals(c0) ? c1 : c0);
-            if (leftKey == null || rightKey == null) {
-                return Optional.empty();
-            }
+            ColumnRefOperator leftKey = leftKeys.get(0);
+            ColumnRefOperator rightKey = rightKeys.get(0);
 
             double bestScore = -1.0;
             SkewJoinSplitInfo best = null;
@@ -741,6 +776,67 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
                     continue;
                 }
 
+                List<ColumnRefOperator> ownKeys = side == 0 ? leftKeys : rightKeys;
+                List<ColumnRefOperator> otherKeys = side == 0 ? rightKeys : leftKeys;
+                var distribution = SkewJoinStatistics.find(stats, ownKeys,
+                        sessionVariable.getSkewJoinOptimizeUseMCVCount());
+                if (distribution != null && distribution.rows() >= sessionVariable.getSkewJoinMcvMinInputRows()) {
+                    double mass = distribution.entries().stream().mapToDouble(SkewJoinStatistics.Entry::rows).sum()
+                            / distribution.rows();
+                    if (mass > sessionVariable.getSkewJoinDataSkewThreshold() && mass > bestScore) {
+                        List<ScalarOperator> ownTuples = new ArrayList<>();
+                        List<ScalarOperator> otherTuples = new ArrayList<>();
+                        List<ScalarOperator> scalarValues = new ArrayList<>();
+                        boolean hasNull = false;
+                        double maximumSelectedRows = 0;
+                        for (var entry : distribution.entries()) {
+                            if (entry.rows() / distribution.rows() < sessionVariable.getSkewJoinMcvSingleThreshold()) {
+                                continue;
+                            }
+                            var own = SkewJoinStatistics.constants(entry, ownKeys);
+                            var other = SkewJoinStatistics.constants(entry, otherKeys);
+                            if (own.isEmpty() || other.isEmpty()) {
+                                continue;
+                            }
+                            if (ownKeys.size() == 1) {
+                                if (own.get(0).isNull()) {
+                                    hasNull = true;
+                                } else {
+                                    scalarValues.add(own.get(0));
+                                }
+                            } else if (own.stream().noneMatch(ConstantOperator::isNull)
+                                    && other.stream().noneMatch(ConstantOperator::isNull)) {
+                                // Compare complete tuples. Hot individual components need not form a hot shuffle key.
+                                ownTuples.add(tuplePredicate(ownKeys, own));
+                                otherTuples.add(tuplePredicate(otherKeys, other));
+                            } else {
+                                continue;
+                            }
+                            maximumSelectedRows = Math.max(maximumSelectedRows, entry.rows());
+                        }
+                        SkewJoinSplitInfo candidate = null;
+                        if (ownKeys.size() == 1 && (hasNull || !scalarValues.isEmpty())) {
+                            candidate = new SkewJoinSplitInfo(scalarValues, ownKeys.get(0), otherKeys.get(0), side, hasNull);
+                        } else if (!ownTuples.isEmpty()) {
+                            // The two Boolean membership expressions identify the same retained tuples.
+                            // Existing split logic preserves UNKNOWN in the ordinary branch, including outer rows.
+                            candidate = new SkewJoinSplitInfo(List.of(ConstantOperator.createBoolean(true)),
+                                    Utils.compoundOr(ownTuples), Utils.compoundOr(otherTuples), side, false);
+                        }
+                        if (candidate != null) {
+                            if (distribution.leavesHeavierKey(maximumSelectedRows,
+                                    sessionVariable.getSkewJoinMcvSingleThreshold())) {
+                                // Do not reintroduce the same incomplete candidate via the histogram fallback below.
+                                continue;
+                            }
+                            best = candidate;
+                            bestScore = mass;
+                        }
+                    }
+                }
+                if (equalConjs.size() != 1) {
+                    continue;
+                }
                 if (!stats.getColumnStatistics().containsKey(skewSideKeyColumn)) {
                     continue;
                 }
@@ -781,6 +877,14 @@ public class SkewShuffleJoinEliminationRule implements TreeRewriteRule {
             }
 
             return Optional.ofNullable(best);
+        }
+
+        private ScalarOperator tuplePredicate(List<ColumnRefOperator> columns, List<ConstantOperator> values) {
+            List<ScalarOperator> equalities = new ArrayList<>();
+            for (int i = 0; i < columns.size(); i++) {
+                equalities.add(new BinaryPredicateOperator(BinaryType.EQ, columns.get(i), values.get(i)));
+            }
+            return Utils.compoundAnd(equalities);
         }
 
         private static class ColumnRefReplacer extends BaseScalarOperatorShuttle {

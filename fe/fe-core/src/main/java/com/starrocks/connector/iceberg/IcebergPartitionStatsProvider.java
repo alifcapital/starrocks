@@ -106,10 +106,13 @@ public final class IcebergPartitionStatsProvider {
             String partitionName = PartitionUtil.convertIcebergPartitionToPartitionName(
                     nativeTable, spec, stats.partition());
             Partition partition = new Partition(modifiedTime, version, stats.specId());
+            partition.setValues(spec, org.apache.iceberg.Partitioning.partitionType(nativeTable), stats.partition());
             partition.setRecordCount(stats.dataRecordCount());
             partition.setPositionDeleteRecordCount(stats.positionDeleteRecordCount());
             partition.setEqualityDeleteRecordCount(stats.equalityDeleteRecordCount());
-            result.put(partitionName, partition);
+            if (result.put(partitionName, partition) != null) {
+                partition.clearValues();
+            }
         }
         return Optional.of(result);
     }

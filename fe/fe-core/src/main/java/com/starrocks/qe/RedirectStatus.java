@@ -194,6 +194,7 @@ import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowLoadWarningsStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowOpenTableStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
@@ -834,6 +835,13 @@ public class RedirectStatus {
         // ------------------------------------------- Analyze Statement ---------------------------------------------------
 
         @Override
+        public RedirectStatus visitJoinStatisticsStatement(com.starrocks.sql.ast.JoinStatisticsStmt statement,
+                                                           Void context) {
+            return statement.getAction() == com.starrocks.sql.ast.JoinStatisticsStmt.Action.SHOW
+                    ? RedirectStatus.FORWARD_NO_SYNC : RedirectStatus.FORWARD_WITH_SYNC;
+        }
+
+        @Override
         public RedirectStatus visitAnalyzeStatement(AnalyzeStmt statement, Void context) {
             return RedirectStatus.FORWARD_WITH_SYNC;
         }
@@ -875,6 +883,11 @@ public class RedirectStatus {
 
         @Override
         public RedirectStatus visitShowMultiColumnsStatsMetaStatement(ShowMultiColumnStatsMetaStmt statement, Void context) {
+            return RedirectStatus.FORWARD_NO_SYNC;
+        }
+
+        @Override
+        public RedirectStatus visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt statement, Void context) {
             return RedirectStatus.FORWARD_NO_SYNC;
         }
 

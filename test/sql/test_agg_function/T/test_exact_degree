@@ -1,0 +1,40 @@
+-- name: test_exact_degree
+CREATE TABLE degree_fixture (cid INT, part INT, k BIGINT)
+DUPLICATE KEY(cid,part) DISTRIBUTED BY HASH(part) BUCKETS 3
+PROPERTIES('replication_num'='1');
+INSERT INTO degree_fixture VALUES
+(0,0,1),(0,1,1),(0,2,1),(0,0,-2),(0,1,-2),(0,2,NULL),
+(0,0,-9223372036854775808),(0,1,9223372036854775807),
+(1,0,1),(1,1,-2),(1,2,-2),(1,2,99);
+SELECT cid,stats_degree_info(stats_degree_merge(s)) FROM
+(SELECT cid,part,stats_degree_state(k) s FROM degree_fixture GROUP BY cid,part) p
+GROUP BY cid ORDER BY cid;
+WITH a AS (SELECT stats_degree_state(k) s FROM degree_fixture WHERE cid=0),
+b AS (SELECT stats_degree_state(k) s FROM degree_fixture WHERE cid=1)
+SELECT stats_degree_pair(a.s,b.s) FROM a CROSS JOIN b;
+WITH p AS (SELECT cid,bit_shift_right(k,15) shard,stats_degree_state(k) s
+FROM degree_fixture WHERE k IS NOT NULL GROUP BY cid,shard),
+a AS (SELECT shard,stats_degree_merge(UNHEX(IF(cid=0,HEX(s),''))) s0,
+stats_degree_merge(UNHEX(IF(cid=1,HEX(s),''))) s1 FROM p GROUP BY shard)
+SELECT stats_degree_info(stats_degree_head_agg(s0,s1,CAST('' AS VARBINARY),CAST('' AS VARBINARY),16)) FROM a;
+SELECT cid,get_json_double(v,'$.rows'),get_json_double(v,'$.ndv'),
+get_json_double(v,'$.max'),get_json_double(v,'$.moments[1]') FROM
+(SELECT cid,stats_degree_finish(s,CAST('' AS VARBINARY)) v FROM
+(SELECT cid,COALESCE(bit_shift_right(k,15),0) shard,stats_degree_state(k) s
+FROM degree_fixture GROUP BY cid,COALESCE(bit_shift_right(k,15),0)) p GROUP BY cid) a ORDER BY cid;
+SELECT stats_degree_info(stats_degree_state(CAST(NULL AS BIGINT)));
+SET enable_spill=true,spill_mode='force',streaming_preaggregation_mode='force_preaggregation';
+SELECT cid,stats_degree_info(stats_degree_merge(s)) FROM
+(SELECT cid,part,stats_degree_state(k) s FROM degree_fixture GROUP BY cid,part) p
+GROUP BY cid ORDER BY cid;
+SET pipeline_dop=4;
+SELECT SUM(get_json_double(stats_degree_pair(s,s),'$[0]')) FROM
+(SELECT generate_series,stats_degree_state(generate_series) s FROM TABLE(generate_series(1,2048))
+GROUP BY generate_series) p;
+SELECT stats_degree_info(stats_degree_merge(s)) FROM
+(SELECT stats_degree_state(CAST(NULL AS BIGINT)) s) p;
+SELECT get_json_double(v,'$.rows'),get_json_double(v,'$.ndv'),get_json_double(v,'$.max'),
+get_json_double(v,'$.moments[1]') FROM
+(SELECT stats_degree_info(stats_degree_state(generate_series%20000)) v
+FROM TABLE(generate_series(0,399999))) p;
+DROP TABLE degree_fixture;

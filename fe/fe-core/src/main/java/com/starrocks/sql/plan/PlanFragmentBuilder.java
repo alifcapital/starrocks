@@ -295,7 +295,11 @@ public class PlanFragmentBuilder {
         createOutputFragment(new PhysicalPlanTranslator(columnRefFactory).translate(plan, execPlan), execPlan,
                 outputColumns, hasOutputFragment);
         execPlan.setPlanCount(plan.getPlanCount());
-        return finalizeFragments(execPlan, resultSinkType);
+        try {
+            return finalizeFragments(execPlan, resultSinkType);
+        } finally {
+            releaseJoinStatistics(plan);
+        }
     }
 
     public static ExecPlan createPhysicalPlan(OptExpression plan, ConnectContext connectContext,
@@ -342,8 +346,17 @@ public class PlanFragmentBuilder {
                 view.writeQuorum(), view.enableReplicatedStorage(), false, false,
                 connectContext.getCurrentComputeResource());
         execPlan.getTopFragment().setSink(tableSink);
-
+        releaseJoinStatistics(optExpr);
         return execPlan;
+    }
+
+    private static void releaseJoinStatistics(OptExpression expression) {
+        if (expression.getStatistics() != null && expression.getStatistics().getJoinStatisticsPlanner() != null) {
+            expression.getStatistics().getJoinStatisticsPlanner().finishPlanning();
+        }
+        for (OptExpression child : expression.getInputs()) {
+            releaseJoinStatistics(child);
+        }
     }
 
     private static TupleDescriptor buildTupleDesc(ExecPlan execPlan, Table table) {
@@ -833,7 +846,16 @@ public class PlanFragmentBuilder {
             Optional.ofNullable(optExpression.getStatistics()).ifPresent(statistics -> {
                 Statistics.Builder b = Statistics.builder();
                 b.setOutputRowCount(statistics.getOutputRowCount());
+                b.setJoinStatisticsScope(statistics.getJoinStatisticsScope());
+                b.setJoinStatisticsPlanner(statistics.getJoinStatisticsPlanner());
                 b.addColumnStatisticsFromOtherStatistic(statistics, new ColumnRefSet(node.getOutputColumns()), true);
+                // The optimizer has already projected these distributions into output column IDs.
+                // Keep them with the scalar statistics when materializing the physical projection.
+                statistics.getMultiColumnCombinedStats().forEach((columns, group) -> {
+                    if (node.getOutputColumns().containsAll(columns)) {
+                        b.addMultiColumnStatistics(columns, group);
+                    }
+                });
                 projectNode.computeStatistics(b.build());
             });
 
@@ -2686,7 +2708,15 @@ public class PlanFragmentBuilder {
             if (producerStage) {
                 markHonestProducerAggSlotNullability(aggregationNode, aggregateExprList, intermediateAggrExprs);
             }
-            aggregationNode.computeStatistics(optExpr.getStatistics());
+            Statistics aggregateStatistics = optExpr.getStatistics();
+            if (!node.getType().isAnyGlobal() && aggregateStatistics != null
+                    && !aggregateStatistics.getMultiColumnCombinedStats().isEmpty()) {
+                // Memo statistics can describe the final groups even for a split local alternative.
+                // Repeated local groups do not have the final operator's frequency distribution.
+                aggregateStatistics = Statistics.buildFrom(aggregateStatistics)
+                        .setMultiColumnStatistics(Map.of()).build();
+            }
+            aggregationNode.computeStatistics(aggregateStatistics);
             aggregationNode.setGroupByMinMaxStats(node.getGroupByMinMaxStatistic());
 
             if (node.isOnePhaseAgg() || node.isMergedLocalAgg() || node.getType().isDistinctGlobal() ||
@@ -4566,6 +4596,10 @@ public class PlanFragmentBuilder {
                     new PlanFragment(context.getNextFragmentId(), exchangeNode, dataPartition);
             splitConsumeFragment.setQueryGlobalDicts(splitProduceFragment.getQueryGlobalDicts());
             splitConsumeFragment.setQueryGlobalDictExprs(splitProduceFragment.getQueryGlobalDictExprs());
+            // plus what the exchange replaced by this consumer carried for the fragment above it
+            splitConsumeFragment.mergeQueryGlobalDicts(consumerOperator.getGlobalDicts());
+            splitConsumeFragment.mergeQueryDictExprs(
+                    getGlobalDictsExprs(consumerOperator.getGlobalDictsExpr(), context));
             splitConsumeFragment.setLoadGlobalDicts(splitProduceFragment.getLoadGlobalDicts());
 
             if (consumerOperator.hasLimit()) {

@@ -37,6 +37,7 @@ using RuntimeFilterProbeCollector = starrocks::RuntimeFilterProbeCollector;
 namespace pipeline {
 class Operator;
 class OperatorFactory;
+class LocalRuntimeFilterFeedback;
 using OperatorPtr = std::shared_ptr<Operator>;
 using Operators = std::vector<OperatorPtr>;
 using LocalRFWaitingSet = std::set<TPlanNodeId>;
@@ -220,6 +221,10 @@ public:
     // equal to ExecNode::eval_join_runtime_filters, is used to apply bloom-filters to Operators.
     virtual void eval_runtime_bloom_filters(Chunk* chunk);
 
+    void set_local_runtime_filter_feedback(std::shared_ptr<LocalRuntimeFilterFeedback> feedback) {
+        _local_rf_feedback = std::move(feedback);
+    }
+
     // Pseudo plan_node_id for final sink, such as result_sink, table_sink
     static const int32_t s_pseudo_plan_node_id_for_final_sink;
 
@@ -337,6 +342,8 @@ protected:
     std::vector<ExprContext*> _cached_conjuncts_and_in_filters;
 
     RuntimeMembershipFilterEvalContext _bloom_filter_eval_context;
+    std::shared_ptr<LocalRuntimeFilterFeedback> _local_rf_feedback;
+    bool _local_rf_was_on = true;
 
     spill::OperatorMemoryResourceManager _mem_resource_manager;
 

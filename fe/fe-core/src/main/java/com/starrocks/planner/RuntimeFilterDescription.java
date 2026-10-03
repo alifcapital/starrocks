@@ -22,6 +22,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.ExprToSql;
+import com.starrocks.sql.optimizer.statistics.RuntimeFilterStatistics;
 import com.starrocks.thrift.TBucketProperty;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TRuntimeFilterBuildJoinMode;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -84,6 +86,8 @@ public class RuntimeFilterDescription {
     private boolean equalForNull;
 
     private long buildCardinality;
+    // NDV of the build key (distinct keys held by the filter); -1 when unknown.
+    private RuntimeFilterStatistics buildKeyStatistics;
     private SessionVariable sessionVariable;
 
     // TODO: remove me
@@ -154,6 +158,18 @@ public class RuntimeFilterDescription {
 
     public void setBuildCardinality(long value) {
         buildCardinality = value;
+    }
+
+    public RuntimeFilterStatistics getBuildKeyStatistics() {
+        return buildKeyStatistics;
+    }
+
+    public boolean isEqualForNull() {
+        return equalForNull;
+    }
+
+    public void setBuildKeyStatistics(RuntimeFilterStatistics value) {
+        buildKeyStatistics = value;
     }
 
     public RuntimeFilterType runtimeFilterType() {
@@ -230,7 +246,7 @@ public class RuntimeFilterDescription {
         return false;
     }
 
-    public boolean canProbeUse(PlanNode node, RuntimeFilterPushDownContext rfPushCtx) {
+    public boolean canProbeUse(PlanNode node, Expr probeExpr, RuntimeFilterPushDownContext rfPushCtx) {
         if (!canAcceptFilter(node, rfPushCtx)) {
             return false;
         }
@@ -238,13 +254,26 @@ public class RuntimeFilterDescription {
         if (runtimeFilterType().isTopNFilter() && node instanceof OlapScanNode) {
             ((OlapScanNode) node).setOrderHint(isAscFilter());
         }
-        // if we don't across exchange node, that's to say this is in local fragment instance.
-        // we don't need to use adaptive strategy now. we are using a conservative way.
+        long probeMin = sessionVariable.getGlobalRuntimeFilterProbeMinSize();
+        // Preserve the explicit force setting. Neither locality nor a small build is a reason
+        // to ignore a known membership estimate: filling and evaluating a filter still costs CPU.
+        if (probeMin == 0) {
+            return true;
+        }
+        RuntimeFilterStatistics probe = node.getRuntimeFilterStatistics(probeExpr);
+        OptionalDouble passFraction = runtimeFilterType() == RuntimeFilterType.JOIN_FILTER
+                && buildKeyStatistics != null ? buildKeyStatistics.probePassFraction(probe, equalForNull)
+                : OptionalDouble.empty();
+        float acceptedFilterRatioLB = 1.0f - sessionVariable.getGlobalRuntimeFilterProbeMinSelectivity();
+        if (passFraction.isPresent()) {
+            return (inLocalFragmentInstance() || node.getCardinality() >= probeMin)
+                    && passFraction.getAsDouble() <= acceptedFilterRatioLB;
+        }
+        // Without a key distribution retain the existing local and small-build fallbacks.
         if (inLocalFragmentInstance()) {
             return true;
         }
 
-        long probeMin = sessionVariable.getGlobalRuntimeFilterProbeMinSize();
         long card = node.getCardinality();
         // The special value 0 means force use this filter
         // Adopts small runtime filter when:
@@ -256,15 +285,13 @@ public class RuntimeFilterDescription {
             numBackends = Math.max(1, numBackends);
             buildMin = (Long.MAX_VALUE / numBackends > buildMin) ? buildMin * numBackends : Long.MAX_VALUE;
         }
-        if (probeMin == 0 || (buildMin > 0 && buildCardinality <= buildMin)) {
+        if (buildMin > 0 && buildCardinality <= buildMin) {
             return true;
         }
         if (card < probeMin) {
             return false;
         }
-        long buildCard = Math.max(0, buildCardinality);
-        float evaluatedFilterRatio = (buildCard * 1.0f / card);
-        float acceptedFilterRatioLB = 1.0f - sessionVariable.getGlobalRuntimeFilterProbeMinSelectivity();
+        double evaluatedFilterRatio = Math.max(0, buildCardinality) / (double) card;
         return evaluatedFilterRatio <= acceptedFilterRatioLB;
     }
 
@@ -602,6 +629,9 @@ public class RuntimeFilterDescription {
             t.setBuild_expr(ExprToThrift.treeToThrift(buildExpr));
         }
         t.setExpr_order(exprOrder);
+        if (equalCount > 1 && buildKeyStatistics != null && buildKeyStatistics.getNdv() >= 0) {
+            t.setEstimated_build_ndv((long) Math.ceil(buildKeyStatistics.getNdv()));
+        }
         for (Map.Entry<Integer, Expr> entry : nodeIdToProbeExpr.entrySet()) {
             t.putToPlan_node_id_to_target_expr(entry.getKey(), ExprToThrift.treeToThrift(entry.getValue()));
         }

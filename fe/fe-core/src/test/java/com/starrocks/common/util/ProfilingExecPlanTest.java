@@ -33,6 +33,10 @@ public class ProfilingExecPlanTest {
         String[] classPathEntries = System.getProperty("java.class.path").split(System.getProperty("path.separator"));
 
         for (String classPathEntry : classPathEntries) {
+            // Tests may define plan nodes of their own in the same package. We check only the production nodes.
+            if (classPathEntry.endsWith("test-classes") || classPathEntry.endsWith("test-classes" + File.separator)) {
+                continue;
+            }
             File baseDir = new File(classPathEntry + File.separatorChar + path);
 
             if (baseDir.isDirectory()) {

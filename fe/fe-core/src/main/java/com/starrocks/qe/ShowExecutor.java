@@ -204,6 +204,7 @@ import com.starrocks.sql.ast.ShowHistogramStatsMetaStmt;
 import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
 import com.starrocks.sql.ast.ShowPluginsStmt;
@@ -267,6 +268,7 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalHistogramStatsMeta;
+import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
@@ -2886,6 +2888,25 @@ public class ShowExecutor {
         }
 
         @Override
+        public ShowResultSet visitShowMcvStatsMetaStatement(ShowMcvStatsMetaStmt stmt, ConnectContext context) {
+            List<ExternalMcvStatsMeta> metas = new ArrayList<>(
+                    context.getGlobalStateMgr().getAnalyzeMgr().getExternalMcvStatsMetaMap().values());
+            List<List<String>> rows = Lists.newArrayList();
+            for (ExternalMcvStatsMeta meta : metas) {
+                List<String> result = ShowExecutor.showExternalMcvStatsMeta(context, meta);
+                if (result != null) {
+                    rows.add(result);
+                }
+            }
+
+            ShowResultSetMetaData showResultSetMetaData = new ShowResultMetaFactory().getMetadata(stmt);
+            rows = doPredicate(stmt, showResultSetMetaData, rows);
+            rows = doOrderBy(rows, stmt.getOrderByPairs());
+            rows = doLimit(rows, stmt.getLimitElement());
+            return new ShowResultSet(showResultSetMetaData, rows);
+        }
+
+        @Override
         public ShowResultSet visitShowBaselinePlanStatement(ShowBaselinePlanStmt statement, ConnectContext context) {
             return SPMStmtExecutor.execute(context, statement);
         }
@@ -3631,6 +3652,38 @@ public class ShowExecutor {
         row.set(5, meta.getUpdateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
         row.set(6, meta.getProperties() == null ? "{}" : meta.getProperties().toString());
 
+        return row;
+    }
+
+    public static List<String> showExternalMcvStatsMeta(ConnectContext context, ExternalMcvStatsMeta meta) {
+        Database db;
+        Table table;
+        try {
+            db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, meta.getCatalogName(), meta.getDbName());
+            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, meta.getCatalogName(),
+                    meta.getDbName(), meta.getTableName());
+        } catch (Exception e) {
+            // The catalog may be unreachable; the row is skipped like for the other external statistics.
+            return null;
+        }
+        if (db == null || table == null) {
+            return null;
+        }
+        try {
+            Authorizer.checkAnyActionOnTableLikeObject(context, db.getFullName(), table);
+        } catch (AccessDeniedException e) {
+            return null;
+        }
+
+        List<String> row = Lists.newArrayList("", "", "", "", "", "", "");
+        row.set(0, meta.getCatalogName() + "." + meta.getDbName());
+        row.set(1, meta.getTableName());
+        row.set(2, meta.getColumnNames().toString());
+        row.set(3, meta.getAnalyzeType().name());
+        row.set(4, meta.getStatisticsTypes() == null ? "" :
+                meta.getStatisticsTypes().stream().map(Enum::name).collect(Collectors.joining(", ")));
+        row.set(5, meta.getUpdateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        row.set(6, meta.getProperties() == null ? "{}" : meta.getProperties().toString());
         return row;
     }
 }

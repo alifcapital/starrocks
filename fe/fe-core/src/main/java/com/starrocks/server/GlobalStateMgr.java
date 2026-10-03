@@ -796,6 +796,8 @@ public class GlobalStateMgr {
         this.compactionMgr = new CompactionMgr();
         this.compactionControlScheduler = new CompactionControlScheduler();
         this.configRefreshDaemon = new ConfigRefreshDaemon();
+        // Storage is constructed before this daemon; register here, after both exist.
+        this.configRefreshDaemon.registerListener(() -> statisticStorage.refreshCacheLimits());
         this.starMgrMetaSyncer = new StarMgrMetaSyncer();
         this.refreshDictionaryCacheTaskDaemon = new RefreshDictionaryCacheTaskDaemon();
 
@@ -1647,6 +1649,11 @@ public class GlobalStateMgr {
 
     private void transferToNonLeader(FrontendNodeType newType) {
         isReady.set(false);
+        try {
+            analyzeMgr.revokeJoinStatisticsCollections();
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to cancel JOIN statistics collection during leader transition", e);
+        }
 
         if (feType == FrontendNodeType.OBSERVER || feType == FrontendNodeType.FOLLOWER) {
             Preconditions.checkState(newType == FrontendNodeType.UNKNOWN);

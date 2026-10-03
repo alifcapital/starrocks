@@ -161,9 +161,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         long savedScanBytesCap = sessionVariable.getExternalStatsScanBytesCap();
         long savedScanFilesCap = sessionVariable.getExternalStatsScanFilesCap();
         long savedScanRowsCap = sessionVariable.getExternalStatsScanRowsCap();
-        // Saved so the forced CTE-reuse settings (set below, restored in finally) do not leak to a reused context.
+        // Saved so the forced CTE-reuse and spill settings (set below, restored in finally) do not leak to a
+        // reused context.
         boolean savedCboCteReuse = sessionVariable.isCboCteReuse();
         double savedCboCteReuseRatio = sessionVariable.getCboCTERuseRatio();
+        boolean savedEnableSpill = sessionVariable.isEnableSpill();
         long scanBytesCap = resolveScanCap(StatsConstants.EXTERNAL_ANALYZE_SCAN_BYTES_CAP,
                 Config.connector_table_analyze_scan_bytes_cap, jobId);
         long scanFilesCap = resolveScanCap(StatsConstants.EXTERNAL_ANALYZE_SCAN_FILES_CAP,
@@ -213,6 +215,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         // enable_profile. So re-force it here, the last write before the collection SQL runs. Do not remove.
         sessionVariable.setCboCteReuse(true);
         sessionVariable.setCboCTERuseRatio(0);
+        // The shared scan feeds the column branches through a multicast exchanger that keeps what the slowest
+        // branch has not consumed. With spilling on, the exchanger flushes that backlog to disk past its memory
+        // limit (SpillableMultiCastLocalExchanger); without, an integer branch running ahead of a wide string
+        // branch keeps most of the partition in memory.
+        sessionVariable.setEnableSpill(true);
 
         String status = "SUCCESS";
         String failureReason = "";
@@ -242,7 +249,8 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
             }
 
             flushInsertStatisticsData(context, true);
-            cleanupStaleRawKeyedRows(context, jobId);
+            new StatisticExecutor().publishExternalTableStatistics(context, table, catalogName,
+                    db.getFullName(), columnNames, partitionNames);
         } catch (Exception e) {
             status = "FAILED";
             failureReason = e.getMessage();
@@ -253,6 +261,7 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
             sessionVariable.setExternalStatsScanRowsCap(savedScanRowsCap);
             sessionVariable.setCboCteReuse(savedCboCteReuse);
             sessionVariable.setCboCTERuseRatio(savedCboCteReuseRatio);
+            sessionVariable.setEnableSpill(savedEnableSpill);
             LOG.info("[ExternalStats] collect end | jobId={} catalog={} db={} table={} status={} " +
                             "durationMs={} partitions={} columns={} reason={}",
                     jobId, catalogName, db.getOriginName(), table.getName(),
@@ -350,32 +359,16 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         }
     }
 
-    // Deletes the stale raw-keyed rows for exactly the (partition, column) pairs this job just
-    // (re-)wrote under the hashed table_uuid. Purely storage hygiene: buildQueryExternalFullStatisticsSQL
-    // dedups by (partition_name, column_name, latest update_time) internally, so a lingering stale
-    // row is never double-counted even if this cleanup fails - it just wastes a bit of space until
-    // the next collection retries it. Best-effort: must never fail a job whose actual stats write
-    // already succeeded.
-    private void cleanupStaleRawKeyedRows(ConnectContext context, long jobId) {
-        String rawTableUuid = table.getUUID();
-        boolean ok = new StatisticExecutor().dropExternalStatRawPartitions(context, rawTableUuid, partitionNames, columnNames);
-        if (!ok) {
-            LOG.warn("[ExternalStats] failed to clean up stale raw-keyed rows | jobId={} catalog={} db={} table={}",
-                    jobId, catalogName, db.getOriginName(), table.getName());
-        }
-    }
-
     protected List<List<String>> buildCollectSQLList(int parallelism) {
         // Collect a partition in a single scan by wrapping the read in a CTE (base_cte_table) shared by every
         // column's aggregate branch. Columns are split into groups so a wide table does not build one CTE
         // multicast to hundreds of consumers (inflating query/plan size and the memory held for the
         // materialized partition); each group scans the partition once, so total scans are
-        // partitions x ceil(columns / columnsPerScan). The group size mirrors the internal sample path
-        // (ColumnSampleManager.splitPrimitiveTypeStats): max(2, statistic_collect_parallelism), i.e. at least
-        // two columns share a scan. Each group is a self-contained CTE query and two CTE queries cannot be
-        // UNION ALL'd (one WITH per statement), so the outer group size is fixed to 1; parallelism only sets
-        // per-query pipeline dop in the execute loop.
-        int columnsPerScan = Math.max(2, parallelism);
+        // partitions x ceil(columns / columnsPerScan). The group size is statistic_collect_parallelism, one
+        // column per scan at its minimum. Each group is a self-contained CTE query and two CTE queries cannot
+        // be UNION ALL'd (one WITH per statement), so the outer group size is fixed to 1; parallelism only
+        // sets per-query pipeline dop in the execute loop.
+        int columnsPerScan = Math.max(1, parallelism);
         List<String> totalQuerySQL = new ArrayList<>();
         for (String partitionName : partitionNames) {
             if (DO_NOT_COLLECT_PARTITIONS.contains(partitionName)) {
@@ -552,12 +545,13 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
             // Extrapolate a bounded-cost truncated sample back to the full partition. No-op (scale=1) when the
             // partition was not truncated or its total is unknown.
             ScaledStats scaled = scaleStatisticData(data);
+            String partitionName = table.isUnPartitioned() ? "" : data.getPartitionName();
 
             List<String> params = Lists.newArrayList();
             List<Expr> row = Lists.newArrayList();
 
             params.add("'" + hashedTableUuid + "'");
-            params.add("'" + StringEscapeUtils.escapeSql(data.getPartitionName()) + "'");
+            params.add("'" + StringEscapeUtils.escapeSql(partitionName) + "'");
             params.add("'" + StringEscapeUtils.escapeSql(data.getColumnName()) + "'");
             params.add("'" + catalogName + "'");
             params.add("'" + db.getOriginName() + "'");
@@ -571,7 +565,7 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
             params.add("now()");
             // int
             row.add(new StringLiteral(hashedTableUuid)); // table id, wait to byte
-            row.add(new StringLiteral(data.getPartitionName()));
+            row.add(new StringLiteral(partitionName));
             row.add(new StringLiteral(data.getColumnName())); // column name, 20 byte
             row.add(new StringLiteral(catalogName));
             row.add(new StringLiteral(db.getOriginName()));
@@ -621,6 +615,8 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
                     throw new DdlException(context.getState().getErrorMessage());
                 }
             } else {
+                // The table summary must never aggregate cells from before this committed write.
+                StatisticExecutor.requireVisibleStatisticsInsert((InsertStmt) insertStmt);
                 sqlBuffer.clear();
                 rowsBuffer.clear();
                 return;
@@ -635,10 +631,11 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
                 .map(ColumnDef::getName)
                 .collect(Collectors.toList());
 
-        String sql = "INSERT INTO external_column_statistics(" + String.join(", ", targetColumnNames) +
+        String sql = "INSERT INTO " + EXTERNAL_FULL_STATISTICS_TABLE_NAME + "(" + String.join(", ", targetColumnNames) +
                 ") values " + String.join(", ", sqlBuffer) + ";";
         QueryStatement qs = new QueryStatement(new ValuesRelation(rowsBuffer, targetColumnNames));
-        TableRef tableRef = new TableRef(QualifiedName.of(Lists.newArrayList("_statistics_", "external_column_statistics")),
+        TableRef tableRef = new TableRef(QualifiedName.of(
+                Lists.newArrayList(StatsConstants.STATISTICS_DB_NAME, EXTERNAL_FULL_STATISTICS_TABLE_NAME)),
                 null, NodePosition.ZERO);
         InsertStmt insert = new InsertStmt(tableRef, qs);
         insert.setTargetColumnNames(targetColumnNames);

@@ -142,6 +142,7 @@ statement
     | showComputeNodesStatement
 
     // Analyze Statement
+    | joinStatisticsStatement
     | analyzeStatement
     | dropStatsStatement
     | createAnalyzeStatement
@@ -1455,6 +1456,14 @@ showStreamLoadStatement
     ;
 // ------------------------------------------- Analyze Statement -------------------------------------------------------
 
+joinStatisticsStatement
+    : CREATE JOIN STATISTICS name=identifier properties? (WITH (SYNC | ASYNC) MODE)? AS queryStatement
+    | ANALYZE JOIN STATISTICS name=identifier (WITH (SYNC | ASYNC) MODE)?
+    | DROP JOIN STATISTICS (IF EXISTS)? name=identifier
+    | SHOW JOIN STATISTICS name=identifier?
+    | SHOW VERBOSE JOIN STATISTICS name=identifier (LIMIT limit=INTEGER_VALUE (OFFSET offset=INTEGER_VALUE)?)?
+    ;
+
 analyzeStatement
     : ANALYZE (FULL | SAMPLE)? TABLE tableName analyzeColumnClause? partitionNames?
         (WITH (SYNC | ASYNC) MODE)?
@@ -1467,10 +1476,14 @@ analyzeColumnClause
     | ALL COLUMNS                                               #allColumns
     | PREDICATE COLUMNS                                         #predicateColumns
     | MULTIPLE COLUMNS '(' qualifiedName  (',' qualifiedName)* ')' #multiColumnSet
+    | MCV '(' qualifiedName  (',' qualifiedName)* ')'              #mcvColumnSet
+    | MCV PREDICATE COLUMNS                                      #mcvPredicateColumns
     ;
 
 dropStatsStatement
-    : DROP (MULTIPLE COLUMNS)? STATS qualifiedName
+    : DROP (MULTIPLE COLUMNS STATS qualifiedName
+           | MCV STATS qualifiedName ('(' identifier (',' identifier)* ')')?
+           | STATS qualifiedName)
     ;
 
 histogramStatement:
@@ -1492,6 +1505,8 @@ createAnalyzeStatement
     : CREATE ANALYZE (FULL | SAMPLE)? ALL properties?
     | CREATE ANALYZE (FULL | SAMPLE)? DATABASE db=identifier properties?
     | CREATE ANALYZE (FULL | SAMPLE)? (IF NOT EXISTS)? TABLE qualifiedName ('(' qualifiedName (',' qualifiedName)* ')')? properties?
+    | CREATE ANALYZE FULL TABLE qualifiedName MCV '(' qualifiedName (',' qualifiedName)* ')' properties?
+    | CREATE ANALYZE JOIN STATISTICS joinName=identifier properties?
     | CREATE histogramStatement
     ;
 
@@ -1505,7 +1520,7 @@ showAnalyzeStatement
     ;
 
 showStatsMetaStatement
-    : SHOW (MULTIPLE COLUMNS)? STATS META showPredicateClauses
+    : SHOW (MULTIPLE COLUMNS | MCV)? STATS META showPredicateClauses
     ;
 
 showHistogramMetaStatement
@@ -3319,7 +3334,7 @@ nonReserved
     | INTERVAL | ISOLATION
     | JOB
     | LABEL | LAST | LESS | LEVEL | LIST | LOCAL | LOCATION | LOGS | LOGICAL | LOW_PRIORITY | LOCK | LOCATIONS
-    | MANUAL | MAP | MAPPING | MAPPINGS | MASKING | MATCH | MATCH_ANY | MATCH_ALL | MAPPINGS | MATERIALIZED | MAX | META | METADATA | MIN | MINUTE | MINUTES | MODE | MODIFY | MONTH | MERGE | MINUS | MULTIPLE
+    | MANUAL | MAP | MAPPING | MAPPINGS | MASKING | MATCH | MATCH_ANY | MATCH_ALL | MAPPINGS | MATERIALIZED | MAX | MCV | META | METADATA | MIN | MINUTE | MINUTES | MODE | MODIFY | MONTH | MERGE | MINUS | MULTIPLE
     | NAME | NAMES | NEGATIVE | NO | NODE | NODES | NONE | NULLS | NUMBER | NUMERIC
     | OBSERVER | OF | OFFSET | ONLY | OPTIMIZER | OPEN | OPERATE | OPTION | OVERWRITE | OFF
     | PARTITIONS | PASSWORD | PATH | PAUSE | PENDING | PERCENTILE_UNION | PIVOT | PLAN | PLUGIN | PLUGINS | POLICY | POLICIES
@@ -3330,7 +3345,7 @@ nonReserved
     | RESOURCE | RESOURCES | RESTORE | RESUME | RETAIN | RETENTION | RETURNS | RETRY | REVERT | ROLE | ROLES | ROLLUP | ROLLBACK | ROUTINE | ROW | RUNNING | RULE | RULES
     | SAMPLE | SCHEDULE | SCHEDULER | SECOND | SECURITY | SEPARATOR | SERIALIZABLE |SEMI | SESSION | SETS | SIGNED | SNAPSHOT | SNAPSHOTS | SPLIT | SQL | SQLBLACKLIST | START | STARROCKS
     | STREAM | SUM | STATUS | STOP | SKIP_KW | SKIP_HEADER | SWAP
-    | STORAGE| STRING | STRUCT | STATS | SUBMIT | SUSPEND | SYNC | SYSTEM | SYSTEM_TIME
+    | STORAGE| STRING | STRUCT | STATS | STATISTICS | SUBMIT | SUSPEND | SYNC | SYSTEM | SYSTEM_TIME
     | TABLES | TABLET | TABLETS | TAG | TASK | TEMPORARY | TIMESTAMP | TIMESTAMPADD | TIMESTAMPDIFF | THAN | TIME | TIMES | TRANSACTION | TRACE | TRANSLATE
     | TRIM_SPACE
     | TRIGGERS | TRUNCATE | TYPE | TYPES

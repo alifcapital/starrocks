@@ -46,6 +46,12 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
 
     public static List<String> showAnalyzeJobs(ConnectContext context,
                                                AnalyzeJob analyzeJob) throws MetaNotFoundException {
+        if (analyzeJob instanceof com.starrocks.statistic.ExternalAnalyzeJob extended
+                && extended.getAnalyzeType() == com.starrocks.statistic.StatsConstants.AnalyzeType.JOIN
+                && !com.starrocks.statistic.ExtendedStatisticsSchedule.canInspectJoin(
+                        context, extended.getJoinStatisticsName(), extended.getJoinStatisticsId())) {
+            return null;
+        }
         List<String> row = Lists.newArrayList("", analyzeJob.getCatalogName(), "ALL", "ALL",
                 "ALL", "", "", "", "", "", "");
         List<String> columns = analyzeJob.getColumns();
@@ -107,6 +113,10 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
             }
         }
 
+        if (analyzeJob instanceof com.starrocks.statistic.ExternalAnalyzeJob extended
+                && extended.getAnalyzeType() == com.starrocks.statistic.StatsConstants.AnalyzeType.JOIN) {
+            row.set(4, "JOIN STATISTICS " + extended.getJoinStatisticsName());
+        }
         row.set(5, analyzeJob.getAnalyzeType().name());
         row.set(6, analyzeJob.getScheduleType().name());
         row.set(7, analyzeJob.getProperties() == null ? "{}" : analyzeJob.getProperties().toString());

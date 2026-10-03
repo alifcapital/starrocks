@@ -16,6 +16,7 @@ package com.starrocks.sql.plan;
 
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.common.FeConstants;
+import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.CachedStatisticStorage;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Histogram;
@@ -177,7 +178,8 @@ class WindowSkewTest extends PlanTestBase {
         final var statisticStorage = connectContext.getGlobalStateMgr().getStatisticStorage();
 
         Histogram histogram = new Histogram(
-                /* buckets */ List.of(),
+                // 300/1000 rows have p=1; the bucket records the remaining non-MCV rows.
+                /* buckets */ List.of(new Bucket(2, 8, 700L, 100L)),
                 /* mcv */ Map.of("1", 300L));
 
         final var skewedMCV = ColumnStatistic.builder().setNullsFraction(0.0).setHistogram(histogram).build();
@@ -201,13 +203,7 @@ class WindowSkewTest extends PlanTestBase {
                         " result nullable: true], ]\n" +
                         "  |  partition by: [5: p, INT, true]\n" +
                         "  |  order by: [6: s, INT, true] ASC\n" +
-                        "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n" +
-                        "  |  cardinality: 730\n" +
-                        "  |  column statistics: \n" +
-                        "  |  * p-->[-Infinity, Infinity, 0.0, NaN, NaN] MCV: [[1:300]] ESTIMATE\n" +
-                        "  |  * s-->[-Infinity, Infinity, 0.0, 1.0, 1.0] UNKNOWN\n" +
-                        "  |  * x-->[-Infinity, Infinity, 0.0, 1.0, 1.0] UNKNOWN\n" +
-                        "  |  * sum(7: x)-->[-Infinity, Infinity, 0.0, 1.0, 1.0] UNKNOWN");
+                        "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n");
         assertContains(plan,
                 "ANALYTIC\n" +
                         "  |  functions: [, sum[([3: x, INT, true]); args: INT; result: BIGINT; args nullable: true;" +

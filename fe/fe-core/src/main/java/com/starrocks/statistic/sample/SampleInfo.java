@@ -146,6 +146,13 @@ public class SampleInfo {
     public String generatePrimitiveTypeColumnTask(long tableId, long dbId, String tableName, String dbName,
                                                   List<ColumnStats> primitiveTypeStats,
                                                   TabletSampleManager manager) {
+        return generatePrimitiveTypeColumnTask(
+                tableId, dbId, tableName, dbName, primitiveTypeStats, manager, false);
+    }
+
+    public String generatePrimitiveTypeColumnTask(long tableId, long dbId, String tableName, String dbName,
+                                                  List<ColumnStats> primitiveTypeStats,
+                                                  TabletSampleManager manager, boolean useMetaStatistics) {
         String prefix = "INSERT INTO " + STATISTICS_DB_NAME + "." + SAMPLE_STATISTICS_TABLE_NAME;
         List<String> targetColumnNames = StatisticUtils.buildStatsColumnDef(SAMPLE_STATISTICS_TABLE_NAME).stream()
                 .map(ColumnDef::getName)
@@ -161,7 +168,8 @@ public class SampleInfo {
         int size = primitiveTypeStats.size();
         for (ColumnStats columnStats : primitiveTypeStats) {
             idx++;
-            builder.append(generateQueryColumnSql(tableId, dbId, tableName, dbName, columnStats, "col_" + idx));
+            builder.append(generateQueryColumnSql(
+                    tableId, dbId, tableName, dbName, columnStats, "col_" + idx, useMetaStatistics));
             if (idx != size) {
                 builder.append(" UNION ALL ");
             }
@@ -252,7 +260,7 @@ public class SampleInfo {
     }
 
     private String generateQueryColumnSql(long tableId, long dbId, String tableName, String dbName,
-                                          ColumnStats columnStats, String alias) {
+                                          ColumnStats columnStats, String alias, boolean useMetaStatistics) {
         String sep = ", ";
         StringBuilder builder = new StringBuilder();
         builder.append("SELECT ");
@@ -262,15 +270,29 @@ public class SampleInfo {
         builder.append("'").append(StringEscapeUtils.escapeSql(dbName)).append(".")
                 .append(StringEscapeUtils.escapeSql(tableName)).append("'").append(sep);
         builder.append(addSingleQuote(dbName)).append(sep);
-        builder.append(columnStats.getRowCount()).append(sep);
-        builder.append(columnStats.getDataSize()).append(sep);
-        builder.append(columnStats.getDistinctCount(rowSampleRatio)).append(sep);
-        builder.append(columnStats.getNullCount()).append(sep);
-        builder.append(columnStats.getMax()).append(sep);
-        builder.append(columnStats.getMin()).append(sep);
+        String rows = useMetaStatistics ? "IFNULL(MAX(meta_bounds.total_rows), 0)" : columnStats.getRowCount();
+        String scale = useMetaStatistics ? " * MAX(meta_bounds.total_rows) / NULLIF(SUM(t1.count), 0)" : "";
+        builder.append(rows).append(sep);
+        builder.append("IFNULL((").append(columnStats.getDataSize()).append(")").append(scale).append(", 0)").append(sep);
+        builder.append(columnStats.getDistinctCount(this,
+                useMetaStatistics ? rows : Long.toString(totalRowCount))).append(sep);
+        builder.append("IFNULL((").append(columnStats.getNullCount()).append(")").append(scale).append(", 0)").append(sep);
+        boolean metaBounds = useMetaStatistics && columnStats.supportsMetaBounds();
+        builder.append(metaBounds ? "IFNULL(MAX(meta_bounds.max_value), '')" : columnStats.getMax()).append(sep);
+        builder.append(metaBounds ? "IFNULL(MIN(meta_bounds.min_value), '')" : columnStats.getMin()).append(sep);
         builder.append("NOW() FROM (");
         builder.append("SELECT t0.`column_key`, COUNT(1) as count FROM (SELECT ");
         builder.append(alias).append(" AS column_key FROM `base_cte_table`) as t0 GROUP BY t0.column_key) AS t1");
+        if (useMetaStatistics) {
+            // Keep metadata even when a nonempty table happens to produce an empty sample.
+            builder.append(" RIGHT JOIN (SELECT COUNT(*) AS total_rows");
+            if (metaBounds) {
+                builder.append(", MAX(").append(columnStats.getQuotedColumnName()).append(") AS max_value")
+                        .append(", MIN(").append(columnStats.getQuotedColumnName()).append(") AS min_value");
+            }
+            builder.append(" FROM `").append(dbName).append("`.`").append(tableName)
+                    .append("` [_META_]) meta_bounds ON TRUE");
+        }
         return builder.toString();
     }
 

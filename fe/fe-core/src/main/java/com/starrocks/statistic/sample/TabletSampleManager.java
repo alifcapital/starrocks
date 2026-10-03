@@ -56,6 +56,11 @@ public class TabletSampleManager {
     private final long sampleRowsLimit;
 
     public static TabletSampleManager init(Map<String, String> properties, Table table) {
+        return init(properties, table, null);
+    }
+
+    public static TabletSampleManager init(Map<String, String> properties, Table table,
+                                           com.google.common.collect.Table<Long, Long, Long> tabletRowCounts) {
         double highSampleRatio = Double.parseDouble(properties.getOrDefault(StatsConstants.HIGH_WEIGHT_SAMPLE_RATIO,
                 "0.5"));
         double mediumHighRatio = Double.parseDouble(properties.getOrDefault(StatsConstants.MEDIUM_HIGH_WEIGHT_SAMPLE_RATIO,
@@ -71,7 +76,7 @@ public class TabletSampleManager {
 
         TabletSampleManager manager = new TabletSampleManager(highSampleRatio, mediumHighRatio, mediumLowRatio, lowRatio,
                 maxSize, sampleRowLimit);
-        manager.classifyTablet(table);
+        manager.classifyTablet(table, tabletRowCounts);
         return manager;
     }
 
@@ -84,7 +89,7 @@ public class TabletSampleManager {
         this.sampleRowsLimit = sampleRowsLimit;
     }
 
-    private void classifyTablet(Table table) {
+    private void classifyTablet(Table table, com.google.common.collect.Table<Long, Long, Long> tabletRowCounts) {
         if (table instanceof OlapTable) {
             OlapTable olapTable = (OlapTable) table;
             for (Partition logicalPartition : olapTable.getPartitions()) {
@@ -95,6 +100,12 @@ public class TabletSampleManager {
                     for (Tablet tablet : physicalPartition.getLatestBaseIndex().getTablets()) {
                         long tabletId = tablet.getId();
                         long rowCount = tablet.getFuzzyRowCount();
+                        if (rowCount <= 0 && tabletRowCounts != null) {
+                            Long fallback = tabletRowCounts.get(logicalPartition.getId(), tabletId);
+                            if (fallback != null) {
+                                rowCount = fallback;
+                            }
+                        }
                         TabletStats tabletStats = new TabletStats(tabletId, physicalPartition.getId(), rowCount);
                         if (rowCount >= HIGH_WEIGHT_ROWS_THRESHOLD) {
                             highWeight.addTabletStats(tabletStats);

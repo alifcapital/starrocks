@@ -15,6 +15,7 @@
 package com.starrocks.statistic;
 
 import com.starrocks.catalog.Database;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.qe.ConnectContext;
@@ -29,6 +30,11 @@ import java.util.List;
 import java.util.Map;
 
 public class SampleStatisticsCollectJob extends StatisticsCollectJob {
+    private boolean useMetaStatistics;
+
+    public void setUseMetaStatistics(boolean value) {
+        useMetaStatistics = value;
+    }
 
     public SampleStatisticsCollectJob(Database db, Table table, List<String> columnNames,
                                       StatsConstants.AnalyzeType type, StatsConstants.ScheduleType scheduleType,
@@ -44,7 +50,10 @@ public class SampleStatisticsCollectJob extends StatisticsCollectJob {
 
     @Override
     public void collect(ConnectContext context, AnalyzeStatus analyzeStatus) throws Exception {
-        TabletSampleManager tabletSampleManager = TabletSampleManager.init(properties, table);
+        if (table.isTemporaryTable()) {
+            context.setSessionId(((OlapTable) table).getSessionId());
+        }
+        TabletSampleManager tabletSampleManager = TabletSampleManager.init(properties, table, partitionTabletRowCounts);
         SampleInfo sampleInfo = tabletSampleManager.generateSampleInfo();
         if (sampleInfo.getMaxSampleTabletNum() == 0) {
             analyzeStatus.setProgress(100);
@@ -77,19 +86,26 @@ public class SampleStatisticsCollectJob extends StatisticsCollectJob {
         int totalTaskNum = columnStatsBatchList.size();
         double recordStagePoint = 0.2;
         for (List<ColumnStats> columnStatsBatch : columnStatsBatchList) {
+            checkCancelled(analyzeStatus);
+            calculateAndSetRemainingTimeout(context, analyzeStatus);
             String primitiveTypeColsTask = sampleInfo.generatePrimitiveTypeColumnTask(table.getId(),
-                    db.getId(), table.getName(), db.getFullName(), columnStatsBatch, tabletSampleManager);
+                    db.getId(), table.getName(), db.getFullName(), columnStatsBatch, tabletSampleManager, useMetaStatistics);
             context.getSessionVariable().setExprChildrenLimit(
                     Math.max(Config.expr_children_limit, sampleInfo.getMaxSampleTabletNum()));
             collectStatisticSync(primitiveTypeColsTask, context, analyzeStatus);
 
-            double progress = finishedTaskNum * 1.0 / totalTaskNum;
+            double progress = ++finishedTaskNum * 1.0 / totalTaskNum;
             if (progress >= recordStagePoint) {
                 recordStagePoint += 0.2;
                 analyzeStatus.setProgress((long) Math.ceil(progress * 100));
                 GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
             }
         }
+    }
+
+    @Override
+    public boolean usesSampleStatisticsTable(String column) {
+        return true;
     }
 
     @Override

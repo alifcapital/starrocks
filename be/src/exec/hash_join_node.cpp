@@ -345,8 +345,6 @@ Status HashJoinNode::open(RuntimeState* state) {
         if (_children[0]->type() == TPlanNodeType::EXCHANGE_NODE &&
             _children[1]->type() == TPlanNodeType::EXCHANGE_NODE) {
             _is_push_down = false;
-        } else if (_ht.get_row_count() > _runtime_join_filter_pushdown_limit) {
-            _is_push_down = false;
         }
 
         if (_is_push_down || !child(1)->conjunct_ctxs().empty()) {
@@ -562,7 +560,10 @@ pipeline::OpFactories HashJoinNode::_decompose_to_pipeline(pipeline::PipelineBui
 
     auto partial_rf_merger = std::make_unique<PartialRuntimeFilterMerger>(
             pool, runtime_join_filter_pushdown_limit, global_runtime_filter_build_max_size,
-            runtime_state()->func_version(), runtime_state()->enable_join_runtime_bitset_filter());
+            runtime_state()->func_version(), runtime_state()->enable_join_runtime_bitset_filter(),
+            runtime_state()->query_options().__isset.max_pushdown_conditions_per_column
+                    ? runtime_state()->query_options().max_pushdown_conditions_per_column
+                    : config::max_pushdown_conditions_per_column);
 
     auto build_op = std::make_shared<HashJoinBuilderFactory>(context->next_operator_id(), id(), hash_joiner_factory,
                                                              std::move(partial_rf_merger), _distribution_mode,
@@ -974,9 +975,9 @@ Status HashJoinNode::_process_other_conjunct(ChunkPtr* chunk) {
 Status HashJoinNode::_push_down_in_filter(RuntimeState* state) {
     SCOPED_TIMER(_build_push_down_expr_timer);
 
-    if (_ht.get_row_count() > 1024) {
-        return Status::OK();
-    }
+    size_t max_conditions = state->query_options().__isset.max_pushdown_conditions_per_column
+                                    ? state->query_options().max_pushdown_conditions_per_column
+                                    : config::max_pushdown_conditions_per_column;
 
     if (_ht.get_row_count() > 0) {
         // there is a bug (DSDB-3860) in old planner if probe_expr is not slot-ref, and this fix is workaround.
@@ -997,7 +998,7 @@ Status HashJoinNode::_push_down_in_filter(RuntimeState* state) {
             builder.use_as_join_runtime_filter();
             Status st = builder.create();
             if (!st.ok()) continue;
-            builder.add_values(column, kHashJoinKeyColumnOffset);
+            if (!builder.add_values(column, kHashJoinKeyColumnOffset, max_conditions)) continue;
             _runtime_in_filters.push_back(builder.get_in_const_predicate());
         }
     }
@@ -1020,17 +1021,17 @@ Status HashJoinNode::_do_publish_runtime_filters(RuntimeState* state, int64_t li
     for (auto* rf_desc : _build_runtime_filters) {
         // skip if it does not have consumer.
         if (!rf_desc->has_consumer()) continue;
-        // skip if ht.size() > limit and it's only for local.
-        if (!rf_desc->has_remote_targets() && _ht.get_row_count() > limit) continue;
         LogicalType build_type = rf_desc->build_expr_type();
         RuntimeFilter* filter =
                 RuntimeFilterHelper::create_runtime_bloom_filter(_pool, build_type, rf_desc->join_mode());
         if (filter == nullptr) continue;
-        filter->get_membership_filter()->init(_ht.get_row_count());
 
         int expr_order = rf_desc->build_expr_order();
         ColumnPtr column = _ht.get_key_columns()[expr_order];
         bool eq_null = _is_null_safes[expr_order];
+        const size_t filter_ndv = rf_desc->estimate_local_ndv(_ht.get_row_count(), _ht.table_items()->estimate_ndv());
+        if (!rf_desc->has_remote_targets() && filter_ndv > limit) continue;
+        filter->get_membership_filter()->init(filter_ndv);
         RETURN_IF_ERROR(RuntimeFilterHelper::fill_runtime_filter(column, build_type, filter, kHashJoinKeyColumnOffset,
                                                                  eq_null));
         rf_desc->set_runtime_filter(filter);

@@ -44,6 +44,30 @@ public:
     void TearDown() override {}
 };
 
+TEST_F(SIMDTest, count_bitmap) {
+    EXPECT_EQ(0u, SIMD::count_bitmap(nullptr, 0).set_bits);
+    std::vector<uint8_t> data(1040);
+    for (int pattern = 0; pattern < 4; ++pattern) {
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = pattern == 0 ? 0 : pattern == 1 ? 255 : pattern == 2 ? uint8_t(i * 37) : uint8_t(1u << (i % 8));
+        }
+        for (size_t offset = 0; offset < 16; ++offset) {
+            for (size_t length : {0, 1, 7, 8, 15, 16, 17, 31, 32, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024}) {
+                SCOPED_TRACE(testing::Message() << pattern << ":" << offset << ":" << length);
+                size_t bytes = 0;
+                size_t bits = 0;
+                for (size_t i = offset; i < offset + length; ++i) {
+                    bytes += data[i] != 0;
+                    for (int bit = 0; bit < 8; ++bit) bits += (data[i] >> bit) & 1;
+                }
+                auto counts = SIMD::count_bitmap(data.data() + offset, length);
+                EXPECT_EQ(bytes, counts.nonzero_bytes);
+                EXPECT_EQ(bits, counts.set_bits);
+            }
+        }
+    }
+}
+
 TEST_F(SIMDTest, count_zeros) {
     EXPECT_EQ(0u, SIMD::count_zero(std::vector<int8_t>{}));
     EXPECT_EQ(3u, SIMD::count_zero(std::vector<int8_t>{0, 0, 0}));

@@ -231,6 +231,17 @@ public class ConfigBase {
             throws InvalidConfException {
         // TODO: refactor to allow register custom validator for each config field
         switch (f.getName()) {
+            case "external_statistics_cache_max_bytes":
+                if (Long.parseLong(confVal) < 0) {
+                    throw new InvalidConfException(f.getName() + " must be non-negative");
+                }
+                break;
+            case "statistic_mcv_cache_max_bytes":
+            case "statistic_join_cache_max_bytes":
+                if (Long.parseLong(confVal) <= 0) {
+                    throw new InvalidConfException(f.getName() + " must be positive");
+                }
+                break;
             case "authentication_chain":
                 Set<String> argsSet = new HashSet<>(Arrays.asList(arrayArgs));
                 if (!f.getType().equals(String[].class)

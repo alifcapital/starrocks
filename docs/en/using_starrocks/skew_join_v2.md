@@ -11,7 +11,7 @@ Skew Join V2 is an advanced optimization feature in StarRocks that addresses dat
 
 Data skew occurs when certain values in join columns appear much more frequently than others, leading to uneven data distribution across nodes and causing performance bottlenecks. Skew Join V2 solves this problem by:
 
-1. **Identifying skew values**: Manually specifying values that cause data skew
+1. **Identifying skew values**: Using statistics or manually specifying frequent keys
 2. **Broadcasting skew values**: Broadcasting these specific values to all nodes to ensure even data distribution
 3. **Hybrid execution**: Using a combination of shuffle and broadcast joins for optimal performance
 
@@ -34,9 +34,40 @@ SET enable_optimize_skew_join_v2 = true;
 
 After enabling Skew Join V2, you can then update your queries based on the [syntax](#usage) with explicitly specified skew values.
 
-:::note
-Currently, Skew Join V2 does not support automatic plan rewrite based on statistics. Only hint-based manual SQL rewrite is supported.
-:::
+## Automatic detection from statistics
+
+To use automatic detection without SQL hints, enable it separately:
+
+```SQL
+SET enable_stats_to_optimize_skew_join = true;
+```
+
+The detector uses histograms, retained local MCV tuples, and applicable JOIN statistics.
+Conditional MCV can identify frequent keys after a filter even when its retained head does
+not cover all rows. For a multi-column equality JOIN, joint tuples identify skew of the
+complete key; frequent individual components alone do not establish joint skew.
+
+JOIN statistics store original values once per shared retained-key dictionary. Objects
+collected before this support was added remain usable for cardinality and runtime-filter
+estimates. Run `ANALYZE JOIN STATISTICS object_name` to add the dictionary for skew detection.
+This does not require a new statistics definition. Textual key encodings longer than
+1024 bytes are omitted from skew detection, while their numeric frequency summaries remain.
+
+Above a JOIN, retained frequencies can be used when its sources are joined on the same
+complete equality key. Different-key chains do not expose derived heavy keys from their
+separate marginal distributions. Unsupported predicates or missing statistics retain the
+ordinary planning behavior.
+
+V2 keeps its existing eligibility thresholds: `skew_join_mcv_min_input_rows`,
+`skew_join_optimize_use_mcv_count`, `skew_join_data_skew_threshold`, and
+`skew_join_mcv_single_threshold`. It splits only a physical INNER or LEFT JOIN whose
+inputs both use hash shuffle exchanges. Broadcast, bucket-shuffle, and right-outer plans
+are not converted by this rule. NULL-safe equality (`<=>`) retains the ordinary JOIN,
+including when a skew hint is present.
+
+Use `EXPLAIN` to confirm the split and compare execution profiles before enabling the
+feature for a workload. A frequent key does not guarantee that broadcasting its matches
+is cheaper. In particular, V1 salting and V2 splitting have different costs.
 
 ## Usage
 
@@ -173,17 +204,6 @@ FROM table1 t1
 LEFT JOIN [skew|t1.category('electronics')] t2 
 ON t1.category = t2.category;
 
--- Left Semi Join
-SELECT t1.id
-FROM table1 t1 
-LEFT SEMI JOIN [skew|t1.category('electronics')] t2 
-ON t1.category = t2.category;
-
--- Left Anti Join
-SELECT t1.id
-FROM table1 t1 
-LEFT ANTI JOIN [skew|t1.category('electronics')] t2 
-ON t1.category = t2.category;
 ```
 
 ## Best Practices
@@ -212,13 +232,13 @@ Follow these rules to choose the appropriate skew values:
 ## Limitations
 
 - **Supported Join Types**
-  Currently, only INNER JOIN, LEFT JOIN, LEFT SEMI JOIN, and LEFT ANTI JOIN are supported.
+  Currently, only physical INNER JOIN and LEFT JOIN are supported.
 - **Data Types**
   Currently, only basic data types (INT, BIGINT, STRING, DATE, DATETIME, and string types) are supported.
 - **Complex Expressions**
   The support for complex expressions in Join conditions is limited.
 - **Skew Table**
-  Skew Join V2 can only handle scenarios where the large table in the JOIN operation is skewed, and the large table must be used as the left table.
+  An INNER JOIN can have skew on either input. Both split branches use the same build side to avoid a cycle through their bounded queues. For LEFT JOIN, only skew on the preserved left input is supported.
 - **Join Reordering**
   Using the `skew` hint will prevent the optimizer from reordering the Join. The Join will be executed in the order specified in the SQL, and the optimizer will not attempt to change the Join order or swap the left and right tables of the Join node containing the hint.
 

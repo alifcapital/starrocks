@@ -113,6 +113,27 @@ PROPERTIES(
 );
 ```
 
+### 收集外部表的 MCV 统计信息
+
+```sql
+ANALYZE [FULL] TABLE catalog.db.table MCV (column [, column ...])
+[PROPERTIES ("mcv_size" = "100", "mcv_bucket_num" = "64")];
+
+SHOW MCV STATS META;
+DROP MCV STATS catalog.db.table;
+DROP MCV STATS catalog.db.table (column [, column ...]);
+```
+
+MCV 统计信息描述单列或列组的频率分布。收集过程扫描指定列两次：第一次使用 Sketch 确定高频候选值，并为数值或日期时间单列确定桶边界；第二次计算候选值、NULL 和桶的行数。计数对应第二次扫描的精确结果，去重值数量及候选边界由 Sketch 估计。内存用量由 Sketch、候选值和桶的配置大小决定，而非输入的去重值数量。
+
+- `mcv_size`：最多保留的高频元组数量。默认值取自 FE 配置 `statistic_mcv_size`，默认为 100。
+- `mcv_bucket_num`：单列剩余分布的目标桶数。默认值取自 `statistic_mcv_bucket_num`，默认为 64。边界可能合并，因此实际桶数可能更少。数值和日期时间列使用有序桶；字符串和布尔列使用剩余行数及去重值数量，不使用有序桶。
+- 两个属性均为正整数。多列组不能指定 `mcv_bucket_num`。直方图属性不适用于 MCV 收集。
+
+目前仅支持对可分析的外部表进行同步全量收集，需指定一个或多个顶层标量列。MCV 使用独立的存储和生命周期，无需收集旧版直方图。不指定列列表时，`DROP MCV STATS` 删除该表的所有 MCV 列组。指定列列表时，仅删除完全匹配的列组，列的顺序不影响匹配；其他 MCV 列组和基本统计信息保持不变。
+
+单列记录向优化器提供高频值、剩余桶、去重值数量和 NULL 比例。多列记录还提供联合频率和各分量计数，以估计相关谓词。优化器单独计算已知高频元组与剩余分布。两次扫描之间不固定同一个外部快照。
+
 ## 相关文档
 
 [SHOW ANALYZE STATUS](SHOW_ANALYZE_STATUS.md)：查看当前所有**手动采集任务**的状态。

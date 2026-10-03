@@ -264,6 +264,18 @@ bool HashJoiner::need_input() const {
     return _phase == HashJoinPhase::PROBE && _hash_join_prober->need_input();
 }
 
+void HashJoiner::track_completed_probe_rows() {
+    _hash_join_prober->track_completed_rows();
+}
+
+int64_t HashJoiner::completed_probe_rows() const {
+    return _hash_join_prober->completed_rows();
+}
+
+Status HashJoiner::drain_probe_input(RuntimeState* state) {
+    return _hash_join_prober->drain_input(state);
+}
+
 bool HashJoiner::has_output() const {
     if (_phase == HashJoinPhase::BUILD) {
         return false;
@@ -332,17 +344,14 @@ void HashJoiner::close(RuntimeState* state) {
 }
 
 Status HashJoiner::create_runtime_filters(RuntimeState* state) {
+    SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
     if (_phase != HashJoinPhase::BUILD) {
         return Status::OK();
     }
 
     uint64_t runtime_join_filter_pushdown_limit = runtime_bloom_filter_row_limit();
-    size_t ht_row_count = _hash_join_builder->hash_table_row_count();
-
     if (_is_push_down) {
         if (_probe_node_type == TPlanNodeType::EXCHANGE_NODE && _build_node_type == TPlanNodeType::EXCHANGE_NODE) {
-            _is_push_down = false;
-        } else if (ht_row_count > runtime_join_filter_pushdown_limit) {
             _is_push_down = false;
         }
 
@@ -558,17 +567,12 @@ Status HashJoiner::_process_where_conjunct(ChunkPtr* chunk) {
 }
 
 Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
-    SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
     size_t ht_row_count = get_ht_row_count();
 
     // Use FE session variable if set, otherwise fall back to BE config
     size_t max_conditions = config::max_pushdown_conditions_per_column;
     if (state->query_options().__isset.max_pushdown_conditions_per_column) {
         max_conditions = state->query_options().max_pushdown_conditions_per_column;
-    }
-
-    if (ht_row_count > max_conditions) {
-        return Status::OK();
     }
 
     std::vector<JoinHashTable*> hash_tables;
@@ -589,15 +593,19 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
                 continue;
             }
 
+            bool within_limit = true;
             for (auto* ht : hash_tables) {
                 ColumnPtr column = ht->get_key_columns()[i];
                 if (probe_expr->type().is_string_type()) {
                     _string_key_columns.emplace_back(column);
                 }
-                builder.add_values(column, kHashJoinKeyColumnOffset);
+                if (!builder.add_values(column, kHashJoinKeyColumnOffset, max_conditions)) {
+                    within_limit = false;
+                    break;
+                }
             }
 
-            _runtime_in_filters.push_back(builder.get_in_const_predicate());
+            _runtime_in_filters.push_back(within_limit ? builder.get_in_const_predicate() : nullptr);
         }
     }
 
@@ -606,19 +614,15 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
 }
 
 Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t limit) {
-    SCOPED_TIMER(build_metrics().build_runtime_filter_timer);
     size_t ht_row_count = get_ht_row_count();
     std::vector<JoinHashTable*> hash_tables;
     _hash_join_builder->visitHt([&hash_tables](JoinHashTable* ht) { hash_tables.emplace_back(ht); });
 
+    std::optional<size_t> hash_table_ndv;
     for (auto* rf_desc : _build_runtime_filters) {
         rf_desc->set_is_pipeline(true);
         // skip if it does not have consumer.
         if (!rf_desc->has_consumer()) {
-            _runtime_bloom_filter_build_params.emplace_back();
-            continue;
-        }
-        if (!rf_desc->has_remote_targets() && ht_row_count > limit) {
             _runtime_bloom_filter_build_params.emplace_back();
             continue;
         }
@@ -635,6 +639,15 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
         }
 
         TypeDescriptor type_descriptor = _build_expr_ctxs[expr_order]->root()->type();
+        if (!rf_desc->estimated_build_ndv().has_value() && !hash_table_ndv.has_value()) {
+            hash_table_ndv = 0;
+            for (auto* ht : hash_tables) *hash_table_ndv += ht->table_items()->estimate_ndv();
+        }
+        const size_t filter_ndv = rf_desc->estimate_local_ndv(ht_row_count, hash_table_ndv.value_or(ht_row_count));
+        if (!rf_desc->has_remote_targets() && filter_ndv > limit) {
+            _runtime_bloom_filter_build_params.emplace_back();
+            continue;
+        }
 
         MutableRuntimeFilterPtr filter = nullptr;
         auto multi_partitioned = rf_desc->layout().pipeline_level_multi_partitioned();
@@ -647,13 +660,14 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
                 _runtime_bloom_filter_build_params.emplace_back();
                 continue;
             }
-            filter->get_membership_filter()->init(ht_row_count);
+            filter->get_membership_filter()->init(filter_ndv);
             RETURN_IF_ERROR(RuntimeFilterHelper::fill_runtime_filter(columns, build_type, filter.get(),
                                                                      kHashJoinKeyColumnOffset, eq_null));
         }
 
         _runtime_bloom_filter_build_params.emplace_back(pipeline::RuntimeMembershipFilterBuildParam(
                 multi_partitioned, eq_null, is_empty, std::move(columns), std::move(filter), type_descriptor));
+        _runtime_bloom_filter_build_params.back()->ndv = filter_ndv;
     }
     return Status::OK();
 }

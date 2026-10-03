@@ -62,6 +62,34 @@ public class ExternalAnalyzeStatus implements AnalyzeStatus, Writable {
     @SerializedName("endTime")
     private LocalDateTime endTime;
 
+    private transient volatile long joinCollectionGeneration;
+
+    public long getJoinCollectionGeneration() {
+        return joinCollectionGeneration;
+    }
+
+    public void setJoinCollectionGeneration(long generation) {
+        joinCollectionGeneration = generation;
+    }
+
+    @SerializedName("joinStatisticsId")
+    private long joinStatisticsId;
+    @SerializedName("joinStatisticsName")
+    private String joinStatisticsName;
+
+    public void setJoinStatisticsTarget(ExternalAnalyzeJob job) {
+        joinStatisticsId = job.getJoinStatisticsId();
+        joinStatisticsName = job.getJoinStatisticsName();
+    }
+
+    public long getJoinStatisticsId() {
+        return joinStatisticsId;
+    }
+
+    public String getJoinStatisticsName() {
+        return joinStatisticsName;
+    }
+
     @SerializedName("warehouseName")
     private String warehouseName = "";
 

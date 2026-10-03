@@ -24,6 +24,11 @@ import java.util.Optional;
 public interface IRelaxDictManager {
     boolean hasGlobalDict(String tableUUID, String columnName);
     Optional<ColumnDict> getGlobalDict(String tableUUID, String columnName);
+
+    default Optional<ColumnDict> getCachedGlobalDict(String tableUUID, String columnName) {
+        return Optional.empty();
+    }
+
     void updateGlobalDict(String tableUUID, String columnName, Optional<TStatisticData> stat);
     void removeGlobalDict(String tableUUID, String columnName);
     void invalidTemporarily(String tableUUID, String columnName);

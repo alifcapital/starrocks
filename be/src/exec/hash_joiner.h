@@ -265,6 +265,9 @@ public:
 
     const HashJoinBuildMetrics& build_metrics() { return *_build_metrics; }
     const HashJoinProbeMetrics& probe_metrics() { return *_probe_metrics; }
+    void track_completed_probe_rows();
+    int64_t completed_probe_rows() const;
+    Status drain_probe_input(RuntimeState* state);
     bool is_skew_join() const { return _is_skew_join; }
 
     size_t runtime_in_filter_row_limit() const { return 1024; }

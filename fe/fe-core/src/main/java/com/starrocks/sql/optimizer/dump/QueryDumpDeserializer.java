@@ -27,12 +27,20 @@ import com.starrocks.catalog.Resource;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatsCacheLoader;
+import com.starrocks.sql.optimizer.statistics.Histogram;
+import com.starrocks.sql.optimizer.statistics.HistogramUtils;
+import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.json.JSONObject;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
@@ -44,6 +52,13 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
         QueryDumpInfo dumpInfo = new QueryDumpInfo();
 
         JsonObject dumpJsonObject = jsonElement.getAsJsonObject();
+        if (dumpJsonObject.has("join_statistics")) {
+            try {
+                dumpInfo.getJoinStatistics().read(dumpJsonObject.getAsJsonArray("join_statistics"));
+            } catch (IOException | IllegalArgumentException e) {
+                throw new JsonParseException("Invalid JOIN statistics in query dump", e);
+            }
+        }
         // statement
         String statement = dumpJsonObject.get("statement").getAsString();
         dumpInfo.setOriginStmt(statement);
@@ -60,6 +75,35 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
         JsonObject tableMeta = dumpJsonObject.getAsJsonObject("table_meta");
         for (Map.Entry<String, JsonElement> entry : tableMeta.entrySet()) {
             dumpInfo.addTableCreateStmt(entry.getKey(), entry.getValue().getAsString());
+        }
+        // external-catalog table -> catalog name (newer dumps only; older dumps omit it and replay infers
+        // the catalog from the SQL). Keyed like table_meta (db.table).
+        if (dumpJsonObject.has("external_table_catalog")) {
+            JsonObject externalCatalog = dumpJsonObject.getAsJsonObject("external_table_catalog");
+            for (Map.Entry<String, JsonElement> entry : externalCatalog.entrySet()) {
+                dumpInfo.addExternalTableCatalog(entry.getKey(), entry.getValue().getAsString());
+            }
+        }
+        if (dumpJsonObject.has("external_table_row_count")) {
+            JsonObject externalRowCount = dumpJsonObject.getAsJsonObject("external_table_row_count");
+            for (Map.Entry<String, JsonElement> entry : externalRowCount.entrySet()) {
+                dumpInfo.addExternalTableRowCount(entry.getKey(), entry.getValue().getAsLong());
+            }
+        }
+        if (dumpJsonObject.has("external_table_partition_names")) {
+            JsonObject specObj = dumpJsonObject.has("external_table_partition_spec")
+                    ? dumpJsonObject.getAsJsonObject("external_table_partition_spec") : new JsonObject();
+            JsonObject namesObj = dumpJsonObject.getAsJsonObject("external_table_partition_names");
+            for (Map.Entry<String, JsonElement> entry : namesObj.entrySet()) {
+                String key = entry.getKey();
+                List<String> names = new ArrayList<>();
+                entry.getValue().getAsJsonArray().forEach(e -> names.add(e.getAsString()));
+                List<String> spec = new ArrayList<>();
+                if (specObj.has(key)) {
+                    specObj.getAsJsonArray(key).forEach(e -> spec.add(e.getAsString()));
+                }
+                dumpInfo.addExternalTablePartitions(key, spec, names);
+            }
         }
         // hive meta store table info
         if (dumpJsonObject.has("hms_table")) {
@@ -119,6 +163,63 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
             for (String columnKey : columnStatistics.keySet()) {
                 String columnStatistic = columnStatistics.get(columnKey).getAsString();
                 dumpInfo.addTableStatistics(tableKey, columnKey, ColumnStatistic.buildFrom(columnStatistic).build());
+            }
+        }
+        // column histogram: merge the round-tripped histogram back onto the column statistic parsed above.
+        // Optional section (older dumps don't have it), guarded by has().
+        if (dumpJsonObject.has("column_histogram")) {
+            JsonObject tableColumnHistogram = dumpJsonObject.getAsJsonObject("column_histogram");
+            for (String tableKey : tableColumnHistogram.keySet()) {
+                JsonObject columnHistograms = tableColumnHistogram.get(tableKey).getAsJsonObject();
+                Map<String, ColumnStatistic> tableStats =
+                        dumpInfo.getTableStatisticsMap().getOrDefault(tableKey, Collections.emptyMap());
+                for (String columnKey : columnHistograms.keySet()) {
+                    ColumnStatistic base = tableStats.get(columnKey);
+                    if (base == null) {
+                        continue;
+                    }
+                    String histogramStr = columnHistograms.get(columnKey).getAsString();
+                    Histogram histogram = HistogramUtils.deserializeHistogram(histogramStr);
+                    dumpInfo.addTableStatistics(tableKey, columnKey,
+                            ColumnStatistic.buildFrom(base).setHistogram(histogram).build());
+                }
+            }
+        }
+        // multi-column statistics: optional section (older dumps don't have it), guarded by has().
+        if (dumpJsonObject.has("external_mcv_statistics")) {
+            JsonObject externalMcvStatistics = dumpJsonObject.getAsJsonObject("external_mcv_statistics");
+            for (String tableKey : externalMcvStatistics.keySet()) {
+                for (JsonElement groupElement : externalMcvStatistics.get(tableKey).getAsJsonArray()) {
+                    JsonObject groupJson = groupElement.getAsJsonObject();
+                    List<String> columns = new ArrayList<>();
+                    groupJson.get("columns").getAsJsonArray().forEach(e -> columns.add(e.getAsString()));
+                    long ndv = groupJson.get("ndv").getAsLong();
+                    long rowCount = groupJson.get("row_count").getAsLong();
+                    List<MultiColumnCombinedStats.McvEntry> mcv =
+                            ExternalMcvStatsCacheLoader.parseMcv(groupJson.get("mcv").getAsString(), columns.size());
+                    dumpInfo.addExternalMcvStatistics(tableKey,
+                            new ExternalMcvStatistics.Group(columns, rowCount, ndv, mcv,
+                                    ExternalMcvStatsCacheLoader.parseBuckets(groupJson.get("buckets").toString()),
+                                    ExternalMcvStatsCacheLoader.parseNullCounts(groupJson.get("null_counts").toString())));
+                }
+            }
+        }
+        // automatic/expression partition values: one representative value tuple per concrete partition, used
+        // to recreate partitions on replay for tables whose CREATE TABLE omits partition definitions.
+        // Optional section (older dumps and tables with explicit partitions don't have it), guarded by has().
+        if (dumpJsonObject.has("partition_values")) {
+            JsonObject tablePartitionValues = dumpJsonObject.getAsJsonObject("partition_values");
+            for (String tableKey : tablePartitionValues.keySet()) {
+                JsonArray valuesArray = tablePartitionValues.get(tableKey).getAsJsonArray();
+                List<List<String>> partitionValues = new ArrayList<>();
+                for (JsonElement tupleElement : valuesArray) {
+                    List<String> tuple = new ArrayList<>();
+                    for (JsonElement valueElement : tupleElement.getAsJsonArray()) {
+                        tuple.add(valueElement.getAsString());
+                    }
+                    partitionValues.add(tuple);
+                }
+                dumpInfo.addAutomaticPartitionValues(tableKey, partitionValues);
             }
         }
         // BE number

@@ -26,7 +26,6 @@ import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.TimeUtils;
-import com.starrocks.server.CatalogMgr;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -54,17 +53,20 @@ public class PredicateColumnsMgr {
     private static final Logger LOG = LogManager.getLogger(PredicateColumnsMgr.class);
     private static final PredicateColumnsMgr INSTANCE = new PredicateColumnsMgr();
 
+    private final ExternalPredicateColumnGroups externalGroups = new ExternalPredicateColumnGroups();
+
     // Why Map? To update the usage
     private final Map<ColumnUsage, ColumnUsage> id2columnUsage = Maps.newConcurrentMap();
-    private final Map<ExternalColumnUsage, ExternalColumnUsage> externalId2columnUsage = Maps.newConcurrentMap();
 
     // Keyed by hashed table_uuid; negative results (empty list, e.g. a table never queried) are
     // cached too, since a wide external table with no predicate columns yet would otherwise hit
     // the storage table on every auto-analyze cycle.
-    private final Cache<String, List<ExternalColumnUsage>> externalQueryCache = Caffeine.newBuilder()
+    private final Cache<String, List<ExternalColumnGroupUsage>> externalQueryCache = Caffeine.newBuilder()
             .expireAfterWrite(Config.statistic_external_predicate_columns_cache_ttl_sec, TimeUnit.SECONDS)
-            .maximumSize(10000)
-            .<String, List<ExternalColumnUsage>>build();
+            .maximumWeight(ExternalPredicateColumnGroups.MAX_HISTORY_BYTES)
+            .weigher((String key, List<ExternalColumnGroupUsage> groups) -> (int) Math.min(Integer.MAX_VALUE,
+                    128L + groups.stream().mapToLong(ExternalColumnGroupUsage::estimatedMemoryBytes).sum()))
+            .build();
 
     public static PredicateColumnsMgr getInstance() {
         return INSTANCE;
@@ -75,8 +77,13 @@ public class PredicateColumnsMgr {
         if (!Config.enable_predicate_columns_collection) {
             return;
         }
-        for (Column column : scanColumns.values()) {
-            addOrUpdateColumnUsage(table, column, ColumnUsage.UseCase.NORMAL);
+        if (table.isNativeTableOrMaterializedView()) {
+            for (Column column : scanColumns.values()) {
+                addOrUpdateNativeColumnUsage(table, column, ColumnUsage.UseCase.NORMAL);
+            }
+        } else {
+            externalGroups.recordColumns(table, scanColumns.values().stream().map(Column::getName).toList(),
+                    ColumnUsage.UseCase.NORMAL);
         }
     }
 
@@ -89,6 +96,7 @@ public class PredicateColumnsMgr {
         }
         List<ColumnRefOperator> refs = Utils.collect(predicate, ColumnRefOperator.class);
         addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.PREDICATE, optExpr);
+        externalGroups.record(refs, ColumnUsage.UseCase.PREDICATE, factory, optExpr);
     }
 
     public void recordJoinPredicate(List<BinaryPredicateOperator> onPredicates, ColumnRefFactory factory,
@@ -96,6 +104,7 @@ public class PredicateColumnsMgr {
         if (!Config.enable_predicate_columns_collection) {
             return;
         }
+        externalGroups.recordJoin(onPredicates, factory, optExpr);
         for (BinaryPredicateOperator op : onPredicates) {
             List<ColumnRefOperator> refs = Utils.collect(op, ColumnRefOperator.class);
             addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.JOIN, optExpr);
@@ -112,10 +121,12 @@ public class PredicateColumnsMgr {
             if (entry.getValue().isDistinct()) {
                 List<ColumnRefOperator> refs = Utils.collect(entry.getValue(), ColumnRefOperator.class);
                 addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.DISTINCT, optExpr);
+                externalGroups.record(refs, ColumnUsage.UseCase.DISTINCT, factory, optExpr);
             }
         }
 
         addOrUpdateColumnUsage(groupBys, factory, ColumnUsage.UseCase.GROUP_BY, optExpr);
+        externalGroups.record(groupBys, ColumnUsage.UseCase.GROUP_BY, factory, optExpr);
     }
 
     public void recordWindowPartitionBy(List<ScalarOperator> partitionByList, ColumnRefFactory factory,
@@ -123,6 +134,9 @@ public class PredicateColumnsMgr {
         if (!Config.enable_predicate_columns_collection) {
             return;
         }
+        externalGroups.record(ListUtils.emptyIfNull(partitionByList).stream()
+                        .flatMap(scalar -> Utils.extractColumnRef(scalar).stream()).toList(),
+                ColumnUsage.UseCase.GROUP_BY, factory, optExpr);
         for (var partitionBy : ListUtils.emptyIfNull(partitionByList)) {
             List<ColumnRefOperator> refs = Utils.collect(partitionBy, ColumnRefOperator.class);
             addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.GROUP_BY, optExpr);
@@ -146,8 +160,6 @@ public class PredicateColumnsMgr {
     private void addOrUpdateColumnUsage(Table table, Column column, ColumnUsage.UseCase useCase) {
         if (table.isNativeTableOrMaterializedView()) {
             addOrUpdateNativeColumnUsage(table, column, useCase);
-        } else {
-            addOrUpdateExternalColumnUsage(table, column, useCase);
         }
     }
 
@@ -161,18 +173,6 @@ public class PredicateColumnsMgr {
         }
         ColumnUsage usage = mayUsage.get();
         ColumnUsage oldValue = id2columnUsage.computeIfAbsent(usage, k -> usage);
-        oldValue.useNow(useCase);
-    }
-
-    private void addOrUpdateExternalColumnUsage(Table table, Column column, ColumnUsage.UseCase useCase) {
-        if (!Config.enable_external_predicate_columns_collection) {
-            return;
-        }
-        if (!CatalogMgr.isExternalCatalog(table.getCatalogName()) || table.isTemporaryTable()) {
-            return;
-        }
-        ExternalColumnUsage usage = ExternalColumnUsage.build(column, table, useCase);
-        ExternalColumnUsage oldValue = externalId2columnUsage.computeIfAbsent(usage, k -> usage);
         oldValue.useNow(useCase);
     }
 
@@ -197,26 +197,37 @@ public class PredicateColumnsMgr {
         }
     }
 
-    public List<ExternalColumnUsage> queryExternalPredicateColumns(Table table) {
-        EnumSet<ColumnUsage.UseCase> useCases = ColumnUsage.UseCase.getPredicateColumnUseCase();
-        String tableUuidHash = StatisticUtils.hashTableUuidForPkStorage(table.getUUID());
-        if (FeConstants.runningUnitTest) {
-            Predicate<ExternalColumnUsage> pred = c -> !SetUtils.intersection(c.getUseCases(), useCases).isEmpty();
-            return externalId2columnUsage.values().stream()
-                    .filter(x -> x.getTableUuidHash().equals(tableUuidHash))
-                    .filter(pred)
-                    .collect(Collectors.toList());
+    /** Basic statistics use the union of observed sets; single-column rows are not stored separately. */
+    public List<String> queryExternalPredicateColumns(Table table) {
+        return queryExternalPredicateColumnGroups(table).stream()
+                .flatMap(group -> group.columns().stream()).distinct().sorted().toList();
+    }
+
+    /** Recent predicate sets from all FEs, including observations on this FE not yet flushed. */
+    public List<ExternalColumnGroupUsage> queryExternalPredicateColumnGroups(Table table) {
+        String uuid = StatisticUtils.hashTableUuidForPkStorage(table.getUUID());
+        Map<String, ExternalColumnGroupUsage> groups = Maps.newHashMap();
+        if (!FeConstants.runningUnitTest) {
+            for (ExternalColumnGroupUsage group : externalQueryCache.get(uuid,
+                    key -> ExternalPredicateColumnsStorage.getInstance().query(key))) {
+                groups.merge(group.key(), group, ExternalColumnGroupUsage::newest);
+            }
         }
-        return externalQueryCache.get(tableUuidHash, key -> getExternalStorage().queryGlobalState(key, useCases));
+        for (ExternalColumnGroupUsage group : externalGroups.snapshot()) {
+            if (group.tableUuid().equals(uuid)) {
+                groups.merge(group.key(), group, ExternalColumnGroupUsage::newest);
+            }
+        }
+        LocalDateTime cutoff = Config.statistic_external_predicate_columns_ttl_hours < 0 ? LocalDateTime.MIN
+                : TimeUtils.getSystemNow().minusHours(Config.statistic_external_predicate_columns_ttl_hours);
+        return groups.values().stream()
+                .filter(group -> group.useCase() != ColumnUsage.UseCase.NORMAL && !group.lastUsed().isBefore(cutoff))
+                .sorted(java.util.Comparator.comparing(ExternalColumnGroupUsage::key)).toList();
     }
 
     //==================================== Maintenance ============================================ //
     public void persist() {
         getStorage().persist(id2columnUsage.values());
-    }
-
-    public void persistExternal() {
-        getExternalStorage().persist(externalId2columnUsage.values());
     }
 
     public void vacuum() {
@@ -239,24 +250,6 @@ public class PredicateColumnsMgr {
         getStorage().vacuum(ttlTime);
     }
 
-    public void vacuumExternal() {
-        long ttlHour = Config.statistic_external_predicate_columns_ttl_hours;
-        if (ttlHour < 0) {
-            return;
-        }
-        LocalDateTime ttlTime = TimeUtils.getSystemNow().minusHours(ttlHour);
-        Predicate<ExternalColumnUsage> outdated = x -> x.getLastUsed().isBefore(ttlTime);
-
-        long before = externalId2columnUsage.size();
-        if (before > 0 && externalId2columnUsage.values().removeIf(outdated)) {
-            long after = externalId2columnUsage.size();
-            LOG.info("removed {} objects from external predicate columns because of ttl {}", before - after,
-                    Config.statistic_external_predicate_columns_ttl_hours);
-        }
-
-        getExternalStorage().vacuum(ttlTime);
-    }
-
     public void restore() {
         List<ColumnUsage> state = getStorage().restore();
         for (ColumnUsage usage : ListUtils.emptyIfNull(state)) {
@@ -264,31 +257,24 @@ public class PredicateColumnsMgr {
         }
     }
 
-    public void restoreExternal() {
-        List<ExternalColumnUsage> state = getExternalStorage().restore();
-        for (ExternalColumnUsage usage : ListUtils.emptyIfNull(state)) {
-            externalId2columnUsage.merge(usage, usage, ExternalColumnUsage::merge);
-        }
-    }
-
     private PredicateColumnsStorage getStorage() {
         return PredicateColumnsStorage.getInstance();
-    }
-
-    private ExternalPredicateColumnsStorage getExternalStorage() {
-        return ExternalPredicateColumnsStorage.getInstance();
     }
 
     @VisibleForTesting
     public void reset() {
         id2columnUsage.clear();
-        externalId2columnUsage.clear();
         externalQueryCache.invalidateAll();
+        externalGroups.clear();
     }
 
     @VisibleForTesting
     public void recordColumnUsageForTest(Table table, Column column, ColumnUsage.UseCase useCase) {
-        addOrUpdateColumnUsage(table, column, useCase);
+        if (table.isNativeTableOrMaterializedView()) {
+            addOrUpdateNativeColumnUsage(table, column, useCase);
+        } else {
+            externalGroups.recordColumns(table, List.of(column.getName()), useCase);
+        }
     }
 
     public void startDaemon() {
@@ -313,9 +299,14 @@ public class PredicateColumnsMgr {
 
             PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
 
-            // Native and external tables are tracked in separate in-memory maps and separate storage
-            // tables, each with its own restore-gating sentinel; drive them independently so one
-            // being un-restored (e.g. right after FE start) never blocks the other from persisting.
+            try {
+                ExternalPredicateColumnsStorage.getInstance().maintain(mgr.externalGroups);
+            } catch (Exception e) {
+                LOG.warn("failed to maintain external predicate column groups", e);
+            }
+
+            // Native usage retains its own persistence lifecycle. External singleton and multi-column
+            // sets share the same store above; no per-column external mirror is maintained.
             PredicateColumnsStorage storage = PredicateColumnsStorage.getInstance();
             if (!storage.isSystemTableReady()) {
                 LOG.warn("system table of predicate_columns is still not ready");
@@ -327,16 +318,7 @@ public class PredicateColumnsMgr {
                 mgr.persist();
             }
 
-            ExternalPredicateColumnsStorage externalStorage = ExternalPredicateColumnsStorage.getInstance();
-            if (!externalStorage.isSystemTableReady()) {
-                LOG.warn("system table of external_predicate_columns is still not ready");
-            } else if (!externalStorage.isRestored()) {
-                mgr.restoreExternal();
-                externalStorage.finishRestore();
-            } else {
-                mgr.vacuumExternal();
-                mgr.persistExternal();
-            }
+
         }
     }
 

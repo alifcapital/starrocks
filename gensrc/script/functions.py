@@ -867,6 +867,15 @@ vectorized_functions = [
     [100025, 'uuid_v7', True, False, 'VARCHAR', [], "UtilityFunctions::uuid_v7"],
     [100026, 'uuid_v7_numeric', True, False, 'LARGEINT', [], "UtilityFunctions::uuid_v7_numeric"],
     [100027, 'query_id', True, False, 'VARCHAR', [], "UtilityFunctions::query_id"],
+    # Fork-owned statistics IDs: 1100000-1100099. Keep stable across FE/BE versions.
+    # Do not reuse upstream's growing 1000xx utility-function range.
+    [1100001, 'stats_tuple_key', True, False, 'VARCHAR', ['VARCHAR', '...'], 'StatsFunctions::tuple_key'],
+    [1100002, 'stats_degree_info', True, False, 'VARCHAR', ['VARBINARY'], 'StatsFunctions::degree_info'],
+    [1100003, 'stats_degree_pair', True, False, 'VARCHAR', ['VARBINARY', 'VARBINARY'], 'StatsFunctions::degree_pair'],
+    [1100004, 'stats_degree_head', True, False, 'VARBINARY', ['VARBINARY', 'VARBINARY', 'VARBINARY', 'VARBINARY', 'INT'], 'StatsFunctions::degree_head'],
+    [1100005, 'stats_degree_tail', True, False, 'VARCHAR', ['VARBINARY', 'VARBINARY'], 'StatsFunctions::degree_tail'],
+    [1100006, 'stats_degree_project', True, False, 'VARBINARY', ['VARBINARY', 'BIGINT', 'INT'], 'StatsFunctions::degree_project'],
+    [1100007, 'stats_degree_intra', True, False, 'VARCHAR', ['VARBINARY', 'VARBINARY', 'VARBINARY', 'BIGINT', 'BIGINT'], 'StatsFunctions::degree_intra'],
 
     # json string function
     [110022, "get_json_int", False, False, "BIGINT", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bigint",

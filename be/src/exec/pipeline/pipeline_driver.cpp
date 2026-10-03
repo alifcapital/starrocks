@@ -23,6 +23,8 @@
 #include "common/statusor.h"
 #include "exec/pipeline/adaptive/event.h"
 #include "exec/pipeline/exchange/exchange_sink_operator.h"
+#include "exec/pipeline/hashjoin/hash_join_probe_operator.h"
+#include "exec/pipeline/hashjoin/local_runtime_filter_feedback.h"
 #include "exec/pipeline/pipeline_driver_executor.h"
 #include "exec/pipeline/scan/olap_scan_operator.h"
 #include "exec/pipeline/scan/scan_operator.h"
@@ -272,6 +274,12 @@ Status PipelineDriver::prepare_local_state(RuntimeState* runtime_state) {
         op->set_local_prepare_time(time_spent);
     }
 
+    // Feedback uses operator counters created by prepare_local_state().
+    if (config::enable_local_runtime_filter_feedback && !_fragment_ctx->enable_cache() &&
+        !_fragment_ctx->is_stream_pipeline()) {
+        HashJoinProbeOperator::configure_local_runtime_filter_feedback(_operators);
+    }
+
     _local_prepare_is_done = true;
 
     return Status::OK();
@@ -304,6 +312,7 @@ StatusOr<DriverState> PipelineDriver::process(RuntimeState* runtime_state, int w
     if (ScanOperator* scan = source_scan_operator()) {
         scan->begin_driver_process();
     }
+    auto* const local_rf_feedback = source_operator()->_local_rf_feedback.get();
 
     while (true) {
         RETURN_IF_LIMIT_EXCEEDED(runtime_state, "Pipeline");
@@ -351,6 +360,16 @@ StatusOr<DriverState> PipelineDriver::process(RuntimeState* runtime_state, int w
                     RETURN_IF_ERROR(return_status = _mark_operator_finishing(next_op, runtime_state));
                     new_first_unfinished = i + 1;
                     continue;
+                }
+
+                if (local_rf_feedback != nullptr && local_rf_feedback->needs_drain()) {
+                    // Bound the measurement window even when an intermediate operator
+                    // prefetches input while JOIN is still emitting duplicate matches.
+                    if (i == 0) continue;
+                    // A zero-output RF chunk can end the window without another push
+                    // into the accumulator or JOIN. Drain before testing has_output().
+                    RETURN_IF_ERROR(return_status = HashJoinProbeOperator::drain_local_runtime_filter_input(
+                                            runtime_state, curr_op.get()));
                 }
 
                 _try_to_release_buffer(runtime_state, curr_op);
@@ -511,13 +530,15 @@ StatusOr<DriverState> PipelineDriver::process(RuntimeState* runtime_state, int w
         // very long time so that the driver should switch off the core and
         // give chance for another ready driver to run.
         if (num_chunks_moved == 0 || should_yield) {
+            const bool draining_local_rf = local_rf_feedback != nullptr && local_rf_feedback->needs_drain();
+            _local_rf_draining.store(draining_local_rf, std::memory_order_relaxed);
             if (is_precondition_block()) {
                 set_driver_state(DriverState::PRECONDITION_BLOCK);
                 COUNTER_UPDATE(_block_by_precondition_counter, 1);
             } else if (!sink_operator()->need_input() && !sink_operator()->is_finished()) {
                 set_driver_state(DriverState::OUTPUT_FULL);
                 COUNTER_UPDATE(_block_by_output_full_counter, 1);
-            } else if (!source_operator()->has_output() && !source_operator()->is_finished()) {
+            } else if (!draining_local_rf && !source_operator()->has_output() && !source_operator()->is_finished()) {
                 if (source_operator()->is_mutable()) {
                     set_driver_state(DriverState::LOCAL_WAITING);
                     COUNTER_UPDATE(_yield_by_local_wait_counter, 1);
@@ -771,7 +792,8 @@ StatusOr<bool> PipelineDriver::is_not_blocked() {
     }
 
     // INPUT_EMPTY
-    if (!source_operator()->has_output() && !source_operator()->is_finished()) {
+    if (!_local_rf_draining.load(std::memory_order_relaxed) && !source_operator()->has_output() &&
+        !source_operator()->is_finished()) {
         set_driver_state(DriverState::INPUT_EMPTY);
         return false;
     }
@@ -825,7 +847,8 @@ bool PipelineDriver::check_is_ready() {
     }
 
     // INPUT_EMPTY
-    if (!source_operator()->has_output() && !source_operator()->is_finished()) {
+    if (!_local_rf_draining.load(std::memory_order_relaxed) && !source_operator()->has_output() &&
+        !source_operator()->is_finished()) {
         set_driver_state(DriverState::INPUT_EMPTY);
         return false;
     }
@@ -841,6 +864,7 @@ bool PipelineDriver::check_is_ready() {
 }
 
 void PipelineDriver::cancel_operators(RuntimeState* runtime_state) {
+    // Cancellation also runs on the blocked-driver poller and can release operator-owned memory.
     SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(runtime_state->instance_mem_tracker());
     if (this->query_ctx()->is_query_expired()) {
         if (_has_log_cancelled.exchange(true) == false) {

@@ -130,6 +130,16 @@ public class ConnectorHistogramColumnStatsCacheLoader implements
 
         List<Bucket> buckets = HistogramUtils.convertBuckets(statisticData.histogram, columnType);
         Map<String, Long> mcv = HistogramUtils.convertMCV(statisticData.histogram);
-        return new Histogram(buckets, mcv);
+        if (buckets.isEmpty()) {
+            LOG.warn("Stored histogram for column {} has no buckets; re-collect statistics to restore accurate "
+                    + "row count estimation.", statisticData.columnName);
+            Histogram histogram = new Histogram(mcv);
+            histogram.getMcvDistribution().prepareFrequencyOrder();
+            return histogram;
+        }
+
+        Histogram histogram = new Histogram(buckets, mcv);
+        histogram.getMcvDistribution().prepareFrequencyOrder();
+        return histogram;
     }
 }

@@ -150,3 +150,33 @@ an external runtime benchmark.
 
 No PR has been published. Integration into the statistics branch should extend
 this estimator, leaving the peer-preservation correctness contract unchanged.
+
+## Statistics integration
+
+The integration branch uses the GROUP BY estimator for joint/projected NDV, including
+conditional MCV after filters and projections. For a supported scan key, JOIN
+statistics can supply conditional degree NDV through the existing budgeted, memoized
+planner lookup. A JOIN input uses its already derived row count: the TopN cost model
+does not independently rescale or multiply table cardinalities.
+
+When the retained MCV covers the whole distribution, project it to distinct GROUP BY
+tuples and find the rank boundary in their ordering. Count each distinct tuple once,
+regardless of its original row frequency. Use that boundary against the original
+row distribution to estimate the aggregate RF. The RF uses only the first ORDER BY
+key and keeps NULL rows even for NULLS LAST. String ordering follows BE's binary
+UTF-8 order. Native and external MCV use the same prepared statistics interface.
+
+A partial joint head cannot supply an exact marginal by summing its retained tuples.
+Use saved component frequencies when available; otherwise retain the ordinary
+NDV/histogram approximation. Conditional degree moments alone do not locate an
+ordered boundary, and an unrelated JOIN-key head is not a GROUP BY distribution.
+No new collection format, synchronous loading, or rewrite based on a correctness
+assumption about statistics is introduced. WITH TIES remains mandatory independently
+of cost estimates. These are estimates from collected statistics, not guarantees
+about changed data or arrival order across parallel drivers.
+
+Integration checks cover duplicate-heavy groups, many distinct boundary peers,
+ASC/DESC and tuple ordering, NULLs, binary string ordering, partial MCV and saved
+marginals, predicate slices, projected NDV, conditional JOIN NDV, local aggregation,
+and Iceberg plan generation. The runtime timings in BENCHMARK.md are the original
+TopN branch measurements; they are not a benchmark of this later statistics adaptation.

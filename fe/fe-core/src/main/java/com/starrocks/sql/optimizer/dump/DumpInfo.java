@@ -20,7 +20,9 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.View;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
 
+import java.util.List;
 import java.util.Map;
 
 
@@ -41,6 +43,16 @@ public interface DumpInfo {
     }
 
     default void addTableStatistics(Table table, String column, ColumnStatistic columnStatistic) {
+    }
+
+    default void addExternalMcvStatistics(Table table, ExternalMcvStatistics.Group group) {
+    }
+
+    default void addExternalTableRowCount(Table table, long rowCount) {
+    }
+
+    default void addExternalTablePartitions(Table table, List<String> partitionSpec,
+                                            List<String> partitionNames) {
     }
 
     default void addPartitionRowCount(Table table, String partition, long rowCount) {

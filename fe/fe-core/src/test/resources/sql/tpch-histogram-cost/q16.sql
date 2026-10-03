@@ -11,7 +11,7 @@ column statistics:
 * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
 * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 * P_SIZE-->[1.0, 43.0, 0.0, 4.0, 8.0] MCV: [[9:403400][18:402500][1:402000][11:400600][6:396400]] ESTIMATE
-* count-->[0.0, 6853797.89325, 0.0, 8.0, 7119.140625] ESTIMATE
+* count-->[0.0, 8775631.965618351, 0.0, 8.0, 7119.140625] ESTIMATE
 
 PLAN FRAGMENT 1(F05)
 
@@ -27,7 +27,7 @@ OutPut Exchange Id: 15
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
 |  * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 |  * P_SIZE-->[1.0, 43.0, 0.0, 4.0, 8.0] MCV: [[9:403400][18:402500][1:402000][11:400600][6:396400]] ESTIMATE
-|  * count-->[0.0, 6853797.89325, 0.0, 8.0, 7119.140625] ESTIMATE
+|  * count-->[0.0, 8775631.965618351, 0.0, 8.0, 7119.140625] ESTIMATE
 |
 13:AGGREGATE (update finalize)
 |  aggregate: count[([2: PS_SUPPKEY, INT, false]); args: INT; result: BIGINT; args nullable: false; result nullable: false]
@@ -37,11 +37,11 @@ OutPut Exchange Id: 15
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
 |  * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 |  * P_SIZE-->[1.0, 43.0, 0.0, 4.0, 8.0] MCV: [[9:403400][18:402500][1:402000][11:400600][6:396400]] ESTIMATE
-|  * count-->[0.0, 6853797.89325, 0.0, 8.0, 7119.140625] ESTIMATE
+|  * count-->[0.0, 8775631.965618351, 0.0, 8.0, 7119.140625] ESTIMATE
 |
 12:AGGREGATE (merge serialize)
 |  group by: [2: PS_SUPPKEY, INT, false], [10: P_BRAND, VARCHAR, false], [11: P_TYPE, VARCHAR, false], [12: P_SIZE, INT, false]
-|  cardinality: 6853798
+|  cardinality: 8775632
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 250000.0] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
@@ -51,7 +51,7 @@ OutPut Exchange Id: 15
 11:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [10: P_BRAND, VARCHAR, false], [11: P_TYPE, VARCHAR, false], [12: P_SIZE, INT, false]
-cardinality: 6853798
+cardinality: 8775632
 
 PLAN FRAGMENT 2(F00)
 
@@ -62,7 +62,7 @@ OutPut Exchange Id: 11
 10:AGGREGATE (update serialize)
 |  STREAMING
 |  group by: [2: PS_SUPPKEY, INT, false], [10: P_BRAND, VARCHAR, false], [11: P_TYPE, VARCHAR, false], [12: P_SIZE, INT, false]
-|  cardinality: 6853798
+|  cardinality: 8775632
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 250000.0] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
@@ -75,7 +75,7 @@ OutPut Exchange Id: 11
 |  10 <-> [10: P_BRAND, VARCHAR, false]
 |  11 <-> [11: P_TYPE, VARCHAR, false]
 |  12 <-> [12: P_SIZE, INT, false]
-|  cardinality: 6853798
+|  cardinality: 8775632
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 250000.0] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
@@ -86,7 +86,7 @@ OutPut Exchange Id: 11
 |  join op: NULL AWARE LEFT ANTI JOIN (BROADCAST)
 |  equal join conjunct: [2: PS_SUPPKEY, INT, false] = [17: S_SUPPKEY, INT, false]
 |  output columns: 2, 10, 11, 12
-|  cardinality: 6853798
+|  cardinality: 8775632
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 250000.0] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
@@ -104,7 +104,7 @@ OutPut Exchange Id: 11
 |  10 <-> [10: P_BRAND, CHAR, false]
 |  11 <-> [11: P_TYPE, VARCHAR, false]
 |  12 <-> [12: P_SIZE, INT, false]
-|  cardinality: 9138397
+|  cardinality: 11700843
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 1000000.0] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
@@ -117,11 +117,11 @@ OutPut Exchange Id: 11
 |  build runtime filters:
 |  - filter_id = 0, build_expr = (7: P_PARTKEY), remote = false
 |  output columns: 2, 10, 11, 12
-|  cardinality: 9138397
+|  cardinality: 11700843
 |  column statistics:
-|  * PS_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2284599.29775] ESTIMATE
+|  * PS_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2925210.6552061173] ESTIMATE
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 1000000.0] ESTIMATE
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2284599.29775] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2925210.6552061173] ESTIMATE
 |  * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
 |  * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 |  * P_SIZE-->[1.0, 43.0, 0.0, 4.0, 8.0] MCV: [[9:403400][18:402500][1:402000][11:400600][6:396400]] ESTIMATE
@@ -129,7 +129,7 @@ OutPut Exchange Id: 11
 |----2:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [7: P_PARTKEY, INT, false]
-|       cardinality: 2284599
+|       cardinality: 2925211
 |
 0:OlapScanNode
 table: partsupp, rollup: partsupp
@@ -179,9 +179,9 @@ preAggregation: on
 Predicates: [10: P_BRAND, CHAR, false] != 'Brand#43', NOT ([11: P_TYPE, VARCHAR, false] LIKE 'PROMO BURNISHED%'), [12: P_SIZE, INT, false] IN (31, 43, 9, 6, 18, 11, 25, 1)
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=47.0
-cardinality: 2284599
+cardinality: 2925211
 column statistics:
-* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2284599.29775] ESTIMATE
+* P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2925210.6552061173] ESTIMATE
 * P_BRAND-->[-Infinity, Infinity, 0.0, 10.0, 25.0] MCV: [[Brand#35:823300][Brand#12:816700][Brand#52:815800][Brand#33:814100][Brand#53:808800]] ESTIMATE
 * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 * P_SIZE-->[1.0, 43.0, 0.0, 4.0, 8.0] MCV: [[9:403400][18:402500][1:402000][11:400600][6:396400]] ESTIMATE

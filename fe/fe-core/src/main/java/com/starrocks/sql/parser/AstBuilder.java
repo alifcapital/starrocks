@@ -111,6 +111,7 @@ import com.starrocks.sql.ast.AlterViewClause;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.AnalyzeBasicDesc;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
+import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeProfileStmt;
 import com.starrocks.sql.ast.AnalyzeStmt;
@@ -243,6 +244,7 @@ import com.starrocks.sql.ast.InstallPluginStmt;
 import com.starrocks.sql.ast.IntersectRelation;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.JoinRelation;
+import com.starrocks.sql.ast.JoinStatisticsStmt;
 import com.starrocks.sql.ast.KeyPartitionRef;
 import com.starrocks.sql.ast.KeysDesc;
 import com.starrocks.sql.ast.KeysType;
@@ -365,6 +367,7 @@ import com.starrocks.sql.ast.ShowIndexStmt;
 import com.starrocks.sql.ast.ShowLoadStmt;
 import com.starrocks.sql.ast.ShowLoadWarningsStmt;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
+import com.starrocks.sql.ast.ShowMcvStatsMetaStmt;
 import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowOpenTableStmt;
 import com.starrocks.sql.ast.ShowPartitionsStmt;
@@ -3156,7 +3159,14 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             List<QualifiedName> names = multiColumnSetContext.qualifiedName().stream()
                     .map(this::getQualifiedName).collect(toList());
             columns = getAnalyzeColumns(names);
-        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext) {
+        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) {
+            com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext mcvColumnSetContext =
+                    (com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) context;
+            List<QualifiedName> names = mcvColumnSetContext.qualifiedName().stream()
+                    .map(this::getQualifiedName).collect(toList());
+            columns = getAnalyzeColumns(names);
+        } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext
+                || context instanceof com.starrocks.sql.parser.StarRocksParser.McvPredicateColumnsContext) {
             usePredicateColumns = true;
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.RegularColumnsContext) {
             com.starrocks.sql.parser.StarRocksParser.RegularColumnsContext regularColumnsContext =
@@ -3191,6 +3201,9 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             // we use sample strategy to collect multi-column combined statistics as default.
             isSample = context.FULL() == null;
             analyzeTypeDesc = new AnalyzeMultiColumnDesc(statisticsTypes);
+        } else if (context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext
+                || context.analyzeColumnClause() instanceof com.starrocks.sql.parser.StarRocksParser.McvPredicateColumnsContext) {
+            analyzeTypeDesc = new AnalyzeMcvDesc();
         }
 
         return new AnalyzeStmt(tableRef, analyzeColumn.second, partitionNames, properties,
@@ -3201,11 +3214,32 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     }
 
     @Override
+    public ParseNode visitJoinStatisticsStatement(
+            com.starrocks.sql.parser.StarRocksParser.JoinStatisticsStatementContext context) {
+        JoinStatisticsStmt.Action action = context.CREATE() != null ? JoinStatisticsStmt.Action.CREATE
+                : context.ANALYZE() != null ? JoinStatisticsStmt.Action.ANALYZE
+                : context.DROP() != null ? JoinStatisticsStmt.Action.DROP : JoinStatisticsStmt.Action.SHOW;
+        QueryStatement query = context.queryStatement() == null ? null : (QueryStatement) visit(context.queryStatement());
+        JoinStatisticsStmt statement = new JoinStatisticsStmt(action,
+                context.name == null ? null : getIdentifierName(context.name), query,
+                context.ASYNC() != null, context.EXISTS() != null, getCaseSensitiveProperties(context.properties()),
+                createPos(context));
+        if (context.VERBOSE() != null) {
+            statement.setInspection(context.offset == null ? 0 : Long.parseLong(context.offset.getText()),
+                    context.limit == null ? 100 : Long.parseLong(context.limit.getText()));
+        }
+        return statement;
+    }
+
+    @Override
     public ParseNode visitDropStatsStatement(com.starrocks.sql.parser.StarRocksParser.DropStatsStatementContext context) {
         QualifiedName qualifiedName = getQualifiedName(context.qualifiedName());
         NodePosition tablePos = createPos(context.qualifiedName().start, context.qualifiedName().stop);
         TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, tablePos);
-        return new DropStatsStmt(tableRef, context.MULTIPLE() != null, createPos(context));
+        DropStatsStmt statement = new DropStatsStmt(tableRef, context.MULTIPLE() != null,
+                context.MCV() != null, createPos(context));
+        statement.setColumnNames(context.identifier().stream().map(this::getIdentifierName).collect(Collectors.toList()));
+        return statement;
     }
 
     @Override
@@ -3222,6 +3256,14 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         }
         boolean isSample = context.FULL() == null;
 
+        if (context.JOIN() != null) {
+            CreateAnalyzeJobStmt statement = new CreateAnalyzeJobStmt(false, properties, pos);
+            statement.setJoinStatisticsName(getIdentifierName(context.joinName));
+            return statement;
+        }
+        if (context.MCV() != null) {
+            analyzeType = StatsConstants.AnalyzeType.MCV;
+        }
         if (context.DATABASE() != null) {
             return new CreateAnalyzeJobStmt(((Identifier) visit(context.db)).getValue(), isSample,
                     properties, pos);
@@ -3231,7 +3273,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             TableRef tableRef = new TableRef(normalizeName(qualifiedNames.get(0)), null, createPos(context));
             List<Expr> columns = getAnalyzeColumns(qualifiedNames.subList(1, qualifiedNames.size()));
             return new CreateAnalyzeJobStmt(tableRef, columns, context.IF() != null, isSample, properties,
-                    analyzeType, null, pos);
+                    analyzeType, context.MCV() != null ? new AnalyzeMcvDesc() : null, pos);
         } else if (context.histogramStatement() != null) {
             AnalyzeStmt analyzeStmt = histogramStatement(context.histogramStatement());
             return new CreateAnalyzeJobStmt(analyzeStmt.getTableRef(), analyzeStmt.getColumns(), false,
@@ -3283,7 +3325,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         List<OrderByElement> orderByElements = getOrderByFrom(showPredicateClauses);
         LimitElement limitElement = getLimitFrom(showPredicateClauses);
 
-        if (context.MULTIPLE() != null) {
+        if (context.MCV() != null) {
+            ShowMcvStatsMetaStmt showMcvStatsMetaStmt =
+                    new ShowMcvStatsMetaStmt(predicate, orderByElements, limitElement, createPos(context));
+            showMcvStatsMetaStmt.markSelfPredicateOrderLimit(true, true, true);
+            return showMcvStatsMetaStmt;
+        } else if (context.MULTIPLE() != null) {
             ShowMultiColumnStatsMetaStmt showMultiColumnStatsMetaStmt =
                     new ShowMultiColumnStatsMetaStmt(predicate, orderByElements, limitElement, createPos(context));
             showMultiColumnStatsMetaStmt.markSelfPredicateOrderLimit(true, true, true);

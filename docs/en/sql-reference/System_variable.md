@@ -1523,7 +1523,7 @@ Specifies the query rewrite mode of asynchronous materialized views. Valid value
 
 ### max_pushdown_conditions_per_column
 
-* **Description**: The maximum number of predicates that can be pushed down for a column.
+* **Description**: The maximum number of predicates that can be pushed down for a column. For join-generated IN filters, the limit is checked against the actual number of distinct non-NULL values during construction and merging.
 * **Default**: -1, indicating that the value in the `be.conf` file is used. If this variable is set to a value greater than 0, the value in `be.conf` is ignored.
 * **Data type**: Int
 
@@ -1778,6 +1778,19 @@ Used for compatibility with JDBC connection pool C3P0. No practical use.
         * **Data Type**: String
         * **Introduced in**: 3.2.0
 
+### global_runtime_filter_probe_min_selectivity
+
+- Default: `0.5`
+- Type: Float
+- Unit: Fraction of probe rows rejected
+- Description: Minimum estimated rejection required for a join runtime filter when build and probe key statistics are available. The decision applies to both local and remote filters, including small builds. Membership is estimated from key NDV and available MCV frequencies. When key statistics are unavailable, local filters and small builds retain their existing admission rules; other remote filters fall back to the build/probe row-count ratio. Setting `global_runtime_filter_probe_min_size` to `0` explicitly forces admission regardless of selectivity. A remote filter with known key statistics also requires at least `global_runtime_filter_probe_min_size` estimated probe rows. This threshold estimates benefit; it does not predict filter arrival time or guarantee a query speedup.
+
+### enable_joint_runtime_filter_selection
+
+- Default: `true`
+- Type: Boolean
+- Description: Uses a joint probe MCV distribution to select independently admitted component runtime filters by estimated additional rejection after filters already selected. Unknown build membership and the unrecorded probe tail are treated conservatively. A filter is removed only if no target needs it. Explicit forced admission (`global_runtime_filter_probe_min_size=0`) and skew joins retain their existing selection.
+
 ### runtime_filter_on_exchange_node
 
 * **Description**: Whether to place GRF on Exchange Node after GRF is pushed down across the Exchange operator to a lower-level operator. The default value is `false`, which means GRF will not be placed on Exchange Node after it is pushed down across the Exchange operator to a lower-level operator. This prevents repetitive use of GRF and reduces the computation time.
@@ -1788,7 +1801,7 @@ Used for compatibility with JDBC connection pool C3P0. No practical use.
 
 ### runtime_join_filter_push_down_limit
 
-* **Description**: The maximum number of rows allowed for the Hash table based on which Bloom filter Local RF is generated. Local RF will not be generated if this value is exceeded. This variable prevents the generation of an excessively long Local RF.
+* **Description**: The maximum number of distinct build-key values used to generate a local Bloom runtime filter. For a single join key, the backend derives NDV from its hash table. For composite keys, it uses the frontend estimate for each component when available, bounded by the local build row count; otherwise it falls back to the hash-table estimate. This does not add a scan of build keys. For partitioned filters with separate bit arrays, the distinct counts of the partial filters are added. A local filter is skipped when its count exceeds this limit.
 * **Default**: 1024000
 * **Data type**: Int
 

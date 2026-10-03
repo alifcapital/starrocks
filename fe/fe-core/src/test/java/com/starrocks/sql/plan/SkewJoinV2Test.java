@@ -18,6 +18,7 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.FeConstants;
+import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
@@ -143,13 +144,79 @@ public class SkewJoinV2Test extends PlanTestBase {
     }
 
     @Test
+    public void testOmittedHeavierKeyBlocksPartialRewriteAndHistogramFallback() {
+        var mixed = new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(20_000_000,
+                List.of(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("1"), 2_200_000),
+                        new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("2"), 2_200_000),
+                        new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(List.of("3"), 2_200_000)),
+                "JOIN_STATISTICS", 2_400_000);
+        var distribution = new java.util.concurrent.atomic.AtomicReference<>(mixed);
+        boolean oldUnitTest = FeConstants.runningUnitTest;
+        FeConstants.runningUnitTest = true;
+        try (var mocked = org.mockito.Mockito.mockStatic(
+                com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+            mocked.when(() -> com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.find(
+                    org.mockito.Mockito.any(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyInt()))
+                    .thenAnswer(invocation -> {
+                        List<com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator> columns = invocation.getArgument(1);
+                        return columns.get(0).getName().equals("v1") ? distribution.get() : null;
+                    });
+            var probe = buildIntMcvColumnStat(13_400_000, Map.of("1", 2_200_000L, "2", 2_200_000L, "3", 2_200_000L), 0);
+            var build = buildIntMcvColumnStat(20_000_000, Map.of(), 0);
+            withMockedMcvStats(20_000_000, 20_000_000, probe, build, () -> {
+                try {
+                    String sql = "select sum(v2 + v5) from t0 join[shuffle] t1 on v1 = v4";
+                    assertNotContains(getFragmentPlan(sql), "SplitCastDataSink");
+                    // Fully available labels permit the existing rewrite; the histogram itself is also skewed.
+                    distribution.set(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(
+                            mixed.rows(), mixed.entries(), mixed.source()));
+                    assertContains(getFragmentPlan(sql), "SplitCastDataSink");
+                    distribution.set(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Distribution(
+                            20_000_000, List.of(new com.starrocks.sql.optimizer.statistics.SkewJoinStatistics.Entry(
+                                    List.of("1"), 14_000_000)), "JOIN_STATISTICS", 1_000_000));
+                    assertContains(getFragmentPlan(sql), "SplitCastDataSink");
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } finally {
+            FeConstants.runningUnitTest = oldUnitTest;
+        }
+    }
+
+    @Test
+    public void testRightSkewUsesSameBuildSideInBothBranches() throws Exception {
+        String plan = getFragmentPlan("select sum(v2 + v5) from t0 "
+                + "join[skew|t1.v4(1,2)] t1 on v1 = v4");
+        assertContains(plan, "SplitCastDataSink", "UNION");
+        // Reversing only the broadcast branch produces a bounded split-buffer dependency cycle.
+        org.junit.jupiter.api.Assertions.assertEquals(2, plan.lines()
+                .filter(line -> line.contains("equal join conjunct: 4: v4 = 1: v1")).count(), plan);
+    }
+
+    @Test
+    public void testNullSafeSkewHintRetainsOrdinaryJoin() throws Exception {
+        assertNotContains(getFragmentPlan("select count(*) from t0 "
+                + "join[skew|t0.v1(null,1)] t1 on v1 <=> v4"), "SplitCastDataSink");
+    }
+
+    @Test
+    public void testAggregateExpressionAfterSkewSplit() throws Exception {
+        for (String equality : List.of("v1 = v4", "v1 = v4 and v2 = v5")) {
+            String plan = getFragmentPlan("select count(*), sum(v2 + v5) from t0 "
+                    + "join[skew|t0.v1(1,2)] t1 on " + equality);
+            assertContains(plan, "SplitCastDataSink", "UNION", "sum(");
+        }
+    }
+
+    @Test
     public void testSkewJoinV2WithRightSideHint1() throws Exception {
         String sql = "select v2, v5 from t0 join[skew|t1.v4(1,2)] t1 on v1 = v4 ";
         String sqlPlan = getVerboseExplain(sql);
         assertCContains(sqlPlan, "Input Partition: RANDOM\n" +
                 "  SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 1: v1\n" +
-                "  OutPut Exchange Id: 02\n" +
+                "  OutPut Exchange Id: 03\n" +
                 "  Split expr: ([1: v1, BIGINT, true] NOT IN (1, 2)) OR ([1: v1, BIGINT, true] IS NULL)\n" +
                 "  OutPut Partition: UNPARTITIONED\n" +
                 "  OutPut Exchange Id: 07\n" +
@@ -279,8 +346,6 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "  |    8:HASH JOIN\n" +
                     "  |    |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |    |  equal join conjunct: [1: S_SUPPKEY, INT, false] = [9: S_SUPPKEY, INT, false]\n" +
-                    "  |    |  build runtime filters:\n" +
-                    "  |    |  - filter_id = 1, build_expr = (9: S_SUPPKEY), remote = false\n" +
                     "  |    |  output columns: 17, 18\n" +
                     "  |    |  cardinality: 1\n" +
                     "  |    |  \n" +
@@ -290,12 +355,97 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "  |    |    \n" +
                     "  |    6:EXCHANGE\n" +
                     "  |       distribution type: ROUND_ROBIN\n" +
-                    "  |       cardinality: 1\n" +
-                    "  |       probe runtime filters:\n" +
-                    "  |       - filter_id = 1, probe_expr = (1: S_SUPPKEY)");
+                    "  |       cardinality: 1");
+            assertNotContains(plan, "build runtime filters");
         } finally {
             FeConstants.USE_MOCK_DICT_MANAGER = oldMockDictManager;
             connectContext.getSessionVariable().setEnableLowCardinalityOptimize(oldLowCardinality);
+        }
+    }
+
+    private static ColumnStatistic ndvStat(double ndv) {
+        return new ColumnStatistic(1, ndv, 0, 8, ndv);
+    }
+
+    // A two-key skew join exercises the broadcast friend mirroring the shuffle friend's gated conjuncts.
+    // The build-side size gate keeps the narrow key (v4) and drops the wide key (v5) on the partitioned
+    // shuffle friend. The broadcast friend must skip the same wide key; otherwise it builds filters for
+    // both keys and PlanFragment#collectNodes clears the remote runtime filters on both friends because
+    // their build-filter counts differ, discarding the surviving narrow filter.
+    @Test
+    public void testSkewJoinV2BroadcastFriendMirrorsGatedConjunct() throws Exception {
+        SessionVariable sv = connectContext.getSessionVariable();
+        long savedMax = sv.getGlobalRuntimeFilterBuildMaxSize();
+        long savedProbeMin = sv.getGlobalRuntimeFilterProbeMinSize();
+        boolean savedGrf = sv.getEnableGlobalRuntimeFilter();
+        StatisticStorage oldStorage = connectContext.getGlobalStateMgr().getStatisticStorage();
+        try {
+            sv.setGlobalRuntimeFilterBuildMaxSize(1000);
+            sv.setGlobalRuntimeFilterProbeMinSize(0);
+            sv.setEnableGlobalRuntimeFilter(true);
+            sv.disableJoinReorder();
+
+            TestStatisticStorage storage = new TestStatisticStorage();
+            connectContext.getGlobalStateMgr().setStatisticStorage(storage);
+            OlapTable t0 = getOlapTable("t0");
+            OlapTable t1 = getOlapTable("t1");
+            setTableStatistics(t0, 100_000_000);
+            setTableStatistics(t1, 10_000_000);
+            // Build side t1: v4 is narrow (NDV below the size gate, filter kept), v5 is wide (NDV above the
+            // gate, filter dropped). Probe-side NDV is left unknown so the probe gate accepts on the
+            // build/probe row-count ratio (10M / 100M), keeping this test focused on the build-side mirroring.
+            storage.addColumnStatistic(t1, "v4", ndvStat(100));
+            storage.addColumnStatistic(t1, "v5", ndvStat(5_000_000));
+
+            String sql = "select v3, v6 from t0 join[skew|t0.v1(1,2)] t1 on v1 = v4 and v2 = v5";
+            String plan = getVerboseExplain(sql);
+            // The narrow key's remote runtime filter survives the skew split; without the mirroring it would
+            // be cleared together with the broadcast friend's filters on the count mismatch.
+            assertContains(plan, "remote = true");
+        } finally {
+            sv.setGlobalRuntimeFilterBuildMaxSize(savedMax);
+            sv.setGlobalRuntimeFilterProbeMinSize(savedProbeMin);
+            sv.setEnableGlobalRuntimeFilter(savedGrf);
+            sv.enableJoinReorder();
+            connectContext.getGlobalStateMgr().setStatisticStorage(oldStorage);
+        }
+    }
+
+    @Test
+    public void testSkewJoinV2KeepsDerivedDictExprs() throws Exception {
+        boolean oldMockDictManager = FeConstants.USE_MOCK_DICT_MANAGER;
+        boolean oldLowCardinality = connectContext.getSessionVariable().isEnableLowCardinalityOptimize();
+        boolean oldV2 = connectContext.getSessionVariable().isUseLowCardinalityOptimizeV2();
+        try {
+            FeConstants.USE_MOCK_DICT_MANAGER = true;
+            connectContext.getSessionVariable().setEnableLowCardinalityOptimize(true);
+            connectContext.getSessionVariable().setUseLowCardinalityOptimizeV2(true);
+
+            // t1.u is a DERIVED dict (upper over S_ADDRESS) defined below the shuffle that the skew
+            // rewrite replaces with split produce/consume; the fragments above must still receive its
+            // global dict expr, otherwise BE cannot build the dictionary to decode u.
+            String sql = "select ifnull(t1.u, 'x') v, s2.S_ADDRESS from " +
+                    "(select distinct upper(S_ADDRESS) u, S_SUPPKEY k from supplier) t1 " +
+                    "join[skew|t1.k(1,2)] supplier s2 on t1.k = s2.S_SUPPKEY";
+            String plan = getVerboseExplain(sql);
+            // The top projection decodes the derived dictionary before evaluating ifnull().
+            assertContains(plan, "18 <-> ifnull[(DictDecode([21: upper, INT, true], [<place-holder>]), 'x')");
+            // It must carry the derived dictionary expression through the split consumers.
+            assertContains(plan, "  RESULT SINK\n" +
+                    "\n" +
+                    "  Global Dict Exprs:\n" +
+                    "    21: DictDefine(19: S_ADDRESS, [upper(<place-holder>)])\n" +
+                    "\n" +
+                    "  13:Decode");
+            // and the split-producing fragment keeps the exprs of the fragment it was built from
+            assertContains(plan, "  Split expr: [1: S_SUPPKEY, INT, false] IN (1, 2)\n" +
+                    "\n" +
+                    "  Global Dict Exprs:\n" +
+                    "    21: DictDefine(19: S_ADDRESS, [upper(<place-holder>)])");
+        } finally {
+            FeConstants.USE_MOCK_DICT_MANAGER = oldMockDictManager;
+            connectContext.getSessionVariable().setEnableLowCardinalityOptimize(oldLowCardinality);
+            connectContext.getSessionVariable().setUseLowCardinalityOptimizeV2(oldV2);
         }
     }
 
@@ -345,7 +495,7 @@ public class SkewJoinV2Test extends PlanTestBase {
         PlanTestBase.assertContains(sqlPlan, "Input Partition: RANDOM\n" +
                 "  SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 7: abs\n" +
-                "  OutPut Exchange Id: 05\n" +
+                "  OutPut Exchange Id: 04\n" +
                 "  Split expr: ([7: abs, LARGEINT, true] NOT IN (abs[(1); args: BIGINT; result: LARGEINT; args nullable: " +
                 "false; result nullable: true], abs[(2); args: BIGINT; result: LARGEINT; args nullable: false; result " +
                 "nullable: true])) OR ([7: abs, LARGEINT, true] IS NULL)\n" +
@@ -356,7 +506,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 "true])");
         PlanTestBase.assertContains(sqlPlan, "SplitCastDataSink:\n" +
                 "  OutPut Partition: HASH_PARTITIONED: 8: abs\n" +
-                "  OutPut Exchange Id: 04\n" +
+                "  OutPut Exchange Id: 05\n" +
                 "  Split expr: ([8: abs, LARGEINT, true] NOT IN (abs[(1); args: BIGINT; result: LARGEINT; args nullable: " +
                 "false; result nullable: true], abs[(2); args: BIGINT; result: LARGEINT; args nullable: false; result " +
                 "nullable: true])) OR ([8: abs, LARGEINT, true] IS NULL)\n" +
@@ -499,7 +649,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 assertCContains(plan, "Input Partition: RANDOM\n" +
                         "  SplitCastDataSink:\n" +
                         "  OutPut Partition: HASH_PARTITIONED: 4: v4\n" +
-                        "  OutPut Exchange Id: 03\n" +
+                        "  OutPut Exchange Id: 02\n" +
                         "  Split expr: ([4: v4, BIGINT, true] NOT IN (1, 2)) OR ([4: v4, BIGINT, true] IS NULL)\n" +
                         "  OutPut Partition: RANDOM\n" +
                         "  OutPut Exchange Id: 06\n" +
@@ -507,7 +657,7 @@ public class SkewJoinV2Test extends PlanTestBase {
                 assertCContains(plan, "Input Partition: RANDOM\n" +
                         "  SplitCastDataSink:\n" +
                         "  OutPut Partition: HASH_PARTITIONED: 1: v1\n" +
-                        "  OutPut Exchange Id: 02\n" +
+                        "  OutPut Exchange Id: 03\n" +
                         "  Split expr: ([1: v1, BIGINT, true] NOT IN (1, 2)) OR ([1: v1, BIGINT, true] IS NULL)\n" +
                         "  OutPut Partition: UNPARTITIONED\n" +
                         "  OutPut Exchange Id: 07\n" +

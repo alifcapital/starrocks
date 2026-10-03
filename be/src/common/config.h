@@ -1321,6 +1321,8 @@ CONF_Int64(send_runtime_filter_via_http_rpc_min_size, "67108864");
 
 // -1: unlimited, 0: limit by memory use, >0: limit by queue_size
 CONF_mInt64(runtime_filter_queue_limit, "-1");
+// Adapt local RF evaluation using its consuming JOIN's lookup work in the same driver.
+CONF_mBool(enable_local_runtime_filter_feedback, "true");
 
 CONF_Int64(rpc_connect_timeout_ms, "30000");
 

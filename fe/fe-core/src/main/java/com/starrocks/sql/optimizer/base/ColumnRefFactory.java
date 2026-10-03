@@ -44,6 +44,7 @@ public class ColumnRefFactory {
     // The unique id for each scan operator
     // For table a join table a, the two unique ids for table a is different
     private int nextRelationId = 1;
+    private long tableMappingVersion;
     private final List<ColumnRefOperator> columnRefs = Lists.newArrayList();
     private final Map<Integer, Integer> columnToRelationIds = Maps.newHashMap();
     private final Map<ColumnRefOperator, Column> columnRefToColumns = Maps.newHashMap();
@@ -140,7 +141,9 @@ public class ColumnRefFactory {
 
     public void updateColumnRefToColumns(ColumnRefOperator columnRef, Column column, Table table) {
         columnRefToColumns.put(columnRef, column);
-        columnRefToTable.put(columnRef, table);
+        if (columnRefToTable.put(columnRef, table) != table) {
+            tableMappingVersion++;
+        }
     }
 
     public Column getColumn(ColumnRefOperator columnRef) {
@@ -169,6 +172,11 @@ public class ColumnRefFactory {
 
     public Map<Integer, Integer> getColumnToRelationIds() {
         return columnToRelationIds;
+    }
+
+    /** Changes when rewrites register or replace a column's source table. */
+    public long getTableMappingVersion() {
+        return tableMappingVersion;
     }
 
     public Map<ColumnRefOperator, Table> getColumnRefToTable() {

@@ -229,18 +229,10 @@ protected:
     }
 
     void eval_runtime_bloom_filters(Chunk* chunk) override {
-        if (chunk == nullptr || chunk->is_empty()) {
-            return;
+        if (_topn_filter_back_pressure) {
+            _bloom_filter_eval_context.mode = RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
         }
-
-        if (auto* bloom_filters = runtime_bloom_filters()) {
-            _init_rf_counters(true);
-            if (_topn_filter_back_pressure) {
-                _bloom_filter_eval_context.mode = RuntimeMembershipFilterEvalContext::Mode::M_WITHOUT_TOPN;
-            }
-            bloom_filters->evaluate(chunk, _bloom_filter_eval_context);
-        }
-        ExecNode::eval_filter_null_values(chunk, filter_null_value_columns());
+        Operator::eval_runtime_bloom_filters(chunk);
     }
 
 protected:

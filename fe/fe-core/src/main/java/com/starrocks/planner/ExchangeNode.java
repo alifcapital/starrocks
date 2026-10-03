@@ -287,7 +287,12 @@ public class ExchangeNode extends PlanNode {
             isBound = isBound && partitionByExprs.stream()
                     .allMatch(expr -> ExprUtils.isBoundByTupleIds(expr, getTupleIds()));
         }
-        if (isBound && description.canAcceptFilter(this, context)) {
+        // A fallback target on the exchange must obey the same JOIN selectivity decision
+        // as a scan; otherwise a rejected remote filter silently survives as a local one.
+        boolean canUse = isBound && (description.runtimeFilterType()
+                == RuntimeFilterDescription.RuntimeFilterType.JOIN_FILTER
+                ? description.canProbeUse(this, probeExpr, context) : description.canAcceptFilter(this, context));
+        if (canUse) {
             if (onExchangeNode || (description.isLocalApplicable() && description.inLocalFragmentInstance())) {
                 description.addProbeExpr(id.asInt(), probeExpr);
                 description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr,

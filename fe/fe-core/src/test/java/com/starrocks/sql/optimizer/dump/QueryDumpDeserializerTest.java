@@ -14,14 +14,28 @@
 
 package com.starrocks.sql.optimizer.dump;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.starrocks.sql.optimizer.statistics.Bucket;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalMcvStatsCacheLoader;
+import com.starrocks.sql.optimizer.statistics.Histogram;
+import com.starrocks.sql.optimizer.statistics.HistogramUtils;
+import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -247,5 +261,167 @@ public class QueryDumpDeserializerTest {
         assertThat(nameStats.getMaxValue()).isEqualTo(1000.0);
         assertThat(nameStats.getNullsFraction()).isEqualTo(0.1);
         assertThat(nameStats.getDistinctValuesCount()).isEqualTo(500.0);
+    }
+
+    @Test
+    public void testHistogramSerializeDeserializeRoundTrip() {
+        // A bucket without distinctCount (4-element) and one with it (5-element), plus MCV entries.
+        List<Bucket> buckets = Lists.newArrayList(
+                new Bucket(1.0, 10.0, 100L, 5L),
+                new Bucket(11.0, 20.0, 200L, 8L, 7L));
+        Map<String, Long> mcv = ImmutableMap.of("apple", 30L, "banana", 20L);
+        Histogram original = new Histogram(buckets, mcv);
+
+        Histogram roundTrip = HistogramUtils.deserializeHistogram(HistogramUtils.serializeHistogram(original));
+
+        assertThat(roundTrip.getBuckets()).hasSize(2);
+        Bucket b0 = roundTrip.getBuckets().get(0);
+        assertThat(b0.getLower()).isEqualTo(1.0);
+        assertThat(b0.getUpper()).isEqualTo(10.0);
+        assertThat(b0.getCount()).isEqualTo(100L);
+        assertThat(b0.getUpperRepeats()).isEqualTo(5L);
+        assertThat(b0.getDistinctCount()).isEmpty();
+        Bucket b1 = roundTrip.getBuckets().get(1);
+        assertThat(b1.getLower()).isEqualTo(11.0);
+        assertThat(b1.getUpper()).isEqualTo(20.0);
+        assertThat(b1.getCount()).isEqualTo(200L);
+        assertThat(b1.getUpperRepeats()).isEqualTo(8L);
+        assertThat(b1.getDistinctCount()).hasValue(7L);
+        assertThat(roundTrip.getMCV()).hasSize(2).containsEntry("apple", 30L).containsEntry("banana", 20L);
+    }
+
+    @Test
+    public void testDeserializeQueryDumpWithMultiColumnStatistics() {
+        List<MultiColumnCombinedStats.McvEntry> mcv = Lists.newArrayList(
+                new MultiColumnCombinedStats.McvEntry(Lists.newArrayList("approved", "0"), 500, Lists.newArrayList(600L, 620L)),
+                new MultiColumnCombinedStats.McvEntry(Arrays.asList(null, "2"), 50, List.of(50L, 100L)));
+        String mcvText = ExternalMcvStatsCacheLoader.formatMcv(mcv);
+        assertThat(mcvText).isEqualTo(
+                "[[[\"approved\",\"0\"],\"500\",[\"600\",\"620\"]],[[null,\"2\"],\"50\",[\"50\",\"100\"]]]");
+
+        JsonObject dump = new JsonObject();
+        dump.addProperty("statement", "select * from t1");
+        JsonObject tableMeta = new JsonObject();
+        tableMeta.addProperty("test.t1", "CREATE TABLE t1 (status VARCHAR(10), gate INT)");
+        dump.add("table_meta", tableMeta);
+        JsonObject rowCount = new JsonObject();
+        JsonObject partitionRowCount = new JsonObject();
+        partitionRowCount.addProperty("t1", 1000L);
+        rowCount.add("test.t1", partitionRowCount);
+        dump.add("table_row_count", rowCount);
+        dump.add("column_statistics", new JsonObject());
+        JsonObject multiColumn = new JsonObject();
+        JsonArray groups = new JsonArray();
+        JsonObject group = new JsonObject();
+        JsonArray columns = new JsonArray();
+        columns.add("status");
+        columns.add("gate");
+        group.add("columns", columns);
+        group.addProperty("ndv", 12L);
+        group.addProperty("row_count", 1000L);
+        group.addProperty("mcv", mcvText);
+        group.add("buckets", new JsonArray());
+        group.add("null_counts", JsonParser.parseString("[50,0]"));
+        groups.add(group);
+        JsonObject ndvOnly = new JsonObject();
+        JsonArray ndvOnlyColumns = new JsonArray();
+        ndvOnlyColumns.add("gate");
+        ndvOnlyColumns.add("type");
+        ndvOnly.add("columns", ndvOnlyColumns);
+        ndvOnly.addProperty("ndv", 7L);
+        ndvOnly.addProperty("row_count", 0L);
+        ndvOnly.addProperty("mcv", "[]");
+        ndvOnly.add("buckets", new JsonArray());
+        ndvOnly.add("null_counts", JsonParser.parseString("[0,0]"));
+        groups.add(ndvOnly);
+        multiColumn.add("test.t1", groups);
+        dump.add("external_mcv_statistics", multiColumn);
+        dump.addProperty("be_number", 3);
+
+        Gson gson = new GsonBuilder()
+                .registerTypeAdapter(QueryDumpInfo.class, new QueryDumpDeserializer())
+                .create();
+        QueryDumpInfo dumpInfo = gson.fromJson(dump, QueryDumpInfo.class);
+
+        List<ExternalMcvStatistics.Group> parsed = dumpInfo.getExternalMcvStatisticsMap().get("test.t1");
+        assertThat(parsed).hasSize(2);
+        assertThat(parsed.get(0).getColumnNames()).containsExactly("status", "gate");
+        assertThat(parsed.get(0).getNdv()).isEqualTo(12L);
+        assertThat(parsed.get(0).getRowCount()).isEqualTo(1000L);
+        assertThat(parsed.get(0).getMcv()).hasSize(2);
+        assertThat(parsed.get(0).getMcv().get(0).getValues()).containsExactly("approved", "0");
+        assertThat(parsed.get(0).getMcv().get(0).getCount()).isEqualTo(500L);
+        assertThat(parsed.get(0).getMcv().get(0).getComponentCounts()).containsExactly(600L, 620L);
+        assertThat(parsed.get(0).getMcv().get(1).getValues()).containsExactly(null, "2");
+        assertThat(parsed.get(1).getColumnNames()).containsExactly("gate", "type");
+        assertThat(parsed.get(1).getNdv()).isEqualTo(7L);
+        assertThat(parsed.get(1).getMcv()).isEmpty();
+    }
+
+    @Test
+    public void testDeserializeQueryDumpWithHistogram() {
+        // Build a dump whose column_histogram section carries the serialized histogram, then verify the
+        // deserializer merges it back onto the column statistic parsed from column_statistics.
+        List<Bucket> buckets = Lists.newArrayList(
+                new Bucket(1.0, 10.0, 100L, 5L),
+                new Bucket(11.0, 20.0, 200L, 8L, 7L));
+        Histogram original = new Histogram(buckets, ImmutableMap.of("5", 30L, "15", 20L));
+
+        JsonObject dump = new JsonObject();
+        dump.addProperty("statement", "select * from t1");
+        JsonObject tableMeta = new JsonObject();
+        tableMeta.addProperty("test.t1", "CREATE TABLE t1 (id INT)");
+        dump.add("table_meta", tableMeta);
+        JsonObject rowCount = new JsonObject();
+        JsonObject partitionRowCount = new JsonObject();
+        partitionRowCount.addProperty("t1", 1000L);
+        rowCount.add("test.t1", partitionRowCount);
+        dump.add("table_row_count", rowCount);
+        JsonObject columnStatistics = new JsonObject();
+        JsonObject t1ColumnStatistics = new JsonObject();
+        t1ColumnStatistics.addProperty("id", "[1.0, 100.0, 0.0, 4.0, 100.0] ESTIMATE");
+        columnStatistics.add("test.t1", t1ColumnStatistics);
+        dump.add("column_statistics", columnStatistics);
+        JsonObject columnHistogram = new JsonObject();
+        JsonObject t1ColumnHistogram = new JsonObject();
+        t1ColumnHistogram.addProperty("id", HistogramUtils.serializeHistogram(original));
+        columnHistogram.add("test.t1", t1ColumnHistogram);
+        dump.add("column_histogram", columnHistogram);
+        dump.addProperty("be_number", 3);
+
+        Gson gson = new GsonBuilder()
+                .registerTypeAdapter(QueryDumpInfo.class, new QueryDumpDeserializer())
+                .create();
+        QueryDumpInfo dumpInfo = gson.fromJson(dump, QueryDumpInfo.class);
+
+        ColumnStatistic stats = dumpInfo.getTableStatisticsMap().get("test.t1").get("id");
+        // The base statistic parsed from column_statistics must be preserved.
+        assertThat(stats.getMinValue()).isEqualTo(1.0);
+        assertThat(stats.getMaxValue()).isEqualTo(100.0);
+        assertThat(stats.getDistinctValuesCount()).isEqualTo(100.0);
+        // The histogram must be merged back on with buckets and MCV intact.
+        Histogram histogram = stats.getHistogram();
+        assertThat(histogram).isNotNull();
+        assertThat(histogram.getBuckets()).hasSize(2);
+        assertThat(histogram.getBuckets().get(1).getDistinctCount()).hasValue(7L);
+        assertThat(histogram.getMCV()).hasSize(2).containsEntry("5", 30L).containsEntry("15", 20L);
+    }
+
+    @Test
+    public void testBuildFromStatisticStringWithCollectionSizeAndMcvPrefix() {
+        // ColumnStatistic.toString() emits "COS: .. MCV: [..]" before the trailing type token when the
+        // statistic carries a collection size and/or histogram. buildFrom must recover the trailing type
+        // instead of throwing on StatisticType.valueOf over the whole tail (the pre-fix behavior).
+        String withCosAndMcv = "[1.0, 100.0, 0.0, 8.0, 50.0] COS: 5.0 MCV: [[5:10][15:8]] ESTIMATE";
+        ColumnStatistic parsed = ColumnStatistic.buildFrom(withCosAndMcv).build();
+        assertThat(parsed.getType()).isEqualTo(ColumnStatistic.StatisticType.ESTIMATE);
+        assertThat(parsed.getMinValue()).isEqualTo(1.0);
+        assertThat(parsed.getMaxValue()).isEqualTo(100.0);
+        assertThat(parsed.getDistinctValuesCount()).isEqualTo(50.0);
+
+        // MCV-only tail (no collection size) must parse too.
+        String withMcvOnly = "[1.0, 100.0, 0.0, 8.0, 50.0] MCV: [[5:10]] ESTIMATE";
+        assertThat(ColumnStatistic.buildFrom(withMcvOnly).build().getType())
+                .isEqualTo(ColumnStatistic.StatisticType.ESTIMATE);
     }
 }

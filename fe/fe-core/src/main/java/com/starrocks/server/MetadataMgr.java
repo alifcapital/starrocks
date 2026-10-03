@@ -45,6 +45,7 @@ import com.starrocks.common.MaterializedViewExceptions;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.StarRocksException;
 import com.starrocks.common.profile.Tracers;
+import com.starrocks.common.tvr.TvrTableDelta;
 import com.starrocks.common.tvr.TvrTableDeltaTrait;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
@@ -58,12 +59,15 @@ import com.starrocks.connector.DatabaseTableName;
 import com.starrocks.connector.GetRemoteFilesParams;
 import com.starrocks.connector.MetaPreparationItem;
 import com.starrocks.connector.PartitionInfo;
+import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.Procedure;
 import com.starrocks.connector.RemoteFileInfo;
 import com.starrocks.connector.RemoteFileInfoDefaultSource;
 import com.starrocks.connector.RemoteFileInfoSource;
 import com.starrocks.connector.SerializedMetaSpec;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.connector.hive.HiveMetaClient;
+import com.starrocks.connector.iceberg.Partition;
 import com.starrocks.connector.metadata.MetadataTable;
 import com.starrocks.connector.metadata.MetadataTableType;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
@@ -87,6 +91,9 @@ import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsScanKey;
 import com.starrocks.sql.optimizer.statistics.Histogram;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.statistic.StatisticUtils;
@@ -98,6 +105,7 @@ import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -105,6 +113,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -763,6 +772,122 @@ public class MetadataMgr {
                                          ScalarOperator predicate,
                                          long limit,
                                          TvrVersionRange versionRange) {
+        Statistics statistics = computeTableStatistics(session, catalogName, table, columns, partitionKeys,
+                predicate, limit, versionRange);
+        captureExternalTableStatisticsToDump(session, catalogName, table, statistics);
+        return statistics;
+    }
+
+    // Capture external-table statistics into the query dump at this single choke point -- it covers both the
+    // connector branch and the internal/ANALYZE early-return, iceberg and hive alike -- so replay can feed them
+    // back exactly as internal-table statistics are. Only fires while a dump is being taken.
+    private void captureExternalTableStatisticsToDump(OptimizerContext session, String catalogName, Table table,
+                                                      Statistics statistics) {
+        if (statistics == null || session == null || session.getDumpInfo() == null
+                || CatalogMgr.isInternalCatalog(catalogName)) {
+            return;
+        }
+        for (Map.Entry<ColumnRefOperator, ColumnStatistic> e : statistics.getColumnStatistics().entrySet()) {
+            session.getDumpInfo().addTableStatistics(table, e.getKey().getName(), e.getValue());
+        }
+        // Also record the total row count. Iceberg has no hms scanRowCount to carry it, and replay needs it so
+        // column NDVs/cardinality are not clamped by a tiny fallback row count. Zero is a valid finite count
+        // (an empty external table) and must be recorded too, otherwise replay substitutes its nonzero fallback
+        // (100 for iceberg / 1 for hive) and plans an empty table with the wrong cardinality.
+        if (statistics.getOutputRowCount() >= 0 && !Double.isInfinite(statistics.getOutputRowCount())) {
+            session.getDumpInfo().addExternalTableRowCount(table, (long) statistics.getOutputRowCount());
+        }
+        // For a partitioned iceberg table also record its partition spec + names + per-partition counts (hive
+        // captures the same via OptExternalPartitionPruner) so replay can reproduce partition pruning.
+        if (table instanceof IcebergTable && !((IcebergTable) table).isUnPartitioned()) {
+            captureIcebergPartitionsToDump(session, catalogName, (IcebergTable) table);
+        }
+    }
+
+    // Record a partitioned iceberg table's partition spec, partition names, and real per-partition record
+    // counts into the dump. Guarded so a metadata hiccup never fails the query being dumped.
+    private void captureIcebergPartitionsToDump(OptimizerContext session, String catalogName, IcebergTable table) {
+        try {
+            List<String> transforms = table.getPartitionColumnNamesWithTransform();
+            List<String> partitionNames = listPartitionNames(catalogName, table.getCatalogDBName(),
+                    table.getCatalogTableName(), ConnectorMetadataRequestContext.DEFAULT);
+            session.getDumpInfo().addExternalTablePartitions(table, transforms, partitionNames);
+            // Real per-partition record count (Iceberg $partitions.record_count, no data scan), reusing the
+            // existing table_row_count section, so replay reconstructs each partition's DataFile with its true
+            // row count instead of an even total/partitionCount split. getPartitions returns infos positionally
+            // aligned to partitionNames.
+            List<PartitionInfo> partitions = getPartitions(catalogName, table, partitionNames);
+            for (int i = 0; i < partitionNames.size() && i < partitions.size(); i++) {
+                if (partitions.get(i) instanceof Partition) {
+                    long recordCount = ((Partition) partitions.get(i)).getRecordCount();
+                    if (recordCount > 0) {
+                        session.getDumpInfo().addPartitionRowCount(table, partitionNames.get(i), recordCount);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("failed to capture iceberg partitions for dump: {}.{}",
+                    table.getCatalogDBName(), table.getCatalogTableName(), e);
+        }
+    }
+
+    private Statistics computeTableStatistics(OptimizerContext session,
+                                         String catalogName,
+                                         Table table,
+                                         Map<ColumnRefOperator, Column> columns,
+                                         List<PartitionKey> partitionKeys,
+                                         ScalarOperator predicate,
+                                         long limit,
+                                         TvrVersionRange versionRange) {
+        if (isIncrementalIcebergScan(table, versionRange)) {
+            // ANALYZE rows describe entire partitions, not the newly appended files inside them.
+            // Keep the connector's existing delta-file estimate, including for unpartitioned tables.
+            session.setObtainedFromInternalStatistics(false);
+            Statistics delta = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
+                    session, table, columns, partitionKeys, predicate, limit, versionRange))
+                    .orElseGet(() -> StatisticsUtils.buildDefaultStatistics(columns.keySet()));
+            return Statistics.buildFrom(delta).setPartitionRestricted(true).build();
+        }
+        ExternalStatisticsScanKey fallbackKey = null;
+        if (!FeConstants.runningUnitTest && (table.isHiveTable() || table.isHudiTable() || table.isIcebergTable())
+                && !StatisticUtils.statisticTableBlackListCheck(table.getId())) {
+            fallbackKey = new ExternalStatisticsScanKey(catalogName, table, columns, partitionKeys, predicate,
+                    limit, versionRange, session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics(),
+                    session.getSessionVariable().disableTableStatsFromMetadataForSingleTable()
+                            && session.getSourceTablesCount() == 1);
+            Statistics cached = session.getExternalStatisticsFallback(fallbackKey);
+            if (cached != null) {
+                session.setObtainedFromInternalStatistics(false);
+                return cached;
+            }
+        }
+        ExternalStatisticsRequest request = FeConstants.runningUnitTest ? null : prepareExternalStatisticsRequest(
+                session, catalogName, table, columns, partitionKeys, predicate, limit, versionRange);
+        if (request != null) {
+            Statistics statistics = computeScopedExternalStatistics(session, catalogName, table, columns, partitionKeys,
+                    predicate, limit, versionRange, request);
+            if (fallbackKey != null && !session.isObtainedFromInternalStatistics()) {
+                session.cacheExternalStatisticsFallback(fallbackKey, statistics);
+            }
+            return statistics;
+        }
+        if (!FeConstants.runningUnitTest && table.isIcebergTable() && !table.isUnPartitioned()
+                && session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics()
+                && referencesPartitionColumn(table, columns, predicate)) {
+            // No complete cached partition domain: never substitute whole-table ANALYZE/MCV
+            // for a restricted scan, and never enumerate files just to recover that domain.
+            session.setObtainedFromInternalStatistics(false);
+            Statistics fallback = null;
+            if (!(session.getSessionVariable().disableTableStatsFromMetadataForSingleTable()
+                    && session.getSourceTablesCount() == 1)) {
+                fallback = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
+                        session, table, columns, partitionKeys, predicate, limit, versionRange)).orElse(null);
+            }
+            if (fallback == null) {
+                fallback = StatisticsUtils.buildDefaultStatistics(columns.keySet());
+            }
+            return Statistics.buildFrom(fallback).setPartitionRestricted(true).build();
+        }
         // FIXME: In testing env, `_statistics_.external_column_statistics` is not created, ignore query columns stats from it.
         // Get basic/histogram stats from internal statistics.
         Statistics internalStatistics = FeConstants.runningUnitTest ? null :
@@ -825,6 +950,177 @@ public class MetadataMgr {
         });
         return builder.build();
     }
+
+    public static boolean isIncrementalIcebergScan(Table table, TvrVersionRange versionRange) {
+        return table.isIcebergTable() && versionRange instanceof TvrTableDelta && versionRange.start().isPresent();
+    }
+
+    /** Resolve the scan domain before loading any statistics. Null means this connector cannot name it. */
+    public ExternalStatisticsRequest prepareExternalStatisticsRequest(OptimizerContext session, String catalogName,
+            Table table, Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
+            ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
+        if (isIncrementalIcebergScan(table, versionRange)
+                || !(table.isHiveTable() || table.isHudiTable() || table.isIcebergTable())
+                || StatisticUtils.statisticTableBlackListCheck(table.getId())) {
+            return null;
+        }
+        boolean wholeTable = table.isUnPartitioned()
+                || !session.getSessionVariable().isCboEnablePartitionAwareExternalStatistics();
+        List<String> names;
+        if (wholeTable) {
+            names = List.of();
+        } else if (table instanceof IcebergTable && versionRange != null
+                && versionRange.from().isMin() && versionRange.end().isPresent()
+                && !referencesPartitionColumn(table, columns, predicate)) {
+            // A complete snapshot uses the BE-aggregated TABLE entry, including FOR VERSION AS OF.
+            // Neither enumerating its partitions nor loading their sketches is necessary.
+            names = List.of();
+            wholeTable = true;
+        } else if ((table.isHiveTable() || table.isHudiTable()) && limit < 0
+                && !referencesPartitionColumn(table, columns, predicate)) {
+            names = List.of();
+            wholeTable = true;
+        } else {
+            names = selectedPartitionNames(catalogName, table, partitionKeys, predicate, limit, versionRange);
+        }
+        if (names == null) {
+            return null;
+        }
+        List<String> columnNames = columns.entrySet().stream()
+                .filter(entry -> !FeNameFormat.FORBIDDEN_COLUMN_NAMES.contains(entry.getKey().getName()))
+                .map(entry -> entry.getValue().getName()).collect(Collectors.toList());
+        return new ExternalStatisticsRequest(table.getUUID(), names, columnNames, wholeTable, table.isUnPartitioned());
+    }
+
+    private static boolean referencesPartitionColumn(Table table, Map<ColumnRefOperator, Column> columns,
+                                                      ScalarOperator predicate) {
+        if (predicate == null) {
+            return false;
+        }
+        List<String> partitionColumns = table.getPartitionColumnNames();
+        return predicate.getColumnRefs().stream().anyMatch(ref -> {
+            Column column = columns.get(ref);
+            return column == null || partitionColumns.stream().anyMatch(name -> name.equalsIgnoreCase(column.getName()));
+        });
+    }
+
+    private Statistics computeScopedExternalStatistics(OptimizerContext session, String catalogName, Table table,
+            Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys, ScalarOperator predicate,
+            long limit, TvrVersionRange versionRange, ExternalStatisticsRequest request) {
+        boolean restricted = !request.wholeTable;
+        if (!request.wholeTable && request.partitions.isEmpty()) {
+            session.setObtainedFromInternalStatistics(true);
+            Statistics.Builder empty = Statistics.builder().setOutputRowCount(0)
+                    .setStatsSource(Statistics.StatsSource.ANALYZE).setPartitionRestricted(true);
+            columns.keySet().forEach(column -> empty.addColumnStatistic(column, ColumnStatistic.unknown()));
+            return empty.build();
+        }
+        Optional<ExternalStatisticsAggregate> snapshot = session.getExternalStatisticsSnapshot(request, () -> {
+            CompletableFuture<ExternalStatisticsAggregate> load = session.getExternalStatisticsLoad(request,
+                    () -> GlobalStateMgr.getCurrentState().getStatisticStorage().loadExternalStatistics(request));
+            try {
+                return Optional.ofNullable(Config.enable_sync_statistics_load ? load.get() : load.getNow(null));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Optional.empty();
+            } catch (Exception e) {
+                LOG.warn("Failed to load scoped external statistics for {}", table.getName(), e);
+                return Optional.empty();
+            }
+        });
+        ExternalStatisticsAggregate aggregate = snapshot.orElse(null);
+        if (aggregate != null) {
+            List<String> incompatible = new ArrayList<>();
+            for (Column column : columns.values()) {
+                String loadedType = aggregate.sourceTypes.get(column.getName());
+                if (loadedType != null && !loadedType.equals(column.getType().toSql())) {
+                    incompatible.add(column.getName());
+                }
+            }
+            if (!incompatible.isEmpty()) {
+                // Cached numeric/date bounds were prepared against an older source schema. Never
+                // reinterpret them as the new type; let the next request load a freshly typed value.
+                GlobalStateMgr.getCurrentState().getStatisticStorage()
+                        .invalidateConnectorTableColumnStatistics(table.getUUID(), incompatible);
+                aggregate = null;
+            }
+        }
+        Statistics connectorStats = null;
+        if (aggregate == null || aggregate.isEmpty()
+                || aggregate.hasUnknownColumns()) {
+            // Missing coverage is not an empty partition. Partial coverage already carries an
+            // explicit extrapolation; consult connector metadata only when a column is entirely
+            // unknown, without launching a second whole-table statistics SQL query.
+            if (!(session.getSessionVariable().disableTableStatsFromMetadataForSingleTable()
+                    && session.getSourceTablesCount() == 1)) {
+                connectorStats = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
+                        session, table, columns, partitionKeys, predicate, limit, versionRange)).orElse(null);
+            }
+        }
+        if (aggregate == null || aggregate.isEmpty()) {
+            session.setObtainedFromInternalStatistics(false);
+            Statistics fallback = connectorStats == null ?
+                    StatisticsUtils.buildDefaultStatistics(columns.keySet()) : connectorStats;
+            return fallback.isPartitionRestricted() == restricted ? fallback
+                    : Statistics.buildFrom(fallback).setPartitionRestricted(restricted).build();
+        }
+        session.setObtainedFromInternalStatistics(true);
+        Statistics.Builder result = Statistics.builder().setOutputRowCount(aggregate.rowCount)
+                .setStatsSource(Statistics.StatsSource.ANALYZE).setPartitionRestricted(restricted)
+                .setTableRowCountMayInaccurate(!aggregate.hasCompleteCoverage());
+        if (!aggregate.hasCompleteCoverage() && connectorStats != null
+                && connectorStats.getStatsSource() == Statistics.StatsSource.TABLE_METADATA) {
+            result.setOutputRowCount(connectorStats.getOutputRowCount());
+        }
+        Map<String, Histogram> histograms = restricted ? Collections.emptyMap() :
+                GlobalStateMgr.getCurrentState().getStatisticStorage().getConnectorHistogramStatistics(table, request.columns);
+        for (Map.Entry<ColumnRefOperator, Column> entry : columns.entrySet()) {
+            ColumnStatistic column = aggregate.columns.getOrDefault(entry.getValue().getName(), ColumnStatistic.unknown());
+            if (column.isUnknown() && connectorStats != null) {
+                column = connectorStats.getColumnStatistics().getOrDefault(entry.getKey(), column);
+            }
+            Histogram histogram = histograms.get(entry.getValue().getName());
+            if (histogram != null) {
+                column = ColumnStatistic.buildFrom(column).setHistogram(histogram).build();
+            }
+            result.addColumnStatistic(entry.getKey(), column);
+        }
+        return result.build();
+    }
+
+    // The partitions the scan reads, named as the collection wrote them; null when unknown.
+    private List<String> selectedPartitionNames(String catalogName, Table table, List<PartitionKey> partitionKeys,
+                                                ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
+        if (table.isHiveTable() || table.isHudiTable()) {
+            if (partitionKeys == null) {
+                List<String> names = listPartitionNames(catalogName, table.getCatalogDBName(), table.getCatalogTableName(),
+                        ConnectorMetadataRequestContext.DEFAULT);
+                return names.stream().map(name -> PartitionUtil.normalizePartitionName(name,
+                        table.getPartitionColumnNames(), Collections.singleton(HiveMetaClient.PARTITION_NULL_VALUE)))
+                        .collect(Collectors.toList());
+            }
+            List<String> partitionColumnNames = table.getPartitionColumnNames();
+            List<String> partitionNames = new ArrayList<>(partitionKeys.size());
+            for (PartitionKey partitionKey : partitionKeys) {
+                // The names the collection wrote, see ExternalFullStatisticsCollectJob.
+                partitionNames.add(PartitionUtil.normalizePartitionName(
+                        PartitionUtil.toHivePartitionName(partitionColumnNames, partitionKey), partitionColumnNames,
+                        Collections.singleton(HiveMetaClient.PARTITION_NULL_VALUE)));
+            }
+            return partitionNames;
+        }
+        if (table.isIcebergTable()) {
+            try {
+                return getOptionalMetadata(catalogName)
+                        .map(metadata -> metadata.getScannedPartitionNames(table, predicate, limit, versionRange))
+                        .orElse(null);
+            } catch (Exception e) {
+                LOG.warn("Failed to name the partitions iceberg table {} reads for the scan predicate", table.getName(), e);
+            }
+        }
+        return null;
+    }
+
 
     public Statistics getTableStatistics(OptimizerContext session,
                                          String catalogName,

@@ -421,6 +421,29 @@ TEST_F(ChunkPipelineAccumulatorTest, test_push) {
     ASSERT_FALSE(accumulator.has_output());
 }
 
+TEST_F(ChunkPipelineAccumulatorTest, flush_preserves_pending_output_and_accepts_more_input) {
+    ChunkPipelineAccumulator accumulator;
+    accumulator.push(_generate_chunk(3000, 1));
+    accumulator.push(_generate_chunk(2000, 1));
+    accumulator.flush();
+    auto first = std::move(accumulator.pull());
+    ASSERT_EQ(3000, first->num_rows());
+    accumulator.flush();
+    auto second = std::move(accumulator.pull());
+    ASSERT_EQ(2000, second->num_rows());
+    ASSERT_TRUE(accumulator.need_input());
+    ASSERT_FALSE(accumulator.is_finished());
+    accumulator.push(_generate_chunk(100, 1));
+    ASSERT_FALSE(accumulator.has_output());
+    accumulator.flush();
+    auto third = std::move(accumulator.pull());
+    ASSERT_EQ(100, third->num_rows());
+    accumulator.flush();
+    ASSERT_FALSE(accumulator.has_output());
+    accumulator.finalize();
+    ASSERT_TRUE(accumulator.is_finished());
+}
+
 TEST_F(ChunkPipelineAccumulatorTest, test_owner_info) {
     constexpr size_t kDesiredSize = 4096;
 

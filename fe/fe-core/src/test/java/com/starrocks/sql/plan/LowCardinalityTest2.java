@@ -16,7 +16,11 @@ package com.starrocks.sql.plan;
 
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.common.FeConstants;
+import com.starrocks.planner.DecodeNode;
+import com.starrocks.planner.ExchangeNode;
 import com.starrocks.planner.OlapScanNode;
+import com.starrocks.planner.PlanNode;
+import com.starrocks.planner.UnionNode;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.optimizer.rule.tree.lowcardinality.DecodeCollector;
 import com.starrocks.sql.optimizer.rule.tree.lowcardinality.DecodeInfo;
@@ -30,6 +34,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 public class LowCardinalityTest2 extends PlanTestBase {
@@ -298,16 +303,37 @@ public class LowCardinalityTest2 extends PlanTestBase {
                 ")\n" +
                 "select cte1.L_SHIPMODE, cte1.L_COMMENT from cte1 join[broadcast] cte2 on cte1.L_SHIPMODE = cte2.P_COMMENT";
 
-        String plan = getVerboseExplain(sql);
-        Assertions.assertTrue(plan.contains("  4:Decode\n" +
-                "  |  <dict id 51> : <string id 18>\n" +
-                "  |  cardinality: 1\n" +
-                "  |  \n" +
-                "  3:EXCHANGE\n" +
-                "     distribution type: ROUND_ROBIN\n" +
-                "     cardinality: 1\n" +
-                "     probe runtime filters:\n" +
-                "     - filter_id = 0, probe_expr = (<slot 15>)"), plan);
+        long previousProbeMin = connectContext.getSessionVariable().getGlobalRuntimeFilterProbeMinSize();
+        try {
+            // Fixture estimates: build NDV=1, each UNION arm NDV=1, UNION NDV=2.
+            // The arms are not selective; the UNION's estimated 50% rejection is useful.
+            connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(102400);
+            List<PlanNode> costed = getExecPlan(sql).getFragments().stream()
+                    .flatMap(fragment -> fragment.collectNodes().stream()).toList();
+            Assertions.assertTrue(costed.stream().anyMatch(node -> node instanceof UnionNode
+                    && !node.getProbeRuntimeFilters().isEmpty()));
+            List<PlanNode> decodes = costed.stream().filter(node -> node instanceof DecodeNode).toList();
+            Assertions.assertFalse(decodes.isEmpty());
+            for (PlanNode decode : decodes) {
+                Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
+                Assertions.assertTrue(decode.getChild(0).getProbeRuntimeFilters().isEmpty());
+            }
+
+            // Test Decode traversal independently of the RF cost decision. Zero explicitly
+            // forces RF use; keep the original requirement that it reaches the exchange below Decode.
+            connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(0);
+            List<PlanNode> forced = getExecPlan(sql).getFragments().stream()
+                    .flatMap(fragment -> fragment.collectNodes().stream()).toList();
+            decodes = forced.stream().filter(node -> node instanceof DecodeNode).toList();
+            Assertions.assertFalse(decodes.isEmpty());
+            for (PlanNode decode : decodes) {
+                Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
+                Assertions.assertFalse(decode.getChild(0).getProbeRuntimeFilters().isEmpty(),
+                        "Forced runtime filter must cross Decode and reach its input exchange");
+            }
+        } finally {
+            connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(previousProbeMin);
+        }
     }
 
     @Test

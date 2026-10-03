@@ -245,6 +245,17 @@ public interface ConnectorMetadata {
     }
 
     /**
+     * Candidate partition names for statistics, as listPartitionNames names them. May include
+     * partitions rejected later by file metrics. Must not enumerate files or load partition metadata.
+     * Return null when the domain is unknown; an empty list means it is known to be empty.
+     * LIMIT does not define a partition domain.
+     */
+    default List<String> getScannedPartitionNames(Table table, ScalarOperator predicate, long limit,
+                                                  TvrVersionRange version) {
+        return null;
+    }
+
+    /**
      * Get statistics for the table.
      *
      * @param session           optimizer context

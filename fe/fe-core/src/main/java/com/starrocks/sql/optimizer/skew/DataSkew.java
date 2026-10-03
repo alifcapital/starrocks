@@ -15,13 +15,14 @@ package com.starrocks.sql.optimizer.skew;
 
 import com.google.common.collect.Lists;
 import com.starrocks.common.Pair;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import javax.validation.constraints.NotNull;
 
 public class DataSkew {
@@ -62,12 +63,13 @@ public class DataSkew {
             this(type, additionalInfo, Optional.empty());
         }
 
-        public SkewInfo(SkewType type, Optional<List<Pair<String, Long>>> maybeMcvs) {
-            this(type, AdditionalInfo.NONE, maybeMcvs);
-        }
-
         public boolean isSkewed() {
             return type != SkewType.NOT_SKEWED;
+        }
+
+        public Optional<Map<String, Long>> getMcvs() {
+            return maybeMcvs.map(mcvs -> mcvs.stream() //
+                    .collect(Collectors.toMap(pair -> pair.first, pair -> pair.second)));
         }
     }
 
@@ -106,22 +108,23 @@ public class DataSkew {
             return new McvSkewInfo(false, AdditionalInfo.NO_HISTOGRAM);
         }
 
-        final var mcv = histogram.getMCV();
+        final var mcv = histogram.getMcvDistribution();
 
         if (mcv.isEmpty()) {
             return new McvSkewInfo(false, AdditionalInfo.NO_MCV);
         }
 
         int mcvLimit = Math.min(thresholds.mcvLimit, mcv.size());
-        List<Pair<String, Long>> mcvs = Lists.newArrayList();
-        mcv.entrySet().stream()
-                .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder())) //
-                .limit(mcvLimit)
-                .forEach(entry -> {
-                    mcvs.add(Pair.create(entry.getKey(), entry.getValue()));
-                });
-
-        long rowCountOfMcvs = mcvs.stream().mapToLong(pair -> pair.second).sum();
+        if (mcvLimit < 0) {
+            throw new IllegalArgumentException("Negative MCV limit: " + mcvLimit);
+        }
+        List<Pair<String, Long>> mcvs = Lists.newArrayListWithCapacity(mcvLimit);
+        long rowCountOfMcvs = 0;
+        for (int rank = 0; rank < mcvLimit; rank++) {
+            long count = mcv.getCountByFrequency(rank);
+            mcvs.add(Pair.create(mcv.getKeyByFrequency(rank), count));
+            rowCountOfMcvs += count;
+        }
         final var mcvSkewFactor = rowCountOfMcvs / rowCount;
 
         if (mcvSkewFactor > thresholds.relativeRowThreshold) {
@@ -147,6 +150,20 @@ public class DataSkew {
     }
 
     /**
+     * In some cases the row count in statistics can be inaccurate,
+     * and enforcing skew detection in those cases can lead to false positives.
+     * This utility checks whether the inaccurate stats should be ignored for
+     * skew detection based on the session variable enableSkewDetectWithInaccurateStats
+     */
+    private static boolean shouldEnforceRowCountAccuracy() {
+        ConnectContext ctx = ConnectContext.get();
+        if (ctx != null && ctx.getSessionVariable() != null) {
+            return !ctx.getSessionVariable().isEnableSkewDetectWithInaccurateStats();
+        }
+        return true;
+    }
+
+    /**
      * Utility method to get detailed information about if a column is skewed and how it is skewed.
      */
     public static SkewInfo getColumnSkewInfo(@NotNull Statistics statistics, @NotNull ColumnStatistic columnStatistic) {
@@ -158,7 +175,8 @@ public class DataSkew {
      */
     public static SkewInfo getColumnSkewInfo(@NotNull Statistics statistics, @NotNull ColumnStatistic columnStatistic,
                                              Thresholds thresholds) {
-        if (statistics.isTableRowCountMayInaccurate() || statistics.getOutputRowCount() < 1) {
+        final var rowCount = statistics.getOutputRowCount();
+        if (rowCount < 1 || (statistics.isTableRowCountMayInaccurate() && shouldEnforceRowCountAccuracy())) {
             // Without sufficient information we can not make a decision.
             return new SkewInfo(SkewType.NOT_SKEWED, AdditionalInfo.INACCURATE_ROW_COUNT);
         }
@@ -191,7 +209,8 @@ public class DataSkew {
                                                    @NotNull ColumnStatistic columnStatistic,
                                                    Thresholds thresholds,
                                                    double singleMcvThreshold) {
-        if (statistics.isTableRowCountMayInaccurate() || statistics.getOutputRowCount() < 1) {
+        if (statistics.getOutputRowCount() < 1 ||
+                (statistics.isTableRowCountMayInaccurate() && shouldEnforceRowCountAccuracy())) {
             return new SkewCandidates(false, List.of(), Optional.empty(), Optional.empty(), Optional.empty());
         }
 
@@ -236,5 +255,16 @@ public class DataSkew {
     /* Always using default thresholds */
     public static boolean isColumnSkewed(@NotNull Statistics statistics, @NotNull ColumnStatistic columnStatistic) {
         return isColumnSkewed(statistics, columnStatistic, DEFAULT_THRESHOLDS);
+    }
+
+    public static long getOverlappingMcvRowCount(Map<String, Long> mcvs, Map<String, Long> otherMcvs) {
+        if (mcvs == null || mcvs.isEmpty() || otherMcvs == null || otherMcvs.isEmpty()) {
+            return 0;
+        }
+
+        return mcvs.entrySet().stream() //
+                .filter(mcv -> otherMcvs.containsKey(mcv.getKey())) //
+                .mapToLong(Map.Entry::getValue) //
+                .sum();
     }
 }

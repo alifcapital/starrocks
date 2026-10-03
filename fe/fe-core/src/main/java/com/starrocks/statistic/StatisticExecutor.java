@@ -19,6 +19,10 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.Striped;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.Database;
@@ -28,10 +32,12 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
+import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.common.Status;
 import com.starrocks.common.util.DebugUtil;
+import com.starrocks.common.util.SqlUtils;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.connector.RemoteFilesSampleStrategy;
 import com.starrocks.connector.statistics.StatisticsUtils;
@@ -44,12 +50,16 @@ import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.StatementPlanner;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldAccessPathNormalizer;
 import com.starrocks.sql.optimizer.statistics.CacheDictManager;
+import com.starrocks.sql.optimizer.statistics.ExternalPartitionStatistics;
+import com.starrocks.sql.optimizer.statistics.ExternalStatisticsCacheKey;
+import com.starrocks.sql.optimizer.statistics.ExternalTableStatistics;
 import com.starrocks.sql.optimizer.statistics.IRelaxDictManager;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.sql.plan.ExecPlan;
@@ -59,8 +69,10 @@ import com.starrocks.thrift.TResultBatch;
 import com.starrocks.thrift.TResultSinkType;
 import com.starrocks.thrift.TStatisticData;
 import com.starrocks.thrift.TStatusCode;
+import com.starrocks.transaction.TransactionStatus;
 import com.starrocks.type.JsonType;
 import com.starrocks.type.Type;
+import io.netty.buffer.Unpooled;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.logging.log4j.LogManager;
@@ -71,20 +83,25 @@ import org.apache.thrift.protocol.TCompactProtocol;
 import org.jetbrains.annotations.NotNull;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 public class StatisticExecutor {
     private static final Logger LOG = LogManager.getLogger(StatisticExecutor.class);
+    private static final Striped<Lock> SUMMARY_LOCKS = Striped.lock(128);
     private static final Set<THdfsFileFormat> SUPPORTED_FORMAT = ImmutableSet.of(THdfsFileFormat.PARQUET);
 
     private static final Predicate<THdfsScanRange> FORMAT_CHECKER = x -> x.isSetFile_format() &&
@@ -172,11 +189,12 @@ public class StatisticExecutor {
                                                            Table table) {
         List<ColumnStatsMeta> columnWithFullStats =
                 columnStatsMetaList.stream()
-                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.FULL)
+                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.FULL ||
+                                (x.getType() == StatsConstants.AnalyzeType.SAMPLE && !x.usesSampleStatisticsTable()))
                         .collect(Collectors.toList());
         List<ColumnStatsMeta> columnWithSampleStats =
                 columnStatsMetaList.stream()
-                        .filter(x -> x.getType() == StatsConstants.AnalyzeType.SAMPLE)
+                        .filter(ColumnStatsMeta::usesSampleStatisticsTable)
                         .collect(Collectors.toList());
 
         List<Long> partitionIds = null;
@@ -205,19 +223,8 @@ public class StatisticExecutor {
         if (CollectionUtils.isNotEmpty(columnWithSampleStats)) {
             List<String> columnNamesForStats = columnWithSampleStats.stream().map(ColumnStatsMeta::getColumnName)
                     .collect(Collectors.toList());
-            if (Config.statistic_use_meta_statistics) {
-                List<Type> columnTypesForStats = columnWithSampleStats.stream()
-                        .map(x -> StatisticUtils.getQueryStatisticsColumnType(table, x.getColumnName()))
-                        .collect(Collectors.toList());
-                String statsSql = StatisticSQLBuilder.buildQueryFullStatisticsSQL(
-                        tableId, columnNamesForStats, columnTypesForStats, partitionIds);
-                List<TStatisticData> tStatisticData = executeStatisticDQL(context, statsSql);
-                columnStats.addAll(tStatisticData);
-            } else {
-                String statsSql = StatisticSQLBuilder.buildQuerySampleStatisticsSQL(dbId, tableId, columnNamesForStats);
-                List<TStatisticData> tStatisticData = executeStatisticDQL(context, statsSql);
-                columnStats.addAll(tStatisticData);
-            }
+            String statsSql = StatisticSQLBuilder.buildQuerySampleStatisticsSQL(dbId, tableId, columnNamesForStats);
+            columnStats.addAll(executeStatisticDQL(context, statsSql));
         }
         return columnStats;
     }
@@ -272,6 +279,7 @@ public class StatisticExecutor {
     }
 
     public void dropExternalTableStatistics(ConnectContext statsConnectCtx, String tableUUID) {
+        dropExternalTableSummary(statsConnectCtx, "table_uuid = '" + StatisticUtils.hashTableUuidForPkStorage(tableUUID) + "'");
         String sql = StatisticSQLBuilder.buildDropExternalStatSQL(tableUUID);
         LOG.debug("Expire external statistic SQL: {}", sql);
 
@@ -282,6 +290,9 @@ public class StatisticExecutor {
     }
 
     public void dropExternalTableStatistics(ConnectContext statsConnectCtx, String catalogName, String dbName, String tableName) {
+        dropExternalTableSummary(statsConnectCtx, "catalog_name = '" + SqlUtils.escapeSqlString(catalogName)
+                        + "' AND db_name = '" + SqlUtils.escapeSqlString(dbName)
+                        + "' AND table_name = '" + SqlUtils.escapeSqlString(tableName) + "'");
         String sql = StatisticSQLBuilder.buildDropExternalStatSQL(catalogName, dbName, tableName);
         LOG.debug("Expire external statistic SQL: {}", sql);
 
@@ -291,14 +302,15 @@ public class StatisticExecutor {
         }
     }
 
-    // Best-effort cleanup of the stale raw-keyed rows superseded by a fresh hashed-key write.
-    // Failure just means the raw row lingers a bit longer (until this partition/column is
-    // collected again); it must never fail the collection job that just succeeded.
-    public boolean dropExternalStatRawPartitions(ConnectContext statsConnectCtx, String rawTableUUID,
-                                                 List<String> partitionNames, List<String> columnNames) {
-        String sql = StatisticSQLBuilder.buildDropExternalStatSQLForPartitions(rawTableUUID, partitionNames, columnNames);
-        LOG.debug("Cleanup stale raw-keyed external statistic rows SQL: {}", sql);
-        return executeDML(statsConnectCtx, sql);
+    private void dropExternalTableSummary(ConnectContext context, String predicate) {
+        if (!executeDML(context, "DELETE FROM " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME + " WHERE " + predicate)) {
+            LOG.warn("Failed to delete external partition summaries");
+        }
+        if (!executeDML(context, "DELETE FROM " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME + " WHERE " + predicate)) {
+            LOG.warn("Failed to delete external table summary");
+        }
     }
 
     public boolean dropExternalHistogramRawColumn(ConnectContext statsConnectCtx, String rawTableUUID, String columnName) {
@@ -526,6 +538,16 @@ public class StatisticExecutor {
 
     public List<TStatisticData> queryPartitionLevelColumnNDV(ConnectContext context, long tableId,
                                                              List<Long> partitions, List<String> columns) {
+        BasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getTableBasicStatsMeta(tableId);
+        if (meta != null) {
+            columns = columns.stream().filter(column -> {
+                ColumnStatsMeta columnMeta = meta.getAnalyzedColumns().get(column);
+                return columnMeta == null || !columnMeta.usesSampleStatisticsTable();
+            }).collect(Collectors.toList());
+        }
+        if (columns.isEmpty()) {
+            return Collections.emptyList();
+        }
         String sql = StatisticSQLBuilder.buildQueryPartitionStatisticsSQL(tableId, partitions, columns);
         return executeStatisticDQL(context, sql);
     }
@@ -565,6 +587,20 @@ public class StatisticExecutor {
                                            AnalyzeStatus analyzeStatus,
                                            boolean refreshAsync,
                                            boolean resetWarehouse) {
+        if (statsJob instanceof ExternalMcvStatisticsCollectJob) {
+            var lock = ExtendedStatisticsSchedule.mcvLock(statsJob.getTable().getUUID());
+            lock.lock();
+            try {
+                return collectStatisticsImpl(statsConnectCtx, statsJob, analyzeStatus, refreshAsync, resetWarehouse);
+            } finally {
+                lock.unlock();
+            }
+        }
+        return collectStatisticsImpl(statsConnectCtx, statsJob, analyzeStatus, refreshAsync, resetWarehouse);
+    }
+
+    private AnalyzeStatus collectStatisticsImpl(ConnectContext statsConnectCtx, StatisticsCollectJob statsJob,
+                                                AnalyzeStatus analyzeStatus, boolean refreshAsync, boolean resetWarehouse) {
         Database db = statsJob.getDb();
         Table table = statsJob.getTable();
 
@@ -678,6 +714,9 @@ public class StatisticExecutor {
                     for (String column : ListUtils.emptyIfNull(statsJob.getColumnNames())) {
                         ColumnStatsMeta meta =
                                 new ColumnStatsMeta(column, statsJob.getAnalyzeType(), analyzeStatus.getEndTime());
+                        if (statsJob.getAnalyzeType() == StatsConstants.AnalyzeType.SAMPLE) {
+                            meta.setSampleStatisticsTable(statsJob.usesSampleStatisticsTable(column));
+                        }
                         basicStatsMeta.addColumnStatsMeta(meta);
                     }
                     analyzeMgr.addBasicStatsMeta(basicStatsMeta);
@@ -685,6 +724,22 @@ public class StatisticExecutor {
                             basicStatsMeta.getDbId(), basicStatsMeta.getTableId(), basicStatsMeta.getColumns(),
                             refreshAsync);
                 }
+            } else if (statsJob.isMultiColumnStatsJob()) {
+                // for external table
+                for (List<String> columnGroup : statsJob.getColumnGroups()) {
+                    ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta(statsJob.getCatalogName(),
+                            db.getFullName(), table.getName(), Lists.newArrayList(columnGroup),
+                            statsJob.getAnalyzeType(), statsJob.getStatisticsTypes(), analyzeStatus.getEndTime(),
+                            statsJob.getProperties());
+                    try {
+                        meta.setTableUUID(table.getUUID());
+                    } catch (Exception e) {
+                        LOG.warn("Failed to resolve table UUID for external MCV stats meta, table: {}.{}.{}",
+                                statsJob.getCatalogName(), db.getFullName(), table.getName(), e);
+                    }
+                    analyzeMgr.addExternalMcvStatsMeta(meta);
+                }
+                analyzeMgr.refreshExternalMcvStatisticsCache(table.getUUID(), !refreshAsync);
             } else {
                 // for external table
                 ExternalBasicStatsMeta externalBasicStatsMeta = analyzeMgr.getExternalTableBasicStatsMeta(
@@ -748,6 +803,251 @@ public class StatisticExecutor {
     }
 
     /**
+     * Runs a statistics query whose result does not fit a TStatisticData layout and returns its rows as
+     * text cells, null for a NULL cell.
+     */
+    public List<List<String>> executeStatisticJsonDQL(ConnectContext context, String sql) {
+        context.setQueryId(UUIDUtil.genUUID());
+        if (Config.enable_print_sql) {
+            LOG.info("Begin to execute sql, type: Statistics collect，query id:{}, sql:{}", context.getQueryId(), sql);
+        }
+        if (FeConstants.enableUnitStatistics) {
+            return Collections.emptyList();
+        }
+        Stopwatch watch = Stopwatch.createStarted();
+        StatementBase parsedStmt = SqlParser.parseOneWithStarRocksDialect(sql, context.getSessionVariable());
+        ExecPlan execPlan = StatementPlanner.plan(parsedStmt, context, TResultSinkType.HTTP_PROTOCAL);
+        StmtExecutor executor = StmtExecutor.newInternalExecutor(context, parsedStmt);
+        context.setExecutor(executor);
+        context.getSessionVariable().setEnableMaterializedViewRewrite(false);
+        Pair<List<TResultBatch>, Status> sqlResult = executor.executeStmtWithExecPlan(context, execPlan);
+        if (!sqlResult.second.ok()) {
+            String errorMsg = context.getState().getErrorMessage();
+            if (Strings.isNullOrEmpty(errorMsg) && executor.getCoordinator() != null) {
+                errorMsg = executor.getCoordinator().getExecStatus().getErrorMsg();
+            }
+            throw new SemanticException("Statistics query fail | Error Message [%s] | QueryId [%s] | SQL [%s]",
+                    errorMsg, DebugUtil.printId(context.getQueryId()), sql);
+        }
+        AuditInternalLog.handleInternalLog(AuditInternalLog.InternalType.QUERY, DebugUtil.printId(context.getQueryId()),
+                sql, watch);
+
+        List<List<String>> rows = Lists.newArrayList();
+        for (TResultBatch batch : ListUtils.emptyIfNull(sqlResult.first)) {
+            for (ByteBuffer buffer : batch.getRows()) {
+                String json = Unpooled.copiedBuffer(buffer).toString(StandardCharsets.UTF_8);
+                JsonArray data = JsonParser.parseString(json).getAsJsonObject().getAsJsonArray("data");
+                List<String> row = Lists.newArrayList();
+                for (JsonElement cell : data) {
+                    row.add(cell.isJsonNull() ? null : cell.isJsonPrimitive() ? cell.getAsString() : cell.toString());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    public List<TStatisticData> queryExternalPartitionStatistics(ConnectContext context, String tableUUID,
+                                                               Map<String, Set<String>> columnsByPartition,
+                                                               boolean unpartitioned) {
+        if (columnsByPartition.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (!GlobalStateMgr.getCurrentState().isReady()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME))) {
+            throw new IllegalStateException("External column statistics table is not ready");
+        }
+        return executeStatisticDQL(context,
+                StatisticSQLBuilder.buildQueryExternalPartitionStatisticsSQL(tableUUID, columnsByPartition, unpartitioned));
+    }
+
+    public List<TStatisticData> queryExternalPartitionRows(ConnectContext context, String tableUUID,
+                                                          List<String> partitions) {
+        if (!GlobalStateMgr.getCurrentState().isReady()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME))) {
+            throw new IllegalStateException("External partition statistics store is not ready");
+        }
+        return executeStatisticDQL(context,
+                StatisticSQLBuilder.buildQueryExternalPartitionRowsSQL(tableUUID, partitions));
+    }
+
+    public List<TStatisticData> queryExternalPartitionBlocks(ConnectContext context, String tableUUID,
+            List<ExternalStatisticsCacheKey> blocks,
+            Map<String, Type> types) {
+        if (!GlobalStateMgr.getCurrentState().isReady()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME))) {
+            throw new IllegalStateException("External column statistics table is not ready");
+        }
+        return executeStatisticDQL(context,
+                StatisticSQLBuilder.buildQueryExternalPartitionBlocksSQL(tableUUID, blocks, types));
+    }
+
+    public List<String> queryExternalTableStatistics(ConnectContext context, String tableUUID) {
+        if (!GlobalStateMgr.getCurrentState().isReady()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME))) {
+            throw new IllegalStateException("External table statistics store is not ready");
+        }
+        String key = SqlUtils.escapeSqlString(
+                StatisticUtils.hashTableUuidForPkStorage(tableUUID));
+        List<List<String>> rows = executeStatisticJsonDQL(context,
+                "SELECT chunk FROM " + StatsConstants.STATISTICS_DB_NAME + "."
+                        + StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME
+                        + ", UNNEST(payload) AS u(chunk) WHERE table_uuid = '" + key + "'");
+        return rows.stream().map(row -> row.get(0)).toList();
+    }
+
+    /** Publish all available column summaries once, after collection; no aggregation on a TABLE cache miss. */
+    public void publishExternalTableStatistics(ConnectContext context, Table table, String catalogName,
+                                               String dbName, List<String> collectedColumns) {
+        publishExternalTableStatistics(context, table, catalogName, dbName, collectedColumns, List.of());
+    }
+
+    public void publishExternalTableStatistics(ConnectContext context, Table table, String catalogName,
+                                               String dbName, List<String> collectedColumns, List<String> partitions) {
+        // Serialize publication, not source-table scans. A later publisher re-reads all committed cells;
+        // it cannot overwrite a newer summary with an earlier aggregate from a concurrent ANALYZE.
+        Lock lock = SUMMARY_LOCKS.get(table.getUUID());
+        lock.lock();
+        try {
+            publishExternalTableStatisticsLocked(context, table, catalogName, dbName, collectedColumns, partitions);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void publishExternalTableStatisticsLocked(ConnectContext context, Table table, String catalogName,
+                                                       String dbName, List<String> collectedColumns,
+                                                       List<String> partitions) {
+        Set<String> names = new LinkedHashSet<>(collectedColumns);
+        table.getBaseSchema().forEach(column -> names.add(column.getName()));
+        ExternalBasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr()
+                .getExternalTableBasicStatsMeta(catalogName, dbName, table.getName());
+        if (meta != null) {
+            names.addAll(meta.getColumnStatsMetaMap().keySet());
+        }
+        List<String> valid = new ArrayList<>();
+        for (String name : names) {
+            try {
+                StatisticUtils.getQueryStatisticsColumnType(table, name);
+                valid.add(name);
+            } catch (SemanticException removedColumn) {
+                // Do not preserve a removed column merely because an older collection mentioned it.
+            }
+        }
+        publishExternalPartitionRows(context, table, catalogName, dbName, valid, partitions);
+        List<TStatisticData> rows = valid.isEmpty() ? List.of() : queryStatisticSync(context, table.getUUID(), table, valid);
+        List<String> chunks = ExternalTableStatistics.encode(rows, table);
+        String payload = chunks.stream().map(value -> "'" + SqlUtils.escapeSqlString(value) + "'")
+                .collect(Collectors.joining(",", "[", "]"));
+        String statement = "INSERT INTO " + StatsConstants.STATISTICS_DB_NAME + "."
+                + StatsConstants.EXTERNAL_TABLE_STATISTICS_TABLE_NAME
+                + " (table_uuid,catalog_name,db_name,table_name,payload,update_time) VALUES ('"
+                + StatisticUtils.hashTableUuidForPkStorage(table.getUUID()) + "','"
+                + SqlUtils.escapeSqlString(catalogName) + "','"
+                + SqlUtils.escapeSqlString(dbName) + "','"
+                + SqlUtils.escapeSqlString(table.getName()) + "'," + payload + ",now())";
+        if (!executeDML(context, statement, true) || context.getState().isError()) {
+            throw new IllegalStateException("Failed to publish external table statistics for " + table.getName());
+        }
+    }
+
+    private void publishExternalPartitionRows(ConnectContext context, Table table, String catalogName,
+                                              String dbName, List<String> columns, List<String> partitions) {
+        if (partitions.isEmpty()) {
+            return;
+        }
+        List<String> names = table.isUnPartitioned() ? List.of("") : partitions.stream()
+                .filter(name -> !name.equals(com.starrocks.connector.PartitionUtil.ICEBERG_DEFAULT_PARTITION))
+                .distinct().toList();
+        Map<String, Type> types = new java.util.LinkedHashMap<>();
+        columns.forEach(name -> types.put(name, StatisticUtils.getQueryStatisticsColumnType(table, name)));
+        // Read only the persisted statistics, never source data. Re-read all collected columns so a
+        // partial-column ANALYZE preserves the others. Bound the transport to <= 4096 HLL cells.
+        int batchSize = Math.max(1, Math.min(32, 4096 / Math.max(1, columns.size())));
+        String target = StatsConstants.STATISTICS_DB_NAME + "." + StatsConstants.EXTERNAL_PARTITION_STATISTICS_TABLE_NAME;
+        String prefix = "INSERT INTO " + target
+                + " (table_uuid,partition_name,catalog_name,db_name,table_name,payload,update_time) VALUES ";
+        String uuid = StatisticUtils.hashTableUuidForPkStorage(table.getUUID());
+        String suffix = "','" + SqlUtils.escapeSqlString(catalogName) + "','" + SqlUtils.escapeSqlString(dbName)
+                + "','" + SqlUtils.escapeSqlString(table.getName()) + "',";
+        for (int offset = 0; offset < names.size(); offset += batchSize) {
+            List<String> batch = names.subList(offset, Math.min(offset + batchSize, names.size()));
+            Map<String, Set<String>> requested = new java.util.LinkedHashMap<>();
+            Set<String> selectedColumns = Set.copyOf(columns);
+            batch.forEach(name -> requested.put(name, selectedColumns));
+            Map<String, List<TStatisticData>> byPartition = new java.util.LinkedHashMap<>();
+            for (TStatisticData row : queryExternalPartitionStatistics(context, table.getUUID(), requested,
+                    table.isUnPartitioned())) {
+                byPartition.computeIfAbsent(row.partitionName, ignored -> new ArrayList<>()).add(row);
+            }
+            List<String> values = new ArrayList<>();
+            int sqlBytes = 0;
+            for (String name : batch) {
+                Optional<byte[]> payload = ExternalPartitionStatistics.encode(
+                        byPartition.getOrDefault(name, List.of()), types);
+                if (payload.isEmpty()) {
+                    // Remove a previous smaller copy too: it must not survive a width increase.
+                    if (!executeDML(context, "DELETE FROM " + target + " WHERE table_uuid='" + uuid
+                            + "' AND partition_name='" + SqlUtils.escapeSqlString(name) + "'") || context.getState().isError()) {
+                        throw new IllegalStateException("Failed to remove oversized external partition row");
+                    }
+                    continue;
+                }
+                String value = "('" + uuid + "','" + SqlUtils.escapeSqlString(name) + suffix + "X'"
+                        + com.google.common.io.BaseEncoding.base16().encode(payload.get()) + "',now())";
+                if (!values.isEmpty() && sqlBytes + value.length() > 4 * 1024 * 1024) {
+                    publishExternalPartitionBatch(context, prefix, values);
+                    values.clear();
+                    sqlBytes = 0;
+                }
+                values.add(value);
+                sqlBytes += value.length();
+            }
+            publishExternalPartitionBatch(context, prefix, values);
+        }
+    }
+
+    private void publishExternalPartitionBatch(ConnectContext context, String prefix, List<String> values) {
+        if (!values.isEmpty() && (!executeDML(context, prefix + String.join(",", values), true)
+                || context.getState().isError())) {
+            throw new IllegalStateException("Failed to publish external partition statistics");
+        }
+    }
+
+    public List<List<String>> queryExternalMcvStatistics(ConnectContext context, String tableUUID) {
+        if (!GlobalStateMgr.getCurrentState().isReady()
+                || !StatisticUtils.checkStatisticTables(List.of(StatsConstants.EXTERNAL_MCV_STATISTICS_TABLE_NAME))) {
+            // Unavailable storage is different from a successful query returning no statistics.
+            // Propagate the failure so asynchronous caches can retry instead of caching absence.
+            throw new IllegalStateException("External MCV statistics table is not ready");
+        }
+        return executeStatisticJsonDQL(context,
+                StatisticSQLBuilder.buildQueryExternalMcvStatisticsSQL(tableUUID));
+    }
+
+    public void dropExternalMcvStatistics(ConnectContext statsConnectCtx, String tableUUID) {
+        String sql = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(tableUUID);
+        if (!executeDML(statsConnectCtx, sql)) {
+            LOG.warn("Execute external multi-column statistic table expire fail.");
+        }
+    }
+
+    public void dropExternalMcvStatistics(ConnectContext statsConnectCtx, String tableUUID, List<String> columnNames) {
+        String sql = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(tableUUID, columnNames);
+        if (!executeDML(statsConnectCtx, sql) || statsConnectCtx.getState().isError()) {
+            throw new IllegalStateException("Failed to delete external MCV statistics for columns " + columnNames);
+        }
+    }
+
+    public void dropExternalMcvStatistics(ConnectContext statsConnectCtx, String catalogName, String dbName,
+                                                  String tableName) {
+        String sql = StatisticSQLBuilder.buildDropExternalMcvStatisticsSQL(catalogName, dbName, tableName);
+        if (!executeDML(statsConnectCtx, sql)) {
+            LOG.warn("Execute external multi-column statistic table expire fail.");
+        }
+    }
+
+    /**
      * In case of INSERT-OVERWRITE, the partition-id would change but the statistics would not. So we need to update
      * the partition id of the statistics. Since PRIMARY-KEY tables doesn't really support update key columns, we
      * choose to copy existing row but change the id of it,  then delete existing row.
@@ -803,7 +1103,23 @@ public class StatisticExecutor {
         }
     }
 
+    static void requireVisibleStatisticsInsert(InsertStmt statement) throws DdlException {
+        GlobalStateMgr state = GlobalStateMgr.getCurrentState();
+        Database database = state.getLocalMetastore().getDb(StatsConstants.STATISTICS_DB_NAME);
+        var transaction = database == null ? null : state.getGlobalTransactionMgr()
+                .getTransactionState(database.getId(), statement.getTxnId());
+        if (transaction == null || transaction.getTransactionStatus() != TransactionStatus.VISIBLE) {
+            // INSERT may report COMMITTED after a publish timeout. That is insufficient for a
+            // dependent read or for invalidating readers of the newly persisted summary.
+            throw new DdlException("Statistics INSERT is not visible; retry ANALYZE after publication completes");
+        }
+    }
+
     private static boolean executeDML(ConnectContext context, String sql) {
+        return executeDML(context, sql, false);
+    }
+
+    private static boolean executeDML(ConnectContext context, String sql, boolean requireVisible) {
         StatementBase parsedStmt;
         try {
             Stopwatch watch = Stopwatch.createStarted();
@@ -812,6 +1128,9 @@ public class StatisticExecutor {
             context.setExecutor(executor);
             context.setQueryId(UUIDUtil.genUUID());
             executor.execute();
+            if (requireVisible && !context.getState().isError()) {
+                requireVisibleStatisticsInsert((InsertStmt) parsedStmt);
+            }
             AuditInternalLog.handleInternalLog(AuditInternalLog.InternalType.DML, DebugUtil.printId(context.getQueryId()),
                     sql, watch);
             return true;

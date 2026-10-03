@@ -80,7 +80,19 @@ Status VectorizedInConstPredicateBuilder::create() {
     return _st;
 }
 
-void VectorizedInConstPredicateBuilder::add_values(const ColumnPtr& column, size_t column_offset) {
+size_t VectorizedInConstPredicateBuilder::values_count(Expr* predicate) {
+    switch (predicate->get_child(0)->type().type) {
+#define M(LT) \
+    case LT:  \
+        return down_cast<VectorizedInConstPredicate<LT>*>(predicate)->values_count();
+        APPLY_FOR_ALL_SCALAR_TYPE(M)
+#undef M
+    default:
+        return SIZE_MAX;
+    }
+}
+
+bool VectorizedInConstPredicateBuilder::add_values(const ColumnPtr& column, size_t column_offset, size_t max_values) {
     LogicalType type = _expr->type().type;
     Expr* expr = _in_pred_ctx->root();
     DCHECK(column != nullptr);
@@ -98,6 +110,7 @@ void VectorizedInConstPredicateBuilder::add_values(const ColumnPtr& column, size
         } else {                                                               \
             for (size_t j = column_offset; j < data_ptr.size(); j++) {         \
                 in_pred->insert(data_ptr[j]);                                  \
+                if (in_pred->values_count() > max_values) return false;        \
             }                                                                  \
         }                                                                      \
         break;                                                                 \
@@ -128,6 +141,7 @@ void VectorizedInConstPredicateBuilder::add_values(const ColumnPtr& column, size
             for (size_t j = column_offset; j < data_array.size(); j++) {                             \
                 if (!nullable_column->is_null(j)) {                                                  \
                     in_pred->insert(data_array[j]);                                                  \
+                    if (in_pred->values_count() > max_values) return false;                          \
                 } else {                                                                             \
                     if (_eq_null) {                                                                  \
                         in_pred->insert_null();                                                      \
@@ -142,6 +156,7 @@ void VectorizedInConstPredicateBuilder::add_values(const ColumnPtr& column, size
         default:;
         }
     }
+    return true;
 }
 
 } // namespace starrocks

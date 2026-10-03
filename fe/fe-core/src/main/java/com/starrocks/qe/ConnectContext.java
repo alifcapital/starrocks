@@ -224,6 +224,17 @@ public class ConnectContext {
     protected boolean needQueued = true;
 
     protected DumpInfo dumpInfo;
+    // Null means normal planning; an empty replay deliberately isolates the live registry.
+    private com.starrocks.sql.optimizer.dump.JoinStatisticsDump joinStatisticsReplay;
+
+    public com.starrocks.sql.optimizer.dump.JoinStatisticsDump getJoinStatisticsReplay() {
+        return joinStatisticsReplay;
+    }
+
+    public void setJoinStatisticsReplay(com.starrocks.sql.optimizer.dump.JoinStatisticsDump replay) {
+        joinStatisticsReplay = replay;
+    }
+
 
     // The related db ids for current sql
     protected Set<Long> currentSqlDbIds = Sets.newHashSet();

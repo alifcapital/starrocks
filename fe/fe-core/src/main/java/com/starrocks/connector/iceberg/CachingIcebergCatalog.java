@@ -287,11 +287,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             return cachedTable;
         }
 
-        if (shouldOnlyReadCache(connectContext)) {
-            return delegate.getTable(connectContext, dbName, tableName);
-        }
-
         try {
+            // Metadata-only callers (including MV validation) must share table cache misses too.
+            // They still do not mark the table active or populate file caches: recordScanAccess
+            // and getTableScan honor onlyReadIcebergCache independently.
             // Serialize a cache-miss load with refresh. A slow old load must not overwrite
             // a newer table published by refresh while that load was in flight.
             synchronized (tableRefreshLock(dbName, tableName)) {
@@ -446,6 +445,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                     nativeTable.spec().fields().size());
         }
         return partitions;
+    }
+
+    @Override
+    public Map<String, Partition> getCachedPartitions(IcebergTable icebergTable, long snapshotId) {
+        // Never use the mutable "current snapshot" alias (-1) for a pinned query snapshot.
+        if (snapshotId < 0) {
+            return null;
+        }
+        return partitionCache.getIfPresent(new IcebergTableName(
+                icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), snapshotId));
     }
 
     @Override
@@ -828,7 +837,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return newCacheBuilder(expiresAfterWriteSec, refreshInterval).maximumSize(maximumSize);
     }
 
-    // We still allow reads from caches, but skip populating or refreshing them when this flag is set.
+    // Suppress scan activity and file-cache population, while allowing table metadata to be reused.
     private boolean shouldOnlyReadCache(ConnectContext context) {
         return context != null && context.isOnlyReadIcebergCache();
     }

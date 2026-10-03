@@ -77,8 +77,6 @@ OutPut Exchange Id: 17
 13:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
 |  equal join conjunct: [4: C_NATIONKEY, INT, false] = [37: N_NATIONKEY, INT, false]
-|  build runtime filters:
-|  - filter_id = 2, build_expr = (37: N_NATIONKEY), remote = false
 |  output columns: 1, 2, 3, 5, 6, 8, 25, 26, 38
 |  cardinality: 5644405
 |  column statistics:
@@ -154,7 +152,6 @@ actualRows=0, avgRowSize=217.0
 cardinality: 15000000
 probe runtime filters:
 - filter_id = 1, probe_expr = (1: C_CUSTKEY)
-- filter_id = 2, probe_expr = (4: C_NATIONKEY)
 column statistics:
 * C_CUSTKEY-->[1.0, 1.5E7, 0.0, 8.0, 1.5E7] ESTIMATE
 * C_NAME-->[-Infinity, Infinity, 0.0, 25.0, 1.5E7] ESTIMATE

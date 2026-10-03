@@ -22,6 +22,9 @@ import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.statistic.ColumnStatsMeta;
+import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.StatisticExecutor;
 import io.trino.hive.$internal.org.apache.commons.lang3.tuple.Triple;
 import org.apache.logging.log4j.LogManager;
@@ -128,6 +131,45 @@ public class ConnectorTableTriggerAnalyzeMgr {
         if (!analyzeColumns.isEmpty()) {
             // need to execute analyze
             this.connectorAnalyzeTaskQueue.addPendingTask(tableUUID, new ConnectorAnalyzeTask(tableTriple, analyzeColumns));
+        }
+    }
+
+    /**
+     * Scoped statistics need not load a table-wide statistics row just to decide whether to ANALYZE.
+     * Use the persisted per-column collection metadata for freshness instead. A selected partition's
+     * row count is not evidence that the whole table qualifies for the small-table interval.
+     */
+    public void checkAndUpdateScopedTableStats(String tableUUID, Map<String, ColumnStatistic> columns,
+                                              double rowCount, boolean wholeTable) {
+        if (columns.isEmpty()) {
+            return;
+        }
+        Triple<String, Database, Table> tableTriple;
+        try (ConnectContext.ContextScope scope = ConnectContext.enterOnlyReadIcebergCacheScope(ConnectContext.get())) {
+            tableTriple = StatisticsUtils.getTableTripleByUUID(scope.getContext(), tableUUID);
+        } catch (Exception e) {
+            LOG.warn("[ExternalStats] trigger skip | table_uuid={} reason=table_not_found", tableUUID);
+            return;
+        }
+        if (!tableTriple.getRight().isAnalyzableExternalTable()) {
+            return;
+        }
+        ExternalBasicStatsMeta meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getExternalTableBasicStatsMeta(
+                tableTriple.getLeft(), tableTriple.getMiddle().getFullName(), tableTriple.getRight().getName());
+        long interval = wholeTable && rowCount < Config.connector_table_query_trigger_analyze_small_table_rows ?
+                Config.connector_table_query_trigger_analyze_small_table_interval :
+                Config.connector_table_query_trigger_analyze_large_table_interval;
+        LocalDateTime now = LocalDateTime.now();
+        Set<String> analyzeColumns = Sets.newHashSet();
+        columns.forEach((name, statistic) -> {
+            ColumnStatsMeta column = meta == null ? null : meta.getColumnStatsMeta(name);
+            if (column == null || column.getUpdateTime() == null || (wholeTable && statistic.isUnknown())
+                    || !column.getUpdateTime().plusSeconds(interval).isAfter(now)) {
+                analyzeColumns.add(name);
+            }
+        });
+        if (!analyzeColumns.isEmpty()) {
+            connectorAnalyzeTaskQueue.addPendingTask(tableUUID, new ConnectorAnalyzeTask(tableTriple, analyzeColumns));
         }
     }
 

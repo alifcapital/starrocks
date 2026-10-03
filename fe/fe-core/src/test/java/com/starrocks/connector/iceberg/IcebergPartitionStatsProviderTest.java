@@ -342,6 +342,9 @@ public class IcebergPartitionStatsProviderTest extends TableTestBase {
                     "version must be bit-equivalent for partition " + entry.getKey());
             Assertions.assertEquals(entry.getValue().getSpecId(), fastEntry.getSpecId(),
                     "specId must match for partition " + entry.getKey());
+            Assertions.assertNotNull(entry.getValue().getValues(), "partition pruning needs typed cached values");
+            Assertions.assertEquals(entry.getValue().getValues(), fastEntry.getValues(),
+                    "both catalog loading paths must preserve the same typed partition values");
             Assertions.assertEquals(entry.getValue().getRecordCount(), fastEntry.getRecordCount(),
                     "recordCount must match for partition " + entry.getKey());
             Assertions.assertEquals(entry.getValue().getPositionDeleteRecordCount(), fastEntry.getPositionDeleteRecordCount(),

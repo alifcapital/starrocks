@@ -110,6 +110,24 @@ class ActiveIcebergCacheTest {
     }
 
     @Test
+    void statisticsPartitionLookupNeverLoadsOrUsesAnotherSnapshot() {
+        CachingIcebergCatalog catalog = catalog(true);
+        com.starrocks.catalog.IcebergTable table = Mockito.mock(com.starrocks.catalog.IcebergTable.class);
+        Mockito.when(table.getCatalogDBName()).thenReturn("db");
+        Mockito.when(table.getCatalogTableName()).thenReturn("tbl");
+        Cache<IcebergTableName, Map<String, Partition>> partitions = Deencapsulation.getField(catalog, "partitionCache");
+        Map<String, Partition> old = Map.of("p=1", new Partition(1L));
+        partitions.put(new IcebergTableName("db", "tbl", 7L), old);
+        partitions.put(new IcebergTableName("db", "tbl", -1L), old);
+        org.junit.jupiter.api.Assertions.assertNull(catalog.getCachedPartitions(table, 8L));
+        org.junit.jupiter.api.Assertions.assertNull(catalog.getCachedPartitions(table, -1L));
+        assertSame(old, catalog.getCachedPartitions(table, 7L));
+        partitions.put(new IcebergTableName("db", "tbl", 8L), Map.of());
+        assertTrue(catalog.getCachedPartitions(table, 8L).isEmpty());
+        Mockito.verifyNoInteractions(delegate);
+    }
+
+    @Test
     void cacheHitCannotOverwriteConcurrentRefresh() throws Exception {
         CachingIcebergCatalog catalog = catalog(false);
         BaseTable oldTable = table("old");

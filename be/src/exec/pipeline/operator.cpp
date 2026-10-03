@@ -20,6 +20,7 @@
 
 #include "common/logging.h"
 #include "exec/exec_node.h"
+#include "exec/pipeline/hashjoin/local_runtime_filter_feedback.h"
 #include "exec/pipeline/query_context.h"
 #include "exprs/expr_context.h"
 #include "gutil/strings/substitute.h"
@@ -269,12 +270,41 @@ void Operator::eval_runtime_bloom_filters(Chunk* chunk) {
         return;
     }
 
+    auto* feedback = _local_rf_feedback.get();
+    const auto before = chunk->num_rows();
+    int64_t filter_ns = 0;
     if (auto* bloom_filters = runtime_bloom_filters()) {
         _init_rf_counters(true);
-        bloom_filters->evaluate(chunk, _bloom_filter_eval_context);
+        if (feedback && feedback->enabled()) {
+            for (const auto& [id, desc] : bloom_filters->descriptors()) {
+                const auto* rf = desc->runtime_filter(_runtime_filter_probe_sequence);
+                if (rf == nullptr || rf->always_true() || desc->has_push_down_to_storage()) {
+                    _unique_metrics->add_info_string(
+                            "LocalRfFallbackReason",
+                            rf == nullptr ? "filter unavailable"
+                                          : (rf->always_true() ? "filter always true" : "storage pushdown"));
+                    feedback->disable();
+                    break;
+                }
+            }
+        }
+        const bool on = !feedback || feedback->use_filter();
+        if (on) {
+            if (!_local_rf_was_on) _bloom_filter_eval_context.input_chunk_nums = 0;
+            const auto start = feedback ? COUNTER_VALUE(_bloom_filter_eval_context.join_runtime_filter_timer) : 0;
+            bloom_filters->evaluate(chunk, _bloom_filter_eval_context);
+            if (feedback) filter_ns = COUNTER_VALUE(_bloom_filter_eval_context.join_runtime_filter_timer) - start;
+        }
+        _local_rf_was_on = on;
     }
 
     ExecNode::eval_filter_null_values(chunk, filter_null_value_columns());
+    if (feedback && feedback->enabled()) {
+        feedback->observe_filter(before, chunk->num_rows(), filter_ns);
+        if (!feedback->enabled()) {
+            _unique_metrics->add_info_string("LocalRfFallbackReason", "invalid filter accounting");
+        }
+    }
 }
 
 RuntimeState* Operator::runtime_state() const {

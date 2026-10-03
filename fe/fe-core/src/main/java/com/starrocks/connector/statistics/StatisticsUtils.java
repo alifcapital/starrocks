@@ -32,7 +32,6 @@ import io.trino.hive.$internal.org.apache.commons.lang3.tuple.ImmutableTriple;
 import io.trino.hive.$internal.org.apache.commons.lang3.tuple.Triple;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -95,30 +94,23 @@ public class StatisticsUtils {
                     getExternalTableBasicStatsMeta(tableIdentifier.getLeft(), tableIdentifier.getMiddle().getFullName(),
                             tableIdentifier.getRight().getName());
 
-            if (externalBasicStatsMeta == null) {
-                return connectorTableColumnStats;
-            }
-
-            Map<String, ColumnStatsMeta> columnStatsMetaMap = externalBasicStatsMeta.getColumnStatsMetaMap();
-            if (!columnStatsMetaMap.containsKey(columnName)) {
-                return connectorTableColumnStats;
-            }
-
-            ColumnStatsMeta columnStatsMeta = columnStatsMetaMap.get(columnName);
-            if (columnStatsMeta.getType() == StatsConstants.AnalyzeType.FULL) {
-                return connectorTableColumnStats;
-            }
-
-            // the column statistics analyze type is sample , we need to estimate the table level column statistics
-            int sampledPartitionSize = columnStatsMeta.getSampledPartitionsHashValue().size();
-            int totalPartitionSize = columnStatsMeta.getAllPartitionSize();
-
-            double avgPartitionRowCount = connectorTableColumnStats.getRowCount() * 1.0 / sampledPartitionSize;
-            long totalRowCount = (long) avgPartitionRowCount * totalPartitionSize;
-
-            return new ConnectorTableColumnStats(connectorTableColumnStats.getColumnStatistic(),
-                    totalRowCount, connectorTableColumnStats.getUpdateTime());
+            return estimateColumnStatistics(externalBasicStatsMeta == null ? null
+                    : externalBasicStatsMeta.getColumnStatsMetaMap().get(columnName), connectorTableColumnStats);
         }
+    }
+
+    public static ConnectorTableColumnStats estimateColumnStatistics(
+            ColumnStatsMeta meta, ConnectorTableColumnStats statistics) {
+        if (meta == null || meta.getType() == StatsConstants.AnalyzeType.FULL) {
+            return statistics;
+        }
+        int sampledPartitions = meta.getSampledPartitionsHashValue().size();
+        if (sampledPartitions == 0) {
+            return statistics;
+        }
+        double averageRows = statistics.getRowCount() * 1.0 / sampledPartitions;
+        long totalRows = (long) averageRows * meta.getAllPartitionSize();
+        return new ConnectorTableColumnStats(statistics.getColumnStatistic(), totalRows, statistics.getUpdateTime());
     }
 
 }

@@ -89,7 +89,36 @@ public class HyperStatisticsCollectJob extends StatisticsCollectJob {
         context.getSessionVariable().setEnableAnalyzePhasePruneColumns(true);
         context.getSessionVariable().setPipelineDop(context.getSessionVariable().getStatisticCollectParallelism());
 
-        int splitSize = Math.max(1, batchRowsLimit / columnNames.size());
+        // A sampled HLL describes only observed values. Primitive SAMPLE columns need a
+        // table-wide frequency estimator; scalar estimates cannot be merged as partition HLLs.
+        List<String> queryColumnNames = columnNames;
+        List<Type> queryColumnTypes = columnTypes;
+        if (analyzeType == StatsConstants.AnalyzeType.SAMPLE && statisticsTypes.isEmpty()) {
+            List<String> estimatedNames = Lists.newArrayList();
+            List<Type> estimatedTypes = Lists.newArrayList();
+            queryColumnNames = Lists.newArrayList();
+            queryColumnTypes = Lists.newArrayList();
+            for (int i = 0; i < columnNames.size(); i++) {
+                if (columnTypes.get(i).canStatistic() && !columnTypes.get(i).isCollectionType()) {
+                    estimatedNames.add(columnNames.get(i));
+                    estimatedTypes.add(columnTypes.get(i));
+                } else {
+                    queryColumnNames.add(columnNames.get(i));
+                    queryColumnTypes.add(columnTypes.get(i));
+                }
+            }
+            if (!estimatedNames.isEmpty()) {
+                SampleStatisticsCollectJob sampleJob = new SampleStatisticsCollectJob(db, table,
+                        estimatedNames, estimatedTypes, analyzeType, scheduleType, properties);
+                sampleJob.setUseMetaStatistics(true);
+                sampleJob.setPartitionTabletRowCounts(partitionTabletRowCounts);
+                sampleJob.collect(context, analyzeStatus);
+            }
+            if (queryColumnNames.isEmpty()) {
+                return;
+            }
+        }
+        int splitSize = Math.max(1, batchRowsLimit / queryColumnNames.size());
         List<HyperQueryJob> queryJobs;
         if (statisticsTypes.isEmpty()) {
             if (analyzeType == StatsConstants.AnalyzeType.FULL) {
@@ -99,7 +128,7 @@ public class HyperStatisticsCollectJob extends StatisticsCollectJob {
                 PartitionSampler sampler = PartitionSampler.create(table, partitionIdList, properties,
                         partitionTabletRowCounts);
                 queryJobs = HyperQueryJob.createSampleQueryJobs(analyzeStatus.getId(), context, db, table,
-                        columnNames, columnTypes, partitionIdList, splitSize, sampler, isManualJob);
+                        queryColumnNames, queryColumnTypes, partitionIdList, splitSize, sampler, isManualJob);
             }
         } else {
             queryJobs = HyperQueryJob.createMultiColumnQueryJobs(analyzeStatus.getId(), context, db, table,
@@ -212,6 +241,15 @@ public class HyperStatisticsCollectJob extends StatisticsCollectJob {
         insert.setTargetColumnNames(targetColumnNames);
         insert.setOrigStmt(new OriginStatement(sql, 0));
         return insert;
+    }
+
+    @Override
+    public boolean usesSampleStatisticsTable(String column) {
+        if (analyzeType != StatsConstants.AnalyzeType.SAMPLE || !statisticsTypes.isEmpty()) {
+            return false;
+        }
+        Type type = StatisticUtils.getQueryStatisticsColumnType(table, column);
+        return type.canStatistic() && !type.isCollectionType();
     }
 
     @Override

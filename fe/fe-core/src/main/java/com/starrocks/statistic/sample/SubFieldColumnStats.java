@@ -65,6 +65,16 @@ public class SubFieldColumnStats extends ColumnStats {
     }
 
     @Override
+    public String getDistinctCount(SampleInfo info, String populationRows) {
+        return columnStats.getDistinctCount(info, populationRows);
+    }
+
+    @Override
+    public String getDistinctCount(SampleInfo info) {
+        return columnStats.getDistinctCount(info);
+    }
+
+    @Override
     public String getDistinctCount(double rowSampleRatio) {
         return columnStats.getDistinctCount(rowSampleRatio);
     }

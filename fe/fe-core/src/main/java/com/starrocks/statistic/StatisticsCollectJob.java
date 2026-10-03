@@ -209,6 +209,10 @@ public abstract class StatisticsCollectJob {
         sessionVariable.setEnableMaterializedViewRewrite(false);
     }
 
+    public boolean usesSampleStatisticsTable(String column) {
+        return false;
+    }
+
     public void setPartitionTabletRowCounts(com.google.common.collect.Table<Long, Long, Long> partitionTabletRowCounts) {
         this.partitionTabletRowCounts = partitionTabletRowCounts;
     }

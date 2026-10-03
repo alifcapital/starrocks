@@ -15,6 +15,9 @@
 #include "exprs/agg/aggregate.h"
 #include "exprs/agg/aggregate_factory.h"
 #include "exprs/agg/exchange_perf.h"
+#include "exprs/agg/exact_degree_state.h"
+#include "exprs/agg/exact_degree_finish.h"
+#include "exprs/agg/exact_degree_head.h"
 #include "exprs/agg/factory/aggregate_factory.hpp"
 #include "exprs/agg/factory/aggregate_resolver.hpp"
 #include "types/logical_type.h"
@@ -33,6 +36,14 @@ struct HistogramDispatcher {
 };
 
 void AggregateFuncResolver::register_utility() {
+    add_aggregate_mapping_variadic<TYPE_VARBINARY, TYPE_VARBINARY, ExactDegreeHeadState>(
+            "stats_degree_head_agg", false, new ExactDegreeHeadAggregateFunction());
+    add_aggregate_mapping_variadic<TYPE_VARBINARY, TYPE_VARCHAR, ExactDegreeFinishState>(
+            "stats_degree_finish", false, new ExactDegreeFinishAggregateFunction());
+    add_aggregate_mapping<TYPE_BIGINT, TYPE_VARBINARY, ExactDegreeAggregateState>(
+            "stats_degree_state", false, new ExactDegreeAggregateFunction<false>());
+    add_aggregate_mapping<TYPE_VARBINARY, TYPE_VARBINARY, ExactDegreeAggregateState>(
+            "stats_degree_merge", false, new ExactDegreeAggregateFunction<true>());
     add_aggregate_mapping_notnull<TYPE_BIGINT, TYPE_BIGINT>(
             "exchange_bytes", false, AggregateFactory::MakeExchangePerfAggregateFunction<AggExchangePerfType::BYTES>());
     add_aggregate_mapping_notnull<TYPE_BIGINT, TYPE_VARCHAR>(

@@ -752,6 +752,12 @@ public class Analyzer {
             return null;
         }
 
+        @Override
+        public Void visitJoinStatisticsStatement(com.starrocks.sql.ast.JoinStatisticsStmt statement, ConnectContext session) {
+            JoinStatisticsAnalyzer.analyze(statement, session);
+            return null;
+        }
+
         public Void visitCreateAnalyzeJobStatement(CreateAnalyzeJobStmt statement, ConnectContext session) {
             AnalyzeStmtAnalyzer.analyze(statement, session);
             return null;

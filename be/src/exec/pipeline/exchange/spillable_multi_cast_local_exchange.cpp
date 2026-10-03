@@ -14,6 +14,7 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <memory>
 
 #include "common/compiler_util.h"
@@ -37,16 +38,19 @@
 
 namespace starrocks::pipeline {
 
+size_t SpillableMultiCastLocalExchanger::memory_limit(bool force_spill, size_t producer_dop) {
+    if (force_spill) {
+        return 16L * 1024 * 1024;
+    }
+    return config::local_exchange_buffer_mem_limit_per_driver * std::max<size_t>(1, producer_dop);
+}
+
 SpillableMultiCastLocalExchanger::SpillableMultiCastLocalExchanger(RuntimeState* runtime_state, size_t consumer_number,
-                                                                   int32_t plan_node_id) {
+                                                                   int32_t plan_node_id, size_t producer_dop) {
     DCHECK(runtime_state->enable_spill() && runtime_state->enable_multi_cast_local_exchange_spill());
     MemLimitedChunkQueue::Options opts;
     opts.block_size = config::mem_limited_chunk_queue_block_size;
-    if (runtime_state->spill_mode() == TSpillMode::FORCE) {
-        opts.memory_limit = 16L * 1024 * 1024;
-    } else {
-        opts.memory_limit = std::numeric_limits<size_t>::max();
-    }
+    opts.memory_limit = memory_limit(runtime_state->spill_mode() == TSpillMode::FORCE, producer_dop);
     opts.plan_node_id = plan_node_id;
     opts.block_manager = runtime_state->query_ctx()->spill_manager()->block_manager();
     opts.encode_level = runtime_state->spill_encode_level();

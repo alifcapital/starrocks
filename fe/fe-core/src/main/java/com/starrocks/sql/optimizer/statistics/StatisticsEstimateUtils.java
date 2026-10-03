@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static java.lang.Double.NEGATIVE_INFINITY;
@@ -68,8 +69,8 @@ public class StatisticsEstimateUtils {
         // and keeping unique keys as-is. Only merge if neither side has buckets and the MCVs
         // represent a majority of the total rows to avoid propagation irrelevant MCVs that could be used
         // for a bad estimation downstream.
-        final var mergedHistogram =
-                mergeHistogramsForUnion(left.getHistogram(), leftRowCount, right.getHistogram(), rightRowCount);
+        final var mergedHistogram = mergeHistogramsForUnion(left.getHistogram(), right.getHistogram(), newRange,
+                newRowCount, newNonNullRowCount);
         if (mergedHistogram != null) {
             builder.setHistogram(mergedHistogram);
         }
@@ -77,8 +78,8 @@ public class StatisticsEstimateUtils {
         return builder.build();
     }
 
-    private static Histogram mergeHistogramsForUnion(Histogram left, double leftRowCount,
-                                                     Histogram right, double rightRowCount) {
+    private static Histogram mergeHistogramsForUnion(Histogram left, Histogram right, StatisticRangeValues range,
+                                                     double totalRowCount, double nonNullRowCount) {
         if (left == null && right == null) {
             return null;
         }
@@ -99,14 +100,13 @@ public class StatisticsEstimateUtils {
         boolean noBuckets = (left == null || left.getBuckets().isEmpty()) && (right == null || right.getBuckets().isEmpty());
 
         // The merged MCV rows account for at least 50% of the total rows.
-        final double totalRowCount = leftRowCount + rightRowCount;
         final long mcvRowCount = mergedMcv.values().stream().mapToLong(Long::longValue).sum();
         final var mcvRowPropagationThreshold = ConnectContext.get().getSessionVariable()
                 .getMcvRowPercentagePropagationThreshold();
         boolean mcvRepresentative = totalRowCount > 0 && mcvRowCount >= mcvRowPropagationThreshold * totalRowCount;
 
         if (noBuckets || mcvRepresentative) {
-            return new Histogram(List.of(), mergedMcv);
+            return Histogram.ofSingleBucket(range.getLow(), range.getHigh(), nonNullRowCount, mergedMcv);
         }
 
         return null;
@@ -146,8 +146,9 @@ public class StatisticsEstimateUtils {
         return builder.build();
     }
 
+    // The plain selectivity of a predicate, without the MCV lists: what the MCV estimation is built from.
     public static double getPredicateSelectivity(ScalarOperator predicate, Statistics statistics) {
-        Statistics estimatedStatistics = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics);
+        Statistics estimatedStatistics = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, false);
 
         // avoid sample statistics filter all data, save one rows least
         if (statistics.getOutputRowCount() > 0 && estimatedStatistics.getOutputRowCount() == 0) {
@@ -289,18 +290,79 @@ public class StatisticsEstimateUtils {
         return Math.min(1.0, Math.max(0.0, estimatedSelectivity));
     }
 
+    // S_final = S_mcv * ∏(S_i^(0.5^(i+1))) over the equality predicates on columns the MCV estimate did not
+    // cover, S_i sorted ascending, at most three of them; the same decay as for columns outside a group.
+    private static double applyRemainingEqualityPredicates(MultiColumnMcvEstimator.Result mcvEstimate,
+                                                           Map<ColumnRefOperator, ConstantOperator> equalityPredicates,
+                                                           Statistics statistics) {
+        double selectivity = mcvEstimate.getSelectivity();
+        List<Double> remaining = new ArrayList<>();
+        for (Map.Entry<ColumnRefOperator, ConstantOperator> entry : equalityPredicates.entrySet()) {
+            if (mcvEstimate.getConsumedColumns().contains(entry.getKey())) {
+                continue;
+            }
+            BinaryPredicateOperator equality =
+                    new BinaryPredicateOperator(BinaryType.EQ, entry.getKey(), entry.getValue());
+            remaining.add(getPredicateSelectivity(equality, statistics));
+        }
+        remaining.sort(Double::compare);
+        boolean decay = ConnectContext.get() == null ||
+                ConnectContext.get().getSessionVariable().isUseCorrelatedPredicateEstimate();
+        for (int i = 0; i < Math.min(3, remaining.size()); i++) {
+            double decayFactor = decay ? Math.pow(0.5, i + 1) : 1;
+            selectivity *= Math.pow(remaining.get(i), decayFactor);
+        }
+        return Math.min(1.0, Math.max(0.0, selectivity));
+    }
+
     public static Statistics computeCompoundStatsWithMultiColumnOptimize(ScalarOperator predicate, Statistics inputStats) {
+        return computeCompoundStatsWithMultiColumnOptimize(predicate, inputStats, Optional.empty());
+    }
+
+    /**
+     * Estimates a conjunction with multi-column statistics. When an MCV estimate is given, it covers the
+     * conjuncts it consumed (see MultiColumnMcvEstimator); the equality predicates left over are applied
+     * with the same decay as the columns outside a combined-NDV group, and the other predicates are applied
+     * one after another. Without an MCV estimate, the conjunction must hold at least two equality
+     * predicates, which are estimated with the combined NDV.
+     */
+    public static Statistics computeCompoundStatsWithMultiColumnOptimize(ScalarOperator predicate, Statistics inputStats,
+                                                                          Optional<MultiColumnMcvEstimator.Result> mcvEstimate) {
+        return computeCompoundStatsWithMultiColumnOptimize(predicate, inputStats, mcvEstimate, true);
+    }
+
+    public static Statistics computeCompoundStatsWithMultiColumnOptimize(ScalarOperator predicate, Statistics inputStats,
+            Optional<MultiColumnMcvEstimator.Result> mcvEstimate, boolean useMcv) {
         Pair<Map<ColumnRefOperator, ConstantOperator>, List<ScalarOperator>> decomposedPredicates =
                 Utils.separateEqualityPredicates(predicate);
 
         Map<ColumnRefOperator, ConstantOperator> equalityPredicates = decomposedPredicates.first;
         List<ScalarOperator> nonEqualityPredicates = decomposedPredicates.second;
 
-        double conjunctiveSelectivity = estimateConjunctiveEqualitySelectivity(equalityPredicates, inputStats);
+        double conjunctiveSelectivity;
+        List<ScalarOperator> consumedNonEqualityPredicates = List.of();
+        if (mcvEstimate.isPresent()) {
+            MultiColumnMcvEstimator.Result mcv = mcvEstimate.get();
+            conjunctiveSelectivity = applyRemainingEqualityPredicates(mcv, equalityPredicates, inputStats);
+            consumedNonEqualityPredicates = nonEqualityPredicates.stream()
+                    .filter(p -> mcv.getConsumed().contains(p)).toList();
+            nonEqualityPredicates = nonEqualityPredicates.stream()
+                    .filter(p -> !mcv.getConsumed().contains(p)).toList();
+        } else {
+            conjunctiveSelectivity = estimateConjunctiveEqualitySelectivity(equalityPredicates, inputStats);
+        }
         double filteredRowCount = inputStats.getOutputRowCount() * conjunctiveSelectivity;
 
         Statistics.Builder filteredStatsBuilder = Statistics.buildFrom(inputStats)
                 .setOutputRowCount(filteredRowCount);
+
+        // The row count already reflects these predicates; take only their effect on the column statistics.
+        for (ScalarOperator consumed : consumedNonEqualityPredicates) {
+            Statistics consumedStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, inputStats, false);
+            for (ColumnRefOperator column : Utils.extractColumnRef(consumed)) {
+                filteredStatsBuilder.addColumnStatistic(column, consumedStats.getColumnStatistic(column));
+            }
+        }
 
         for (Map.Entry<ColumnRefOperator, ConstantOperator> entry : equalityPredicates.entrySet()) {
             ColumnRefOperator columnRef = entry.getKey();
@@ -319,7 +381,14 @@ public class StatisticsEstimateUtils {
             filteredStatsBuilder.addColumnStatistic(columnRef, updatedColumnStats);
         }
 
+        List<ScalarOperator> applied = new ArrayList<>(consumedNonEqualityPredicates);
+        equalityPredicates.forEach((column, value) ->
+                applied.add(new BinaryPredicateOperator(BinaryType.EQ, column, value)));
         Statistics equalityFilteredStats = filteredStatsBuilder.build();
+        if (!applied.isEmpty()) {
+            equalityFilteredStats = McvStatisticsPropagation.filter(Utils.compoundAnd(applied),
+                    inputStats, equalityFilteredStats);
+        }
 
         if (nonEqualityPredicates.isEmpty()) {
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(equalityFilteredStats, filteredRowCount);
@@ -330,7 +399,7 @@ public class StatisticsEstimateUtils {
 
         for (ScalarOperator nonEqualityPredicate : nonEqualityPredicates) {
             combinedFilteredStats = PredicateStatisticsCalculator.statisticsCalculate(
-                    nonEqualityPredicate, combinedFilteredStats);
+                    nonEqualityPredicate, combinedFilteredStats, useMcv);
         }
 
         return StatisticsEstimateUtils.adjustStatisticsByRowCount(

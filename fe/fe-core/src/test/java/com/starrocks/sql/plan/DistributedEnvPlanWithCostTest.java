@@ -29,6 +29,7 @@ import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
+import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.AfterEach;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -84,7 +86,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 " WHEN NOT CASE  WHEN DAYOFWEEK(l_shipdate) = 1 THEN 6  ELSE -1 END + DAYOFWEEK(l_shipdate) = 1 " +
                 "THEN l_shipdate ELSE NULL END, 3))), 2) ELSE NULL END) from lineitem";
         String plan = getCostExplain(sql);
-        assertContains(plan, "CONCAT-->[-Infinity, Infinity, 0.7037037037037036, 3.0, 412.0] ESTIMATE");
+        assertContains(plan, "CONCAT-->[-Infinity, Infinity, 0.7037037037037036, 29.0, 442.29411764705884] ESTIMATE");
     }
 
     @Test
@@ -433,7 +435,11 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 + "'FRANCE') ) and l_shipdate between date '1995-01-01' and date '1996-12-31' ) as shipping "
                 + "group by supp_nation, cust_nation, l_year order by supp_nation, cust_nation, l_year;";
         String plan = getCostExplain(sql);
-        assertContains(plan, "build_expr = (1: S_SUPPKEY)");
+        // Both supplier-key domains have NDV 1M: locality must not retain this unselective RF.
+        assertNotContains(plan, "build_expr = (1: S_SUPPKEY)");
+        // The full supplier nation domain cannot reject the already restricted probe domain either.
+        assertNotContains(plan, "build_expr = (4: S_NATIONKEY)");
+        assertContains(plan, "build_expr = (26: O_ORDERKEY)");
     }
 
     @Test
@@ -760,8 +766,6 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 + "  |  join op: RIGHT OUTER JOIN (BUCKET_SHUFFLE)\n"
                 + "  |  equal join conjunct: [1: PS_PARTKEY, INT, true] = [7: P_PARTKEY, INT, false]\n"
                 + "  |  other predicates: [1: PS_PARTKEY, INT, true] IS NULL\n"
-                + "  |  build runtime filters:\n"
-                + "  |  - filter_id = 0, build_expr = (7: P_PARTKEY), remote = false\n"
                 + "  |  output columns: 1, 2\n"
                 + "  |  cardinality: 8000000");
         // test full outer join
@@ -773,7 +777,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 + "  |  equal join conjunct: [1: PS_PARTKEY, INT, true] = [7: P_PARTKEY, INT, true]\n"
                 + "  |  other predicates: [1: PS_PARTKEY, INT, true] IS NULL\n"
                 + "  |  output columns: 1, 2\n"
-                + "  |  cardinality: 4000000");
+                + "  |  cardinality: 8000000");
     }
 
     @Test
@@ -814,11 +818,11 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         // check cardinality is not 0
         String sql = "SELECT sum(L_DISCOUNT * L_TAX) AS revenue FROM lineitem WHERE weekofyear(L_RECEIPTDATE) = 6";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "cardinality=11111111");
+        assertContains(plan, "cardinality=11320755");
 
         sql = "SELECT sum(L_DISCOUNT * L_TAX) AS revenue FROM lineitem WHERE weekofyear(L_RECEIPTDATE) in (6)";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "cardinality=11111111");
+        assertContains(plan, "cardinality=11320755");
     }
 
     @Test
@@ -867,6 +871,24 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
 
     @Test
     public void testGenRuntimeFilterWhenRightJoin() throws Exception {
+        // Make the build (part) side selective: NDV(p_partkey) below NDV(l_partkey) so the runtime filter
+        // prunes the probe (semijoin selectivity 50000/200000 = 0.25). On the unfiltered TPCH FK join the two
+        // sides have equal NDV, which is correctly judged useless by the probe gate; this keeps the test on
+        // its original intent - right joins generate a remote runtime filter when it is actually useful.
+        new MockUp<MockTpchStatisticStorage>() {
+            @Mock
+            public List<ColumnStatistic> getColumnStatistics(Invocation invocation, Table table, List<String> columns) {
+                List<ColumnStatistic> stats = invocation.proceed(table, columns);
+                List<ColumnStatistic> result = new ArrayList<>(stats);
+                for (int i = 0; i < columns.size(); i++) {
+                    if (columns.get(i).equalsIgnoreCase("p_partkey")) {
+                        result.set(i, new ColumnStatistic(1, 200000, 0, 8, 50000));
+                    }
+                }
+                return result;
+            }
+        };
+
         String sql = "select * from lineitem right anti join [shuffle] part on lineitem.l_partkey = part.p_partkey";
         String plan = getVerboseExplain(sql);
         assertContains(plan, "  4:HASH JOIN\n" +
@@ -914,21 +936,21 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
     public void testIFFunctionCardinalityEstimate() throws Exception {
         String sql = "select (case when `O_ORDERKEY` = 0 then 'ALGERIA' else 'others' end) a from orders group by 1";
         String plan = getCostExplain(sql);
-        assertContains(plan, "* case-->[-Infinity, Infinity, 0.0, 16.0, 2.0] ESTIMATE");
+        assertContains(plan, "* case-->[-Infinity, Infinity, 0.0, 16.0, 2.0] MCV: [[others:149999999][ALGERIA:1]] ESTIMATE");
 
         sql = "select if(`O_ORDERKEY` = 0, 'ALGERIA', 'others') a from orders group by 1";
         plan = getCostExplain(sql);
-        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 2.0] ESTIMATE");
+        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 2.0] MCV: [[others:149999999][ALGERIA:1]] ESTIMATE");
 
         sql = "select if(`O_ORDERKEY` = 0, 'ALGERIA', " +
                 "if (`O_ORDERKEY` = 1, 'ARGENTINA', 'others')) a from orders group by 1";
         plan = getCostExplain(sql);
-        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 3.0] ESTIMATE");
+        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 3.0]");
 
         sql = "select if(`O_ORDERKEY` = 0, 'ALGERIA', if (`O_ORDERKEY` = 1, 'ARGENTINA', " +
                 "if(`O_ORDERKEY` = 2, 'BRAZIL', 'Others'))) a from orders group by 1";
         plan = getCostExplain(sql);
-        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 4.0] ESTIMATE");
+        assertContains(plan, "* if-->[-Infinity, Infinity, 0.0, 16.0, 4.0]");
     }
 
     @Test
