@@ -150,7 +150,25 @@ public class StructField {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(name.toLowerCase(), type, fieldId, fieldPhysicalName);
+        return Objects.hashCode(caseInsensitiveNameHash(name), type, fieldId, fieldPhysicalName);
+    }
+
+    // StringUtils.equalsIgnoreCase uses simple Unicode case comparison, not locale/string casing.
+    // Hash the folded code points as UTF-16 units to retain String.hashCode values for ASCII names.
+    private static int caseInsensitiveNameHash(String value) {
+        int hash = 0;
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            int folded = Character.toLowerCase(Character.toUpperCase(codePoint));
+            if (Character.isSupplementaryCodePoint(folded)) {
+                hash = 31 * hash + Character.highSurrogate(folded);
+                hash = 31 * hash + Character.lowSurrogate(folded);
+            } else {
+                hash = 31 * hash + folded;
+            }
+        }
+        return hash;
     }
 
     @Override
