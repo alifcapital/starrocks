@@ -62,20 +62,35 @@ public class OdbcScalarFunctionCall implements ParseNode {
                     .add("user").add("database").add("current_user").build();
 
     public OdbcScalarFunctionCall(Expr function) {
-        this.pos = function.getPos();
+        this(function, function.getPos());
+    }
+
+    public OdbcScalarFunctionCall(Expr function, NodePosition pos) {
+        this.pos = pos;
         this.function = function;
     }
 
     public Expr mappingFunction() {
+        // Ordinary function-call construction already lowers these valid ODBC calls.
+        if (function instanceof InformationFunction informationFunction &&
+                ODBC_SCALAR_INFORMATION_FUNCTIONS.contains(informationFunction.getFuncType())) {
+            return function;
+        }
+        if (function instanceof ArithmeticExpr arithmeticExpr &&
+                (arithmeticExpr.getOp() == ArithmeticExpr.Operator.BITAND ||
+                        arithmeticExpr.getOp() == ArithmeticExpr.Operator.BITOR ||
+                        arithmeticExpr.getOp() == ArithmeticExpr.Operator.MOD)) {
+            return function;
+        }
         if (!(function instanceof FunctionCallExpr)) {
-            throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(ExprToSql.toSql(function)), function.getPos());
+            throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(ExprToSql.toSql(function)), pos);
         }
         FunctionCallExpr functionCallExpr = (FunctionCallExpr) function;
         String fnName = functionCallExpr.getFunctionName();
 
         // for information function
         if (ODBC_SCALAR_INFORMATION_FUNCTIONS.contains(fnName)) {
-            return new InformationFunction(fnName, function.getPos());
+            return new InformationFunction(fnName, pos);
         }
 
         if (ODBC_SCALAR_STRING_FUNCTIONS.contains(fnName) || ODBC_SCALAR_NUMERIC_FUNCTIONS.contains(fnName) ||
@@ -83,7 +98,7 @@ public class OdbcScalarFunctionCall implements ParseNode {
             return function;
         }
 
-        throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(ExprToSql.toSql(function)), function.getPos());
+        throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(ExprToSql.toSql(function)), pos);
     }
 
     @Override
