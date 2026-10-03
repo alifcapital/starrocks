@@ -4902,7 +4902,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             if (clause.getOpType().equals(AlterStorageVolumeClause.AlterOpType.ALTER_COMMENT)) {
                 comment = ((AlterStorageVolumeCommentClause) clause).getNewComment();
             } else if (clause.getOpType().equals(AlterStorageVolumeClause.AlterOpType.MODIFY_PROPERTIES)) {
-                properties = ((ModifyStorageVolumePropertiesClause) clause).getProperties();
+                // Each SET clause adds its properties, so a later clause does not drop an earlier one.
+                properties.putAll(((ModifyStorageVolumePropertiesClause) clause).getProperties());
             }
         }
 
