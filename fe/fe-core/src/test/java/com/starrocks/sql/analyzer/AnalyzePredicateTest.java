@@ -14,8 +14,6 @@
 
 package com.starrocks.sql.analyzer;
 
-import com.starrocks.common.ExceptionChecker;
-import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -72,19 +70,11 @@ public class AnalyzePredicateTest {
     @Test
     public void testLargeInPredicateTypeValidation() {
         connectContext.getSessionVariable().setLargeInPredicateThreshold(3);
-        ExceptionChecker.expectThrowsWithMsg(LargeInPredicateException.class,
-                "LargeInPredicate only supports: (1) compare type is IntegerType and constant type is BIGINT," +
-                        " (2) both compare and constant are STRING types. " +
-                        "Current types: compareType=decimal(10, 2), constantValueType=bigint(20)",
-                () -> analyzeFail("select * from test.t0 where cast(v1 as decimal(10,2)) in (1,2,3,4,5,6,7,8,9,10)"));
-
-        ExceptionChecker.expectThrowsWithMsg(LargeInPredicateException.class,
-                "Current types: compareType=bigint(20), constantValueType=varchar",
-                () -> analyzeFail("select * from test.t0 where v1 in ('1', '2', '3')"));
-
-        ExceptionChecker.expectThrowsWithMsg(LargeInPredicateException.class,
-                "Current types: compareType=varchar(20), constantValueType=bigint(20)",
-                () -> analyzeFail("select * from test.tall where ta in (1, 2, 3, 4, 5, 6, 7)"));
+        // The analyzer accepts these types. The optimizer compares the constants as the InPredicate does and
+        // plans the predicate again as an InPredicate where RAW VALUES cannot hold the comparison.
+        analyzeSuccess("select * from test.t0 where cast(v1 as decimal(10,2)) in (1,2,3,4,5,6,7,8,9,10)");
+        analyzeSuccess("select * from test.t0 where v1 in ('1', '2', '3')");
+        analyzeSuccess("select * from test.tall where ta in (1, 2, 3, 4, 5, 6, 7)");
 
         // fallback to InPredicate
         analyzeSuccess("select * from test.t0 where cast(v1 as tinyint) in (1,2,3,41231231231231231231231123)");
