@@ -909,6 +909,10 @@ public class ConnectProcessorTest extends DDLTestBase {
             ByteBuffer packet = serializer.toByteBuffer();
 
             ConnectContext ctx = initMockContext(mockChannel(packet), GlobalStateMgr.getCurrentState());
+            // With multi-warehouse the query needs the USAGE privilege on wh3, so it runs as root.
+            ctx.setCurrentUserIdentity(UserIdentity.ROOT);
+            ctx.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
+            ctx.setQualifiedUser(UserIdentity.ROOT.getUser());
             ctx.getSessionVariable().setWarehouseName("wh3");
 
             ConnectProcessor processor = new ConnectProcessor(ctx);
