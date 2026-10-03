@@ -6340,12 +6340,18 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitRollup(com.starrocks.sql.parser.StarRocksParser.RollupContext context) {
+        if (context.expressionList() == null) {
+            throw new ParsingException("ROLLUP requires at least one grouping expression", createPos(context));
+        }
         List<Expr> groupingExprs = visit(context.expressionList().expression(), Expr.class);
         return new GroupByClause(new ArrayList<>(groupingExprs), GroupByClause.GroupingType.ROLLUP, createPos(context));
     }
 
     @Override
     public ParseNode visitCube(com.starrocks.sql.parser.StarRocksParser.CubeContext context) {
+        if (context.expressionList() == null) {
+            throw new ParsingException("CUBE requires at least one grouping expression", createPos(context));
+        }
         List<Expr> groupingExprs = visit(context.expressionList().expression(), Expr.class);
         return new GroupByClause(new ArrayList<>(groupingExprs), GroupByClause.GroupingType.CUBE, createPos(context));
     }
