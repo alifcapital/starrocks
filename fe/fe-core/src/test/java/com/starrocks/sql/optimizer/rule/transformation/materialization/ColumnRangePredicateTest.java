@@ -23,7 +23,9 @@ import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
@@ -226,4 +228,72 @@ public class ColumnRangePredicateTest {
         Assertions.assertEquals("1: col > 9223372036854775807", s, s);
     }
 
+
+    // Evaluates a predicate over integer columns, so that a test can compare a rewrite with the ranges row by row.
+    private static boolean evaluate(ScalarOperator operator, int value) {
+        if (operator instanceof ConstantOperator) {
+            return ((ConstantOperator) operator).getBoolean();
+        }
+        if (operator instanceof CompoundPredicateOperator) {
+            CompoundPredicateOperator compound = (CompoundPredicateOperator) operator;
+            if (compound.isAnd()) {
+                return compound.getChildren().stream().allMatch(child -> evaluate(child, value));
+            }
+            if (compound.isOr()) {
+                return compound.getChildren().stream().anyMatch(child -> evaluate(child, value));
+            }
+            return !evaluate(compound.getChild(0), value);
+        }
+        if (operator instanceof InPredicateOperator) {
+            boolean found = operator.getChildren().stream().skip(1)
+                    .anyMatch(child -> ((ConstantOperator) child).getInt() == value);
+            return ((InPredicateOperator) operator).isNotIn() != found;
+        }
+        BinaryPredicateOperator binary = (BinaryPredicateOperator) operator;
+        int right = ((ConstantOperator) binary.getChild(1)).getInt();
+        switch (binary.getBinaryType()) {
+            case EQ:
+                return value == right;
+            case NE:
+                return value != right;
+            case LT:
+                return value < right;
+            case LE:
+                return value <= right;
+            case GT:
+                return value > right;
+            case GE:
+                return value >= right;
+            default:
+                throw new IllegalStateException(binary.toString());
+        }
+    }
+
+    @Test
+    public void testRangesWithOneMissingValueKeepTheirRows() {
+        ColumnRefOperator column = new ColumnRefOperator(1, IntegerType.INT, "a", true);
+        ConstantOperator seven = ConstantOperator.createInt(7);
+        ConstantOperator eight = ConstantOperator.createInt(8);
+        ConstantOperator nine = ConstantOperator.createInt(9);
+        List<List<Range<ConstantOperator>>> cases = List.of(
+                // a <= 7 OR a > 8 leaves out 8, the upper endpoint of the gap (7, 8].
+                List.of(Range.atMost(seven), Range.greaterThan(eight)),
+                // a < 8 OR a >= 9 leaves out 8, the lower endpoint of the gap [8, 9).
+                List.of(Range.lessThan(eight), Range.atLeast(nine)),
+                // a <= 7 OR a >= 9 leaves out 8, inside the open gap (7, 9).
+                List.of(Range.atMost(seven), Range.atLeast(nine)),
+                // 7 < a < 9 is a = 8.
+                List.of(Range.open(seven, nine)),
+                // Two single values given as open ranges.
+                List.of(Range.open(seven, nine), Range.open(ConstantOperator.createInt(10), ConstantOperator.createInt(12))));
+        for (List<Range<ConstantOperator>> ranges : cases) {
+            TreeRangeSet<ConstantOperator> set = TreeRangeSet.create();
+            ranges.forEach(set::add);
+            ScalarOperator predicate = new ColumnRangePredicate(column, TreeRangeSet.create(set)).toScalarOperator();
+            for (int value = 0; value <= 15; value++) {
+                Assertions.assertEquals(set.contains(ConstantOperator.createInt(value)), evaluate(predicate, value),
+                        set + " as " + predicate + " at " + value);
+            }
+        }
+    }
 }
