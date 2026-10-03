@@ -14,9 +14,11 @@
 
 package com.starrocks.sql.optimizer;
 
+import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.optimizer.dump.DumpInfo;
 import com.starrocks.sql.optimizer.dump.QueryDumper;
 import com.starrocks.sql.plan.PlanTestBase;
@@ -164,30 +166,39 @@ public class QueryDumperTest extends PlanTestBase {
                             "\"currentWarehouseId\":0}");
         }
 
-        {
+        // Without multi-warehouse every session runs in the default warehouse, so we expect the dump to show the
+        // default warehouse and wh1 without a computed average. With multi-warehouse the session runs in wh1.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        try {
             connectContext.getSessionVariable().setWarehouseName("wh1");
-            Pair<HttpResponseStatus, String> statusAndRes =
-                    QueryDumper.dumpQuery("default_catalog", "test", "select count(v1) from t0", false);
-            assertThat(statusAndRes.first).isEqualTo(HttpResponseStatus.OK);
+            for (boolean enabled : new boolean[] {false, true}) {
+                Config.enable_multi_warehouse = enabled;
+                Pair<HttpResponseStatus, String> statusAndRes =
+                        QueryDumper.dumpQuery("default_catalog", "test", "select count(v1) from t0", false);
+                assertThat(statusAndRes.first).isEqualTo(HttpResponseStatus.OK);
 
-            assertThat(statusAndRes.second).contains(
-                    "\"be_core_stat\":{" +
-                            "\"cachedAvgNumOfHardwareCores\":12," +
-                            "\"numOfHardwareCoresPerBe\":\"{\\\"0\\\":8,\\\"1\\\":8,\\\"10\\\":16,\\\"11\\\":16}\"" +
-                            "}");
-            assertThat(statusAndRes.second).contains(
-                    "\"be_core_stat_v2\":{" +
-                            "\"cachedAvgNumOfHardwareCores\":12," +
-                            "\"warehouses\":[{" +
-                            "\"warehouseId\":0," +
-                            "\"cachedAvgNumOfHardwareCores\":8," +
-                            "\"numOfHardwareCoresPerBe\":\"{\\\"0\\\":8,\\\"1\\\":8}\"" +
-                            "},{" +
-                            "\"warehouseId\":1," +
-                            "\"cachedAvgNumOfHardwareCores\":16," +
-                            "\"numOfHardwareCoresPerBe\":\"{\\\"10\\\":16,\\\"11\\\":16}\"" +
-                            "}]," +
-                            "\"currentWarehouseId\":1}");
+                assertThat(statusAndRes.second).contains(
+                        "\"be_core_stat\":{" +
+                                "\"cachedAvgNumOfHardwareCores\":12," +
+                                "\"numOfHardwareCoresPerBe\":\"{\\\"0\\\":8,\\\"1\\\":8,\\\"10\\\":16,\\\"11\\\":16}\"" +
+                                "}");
+                assertThat(statusAndRes.second).contains(
+                        "\"be_core_stat_v2\":{" +
+                                "\"cachedAvgNumOfHardwareCores\":12," +
+                                "\"warehouses\":[{" +
+                                "\"warehouseId\":0," +
+                                "\"cachedAvgNumOfHardwareCores\":8," +
+                                "\"numOfHardwareCoresPerBe\":\"{\\\"0\\\":8,\\\"1\\\":8}\"" +
+                                "},{" +
+                                "\"warehouseId\":1," +
+                                "\"cachedAvgNumOfHardwareCores\":" + (enabled ? 16 : -1) + "," +
+                                "\"numOfHardwareCoresPerBe\":\"{\\\"10\\\":16,\\\"11\\\":16}\"" +
+                                "}]," +
+                                "\"currentWarehouseId\":" + (enabled ? 1 : 0) + "}");
+            }
+        } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
+            connectContext.getSessionVariable().setWarehouseName(WarehouseManager.DEFAULT_WAREHOUSE_NAME);
         }
     }
 

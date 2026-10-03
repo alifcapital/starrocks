@@ -1342,13 +1342,16 @@ public class StmtExecutorTest {
         stmt.setOrigStmt(new com.starrocks.sql.ast.OriginStatement(sql, 0));
         StmtExecutor executor = new StmtExecutor(ctx, stmt);
 
-        // Enable query detail collection
+        // Enable query detail collection. The hinted warehouse reaches the query detail only with multi-warehouse.
         boolean oldConfig = Config.enable_collect_query_detail_info;
+        boolean multiWarehouse = Config.enable_multi_warehouse;
         Config.enable_collect_query_detail_info = true;
+        Config.enable_multi_warehouse = true;
         try {
             executor.addRunningQueryDetail(stmt);
         } finally {
             Config.enable_collect_query_detail_info = oldConfig;
+            Config.enable_multi_warehouse = multiWarehouse;
         }
 
         QueryDetail queryDetail = ctx.getQueryDetail();
