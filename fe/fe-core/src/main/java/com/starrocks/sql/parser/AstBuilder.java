@@ -1360,7 +1360,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             return new CreateTemporaryTableAsSelectStmt(
                     createTemporaryTableStmt,
                     columns == null ? null : columns.stream().map(Identifier::getValue).collect(toList()),
-                    (QueryStatement) visit(context.queryStatement()),
+                    visitEmbeddedQuery(context.queryStatement()),
                     createPos(context));
         }
 
@@ -1391,7 +1391,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         return new CreateTableAsSelectStmt(
                 createTableStmt,
                 columns == null ? null : columns.stream().map(Identifier::getValue).collect(toList()),
-                (QueryStatement) visit(context.queryStatement()),
+                visitEmbeddedQuery(context.queryStatement()),
                 createPos(context));
     }
 
@@ -1961,7 +1961,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                 colWithComments,
                 context.comment() == null ? null : ((StringLiteral) visit(context.comment())).getStringValue(),
                 isSecurity,
-                (QueryStatement) visit(context.queryStatement()),
+                visitEmbeddedQuery(context.queryStatement()),
                 createPos(context),
                 getCaseInsensitiveProperties(context.properties())
                 );
@@ -1998,7 +1998,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         } else {
             AlterViewStmt.AlterDialectType alterDialectType = context.ADD() != null ? AlterViewStmt.AlterDialectType.ADD :
                     context.MODIFY() != null ? AlterViewStmt.AlterDialectType.MODIFY : AlterViewStmt.AlterDialectType.NONE;
-            QueryStatement queryStatement = (QueryStatement) visit(context.queryStatement());
+            QueryStatement queryStatement = visitEmbeddedQuery(context.queryStatement());
             AlterViewClause alterClause = new AlterViewClause(colWithComments, queryStatement, createPos(context));
             alterClause.setQueryStartIndex(context.queryStatement().start.getStartIndex());
             alterClause.setQueryStopIndex(context.queryStatement().stop.getStopIndex() + 1);
@@ -2305,7 +2305,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
         String comment =
                 context.comment() == null ? null : ((StringLiteral) visit(context.comment().string())).getStringValue();
-        QueryStatement queryStatement = (QueryStatement) visit(context.queryStatement());
+        QueryStatement queryStatement = visitEmbeddedQuery(context.queryStatement());
         int queryStartIndex = context.queryStatement().start.getStartIndex();
         int queryStopIndex = context.queryStatement().stop.getStopIndex() + 1;
 
@@ -2631,7 +2631,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             queryStatement = new QueryStatement(new ValuesRelation(rows, colNames,
                     createPos(context.VALUES().getSymbol(), context.stop)));
         } else {
-            queryStatement = (QueryStatement) visit(context.queryStatement());
+            queryStatement = visitEmbeddedQuery(context.queryStatement());
         }
 
         if (context.explainDesc() != null) {
@@ -6124,6 +6124,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         queryStatement.setQueryStartIndex(context.queryRelation().start.getStartIndex());
 
         return queryStatement;
+    }
+
+    // Only a top-level query reads EXPLAIN, TRACE and INTO OUTFILE. A statement that embeds a query, such as
+    // INSERT or CREATE VIEW, would run without them, so we reject them there.
+    private QueryStatement visitEmbeddedQuery(StarRocksParser.QueryStatementContext context) {
+        if (context.explainDesc() != null || context.optimizerTrace() != null || context.outfile() != null) {
+            throw new ParsingException("EXPLAIN, TRACE and INTO OUTFILE are not supported in an embedded query",
+                    createPos(context));
+        }
+        return (QueryStatement) visit(context);
     }
 
     private String getTraceMode(com.starrocks.sql.parser.StarRocksParser.OptimizerTraceContext context) {
