@@ -164,6 +164,15 @@ public class SqlParser {
     }
 
     private static List<StatementBase> parseWithStarRocksDialect(String sql, SessionVariable sessionVariable) {
+        AstBuilder.AstBuilderFactory astBuilderFactory = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory;
+        List<StatementBase> fastStatements = FastQueryParser.tryParse(sql, sessionVariable, astBuilderFactory);
+        if (fastStatements != null) {
+            return fastStatements;
+        }
+        return parseWithAntlr(sql, sessionVariable);
+    }
+
+    static List<StatementBase> parseWithAntlr(String sql, SessionVariable sessionVariable) {
         List<StatementBase> statements = Lists.newArrayList();
         Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> pair =
                 invokeParser(sql, sessionVariable, com.starrocks.sql.parser.StarRocksParser::sqlStatements);

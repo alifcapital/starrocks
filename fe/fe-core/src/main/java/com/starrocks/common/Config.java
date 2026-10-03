@@ -4501,6 +4501,13 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long parser_dfa_cache_max_states = 30000;
 
+    /**
+     * Parse queries and DML with the hand-written fast parser first. It gives up on unsupported syntax and on
+     * any error, and then the ANTLR parser parses the statement.
+     */
+    @ConfField(mutable = true)
+    public static boolean enable_fast_query_parser = true;
+
     // Whether restore tables into colocate group if the
     // backuped table is colocated
     @ConfField(mutable = true)
