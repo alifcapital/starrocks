@@ -882,6 +882,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for SHOW DATA DISTRIBUTION",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -2950,6 +2954,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for ADMIN SHOW REPLICA DISTRIBUTION",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -2972,6 +2980,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for ADMIN SHOW TABLET STATUS",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -2993,6 +3005,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for ADMIN SHOW REPLICA STATUS",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -3015,6 +3031,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for ADMIN REPAIR TABLE",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -3034,6 +3054,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         if (context.partitionNames() != null) {
             stop = context.partitionNames().stop;
             PartitionRef partitionNames = (PartitionRef) visit(context.partitionNames());
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for ADMIN CANCEL REPAIR TABLE",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(), partitionNames.getPos());
         }
 
@@ -4058,6 +4082,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         PartitionRef partitionRef = null;
         if (partitionNamesContext != null) {
             PartitionRef partitionNames = (PartitionRef) visit(partitionNamesContext);
+            if (partitionNames.isKeyPartitionNames()) {
+                throw new ParsingException("Key partition selectors are not supported for BACKUP or RESTORE",
+                        partitionNames.getPos());
+            }
             partitionRef = new PartitionRef(partitionNames.getPartitionNames(), partitionNames.isTemp(),
                     partitionNames.getPos());
         }
