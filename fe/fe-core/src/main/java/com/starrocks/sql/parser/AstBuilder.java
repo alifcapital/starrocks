@@ -2709,6 +2709,23 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             return stmt;
         }
 
+        // A FILES() or BLACKHOLE() target would append and ignore a column list, BY NAME and PROPERTIES, so we
+        // reject these clauses.
+        if (context.OVERWRITE() != null) {
+            throw new ParsingException("INSERT OVERWRITE is not supported for FILES() or BLACKHOLE()",
+                    createPos(context));
+        }
+        if (context.properties() != null) {
+            throw new ParsingException("PROPERTIES is not supported for FILES() or BLACKHOLE()",
+                    createPos(context.properties()));
+        }
+        for (StarRocksParser.InsertLabelOrColumnAliasesContext desc : context.insertLabelOrColumnAliases()) {
+            if (desc.columnAliasesOrByName() != null) {
+                throw new ParsingException("A column list or BY NAME is not supported for FILES() or BLACKHOLE()",
+                        createPos(desc));
+            }
+        }
+
         if (context.BLACKHOLE() != null) {
             return new InsertStmt(queryStatement, createPos(context));
         }
