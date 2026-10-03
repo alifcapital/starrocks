@@ -29,6 +29,7 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -58,11 +59,15 @@ public final class LargeInConstants {
     private final Type type;
     private final List<Object> values;
     private final boolean hasNull;
+    // We expect thousands of values, and rules put the predicate into hash sets and maps many times while they
+    // rewrite the plan. So we hash the values once. They cannot change, so the hash stays valid.
+    private final int valuesHash;
 
     private LargeInConstants(Type type, List<Object> values, boolean hasNull) {
         this.type = type;
-        this.values = values;
+        this.values = Collections.unmodifiableList(values);
         this.hasNull = hasNull;
+        this.valuesHash = values.hashCode();
     }
 
     /**
@@ -214,11 +219,12 @@ public final class LargeInConstants {
             return false;
         }
         LargeInConstants that = (LargeInConstants) o;
-        return hasNull == that.hasNull && type.equals(that.type) && values.equals(that.values);
+        return hasNull == that.hasNull && valuesHash == that.valuesHash && type.equals(that.type)
+                && values.equals(that.values);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(type, values, hasNull);
+        return Objects.hash(type, valuesHash, hasNull);
     }
 }

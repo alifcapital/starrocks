@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -131,6 +132,21 @@ public class LargeInConstantsTest {
             assertEquals(VarcharType.VARCHAR, constants.getType());
             assertEquals(expected, constants.getValues());
         }
+    }
+
+    @Test
+    public void testEqualityAndUnmodifiableValues() {
+        LargeInConstants first = resolve(VarcharType.VARCHAR,
+                ConstantOperator.createVarchar("a"), ConstantOperator.createVarchar("b"));
+        LargeInConstants second = resolve(VarcharType.VARCHAR,
+                ConstantOperator.createVarchar("a"), ConstantOperator.createVarchar("b"));
+        LargeInConstants other = resolve(VarcharType.VARCHAR,
+                ConstantOperator.createVarchar("b"), ConstantOperator.createVarchar("a"));
+        assertEquals(first, second);
+        assertEquals(first.hashCode(), second.hashCode());
+        assertNotEquals(first, other);
+        // The hash of the values is computed once, so the values must not change.
+        assertThrows(UnsupportedOperationException.class, () -> first.getValues().add("c"));
     }
 
     @Test
