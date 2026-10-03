@@ -18,6 +18,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -25,6 +26,7 @@ import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Test;
 
@@ -157,5 +159,22 @@ public class NormalizePredicateRuleTest {
         ScalarOperatorRewriter operatorRewriter = new ScalarOperatorRewriter();
         ScalarOperator res =
                 operatorRewriter.rewrite(inOp, Lists.newArrayList(new NormalizePredicateRule()));
+    }
+
+    @Test
+    public void testInListKeepsNonDeterministicCall() {
+        // random() is neither a constant nor a variable. It must stay one of the values that the IN compares with.
+        ColumnRefOperator column = new ColumnRefOperator(1, FloatType.DOUBLE, "c", true);
+        CallOperator random = new CallOperator("random", FloatType.DOUBLE, Lists.newArrayList());
+        ConstantOperator one = ConstantOperator.createDouble(1);
+        ScalarOperator in = new InPredicateOperator(false, column, one, random);
+        ScalarOperator result = new NormalizePredicateRule().apply(in, new ScalarOperatorRewriteContext());
+        assertEquals(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
+                new BinaryPredicateOperator(BinaryType.EQ, column, one),
+                new BinaryPredicateOperator(BinaryType.EQ, column, random)), result);
+
+        ScalarOperator notIn = new InPredicateOperator(true, column, random);
+        assertEquals(new BinaryPredicateOperator(BinaryType.NE, column, random),
+                new NormalizePredicateRule().apply(notIn, new ScalarOperatorRewriteContext()));
     }
 }
