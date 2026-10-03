@@ -85,6 +85,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.parquet.Strings;
@@ -123,7 +124,7 @@ public class PartitionSelector {
             "SELECT PARTITION_NAME, SUM(ROW_COUNT) as ROW_COUNT, CAST(SUM(DATA_SIZE) AS BIGINT) as DATA_SIZE FROM (" +
             "SELECT *, ROW_NUMBER() OVER (PARTITION BY PARTITION_NAME, COLUMN_NAME ORDER BY UPDATE_TIME DESC) AS RN " +
             "FROM _statistics_.external_column_statistics " +
-            "WHERE TABLE_UUID IN ('%s', '%s') AND PARTITION_NAME in ('%s')) DEDUP_T " +
+            "WHERE TABLE_UUID IN ('%s', '%s') AND PARTITION_NAME in (%s)) DEDUP_T " +
             "WHERE RN = 1 GROUP BY PARTITION_NAME;";
     // NOTE: `json` to `datetime` is not supported yet, so we use `string` here.
     private static final String JSON_QUERY_TEMPLATE = "CAST(CAST(JSON_QUERY(%s, '$[0].[%d]') AS STRING) AS %s)";
@@ -822,8 +823,12 @@ public class PartitionSelector {
     public static Map<String, Pair<Long, Long>> getExternalTablePartitionStats(Table table, Set<String> needPartitionNames) {
         String rawTableUuid = table.getUUID();
         String hashedTableUuid = StatisticUtils.hashTableUuidForPkStorage(rawTableUuid);
+        // Each partition name is its own literal; one literal with the joined names matches no partition.
+        String partitionNames = needPartitionNames.stream()
+                .map(name -> "'" + StringEscapeUtils.escapeSql(name) + "'")
+                .collect(Collectors.joining(", "));
         String sql = String.format(EXTERNAL_TABLE_PARTITION_META_TEMPLATE, hashedTableUuid, rawTableUuid,
-                String.join(",", needPartitionNames));
+                partitionNames);
         LOG.info("Get external table partition stats by sql: {}", sql);
         List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
         return deserializeExternalStatisticsResult(batch);
