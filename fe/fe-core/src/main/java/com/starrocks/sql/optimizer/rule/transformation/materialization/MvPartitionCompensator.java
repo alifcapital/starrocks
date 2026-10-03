@@ -296,7 +296,8 @@ public class MvPartitionCompensator {
      * @param expectOutputColumns the expected output columns
      * @return the new opt expression and the new output columns if it needs to cast, otherwise return the original
      */
-    private static Pair<OptExpression, List<ColumnRefOperator>> adjustOptExpressionOutputColumnType(
+    @VisibleForTesting
+    static Pair<OptExpression, List<ColumnRefOperator>> adjustOptExpressionOutputColumnType(
             ColumnRefFactory columnRefFactory,
             OptExpression optExpression,
             List<ColumnRefOperator> curOutputColumns,
@@ -314,7 +315,7 @@ public class MvPartitionCompensator {
             if (!outputType.equals(expectType)) {
                 isNeedCast = true;
                 ColumnRefOperator newColRef = columnRefFactory.create("cast", expectType, expectOp.isNullable());
-                ScalarOperator cast = new CastOperator(outputType, outOp, true);
+                ScalarOperator cast = new CastOperator(expectType, outOp, true);
                 projections.put(newColRef, cast);
                 newChildOutputs.add(newColRef);
             } else {
