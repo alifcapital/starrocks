@@ -813,6 +813,9 @@ public class ConnectProcessorTest extends DDLTestBase {
 
     @Test
     public void testQueryWithInlineWarehouse() throws Exception {
+        // The test checks that a query runs in the warehouse that the session selects, which needs multi-warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         Config.run_mode = RunMode.SHARED_DATA.getName();
         RunMode.detectRunMode();
         Config.enable_collect_query_detail_info = true;
@@ -861,6 +864,7 @@ public class ConnectProcessorTest extends DDLTestBase {
             AuditEvent auditEvent = ctx.getAuditEventBuilder().build();
             Assertions.assertEquals("wh2", auditEvent.warehouse);
         } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
             Config.enable_collect_query_detail_info = false;
             Config.run_mode = RunMode.SHARED_NOTHING.getName();
             RunMode.detectRunMode();
@@ -873,6 +877,9 @@ public class ConnectProcessorTest extends DDLTestBase {
 
     @Test
     public void testQueryWithSetWarehouse() throws Exception {
+        // The test checks that a query runs in the warehouse that the session selects, which needs multi-warehouse.
+        boolean multiWarehouse = Config.enable_multi_warehouse;
+        Config.enable_multi_warehouse = true;
         Config.run_mode = RunMode.SHARED_DATA.getName();
         RunMode.detectRunMode();
         Config.enable_collect_query_detail_info = true;
@@ -918,6 +925,7 @@ public class ConnectProcessorTest extends DDLTestBase {
             AuditEvent auditEvent = ctx.getAuditEventBuilder().build();
             Assertions.assertEquals("wh3", auditEvent.warehouse);
         } finally {
+            Config.enable_multi_warehouse = multiWarehouse;
             Config.enable_collect_query_detail_info = false;
             Config.run_mode = RunMode.SHARED_NOTHING.getName();
             RunMode.detectRunMode();
