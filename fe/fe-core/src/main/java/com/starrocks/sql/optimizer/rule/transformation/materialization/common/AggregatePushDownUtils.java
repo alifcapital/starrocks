@@ -270,7 +270,8 @@ public class AggregatePushDownUtils {
                 logMVRewrite(mvRewriteContext, "Get rollup function name is null, aggCall:{}", aggCall);
                 return null;
             }
-            List<ScalarOperator> newArgs = aggCall.getChildren();
+            // The call may be borrowed from the query aggregate, so we change a copy of its arguments.
+            List<ScalarOperator> newArgs = Lists.newArrayList(aggCall.getChildren());
             newArgs.set(0, newArg0);
             Type[] argTypes = newArgs.stream().map(ScalarOperator::getType).toArray(Type[]::new);
             Function newFunc = ExprUtils.getBuiltinFunction(rollupFuncName, argTypes,
