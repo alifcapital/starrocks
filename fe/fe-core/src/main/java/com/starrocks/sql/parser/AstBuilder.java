@@ -5190,6 +5190,12 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     }
 
     @Override
+    public ParseNode visitAlterLoadErrorUrlClause(
+            com.starrocks.sql.parser.StarRocksParser.AlterLoadErrorUrlClauseContext context) {
+        throw new ParsingException("SET LOAD ERRORS HUB is no longer supported", createPos(context));
+    }
+
+    @Override
     public ParseNode visitCreateImageClause(com.starrocks.sql.parser.StarRocksParser.CreateImageClauseContext context) {
         return new CreateImageClause(createPos(context));
     }
