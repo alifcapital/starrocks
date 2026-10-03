@@ -90,7 +90,7 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
         if (agg.getAggregations().isEmpty() || agg.getPredicate() != null || scanOperator.getProjection() == null) {
             return false;
         }
-        // Fast check: at least one MIN/MAX over a projected monotonic function of a single column
+        // At least one MIN/MAX over a projected monotonic function of a single column that can be rewritten
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : agg.getAggregations().entrySet()) {
             CallOperator call = entry.getValue();
             // 1. Min/Max aggregation
@@ -102,34 +102,37 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
             }
             ColumnRefOperator argRef = (ColumnRefOperator) call.getArguments().get(0);
             ScalarOperator projected = scanOperator.getProjection().getColumnRefMap().get(argRef);
-            if (projected == null) {
-                continue;
-            }
-            // 2. Monotonic function
-            if (!isAllowedMonotonicFunction(projected)) {
-                continue;
-            }
-
-            // 3. The MinMaxStats exists
-            List<ColumnRefOperator> columnRefList = Utils.extractColumnRef(projected);
-            if (columnRefList.size() != 1) {
-                continue;
-            }
-            ColumnRefOperator ref = columnRefList.get(0);
-            OlapTable table = (OlapTable) scanOperator.getTable();
-            Column column = scanOperator.getColRefToColumnMetaMap().get(ref);
-            if (column == null) {
-                continue;
-            }
-            final Long lastUpdateTime = StatisticUtils.getTableLastUpdateTimestamp(table);
-            Optional<IMinMaxStatsMgr.ColumnMinMax> minMax = IMinMaxStatsMgr.internalInstance()
-                    .getStats(new ColumnIdentifier(table.getId(), column.getColumnId()),
-                            new StatsVersion(-1, lastUpdateTime));
-            if (minMax.isPresent()) {
-                return validateArgumentDomain(projected, minMax.get());
+            if (projected != null && canRewrite(scanOperator, projected)) {
+                return true;
             }
         }
         return false;
+    }
+
+    // MIN/MAX(f(col)) is f(MIN/MAX(col)) only when f is defined for every value of col, which the min/max statistics
+    // of the column tell. Each aggregate needs this for its own function and arguments: the scale of to_datetime
+    // decides which values are valid, so one aggregate that passes says nothing about another.
+    private static boolean canRewrite(LogicalScanOperator scanOperator, ScalarOperator projected) {
+        // 2. Monotonic function
+        if (!isAllowedMonotonicFunction(projected)) {
+            return false;
+        }
+        // 3. The MinMaxStats exists
+        List<ColumnRefOperator> columnRefList = Utils.extractColumnRef(projected);
+        if (columnRefList.size() != 1) {
+            return false;
+        }
+        ColumnRefOperator ref = columnRefList.get(0);
+        OlapTable table = (OlapTable) scanOperator.getTable();
+        Column column = scanOperator.getColRefToColumnMetaMap().get(ref);
+        if (column == null) {
+            return false;
+        }
+        final Long lastUpdateTime = StatisticUtils.getTableLastUpdateTimestamp(table);
+        Optional<IMinMaxStatsMgr.ColumnMinMax> minMax = IMinMaxStatsMgr.internalInstance()
+                .getStats(new ColumnIdentifier(table.getId(), column.getColumnId()),
+                        new StatsVersion(-1, lastUpdateTime));
+        return minMax.isPresent() && validateArgumentDomain(projected, minMax.get());
     }
 
     @Override
@@ -159,7 +162,7 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
 
             ColumnRefOperator projectedRef = (ColumnRefOperator) outerAgg.getArguments().get(0);
             ScalarOperator projectedExpr = oldPreProj.get(projectedRef);
-            if (projectedExpr == null || !isAllowedMonotonicFunction(projectedExpr)) {
+            if (projectedExpr == null || !canRewrite(scan, projectedExpr)) {
                 // Not eligible, keep as-is
                 newAggs.put(outAggRef, outerAgg);
                 continue;
@@ -200,8 +203,10 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
             if (fnWithChild.call != null) {
                 CallOperator origCall = fnWithChild.call;
                 Function fn = origCall.getFunction();
-                // rebuild with new child
-                reapplied = new CallOperator(origCall.getFnName(), origCall.getType(), List.of(newInnerAggRef), fn);
+                // Only the first argument is the column. The other arguments, such as the scale of to_datetime, stay.
+                List<ScalarOperator> arguments = Lists.newArrayList(origCall.getChildren());
+                arguments.set(0, newInnerAggRef);
+                reapplied = new CallOperator(origCall.getFnName(), origCall.getType(), arguments, fn);
             } else {
                 // should not happen
                 newAggs.put(outAggRef, outerAgg);
