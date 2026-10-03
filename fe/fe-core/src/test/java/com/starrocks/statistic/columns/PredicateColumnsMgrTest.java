@@ -104,7 +104,9 @@ class PredicateColumnsMgrTest extends PlanTestBase {
         Assertions.assertEquals(List.of("c_acctbal", "c_mktsegment", "c_nationkey"),
                 mgr.queryExternalPredicateColumns(table));
         int threshold = Config.statistic_auto_collect_predicate_columns_threshold;
+        boolean staggered = Config.enable_statistic_auto_collect_staggered_schedule;
         try {
+            Config.enable_statistic_auto_collect_staggered_schedule = false;
             Config.statistic_auto_collect_predicate_columns_threshold = 1;
             var automaticJob = new ExternalAnalyzeJob("hive0", "tpch", "customer", null, null,
                     StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, new HashMap<>(),
@@ -120,6 +122,7 @@ class PredicateColumnsMgrTest extends PlanTestBase {
             Assertions.assertEquals(List.of("c_custkey"), explicitJobs.get(0).getColumnNames());
         } finally {
             Config.statistic_auto_collect_predicate_columns_threshold = threshold;
+            Config.enable_statistic_auto_collect_staggered_schedule = staggered;
         }
     }
 
