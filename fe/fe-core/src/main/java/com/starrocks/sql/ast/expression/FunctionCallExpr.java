@@ -47,6 +47,7 @@ import com.starrocks.sql.ast.QualifiedName;
 import com.starrocks.sql.parser.NodePosition;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -332,7 +333,7 @@ public class FunctionCallExpr extends Expr {
     }
 
     public boolean isNondeterministicBuiltinFnName() {
-        return FunctionSet.nonDeterministicFunctions.contains(fnRef.getFunctionName().toLowerCase());
+        return FunctionSet.nonDeterministicFunctions.contains(fnRef.getFunctionName().toLowerCase(Locale.ROOT));
     }
 
     @Override

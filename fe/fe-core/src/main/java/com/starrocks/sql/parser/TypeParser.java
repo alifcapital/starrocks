@@ -44,6 +44,7 @@ import com.starrocks.type.VariantType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import static com.starrocks.sql.parser.AstBuilderUtils.createPos;
 import static com.starrocks.sql.parser.AstBuilderUtils.getIdentifier;
@@ -113,7 +114,7 @@ public class TypeParser {
                         "execute cmd 'admin set frontend config (\"enable_decimal_v3\" = \"true\")' " +
                         "on every FE server");
             }
-            final PrimitiveType primitiveType = PrimitiveType.valueOf(context.children.get(0).getText().toUpperCase());
+            final PrimitiveType primitiveType = PrimitiveType.valueOf(context.children.get(0).getText().toUpperCase(Locale.ROOT));
             if (precision != null) {
                 if (scale != null) {
                     return TypeFactory.createDecimalV3Type(primitiveType, precision, scale);
@@ -167,7 +168,7 @@ public class TypeParser {
             return null;
         }
 
-        String upperTypeName = typeName.toUpperCase();
+        String upperTypeName = typeName.toUpperCase(Locale.ROOT);
         return switch (upperTypeName) {
             // Null type
             case "NULL_TYPE" -> NullType.NULL;
