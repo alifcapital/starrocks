@@ -49,6 +49,8 @@ public class PhysicalStreamAggOperator extends PhysicalStreamOperator {
         super(OperatorType.PHYSICAL_STREAM_AGG);
         this.aggregations = aggregations;
         this.groupBys = groupBys;
+        this.predicate = predicate;
+        this.projection = projection;
     }
 
     public List<ColumnRefOperator> getGroupBys() {
