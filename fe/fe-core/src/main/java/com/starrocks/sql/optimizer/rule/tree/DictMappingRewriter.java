@@ -77,8 +77,7 @@ public class DictMappingRewriter {
     // rewrite scalar operator as dict mapping operator
     ScalarOperator rewriteAsDictMapping(ScalarOperator scalarOperator, Type type) {
         final ColumnRefSet usedColumns = scalarOperator.getUsedColumns();
-        ColumnRefSet usedCols = scalarOperator.getUsedColumns();
-        if (usedCols.cardinality() != 1) {
+        if (usedColumns.cardinality() != 1) {
             throw new StarRocksPlannerException(ErrorType.INTERNAL_ERROR,
                     "%s used more than one column when DictExpr rewriting", scalarOperator);
         }
@@ -125,12 +124,11 @@ public class DictMappingRewriter {
         }
 
         private ScalarOperator addDictExprToBlockDictOpt(ScalarOperator scalarOperator, RewriterContext context) {
-            List<ScalarOperator> children = Lists.newArrayList(scalarOperator.getChildren());
-            boolean hasApplied = false;
+            int childCount = scalarOperator.getChildren().size();
             boolean disableApplied = context.hasUnsupportedOperator;
             // For any expression that does not support low-cardinality optimization,
             // if child already uses optimization, we need to add a DictExpr
-            for (int i = 0; i < children.size(); i++) {
+            for (int i = 0; i < childCount; i++) {
                 context.reset();
                 ScalarOperator child = scalarOperator.getChild(i).accept(this, context);
                 // wrapper using DictExpr
@@ -139,7 +137,6 @@ public class DictMappingRewriter {
                     context.hasUnsupportedOperator = true;
                 }
                 scalarOperator.setChild(i, child);
-                hasApplied = hasApplied || context.hasAppliedOperator;
                 disableApplied = disableApplied || context.hasUnsupportedOperator;
             }
             context.hasAppliedOperator = false;

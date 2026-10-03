@@ -658,12 +658,13 @@ public class AddDecodeNodeForDictStringRule implements TreeRewriteRule {
             final List<Map.Entry<ColumnRefOperator, CallOperator>> newAggMapEntry = Lists.newArrayList();
 
             for (Map.Entry<ColumnRefOperator, CallOperator> kv : aggOperator.getAggregations().entrySet()) {
-                boolean canApplyDictDecodeOpt = (kv.getValue().getUsedColumns().cardinality() > 0) &&
+                ColumnRefSet usedColumns = kv.getValue().getUsedColumns();
+                boolean canApplyDictDecodeOpt = (usedColumns.cardinality() > 0) &&
                         (PhysicalHashAggregateOperator.COULD_APPLY_LOW_CARD_AGGREGATE_FUNCTION.contains(
                                 kv.getValue().getFnName()));
                 if (canApplyDictDecodeOpt) {
                     CallOperator oldCall = kv.getValue();
-                    int columnId = kv.getValue().getUsedColumns().getFirstId();
+                    int columnId = usedColumns.getFirstId();
                     final String fnName = kv.getValue().getFnName();
                     if (context.needRewriteMultiCountDistinctColumns.contains(columnId)
                             && fnName.equals(FunctionSet.MULTI_DISTINCT_COUNT)) {

@@ -91,8 +91,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 import static com.starrocks.sql.ast.expression.BinaryType.EQ_FOR_NULL;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
@@ -200,6 +198,11 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     }
 
     private void fillDisableStringColumns() {
+        // The closure only grows disableRewriteStringColumns from its own members, so we skip
+        // building the dependency graph when the set is empty.
+        if (disableRewriteStringColumns.isEmpty()) {
+            return;
+        }
         // build string dependency
         // a = upper(b) b = upper(c)
         // if disable b, disable a & c
@@ -211,10 +214,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         // build dependencies from project exprs
         this.stringRefToDefineExprMap.forEach((k, v) -> {
             for (ColumnRefOperator columnRef : v.getColumnRefs()) {
-                dependencyStringIds.computeIfAbsent(columnRef.getId(), x -> Sets.newHashSet());
                 final int cid = columnRef.getId();
+                Set<Integer> dependents = dependencyStringIds.computeIfAbsent(cid, x -> Sets.newHashSet());
                 if (!k.equals(cid)) {
-                    dependencyStringIds.get(cid).add(k);
+                    dependents.add(k);
                 }
             }
         });
@@ -222,10 +225,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         this.stringAggregateExpressions.forEach((k, v) -> {
             for (CallOperator callOperator : v) {
                 for (ColumnRefOperator columnRef : callOperator.getColumnRefs()) {
-                    dependencyStringIds.computeIfAbsent(columnRef.getId(), x -> Sets.newHashSet());
                     final int cid = columnRef.getId();
+                    Set<Integer> dependents = dependencyStringIds.computeIfAbsent(cid, x -> Sets.newHashSet());
                     if (!k.equals(cid)) {
-                        dependencyStringIds.get(cid).add(k);
+                        dependents.add(k);
                     }
                 }
             }
@@ -308,10 +311,13 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             List<ScalarOperator> dictExprList = stringExpressions.getOrDefault(cid, Collections.emptyList());
             long allExprNum = dictExprList.size();
             // only query original string-column
-            long worthless = dictExprList.stream()
-                    .filter(ScalarOperator::isColumnRef)
-                    .filter(x -> !((ColumnRefOperator) x).getHints().contains(JsonPathRewriteRule.COLUMN_REF_HINT))
-                    .count();
+            long worthless = 0;
+            for (ScalarOperator dictExpr : dictExprList) {
+                if (dictExpr.isColumnRef() &&
+                        !((ColumnRefOperator) dictExpr).getHints().contains(JsonPathRewriteRule.COLUMN_REF_HINT)) {
+                    worthless++;
+                }
+            }
             // we believe that the more complex expressions using the dict-column, and the preformance will be better
             if (worthless == 0 && allExprNum != 0) {
                 context.allStringColumns.add(cid);
@@ -353,14 +359,14 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         }
 
         // add string column's all aggregate expression(1st & 2nd stage)
-        for (Integer aggregateId : stringAggregateExpressions.keySet()) {
+        for (Map.Entry<Integer, List<CallOperator>> aggregateEntry : stringAggregateExpressions.entrySet()) {
+            Integer aggregateId = aggregateEntry.getKey();
             if (disableRewriteStringColumns.contains(aggregateId)) {
                 continue;
             }
-            List<CallOperator> aggregateExprs = stringAggregateExpressions.get(aggregateId);
+            List<CallOperator> aggregateExprs = aggregateEntry.getValue();
             for (CallOperator agg : aggregateExprs) {
-                if (agg.getColumnRefs().stream().map(ColumnRefOperator::getId)
-                        .anyMatch(context.allStringColumns::contains)) {
+                if (usesStringColumn(agg, context.allStringColumns)) {
                     context.stringAggregateExprs.put(aggregateId, aggregateExprs);
                     context.allStringColumns.add(aggregateId);
                     break;
@@ -370,8 +376,9 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
         ColumnRefSet alls = new ColumnRefSet();
         context.allStringColumns.forEach(alls::union);
-        for (Operator operator : allOperatorDecodeInfo.keySet()) {
-            DecodeInfo info = allOperatorDecodeInfo.get(operator);
+        for (Map.Entry<Operator, DecodeInfo> operatorEntry : allOperatorDecodeInfo.entrySet()) {
+            Operator operator = operatorEntry.getKey();
+            DecodeInfo info = operatorEntry.getValue();
             info.outputStringColumns.intersect(alls);
             info.decodeStringColumns.intersect(alls);
             info.inputStringColumns.intersect(alls);
@@ -397,6 +404,15 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 }
             }
         }
+    }
+
+    private static boolean usesStringColumn(CallOperator agg, Set<Integer> stringColumns) {
+        for (ColumnRefOperator ref : agg.getColumnRefs()) {
+            if (stringColumns.contains(ref.getId())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean checkDependOnExpr(int cid, Collection<Integer> checkList) {
@@ -438,16 +454,12 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         }
 
         // update all stringRef usage counter
-        info.decodeStringColumns.getStream().forEach(c -> {
-            if (expressionStringRefCounter.getOrDefault(c, -1) == 0) {
-                expressionStringRefCounter.remove(c);
-            }
-        });
-        info.inputStringColumns.getStream().forEach(c -> {
-            if (expressionStringRefCounter.containsKey(c)) {
-                expressionStringRefCounter.put(c, expressionStringRefCounter.get(c) + 1);
-            }
-        });
+        for (int c : info.decodeStringColumns.getColumnIds()) {
+            expressionStringRefCounter.remove(c, 0);
+        }
+        for (int c : info.inputStringColumns.getColumnIds()) {
+            expressionStringRefCounter.computeIfPresent(c, (k, v) -> v + 1);
+        }
         allOperatorDecodeInfo.put(optExpression.getOp(), info);
         collectPredicate(optExpression.getOp(), info);
         collectProjection(optExpression.getOp(), info);
@@ -607,7 +619,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             return;
         }
 
-        root.getUsedColumns().getStream().forEach(disableRewriteStringColumns::union);
+        disableRewriteStringColumns.union(root.getUsedColumns());
     }
 
     @Override
@@ -620,7 +632,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
         ColumnRefSet onColumns = join.getOnPredicate().getUsedColumns();
         if (context.outputStringColumns.isEmpty() || !result.inputStringColumns.containsAny(onColumns)) {
-            onColumns.getStream().forEach(disableRewriteStringColumns::union);
+            disableRewriteStringColumns.union(onColumns);
             return result;
         }
 
@@ -634,17 +646,14 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         if (!sessionVariable.isEnableLowCardinalityOptimizeForJoin() ||
                 !(join instanceof PhysicalHashJoinOperator) ||
                 (leftDistribution.isShuffle() && rightDistribution.isShuffle())) {
-            onColumns.getStream().forEach(disableRewriteStringColumns::union);
+            disableRewriteStringColumns.union(onColumns);
         } else {
             extractJoinEqGroups(result, join.getOnPredicate());
         }
 
         result.outputStringColumns.clear();
-        result.inputStringColumns.getStream().forEach(c -> {
-            if (!disableRewriteStringColumns.contains(c)) {
-                result.outputStringColumns.union(c);
-            }
-        });
+        result.outputStringColumns.union(result.inputStringColumns);
+        result.outputStringColumns.except(disableRewriteStringColumns);
         result.decodeStringColumns.except(disableRewriteStringColumns);
         result.inputStringColumns.except(disableRewriteStringColumns);
         return result;
@@ -676,7 +685,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         PhysicalSetOperation setOp = optExpression.getOp().cast();
         DecodeInfo result = context.createOutputInfo();
         result.decodeStringColumns.except(result.outputStringColumns);
-        result.outputStringColumns.getStream().forEach(c -> disableRewriteStringColumns.union(c));
+        disableRewriteStringColumns.union(result.outputStringColumns);
         result.outputStringColumns.clear();
 
         ColumnRefSet shuffleColumnIds = ColumnRefSet.of();
@@ -696,7 +705,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         if (!result.inputStringColumns.containsAny(shuffleColumnIds)) {
             return result;
         }
-        shuffleColumnIds.getStream().forEach(c -> disableRewriteStringColumns.union(c));
+        disableRewriteStringColumns.union(shuffleColumnIds);
         result.decodeStringColumns.except(disableRewriteStringColumns);
         result.inputStringColumns.except(disableRewriteStringColumns);
         return result;
@@ -730,15 +739,21 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                 }
             }
 
-            Map<Boolean, List<ScalarOperator>> argGroups = windowCallOp.getChildren().stream()
-                    .filter(Predicate.not(ScalarOperator::isConstant))
-                    .collect(Collectors.partitioningBy(ScalarOperator::isColumnRef));
-
-            List<ScalarOperator> columnRefArgs = argGroups.get(true);
-            List<ScalarOperator> exprArgs = argGroups.get(false);
+            int columnRefArgs = 0;
+            boolean hasExprArg = false;
+            for (ScalarOperator arg : windowCallOp.getChildren()) {
+                if (arg.isConstant()) {
+                    continue;
+                }
+                if (arg.isColumnRef()) {
+                    columnRefArgs++;
+                } else {
+                    hasExprArg = true;
+                }
+            }
 
             // window function must have only one string-type column-ref argument.
-            if (!exprArgs.isEmpty() || columnRefArgs.size() != 1) {
+            if (hasExprArg || columnRefArgs != 1) {
                 disableColumns.union(windowCallOp.getUsedColumns());
                 disableColumns.union(key);
             }
@@ -921,8 +936,6 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     public DecodeInfo visitPhysicalOlapScan(OptExpression optExpression, DecodeInfo context) {
         PhysicalOlapScanOperator scan = optExpression.getOp().cast();
         OlapTable table = (OlapTable) scan.getTable();
-        long version = table.getPartitions().stream().flatMap(p -> p.getSubPartitions().stream()).map(
-                PhysicalPartition::getVisibleVersionTime).max(Long::compareTo).orElse(0L);
 
         if (table.hasForbiddenGlobalDict()) {
             return DecodeInfo.empty();
@@ -933,6 +946,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
         // check dict column
         DecodeInfo info = DecodeInfo.create();
+        // We fear the walk over every partition of a table with many partitions, so we compute the
+        // version time once, for the first column that reaches the global dict check.
+        long version = 0L;
+        boolean versionComputed = false;
         for (ColumnRefOperator column : scan.getColRefToColumnMetaMap().keySet()) {
             // Condition 1:
             if (!supportAndEnabledLowCardinality(column.getType())) {
@@ -969,6 +986,11 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             }
 
             // Condition 3: the varchar column has collected global dict
+            if (!versionComputed) {
+                version = table.getPartitions().stream().flatMap(p -> p.getSubPartitions().stream()).map(
+                        PhysicalPartition::getVisibleVersionTime).max(Long::compareTo).orElse(0L);
+                versionComputed = true;
+            }
             Column columnObj = table.getColumn(column.getName());
             if (!IDictManager.getInstance().hasGlobalDict(table.getId(), columnObj.getColumnId(), version)) {
                 LOG.debug("{} doesn't have global dict", column.getName());
@@ -1189,13 +1211,12 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         DictExpressionCollector dictExpressionCollector = new DictExpressionCollector(info.outputStringColumns);
         dictExpressionCollector.collect(operator.getPredicate());
 
-        info.outputStringColumns.getStream().forEach(c -> {
-            List<ScalarOperator> expressions = dictExpressionCollector.getDictExpressions(c);
-            if (!expressions.isEmpty()) {
+        for (Map.Entry<Integer, List<ScalarOperator>> entry : dictExpressionCollector.dictExpressions.entrySet()) {
+            if (info.outputStringColumns.contains(entry.getKey())) {
                 // predicate only translate to string expression
-                stringExpressions.computeIfAbsent(c, l -> Lists.newArrayList()).addAll(expressions);
+                stringExpressions.computeIfAbsent(entry.getKey(), l -> Lists.newArrayList()).addAll(entry.getValue());
             }
-        });
+        }
 
         matchChildren.union(dictExpressionCollector.matchChildren);
     }
@@ -1207,7 +1228,9 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
         ColumnRefSet decodeInput = info.outputStringColumns;
         info.outputStringColumns = new ColumnRefSet();
-        for (ColumnRefOperator key : operator.getProjection().getColumnRefMap().keySet()) {
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> projectionEntry :
+                operator.getProjection().getColumnRefMap().entrySet()) {
+            ColumnRefOperator key = projectionEntry.getKey();
             if (decodeInput.contains(key)) {
                 info.outputStringColumns.union(key.getId());
                 continue;
@@ -1215,16 +1238,18 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
             DictExpressionCollector dictExpressionCollector = new DictExpressionCollector(decodeInput);
 
-            ScalarOperator value = operator.getProjection().getColumnRefMap().get(key);
+            ScalarOperator value = projectionEntry.getValue();
             dictExpressionCollector.collect(value);
 
-            decodeInput.getStream().forEach(c -> {
-                // collect dict expression
-                List<ScalarOperator> exprs = dictExpressionCollector.getDictExpressions(c);
-                if (!exprs.isEmpty()) {
-                    // maybe not new dict, just optimize the expression with dictionary
-                    stringExpressions.computeIfAbsent(c, l -> Lists.newArrayList()).addAll(exprs);
+            for (Map.Entry<Integer, List<ScalarOperator>> entry : dictExpressionCollector.dictExpressions.entrySet()) {
+                int c = entry.getKey();
+                if (!decodeInput.contains(c)) {
+                    continue;
                 }
+                // collect dict expression
+                List<ScalarOperator> exprs = entry.getValue();
+                // maybe not new dict, just optimize the expression with dictionary
+                stringExpressions.computeIfAbsent(c, l -> Lists.newArrayList()).addAll(exprs);
 
                 // whole expression support dictionary, define new dict column
                 // only support varchar/array<varchar> column
@@ -1233,8 +1258,10 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                     expressionStringRefCounter.putIfAbsent(key.getId(), 0);
                     info.outputStringColumns.union(key.getId());
                 }
-                info.usedStringColumns.union(c);
-            });
+            }
+            // an expression key marks every dict input column as used, even when the expression
+            // produced no dict expression for it
+            info.usedStringColumns.union(decodeInput);
             matchChildren.union(dictExpressionCollector.matchChildren);
         }
     }
@@ -1287,7 +1314,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             } else if (!dictColumn.isConstant()) {
                 // array[x], array_min(x)
                 List<ColumnRefOperator> used = dictColumn.getColumnRefs();
-                Preconditions.checkState(used.stream().distinct().count() == 1);
+                Preconditions.checkState(DecodeContext.isSingleDistinctRef(used));
                 this.dictExpressions.computeIfAbsent(used.get(0).getId(), x -> Lists.newArrayList()).add(dictExpr);
             }
         }
@@ -1301,25 +1328,43 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         }
 
         public List<ScalarOperator> visitChildren(ScalarOperator operator, Void context) {
-            List<ScalarOperator> children = Lists.newArrayList();
-            for (ScalarOperator child : operator.getChildren()) {
+            List<ScalarOperator> operands = operator.getChildren();
+            List<ScalarOperator> children = Lists.newArrayListWithCapacity(operands.size());
+            for (ScalarOperator child : operands) {
                 children.add(child.accept(this, context));
             }
             return children;
         }
 
         private ScalarOperator mergeWithArray(List<ScalarOperator> collectors, ScalarOperator scalarOperator) {
+            boolean allConstants = true;
+            int variableExpr = 0;
+            // the first non-constant collector, and whether another distinct one follows it
+            ScalarOperator dictColumn = null;
+            boolean multipleDictColumns = false;
+            for (ScalarOperator collector : collectors) {
+                if (!CONSTANTS.equals(collector)) {
+                    allConstants = false;
+                }
+                if (VARIABLES.equals(collector)) {
+                    variableExpr++;
+                }
+                if (!collector.isConstant()) {
+                    if (dictColumn == null) {
+                        dictColumn = collector;
+                    } else if (!collector.equals(dictColumn)) {
+                        multipleDictColumns = true;
+                    }
+                }
+            }
             // all constant
-            if (collectors.stream().allMatch(CONSTANTS::equals)) {
+            if (allConstants) {
                 return CONSTANTS;
             }
 
-            long variableExpr = collectors.stream().filter(VARIABLES::equals).count();
-            List<ScalarOperator> dictColumns = collectors.stream().filter(s -> !s.isConstant()).distinct()
-                    .collect(Collectors.toList());
             // only one scalar operator, and it's a dict column
-            if (dictColumns.size() == 1 && variableExpr == 0) {
-                return dictColumns.get(0);
+            if (dictColumn != null && !multipleDictColumns && variableExpr == 0) {
+                return dictColumn;
             }
 
             for (int i = 0; i < collectors.size(); i++) {
@@ -1330,7 +1375,14 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
         private ScalarOperator forbidden(List<ScalarOperator> collectors, ScalarOperator scalarOperator) {
             // all constant
-            if (collectors.stream().allMatch(CONSTANTS::equals)) {
+            boolean allConstants = true;
+            for (ScalarOperator collector : collectors) {
+                if (!CONSTANTS.equals(collector)) {
+                    allConstants = false;
+                    break;
+                }
+            }
+            if (allConstants) {
                 return CONSTANTS;
             }
 
@@ -1340,11 +1392,19 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             return VARIABLES;
         }
 
+        private static boolean anyArrayType(List<ScalarOperator> collectors) {
+            for (ScalarOperator collector : collectors) {
+                if (collector.getType().isArrayType()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private ScalarOperator merge(List<ScalarOperator> collectors, ScalarOperator scalarOperator) {
             // the result becomes a new dictionary, so it must be a scalar string; the collectors are
             // BOOLEAN sentinels for constant operands and cannot report the operator's own type
-            if (scalarOperator.getType().isArrayType()
-                    || collectors.stream().anyMatch(s -> s.getType().isArrayType())) {
+            if (scalarOperator.getType().isArrayType() || anyArrayType(collectors)) {
                 return forbidden(collectors, scalarOperator);
             }
             return mergeWithArray(collectors, scalarOperator);
