@@ -590,6 +590,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static com.starrocks.catalog.FunctionSet.ARRAY_AGG_DISTINCT;
+import static com.starrocks.sql.parser.AstBuilderUtils.backQuotedIdentifierText;
 import static com.starrocks.sql.parser.AstBuilderUtils.createPos;
 import static com.starrocks.sql.parser.ErrorMsgProxy.PARSER_ERROR_MSG;
 import static java.lang.String.format;
@@ -9132,7 +9133,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitBackQuotedIdentifier(com.starrocks.sql.parser.StarRocksParser.BackQuotedIdentifierContext context) {
-        Identifier backQuotedIdentifier = new Identifier(context.getText().replace("`", ""), createPos(context));
+        Identifier backQuotedIdentifier = new Identifier(backQuotedIdentifierText(context.getText()), createPos(context));
         backQuotedIdentifier.setBackQuoted(true);
         return backQuotedIdentifier;
     }
