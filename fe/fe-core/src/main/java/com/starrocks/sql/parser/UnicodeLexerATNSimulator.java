@@ -101,4 +101,8 @@ public final class UnicodeLexerATNSimulator extends LexerATNSimulator {
         unicodeEdges.clear();
     }
 
+    static void install(StarRocksLexer lexer) {
+        lexer.setInterpreter(new UnicodeLexerATNSimulator(lexer, lexer.getATN(),
+                StarRocksLexer._decisionToDFA, StarRocksLexer._sharedContextCache));
+    }
 }
