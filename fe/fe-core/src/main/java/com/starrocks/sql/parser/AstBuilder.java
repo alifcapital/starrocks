@@ -4708,7 +4708,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     @Override
     public ParseNode visitSetNames(com.starrocks.sql.parser.StarRocksParser.SetNamesContext context) {
         NodePosition pos = createPos(context);
-        if (context.CHAR() != null || context.CHARSET() != null) {
+        if (context.CHAR() != null || context.CHARSET() != null || context.CHARACTER() != null) {
             if (context.identifierOrString().isEmpty()) {
                 return new SetNamesVar(null, null, pos);
             } else {
