@@ -2407,6 +2407,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
             // Order By
             if (desc.orderByDesc() != null) {
+                if (orderByElements != null) {
+                    throw new ParsingException(PARSER_ERROR_MSG.duplicatedClause("ORDER BY", "building materialized view"),
+                            clausePos);
+                }
                 orderByElements = visit(desc.orderByDesc().sortItem(), OrderByElement.class);
             }
         }
@@ -2428,6 +2432,24 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             if (distributionDesc != null) {
                 throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "DISTRIBUTION BY"),
                         distributionDesc.getPos());
+            }
+            // CreateMaterializedViewStmt keeps only the query and the properties, so we reject the clauses that a
+            // synchronous materialized view would drop.
+            if (colWithComments != null) {
+                throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "column list"),
+                        createPos(context.columnNameWithComment(0)));
+            }
+            if (!context.indexDesc().isEmpty()) {
+                throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "INDEX"),
+                        createPos(context.indexDesc(0)));
+            }
+            if (comment != null) {
+                throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "COMMENT"),
+                        createPos(context.comment()));
+            }
+            if (orderByElements != null) {
+                throw new ParsingException(PARSER_ERROR_MSG.forbidClauseInMV("SYNC refresh type", "ORDER BY"),
+                        orderByElements.get(0).getPos());
             }
             return new CreateMaterializedViewStmt(tableRef, queryStatement, properties);
         }
