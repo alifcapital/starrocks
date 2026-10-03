@@ -83,7 +83,8 @@ public class StatisticAutoCollector extends FrontendDaemon {
         }
         boolean initializeSchedule = Config.enable_statistic_auto_collect_staggered_schedule
                 && (!scheduleSettings.equals(initializedScheduleSettings) || !jobProperties.equals(initializedJobProperties));
-        if (!checkoutAnalyzeTime() && !initializeSchedule) {
+        boolean inAnalyzeWindow = checkoutAnalyzeTime();
+        if (!inAnalyzeWindow && !initializeSchedule) {
             return;
         }
 
@@ -93,8 +94,13 @@ public class StatisticAutoCollector extends FrontendDaemon {
             return;
         }
 
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
-        GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
+        // Seeding the schedule may run outside the collection window, on the first pass after a restart or after a
+        // job change. The cleanup scans every table and deletes from the statistics tables, and we want that load
+        // only inside the window, so it waits for the window even when seeding does not.
+        if (inAnalyzeWindow) {
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedPartition();
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().clearStatisticFromDroppedTable();
+        }
 
         prepareDefaultJob();
 
