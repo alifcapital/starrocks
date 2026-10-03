@@ -9826,6 +9826,11 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
                     Identifier identifier = (Identifier) visit(identifierContext);
                     parts.add(identifier.getValue());
                 }
+            } else if (c instanceof TerminalNode token
+                    && token.getSymbol().getType() == StarRocksParser.DOT_IDENTIFIER) {
+                // The lexer includes the leading dot in digit-starting field names.
+                // Preserve that path component just as for a separate dot and identifier.
+                parts.add(token.getText().substring(1));
             }
         }
         return parts;
