@@ -20,10 +20,15 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
 
 public class AstBuilderUtils {
+    // A backquoted identifier writes a backtick inside it as two backticks.
+    static String backQuotedIdentifierText(String quoted) {
+        return quoted.substring(1, quoted.length() - 1).replace("``", "`");
+    }
+
     public static Identifier getIdentifier(
             com.starrocks.sql.parser.StarRocksParser.IdentifierContext identifierContext) {
         if (identifierContext instanceof com.starrocks.sql.parser.StarRocksParser.BackQuotedIdentifierContext) {
-            Identifier backQuotedIdentifier = new Identifier(identifierContext.getText().replace("`", ""),
+            Identifier backQuotedIdentifier = new Identifier(backQuotedIdentifierText(identifierContext.getText()),
                     createPos(identifierContext));
             backQuotedIdentifier.setBackQuoted(true);
             return backQuotedIdentifier;
