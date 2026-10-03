@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import org.apache.commons.collections4.CollectionUtils;
 
@@ -69,8 +70,10 @@ public class PushDownFlatJsonMetaToMetaScanRule extends TransformationRule {
         }
 
         LogicalProjectOperator projectOperator = (LogicalProjectOperator) input.inputAt(0).getOp();
-        if (projectOperator.getColumnRefMap().entrySet().stream().anyMatch(e -> !e.getKey().equals(e.getValue()))) {
-            throw new SemanticException("flat_json_meta don't support complex project");
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projectOperator.getColumnRefMap().entrySet()) {
+            if (!entry.getKey().equals(entry.getValue())) {
+                throw new SemanticException("flat_json_meta don't support complex project");
+            }
         }
 
         LogicalMetaScanOperator metaScan = (LogicalMetaScanOperator) input.inputAt(0).inputAt(0).getOp();
@@ -98,7 +101,9 @@ public class PushDownFlatJsonMetaToMetaScanRule extends TransformationRule {
                 newAggCalls.put(kv.getKey(), kv.getValue());
                 continue;
             }
-            ColumnRefOperator usedColumn = aggCall.getColumnRefs().get(0);
+            ScalarOperator firstArgument = aggCall.getChild(0);
+            ColumnRefOperator usedColumn = firstArgument instanceof ColumnRefOperator ref &&
+                    ref.getOpType() == OperatorType.VARIABLE ? ref : aggCall.getColumnRefs().get(0);
             String aggFuncName = aggCall.getFnName();
             Column c = metaScan.getColRefToColumnMetaMap().get(usedColumn);
             newScanColumnRefs.put(metaRef, c);

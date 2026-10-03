@@ -133,8 +133,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
         }
 
         LogicalFilterOperator filter = (LogicalFilterOperator) optExpression.getOp();
-        filter.getRequiredChildInputColumns().getStream().map(factory::getColumnRef)
-                .forEach(v -> context.groupBys.put(v, v));
+        for (int id : filter.getRequiredChildInputColumns().getColumnIds()) {
+            ColumnRefOperator v = factory.getColumnRef(id);
+            context.groupBys.put(v, v);
+        }
         return processChild(optExpression, context);
     }
 
@@ -149,8 +151,14 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
 
         // Some rules will change the output columns of an operator, e.g. from c1 to c2, by adding a Project on top of the
         // operator with the mapping of c2->c1. At this time, c2 and c1 are both columnRef, but they are different.
-        if (!originProjectMap.values().stream().allMatch(ScalarOperator::isColumnRef) ||
-                !originProjectMap.entrySet().stream().allMatch(e -> e.getKey().equals(e.getValue()))) {
+        boolean needRewrite = false;
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> e : originProjectMap.entrySet()) {
+            if (!e.getValue().isColumnRef() || !e.getKey().equals(e.getValue())) {
+                needRewrite = true;
+                break;
+            }
+        }
+        if (needRewrite) {
             rewriteProject(context, originProjectMap);
         }
 
@@ -171,7 +179,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
         ColumnRefSet refSet = new ColumnRefSet();
         context.groupBys.values().forEach(v -> refSet.union(v.getUsedColumns()));
         context.groupBys.clear();
-        refSet.getStream().map(factory::getColumnRef).forEach(k -> context.groupBys.put(k, k));
+        for (int id : refSet.getColumnIds()) {
+            ColumnRefOperator k = factory.getColumnRef(id);
+            context.groupBys.put(k, k);
+        }
 
         // rewrite aggregation & push down expression
         // special case-when/if only push down values
@@ -197,8 +208,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
                 // the first aggregation's setThenClause/setElseClause corrupts the shared operator.
                 CaseWhenOperator caseWhen = (CaseWhenOperator) aggExpr.clone();
                 for (ScalarOperator condition : caseWhen.getAllConditionClause()) {
-                    condition.getUsedColumns().getStream().map(factory::getColumnRef)
-                            .forEach(v -> context.groupBys.put(v, v));
+                    for (int id : condition.getUsedColumns().getColumnIds()) {
+                        ColumnRefOperator v = factory.getColumnRef(id);
+                        context.groupBys.put(v, v);
+                    }
                 }
 
                 for (int i = 0; i < caseWhen.getWhenClauseSize(); i++) {
@@ -226,8 +239,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
             } else if (isIfFn) {
                 // Clone to avoid mutating the shared object (same reason as CaseWhen above).
                 CallOperator ifFn = (CallOperator) aggExpr.clone();
-                ifFn.getChild(0).getUsedColumns().getStream().map(factory::getColumnRef)
-                        .forEach(v -> context.groupBys.put(v, v));
+                for (int id : ifFn.getChild(0).getUsedColumns().getColumnIds()) {
+                    ColumnRefOperator v = factory.getColumnRef(id);
+                    context.groupBys.put(v, v);
+                }
 
                 for (int i = 1; i < ifFn.getChildren().size(); i++) {
                     if (ifFn.getChild(i).isConstant()) {
@@ -251,11 +266,14 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
     private ColumnRefOperator replaceByNewAggregation(CallOperator originAggFn, ScalarOperator input,
                                                       AggregatePushDownContext context) {
         CallOperator newAgg = genAggregation(originAggFn, input);
-        ColumnRefOperator ref;
-        if (context.aggregations.containsValue(newAgg)) {
-            ref = context.aggregations.entrySet().stream().filter(e -> e.getValue().equals(newAgg))
-                    .findFirst().map(Map.Entry::getKey).orElseThrow(IllegalArgumentException::new);
-        } else {
+        ColumnRefOperator ref = null;
+        for (Map.Entry<ColumnRefOperator, CallOperator> e : context.aggregations.entrySet()) {
+            if (e.getValue().equals(newAgg)) {
+                ref = e.getKey();
+                break;
+            }
+        }
+        if (ref == null) {
             ref = factory.create(newAgg, newAgg.getType(), newAgg.isNullable());
         }
         context.aggregations.put(ref, newAgg);
@@ -265,11 +283,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
     @Override
     public OptExpression visitLogicalAggregate(OptExpression optExpression, AggregatePushDownContext context) {
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) optExpression.getOp();
-        if (!allRewriteContext.containsKey(aggregate)) {
+        List<AggregatePushDownContext> allRewrite = allRewriteContext.get(aggregate);
+        if (allRewrite == null) {
             return visit(optExpression, context);
         }
-
-        List<AggregatePushDownContext> allRewrite = allRewriteContext.get(aggregate);
         // rewrite
         AggregatePushDownContext childContext = new AggregatePushDownContext();
         childContext.origAggregator = aggregate;
@@ -358,13 +375,21 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
         childContext.origAggregator = context.origAggregator;
 
         if (join.getOnPredicate() != null) {
-            join.getOnPredicate().getUsedColumns().getStream().filter(childOutput::contains)
-                    .map(factory::getColumnRef).forEach(c -> childContext.groupBys.put(c, c));
+            for (int id : join.getOnPredicate().getUsedColumns().getColumnIds()) {
+                if (childOutput.contains(id)) {
+                    ColumnRefOperator c = factory.getColumnRef(id);
+                    childContext.groupBys.put(c, c);
+                }
+            }
         }
 
         if (join.getPredicate() != null) {
-            join.getPredicate().getUsedColumns().getStream().filter(childOutput::contains)
-                    .map(factory::getColumnRef).forEach(v -> childContext.groupBys.put(v, v));
+            for (int id : join.getPredicate().getUsedColumns().getColumnIds()) {
+                if (childOutput.contains(id)) {
+                    ColumnRefOperator v = factory.getColumnRef(id);
+                    childContext.groupBys.put(v, v);
+                }
+            }
         }
 
         return process(joinOpt.inputAt(child), childContext);
@@ -397,9 +422,10 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
         // if the aggregation is complex expression, need create project
         if (context.aggregations.values().stream().map(c -> c.getChild(0)).anyMatch(s -> !s.isColumnRef())) {
             Map<ColumnRefOperator, ScalarOperator> refs = Maps.newHashMap();
-            optExpression.getOutputColumns().getStream()
-                    .map(factory::getColumnRef)
-                    .forEach(c -> refs.put(c, c));
+            for (int id : optExpression.getOutputColumns().getColumnIds()) {
+                ColumnRefOperator c = factory.getColumnRef(id);
+                refs.put(c, c);
+            }
 
             for (Map.Entry<ColumnRefOperator, CallOperator> entry : context.aggregations.entrySet()) {
                 ScalarOperator input = entry.getValue().getChild(0);
@@ -461,8 +487,12 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
             context.groupBys.values().stream()
                     .map(rewriter::rewrite)
                     .map(ScalarOperator::getUsedColumns)
-                    .forEach(c -> c.getStream().map(factory::getColumnRef)
-                            .forEach(ref -> childContext.groupBys.put(ref, ref)));
+                    .forEach(c -> {
+                        for (int id : c.getColumnIds()) {
+                            ColumnRefOperator ref = factory.getColumnRef(id);
+                            childContext.groupBys.put(ref, ref);
+                        }
+                    });
             childContexts.add(childContext);
         }
 

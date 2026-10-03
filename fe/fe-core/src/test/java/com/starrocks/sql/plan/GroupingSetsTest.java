@@ -284,39 +284,44 @@ public class GroupingSetsTest extends PlanTestBase {
     @Test
     public void testPushDownGroupingSetNormal() throws Exception {
         connectContext.getSessionVariable().setCboPushDownGroupingSet(true);
+        boolean originalReshuffle = connectContext.getSessionVariable().isCboPushDownGroupingSetReshuffle();
         try {
-            String sql = "select t1b, t1c, t1d, sum(t1g) " +
-                    "   from test_all_type group by rollup(t1b, t1c, t1d)";
-            String plan = getFragmentPlan(sql);
-            assertContains(plan, "    HASH_PARTITIONED: 2: t1b, 3: t1c, 4: t1d\n" +
-                    "\n" +
-                    "  1:AGGREGATE (update serialize)\n" +
-                    "  |  STREAMING\n" +
-                    "  |  output: sum(7: t1g)\n" +
-                    "  |  group by: 2: t1b, 3: t1c, 4: t1d");
-            assertContains(plan, "  7:REPEAT_NODE\n" +
-                    "  |  repeat: repeat 2 lines [[], [14], [14, 15]]");
+            for (boolean reshuffle : new boolean[] {false, true}) {
+                connectContext.getSessionVariable().setCboPushDownGroupingSetReshuffle(reshuffle);
+                String sql = "select t1b, t1c, t1d, sum(t1g) " +
+                        "   from test_all_type group by rollup(t1b, t1c, t1d)";
+                String plan = getFragmentPlan(sql);
+                assertContains(plan, "    HASH_PARTITIONED: 2: t1b, 3: t1c, 4: t1d\n" +
+                        "\n" +
+                        "  1:AGGREGATE (update serialize)\n" +
+                        "  |  STREAMING\n" +
+                        "  |  output: sum(7: t1g)\n" +
+                        "  |  group by: 2: t1b, 3: t1c, 4: t1d");
+                assertContains(plan, "  7:REPEAT_NODE\n" +
+                        "  |  repeat: repeat 2 lines [[], [14], [14, 15]]");
 
-            sql = "select t1b, t1c, t1d, GROUPING_ID(t1c), GROUPING(t1d), sum(t1g) " +
-                    "   from test_all_type group by rollup(t1b, t1c, t1d)";
-            plan = getVerboseExplain(sql);
-            assertContains(plan, "  1:AGGREGATE (update serialize)\n" +
-                    "  |  STREAMING\n" +
-                    "  |  aggregate: sum[([7: t1g, BIGINT, true]); " +
-                    "args: BIGINT; result: BIGINT; args nullable: true; result nullable: true]\n" +
-                    "  |  group by: [2: t1b, SMALLINT, true], [3: t1c, INT, true], [4: t1d, BIGINT, true]\n" +
-                    "  |  cardinality: 1\n" +
-                    "  |  \n" +
-                    "  0:OlapScanNode");
-            assertContains(plan, "  15:Project\n" +
-                    "  |  output columns:\n" +
-                    "  |  23 <-> [23: sum, BIGINT, true]\n" +
-                    "  |  24 <-> [24: t1b, SMALLINT, true]\n" +
-                    "  |  25 <-> [25: t1c, INT, true]\n" +
-                    "  |  26 <-> [26: t1d, BIGINT, true]\n" +
-                    "  |  28 <-> 0\n" +
-                    "  |  29 <-> 0");
+                sql = "select t1b, t1c, t1d, GROUPING_ID(t1c), GROUPING(t1d), sum(t1g) " +
+                        "   from test_all_type group by rollup(t1b, t1c, t1d)";
+                plan = getVerboseExplain(sql);
+                assertContains(plan, "  1:AGGREGATE (update serialize)\n" +
+                        "  |  STREAMING\n" +
+                        "  |  aggregate: sum[([7: t1g, BIGINT, true]); " +
+                        "args: BIGINT; result: BIGINT; args nullable: true; result nullable: true]\n" +
+                        "  |  group by: [2: t1b, SMALLINT, true], [3: t1c, INT, true], [4: t1d, BIGINT, true]\n" +
+                        "  |  cardinality: 1\n" +
+                        "  |  \n" +
+                        "  0:OlapScanNode");
+                assertContains(plan, "  15:Project\n" +
+                        "  |  output columns:\n" +
+                        "  |  23 <-> [23: sum, BIGINT, true]\n" +
+                        "  |  24 <-> [24: t1b, SMALLINT, true]\n" +
+                        "  |  25 <-> [25: t1c, INT, true]\n" +
+                        "  |  26 <-> [26: t1d, BIGINT, true]\n" +
+                        "  |  28 <-> 0\n" +
+                        "  |  29 <-> 0");
+            }
         } finally {
+            connectContext.getSessionVariable().setCboPushDownGroupingSetReshuffle(originalReshuffle);
             connectContext.getSessionVariable().setCboPushDownGroupingSet(false);
         }
     }

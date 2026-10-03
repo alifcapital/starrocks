@@ -42,11 +42,9 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.type.Type;
 import org.apache.commons.lang.StringUtils;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 /*
  *
@@ -102,60 +100,71 @@ public class GroupByCountDistinctRewriteRule extends TransformationRule {
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) input.getOp();
         LogicalOlapScanOperator scan = (LogicalOlapScanOperator) input.getInputs().get(0).getOp();
 
-        Collection<CallOperator> calls = aggregate.getAggregations().values();
-
-        List<CallOperator> distinctList = calls.stream().filter(this::isDistinct).collect(Collectors.toList());
-        List<CallOperator> otherList = calls.stream().filter(c -> !isDistinct(c)).collect(Collectors.toList());
-
-        // check other function
-        if (!otherList.isEmpty() && !otherList.stream().map(c -> c.getFunction().getFunctionName().getFunction())
-                .allMatch(OTHER_FUNCTION_TRANS::containsKey)) {
-            return false;
-        }
-
-        // check distinct function
-        if (distinctList.isEmpty() || !distinctList.stream().map(f -> f.getFunction().getFunctionName().getFunction())
-                .allMatch(DISTINCT_FUNCTION_TRANS::containsKey)) {
-            return false;
-        }
-
-        // check distinct column only one
-        if (distinctList.stream().anyMatch(f -> f.getChildren().size() > 1)) {
-            return false;
-        }
-
-        if (!distinctList.stream().map(f -> f.getChild(0)).allMatch(ScalarOperator::isColumnRef)) {
-            return false;
-        }
-
-        List<ColumnRefOperator> distinctColumns = distinctList.stream().map(f -> f.getChild(0))
-                .map(c -> (ColumnRefOperator) c).distinct().collect(Collectors.toList());
-        if (distinctColumns.size() != 1) {
-            return false;
-        }
-
         if (!(scan.getDistributionSpec() instanceof HashDistributionSpec)) {
             return false;
         }
 
+        List<ColumnRefOperator> groupBy = aggregate.getGroupingKeys();
+        if (groupBy.isEmpty() || aggregate.hasLimit()) {
+            return false;
+        }
+
+        ColumnRefOperator distinctColumn = null;
+        for (CallOperator call : aggregate.getAggregations().values()) {
+            String functionName = call.getFunction().getFunctionName().getFunction();
+            if (!isDistinct(call)) {
+                // check other function
+                if (!OTHER_FUNCTION_TRANS.containsKey(functionName)) {
+                    return false;
+                }
+                continue;
+            }
+
+            // check distinct function
+            if (!DISTINCT_FUNCTION_TRANS.containsKey(functionName)) {
+                return false;
+            }
+
+            // check distinct column only one
+            if (call.getChildren().size() > 1) {
+                return false;
+            }
+
+            ScalarOperator child = call.getChild(0);
+            if (!child.isColumnRef()) {
+                return false;
+            }
+
+            if (distinctColumn == null) {
+                distinctColumn = (ColumnRefOperator) child;
+            } else if (!distinctColumn.equals(child)) {
+                return false;
+            }
+        }
+
+        if (distinctColumn == null) {
+            return false;
+        }
+
         // check distribution satisfy scan node
-        List<Integer> groupBy = aggregate.getGroupingKeys().stream().map(ColumnRefOperator::getId)
-                .collect(Collectors.toList());
-
-        List<Integer> distributionCols = ((HashDistributionSpec) scan.getDistributionSpec()).getShuffleColumns().stream().map(
-                DistributionCol::getColId).collect(Collectors.toList());
-
-        if (groupBy.isEmpty() || groupBy.containsAll(distributionCols)) {
-            return false;
+        boolean needsDistinctColumn = false;
+        for (DistributionCol distributionCol : ((HashDistributionSpec) scan.getDistributionSpec()).getShuffleColumns()) {
+            int colId = distributionCol.getColId();
+            boolean inGroupBy = false;
+            for (ColumnRefOperator groupByColumn : groupBy) {
+                if (groupByColumn.getId() == colId) {
+                    inGroupBy = true;
+                    break;
+                }
+            }
+            if (!inGroupBy) {
+                if (colId != distinctColumn.getId()) {
+                    return false;
+                }
+                needsDistinctColumn = true;
+            }
         }
-
-        // check limit
-        if (aggregate.hasLimit()) {
-            return false;
-        }
-
-        groupBy.add(distinctColumns.get(0).getId());
-        return groupBy.containsAll(distributionCols);
+        return needsDistinctColumn;
     }
 
     @Override

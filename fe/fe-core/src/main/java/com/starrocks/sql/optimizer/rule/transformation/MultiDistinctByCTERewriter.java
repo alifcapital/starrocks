@@ -25,7 +25,7 @@ import com.starrocks.sql.analyzer.DecimalV3FunctionAnalyzer;
 import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.expression.BinaryType;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
@@ -137,10 +137,15 @@ public class MultiDistinctByCTERewriter {
         // generate all aggregation operator, split count distinct function and other function
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) input.getOp();
 
-        List<ColumnRefOperator> distinctAggList = aggregate.getAggregations().entrySet().stream()
-                .filter(kv -> kv.getValue().isDistinct()).map(Map.Entry::getKey).collect(Collectors.toList());
-        List<ColumnRefOperator> otherAggregate = aggregate.getAggregations().entrySet().stream()
-                .filter(kv -> !kv.getValue().isDistinct()).map(Map.Entry::getKey).collect(Collectors.toList());
+        List<ColumnRefOperator> distinctAggList = Lists.newArrayList();
+        List<ColumnRefOperator> otherAggregate = Lists.newArrayList();
+        for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregate.getAggregations().entrySet()) {
+            if (entry.getValue().isDistinct()) {
+                distinctAggList.add(entry.getKey());
+            } else {
+                otherAggregate.add(entry.getKey());
+            }
+        }
         List<ColumnRefOperator> groupingKeys = aggregate.getGroupingKeys();
         boolean hasGroupBy = !groupingKeys.isEmpty();
 
@@ -154,6 +159,18 @@ public class MultiDistinctByCTERewriter {
                             columnRefMap));
         }
 
+        // Every join keeps the first aggregate's grouping columns on its left side.
+        // Keep those keys directly instead of recovering them from each new predicate.
+        List<ColumnRefOperator> joinKeys = List.of();
+        if (hasGroupBy && allCteConsumes.size() > 1) {
+            LogicalAggregationOperator firstAgg = (LogicalAggregationOperator) allCteConsumes.getFirst().getOp();
+            joinKeys = firstAgg.getGroupingKeys();
+            Preconditions.checkState(groupingKeys.size() == joinKeys.size());
+            for (int index = 0; index < groupingKeys.size(); ++index) {
+                columnRefMap.put(groupingKeys.get(index), joinKeys.get(index));
+            }
+        }
+
         // left deep join tree
         while (allCteConsumes.size() > 1) {
             OptExpression left = allCteConsumes.poll();
@@ -165,15 +182,7 @@ public class MultiDistinctByCTERewriter {
                         left, right);
             } else {
                 // create inner join when aggregate has group by keys
-                join = buildInnerJoin(left, right);
-                // Add project map for group keys.
-                LogicalJoinOperator joinOperator = (LogicalJoinOperator) join.getOp();
-                List<ColumnRefOperator> joinOnPredicateColumns = getJoinOnPredicateColumn(joinOperator);
-                Preconditions.checkState(groupingKeys.size() == joinOnPredicateColumns.size());
-
-                for (int index = 0; index < groupingKeys.size(); ++index) {
-                    columnRefMap.put(groupingKeys.get(index), joinOnPredicateColumns.get(index));
-                }
+                join = buildInnerJoin(left, right, joinKeys);
             }
             allCteConsumes.offerFirst(join);
         }
@@ -201,10 +210,10 @@ public class MultiDistinctByCTERewriter {
         return Lists.newArrayList(OptExpression.create(cteAnchor, cteProduce, rightTree));
     }
 
-    private OptExpression buildInnerJoin(OptExpression left, OptExpression right) {
-        // Get on predicate columns from left and right children.
-        List<ColumnRefOperator> onPredicateLeftColumns = getJoinOnPredicateColumn(left.getOp());
-        List<ColumnRefOperator> onPredicateRightColumns = getJoinOnPredicateColumn(right.getOp());
+    private OptExpression buildInnerJoin(OptExpression left, OptExpression right,
+                                         List<ColumnRefOperator> onPredicateLeftColumns) {
+        LogicalAggregationOperator rightAggregate = (LogicalAggregationOperator) right.getOp();
+        List<ColumnRefOperator> onPredicateRightColumns = rightAggregate.getGroupingKeys();
         Preconditions.checkState(onPredicateLeftColumns.size() == onPredicateRightColumns.size());
 
         List<ScalarOperator> onPredicateList = Lists.newArrayList();
@@ -216,19 +225,6 @@ public class MultiDistinctByCTERewriter {
         }
         return OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN,
                 Utils.compoundAnd(onPredicateList), HintNode.HINT_JOIN_UNREORDER), left, right);
-    }
-
-    private List<ColumnRefOperator> getJoinOnPredicateColumn(Operator operator) {
-        List<ColumnRefOperator> onPredicateColumns;
-        if (operator instanceof LogicalAggregationOperator) {
-            LogicalAggregationOperator aggregationOperator = (LogicalAggregationOperator) operator;
-            onPredicateColumns = aggregationOperator.getGroupingKeys();
-        } else {
-            LogicalJoinOperator joinOperator = (LogicalJoinOperator) operator;
-            onPredicateColumns = Utils.extractConjuncts(joinOperator.getOnPredicate()).stream().
-                    map(predicate -> (ColumnRefOperator) predicate.getChild(0)).collect(Collectors.toList());
-        }
-        return onPredicateColumns;
     }
 
     private LinkedList<OptExpression> buildDistinctAggCTEConsume(LogicalAggregationOperator aggregate,
@@ -412,7 +408,7 @@ public class MultiDistinctByCTERewriter {
         // If there is no requiredColumns, we need to add least one column which is smallest
         if (consumeOutputMap.isEmpty()) {
             List<ColumnRefOperator> outputColumns =
-                    produceOperator.getOutputColumns(new ExpressionContext(cteProduce)).getStream().
+                    produceOperator.getOutputColumns(LogicalPropertyContext.of(cteProduce)).getStream().
                             map(factory::getColumnRef).collect(Collectors.toList());
             ColumnRefOperator smallestColumn = Utils.findSmallestColumnRef(outputColumns);
             ColumnRefOperator consumeOutput =

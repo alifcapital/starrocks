@@ -70,13 +70,14 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
         FastRewritableChecker fastRewritableChecker =
                 new FastRewritableChecker(preAggProjectOperator.getColumnRefMap());
 
-        boolean canRewritable = false;
         for (Map.Entry<ColumnRefOperator, CallOperator> aggregation :
                 aggregationOperator.getAggregations().entrySet()) {
-            canRewritable |= fastRewritableChecker.isRewritable(aggregation.getValue());
+            if (fastRewritableChecker.isRewritable(aggregation.getValue())) {
+                return true;
+            }
         }
 
-        return canRewritable;
+        return false;
     }
 
     @Override
@@ -130,6 +131,9 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
         // if the number of agg functions can not be reduced after rewriting, just skip it.
         if (aggregationOperator.getGroupingKeys() != null && !aggregationOperator.getGroupingKeys().isEmpty()) {
             HashSet<CallOperator> uniqueNewAggregations = new HashSet<>(newAggregations.values());
+            if (uniqueNewAggregations.size() >= aggregationOperator.getAggregations().size()) {
+                return Lists.newArrayList();
+            }
             HashSet<CallOperator> uniqueOldAggregations = new HashSet<>(aggregationOperator.getAggregations().values());
             if (uniqueNewAggregations.size() >= uniqueOldAggregations.size()) {
                 return Lists.newArrayList();
@@ -214,7 +218,6 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
             this.newAggregations = Maps.newHashMap();
             this.newPreAggProjections = newPreAggProjections;
             this.reservedAggregations = Maps.newHashMap();
-            this.commonArguments = Maps.newHashMap();
         }
 
         public ScalarOperator rewrite(ColumnRefOperator op, CallOperator aggFunction) {
@@ -250,7 +253,7 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
 
                                 Function newFn = GlobalStateMgr.getCurrentState().getFunction(
                                         new Function(new FunctionName(functionName),
-                                                Lists.newArrayList(agg0.getType(), agg1.getType()),
+                                                new Type[] {agg0.getType(), agg1.getType()},
                                                 aggFunction.getType(), false),
                                         Function.CompareMode.IS_IDENTICAL);
                                 Preconditions.checkState(newFn != null,
@@ -298,13 +301,17 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
                 if (!oldPreAggProjections.containsKey(arg)) {
                     newPreAggProjections.put((ColumnRefOperator) arg, arg);
                 }
-            } else if (commonArguments.containsKey(arg)) {
-                // if arg has been created by the previous rewriting, we don't need to create a new one.
-                newColumnRef = commonArguments.get(arg);
             } else {
-                newColumnRef = columnRefFactory.create(arg, arg.getType(), arg.isNullable());
-                newPreAggProjections.put(newColumnRef, arg);
-                commonArguments.put(arg, newColumnRef);
+                if (commonArguments == null) {
+                    commonArguments = Maps.newHashMap();
+                }
+                // Reuse the first reference created for an equivalent argument.
+                newColumnRef = commonArguments.get(arg);
+                if (newColumnRef == null) {
+                    newColumnRef = columnRefFactory.create(arg, arg.getType(), arg.isNullable());
+                    newPreAggProjections.put(newColumnRef, arg);
+                    commonArguments.put(arg, newColumnRef);
+                }
             }
             return newColumnRef;
         }
@@ -363,7 +370,7 @@ public class RewriteSumByAssociativeRule extends TransformationRule {
 
                 Function multiplyFn = GlobalStateMgr.getCurrentState().getFunction(
                         new Function(new FunctionName(FunctionSet.MULTIPLY),
-                                Lists.newArrayList(countOperator.getType(), constOperator.getType()),
+                                new Type[] {countOperator.getType(), constOperator.getType()},
                                 returnType, false),
                         Function.CompareMode.IS_IDENTICAL);
                 Preconditions.checkState(multiplyFn != null,

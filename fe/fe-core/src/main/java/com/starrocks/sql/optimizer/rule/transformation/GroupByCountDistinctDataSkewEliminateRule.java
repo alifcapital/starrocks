@@ -55,11 +55,8 @@ public class GroupByCountDistinctDataSkewEliminateRule extends TransformationRul
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalAggregationOperator aggOp = input.getOp().cast();
-        final var isCountDistinctAndHasSkewHint = aggOp.checkGroupByCountDistinctWithSkewHint();
-        final var isCountDistinct = aggOp.checkGroupByCountDistinct();
-        final var isDistinctColumnBucketizationEnabled = context.getSessionVariable().isEnableDistinctColumnBucketization();
-
-        return isCountDistinctAndHasSkewHint || (isCountDistinct && isDistinctColumnBucketizationEnabled);
+        return (aggOp.hasSkew() || context.getSessionVariable().isEnableDistinctColumnBucketization()) &&
+                aggOp.checkGroupByCountDistinct();
     }
 
     private static final GroupByCountDistinctDataSkewEliminateRule INSTANCE =

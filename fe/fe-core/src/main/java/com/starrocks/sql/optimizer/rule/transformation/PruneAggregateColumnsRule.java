@@ -50,11 +50,12 @@ public class PruneAggregateColumnsRule extends TransformationRule {
 
         // Agg required input provide the having used columns
         if (aggOperator.getPredicate() != null) {
-            requiredInputColumns.union(aggOperator.getPredicate().getUsedColumns());
+            ColumnRefSet havingColumns = aggOperator.getPredicate().getUsedColumns();
+            requiredInputColumns.union(havingColumns);
             // For SQL: SELECT 8 from t0 group by v1 having avg(v2) < 63;
             // We need `requiredOutputColumns` early union having used columns, in order to
             // don't prune avg(v2)
-            requiredOutputColumns.union(aggOperator.getPredicate().getUsedColumns());
+            requiredOutputColumns.union(havingColumns);
         }
 
         Map<ColumnRefOperator, CallOperator> newAggregations = Maps.newHashMap();

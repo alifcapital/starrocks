@@ -53,7 +53,12 @@ public class ArrayDistinctAfterAggRule extends TransformationRule {
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) input.getInputs().get(0).getOp();
-        return aggregate.getAggregations().values().stream().anyMatch(x -> x.getFnName().equals(FunctionSet.ARRAY_AGG));
+        for (CallOperator call : aggregate.getAggregations().values()) {
+            if (call.getFnName().equals(FunctionSet.ARRAY_AGG)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean checkScalarOp(ColumnRefOperator col, ScalarOperator op) {
@@ -64,11 +69,8 @@ public class ArrayDistinctAfterAggRule extends TransformationRule {
             @Override
             public Boolean visit(ScalarOperator scalarOperator, Void context) {
                 for (ScalarOperator child : scalarOperator.getChildren()) {
-                    if (child.getColumnRefs().contains(col)) {
-                        boolean ret = child.accept(this, null);
-                        if (!ret) {
-                            return false;
-                        }
+                    if (!child.accept(this, null)) {
+                        return false;
                     }
                 }
                 return true;
@@ -76,13 +78,17 @@ public class ArrayDistinctAfterAggRule extends TransformationRule {
 
             @Override
             public Boolean visitVariableReference(ColumnRefOperator columnRefOperator, Void context) {
-                return !columnRefOperator.equals(col);
+                return columnRefOperator.getOpType() == OperatorType.LAMBDA_ARGUMENT || !columnRefOperator.equals(col);
             }
 
             @Override
             public Boolean visitCall(CallOperator callOperator, Void context) {
                 if (callOperator.getFnName().equals(FunctionSet.ARRAY_DISTINCT)) {
-                    return callOperator.getArguments().size() == 1 && callOperator.getArguments().get(0).equals(col);
+                    if (callOperator.getArguments().size() == 1 && callOperator.getArguments().get(0).equals(col)) {
+                        return true;
+                    }
+                    // Unrelated array_distinct calls must not reject this aggregate's rewrite.
+                    return !callOperator.getColumnRefs().contains(col);
                 } else {
                     return visit(callOperator, null);
                 }
@@ -113,7 +119,8 @@ public class ArrayDistinctAfterAggRule extends TransformationRule {
         ScalarOperatorVisitor<ScalarOperator, Void> visitor = new ScalarOperatorVisitor<ScalarOperator, Void>() {
             @Override
             public ScalarOperator visit(ScalarOperator scalarOperator, Void context) {
-                List<ScalarOperator> children = Lists.newArrayList(scalarOperator.getChildren());
+                // Rewriting replaces child positions without changing the child list's size or order.
+                List<ScalarOperator> children = scalarOperator.getChildren();
                 for (int i = 0; i < children.size(); ++i) {
                     ScalarOperator child = children.get(i);
                     if (child.getColumnRefs().contains(oldCol)) {

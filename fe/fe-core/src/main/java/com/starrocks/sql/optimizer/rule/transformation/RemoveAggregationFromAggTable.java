@@ -161,8 +161,9 @@ public class RemoveAggregationFromAggTable extends TransformationRule {
             }
         }
 
-        Map<ColumnRefOperator, ScalarOperator> newProjectMap = Maps.newHashMap();
-        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(projectMap);
+        ReplaceColumnRefRewriter rewriter =
+                aggregationOperator.getPredicate() != null || aggregationOperator.getProjection() != null
+                        ? new ReplaceColumnRefRewriter(projectMap) : null;
 
         OptExpression newChildOpt = input.inputAt(0);
         if (aggregationOperator.getPredicate() != null) {
@@ -181,7 +182,9 @@ public class RemoveAggregationFromAggTable extends TransformationRule {
             newChildOpt = OptExpression.create(scanOperator, newChildOpt.getInputs());
         }
 
+        Map<ColumnRefOperator, ScalarOperator> newProjectMap;
         if (aggregationOperator.getProjection() != null) {
+            newProjectMap = Maps.newHashMap();
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry :
                     aggregationOperator.getProjection().getColumnRefMap().entrySet()) {
                 // rewrite the projection of this agg. replace the aggFunc by the columnRef

@@ -52,6 +52,7 @@ import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -147,6 +148,15 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         opt.getOp().accept(this, opt, context);
     }
 
+    private static boolean allConstant(Collection<CallOperator> calls) {
+        for (CallOperator call : calls) {
+            if (!call.isConstant()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private boolean isInvalid(OptExpression optExpression, AggregatePushDownContext context) {
         return context.isEmpty() || optExpression.getOp().hasLimit();
     }
@@ -159,8 +169,10 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
 
         // add filter columns in groupBys
         LogicalFilterOperator filter = (LogicalFilterOperator) optExpression.getOp();
-        filter.getRequiredChildInputColumns().getStream().map(factory::getColumnRef)
-                .forEach(v -> context.groupBys.put(v, v));
+        for (int id : filter.getRequiredChildInputColumns().getColumnIds()) {
+            ColumnRefOperator v = factory.getColumnRef(id);
+            context.groupBys.put(v, v);
+        }
         return processChild(optExpression, context);
     }
 
@@ -172,12 +184,21 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
 
         LogicalProjectOperator project = (LogicalProjectOperator) optExpression.getOp();
 
-        if (project.getColumnRefMap().entrySet().stream().allMatch(e -> e.getValue().equals(e.getKey()))) {
+        boolean identityProject = true;
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> e : project.getColumnRefMap().entrySet()) {
+            if (!e.getValue().equals(e.getKey())) {
+                identityProject = false;
+                break;
+            }
+        }
+        if (identityProject) {
             return processChild(optExpression, context);
         }
 
         ColumnRefSet aggUsedColumns = new ColumnRefSet();
-        context.aggregations.values().forEach(v -> aggUsedColumns.union(v.getUsedColumns()));
+        for (CallOperator v : context.aggregations.values()) {
+            v.collectUsedColumns(aggUsedColumns);
+        }
 
         Map<ColumnRefOperator, ScalarOperator> columnRefMap = project.getColumnRefMap();
         Map<ColumnRefOperator, ScalarOperator> aggRewriteMap = columnRefMap;
@@ -196,8 +217,10 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             if (call instanceof CaseWhenOperator) {
                 CaseWhenOperator caseWhen = (CaseWhenOperator) value;
                 for (ScalarOperator condition : caseWhen.getAllConditionClause()) {
-                    condition.getUsedColumns().getStream().map(factory::getColumnRef)
-                            .forEach(v -> context.groupBys.put(v, v));
+                    for (int id : condition.getUsedColumns().getColumnIds()) {
+                        ColumnRefOperator v = factory.getColumnRef(id);
+                        context.groupBys.put(v, v);
+                    }
                 }
 
                 List<ScalarOperator> newWhenThen = Lists.newArrayList();
@@ -234,8 +257,10 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
                     return visit(optExpression, context);
                 }
 
-                call.getChild(0).getUsedColumns().getStream().map(factory::getColumnRef)
-                        .forEach(v -> context.groupBys.put(v, v));
+                for (int id : call.getChild(0).getUsedColumns().getColumnIds()) {
+                    ColumnRefOperator v = factory.getColumnRef(id);
+                    context.groupBys.put(v, v);
+                }
 
                 CallOperator newIf = new CallOperator(call.getFnName(), call.getType(), Lists.newArrayList(call.getArguments()),
                         call.getFunction());
@@ -270,13 +295,14 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
     public Void visitLogicalAggregate(OptExpression optExpression, AggregatePushDownContext context) {
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) optExpression.getOp();
         // distinct/count* aggregate can't push down
-        if (aggregate.getAggregations().values().stream().anyMatch(c -> c.isDistinct() || c.isCountStar())) {
-            return visit(optExpression, context);
+        for (CallOperator c : aggregate.getAggregations().values()) {
+            if (c.isDistinct() || c.isCountStar()) {
+                return visit(optExpression, context);
+            }
         }
 
         // all constant can't push down
-        if (!aggregate.getAggregations().isEmpty() &&
-                aggregate.getAggregations().values().stream().allMatch(ScalarOperator::isConstant)) {
+        if (!aggregate.getAggregations().isEmpty() && allConstant(aggregate.getAggregations().values())) {
             return visit(optExpression, context);
         }
 
@@ -308,8 +334,10 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         }
 
         // split aggregate to left/right child
-        AggregatePushDownContext leftContext = splitJoinAggregate(optExpression, context, 0, isSmallBroadcastJoin);
-        AggregatePushDownContext rightContext = splitJoinAggregate(optExpression, context, 1, false);
+        JoinUsedColumns usedColumns = new JoinUsedColumns();
+        AggregatePushDownContext leftContext =
+                splitJoinAggregate(optExpression, context, 0, isSmallBroadcastJoin, usedColumns);
+        AggregatePushDownContext rightContext = splitJoinAggregate(optExpression, context, 1, false, usedColumns);
         process(optExpression.inputAt(0), leftContext);
         process(optExpression.inputAt(1), rightContext);
         return null;
@@ -335,13 +363,19 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
      *   1        1               1        1
      */
     private AggregatePushDownContext splitJoinAggregate(OptExpression optExpression, AggregatePushDownContext context,
-                                                        int child, boolean immediateChildOfSmallBroadcastJoin) {
+                                                        int child, boolean immediateChildOfSmallBroadcastJoin,
+                                                        JoinUsedColumns usedColumns) {
         LogicalJoinOperator join = (LogicalJoinOperator) optExpression.getOp();
         ColumnRefSet childOutput = optExpression.getChildOutputColumns(child);
 
         // check aggregations
-        ColumnRefSet aggregationsRefs = new ColumnRefSet();
-        context.aggregations.values().stream().map(CallOperator::getUsedColumns).forEach(aggregationsRefs::union);
+        if (usedColumns.aggregations == null) {
+            usedColumns.aggregations = new ColumnRefSet();
+            for (CallOperator aggregation : context.aggregations.values()) {
+                aggregation.collectUsedColumns(usedColumns.aggregations);
+            }
+        }
+        ColumnRefSet aggregationsRefs = usedColumns.aggregations;
         if (!childOutput.containsAll(aggregationsRefs)) {
             return AggregatePushDownContext.EMPTY;
         }
@@ -351,30 +385,53 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         childContext.aggregations.putAll(context.aggregations);
 
         // check group by
+        if (usedColumns.groupBys == null) {
+            usedColumns.groupBys = Lists.newArrayListWithCapacity(context.groupBys.size());
+            for (ScalarOperator groupBy : context.groupBys.values()) {
+                usedColumns.groupBys.add(groupBy.getUsedColumns());
+            }
+        }
+        int groupByIndex = 0;
         for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : context.groupBys.entrySet()) {
-            ColumnRefSet groupByUseColumns = entry.getValue().getUsedColumns();
+            ColumnRefSet groupByUseColumns = usedColumns.groupBys.get(groupByIndex++);
             if (childOutput.containsAll(groupByUseColumns)) {
                 childContext.groupBys.put(entry.getKey(), entry.getValue());
             } else if (childOutput.isIntersect(groupByUseColumns)) {
                 // e.g. group by abs(a + b), we can derive group by a
-                Map<ColumnRefOperator, ScalarOperator> rewriteMap = groupByUseColumns.getStream()
-                        .filter(c -> !childOutput.contains(c)).map(factory::getColumnRef)
-                        .collect(Collectors.toMap(k -> k, k -> ConstantOperator.createNull(k.getType())));
+                Map<ColumnRefOperator, ScalarOperator> rewriteMap = Maps.newHashMap();
+                for (int id : groupByUseColumns.getColumnIds()) {
+                    if (!childOutput.contains(id)) {
+                        ColumnRefOperator k = factory.getColumnRef(id);
+                        rewriteMap.put(k, ConstantOperator.createNull(k.getType()));
+                    }
+                }
                 ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(rewriteMap);
                 childContext.groupBys.put(entry.getKey(), rewriter.rewrite(entry.getValue()));
             }
         }
 
         if (join.getOnPredicate() != null) {
-            join.getOnPredicate().getUsedColumns().getStream().map(factory::getColumnRef)
-                    .filter(childOutput::contains)
-                    .forEach(c -> childContext.groupBys.put(c, c));
+            if (usedColumns.onPredicate == null) {
+                usedColumns.onPredicate = join.getOnPredicate().getUsedColumns();
+            }
+            for (int id : usedColumns.onPredicate.getColumnIds()) {
+                ColumnRefOperator c = factory.getColumnRef(id);
+                if (childOutput.contains(c)) {
+                    childContext.groupBys.put(c, c);
+                }
+            }
         }
 
         if (join.getPredicate() != null) {
-            join.getPredicate().getUsedColumns().getStream().map(factory::getColumnRef)
-                    .filter(childOutput::contains)
-                    .forEach(v -> childContext.groupBys.put(v, v));
+            if (usedColumns.predicate == null) {
+                usedColumns.predicate = join.getPredicate().getUsedColumns();
+            }
+            for (int id : usedColumns.predicate.getColumnIds()) {
+                ColumnRefOperator v = factory.getColumnRef(id);
+                if (childOutput.contains(v)) {
+                    childContext.groupBys.put(v, v);
+                }
+            }
         }
 
         childContext.immediateChildOfSmallBroadcastJoin = immediateChildOfSmallBroadcastJoin;
@@ -382,6 +439,14 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         childContext.pushPaths.addAll(context.pushPaths);
         childContext.pushPaths.add(child);
         return childContext;
+    }
+
+    // Used columns of one join's aggregations, group-bys and predicates, filled by the first split that needs them.
+    private static final class JoinUsedColumns {
+        private ColumnRefSet aggregations;
+        private List<ColumnRefSet> groupBys;
+        private ColumnRefSet onPredicate;
+        private ColumnRefSet predicate;
     }
 
     @Override
@@ -419,9 +484,9 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         // collect push down aggregate context
         List<List<AggregatePushDownContext>> allChildRewriteContext = Lists.newArrayList();
         for (PushDownAggregateCollector childCollector : collectors) {
-            if (childCollector.allRewriteContext.containsKey(context.origAggregator)) {
-                allChildRewriteContext.add(childCollector.allRewriteContext.get(context.origAggregator));
-                childCollector.allRewriteContext.remove(context.origAggregator);
+            List<AggregatePushDownContext> childRewriteContext = childCollector.allRewriteContext.remove(context.origAggregator);
+            if (childRewriteContext != null) {
+                allChildRewriteContext.add(childRewriteContext);
             }
         }
 
@@ -436,9 +501,6 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         if (allChildRewriteContext.isEmpty() || allChildRewriteContext.size() != collectors.size()) {
             return null;
         }
-
-        Set<ColumnRefOperator> checkGroupBys = new HashSet<>(context.groupBys.keySet());
-        Set<ColumnRefOperator> checkAggregations = new HashSet<>(context.aggregations.keySet());
 
         for (List<AggregatePushDownContext> childContexts : allChildRewriteContext) {
             Set<ColumnRefOperator> cg = new HashSet<>();
@@ -457,12 +519,15 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             //     Scan1    Join
             //             /    \
             //         Scan2    Scan3
-            if (!cg.containsAll(checkGroupBys) || !ca.containsAll(checkAggregations)) {
+            if (!cg.containsAll(context.groupBys.keySet()) || !ca.containsAll(context.aggregations.keySet())) {
                 return null;
             }
         }
 
-        List<AggregatePushDownContext> list = allRewriteContext.getOrDefault(context.origAggregator, Lists.newArrayList());
+        List<AggregatePushDownContext> list = allRewriteContext.get(context.origAggregator);
+        if (list == null) {
+            list = Lists.newArrayList();
+        }
         allChildRewriteContext.forEach(list::addAll);
         allRewriteContext.put(context.origAggregator, list);
         return null;
@@ -498,10 +563,8 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         }
 
         List<ColumnStatistic> lower = Lists.newArrayList();
-        List<ColumnStatistic> medium = Lists.newArrayList();
-        List<ColumnStatistic> high = Lists.newArrayList();
-
-        List<ColumnStatistic>[] cards = new List[] {lower, medium, high};
+        int mediumCount = 0;
+        int highCount = 0;
 
         Set<ColumnRefOperator> columnRefOperators = groupBys.getStream()
                 .map(factory::getColumnRef)
@@ -537,7 +600,17 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
 
         double outputRowCount = statistics.getOutputRowCount();
         for (ColumnStatistic stat : columnStatistics) {
-            cards[groupByCardinality(stat, outputRowCount)].add(stat);
+            switch (groupByCardinality(stat, outputRowCount)) {
+                case 0:
+                    lower.add(stat);
+                    break;
+                case 1:
+                    mediumCount++;
+                    break;
+                default:
+                    highCount++;
+                    break;
+            }
         }
 
         if (pushDownMode == PUSH_DOWN_AGG_AUTO && context.immediateChildOfSmallBroadcastJoin) {
@@ -550,36 +623,41 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             }
         }
 
-        double lowerCartesian = lower.stream().map(ColumnStatistic::getDistinctValuesCount).reduce((a, b) -> a * b)
-                .orElse(Double.MAX_VALUE);
+        double lowerCartesian = Double.MAX_VALUE;
+        for (int i = 0; i < lower.size(); i++) {
+            double distinct = lower.get(i).getDistinctValuesCount();
+            lowerCartesian = i == 0 ? distinct : lowerCartesian * distinct;
+        }
 
         // pow(row_count/20, a half of lower column size)
         double lowerUpper = Math.max(statistics.getOutputRowCount() / 20, 1);
         lowerUpper = Math.pow(lowerUpper, Math.max(lower.size() / 2, 1));
 
-        String aggStr = context.aggregations.values().stream().map(CallOperator::toString)
-                .collect(Collectors.joining(", "));
-        String groupStr = groupBys.getStream().map(String::valueOf).collect(Collectors.joining(", "));
+        if (LOG.isDebugEnabled()) {
+            String aggStr = context.aggregations.values().stream().map(CallOperator::toString)
+                    .collect(Collectors.joining(", "));
+            String groupStr = groupBys.getStream().map(String::valueOf).collect(Collectors.joining(", "));
 
-        LOG.debug("Push down aggregation[" + aggStr + "]" +
-                " group by[" + groupStr + "]," +
-                " check statistics rows[" + statistics.getOutputRowCount() +
-                "] high[" + high.size() +
-                "] mid[" + medium.size() +
-                "] low[" + lower.size() +
-                "] cartesian[" + lowerCartesian +
-                "] upper-cartesian[" + lowerUpper + "], mode[" + pushDownMode + "]");
+            LOG.debug("Push down aggregation[" + aggStr + "]" +
+                    " group by[" + groupStr + "]," +
+                    " check statistics rows[" + statistics.getOutputRowCount() +
+                    "] high[" + highCount +
+                    "] mid[" + mediumCount +
+                    "] low[" + lower.size() +
+                    "] cartesian[" + lowerCartesian +
+                    "] upper-cartesian[" + lowerUpper + "], mode[" + pushDownMode + "]");
+        }
 
         // 1. white push down rules
         // 1.1 only one lower/medium cardinality columns
-        if (high.isEmpty() && (lower.size() + medium.size()) == 1) {
+        if (highCount == 0 && (lower.size() + mediumCount) == 1) {
             return true;
         }
 
         // 1.2 the cartesian of all lower/count <= 1
         // 1.3 the lower cardinality <= 3 and lowerCartesian < lowerUpper
         // 1.4 follow medium cardinality flag
-        if (high.isEmpty() && medium.isEmpty()) {
+        if (highCount == 0 && mediumCount == 0) {
             if (lowerCartesian <= statistics.getOutputRowCount() || lower.size() <= 2) {
                 return true;
             } else if (lower.size() <= 3 && lowerCartesian < lowerUpper) {
@@ -593,19 +671,19 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         // 2.1 high cardinality >= 2
         // 2.2 medium cardinality > 2
         // 2.3 high cardinality = 1 and medium cardinality > 0
-        if (high.size() >= 2 || medium.size() > 2 || (high.size() == 1 && !medium.isEmpty())) {
+        if (highCount >= 2 || mediumCount > 2 || (highCount == 1 && mediumCount != 0)) {
             return false;
         }
 
         // 3. Extremely low cardinality for lower with at most one medium or high.
         double lowerCartesianLowerBound =
                 statistics.getOutputRowCount() / StatisticsEstimateCoefficient.LOWER_AGGREGATE_EFFECT_COEFFICIENT;
-        if (high.size() + medium.size() == 1 && lower.size() <= 2 && lowerCartesian <= lowerCartesianLowerBound) {
+        if (highCount + mediumCount == 1 && lower.size() <= 2 && lowerCartesian <= lowerCartesianLowerBound) {
             return true;
         }
 
         // 4. high cardinality < 2 and lower cardinality < 2
-        if (high.size() == 1 && lower.size() <= 2) {
+        if (highCount == 1 && lower.size() <= 2) {
             return pushDownMode >= PUSH_DOWN_HIGH_CARDINALITY_AGG;
         }
 

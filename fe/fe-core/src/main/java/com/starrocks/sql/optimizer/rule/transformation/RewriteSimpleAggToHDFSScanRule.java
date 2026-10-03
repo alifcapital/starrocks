@@ -51,7 +51,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
     private static final Logger LOG = LogManager.getLogger(RewriteSimpleAggToHDFSScanRule.class);
@@ -89,8 +88,9 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
         // only need to handle count(*)
         Map<ColumnRefOperator, CallOperator> aggs = aggregationOperator.getAggregations();
         Preconditions.checkArgument(aggs.entrySet().size() == 1);
-        ColumnRefOperator aggColumnRef = aggs.entrySet().iterator().next().getKey();
-        CallOperator aggCall = aggs.entrySet().iterator().next().getValue();
+        Map.Entry<ColumnRefOperator, CallOperator> aggEntry = aggs.entrySet().iterator().next();
+        ColumnRefOperator aggColumnRef = aggEntry.getKey();
+        CallOperator aggCall = aggEntry.getValue();
         Preconditions.checkArgument(aggCall.getFnName().equals(FunctionSet.COUNT) && !aggCall.isDistinct());
 
         Map<ColumnRefOperator, CallOperator> newAggCalls = Maps.newHashMap();
@@ -98,7 +98,8 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
 
         // select out partition columns.
         int tableRelationId = -1;
-        for (ColumnRefOperator c : scanOperator.getColRefToColumnMetaMap().keySet()) {
+        for (Map.Entry<ColumnRefOperator, Column> entry : scanOperator.getColRefToColumnMetaMap().entrySet()) {
+            ColumnRefOperator c = entry.getKey();
             int relationId = columnRefFactory.getRelationId(c.getId());
             if (tableRelationId == -1) {
                 tableRelationId = relationId;
@@ -108,7 +109,7 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
                 return null;
             }
             if (scanOperator.getPartitionColumns().contains(c.getName())) {
-                newScanColumnRefs.put(c, scanOperator.getColRefToColumnMetaMap().get(c));
+                newScanColumnRefs.put(c, entry.getValue());
             }
         }
 
@@ -177,8 +178,7 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
                 Lists.newArrayList(sumOutputColumnRef, ConstantOperator.createBigint(0)),
                 ExprUtils.getBuiltinFunction(FunctionSet.IFNULL, new Type[] {IntegerType.BIGINT, IntegerType.BIGINT},
                         Function.CompareMode.IS_IDENTICAL));
-        Map<ColumnRefOperator, ScalarOperator> newProjectMap = Maps.newHashMap();
-        newProjectMap.putAll(newAggOperator.getColumnRefMap());
+        Map<ColumnRefOperator, ScalarOperator> newProjectMap = newAggOperator.getColumnRefMap();
         newProjectMap.remove(sumOutputColumnRef);
         newProjectMap.put(aggColumnRef, ifNullCall);
         LogicalProjectOperator newProjectOperator = new LogicalProjectOperator(newProjectMap);
@@ -221,9 +221,11 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
 
         // all group by keys are partition keys.
         List<ColumnRefOperator> groupingKeys = aggregationOperator.getGroupingKeys();
-        if (!scanOperator.getPartitionColumns()
-                .containsAll(groupingKeys.stream().map(x -> x.getName()).collect(Collectors.toList()))) {
-            return false;
+        Set<String> partitionColumns = scanOperator.getPartitionColumns();
+        for (ColumnRefOperator key : groupingKeys) {
+            if (!partitionColumns.contains(key.getName())) {
+                return false;
+            }
         }
 
         // add check for column mapping

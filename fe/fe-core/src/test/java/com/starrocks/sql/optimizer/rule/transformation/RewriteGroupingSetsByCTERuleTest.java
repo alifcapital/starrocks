@@ -23,6 +23,7 @@ import com.starrocks.sql.optimizer.OptimizerFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.operator.AggType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalCTEConsumeOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalRepeatOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
@@ -34,9 +35,11 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class RewriteGroupingSetsByCTERuleTest {
 
@@ -102,7 +105,18 @@ public class RewriteGroupingSetsByCTERuleTest {
             int uvPos = outputColumns.indexOf(uv);
             Assertions.assertTrue(cntPos >= 0 && uvPos >= 0);
 
+            Set<ColumnRefOperator> consumerRefs = new HashSet<>();
             for (int i = 0; i < childOutputColumns.size(); i++) {
+                LogicalCTEConsumeOperator consumer =
+                        (LogicalCTEConsumeOperator) union.inputAt(i).inputAt(0).inputAt(0).getOp();
+                Set<ColumnRefOperator> expectedInputs = new HashSet<>(repeatColumnRefList.get(i));
+                expectedInputs.add(v3);
+                Assertions.assertEquals(expectedInputs,
+                        new HashSet<>(consumer.getCteOutputColumnRefMap().values()),
+                        "grouping keys must not leak between consumers, pad=" + pad + " child=" + i);
+                for (ColumnRefOperator ref : consumer.getCteOutputColumnRefMap().keySet()) {
+                    Assertions.assertTrue(consumerRefs.add(ref), "consumers must own distinct output refs");
+                }
                 // child: project -> aggregate -> cte consume
                 LogicalAggregationOperator childAgg =
                         (LogicalAggregationOperator) union.inputAt(i).inputAt(0).getOp();
