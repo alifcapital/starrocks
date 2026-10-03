@@ -9704,8 +9704,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             statement = (StatementBase) visitStatement(context.prepareSql().statement());
             return new PrepareStmt(stmtName, statement, parameters);
         } else if (context.prepareSql().SINGLE_QUOTED_TEXT() != null) {
-            String sql = context.prepareSql().SINGLE_QUOTED_TEXT().getText();
-            statement = SqlParser.parseSingleStatement(sql.substring(1, sql.length() - 1), sqlMode);
+            // The statement text is the value of the string literal, so we unescape it as visitString does.
+            String quoted = context.prepareSql().SINGLE_QUOTED_TEXT().getText();
+            String sql = escapeBackSlash(quoted.substring(1, quoted.length() - 1).replace("''", "'"));
+            statement = SqlParser.parseSingleStatement(sql, sqlMode);
             if (null != statement && statement instanceof PrepareStmt) {
                 PrepareStmt prepareStmt = (PrepareStmt) statement;
                 return new PrepareStmt(stmtName, prepareStmt.getInnerStmt(), prepareStmt.getParameters());
