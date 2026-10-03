@@ -188,6 +188,10 @@ public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRew
 
         @Override
         public boolean check() {
+            // substr(s, pos) has no length argument, so it is not substr(cast(date), 1, 10).
+            if (call.getChildren().size() != 3) {
+                return false;
+            }
             if (!(call.getChild(1).isConstantRef() && ((ConstantOperator) call.getChild(1)).getInt() == 1)
                     || !(call.getChild(2).isConstantRef() && ((ConstantOperator) call.getChild(2)).getInt() == 10)) {
                 return false;
