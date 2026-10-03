@@ -3337,11 +3337,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     public ParseNode visitCreateAnalyzeStatement(com.starrocks.sql.parser.StarRocksParser.CreateAnalyzeStatementContext context) {
         NodePosition pos = createPos(context);
         Map<String, String> properties = getCaseSensitiveProperties(context.properties());
-        StatsConstants.AnalyzeType analyzeType = StatsConstants.AnalyzeType.FULL;
+        // Without FULL or SAMPLE a job collects sampled statistics, as for ALL and DATABASE.
+        StatsConstants.AnalyzeType analyzeType = StatsConstants.AnalyzeType.SAMPLE;
         if (context.FULL() != null) {
             analyzeType = StatsConstants.AnalyzeType.FULL;
-        } else if (context.SAMPLE() != null) {
-            analyzeType = StatsConstants.AnalyzeType.SAMPLE;
         } else if (context.histogramStatement() != null) {
             analyzeType = StatsConstants.AnalyzeType.HISTOGRAM;
         }
