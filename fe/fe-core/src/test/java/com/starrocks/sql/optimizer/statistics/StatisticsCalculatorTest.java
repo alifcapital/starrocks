@@ -27,6 +27,7 @@ import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.tvr.TvrTableSnapshot;
+import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.MetadataMgr;
@@ -332,8 +333,13 @@ public class StatisticsCalculatorTest {
 
         new MockUp<MetadataMgr>() {
             @Mock
-            public Statistics getTableStatisticsFromInternalStatistics(Table table, Map<ColumnRefOperator,
-                    Column> columns) {
+            public Statistics getTableStatistics(OptimizerContext session, String catalogName, Table table,
+                                                  Map<ColumnRefOperator, Column> columns,
+                                                  List<PartitionKey> partitionKeys, ScalarOperator predicate,
+                                                  long limit, TvrVersionRange versionRange) {
+                // We test how the calculator uses internal statistics, so we mock the whole lookup. The scoped
+                // external statistics cache that the lookup reads has its own ScopedExternalStatisticsTest.
+                session.setObtainedFromInternalStatistics(true);
                 Statistics.Builder builder = Statistics.builder();
                 icebergScanOperator.getOutputColumns().forEach(col ->
                         builder.addColumnStatistic(col,

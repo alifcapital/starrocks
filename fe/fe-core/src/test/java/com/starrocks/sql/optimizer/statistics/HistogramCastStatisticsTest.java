@@ -158,6 +158,29 @@ class HistogramCastStatisticsTest {
     }
 
     @Test
+    void dateToDoubleCannotReuseTimestampBoundsOrHistogram() {
+        for (Type sourceType : List.of(DateType.DATE, DateType.DATETIME)) {
+            ColumnRefOperator date = new ColumnRefOperator(1, sourceType, "date_value", true);
+            double min = Utils.getLongFromDateTime(LocalDateTime.of(2024, 1, 1, 0, 0));
+            double max = Utils.getLongFromDateTime(LocalDateTime.of(2025, 1, 1, 0, 0));
+            Histogram histogram = new Histogram(List.of(new Bucket(min, max, (long) ROWS, 1L)), Map.of());
+            ColumnStatistic original = ColumnStatistic.builder().setMinValue(min).setMaxValue(max)
+                    .setNullsFraction(0).setAverageRowSize(8).setDistinctValuesCount(366)
+                    .setHistogram(histogram).build();
+            Statistics input = Statistics.builder().setOutputRowCount(ROWS).addColumnStatistic(date, original).build();
+            CastOperator cast = new CastOperator(FloatType.DOUBLE, date);
+            ColumnStatistic converted = ExpressionStatisticCalculator.calculate(cast, input);
+            Assertions.assertEquals(Double.NEGATIVE_INFINITY, converted.getMinValue());
+            Assertions.assertEquals(Double.POSITIVE_INFINITY, converted.getMaxValue());
+            Assertions.assertNull(converted.getHistogram());
+            Assertions.assertEquals(ROWS / 2,
+                    estimate(cast, BinaryType.LE, ConstantOperator.createDouble(1979), input).getOutputRowCount());
+            Assertions.assertSame(histogram, original.getHistogram());
+            Assertions.assertEquals(min, original.getMinValue());
+        }
+    }
+
+    @Test
     void nestedUnsafeCastCannotRecoverOriginalHistogram() throws Exception {
         ScalarOperator cast = new CastOperator(IntegerType.LARGEINT, new CastOperator(IntegerType.BIGINT, TEXT));
         Statistics input = input(TEXT, stored());

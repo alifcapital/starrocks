@@ -467,20 +467,24 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
     public void testMultiSubqueries() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/subquery_statistics"), null, TExplainLevel.COSTS);
-        Assertions.assertTrue(replayPair.second.contains("  96:AGGREGATE (update serialize)\n" +
+        // A DATETIME cast to DOUBLE is a YYYYMMDDhhmmss number, so the cast cannot keep the timestamp bounds of the
+        // column, and the date predicates of this dump use the default range estimate. We check the statistics
+        // without the node numbers, which other plan changes shift.
+        String plan = replayPair.second.replaceAll("(?m)^(\\s*)\\d+:", "$1");
+        Assertions.assertTrue(plan.contains("  AGGREGATE (update serialize)\n" +
                 "  |  aggregate: count[(*); args: ; result: BIGINT; args nullable: false; result nullable: false]\n" +
                 "  |  hasNullableGenerateChild: true\n" +
                 "  |  cardinality: 1\n" +
                 "  |  column statistics: \n" +
-                "  |  * count-->[0.0, 1.0397971264164303, 0.0, 8.0, 1.0] ESTIMATE\n" +
+                "  |  * count-->[0.0, 64.6090263353273, 0.0, 8.0, 1.0] ESTIMATE\n" +
                 "  |  \n" +
-                "  95:Project\n" +
+                "  Project\n" +
                 "  |  output columns:\n" +
                 "  |  549 <-> 1\n" +
                 "  |  hasNullableGenerateChild: true\n" +
-                "  |  cardinality: 1\n" +
+                "  |  cardinality: 65\n" +
                 "  |  column statistics: \n" +
-                "  |  * auto_fill_col-->[1.0, 1.0, 0.0, 1.0, 1.0] MCV: [[1:1]] ESTIMATE"), replayPair.second);
+                "  |  * auto_fill_col-->[1.0, 1.0, 0.0, 1.0, 1.0] MCV: [[1:65]] ESTIMATE"), replayPair.second);
     }
 
     @Test
