@@ -2227,6 +2227,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             createTableAsSelectStmt = (CreateTableAsSelectStmt) visit(context.createTableAsSelectStatement());
         } else if (context.insertStatement() != null) {
             insertStmt = (InsertStmt) visit(context.insertStatement());
+            rejectExplainedInsert(context.insertStatement(), "SUBMIT TASK");
         } else if (context.dataCacheSelectStatement() != null) {
             dataCacheSelectStmt = (DataCacheSelectStatement) visit(context.dataCacheSelectStatement());
         }
@@ -2258,6 +2259,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         res.getProperties().putAll(extractVarHintValues(hintMap.get(context)));
         parseTaskClause(context.taskClause(), res);
         return res;
+    }
+
+    // A task or a pipe keeps the text of its INSERT and runs it later. With EXPLAIN that text only shows a plan and
+    // loads nothing, so we reject it.
+    private void rejectExplainedInsert(com.starrocks.sql.parser.StarRocksParser.InsertStatementContext context,
+                                       String statement) {
+        if (context.explainDesc() != null) {
+            throw new ParsingException("EXPLAIN is not supported in the INSERT of " + statement,
+                    createPos(context.explainDesc()));
+        }
     }
 
     @Override
@@ -5780,6 +5791,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             throw new ParsingException(PARSER_ERROR_MSG.unsupportedStatement(sql),
                     context.insertStatement());
         }
+        rejectExplainedInsert(context.insertStatement(), "CREATE PIPE");
         Map<String, String> properties = getCaseInsensitiveProperties(context.properties());
         InsertStmt insertStmt = (InsertStmt) insertNode;
         int insertSqlIndex = context.insertStatement().start.getStartIndex();
