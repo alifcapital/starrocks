@@ -30,7 +30,11 @@ public class DummyStatisticsCalculator extends OptExpressionVisitor<Void, Expres
 
     @Override
     public Void visit(OptExpression optExpression, ExpressionContext context) {
+        context.setStatistics(estimate(optExpression));
+        return null;
+    }
 
+    public static Statistics estimate(OptExpression optExpression) {
         Statistics.Builder statisticsBuilder = new Statistics.Builder();
         statisticsBuilder.setOutputRowCount(0xdeadbeef);
         statisticsBuilder.setTableRowCountMayInaccurate(true);
@@ -38,8 +42,7 @@ public class DummyStatisticsCalculator extends OptExpressionVisitor<Void, Expres
         optExpression.getRowOutputInfo().getOutputColRefs().forEach(columnRef -> {
             statisticsBuilder.addColumnStatistic(columnRef, ColumnStatistic.unknown());
         });
-        context.setStatistics(statisticsBuilder.build());
-        return null;
+        return statisticsBuilder.build();
     }
 
     public void estimatorStats() {

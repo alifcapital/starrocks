@@ -259,10 +259,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             JoinStatisticsPlanner planner = optimizerContext.getJoinStatisticsPlanner();
             JoinStatisticsScope scope = planner.deriveScope(expressionContext, columnRefFactory, true);
             JoinStatisticsPlanner scopePlanner = scope == null ? null : planner;
-            if (scope != statistics.getJoinStatisticsScope() || scopePlanner != statistics.getJoinStatisticsPlanner()) {
-                expressionContext.setStatistics(Statistics.buildFrom(statistics)
-                        .setJoinStatisticsScope(scope).setJoinStatisticsPlanner(scopePlanner).build());
-            }
+            expressionContext.setStatistics(statistics.withJoinStatisticsProvenance(scope, scopePlanner));
         }
     }
 
@@ -291,18 +288,33 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             statistics = estimateStatistics(ImmutableList.of(predicate), statistics);
         }
 
-        Statistics.Builder statisticsBuilder = Statistics.buildFrom(statistics);
+        Statistics.Builder statisticsBuilder = null;
         if (!isPeerPreservingAggTopN(node) && limit != Operator.DEFAULT_LIMIT && limit < statistics.getOutputRowCount()) {
-            statisticsBuilder.setOutputRowCount(limit);
+            statisticsBuilder = Statistics.buildFrom(statistics).setOutputRowCount(limit);
         }
         // CTE consumer has children but the children do not estimate the statistics, so here need to filter null
-        if (context.getChildrenStatistics().stream().filter(Objects::nonNull)
-                .anyMatch(Statistics::isTableRowCountMayInaccurate)) {
-            statisticsBuilder.setTableRowCountMayInaccurate(true);
+        if (!statistics.isTableRowCountMayInaccurate()) {
+            // CTE children can have null statistics. Stop at the first inaccurate child.
+            for (Statistics childStatistics : context.getChildrenStatistics()) {
+                if (childStatistics != null && childStatistics.isTableRowCountMayInaccurate()) {
+                    if (statisticsBuilder == null) {
+                        statisticsBuilder = Statistics.buildFrom(statistics);
+                    }
+                    statisticsBuilder.setTableRowCountMayInaccurate(true);
+                    break;
+                }
+            }
         }
 
         Projection projection = node.getProjection();
         if (projection != null) {
+            if (statisticsBuilder == null) {
+                statisticsBuilder = Statistics.buildFrom(statistics);
+            }
+            // build() exposes read-only views of the builder maps. Reuse this local view
+            // so dependent expressions see preceding outputs without a wrapper per output.
+            // Row count and accuracy have already been finalized above.
+            Statistics projectionStatistics = statisticsBuilder.build();
             Map<ColumnRefOperator, SubfieldOperator> subfieldColumns = Maps.newHashMap();
             Preconditions.checkState(projection.getCommonSubOperatorMap().isEmpty());
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projection.getColumnRefMap().entrySet()) {
@@ -311,7 +323,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                     subfieldColumns.put(entry.getKey(), (SubfieldOperator) entry.getValue());
                 } else {
                     statisticsBuilder.addColumnStatistic(entry.getKey(),
-                            ExpressionStatisticCalculator.calculate(entry.getValue(), statisticsBuilder.build()));
+                            ExpressionStatisticCalculator.calculate(entry.getValue(), projectionStatistics));
                 }
             }
             // for subfield operator, we get the statistics from statistics storage
@@ -324,7 +336,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             statisticsBuilder.addMultiColumnStatistics(
                     McvStatisticsPropagation.project(projection.getColumnRefMap(), statistics));
         }
-        context.setStatistics(statisticsBuilder.build());
+        context.setStatistics(statisticsBuilder == null ? statistics : statisticsBuilder.build());
         return null;
     }
 
@@ -442,9 +454,6 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         Preconditions.checkState(context.arity() == 0);
 
         PredicateColumnsMgr.getInstance().recordScanColumns(colRefToColumnMetaMap, table, context.getOptExpression());
-        PredicateColumnsMgr.getInstance()
-                .recordPredicateColumns(node.getPredicate(), optimizerContext.getColumnRefFactory(),
-                        context.getOptExpression());
 
         // 1. get table row count
         long tableRowCount = StatisticsCalcUtils.getTableRowCount(table, node, optimizerContext);
@@ -1478,7 +1487,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             }
         }
 
-        Statistics.Builder joinStatsBuilder;
+        Statistics.Builder joinStatsBuilder = null;
+        Statistics joinStats = null;
         double outputRowCount;
         boolean preservesOuterRows = optimizerContext != null
                 && ((joinType == JoinOperator.LEFT_OUTER_JOIN
@@ -1499,15 +1509,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         }
         switch (joinType) {
             case CROSS_JOIN:
-                joinStatsBuilder = Statistics.buildFrom(crossJoinStats);
+                joinStats = crossJoinStats;
                 break;
             case INNER_JOIN:
             case ASOF_INNER_JOIN:
-                if (eqOnPredicates.isEmpty()) {
-                    joinStatsBuilder = Statistics.buildFrom(crossJoinStats);
-                    break;
-                }
-                joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
+                joinStats = eqOnPredicates.isEmpty() ? crossJoinStats : innerJoinStats;
                 break;
             case LEFT_OUTER_JOIN:
                 joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
@@ -1573,7 +1579,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         if (joinType.isSemiJoin() && joinBound.isPresent()) {
             joinStatsBuilder.setOutputRowCount(joinBound.getAsDouble());
         }
-        Statistics joinStats = joinStatsBuilder.build();
+        if (joinStatsBuilder != null) {
+            joinStats = joinStatsBuilder.build();
+        }
         if (joinBound.isPresent()) {
             joinStats = StatisticsEstimateUtils.adjustStatisticsByRowCount(joinStats, joinStats.getOutputRowCount());
         }

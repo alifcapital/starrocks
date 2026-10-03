@@ -1582,11 +1582,8 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         new MockUp<MockTpchStatisticStorage>() {
             @Mock
             ColumnStatistic getColumnStatistic(Table table, String column) {
-                ColumnStatistic c;
-                c = new ColumnStatistic(1, 2, 3, 4, 5);
-                c.setMaxString("test_max_" + column);
-                c.setMinString("test_min_" + column);
-                return c;
+                return ColumnStatistic.buildFrom(new ColumnStatistic(1, 2, 3, 4, 5))
+                        .setMaxString("test_max_" + column).setMinString("test_min_" + column).build();
             }
 
             @Mock

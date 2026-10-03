@@ -70,9 +70,12 @@ public class StatisticsCalcUtils {
                                                           Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
                                                           OptimizerContext optimizerContext) {
         Statistics.Builder builder = Statistics.builder();
-        List<ColumnRefOperator> requiredColumnRefs = new ArrayList<>(colRefToColumnMetaMap.keySet());
-        List<String> columns = new ArrayList<>(colRefToColumnMetaMap.values())
-                .stream().map(Column::getName).collect(Collectors.toList());
+        List<ColumnRefOperator> requiredColumnRefs = new ArrayList<>(colRefToColumnMetaMap.size());
+        List<String> columns = new ArrayList<>(colRefToColumnMetaMap.size());
+        for (Map.Entry<ColumnRefOperator, Column> entry : colRefToColumnMetaMap.entrySet()) {
+            requiredColumnRefs.add(entry.getKey());
+            columns.add(entry.getValue().getName());
+        }
         List<ColumnStatistic> columnStatisticList =
                 GlobalStateMgr.getCurrentState().getStatisticStorage().getColumnStatistics(table, columns);
 
