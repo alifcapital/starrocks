@@ -2732,6 +2732,7 @@ replicaList
  * -, +
  * &
  * |
+ * BITSHIFTLEFT, BITSHIFTRIGHT, BITSHIFTRIGHTLOGICAL
  * = (comparison), <=>, >=, >, <=, <, <>, !=, IS, LIKE, REGEXP
  * BETWEEN, CASE WHEN
  * NOT
@@ -2788,9 +2789,8 @@ booleanExpression
         right = booleanExpression                                                           #flatArithmeticBinary
     | left = booleanExpression operator = BITAND right = booleanExpression                    #flatArithmeticBinary
     | left = booleanExpression operator = BITOR right = booleanExpression                     #flatArithmeticBinary
-    | left = booleanExpression operator = BIT_SHIFT_LEFT right = booleanExpression              #flatArithmeticBinary
-    | left = booleanExpression operator = BIT_SHIFT_RIGHT right = booleanExpression             #flatArithmeticBinary
-    | left = booleanExpression operator = BIT_SHIFT_RIGHT_LOGICAL right = booleanExpression     #flatArithmeticBinary
+    | left = booleanExpression operator = (BIT_SHIFT_LEFT | BIT_SHIFT_RIGHT | BIT_SHIFT_RIGHT_LOGICAL)
+        right = booleanExpression                                                           #flatArithmeticBinary
     | left=booleanExpression predicateOperations[$left.ctx] #predicatedBooleanExpression
     | booleanExpression IS NOT? NULL #isNull
     | left=booleanExpression comparisonOperator right=predicate #comparison
@@ -2829,9 +2829,8 @@ valueExpression
         right = valueExpression                                                           #arithmeticBinary
     | left = valueExpression operator = BITAND right = valueExpression                    #arithmeticBinary
     | left = valueExpression operator = BITOR right = valueExpression                     #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_LEFT right = valueExpression              #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_RIGHT right = valueExpression             #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_RIGHT_LOGICAL right = valueExpression     #arithmeticBinary
+    | left = valueExpression operator = (BIT_SHIFT_LEFT | BIT_SHIFT_RIGHT | BIT_SHIFT_RIGHT_LOGICAL)
+        right = valueExpression                                                             #arithmeticBinary
     ;
 
 primaryExpression
