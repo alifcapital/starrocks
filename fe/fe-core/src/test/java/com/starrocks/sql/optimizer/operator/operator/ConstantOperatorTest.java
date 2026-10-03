@@ -17,17 +17,25 @@ package com.starrocks.sql.optimizer.operator.operator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.type.CharType;
 import com.starrocks.type.DateType;
+import com.starrocks.type.DecimalType;
 import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
+import com.starrocks.type.PrimitiveType;
+import com.starrocks.type.ScalarType;
 import com.starrocks.type.TypeFactory;
 import com.starrocks.type.VarbinaryType;
 import com.starrocks.type.VarcharType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 public class ConstantOperatorTest {
@@ -215,6 +223,31 @@ public class ConstantOperatorTest {
         // A null binary constant used to be folded into the literal string "null".
         Assertions.assertEquals(Optional.empty(),
                 ConstantOperator.createNull(VarbinaryType.VARBINARY).castTo(VarcharType.VARCHAR));
+    }
+
+    @Test
+    public void testDecimalToStringPadsToTheScale() {
+        List<ScalarType> types = List.of(
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, 0),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL32, 9, 2),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL64, 18, 3),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL128, 38, 10),
+                TypeFactory.createDecimalV3Type(PrimitiveType.DECIMAL256, 76, 20),
+                DecimalType.DECIMALV2);
+        String[] values = {"0", "0.0", "-0.50", "1E+3", "244731.20", "244736.106", "-7.5", "1.005",
+                "12345678901234567890123456789012345678.12345678901234567890"};
+        for (ScalarType type : types) {
+            int scale = type.getScalarScale();
+            DecimalFormat format = new DecimalFormat((scale == 0 ? "0" : "0.") + "0".repeat(scale),
+                    DecimalFormatSymbols.getInstance(Locale.ROOT));
+            for (String value : values) {
+                BigDecimal decimal = new BigDecimal(value);
+                String expected = type.isDecimalV2() ? decimal.stripTrailingZeros().toPlainString()
+                        : format.format(decimal);
+                Assertions.assertEquals(expected, ConstantOperator.createDecimal(decimal, type).toString(),
+                        value + " as " + type);
+            }
+        }
     }
 
     @Test
