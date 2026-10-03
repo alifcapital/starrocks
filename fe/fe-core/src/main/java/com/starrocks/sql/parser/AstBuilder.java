@@ -9255,6 +9255,9 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
 
     @Override
     public ParseNode visitPartitionDesc(com.starrocks.sql.parser.StarRocksParser.PartitionDescContext context) {
+        if (context.primaryExpression() != null) {
+            return getPartitionDesc(context, null);
+        }
         List<PartitionDesc> partitionDescList = new ArrayList<>();
         com.starrocks.sql.parser.StarRocksParser.IdentifierListContext identifierListContext = context.identifierList();
         if (context.functionCall() != null) {
@@ -9295,9 +9298,19 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         }
         List<Identifier> identifierList = visit(identifierListContext.identifier(), Identifier.class);
 
-        if (context.LIST() == null && context.RANGE() == null) {
+        if (context.LIST() != null) {
             List<String> columnList = identifierList.stream().map(Identifier::getValue).collect(toList());
-            return new ListPartitionDesc(columnList, new ArrayList<>());
+            List<PartitionDesc> partitions = visit(context.listPartitionDesc(), PartitionDesc.class);
+            return new ListPartitionDesc(columnList, partitions, createPos(context));
+        }
+        if (context.LIST() == null && context.RANGE() == null) {
+            if (!context.listPartitionDesc().isEmpty()) {
+                throw new ParsingException("Does not support creating partitions in advance", NodePosition.ZERO);
+            }
+            List<String> columnList = identifierList.stream().map(Identifier::getValue).collect(toList());
+            ListPartitionDesc listPartitionDesc = new ListPartitionDesc(columnList, new ArrayList<>());
+            listPartitionDesc.setAutoPartitionTable(true);
+            return listPartitionDesc;
         } else {
             List<PartitionDesc> partitionDesc = visit(context.rangePartitionDesc(), PartitionDesc.class);
             return new RangePartitionDesc(
