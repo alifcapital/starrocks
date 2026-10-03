@@ -207,44 +207,59 @@ class ColumnUsageTest extends PlanTestBase {
         Mockito.when(statsMeta.isUpdatedAfterLoad(Mockito.any())).thenReturn(false);
         Mockito.when(statsMeta.getHealthy()).thenReturn(0.1);
 
-        // enable the predicate-columns strategy
-        {
-            int defaultValue = Config.statistic_auto_collect_predicate_columns_threshold;
-            Config.statistic_auto_collect_predicate_columns_threshold = 2;
+        // A job of the weekly staggered schedule runs only in its own slot, and the weekly collection interval
+        // skips statistics collected a day ago. The cases below check which columns a due job collects, so we
+        // turn the schedule off and collect at every interval.
+        boolean staggered = Config.enable_statistic_auto_collect_staggered_schedule;
+        long smallTableInterval = Config.statistic_auto_collect_small_table_interval;
+        long largeTableInterval = Config.statistic_auto_collect_large_table_interval;
+        Config.enable_statistic_auto_collect_staggered_schedule = false;
+        Config.statistic_auto_collect_small_table_interval = 0;
+        Config.statistic_auto_collect_large_table_interval = 0;
+        try {
+            // enable the predicate-columns strategy
+            {
+                int defaultValue = Config.statistic_auto_collect_predicate_columns_threshold;
+                Config.statistic_auto_collect_predicate_columns_threshold = 2;
 
-            List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
-            Assertions.assertEquals(1, collectJobs.size());
-            StatisticsCollectJob job0 = collectJobs.get(0);
-            Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
-            Assertions.assertEquals(List.of("v1"), job0.getColumnNames());
+                List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
+                Assertions.assertEquals(1, collectJobs.size());
+                StatisticsCollectJob job0 = collectJobs.get(0);
+                Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
+                Assertions.assertEquals(List.of("v1"), job0.getColumnNames());
 
-            Config.statistic_auto_collect_predicate_columns_threshold = defaultValue;
-        }
+                Config.statistic_auto_collect_predicate_columns_threshold = defaultValue;
+            }
 
-        // disable the strategy
-        {
-            int defaultValue = Config.statistic_auto_collect_predicate_columns_threshold;
-            Config.statistic_auto_collect_predicate_columns_threshold = 0;
-            List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
-            Assertions.assertEquals(1, collectJobs.size());
-            StatisticsCollectJob job0 = collectJobs.get(0);
-            Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
-            Assertions.assertEquals(List.of("v1", "v2", "v3"), job0.getColumnNames());
-            Config.statistic_auto_collect_predicate_columns_threshold = defaultValue;
-        }
+            // disable the strategy
+            {
+                int defaultValue = Config.statistic_auto_collect_predicate_columns_threshold;
+                Config.statistic_auto_collect_predicate_columns_threshold = 0;
+                List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
+                Assertions.assertEquals(1, collectJobs.size());
+                StatisticsCollectJob job0 = collectJobs.get(0);
+                Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
+                Assertions.assertEquals(List.of("v1", "v2", "v3"), job0.getColumnNames());
+                Config.statistic_auto_collect_predicate_columns_threshold = defaultValue;
+            }
 
-        {
-            long defaultSmallTableSize = Config.statistic_auto_collect_small_table_size;
-            Config.statistic_auto_collect_small_table_size = -1;
-            int defaultPredicateColumnSize = Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy;
-            Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy = -1;
-            List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
-            Assertions.assertEquals(1, collectJobs.size());
-            StatisticsCollectJob job0 = collectJobs.get(0);
-            Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
-            Assertions.assertEquals(List.of("v1"), job0.getColumnNames());
-            Config.statistic_auto_collect_small_table_size = defaultSmallTableSize;
-            Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy = defaultPredicateColumnSize;
+            {
+                long defaultSmallTableSize = Config.statistic_auto_collect_small_table_size;
+                Config.statistic_auto_collect_small_table_size = -1;
+                int defaultPredicateColumnSize = Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy;
+                Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy = -1;
+                List<StatisticsCollectJob> collectJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(analyzeJob);
+                Assertions.assertEquals(1, collectJobs.size());
+                StatisticsCollectJob job0 = collectJobs.get(0);
+                Assertions.assertEquals(StatsConstants.AnalyzeType.FULL, job0.getAnalyzeType());
+                Assertions.assertEquals(List.of("v1"), job0.getColumnNames());
+                Config.statistic_auto_collect_small_table_size = defaultSmallTableSize;
+                Config.statistic_auto_collect_max_predicate_column_size_on_sample_strategy = defaultPredicateColumnSize;
+            }
+        } finally {
+            Config.enable_statistic_auto_collect_staggered_schedule = staggered;
+            Config.statistic_auto_collect_small_table_interval = smallTableInterval;
+            Config.statistic_auto_collect_large_table_interval = largeTableInterval;
         }
     }
 
