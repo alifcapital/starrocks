@@ -90,6 +90,12 @@ public class OdbcScalarFunctionCall implements ParseNode {
 
         // for information function
         if (ODBC_SCALAR_INFORMATION_FUNCTIONS.contains(fnName)) {
+            // InformationFunction has no argument children. Reject arguments instead of
+            // silently discarding their evaluation and prepared-statement placeholders.
+            if (!functionCallExpr.getChildren().isEmpty() || functionCallExpr.getParams().isStar() ||
+                    functionCallExpr.getParams().isDistinct()) {
+                throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(ExprToSql.toSql(function)), pos);
+            }
             return new InformationFunction(fnName, pos);
         }
 
