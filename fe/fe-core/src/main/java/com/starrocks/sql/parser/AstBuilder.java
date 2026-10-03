@@ -6660,13 +6660,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
     }
 
     // only used for mysql external table
+    // The clause goes to MySQL as text. We take it from the input, because the text of a child rule drops the
+    // spaces between its tokens, as in INTERVAL1DAY.
     private String buildQueryPeriodString(com.starrocks.sql.parser.StarRocksParser.QueryPeriodContext context) {
-        StringBuilder sb = new StringBuilder();
-        for (ParseTree child : context.children) {
-            sb.append(child.getText());
-            sb.append(" ");
-        }
-        return sb.toString();
+        return extractRawText(context);
     }
 
     @Override
