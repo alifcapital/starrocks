@@ -115,7 +115,6 @@ public class AggStateRewriteEquivalent extends IAggregateRewriteEquivalent {
 
         List<ScalarOperator> eqArgs = eqAggState.getChildren();
         AggregateFunction aggregateFunction = (AggregateFunction) aggFunc.getFunction();
-        List<Type> argTypes = aggFunc.getChildren().stream().map(ScalarOperator::getType).toList();
         if (aggFuncName.equalsIgnoreCase(realAggFuncName)) {
             // query's agg function, mv: avg_union(avg_state(x)), query: avg(x)
             // check all input arguments are the same.
@@ -186,7 +185,8 @@ public class AggStateRewriteEquivalent extends IAggregateRewriteEquivalent {
         ConnectContext connectContext = ConnectContext.get() != null ? ConnectContext.get() : new ConnectContext();
         FunctionParams params = new FunctionParams(false, Lists.newArrayList());
         Type[] argumentTypes = argTypes.toArray(Type[]::new);
-        Boolean[] isArgumentConstants = argTypes.stream().map(x -> false).toArray(Boolean[]::new);
+        Boolean[] isArgumentConstants = new Boolean[argumentTypes.length];
+        Arrays.fill(isArgumentConstants, Boolean.FALSE);
         Function aggFn = FunctionAnalyzer.getAnalyzedAggregateFunction(connectContext, functionName,
                 params, argumentTypes, isArgumentConstants, NodePosition.ZERO);
         Preconditions.checkState(aggFn != null);

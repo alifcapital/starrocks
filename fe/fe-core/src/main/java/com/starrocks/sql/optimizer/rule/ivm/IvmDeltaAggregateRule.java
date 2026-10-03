@@ -42,9 +42,11 @@ import com.starrocks.sql.optimizer.rule.ivm.common.IvmRuleUtils;
 import com.starrocks.sql.optimizer.rule.transformation.TransformationRule;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.common.AggregateFunctionRollupUtils;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -138,9 +140,7 @@ public class IvmDeltaAggregateRule extends TransformationRule {
                 columnRefFactory, groupingKeys, inputAggMap, oldToNewRefMap);
 
         // Step 5: Build __ROW_ID__ equality predicate
-        List<ScalarOperator> uniqueKeys = groupingKeys.stream()
-                .map(col -> (ScalarOperator) col)
-                .collect(Collectors.toList());
+        List<ScalarOperator> uniqueKeys = new ArrayList<>(groupingKeys);
         ScalarOperator eqPredicate = IvmOpUtils.buildRowIdEqBinaryPredicateOp(
                 encodeRowIdVersion, mvRowIdRef, uniqueKeys);
 
@@ -201,20 +201,24 @@ public class IvmDeltaAggregateRule extends TransformationRule {
             List<ColumnRefOperator> groupingKeys,
             Map<ColumnRefOperator, CallOperator> inputAggMap,
             Map<ScalarOperator, ColumnRefOperator> oldToNewRefMap) {
-        Map<ColumnRefOperator, CallOperator> intermediateAggMap = inputAggMap.entrySet().stream()
-                .map(e -> {
-                    ColumnRefOperator origRef = e.getKey();
-                    CallOperator origCall = e.getValue();
-                    CallOperator intermediateFunc =
-                            AggregateFunctionRollupUtils.getIntermediateStateAggregateFunc(origCall);
-                    Preconditions.checkArgument(intermediateFunc != null,
-                            "Intermediate state agg func should not be null for: %s", origCall);
-                    ColumnRefOperator newRef = columnRefFactory.create(
-                            origRef.getName(), origRef.getType(), origRef.isNullable());
-                    oldToNewRefMap.put(origCall, newRef);
-                    return Map.entry(newRef, intermediateFunc);
-                })
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        Map<ColumnRefOperator, CallOperator> intermediateAggMap = Maps.newHashMap();
+        for (Map.Entry<ColumnRefOperator, CallOperator> entry : inputAggMap.entrySet()) {
+            ColumnRefOperator origRef = entry.getKey();
+            CallOperator origCall = entry.getValue();
+            CallOperator intermediateFunc = AggregateFunctionRollupUtils.getIntermediateStateAggregateFunc(origCall);
+            Preconditions.checkArgument(intermediateFunc != null,
+                    "Intermediate state agg func should not be null for: %s", origCall);
+            ColumnRefOperator newRef = columnRefFactory.create(
+                    origRef.getName(), origRef.getType(), origRef.isNullable());
+            oldToNewRefMap.put(origCall, newRef);
+            Objects.requireNonNull(newRef);
+            Objects.requireNonNull(intermediateFunc);
+            CallOperator previous = intermediateAggMap.putIfAbsent(newRef, intermediateFunc);
+            if (previous != null) {
+                throw new IllegalStateException(String.format(
+                        "Duplicate key %s (attempted merging values %s and %s)", newRef, previous, intermediateFunc));
+            }
+        }
         return new LogicalAggregationOperator(AggType.GLOBAL, groupingKeys, intermediateAggMap);
     }
 }

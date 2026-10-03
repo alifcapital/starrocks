@@ -36,6 +36,21 @@ import java.util.List;
 
 public class PredicateSplitTest {
     @Test
+    public void testTrueFilteringPreservesInputAndEmptySplit() {
+        ScalarOperator allTrue = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                ConstantOperator.TRUE, ConstantOperator.TRUE);
+        PredicateSplit empty = PredicateSplit.splitPredicate(allTrue);
+        Assertions.assertNull(empty.toScalarOperator());
+        Assertions.assertEquals(List.of(ConstantOperator.TRUE, ConstantOperator.TRUE), allTrue.getChildren());
+        ColumnRefOperator column = new ColumnRefOperator(1, IntegerType.INT, "x", true);
+        ScalarOperator comparison = BinaryPredicateOperator.eq(column, ConstantOperator.createInt(3));
+        ScalarOperator mixed = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                ConstantOperator.TRUE, comparison);
+        Assertions.assertEquals(comparison, PredicateSplit.splitPredicate(mixed).toScalarOperator());
+        Assertions.assertEquals(List.of(ConstantOperator.TRUE, comparison), mixed.getChildren());
+    }
+
+    @Test
     public void testSplitPredicate() {
         ScalarOperator predicate = null;
         PredicateSplit split = PredicateSplit.splitPredicate(predicate);

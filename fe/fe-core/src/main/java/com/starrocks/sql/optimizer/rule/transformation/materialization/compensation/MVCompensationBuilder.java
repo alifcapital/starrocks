@@ -46,7 +46,6 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -116,10 +115,13 @@ public class MVCompensationBuilder {
         // consider partition predicates
         if (olapScanOperator.getPredicate() != null) {
             ColumnRefSet partitionColumnRefSet = getPartitionColumnRefSet(partitionColumns, olapScanOperator);
-            List<ScalarOperator> partitionPredicates = Utils.extractConjuncts(olapScanOperator.getPredicate());
-            for (ScalarOperator predicate : partitionPredicates) {
-                if (predicate.getUsedColumns().isIntersect(partitionColumnRefSet)) {
-                    predicates.add(predicate);
+            // an empty column set intersects nothing, so there is no need to extract the conjuncts
+            if (!partitionColumnRefSet.isEmpty()) {
+                List<ScalarOperator> partitionPredicates = Utils.extractConjuncts(olapScanOperator.getPredicate());
+                for (ScalarOperator predicate : partitionPredicates) {
+                    if (predicate.getUsedColumns().isIntersect(partitionColumnRefSet)) {
+                        predicates.add(predicate);
+                    }
                 }
             }
         }
@@ -159,9 +161,11 @@ public class MVCompensationBuilder {
         if (scanOperatorPredicates.getNonPartitionConjuncts() != null) {
             ColumnRefSet partitionColumnRefSet = getPartitionColumnRefSet(partitionColumns, scanOperator);
             List<ScalarOperator> nonPartitionPredicates = scanOperatorPredicates.getNonPartitionConjuncts();
-            for (ScalarOperator predicate : nonPartitionPredicates) {
-                if (predicate.getUsedColumns().isIntersect(partitionColumnRefSet)) {
-                    predicates.add(predicate);
+            if (!partitionColumnRefSet.isEmpty()) {
+                for (ScalarOperator predicate : nonPartitionPredicates) {
+                    if (predicate.getUsedColumns().isIntersect(partitionColumnRefSet)) {
+                        predicates.add(predicate);
+                    }
                 }
             }
         }
@@ -174,12 +178,13 @@ public class MVCompensationBuilder {
             return new ColumnRefSet();
         }
         Map<Column, ColumnRefOperator> columnColumnRefOperatorMap = scanOperator.getColumnMetaToColRefMap();
-        Set<ColumnRefOperator>  partitionColumnRefs = partitionColumns.stream()
-                .map(columnColumnRefOperatorMap::get)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
         ColumnRefSet partitionColumnRefSet = new ColumnRefSet();
-        partitionColumnRefs.forEach(colRef -> partitionColumnRefSet.union(colRef.getId()));
+        for (Column partitionColumn : partitionColumns) {
+            ColumnRefOperator columnRef = columnColumnRefOperatorMap.get(partitionColumn);
+            if (columnRef != null) {
+                partitionColumnRefSet.union(columnRef.getId());
+            }
+        }
         return partitionColumnRefSet;
     }
 
@@ -283,9 +288,11 @@ public class MVCompensationBuilder {
             return TableCompensation.noCompensation();
         }
         if (refBaseTable.isNativeTableOrMaterializedView()) {
-            return OlapTableCompensation.build(refBaseTable, mvUpdateInfo, scanOperatorOpt);
+            return OlapTableCompensation.build(refBaseTable, scanOperatorOpt,
+                    mvUpdateInfo.getMv(), toRefreshPartitionNames);
         } else if (MvPartitionCompensator.isSupportPartitionCompensate(refBaseTable)) {
-            return ExternalTableCompensation.build(refBaseTable, mvUpdateInfo, scanOperatorOpt);
+            return ExternalTableCompensation.build(refBaseTable, mvUpdateInfo, scanOperatorOpt,
+                    mvUpdateInfo.getMv(), toRefreshPartitionNames);
         } else {
             // TODO: support more ref base table types
             logMVRewrite(mv.getName(), "Unsupported ref base table type: {}", refBaseTable.getName());

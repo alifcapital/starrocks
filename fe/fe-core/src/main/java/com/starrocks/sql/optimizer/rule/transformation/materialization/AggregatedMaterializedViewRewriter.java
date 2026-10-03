@@ -215,7 +215,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
 
         Map<ColumnRefOperator, ScalarOperator> swappedQueryColumnMap = Maps.newHashMap();
         for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : queryMap.entrySet()) {
-            ScalarOperator rewritten = rewriteContext.getQueryColumnRefRewriter().rewrite(entry.getValue().clone());
+            ScalarOperator rewritten = rewriteContext.getQueryColumnRefRewriter().rewrite(entry.getValue());
             ScalarOperator swapped = columnRewriter.rewriteByQueryEc(rewritten);
             swappedQueryColumnMap.put(entry.getKey(), swapped);
         }
@@ -223,7 +223,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         Map<ColumnRefOperator, ScalarOperator> newQueryProjection = Maps.newHashMap();
         AggregateFunctionRewriter aggregateFunctionRewriter =
                 new AggregateFunctionRewriter(queryExprToMvExprRewriter, rewriteContext.getQueryRefFactory(), oldAggregations);
-        ColumnRefSet originalColumnSet = new ColumnRefSet(rewriteContext.getQueryColumnSet());
+        ColumnRefSet originalColumnSet = rewriteContext.getQueryColumnRefSet();
 
         // rewrite group by + aggregate functions
         for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : swappedQueryColumnMap.entrySet()) {
@@ -293,7 +293,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         Map<ColumnRefOperator, ScalarOperator> queryColumnRefToScalarMap = Maps.newHashMap();
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : queryAggregationOperator.getAggregations().entrySet()) {
             ScalarOperator scalarOp = entry.getValue();
-            ScalarOperator mapped = rewriteContext.getQueryColumnRefRewriter().rewrite(scalarOp.clone());
+            ScalarOperator mapped = rewriteContext.getQueryColumnRefRewriter().rewrite(scalarOp);
             ScalarOperator swapped = columnRewriter.rewriteByQueryEc(mapped);
             ScalarOperator rewritten = rewriteScalarOperator(rewriteContext, swapped,
                     queryExprToMvExprRewriter, rewriteContext.getOutputMapping(),
@@ -308,7 +308,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
             queryColumnRefToScalarMap.put(entry.getKey(), rewritten);
         }
         for (ColumnRefOperator groupKey : queryAggregationOperator.getGroupingKeys()) {
-            ScalarOperator mapped = rewriteContext.getQueryColumnRefRewriter().rewrite(groupKey.clone());
+            ScalarOperator mapped = rewriteContext.getQueryColumnRefRewriter().rewrite(groupKey);
             ScalarOperator swapped = columnRewriter.rewriteByQueryEc(mapped);
             ScalarOperator rewritten = rewriteScalarOperator(rewriteContext, swapped,
                     queryExprToMvExprRewriter, rewriteContext.getOutputMapping(),
@@ -337,7 +337,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
             return false;
         }
 
-        ScalarOperator rewrittenQueryPredicate = queryPredicateRewriter.rewrite(queryPredicate.clone());
+        ScalarOperator rewrittenQueryPredicate = queryPredicateRewriter.rewrite(queryPredicate);
         ScalarOperator rewrittenMvPredicate = rewriteMvAggregatePredicate(rewriteContext, mvPredicate);
         if (rewrittenQueryPredicate == null || rewrittenMvPredicate == null) {
             OptimizerTraceUtil.logMVRewriteFailReason(mvRewriteContext,
@@ -388,7 +388,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         Pair<Map<ColumnRefOperator, ScalarOperator>, Boolean> result =
                 rewriteAggregatePredicateColumns(rewriteContext, queryAggregationOperator,
                         queryExprToMvExprRewriter, columnRewriter,
-                        new ColumnRefSet(rewriteContext.getQueryColumnSet()), aggregateFunctionRewriter);
+                        rewriteContext.getQueryColumnRefSet(), aggregateFunctionRewriter);
         if (result.first == null || result.second) {
             OptimizerTraceUtil.logMVRewriteFailReason(mvRewriteContext,
                     "Rewrite rollup aggregate with MV HAVING predicate failed: cannot rewrite aggregate predicate");
@@ -400,7 +400,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
 
     private ScalarOperator rewriteMvAggregatePredicate(RewriteContext rewriteContext, ScalarOperator mvPredicate) {
         ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(rewriteContext.getOutputMapping());
-        ScalarOperator rewritten = rewriter.rewrite(mvPredicate.clone());
+        ScalarOperator rewritten = rewriter.rewrite(mvPredicate);
         ColumnRefSet mvScanOutputColumnSet = new ColumnRefSet(rewriteContext.getOutputMapping().values());
         if (!mvScanOutputColumnSet.containsAll(rewritten.getUsedColumns())) {
             return null;
@@ -589,10 +589,10 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         List<ScalarOperator> rewriteGroupingKeys = Lists.newArrayList();
         for (ColumnRefOperator key : groupByKeys) {
             if (rewriteViewToQuery) {
-                ScalarOperator rewriteKey = rewriteContext.getMvColumnRefRewriter().rewrite(key.clone());
+                ScalarOperator rewriteKey = rewriteContext.getMvColumnRefRewriter().rewrite(key);
                 rewriteGroupingKeys.add(columnRewriter.rewriteViewToQueryWithQueryEc(rewriteKey));
             } else {
-                ScalarOperator rewriteKey = rewriteContext.getQueryColumnRefRewriter().rewrite(key.clone());
+                ScalarOperator rewriteKey = rewriteContext.getQueryColumnRefRewriter().rewrite(key);
                 rewriteGroupingKeys.add(columnRewriter.rewriteByQueryEc(rewriteKey));
             }
         }
@@ -606,11 +606,11 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         Map<ColumnRefOperator, CallOperator> rewriteAggregations = Maps.newHashMap();
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregations.entrySet()) {
             if (rewriteViewToQuery) {
-                ScalarOperator rewriteAgg = rewriteContext.getMvColumnRefRewriter().rewrite(entry.getValue().clone());
+                ScalarOperator rewriteAgg = rewriteContext.getMvColumnRefRewriter().rewrite(entry.getValue());
                 ScalarOperator rewritten = columnRewriter.rewriteViewToQueryWithQueryEc(rewriteAgg);
                 rewriteAggregations.put(entry.getKey(), (CallOperator) rewritten);
             } else {
-                ScalarOperator rewriteAgg = rewriteContext.getQueryColumnRefRewriter().rewrite(entry.getValue().clone());
+                ScalarOperator rewriteAgg = rewriteContext.getQueryColumnRefRewriter().rewrite(entry.getValue());
                 ScalarOperator rewritten = columnRewriter.rewriteByQueryEc(rewriteAgg);
                 rewriteAggregations.put(entry.getKey(), (CallOperator) rewritten);
             }
@@ -633,7 +633,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
 
         // rewrite group by keys by using mv
         List<ScalarOperator> newQueryGroupKeys = rewriteGroupKeys(rewriteContext, queryGroupingKeys, equationRewriter,
-                rewriteContext.getOutputMapping(), new ColumnRefSet(rewriteContext.getQueryColumnSet()));
+                rewriteContext.getOutputMapping(), rewriteContext.getQueryColumnRefSet());
         if (newQueryGroupKeys == null) {
             OptimizerTraceUtil.logMVRewriteFailReason(mvRewriteContext,
                     "Rewrite rollup aggregate failed, cannot rewrite group by keys: {}",
@@ -654,7 +654,7 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
         final Map<ColumnRefOperator, ScalarOperator> newProjection = new HashMap<>();
         Map<ColumnRefOperator, CallOperator> newAggregations = rewriteAggregates(
                 queryAggregation, equationRewriter, rewriteContext.getOutputMapping(),
-                new ColumnRefSet(rewriteContext.getQueryColumnSet()), queryColumnRefToScalarMap,
+                rewriteContext.getQueryColumnRefSet(), queryColumnRefToScalarMap,
                 newProjection, !newQueryGroupKeys.isEmpty(), rewriteContext);
         if (newAggregations == null) {
             OptimizerTraceUtil.logMVRewriteFailReason(mvRewriteContext,
@@ -770,9 +770,15 @@ public final class AggregatedMaterializedViewRewriter extends MaterializedViewRe
             Map<ColumnRefOperator, ScalarOperator> queryColumnRefToScalarMap,
             Map<ColumnRefOperator, ScalarOperator> newProjection) {
         ColumnRefSet requiredColumns = new ColumnRefSet();
-        newAggregations.values().stream().map(ScalarOperator::getUsedColumns).forEach(requiredColumns::union);
-        newProjection.values().stream().map(ScalarOperator::getUsedColumns).forEach(requiredColumns::union);
-        queryColumnRefToScalarMap.values().stream().map(ScalarOperator::getUsedColumns).forEach(requiredColumns::union);
+        for (CallOperator aggregation : newAggregations.values()) {
+            aggregation.collectUsedColumns(requiredColumns);
+        }
+        for (ScalarOperator projection : newProjection.values()) {
+            projection.collectUsedColumns(requiredColumns);
+        }
+        for (ScalarOperator scalarOperator : queryColumnRefToScalarMap.values()) {
+            scalarOperator.collectUsedColumns(requiredColumns);
+        }
         Map<ColumnRefOperator, ScalarOperator> newQueryProjection = Maps.newHashMap();
         mvOptExpr.getRowOutputInfo().getColumnRefMap().entrySet().stream()
                 .filter(x -> requiredColumns.contains(x.getKey()))

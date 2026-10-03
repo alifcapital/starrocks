@@ -170,7 +170,7 @@ public class QueryMaterializationContext {
             return null;
         }
         ScalarOperator compoundPredicate = Utils.compoundAnd(conjuncts);
-        compoundPredicate = columnRefRewriter.rewrite(compoundPredicate.clone());
+        compoundPredicate = columnRefRewriter.rewrite(compoundPredicate);
         return getCanonizedPredicate(compoundPredicate);
     }
 

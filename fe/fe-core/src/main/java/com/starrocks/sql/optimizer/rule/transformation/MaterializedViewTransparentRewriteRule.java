@@ -140,8 +140,13 @@ public class MaterializedViewTransparentRewriteRule extends TransformationRule {
     }
 
     public static void setOpRuleMask(OptExpression input) {
-        List<LogicalScanOperator> scanOps = MvUtils.getScanOperator(input);
-        scanOps.stream().forEach(op -> op.setOpRuleBit(OP_MV_TRANSPARENT_REWRITE));
+        if (input.getOp() instanceof LogicalScanOperator) {
+            input.getOp().setOpRuleBit(OP_MV_TRANSPARENT_REWRITE);
+        } else {
+            for (OptExpression child : input.getInputs()) {
+                setOpRuleMask(child);
+            }
+        }
     }
 
     /**

@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.rule.transformation.materialization;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
+import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MysqlTable;
 import com.starrocks.catalog.PartitionKey;
@@ -40,6 +41,7 @@ import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.StarRocksAssert;
@@ -49,7 +51,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.operator.OpRuleBit.OP_PARTITION_PRUNED;
 import static com.starrocks.sql.optimizer.rule.transformation.materialization.MvPartitionCompensator.convertToDateRange;
@@ -294,5 +299,220 @@ public class MvUtilsTest {
         // reset
         op.resetOpRuleBit(OP_PARTITION_PRUNED);
         Assertions.assertFalse(op.isOpRuleBitSet(OP_PARTITION_PRUNED));
+    }
+
+    private final ColumnRefFactory factory = new ColumnRefFactory();
+    private final ColumnRefOperator a = factory.create("a", IntegerType.BIGINT, true);
+    private final ColumnRefOperator b = factory.create("b", IntegerType.BIGINT, true);
+    private final ColumnRefOperator c = factory.create("c", IntegerType.BIGINT, true);
+    private final ColumnRefOperator d = factory.create("d", IntegerType.BIGINT, true);
+
+    private static ScalarOperator and(ScalarOperator l, ScalarOperator r) {
+        return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND, l, r);
+    }
+
+    private static ScalarOperator or(ScalarOperator l, ScalarOperator r) {
+        return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR, l, r);
+    }
+
+    private static ScalarOperator gt(ColumnRefOperator col, long value) {
+        return BinaryPredicateOperator.gt(col, ConstantOperator.createBigint(value));
+    }
+
+    private static ScalarOperator flagged(ScalarOperator op, boolean pushdown, boolean redundant) {
+        ScalarOperator cloned = op.clone();
+        cloned.setIsPushdown(pushdown);
+        cloned.setRedundant(redundant);
+        return cloned;
+    }
+
+    private static MysqlTable mysqlTable(long id) {
+        MysqlTable table = new MysqlTable();
+        table.setId(id);
+        return table;
+    }
+
+    private static LogicalMysqlScanOperator scan(Table table, ScalarOperator predicate,
+                                                 ColumnRefOperator... columns) {
+        Map<ColumnRefOperator, Column> colRefToColumn = Maps.newLinkedHashMap();
+        Map<Column, ColumnRefOperator> columnToColRef = Maps.newLinkedHashMap();
+        for (ColumnRefOperator column : columns) {
+            Column meta = new Column(column.getName(), IntegerType.BIGINT);
+            colRefToColumn.put(column, meta);
+            columnToColRef.put(meta, column);
+        }
+        return new LogicalMysqlScanOperator(table, colRefToColumn, columnToColRef, Operator.DEFAULT_LIMIT,
+                predicate, null);
+    }
+
+    @Test
+    public void testGetAllValidPredicatesOfScalarFlattensAndFiltersFlags() {
+        Assertions.assertTrue(MvUtils.getAllValidPredicates((ScalarOperator) null).isEmpty());
+
+        ScalarOperator p1 = gt(a, 1);
+        ScalarOperator pushed = flagged(gt(b, 2), true, false);
+        ScalarOperator redundant = flagged(gt(c, 3), false, true);
+        ScalarOperator disjunction = or(gt(a, 5), flagged(gt(b, 6), true, true));
+        ScalarOperator p5 = gt(d, 7);
+        // ((p1 AND pushed) AND (redundant AND disjunction)) AND p5
+        ScalarOperator root = and(and(and(p1, pushed), and(redundant, disjunction)), p5);
+
+        // We expect every nested AND to be flattened and the pushdown or redundant conjuncts to be dropped.
+        // An OR is one conjunct, so the flags of its children do not matter.
+        Assertions.assertEquals(Set.of(p1, disjunction, p5), MvUtils.getAllValidPredicates(root));
+        Assertions.assertEquals(Set.of(p1), MvUtils.getAllValidPredicates(p1));
+        Assertions.assertTrue(MvUtils.getAllValidPredicates(pushed).isEmpty());
+        ScalarOperator flaggedOr = flagged(or(gt(a, 1), gt(b, 2)), false, true);
+        Assertions.assertTrue(MvUtils.getAllValidPredicates(flaggedOr).isEmpty());
+    }
+
+    @Test
+    public void testGetAllValidPredicatesFromScansDropsFlaggedCopies() {
+        // equals() ignores the pushdown and redundant flags, so the two copies are one set element.
+        ScalarOperator valid = gt(a, 1);
+        ScalarOperator redundantCopy = flagged(valid, false, true);
+        Assertions.assertEquals(valid, redundantCopy);
+        ScalarOperator other = gt(b, 2);
+        ScalarOperator onlyPushed = flagged(gt(c, 3), true, false);
+
+        // The valid copy is seen first and is kept.
+        OptExpression validFirst = OptExpression.create(
+                new LogicalJoinOperator(JoinOperator.CROSS_JOIN, null),
+                OptExpression.create(scan(mysqlTable(1), and(valid, other), a, b)),
+                OptExpression.create(scan(mysqlTable(2), and(redundantCopy, onlyPushed), c, d)));
+        Set<ScalarOperator> actual = MvUtils.getAllValidPredicatesFromScans(validFirst);
+        Assertions.assertEquals(Set.of(valid, other), actual);
+        for (ScalarOperator predicate : actual) {
+            Assertions.assertTrue(MvUtils.isValidPredicate(predicate));
+        }
+
+        OptExpression noPredicate = OptExpression.create(scan(mysqlTable(1), null, a));
+        Assertions.assertTrue(MvUtils.getAllValidPredicatesFromScans(noPredicate).isEmpty());
+    }
+
+    @Test
+    public void testGetPredicateForRewriteSkipsNotNullOnJoinKeys() {
+        ScalarOperator aNotNull = new IsNullPredicateOperator(true, a);
+        ScalarOperator bNotNull = new IsNullPredicateOperator(true, b);
+        ScalarOperator cNotNull = new IsNullPredicateOperator(true, c);
+        ScalarOperator dIsNull = new IsNullPredicateOperator(false, d);
+        ScalarOperator pushedNotNull = flagged(new IsNullPredicateOperator(true, d), true, false);
+        ScalarOperator leftPred = and(and(aNotNull, gt(a, 1)), and(bNotNull, pushedNotNull));
+        ScalarOperator rightPred = and(cNotNull, and(dIsNull, gt(c, 3)));
+        ScalarOperator onPred = BinaryPredicateOperator.eq(a, c);
+        ScalarOperator joinPred = flagged(gt(d, 9), false, true);
+
+        OptExpression left = OptExpression.create(scan(mysqlTable(1), leftPred, a, b));
+        OptExpression right = OptExpression.create(scan(mysqlTable(2), rightPred, c, d));
+        LogicalJoinOperator joinOp = new LogicalJoinOperator(JoinOperator.INNER_JOIN, onPred);
+        joinOp.setPredicate(and(gt(b, 11), joinPred));
+        OptExpression join = OptExpression.create(joinOp, left, right);
+        MvUtils.deriveLogicalProperty(join);
+
+        // a and c are inner join keys, so their IS NOT NULL is implied by the join and is dropped.
+        // b is not a join key, so its IS NOT NULL is kept.
+        Assertions.assertEquals(Set.of(gt(a, 1), bNotNull, dIsNull, gt(c, 3), onPred, gt(b, 11)),
+                MvUtils.getPredicateForRewrite(join));
+
+        // A left outer join does not reject NULL keys, so every valid IS NOT NULL is kept.
+        OptExpression outer = OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, onPred),
+                left, right);
+        MvUtils.deriveLogicalProperty(outer);
+        Assertions.assertEquals(Set.of(gt(a, 1), aNotNull, bNotNull, cNotNull, dIsNull, gt(c, 3), onPred),
+                MvUtils.getPredicateForRewrite(outer));
+
+        Assertions.assertEquals(Set.of(aNotNull, gt(a, 1), bNotNull), MvUtils.getPredicateForRewrite(left));
+    }
+
+    @Test
+    public void testGetPredicateForRewritePropagatesJoinKeysToDescendants() {
+        ColumnRefOperator e = factory.create("e", IntegerType.BIGINT, true);
+        ScalarOperator aNotNull = new IsNullPredicateOperator(true, a);
+        ScalarOperator bNotNull = new IsNullPredicateOperator(true, b);
+        ScalarOperator cNotNull = new IsNullPredicateOperator(true, c);
+        ScalarOperator dNotNull = new IsNullPredicateOperator(true, d);
+        ScalarOperator eNotNull = new IsNullPredicateOperator(true, e);
+        OptExpression s1 = OptExpression.create(scan(mysqlTable(1), and(aNotNull, bNotNull), a, b));
+        OptExpression s2 = OptExpression.create(scan(mysqlTable(2), and(cNotNull, dNotNull), c, d));
+        OptExpression s3 = OptExpression.create(scan(mysqlTable(3), eNotNull, e));
+        ScalarOperator lowerOn = BinaryPredicateOperator.eq(a, c);
+        ScalarOperator upperOn = BinaryPredicateOperator.eq(b, e);
+        OptExpression lower = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, lowerOn), s1, s2);
+        OptExpression upper = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, upperOn), lower, s3);
+        MvUtils.deriveLogicalProperty(upper);
+
+        // The key b of the upper join must reach the scan below the lower join. d is not a key of any join.
+        Assertions.assertEquals(Set.of(dNotNull, lowerOn, upperOn), MvUtils.getPredicateForRewrite(upper));
+    }
+
+    @Test
+    public void testIsSupportViewDelta() {
+        OptExpression s1 = OptExpression.create(scan(mysqlTable(1), null, a));
+        OptExpression s2 = OptExpression.create(scan(mysqlTable(2), null, b));
+        Assertions.assertTrue(MvUtils.isSupportViewDelta(s1));
+
+        OptExpression inner = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null), s1, s2);
+        OptExpression leftOuter = OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null),
+                inner, s2);
+        Assertions.assertTrue(MvUtils.isSupportViewDelta(inner));
+        Assertions.assertTrue(MvUtils.isSupportViewDelta(leftOuter));
+
+        for (JoinOperator unsupported : new JoinOperator[] {JoinOperator.RIGHT_OUTER_JOIN, JoinOperator.FULL_OUTER_JOIN,
+                JoinOperator.LEFT_SEMI_JOIN, JoinOperator.LEFT_ANTI_JOIN, JoinOperator.CROSS_JOIN}) {
+            OptExpression bad = OptExpression.create(new LogicalJoinOperator(unsupported, null), s1, s2);
+            Assertions.assertFalse(MvUtils.isSupportViewDelta(bad), unsupported.toString());
+            // We expect the unsupported join to be found at any depth, in the left and in the right subtree.
+            OptExpression onLeft = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null), bad, s2);
+            OptExpression onRight = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null), s1,
+                    OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null), s1, bad));
+            Assertions.assertFalse(MvUtils.isSupportViewDelta(onLeft), unsupported.toString());
+            Assertions.assertFalse(MvUtils.isSupportViewDelta(onRight), unsupported.toString());
+        }
+    }
+
+    @Test
+    public void testGetTableScanDescsNumbersRepeatedTables() {
+        MysqlTable table1 = mysqlTable(1);
+        MysqlTable table2 = mysqlTable(2);
+        ColumnRefOperator a2 = factory.create("a2", IntegerType.BIGINT, true);
+        ColumnRefOperator b2 = factory.create("b2", IntegerType.BIGINT, true);
+        ColumnRefOperator c2 = factory.create("c2", IntegerType.BIGINT, true);
+        int relation1 = factory.getNextRelationId();
+        int relation2 = factory.getNextRelationId();
+        int relation3 = factory.getNextRelationId();
+        int relation4 = factory.getNextRelationId();
+        factory.updateColumnToRelationIds(a.getId(), relation1);
+        factory.updateColumnToRelationIds(c.getId(), relation2);
+        factory.updateColumnToRelationIds(a2.getId(), relation3);
+        factory.updateColumnToRelationIds(b2.getId(), relation3);
+        factory.updateColumnToRelationIds(c2.getId(), relation4);
+
+        LogicalMysqlScanOperator scanA = scan(table1, null, a, b);
+        LogicalMysqlScanOperator scanC = scan(table2, null, c, d);
+        LogicalMysqlScanOperator scanA2 = scan(table1, null, a2, b2);
+        LogicalMysqlScanOperator scanC2 = scan(table2, null, c2);
+        OptExpression lower = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null),
+                OptExpression.create(scanA), OptExpression.create(scanC));
+        OptExpression middle = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null), lower,
+                OptExpression.create(scanA2));
+        OptExpression upper = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null), middle,
+                OptExpression.create(scanC2));
+
+        // Each table is scanned twice. We expect the scans in tree order, numbered per table from 0,
+        // with the relation id of their columns and the join right above them.
+        List<TableScanDesc> descs = MvUtils.getTableScanDescs(upper, factory);
+        Assertions.assertEquals(4, descs.size());
+        Assertions.assertSame(scanA, descs.get(0).getScanOperator());
+        Assertions.assertSame(scanC, descs.get(1).getScanOperator());
+        Assertions.assertSame(scanA2, descs.get(2).getScanOperator());
+        Assertions.assertSame(scanC2, descs.get(3).getScanOperator());
+        Assertions.assertEquals(List.of(0, 0, 1, 1),
+                descs.stream().map(TableScanDesc::getIndex).collect(Collectors.toList()));
+        Assertions.assertEquals(List.of(relation1, relation2, relation3, relation4),
+                descs.stream().map(TableScanDesc::getRelationid).collect(Collectors.toList()));
+        Assertions.assertSame(lower, descs.get(0).getJoinOptExpression());
+        Assertions.assertSame(lower, descs.get(1).getJoinOptExpression());
+        Assertions.assertSame(middle, descs.get(2).getJoinOptExpression());
+        Assertions.assertSame(upper, descs.get(3).getJoinOptExpression());
     }
 }

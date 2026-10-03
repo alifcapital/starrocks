@@ -145,4 +145,93 @@ public class MaterializedViewRuleTest extends PlanTestBase {
             Assertions.assertTrue(false);
         }
     }
+
+    private static OlapTable getFlatTable() {
+        Database database = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb("test");
+        return (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore()
+                .getTable(database.getFullName(), "lineorder_flat_for_mv");
+    }
+
+    private List<Long> selectedIndexes(String sql) throws Exception {
+        ExecPlan plan = getExecPlan(sql);
+        List<Long> result = Lists.newArrayList();
+        for (Object scanNode : plan.getScanNodes()) {
+            Assertions.assertTrue(scanNode instanceof OlapScanNode);
+            result.add(((OlapScanNode) scanNode).getSelectedIndexMetaId());
+        }
+        return result;
+    }
+
+    @Test
+    public void testUnionAllBranchesAreRewrittenIndependently() throws Exception {
+        OlapTable baseTable = getFlatTable();
+        long mvId = baseTable.getIndexMetaIdByName("lo_count_mv");
+        String agg = "select LO_ORDERDATE, count(LO_LINENUMBER) from lineorder_flat_for_mv group by LO_ORDERDATE";
+        List<Long> selected = selectedIndexes(agg + " union all " + agg);
+        Assertions.assertEquals(List.of(mvId, mvId), selected);
+
+        // a branch which can not use the mv must not prevent the other one from using it
+        String spj = "select LO_ORDERDATE, LO_LINENUMBER from lineorder_flat_for_mv";
+        selected = selectedIndexes(agg + " union all " + spj);
+        Assertions.assertEquals(2, selected.size());
+        Assertions.assertTrue(selected.contains(mvId));
+        Assertions.assertTrue(selected.contains(baseTable.getBaseIndexMetaId()));
+    }
+
+    @Test
+    public void testAggregationBelowUnsupportedOperatorIsRewritten() throws Exception {
+        long mvId = getFlatTable().getIndexMetaIdByName("lo_count_mv");
+        String sql = "select LO_ORDERDATE, c from (select LO_ORDERDATE, count(LO_LINENUMBER) c " +
+                "from lineorder_flat_for_mv group by LO_ORDERDATE) t order by c limit 3";
+        Assertions.assertEquals(List.of(mvId), selectedIndexes(sql));
+
+        sql = "select LO_ORDERDATE, c, row_number() over (order by c) from (select LO_ORDERDATE, " +
+                "count(LO_LINENUMBER) c from lineorder_flat_for_mv group by LO_ORDERDATE) t";
+        Assertions.assertEquals(List.of(mvId), selectedIndexes(sql));
+    }
+
+    @Test
+    public void testKeyColumnsOnlyMatchMaxAndMin() throws Exception {
+        OlapTable baseTable = getFlatTable();
+        long keyMvId = baseTable.getIndexMetaIdByName("lo_count_key_mv");
+        String sql = "select LO_ORDERDATE, max(LO_ORDERKEY), min(LO_ORDERKEY) from lineorder_flat_for_mv " +
+                "group by LO_ORDERDATE";
+        Assertions.assertEquals(List.of(keyMvId), selectedIndexes(sql));
+
+        sql = "select LO_ORDERDATE, approx_count_distinct(LO_ORDERKEY) from lineorder_flat_for_mv " +
+                "group by LO_ORDERDATE";
+        Assertions.assertEquals(List.of(baseTable.getBaseIndexMetaId()), selectedIndexes(sql));
+
+        sql = "select LO_ORDERDATE, multi_distinct_count(LO_ORDERKEY) from lineorder_flat_for_mv " +
+                "group by LO_ORDERDATE";
+        Assertions.assertEquals(List.of(baseTable.getBaseIndexMetaId()), selectedIndexes(sql));
+    }
+
+    @Test
+    public void testPredicateColumnsMustBeInMaterializedView() throws Exception {
+        OlapTable baseTable = getFlatTable();
+        long mvId = baseTable.getIndexMetaIdByName("lo_count_mv");
+        String sql = "select LO_ORDERDATE, count(LO_LINENUMBER) from lineorder_flat_for_mv " +
+                "where LO_ORDERDATE > '2020-01-01' group by LO_ORDERDATE";
+        Assertions.assertEquals(List.of(mvId), selectedIndexes(sql));
+
+        // LO_CUSTKEY is not an output of the mv, so the compensating predicate can not be applied on it
+        sql = "select LO_ORDERDATE, count(LO_LINENUMBER) from lineorder_flat_for_mv " +
+                "where LO_CUSTKEY > 1 group by LO_ORDERDATE";
+        Assertions.assertEquals(List.of(baseTable.getBaseIndexMetaId()), selectedIndexes(sql));
+    }
+
+    @Test
+    public void testAggregationOverJoinChildrenKeepsRelationsApart() throws Exception {
+        OlapTable baseTable = getFlatTable();
+        long mvId = baseTable.getIndexMetaIdByName("lo_count_mv");
+        String sql = "select a.LO_ORDERDATE, a.c from " +
+                "(select LO_ORDERDATE, count(LO_LINENUMBER) c from lineorder_flat_for_mv group by LO_ORDERDATE) a " +
+                "join (select LO_ORDERDATE, LO_LINENUMBER from lineorder_flat_for_mv) b " +
+                "on a.LO_ORDERDATE = b.LO_ORDERDATE";
+        List<Long> selected = selectedIndexes(sql);
+        Assertions.assertEquals(2, selected.size());
+        Assertions.assertTrue(selected.contains(mvId));
+        Assertions.assertTrue(selected.contains(baseTable.getBaseIndexMetaId()));
+    }
 }

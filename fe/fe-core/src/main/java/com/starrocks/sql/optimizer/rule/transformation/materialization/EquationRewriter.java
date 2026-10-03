@@ -33,6 +33,7 @@ import com.starrocks.sql.optimizer.rule.transformation.materialization.equivalen
 import com.starrocks.sql.optimizer.rule.transformation.materialization.equivalent.IRewriteEquivalent;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.equivalent.RewriteEquivalent;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -118,7 +119,8 @@ public class EquationRewriter {
                 return rewritten;
             }
 
-            return super.visitBinaryPredicate(predicate, context);
+            // replace() has just declined this predicate, so skip preprocess and shuttle its children directly.
+            return shuttleChildrenIfUpdate(predicate);
         }
 
         private ScalarOperator rewriteByEquivalent(ScalarOperator input,
@@ -199,16 +201,17 @@ public class EquationRewriter {
             if (call.isAggregate() && call.isConstant()) {
                 return null;
             }
-            return super.visitCall(call, context);
+            // replace() has just declined this call, so skip preprocess and shuttle its children directly.
+            return shuttleChildrenIfUpdate(call);
         }
 
         Optional<ScalarOperator> replace(ScalarOperator scalarOperator) {
-            if (equationMap.containsKey(scalarOperator)) {
-                Optional<Pair<ColumnRefOperator, ScalarOperator>> mappedColumnAndExprRef =
-                        equationMap.get(scalarOperator).stream().findFirst();
-
-                ColumnRefOperator basedColumn = mappedColumnAndExprRef.get().first;
-                ScalarOperator extendedExpr = mappedColumnAndExprRef.get().second;
+            Collection<Pair<ColumnRefOperator, ScalarOperator>> mappings = equationMap.asMap().get(scalarOperator);
+            if (mappings != null) {
+                // Keep the first registered mapping even if its output column is unavailable.
+                Pair<ColumnRefOperator, ScalarOperator> mappedColumnAndExprRef = mappings.iterator().next();
+                ColumnRefOperator basedColumn = mappedColumnAndExprRef.first;
+                ScalarOperator extendedExpr = mappedColumnAndExprRef.second;
 
                 if (columnMapping == null) {
                     return extendedExpr == null ? Optional.of(basedColumn.clone()) : Optional.of(extendedExpr.clone());

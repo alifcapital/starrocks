@@ -39,6 +39,58 @@ import java.util.List;
 public class ColumnRangePredicateTest {
 
     @Test
+    public void testColumnReferenceValidation() {
+        ColumnRefOperator column = new ColumnRefOperator(1, IntegerType.INT, "x", true);
+        TreeRangeSet<ConstantOperator> ranges = TreeRangeSet.create();
+        ranges.add(Range.singleton(ConstantOperator.createInt(1)));
+        Assertions.assertSame(column, new ColumnRangePredicate(column, ranges).getColumnRef());
+        CastOperator cast = new CastOperator(IntegerType.BIGINT, column);
+        Assertions.assertSame(column, new ColumnRangePredicate(cast, ranges).getColumnRef());
+        Assertions.assertThrows(IllegalStateException.class,
+                () -> new ColumnRangePredicate(ConstantOperator.createInt(1), ranges));
+        // The contract is one occurrence, not one distinct column ID.
+        CallOperator repeated = new CallOperator("add", IntegerType.INT, List.of(column, column));
+        Assertions.assertThrows(IllegalStateException.class,
+                () -> new ColumnRangePredicate(repeated, ranges));
+    }
+
+    @Test
+    public void testRenderingInDoesNotConsumeRanges() {
+        // Integer ranges have a separate canonical form; strings share the original range set.
+        for (List<ConstantOperator> values : List.of(
+                List.of(ConstantOperator.createInt(1), ConstantOperator.createInt(3),
+                        ConstantOperator.createInt(10), ConstantOperator.createInt(20)),
+                List.of(ConstantOperator.createVarchar("01"), ConstantOperator.createVarchar("03"),
+                        ConstantOperator.createVarchar("10"), ConstantOperator.createVarchar("20")))) {
+            for (boolean mixed : List.of(false, true)) {
+                ColumnRefOperator column = new ColumnRefOperator(1, values.get(0).getType(), "x", true);
+                TreeRangeSet<ConstantOperator> ranges = TreeRangeSet.create();
+                ranges.add(Range.singleton(values.get(0)));
+                ranges.add(Range.singleton(values.get(1)));
+                if (mixed) {
+                    ranges.add(Range.closed(values.get(2), values.get(3)));
+                }
+                TreeRangeSet<ConstantOperator> original = TreeRangeSet.create(ranges);
+                ColumnRangePredicate predicate = new ColumnRangePredicate(column, ranges);
+                ColumnRangePredicate equivalent = new ColumnRangePredicate(column, TreeRangeSet.create(original));
+                ScalarOperator first = predicate.toScalarOperator();
+                Assertions.assertEquals(original, ranges, "first render must preserve caller-owned ranges");
+                if (!mixed) {
+                    Assertions.assertInstanceOf(InPredicateOperator.class, first);
+                    Assertions.assertEquals(List.of(column, values.get(0), values.get(1)), first.getChildren());
+                }
+                for (int repeat = 0; repeat < 3; repeat++) {
+                    Assertions.assertEquals(first, predicate.toScalarOperator());
+                    Assertions.assertEquals(original, predicate.getColumnRanges());
+                    Assertions.assertTrue(predicate.enclose(equivalent));
+                    Assertions.assertTrue(equivalent.enclose(predicate));
+                    Assertions.assertEquals(ConstantOperator.TRUE, predicate.simplify(equivalent));
+                }
+            }
+        }
+    }
+
+    @Test
     public void testCastDate() {
         {
             ColumnRefOperator columnRef = new ColumnRefOperator(1, VarcharType.VARCHAR, "dt", true);

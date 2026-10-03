@@ -56,6 +56,7 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.util.Box;
 import org.apache.commons.collections4.map.CaseInsensitiveMap;
 
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,12 +70,12 @@ import static com.starrocks.sql.optimizer.rule.mv.MaterializedViewRewriter.isCas
  * Select best materialized view for olap scan node
  */
 public class MaterializedViewRule extends Rule {
-    // For Materialized View key columns, which could hit the following functions
+    // For Materialized View key columns, which could hit the following functions.
+    // Only functions that are keys of COLUMN_AGG_TYPE_MATCH_FN_NAME can ever match, so add a function here
+    // only together with its entry there.
     private static final ImmutableList<String> KEY_COLUMN_FUNCTION_NAMES = ImmutableList.of(
             FunctionSet.MAX,
-            FunctionSet.MIN,
-            FunctionSet.APPROX_COUNT_DISTINCT,
-            FunctionSet.MULTI_DISTINCT_COUNT
+            FunctionSet.MIN
     );
 
     public MaterializedViewRule() {
@@ -144,21 +145,32 @@ public class MaterializedViewRule extends Rule {
                 OperatorType.LOGICAL_OLAP_SCAN
         );
 
-        private boolean isSupported(OptExpression input) {
-            if (!SUPPORTED_OPERATOR_TYPES.contains(input.getOp().getOpType())) {
-                return false;
+        // Returns whether the whole subtree of input consists of supported operators. The topmost fully
+        // supported subtrees are added to the candidates, a supported subtree never contributes inner nodes.
+        private boolean collect(OptExpression input) {
+            List<OptExpression> inputs = input.getInputs();
+            int arity = inputs.size();
+            boolean[] childSupported = new boolean[arity];
+            boolean allChildrenSupported = true;
+            for (int i = 0; i < arity; i++) {
+                childSupported[i] = collect(inputs.get(i));
+                allChildrenSupported &= childSupported[i];
             }
-            return input.getInputs().stream().allMatch(child -> isSupported(child));
+            boolean supported = allChildrenSupported && SUPPORTED_OPERATOR_TYPES.contains(input.getOp().getOpType());
+            if (!supported) {
+                for (int i = 0; i < arity; i++) {
+                    if (childSupported[i]) {
+                        candidates.add(Box.of(inputs.get(i)));
+                    }
+                }
+            }
+            return supported;
         }
 
         @Override
         public Void visit(OptExpression optExpression, Void context) {
-            if (isSupported(optExpression)) {
+            if (collect(optExpression)) {
                 candidates.add(Box.of(optExpression));
-                return null;
-            }
-            for (OptExpression child : optExpression.getInputs()) {
-                visit(child, context);
             }
             return null;
         }
@@ -197,6 +209,16 @@ public class MaterializedViewRule extends Rule {
         return Lists.newArrayList(input.getOp().accept(rewriter, input, null));
     }
 
+    // Relation id of the first output column of the scan.
+    private int getScanRelationId(LogicalOlapScanOperator scan) {
+        Collection<ColumnRefOperator> outputColumns = scan.getProjection() != null ?
+                scan.getProjection().getColumnRefMap().keySet() : scan.getColRefToColumnMetaMap().keySet();
+        if (outputColumns.isEmpty()) {
+            return factory.getRelationId(scan.getOutputColumns().get(0).getId());
+        }
+        return factory.getRelationId(outputColumns.iterator().next().getId());
+    }
+
     private OptExpression doTransform(OptExpression input, OptimizerContext context) {
         this.factory = context.getColumnRefFactory();
         OptExpression optExpression = input;
@@ -211,7 +233,7 @@ public class MaterializedViewRule extends Rule {
         }
 
         for (LogicalOlapScanOperator scan : queryScanOperators) {
-            int relationId = factory.getRelationId(scan.getOutputColumns().get(0).getId());
+            int relationId = getScanRelationId(scan);
             // clear rewrite context since we are going to handle another scan operator.
             mvIdToRewriteContexts.clear();
             Map<Long, List<Column>> candidateIndexIdToSchema = selectValidMVs(scan, relationId);
@@ -303,15 +325,22 @@ public class MaterializedViewRule extends Rule {
                 continue;
             }
 
+            // Remap mv's non aggregated columns to query based.
+            Set<Integer> mvNonAggregatedColumnsBasedQuery = Sets.newHashSet();
+            for (Column column : mvNonAggregatedColumns) {
+                mvNonAggregatedColumnsBasedQuery.add(getMVColumnToQueryColumnId(queryScanNodeColumnNameToIds, column));
+            }
+
             // Step2: check all columns in compensating predicates are available in the view output
-            if (!checkCompensatingPredicates(queryScanNodeColumnNameToIds,
-                    queryRelIdToColumnIdsInPredicates.get(relationId), mvMeta)) {
+            if (!checkCompensatingPredicates(mvNonAggregatedColumnsBasedQuery,
+                    queryRelIdToColumnIdsInPredicates.get(relationId))) {
                 iterator.remove();
                 continue;
             }
 
             // Step3: group by list in query is the subset of group by list in view or view contains no aggregation
-            if (!checkGrouping(queryScanNodeColumnNameToIds, queryRelIdToGroupByIds.get(relationId), mvMeta,
+            if (!checkGrouping(mvNonAggregatedColumnsBasedQuery, mvNonAggregatedColumns.size(),
+                    queryRelIdToGroupByIds.get(relationId), mvMeta,
                     queryRelIdToEnableMVRewrite.get(relationId), queryRelIdToIsSPJQuery.get(relationId))) {
                 iterator.remove();
                 continue;
@@ -407,10 +436,7 @@ public class MaterializedViewRule extends Rule {
         if (logicalOperator instanceof LogicalJoinOperator) {
             LogicalJoinOperator joinOperator = (LogicalJoinOperator) operator;
             if (joinOperator.getOnPredicate() != null) {
-                List<ScalarOperator> conjuncts = Utils.extractConjuncts(joinOperator.getOnPredicate());
-                for (ScalarOperator conjunct : conjuncts) {
-                    updateTableToColumns(conjunct, queryRelIdToColumnIdsInPredicates);
-                }
+                updateTableToColumns(joinOperator.getOnPredicate(), queryRelIdToColumnIdsInPredicates);
             }
         }
     }
@@ -434,7 +460,7 @@ public class MaterializedViewRule extends Rule {
         Operator operator = root.getOp();
         if (operator instanceof LogicalOlapScanOperator) {
             LogicalOlapScanOperator scanOperator = (LogicalOlapScanOperator) operator;
-            visitedQueryRelIds.add(factory.getRelationId(scanOperator.getOutputColumns().get(0).getId()));
+            visitedQueryRelIds.add(getScanRelationId(scanOperator));
         }
 
         if (operator instanceof LogicalAggregationOperator) {
@@ -466,8 +492,7 @@ public class MaterializedViewRule extends Rule {
                 }
                 collectGroupByAndAggFunction(newGroupBys, newAggs);
             } else {
-                collectGroupByAndAggFunction(Lists.newArrayList(aggOperator.getGroupingKeys()),
-                        Lists.newArrayList(aggOperator.getAggregations().values()));
+                collectGroupByAndAggFunction(aggOperator.getGroupingKeys(), aggOperator.getAggregations().values());
             }
         }
     }
@@ -494,16 +519,28 @@ public class MaterializedViewRule extends Rule {
         }
     }
 
-    private void collectGroupByAndAggFunction(List<ScalarOperator> groupBys,
-                                              List<CallOperator> aggs) {
-        if (groupBys.stream().map(ScalarOperator::getUsedColumns).anyMatch(queryRelIdToAggregateIds::isIntersect) ||
-                aggs.stream().map(ScalarOperator::getUsedColumns).anyMatch(queryRelIdToAggregateIds::isIntersect)) {
-            // Has been collect from other aggregate, only check aggregate node which is closest to scan node
-            return;
-        }
-
+    private void collectGroupByAndAggFunction(List<? extends ScalarOperator> groupBys,
+                                              Collection<? extends CallOperator> aggs) {
+        List<ColumnRefSet> groupByColumns = Lists.newArrayListWithCapacity(groupBys.size());
         for (ScalarOperator groupBy : groupBys) {
             ColumnRefSet columns = groupBy.getUsedColumns();
+            if (queryRelIdToAggregateIds.isIntersect(columns)) {
+                // Has been collect from other aggregate, only check aggregate node which is closest to scan node
+                return;
+            }
+            groupByColumns.add(columns);
+        }
+        List<ColumnRefSet> aggColumns = Lists.newArrayListWithCapacity(aggs.size());
+        for (CallOperator agg : aggs) {
+            ColumnRefSet columns = agg.getUsedColumns();
+            if (queryRelIdToAggregateIds.isIntersect(columns)) {
+                // Has been collect from other aggregate, only check aggregate node which is closest to scan node
+                return;
+            }
+            aggColumns.add(columns);
+        }
+
+        for (ColumnRefSet columns : groupByColumns) {
             for (int columnId : columns.getColumnIds()) {
                 int table = factory.getRelationId(columnId);
                 if (table != -1) {
@@ -518,8 +555,9 @@ public class MaterializedViewRule extends Rule {
             }
         }
 
+        int aggIdx = 0;
         for (CallOperator agg : aggs) {
-            ColumnRefSet columns = agg.getUsedColumns();
+            ColumnRefSet columns = aggColumns.get(aggIdx++);
             for (int columnId : columns.getColumnIds()) {
                 int table = factory.getRelationId(columnId);
                 if (table != -1) {
@@ -534,8 +572,8 @@ public class MaterializedViewRule extends Rule {
             }
         }
 
-        groupBys.stream().map(ScalarOperator::getUsedColumns).forEach(queryRelIdToAggregateIds::union);
-        aggs.stream().map(ScalarOperator::getUsedColumns).forEach(queryRelIdToAggregateIds::union);
+        groupByColumns.forEach(queryRelIdToAggregateIds::union);
+        aggColumns.forEach(queryRelIdToAggregateIds::union);
     }
 
     // split scan operators' conjuncts into equal and non-equal column ids
@@ -569,15 +607,22 @@ public class MaterializedViewRule extends Rule {
             LogicalOlapScanOperator scanOperator = (LogicalOlapScanOperator) operator;
             queryScanOperators.add(scanOperator);
 
-            int tableId = factory.getRelationId(scanOperator.getOutputColumns().get(0).getId());
-            scanOperator.getColumnMetaToColRefMap().entrySet()
-                    .stream()
-                    .forEach(x -> queryRelIdToColumnNameIds
-                            .computeIfAbsent(tableId, k -> new CaseInsensitiveMap())
-                            .put(x.getKey().getName(), x.getValue().getId()));
-            scanOperator.getColRefToColumnMetaMap().keySet()
-                    .stream()
-                    .forEach(x -> updateTableToColumns(x, queryRelIdToScanNodeOutputColumnIds));
+            int tableId = getScanRelationId(scanOperator);
+            Map<Column, ColumnRefOperator> columnMetaToColRefMap = scanOperator.getColumnMetaToColRefMap();
+            if (!columnMetaToColRefMap.isEmpty()) {
+                Map<String, Integer> columnNameIds =
+                        queryRelIdToColumnNameIds.computeIfAbsent(tableId, k -> new CaseInsensitiveMap());
+                for (Map.Entry<Column, ColumnRefOperator> entry : columnMetaToColRefMap.entrySet()) {
+                    columnNameIds.put(entry.getKey().getName(), entry.getValue().getId());
+                }
+            }
+            for (ColumnRefOperator columnRef : scanOperator.getColRefToColumnMetaMap().keySet()) {
+                int columnId = columnRef.getId();
+                int table = factory.getRelationId(columnId);
+                if (table != -1) {
+                    queryRelIdToScanNodeOutputColumnIds.computeIfAbsent(table, k -> Sets.newHashSet()).add(columnId);
+                }
+            }
         }
     }
 
@@ -664,18 +709,13 @@ public class MaterializedViewRule extends Rule {
     }
 
     private boolean checkCompensatingPredicates(
-            Map<String, Integer> queryScanColumnNameToIds,
-            Set<Integer> columnsInPredicates,
-            MaterializedIndexMeta mvMeta) {
+            Set<Integer> indexNonAggregatedColumns,
+            Set<Integer> columnsInPredicates) {
         // When the query statement does not contain any columns in predicates, all candidate index can pass this check
         if (columnsInPredicates == null) {
             return true;
         }
 
-        List<Column> mvNonAggregatedColumns = mvMeta.getNonAggregatedColumns();
-        Set<Integer> indexNonAggregatedColumns = Sets.newHashSet();
-        mvNonAggregatedColumns
-                .forEach(col -> indexNonAggregatedColumns.add(getMVColumnToQueryColumnId(queryScanColumnNameToIds, col)));
         if (!indexNonAggregatedColumns.containsAll(columnsInPredicates)) {
             return false;
         }
@@ -690,17 +730,12 @@ public class MaterializedViewRule extends Rule {
      * 1. grouping columns in query is subset of grouping columns in view
      * 2. the empty grouping columns in query is subset of all of views
      */
-    private boolean checkGrouping(Map<String, Integer> queryScanColumnNameToIds,
+    private boolean checkGrouping(Set<Integer> mvNonAggregatedColumnsBasedQuery,
+                                  int mvNonAggregatedColumnsSize,
                                   Set<Integer> queryGroupingIds,
                                   MaterializedIndexMeta mvMeta,
                                   boolean disableSPJGMV,
                                   boolean isSPJQuery) {
-        List<Column> mvNonAggregatedColumns = mvMeta.getNonAggregatedColumns();
-        // Remap mv's non aggregated columns to query based.
-        Set<Integer> mvNonAggregatedColumnsBasedQuery = Sets.newHashSet();
-        mvNonAggregatedColumns.forEach(column ->
-                mvNonAggregatedColumnsBasedQuery.add(getMVColumnToQueryColumnId(queryScanColumnNameToIds, column)));
-
         // If there is no aggregated column in duplicate index, the index will be SPJ.
         // For example:
         //     duplicate table (k1, k2, v1)
@@ -716,7 +751,7 @@ public class MaterializedViewRule extends Rule {
         //
         // ISSUE-3016, MaterializedViewFunctionTest: testDeduplicateQueryInAgg
         List<Column> mvMetaSchema = mvMeta.getSchema();
-        if (mvNonAggregatedColumns.size() == mvMetaSchema.size()
+        if (mvNonAggregatedColumnsSize == mvMetaSchema.size()
                 && mvMeta.getKeysType() == KeysType.DUP_KEYS) {
             return true;
         }
@@ -944,11 +979,12 @@ public class MaterializedViewRule extends Rule {
             queryFnChild0 = queryFnChild0.getChild(0);
         }
         ScalarOperator mvColumnFnChild0 = mvColumnFn.getChild(0);
+        ColumnRefSet mvColumnFnChild0UsedColumns = mvColumnFnChild0.getUsedColumns();
 
         if (!queryFnChild0.isColumnRef()) {
             IsNoCallChildrenValidator validator = new IsNoCallChildrenValidator(keyColumns, aggregateColumns);
             if (!(isCaseWhenScalarOperator(queryFnChild0) && queryFnChild0.accept(validator, null))) {
-                ColumnRefOperator mvColumnRef = factory.getColumnRef(mvColumnFnChild0.getUsedColumns().getFirstId());
+                ColumnRefOperator mvColumnRef = factory.getColumnRef(mvColumnFnChild0UsedColumns.getFirstId());
                 Column mvColumn = factory.getColumn(mvColumnRef);
                 if (mvColumn.getDefineExpr() != null && mvColumn.getDefineExpr() instanceof FunctionCallExpr &&
                         queryFnChild0 instanceof CallOperator) {
@@ -965,24 +1001,23 @@ public class MaterializedViewRule extends Rule {
             }
         }
 
-        if (queryFnChild0.getUsedColumns().equals(mvColumnFnChild0.getUsedColumns())) {
+        ColumnRefSet queryFnChild0UsedColumns = queryFnChild0.getUsedColumns();
+        if (queryFnChild0UsedColumns.equals(mvColumnFnChild0UsedColumns)) {
             return true;
         }
 
         if (isCaseWhenScalarOperator(queryFnChild0)) {
-            int[] queryColumnIds = queryFnChild0.getUsedColumns().getColumnIds();
-            Set<Integer> mvColumnIdSet = usedBaseColumnIds.stream()
-                    .collect(Collectors.toSet());
+            int[] queryColumnIds = queryFnChild0UsedColumns.getColumnIds();
             for (int queryColumnId : queryColumnIds) {
-                if (!mvColumnIdSet.contains(queryColumnId)) {
+                if (!usedBaseColumnIds.contains(queryColumnId)) {
                     return false;
                 }
             }
             return true;
         } else {
-            ColumnRefOperator queryColumnRef = factory.getColumnRef(queryFnChild0.getUsedColumns().getFirstId());
+            ColumnRefOperator queryColumnRef = factory.getColumnRef(queryFnChild0UsedColumns.getFirstId());
             Column queryColumn = factory.getColumn(queryColumnRef);
-            ColumnRefOperator mvColumnRef = factory.getColumnRef(mvColumnFnChild0.getUsedColumns().getFirstId());
+            ColumnRefOperator mvColumnRef = factory.getColumnRef(mvColumnFnChild0UsedColumns.getFirstId());
             Column mvColumn = factory.getColumn(mvColumnRef);
             if (factory.getRelationId(queryColumnRef.getId()).equals(factory.getRelationId(mvColumnRef.getId()))) {
                 if (mvColumn.getAggregationType() == null) {

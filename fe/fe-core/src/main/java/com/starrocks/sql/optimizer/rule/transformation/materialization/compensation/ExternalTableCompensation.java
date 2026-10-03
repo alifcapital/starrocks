@@ -284,6 +284,15 @@ public final class ExternalTableCompensation extends TableCompensation {
                                           Optional<LogicalScanOperator> scanOperatorOpt) {
         MaterializedView mv = mvUpdateInfo.getMv();
         PCellSortedSet toRefreshPartitionNames = mvUpdateInfo.getBaseTableToRefreshPartitionNames(refBaseTable);
+        return build(refBaseTable, mvUpdateInfo, scanOperatorOpt, mv, toRefreshPartitionNames);
+    }
+
+    // Consume the caller-owned fresh set read-only; compensation ranges have their own list.
+    static TableCompensation build(Table refBaseTable,
+                                   MvUpdateInfo mvUpdateInfo,
+                                   Optional<LogicalScanOperator> scanOperatorOpt,
+                                   MaterializedView mv,
+                                   PCellSortedSet toRefreshPartitionNames) {
         if (toRefreshPartitionNames == null) {
             logMVRewrite(mv.getName(), "MV's ref base table {} to refresh partition is null, unknown state",
                     refBaseTable.getName());

@@ -129,24 +129,8 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
             return false;
         }
 
-        // check mv is partitioned table
-        PartitionInfo partitionInfo = mv.getPartitionInfo();
-        if (!partitionInfo.isRangePartition()) {
-            return false;
-        }
-        Optional<Expr> mvPartitionExprOpt = mv.getRangePartitionFirstExpr();
-        if (mvPartitionExprOpt.isEmpty()) {
-            return false;
-        }
-        Expr mvPartitionExpr = mvPartitionExprOpt.get();
-        if (mvPartitionExpr == null || !(mvPartitionExpr instanceof FunctionCallExpr)) {
-            return false;
-        }
-        FunctionCallExpr functionCallExpr = (FunctionCallExpr) mvPartitionExpr;
-        if (!functionCallExpr.getFunctionName().equalsIgnoreCase(FunctionSet.DATE_TRUNC)) {
-            return false;
-        }
-
+        // the mv partition expr (date_trunc on a range partition) is already checked by getMVPartitionExpr,
+        // so we do not check it again here.
         // check ref base table is partitioned or not
         if (refBaseTable instanceof OlapTable) {
             OlapTable refBaseOlapTable = (OlapTable) refBaseTable;
@@ -191,7 +175,7 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
         // check mv's base table
         List<Table> baseTables = mvContext.getBaseTables();
         if (baseTables.size() != 1) {
-            logMVRewrite(mvRewriteContext, "AggTimeSeriesRewriter: base table size is not 1, size=" + baseTables.size());
+            logMVRewrite(mvRewriteContext, "AggTimeSeriesRewriter: base table size is not 1, size={}", baseTables.size());
             return null;
         }
         Table refBaseTable = baseTables.get(0);
@@ -203,7 +187,7 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
         OptExpression queryExpression = mvRewriteContext.getQueryExpression();
         if (!isEnableTimeGranularityRollup(refBaseTable, mv, queryExpression)) {
             logMVRewrite(mvRewriteContext,
-                    "AggTimeSeriesRewriter: cannot enable time granularity rollup for mv: " + mv.getName());
+                    "AggTimeSeriesRewriter: cannot enable time granularity rollup for mv: {}", mv.getName());
             return null;
         }
         // split predicates for mv rewritten and non-mv-rewritten
@@ -315,17 +299,14 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
             ColumnRefOperator aggColRef = entry.getKey();
             CallOperator aggCall = entry.getValue();
             Preconditions.checkArgument(aggCall.getChildren().size() >= 1);
-            if (uniqueAggregations.containsKey(aggCall)) {
-                ctx.aggColRefToPushDownAggMap.put(aggColRef, aggCall);
-                continue;
-            }
-            // NOTE: This new aggregate type is final stage's type, not the immediate/partial stage type.
-            ColumnRefOperator newColRef = queryColumnRefFactory.create(aggCall, aggCall.getType(), aggCall.isNullable());
-            uniqueAggregations.put(aggCall, newColRef);
-
-            // record all aggregate in remapping, original (query) agg col ref -> new(query) agg col ref
-            remapping.put(aggColRef, newColRef);
-
+            uniqueAggregations.computeIfAbsent(aggCall, k -> {
+                // NOTE: This new aggregate type is final stage's type, not the immediate/partial stage type.
+                ColumnRefOperator newColRef =
+                        queryColumnRefFactory.create(aggCall, aggCall.getType(), aggCall.isNullable());
+                // record all aggregate in remapping, original (query) agg col ref -> new(query) agg col ref
+                remapping.put(aggColRef, newColRef);
+                return newColRef;
+            });
             ctx.aggColRefToPushDownAggMap.put(aggColRef, aggCall);
         }
         Map<ColumnRefOperator, CallOperator> newAggregations = Maps.newHashMap();
@@ -454,10 +435,7 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
         OptExpressionDuplicator duplicator = new OptExpressionDuplicator(mvContext);
         OptExpression dupRewritten = duplicator.duplicate(rewritten);
         deriveLogicalProperty(dupRewritten);
-        List<ColumnRefOperator> newOrigOutputColumns = origOutputColumns.stream()
-                .map(col -> aggColRefMapping.getOrDefault(col, col))
-                .collect(Collectors.toList());
-        List<ColumnRefOperator> newOutputColRefs = duplicator.getMappedColumns(newOrigOutputColumns);
+        List<ColumnRefOperator> newOutputColRefs = getMappedOutputColumns(duplicator, origOutputColumns, aggColRefMapping);
 
         // refresh remapping since after duplication, the column ref id has been changed
         Map<ColumnRefOperator, ColumnRefOperator> aggColMapping = duplicator.getColumnMapping();
@@ -488,7 +466,7 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
             // use aggregate push down context to generate related push-down aggregation functions
             CallOperator newAggCall = getRollupPartialAggregate(mvRewriteContext, ctx, aggCall);
             if (newAggCall == null) {
-                logMVRewrite(mvRewriteContext, "AggTimeSeriesRewriter: cannot find partial agg remapping for " + aggCall);
+                logMVRewrite(mvRewriteContext, "AggTimeSeriesRewriter: cannot find partial agg remapping for {}", aggCall);
                 return null;
             }
             ColumnRefOperator newAggColRef = queryColumnRefFactory.create(newAggCall,
@@ -506,12 +484,24 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
         OptExpressionDuplicator duplicator = new OptExpressionDuplicator(mvContext);
         OptExpression queryDuplicateOptExpression = duplicator.duplicate(newQueryOptExpression);
         deriveLogicalProperty(queryDuplicateOptExpression);
-        List<ColumnRefOperator> newOrigOutputColumns = origOutputColumns.stream()
-                .map(col -> aggColRefMapping.getOrDefault(col, col))
-                .collect(Collectors.toList());
-        List<ColumnRefOperator> newQueryOutputCols = duplicator.getMappedColumns(newOrigOutputColumns);
+        List<ColumnRefOperator> newQueryOutputCols = getMappedOutputColumns(duplicator, origOutputColumns, aggColRefMapping);
 
         return Pair.create(queryDuplicateOptExpression, newQueryOutputCols);
+    }
+
+    /**
+     * Map each original output column by aggColRefMapping first (if it has an entry) and then by the duplicator's
+     * column mapping, the same result as duplicator.getMappedColumns over the aggColRefMapping-mapped columns.
+     */
+    private List<ColumnRefOperator> getMappedOutputColumns(OptExpressionDuplicator duplicator,
+                                                           List<ColumnRefOperator> origOutputColumns,
+                                                           Map<ColumnRefOperator, ColumnRefOperator> aggColRefMapping) {
+        Map<ColumnRefOperator, ColumnRefOperator> columnMapping = duplicator.getColumnMapping();
+        List<ColumnRefOperator> mappedColumns = Lists.newArrayList();
+        for (ColumnRefOperator col : origOutputColumns) {
+            mappedColumns.add(columnMapping.get(aggColRefMapping.getOrDefault(col, col)));
+        }
+        return mappedColumns;
     }
 
     private List<ColumnRefOperator> getOutputColumns(OptExpression optExpression) {
@@ -601,15 +591,18 @@ public class AggregatedTimeSeriesRewriter extends MaterializedViewRewriter {
             // collect all column references in the predicate
             List<ColumnRefOperator> colRefs = Lists.newArrayList();
             predicate.getColumnRefs(colRefs);
-            List<ColumnRefOperator> refPartitionColRefs = colRefs.stream()
-                    .filter(col -> col.equals(refPartitionColRef))
-                    .collect(Collectors.toList());
+            int refPartitionColRefCount = 0;
+            for (ColumnRefOperator col : colRefs) {
+                if (col.equals(refPartitionColRef)) {
+                    refPartitionColRefCount++;
+                }
+            }
             // only can push down partition predicate if there is only one partition column reference
-            if (refPartitionColRefs.size() > 1) {
+            if (refPartitionColRefCount > 1) {
                 return null;
             }
 
-            if (refPartitionColRefs.size() == 1) {
+            if (refPartitionColRefCount == 1) {
                 // TODO: only can handle binary predicate, maybe we can loose this restriction in the future
                 if (!(predicate instanceof BinaryPredicateOperator)) {
                     return null;

@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer.rule.transformation.materialization;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
-import com.google.common.collect.Sets;
 import com.google.common.collect.TreeRangeSet;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
@@ -34,7 +33,6 @@ import com.starrocks.type.Type;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.BiFunction;
 
 public class PredicateExtractor extends ScalarOperatorVisitor<RangePredicate, PredicateExtractor.PredicateExtractorContext> {
@@ -89,8 +87,13 @@ public class PredicateExtractor extends ScalarOperatorVisitor<RangePredicate, Pr
     }
 
     private boolean isSupportedRangeExpr(ScalarOperator op) {
-        List<ColumnRefOperator> columns = Utils.collect(op, ColumnRefOperator.class);
-        return op.isVariable() && columns.size() == 1;
+        if (op instanceof ColumnRefOperator) {
+            return true;
+        }
+        if (!op.isVariable()) {
+            return false;
+        }
+        return Utils.collect(op, ColumnRefOperator.class).size() == 1;
     }
 
     private RangePredicate rewriteBinaryPredicate(BinaryPredicateOperator predicate) {
@@ -98,10 +101,10 @@ public class PredicateExtractor extends ScalarOperatorVisitor<RangePredicate, Pr
         ScalarOperator right = predicate.getChild(1);
         ScalarOperator op1 = null;
         ConstantOperator op2 = null;
-        if (isSupportedRangeExpr(left) && right instanceof ConstantOperator) {
+        if (right instanceof ConstantOperator && isSupportedRangeExpr(left)) {
             op1 = left;
             op2 = (ConstantOperator) right;
-        } else if (isSupportedRangeExpr(right) && left instanceof ConstantOperator) {
+        } else if (left instanceof ConstantOperator && isSupportedRangeExpr(right)) {
             op1 = right;
             op2 = (ConstantOperator) left;
         } else {
@@ -228,15 +231,18 @@ public class PredicateExtractor extends ScalarOperatorVisitor<RangePredicate, Pr
     private void mergeColumnRange(
             List<RangePredicate> rangePredicates,
             BiFunction<ColumnRangePredicate, ColumnRangePredicate, ColumnRangePredicate> mergeOp) {
+        if (rangePredicates.size() < 2) {
+            return;
+        }
         Map<ScalarOperator, ColumnRangePredicate> columnRangePredicateMap = Maps.newHashMap();
         List<ColumnRangePredicate> columnRanges = Lists.newArrayList();
         for (RangePredicate rangePredicate : rangePredicates) {
             if (rangePredicate instanceof ColumnRangePredicate) {
                 ColumnRangePredicate columnRangePredicate = rangePredicate.cast();
                 columnRanges.add(columnRangePredicate);
-                if (columnRangePredicateMap.containsKey(columnRangePredicate.getExpression())) {
-                    ColumnRangePredicate newRangePredicate = columnRangePredicateMap.get(columnRangePredicate.getExpression());
-                    newRangePredicate = mergeOp.apply(newRangePredicate, columnRangePredicate);
+                ColumnRangePredicate existing = columnRangePredicateMap.get(columnRangePredicate.getExpression());
+                if (existing != null) {
+                    ColumnRangePredicate newRangePredicate = mergeOp.apply(existing, columnRangePredicate);
                     if (newRangePredicate.equals(ColumnRangePredicate.FALSE)) {
                         rangePredicates.add(newRangePredicate);
                         return;
@@ -251,14 +257,13 @@ public class PredicateExtractor extends ScalarOperatorVisitor<RangePredicate, Pr
                 }
             }
         }
-        rangePredicates.removeAll(columnRanges);
-        Set<ScalarOperator> visited = Sets.newHashSet();
-        // try to keep the sequence to make result steady
+        // columnRanges contains every column predicate above; avoid pairwise range equality checks.
+        rangePredicates.removeIf(rangePredicate -> rangePredicate instanceof ColumnRangePredicate);
+        // Consume the local map in first-occurrence order; repeated expressions then find no entry.
         for (ColumnRangePredicate columnRangePredicate : columnRanges) {
-            ScalarOperator expr = columnRangePredicate.getExpression();
-            if (!visited.contains(expr) && columnRangePredicateMap.containsKey(expr)) {
-                rangePredicates.add(columnRangePredicateMap.get(expr));
-                visited.add(expr);
+            ColumnRangePredicate merged = columnRangePredicateMap.remove(columnRangePredicate.getExpression());
+            if (merged != null) {
+                rangePredicates.add(merged);
             }
         }
     }

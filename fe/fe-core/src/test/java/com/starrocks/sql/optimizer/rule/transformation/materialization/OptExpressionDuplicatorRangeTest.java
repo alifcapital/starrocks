@@ -14,8 +14,10 @@
 
 package com.starrocks.sql.optimizer.rule.transformation.materialization;
 
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.common.jmockit.Deencapsulation;
+import com.starrocks.common.util.UnionFind;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.base.DistributionCol;
@@ -29,6 +31,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -87,5 +90,62 @@ class OptExpressionDuplicatorRangeTest {
         assertEquals(newB.getId(), newSpec.getColocateColumns().get(1).getColId());
         assertEquals(100L, newSpec.getEquivalentDescriptor().getTableId());
         assertEquals(List.of(10L, 20L), newSpec.getEquivalentDescriptor().getPartitionIds());
+    }
+
+    @Test
+    void processRangeDistributionSpecRemapsEveryMemberOfEquivalenceGroups(
+            @Mocked OptimizerContext optimizerContext) throws Exception {
+        ColumnRefFactory prevFactory = new ColumnRefFactory();
+        List<ColumnRefOperator> oldRefs = List.of(
+                prevFactory.create("a", IntegerType.INT, true),
+                prevFactory.create("b", IntegerType.INT, true),
+                prevFactory.create("c", IntegerType.INT, true),
+                prevFactory.create("d", IntegerType.INT, true));
+        Map<ColumnRefOperator, ColumnRefOperator> columnMapping = Maps.newHashMap();
+        for (int i = 0; i < oldRefs.size(); i++) {
+            columnMapping.put(oldRefs.get(i),
+                    new ColumnRefOperator(1001 + i, IntegerType.INT, oldRefs.get(i).getName(), true));
+        }
+        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(columnMapping);
+
+        List<DistributionCol> oldCols = Lists.newArrayList();
+        for (ColumnRefOperator ref : oldRefs) {
+            oldCols.add(new DistributionCol(ref.getId(), true));
+        }
+        EquivalentDescriptor oldDesc = new EquivalentDescriptor(100L, List.of(10L, 20L));
+        oldDesc.initDistributionUnionFind(oldCols);
+        // a, b and c are in one strict equivalence group, d stays alone
+        oldDesc.getNullStrictUnionFind().union(oldCols.get(0), oldCols.get(1));
+        oldDesc.getNullStrictUnionFind().union(oldCols.get(1), oldCols.get(2));
+        RangeDistributionSpec oldSpec = new RangeDistributionSpec(oldCols, oldDesc);
+
+        OptExpressionDuplicator duplicator = new OptExpressionDuplicator(prevFactory, optimizerContext);
+        Class<?> visitorClass =
+                Class.forName("com.starrocks.sql.optimizer.rule.transformation.materialization."
+                        + "OptExpressionDuplicator$OptExpressionDuplicatorVisitor");
+        Object visitor = Deencapsulation.newInnerInstance(
+                visitorClass, duplicator,
+                optimizerContext, columnMapping, rewriter, prevFactory, false, false);
+        RangeDistributionSpec newSpec = Deencapsulation.invoke(visitor, "processRangeDistributionSpec", oldSpec);
+
+        Set<DistributionCol> mappedGroup = Set.of(new DistributionCol(1001, true), new DistributionCol(1002, true),
+                new DistributionCol(1003, true));
+        UnionFind<DistributionCol> relax = newSpec.getEquivalentDescriptor().getNullRelaxUnionFind();
+        assertEquals(mappedGroup, relax.getEquivGroup(new DistributionCol(1001, true)));
+        assertEquals(mappedGroup, relax.getEquivGroup(new DistributionCol(1002, true)));
+        assertEquals(mappedGroup, relax.getEquivGroup(new DistributionCol(1003, true)));
+        assertEquals(Set.of(new DistributionCol(1004, true)), relax.getEquivGroup(new DistributionCol(1004, true)));
+        assertEquals(2, relax.getAllGroups().size());
+
+        UnionFind<DistributionCol> strict = newSpec.getEquivalentDescriptor().getNullStrictUnionFind();
+        assertEquals(4, strict.getAllGroups().size());
+        for (int i = 0; i < 4; i++) {
+            assertEquals(Set.of(new DistributionCol(1001 + i, false)),
+                    strict.getEquivGroup(new DistributionCol(1001 + i, false)));
+        }
+
+        // the original descriptor keeps its ids and groups
+        assertEquals(Set.of(oldCols.get(0), oldCols.get(1), oldCols.get(2)),
+                oldDesc.getNullStrictUnionFind().getEquivGroup(oldCols.get(0)));
     }
 }
