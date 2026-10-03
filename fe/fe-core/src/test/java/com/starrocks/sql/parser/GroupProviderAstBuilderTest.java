@@ -528,15 +528,9 @@ public class GroupProviderAstBuilderTest {
                 "\"type\" = \"unix\", " +
                 "\"type\" = \"ldap\")";
 
-        CreateGroupProviderStmt stmt =
-                (CreateGroupProviderStmt) SqlParser.parseSingleStatement(sql, ctx.getSessionVariable().getSqlMode());
-
-        Assertions.assertNotNull(stmt, "Statement should parse successfully");
-        Assertions.assertEquals("test_provider", stmt.getName(), "Provider name should match");
-
-        // Duplicate properties should be handled (last one wins or validation error)
-        Assertions.assertEquals("ldap", stmt.getPropertyMap().get("type"),
-                "Duplicate type property should be handled");
+        ParsingException error = Assertions.assertThrows(ParsingException.class,
+                () -> SqlParser.parseSingleStatement(sql, ctx.getSessionVariable().getSqlMode()));
+        Assertions.assertTrue(error.getMessage().contains("Duplicate property key: type"), error.getMessage());
     }
 
     /**
