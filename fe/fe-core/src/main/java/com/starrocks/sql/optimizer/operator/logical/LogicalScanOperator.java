@@ -95,7 +95,6 @@ public abstract class LogicalScanOperator extends LogicalOperator {
         this.columnAccessPaths = ImmutableList.of();
         this.scanOptimizeOption = new ScanOptimizeOption();
         this.tvrVersionRange = tvrVersionRange;
-        buildColumnFilters(predicate);
     }
 
     protected LogicalScanOperator(OperatorType type) {
@@ -113,6 +112,7 @@ public abstract class LogicalScanOperator extends LogicalOperator {
 
     public void setTable(Table table) {
         this.table = table;
+        this.columnFilters = null;
     }
 
     public Map<ColumnRefOperator, Column> getColRefToColumnMetaMap() {
@@ -176,12 +176,23 @@ public abstract class LogicalScanOperator extends LogicalOperator {
         return deriver.derive(predicate);
     }
 
+    @Override
+    public void setPredicate(ScalarOperator predicate) {
+        super.setPredicate(predicate);
+        columnFilters = null;
+    }
+
     public void buildColumnFilters(ScalarOperator predicate) {
         this.columnFilters = ImmutableMap.copyOf(
                 ColumnFilterConverter.convertColumnFilter(Utils.extractConjuncts(predicate), table));
     }
 
     public Map<String, PartitionColumnFilter> getColumnFilters() {
+        // Only partition/distribution pruners consume these legacy AST filters. Most external
+        // scans never need them, even when rewrites build many copies of a large IN predicate.
+        if (columnFilters == null) {
+            buildColumnFilters(predicate);
+        }
         return columnFilters;
     }
 
@@ -257,7 +268,7 @@ public abstract class LogicalScanOperator extends LogicalOperator {
             builder.table = scanOperator.table;
             builder.colRefToColumnMetaMap = scanOperator.colRefToColumnMetaMap;
             builder.columnMetaToColRefMap = scanOperator.columnMetaToColRefMap;
-            builder.columnFilters = scanOperator.columnFilters;
+            builder.columnFilters = null;
             builder.columnAccessPaths = scanOperator.columnAccessPaths;
             builder.scanOptimizeOption = scanOperator.scanOptimizeOption;
             builder.partitionColumns = scanOperator.partitionColumns;
@@ -267,9 +278,8 @@ public abstract class LogicalScanOperator extends LogicalOperator {
 
         @Override
         public O build() {
-            builder.columnFilters = ImmutableMap.copyOf(
-                    ColumnFilterConverter.convertColumnFilter(Utils.extractConjuncts(builder.predicate),
-                            builder.table));
+            // Filters contain mutable literals/lists: do not share them between scan copies.
+            builder.columnFilters = null;
             return super.build();
         }
 

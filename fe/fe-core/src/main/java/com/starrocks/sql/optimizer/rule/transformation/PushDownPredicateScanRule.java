@@ -36,10 +36,10 @@ import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.sql.optimizer.rewrite.TimeDriftConstraint;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 public class PushDownPredicateScanRule extends TransformationRule {
     private static final ImmutableSet<OperatorType> SUPPORT = ImmutableSet.of(
@@ -80,8 +80,12 @@ public class PushDownPredicateScanRule extends TransformationRule {
         predicates = ScalarOperatorRewriter.simplifyCaseWhen(predicates, true);
 
         ScalarRangePredicateExtractor rangeExtractor = new ScalarRangePredicateExtractor();
-        predicates = rangeExtractor.rewriteOnlyColumn(Utils.compoundAnd(Utils.extractConjuncts(predicates)
-                .stream().map(rangeExtractor::rewriteOnlyColumn).collect(Collectors.toList())));
+        List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicates);
+        ListIterator<ScalarOperator> iterator = conjuncts.listIterator();
+        while (iterator.hasNext()) {
+            iterator.set(rangeExtractor.rewriteOnlyColumn(iterator.next()));
+        }
+        predicates = rangeExtractor.rewriteOnlyColumn(Utils.compoundAnd(conjuncts));
         Preconditions.checkState(predicates != null);
 
         predicates = scalarOperatorRewriter.rewrite(predicates,
@@ -89,18 +93,17 @@ public class PushDownPredicateScanRule extends TransformationRule {
         predicates = MonotonicFilterDerivation.addScanBounds(predicates);
         predicates = Utils.transTrue2Null(predicates);
 
-        predicates = TimeDriftConstraint.tryAddDerivedPredicates(predicates, logicalScanOperator.getTable(),
-                logicalScanOperator.getColumnNameToColRefMap());
+        predicates = TimeDriftConstraint.tryAddDerivedPredicates(predicates, logicalScanOperator);
 
         // clone a new scan operator and rewrite predicate.
         Operator.Builder builder = OperatorBuilderFactory.build(logicalScanOperator);
         LogicalScanOperator newScanOperator = (LogicalScanOperator) builder.withOperator(logicalScanOperator)
                 .setPredicate(predicates)
                 .build();
-        newScanOperator.buildColumnFilters(predicates);
-        Map<ColumnRefOperator, ScalarOperator> projectMap =
-                newScanOperator.getOutputColumns().stream()
-                        .collect(Collectors.toMap(Function.identity(), Function.identity()));
+        Map<ColumnRefOperator, ScalarOperator> projectMap = new HashMap<>();
+        for (ColumnRefOperator outputColumn : newScanOperator.getOutputColumns()) {
+            projectMap.put(outputColumn, outputColumn);
+        }
         LogicalProjectOperator logicalProjectOperator = new LogicalProjectOperator(projectMap);
         OptExpression project = OptExpression.create(logicalProjectOperator, OptExpression.create(newScanOperator));
         return Lists.newArrayList(project);

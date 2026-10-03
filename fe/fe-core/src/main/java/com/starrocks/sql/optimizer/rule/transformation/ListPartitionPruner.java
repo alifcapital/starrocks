@@ -59,8 +59,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -107,6 +107,11 @@ public class ListPartitionPruner implements PartitionPruner {
     private final List<ColumnRefOperator> partitionColumnRefs;
     private final List<Long> specifyPartitionIds;
     private final ListPartitionInfo listPartitionInfo;
+
+    // Normalized copies of the value maps of a hive scan, keyed by the identity of the source map.
+    // Every partition conjunct on a column reads the same normalized map, so we build it once per source map.
+    private final Map<ConcurrentNavigableMap<LiteralExpr, Set<Long>>, ConcurrentNavigableMap<LiteralExpr, Set<Long>>>
+            normalizedPartitionValueMaps = new IdentityHashMap<>();
 
     private boolean deduceExtraConjuncts = false;
     private LogicalScanOperator scanOperator;
@@ -194,7 +199,7 @@ public class ListPartitionPruner implements PartitionPruner {
             Pair<Set<Long>, Boolean> matchesPair = evalPartitionPruneFilter(operator);
             Set<Long> conjunctMatches = matchesPair.first;
             Boolean existNoEvalConjuncts = matchesPair.second;
-            LOG.debug("prune by expr: {}, partitions: {}", operator.toString(), conjunctMatches);
+            LOG.debug("prune by expr: {}, partitions: {}", operator, conjunctMatches);
             if (conjunctMatches != null) {
                 if (matches == null) {
                     matches = Sets.newHashSet(conjunctMatches);
@@ -238,14 +243,25 @@ public class ListPartitionPruner implements PartitionPruner {
             return bop.getBinaryType().isEqualOrRange() && evaluateConstant(bop.getChild(1)) != null;
         } else if (conjunct instanceof InPredicateOperator) {
             InPredicateOperator inOp = conjunct.cast();
-            return !inOp.isNotIn() && inOp.getChildren().stream().skip(1).allMatch(ScalarOperator::isConstant);
+            if (inOp.isNotIn()) {
+                return false;
+            }
+            List<ScalarOperator> inChildren = inOp.getChildren();
+            for (int i = 1; i < inChildren.size(); i++) {
+                if (!inChildren.get(i).isConstant()) {
+                    return false;
+                }
+            }
+            return true;
         } else if (conjunct instanceof IsNullPredicateOperator) {
             return true;
         } else if (conjunct instanceof CompoundPredicateOperator) {
             CompoundPredicateOperator cop = conjunct.cast();
             // all children should be pruneable
-            if (cop.getChildren().stream().anyMatch(conj -> !canPruneWithConjunct(conj))) {
-                return false;
+            for (ScalarOperator child : cop.getChildren()) {
+                if (!canPruneWithConjunct(child)) {
+                    return false;
+                }
             }
             return true;
         }
@@ -491,7 +507,6 @@ public class ListPartitionPruner implements PartitionPruner {
 
     private Pair<Set<Long>, Boolean> evalPartitionPruneFilter(ScalarOperator operator) {
         Set<Long> matches = null;
-        Boolean existNoEval = false;
         if (operator instanceof BinaryPredicateOperator) {
             matches = evalBinaryPredicate((BinaryPredicateOperator) operator);
         } else if (operator instanceof InPredicateOperator) {
@@ -500,28 +515,24 @@ public class ListPartitionPruner implements PartitionPruner {
             matches = evalIsNullPredicate((IsNullPredicateOperator) operator);
         } else if (operator instanceof CompoundPredicateOperator) {
             Pair<Set<Long>, Boolean> matchesPair = evalCompoundPredicate((CompoundPredicateOperator) operator);
-            matches = matchesPair.first;
-            existNoEval = matchesPair.second;
+            return matchesPair.first == null ? Pair.create(null, true) : matchesPair;
         }
-        return matches == null ? Pair.create(null, true) : Pair.create(matches, existNoEval);
+        return matches == null ? Pair.create(null, true) : Pair.create(matches, false);
     }
 
-    private boolean isSinglePartitionColumn(ScalarOperator predicate) {
-        return isSinglePartitionColumn(predicate, partitionColumnRefs);
-    }
-
-    private static boolean isSinglePartitionColumn(ScalarOperator predicate,
-                                                   List<ColumnRefOperator> partitionColumnRefs) {
+    // Returns the only column ref of the predicate when it is a partition column that can be pruned by,
+    // otherwise null.
+    private ColumnRefOperator singlePartitionColumnRef(ScalarOperator predicate) {
         List<ColumnRefOperator> columnRefOperatorList = Utils.extractColumnRef(predicate);
         if (columnRefOperatorList.size() == 1 && partitionColumnRefs.contains(columnRefOperatorList.get(0))) {
             // such int_part_column + 1 = 11 can't prune partition
             if (predicate.getChild(0).isColumnRef() ||
                     (predicate.getChild(0) instanceof CastOperator &&
                             predicate.getChild(0).getChild(0).isColumnRef())) {
-                return true;
+                return columnRefOperatorList.get(0);
             }
         }
-        return false;
+        return null;
     }
 
     private static LiteralExpr castLiteralExpr(LiteralExpr literalExpr, Type type) {
@@ -558,6 +569,14 @@ public class ListPartitionPruner implements PartitionPruner {
         return newMap;
     }    
 
+    private ConcurrentNavigableMap<LiteralExpr, Set<Long>> getNormalizedPartitionValueMap(
+            ConcurrentNavigableMap<LiteralExpr, Set<Long>> partitionValueMap) {
+        if (scanOperator == null || !scanOperator.getTable().isHiveTable()) {
+            return partitionValueMap;
+        }
+        return normalizedPartitionValueMaps.computeIfAbsent(partitionValueMap, this::normalizePartitionValueMap);
+    }
+
     // generate new partition value map using cast operator' type.
     // eg. string partition value cast to int
     // string_col = '01'  1
@@ -585,7 +604,7 @@ public class ListPartitionPruner implements PartitionPruner {
         if (operator instanceof CastOperator && operator.getChild(0).isConstantRef()) {
             ConstantOperator child = (ConstantOperator) operator.getChild(0);
             ScalarOperatorToExpr.FormatterContext formatterContext =
-                    new ScalarOperatorToExpr.FormatterContext(new HashMap<>());
+                    new ScalarOperatorToExpr.FormatterContext(Map.of(), Map.of());
             LiteralExpr literal = (LiteralExpr) ScalarOperatorToExpr.buildExecExpression(child, formatterContext);
             try {
                 literal = castLiteralExpr(literal, operator.getType());
@@ -608,16 +627,16 @@ public class ListPartitionPruner implements PartitionPruner {
             return null;
         }
 
-        if (!isSinglePartitionColumn(binaryPredicate)) {
+        ColumnRefOperator leftChild = singlePartitionColumnRef(binaryPredicate);
+        if (leftChild == null) {
             return null;
         }
-        ColumnRefOperator leftChild = Utils.extractColumnRef(binaryPredicate).get(0);
 
         Set<Long> matches = Sets.newHashSet();
         ConcurrentNavigableMap<LiteralExpr, Set<Long>> partitionValueMap = columnToPartitionValuesMap.get(leftChild);
         Set<Long> nullPartitions = columnToNullPartitions.get(leftChild);
         if (partitionValueMap != null) {
-            partitionValueMap = normalizePartitionValueMap(partitionValueMap);
+            partitionValueMap = getNormalizedPartitionValueMap(partitionValueMap);
         }
 
         if (binaryPredicate.getChild(0) instanceof CastOperator && partitionValueMap != null) {
@@ -631,7 +650,7 @@ public class ListPartitionPruner implements PartitionPruner {
         }
 
         ScalarOperatorToExpr.FormatterContext formatterContext =
-                new ScalarOperatorToExpr.FormatterContext(new HashMap<>());
+                new ScalarOperatorToExpr.FormatterContext(Map.of(), Map.of());
         LiteralExpr literal = (LiteralExpr) ScalarOperatorToExpr.buildExecExpression(rightChild, formatterContext);
 
         BinaryType type = binaryPredicate.getBinaryType();
@@ -690,7 +709,7 @@ public class ListPartitionPruner implements PartitionPruner {
                 if (type == BinaryType.LE || type == BinaryType.LT) {
                     // SlotRef <[=] Literal
                     if (literal.compareLiteral(firstKey) < 0) {
-                        return Sets.newHashSet();
+                        return matches;
                     }
                     if (type == BinaryType.LE) {
                         upperInclusive = true;
@@ -706,7 +725,7 @@ public class ListPartitionPruner implements PartitionPruner {
                 } else {
                     // SlotRef >[=] Literal
                     if (literal.compareLiteral(lastKey) > 0) {
-                        return Sets.newHashSet();
+                        return matches;
                     }
                     if (type == BinaryType.GE) {
                         lowerInclusive = true;
@@ -746,17 +765,17 @@ public class ListPartitionPruner implements PartitionPruner {
             return null;
         }
 
-        if (!isSinglePartitionColumn(inPredicate)) {
+        ColumnRefOperator child = singlePartitionColumnRef(inPredicate);
+        if (child == null) {
             return null;
         }
-        ColumnRefOperator child = Utils.extractColumnRef(inPredicate).get(0);
 
         Set<Long> matches = Sets.newHashSet();
         ConcurrentNavigableMap<LiteralExpr, Set<Long>> partitionValueMap = columnToPartitionValuesMap.get(child);
         Set<Long> nullPartitions = columnToNullPartitions.get(child);
 
         if (partitionValueMap != null) {
-            partitionValueMap = normalizePartitionValueMap(partitionValueMap);
+            partitionValueMap = getNormalizedPartitionValueMap(partitionValueMap);
         }
 
         if (inPredicate.getChild(0) instanceof CastOperator && partitionValueMap != null) {
@@ -773,7 +792,7 @@ public class ListPartitionPruner implements PartitionPruner {
             // Column NOT IN (Literal, ..., Literal)
             // If there is a NullLiteral, return an empty set.
             if (inPredicate.hasAnyNullValues()) {
-                return Sets.newHashSet();
+                return matches;
             }
 
             // all partitions but remove NULL-only partitions
@@ -782,9 +801,11 @@ public class ListPartitionPruner implements PartitionPruner {
                     && (listPartitionInfo == null || listPartitionInfo.isSingleValuePartition(id)));
         }
 
+        // All values were checked to be constants above. Their conversion neither reads
+        // nor mutates column bindings, so one empty context serves the whole IN list.
+        ScalarOperatorToExpr.FormatterContext formatterContext =
+                new ScalarOperatorToExpr.FormatterContext(Map.of(), Map.of());
         for (int i = 1; i < inPredicate.getChildren().size(); ++i) {
-            ScalarOperatorToExpr.FormatterContext formatterContext =
-                    new ScalarOperatorToExpr.FormatterContext(new HashMap<>());
             LiteralExpr literal =
                     (LiteralExpr) ScalarOperatorToExpr.buildExecExpression(inPredicate.getChild(i), formatterContext);
             Set<Long> partitions = partitionValueMap.get(literal);
@@ -813,10 +834,10 @@ public class ListPartitionPruner implements PartitionPruner {
 
     private Set<Long> evalIsNullPredicate(IsNullPredicateOperator isNullPredicate) {
         Preconditions.checkNotNull(isNullPredicate);
-        if (!isSinglePartitionColumn(isNullPredicate)) {
+        ColumnRefOperator child = singlePartitionColumnRef(isNullPredicate);
+        if (child == null) {
             return null;
         }
-        ColumnRefOperator child = Utils.extractColumnRef(isNullPredicate).get(0);
 
         Set<Long> matches = Sets.newHashSet();
         Set<Long> nullPartitions = columnToNullPartitions.get(child);

@@ -35,11 +35,10 @@ import com.starrocks.sql.optimizer.rewrite.ExternalTablePredicateExtractor;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 // Because the external table may not support the functions in StarRocks,
 // to be on the safe side, we only push down partial predicates to the external table
@@ -81,8 +80,10 @@ public class PushDownPredicateToExternalTableScanRule extends TransformationRule
                 .setPredicate(pushedPredicate).build();
         LogicalScanOperator scanOperator = (LogicalScanOperator) newOperator;
 
-        Map<ColumnRefOperator, ScalarOperator> scanOutput = scanOperator.getOutputColumns().stream()
-                .collect(Collectors.toMap(Function.identity(), Function.identity()));
+        Map<ColumnRefOperator, ScalarOperator> scanOutput = new HashMap<>();
+        for (ColumnRefOperator outputColumn : scanOperator.getOutputColumns()) {
+            scanOutput.put(outputColumn, outputColumn);
+        }
         if (reservedPredicate == null) {
             /*
              * all predicates can push down

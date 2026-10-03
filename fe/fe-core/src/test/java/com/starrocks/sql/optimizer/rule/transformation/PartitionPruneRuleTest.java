@@ -116,7 +116,6 @@ public class PartitionPruneRuleTest {
         ScalarOperator predicate = Utils.compoundAnd(binaryPredicateOperator1, binaryPredicateOperator2);
         LogicalOlapScanOperator operator =
                 new LogicalOlapScanOperator(olapTable, scanColumnMap, scanMetaColMap, null, -1, predicate);
-        operator.setPredicate(null);
 
         new Expectations() {
             {

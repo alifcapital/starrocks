@@ -156,7 +156,6 @@ public class PullUpScanPredicateRule extends TransformationRule {
                 newProjections.remove(ref);
             }
         });
-        newScanOperator.buildColumnFilters(pushedPredicates);
 
         List<ColumnRefOperator> predicateUsedColumns = predicateUsedColumnRefSet
                 .getColumnRefOperators(context.getColumnRefFactory());
