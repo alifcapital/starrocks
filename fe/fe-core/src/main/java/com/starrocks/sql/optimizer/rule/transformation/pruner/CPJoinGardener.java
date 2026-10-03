@@ -563,7 +563,9 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
 
         void merge(PruneContext other) {
             this.pruned &= other.pruned;
-            other.rewriteMapping.forEach((k, v) -> this.rewriteMapping.merge(k, v, Sets::union));
+            // Sets.union is a read-only view, and rewrite() adds to the merged sets, so we merge into a new set.
+            other.rewriteMapping.forEach((k, v) ->
+                    this.rewriteMapping.merge(k, v, (s0, s1) -> new HashSet<>(Sets.union(s0, s1))));
             this.unprunedPkColRefs.addAll(other.unprunedPkColRefs);
             this.prunedTables.addAll(other.prunedTables);
         }
