@@ -58,11 +58,12 @@ public class JoinReorderHelper {
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projection.getColumnRefMap().entrySet()) {
                 ColumnRefOperator columnRefOperator = entry.getKey();
                 ScalarOperator scalarOperator = entry.getValue();
-                if (scalarOperator.getUsedColumns().isEmpty()) {
+                ColumnRefSet usedColumns = scalarOperator.getUsedColumns();
+                if (usedColumns.isEmpty()) {
                     // do nothing
-                } else if (left.getOutputColumns().containsAll(scalarOperator.getUsedColumns())) {
+                } else if (left.getOutputColumns().containsAll(usedColumns)) {
                     leftCols.union(columnRefOperator.getId());
-                } else if (right.getOutputColumns().containsAll(scalarOperator.getUsedColumns())) {
+                } else if (right.getOutputColumns().containsAll(usedColumns)) {
                     rightCols.union(columnRefOperator.getId());
                 } else {
                     refBothChildCols.union(columnRefOperator.getId());
@@ -87,16 +88,15 @@ public class JoinReorderHelper {
         }
 
         ColumnRefSet topJoinOnConditionCols = topJoinOnCondition.getUsedColumns();
-        if (topJoin.getJoinType() == JoinOperator.INNER_JOIN
-                && topJoinOnConditionCols.isIntersect(splitCols.get(1))) {
+        boolean refsBottomRight = topJoinOnConditionCols.isIntersect(splitCols.get(1));
+        if (topJoin.getJoinType() == JoinOperator.INNER_JOIN) {
             // when topJoin is inner join, it's on condition must ref cols from right child of bottom join
             // to avoid cross join transformation.
-            return true;
+            return refsBottomRight;
         } else {
             // when topJoin is other type join, it's on condition must only ref cols from right child of bottom join
             // to avoid cross join transformation and ref null generating cols
-            return topJoinOnConditionCols.isIntersect(splitCols.get(1))
-                    && !topJoinOnConditionCols.isIntersect(splitCols.get(0));
+            return refsBottomRight && !topJoinOnConditionCols.isIntersect(splitCols.get(0));
         }
     }
 

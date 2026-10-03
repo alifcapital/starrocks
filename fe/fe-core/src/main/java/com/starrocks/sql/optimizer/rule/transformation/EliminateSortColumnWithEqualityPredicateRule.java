@@ -35,7 +35,6 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 public class EliminateSortColumnWithEqualityPredicateRule extends TransformationRule {
     public EliminateSortColumnWithEqualityPredicateRule() {
@@ -121,12 +120,18 @@ public class EliminateSortColumnWithEqualityPredicateRule extends Transformation
         @Override
         public Boolean visitCompoundPredicate(CompoundPredicateOperator predicate, Void context) {
             if (predicate.isAnd()) {
-                List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate).stream()
-                        .filter(x -> x.getUsedColumns().contains(column.getId()))
-                        .collect(Collectors.toList());
-
-                if (conjuncts.size() == 1) {
-                    return conjuncts.get(0).accept(this, null);
+                ScalarOperator matchingConjunct = null;
+                for (ScalarOperator conjunct : Utils.extractConjuncts(predicate)) {
+                    if (!conjunct.getUsedColumns().contains(column.getId())) {
+                        continue;
+                    }
+                    if (matchingConjunct != null) {
+                        return false;
+                    }
+                    matchingConjunct = conjunct;
+                }
+                if (matchingConjunct != null) {
+                    return matchingConjunct.accept(this, null);
                 }
             }
             return false;

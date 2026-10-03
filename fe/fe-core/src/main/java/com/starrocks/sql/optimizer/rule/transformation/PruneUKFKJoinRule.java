@@ -128,7 +128,7 @@ public class PruneUKFKJoinRule extends TransformationRule {
         if (joinOp.getOnPredicate() != null) {
             Utils.extractConjuncts(joinOp.getOnPredicate())
                     .stream().filter(p -> !Objects.equals(property.predicate, p))
-                    .forEach(p -> joinUsedColumns.union(p.getUsedColumns()));
+                    .forEach(p -> p.collectUsedColumns(joinUsedColumns));
         }
 
         return joinUsedColumns.containsAny(ukTableColumnRefs);
@@ -228,7 +228,7 @@ public class PruneUKFKJoinRule extends TransformationRule {
         public Void visit(OptExpression optExpression, ColumnRefSet context) {
             LogicalOperator op = optExpression.getOp().cast();
             if (op.getPredicate() != null) {
-                context.union(op.getPredicate().getUsedColumns());
+                op.getPredicate().collectUsedColumns(context);
             }
             for (OptExpression input : optExpression.getInputs()) {
                 input.getOp().accept(this, input, context);

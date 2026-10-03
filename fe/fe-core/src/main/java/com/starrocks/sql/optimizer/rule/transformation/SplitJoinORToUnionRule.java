@@ -415,14 +415,17 @@ public class SplitJoinORToUnionRule extends TransformationRule {
 
         Map<Integer, List<ScalarOperator>> cumulativePredicateMap = new HashMap<>();
         ColumnRefFactory columnRefFactory = context.getColumnRefFactory();
+        OptExpressionDuplicator predicateDuplicator = null;
 
         for (int i = 0; i < binaryPredicateList.size(); i++) {
             List<ScalarOperator> currentBranchPredicates = new ArrayList<>();
             for (int j = 0; j <= i; j++) {
                 BinaryPredicateOperator originalPredicate = binaryPredicateList.get(j);
 
-                OptExpressionDuplicator duplicator = new OptExpressionDuplicator(columnRefFactory, context);
-                ScalarOperator rewrittenPredicate = duplicator.rewriteAfterDuplicate(originalPredicate);
+                if (predicateDuplicator == null) {
+                    predicateDuplicator = new OptExpressionDuplicator(columnRefFactory, context);
+                }
+                ScalarOperator rewrittenPredicate = predicateDuplicator.rewriteAfterDuplicate(originalPredicate);
 
                 currentBranchPredicates.add(rewrittenPredicate);
             }

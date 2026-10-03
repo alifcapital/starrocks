@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.operator.physical.PhysicalHashJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalNestLoopJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamJoinOperator;
@@ -38,7 +39,6 @@ import com.starrocks.type.Type;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import static com.starrocks.sql.ast.expression.BinaryType.EQ_FOR_NULL;
 
@@ -91,8 +91,8 @@ public class JoinHelper {
 
     private void init() {
         equalsPredicate = getEqualsPredicate(leftChildColumns, rightChildColumns, Utils.extractConjuncts(onPredicate));
-        leftOnCols = Lists.newArrayList();
-        rightOnCols = Lists.newArrayList();
+        leftOnCols = new ArrayList<>(equalsPredicate.size());
+        rightOnCols = new ArrayList<>(equalsPredicate.size());
 
         boolean leftTableAggStrict = type.isAnyLeftOuterJoin() || type.isFullOuterJoin();
         boolean rightTableAggStrict = type.isRightOuterJoin() || type.isFullOuterJoin();
@@ -101,34 +101,48 @@ public class JoinHelper {
             boolean nullStrict = binaryPredicate.getBinaryType() == EQ_FOR_NULL;
             leftTableAggStrict = leftTableAggStrict || nullStrict;
             rightTableAggStrict = rightTableAggStrict || nullStrict;
-            ColumnRefSet leftUsedColumns = binaryPredicate.getChild(0).getUsedColumns();
-            ColumnRefSet rightUsedColumns = binaryPredicate.getChild(1).getUsedColumns();
-            // Join on expression had pushed down to project node, so there must be one column
-            if (leftUsedColumns.cardinality() > 1 || rightUsedColumns.cardinality() > 1) {
-                throw new StarRocksPlannerException(
-                        "we do not support equal on predicate have multi columns in left or right",
-                        ErrorType.UNSUPPORTED);
-            }
-
-            if (leftChildColumns.containsAll(leftUsedColumns) && rightChildColumns.containsAll(rightUsedColumns)) {
-                leftOnCols.add(new DistributionCol(leftUsedColumns.getFirstId(), nullStrict, leftTableAggStrict));
-                rightOnCols.add(new DistributionCol(rightUsedColumns.getFirstId(), nullStrict, rightTableAggStrict));
-            } else if (leftChildColumns.containsAll(rightUsedColumns) &&
-                    rightChildColumns.containsAll(leftUsedColumns)) {
-                leftOnCols.add(new DistributionCol(rightUsedColumns.getFirstId(), nullStrict, leftTableAggStrict));
-                rightOnCols.add(new DistributionCol(leftUsedColumns.getFirstId(), nullStrict, rightTableAggStrict));
+            int leftId = getOnlyUsedColumnId(binaryPredicate.getChild(0));
+            int rightId = getOnlyUsedColumnId(binaryPredicate.getChild(1));
+            if (leftChildColumns.contains(leftId) && rightChildColumns.contains(rightId)) {
+                leftOnCols.add(new DistributionCol(leftId, nullStrict, leftTableAggStrict));
+                rightOnCols.add(new DistributionCol(rightId, nullStrict, rightTableAggStrict));
+            } else if (leftChildColumns.contains(rightId) && rightChildColumns.contains(leftId)) {
+                leftOnCols.add(new DistributionCol(rightId, nullStrict, leftTableAggStrict));
+                rightOnCols.add(new DistributionCol(leftId, nullStrict, rightTableAggStrict));
             } else {
                 Preconditions.checkState(false, "shouldn't reach here");
             }
         }
     }
 
+    private static int getOnlyUsedColumnId(ScalarOperator operand) {
+        if (operand instanceof ColumnRefOperator column) {
+            return column.getId();
+        }
+        ColumnRefSet usedColumns = operand.getUsedColumns();
+        // Join expressions have been pushed down to projects; accepted keys use one column.
+        if (usedColumns.cardinality() > 1) {
+            throw new StarRocksPlannerException(
+                    "we do not support equal on predicate have multi columns in left or right",
+                    ErrorType.UNSUPPORTED);
+        }
+        return usedColumns.getFirstId();
+    }
+
     public List<Integer> getLeftOnColumnIds() {
-        return leftOnCols.stream().map(DistributionCol::getColId).collect(Collectors.toList());
+        List<Integer> ids = new ArrayList<>(leftOnCols.size());
+        for (DistributionCol column : leftOnCols) {
+            ids.add(column.getColId());
+        }
+        return ids;
     }
 
     public List<Integer> getRightOnColumnIds() {
-        return rightOnCols.stream().map(DistributionCol::getColId).collect(Collectors.toList());
+        List<Integer> ids = new ArrayList<>(rightOnCols.size());
+        for (DistributionCol column : rightOnCols) {
+            ids.add(column.getColId());
+        }
+        return ids;
     }
 
     public List<DistributionCol> getLeftCols() {
@@ -173,7 +187,7 @@ public class JoinHelper {
                 leftChildColumns, rightChildColumns, onPredicates);
         eqOnPredicates = eqOnPredicates.stream().filter(p -> !p.isCorrelated()).toList();
         for (BinaryPredicateOperator s : eqOnPredicates) {
-            if (!leftChildColumns.containsAll(s.getChild(0).getUsedColumns())) {
+            if (!isOperandFromInput(s.getChild(0), leftChildColumns)) {
                 s.swap();
             }
         }
@@ -220,24 +234,32 @@ public class JoinHelper {
     public static ScalarOperator extractAndValidateAsofTemporalPredicate(List<ScalarOperator> otherJoin,
                                                                          ColumnRefSet leftColumns,
                                                                          ColumnRefSet rightColumns) {
-        List<ScalarOperator> candidates = new ArrayList<>();
+        ScalarOperator temporalPredicate = null;
+        List<ScalarOperator> candidates = null;
         for (ScalarOperator predicate : otherJoin) {
             if (isValidAsofTemporalPredicate(predicate, leftColumns, rightColumns)) {
-                candidates.add(predicate);
+                if (temporalPredicate == null) {
+                    temporalPredicate = predicate;
+                } else {
+                    if (candidates == null) {
+                        candidates = new ArrayList<>();
+                        candidates.add(temporalPredicate);
+                    }
+                    candidates.add(predicate);
+                }
             }
         }
 
-        if (candidates.isEmpty()) {
+        if (temporalPredicate == null) {
             throw new IllegalStateException("ASOF JOIN requires exactly one temporal inequality condition comparing "
                     + "a column of the left side with a column of the right side. found: 0");
         }
-        if (candidates.size() > 1) {
+        if (candidates != null) {
             throw new IllegalStateException(String.format(
                     "ASOF JOIN requires exactly one temporal inequality condition, found %d: %s",
                     candidates.size(), candidates));
         }
 
-        ScalarOperator temporalPredicate = candidates.get(0);
         for (ScalarOperator child : temporalPredicate.getChildren()) {
             if (!child.isColumnRef()) {
                 throw new IllegalStateException(String.format(
@@ -252,7 +274,7 @@ public class JoinHelper {
             }
         }
 
-        return candidates.get(0);
+        return temporalPredicate;
     }
 
     /**
@@ -289,6 +311,7 @@ public class JoinHelper {
                 (rightColumns.containsAll(leftOperandColumns) && leftColumns.containsAll(rightOperandColumns));
     }
 
+    /** Returns whether any AND conjunct is an equality owned by the two join inputs. */
     public static boolean hasEqualsPredicate(ColumnRefSet leftColumns, ColumnRefSet rightColumns,
                                             ScalarOperator onPredicate) {
         if (onPredicate == null) {
@@ -344,7 +367,7 @@ public class JoinHelper {
         onPredicates.removeAll(eqOnPredicates);
         List<BinaryPredicateOperator> lhsEqRhsOnPredicates = Lists.newArrayList();
         for (BinaryPredicateOperator s : eqOnPredicates) {
-            if (!leftChildColumns.containsAll(s.getChild(0).getUsedColumns())) {
+            if (!isOperandFromInput(s.getChild(0), leftChildColumns)) {
                 lhsEqRhsOnPredicates.add(new BinaryPredicateOperator(s.getBinaryType(), s.getChild(1), s.getChild(0)));
             } else {
                 lhsEqRhsOnPredicates.add(s);
@@ -353,6 +376,13 @@ public class JoinHelper {
         return Pair.create(lhsEqRhsOnPredicates, onPredicates);
     }
 
+
+    private static boolean isOperandFromInput(ScalarOperator operand, ColumnRefSet inputColumns) {
+        if (operand instanceof ColumnRefOperator column && column.getOpType() != OperatorType.LAMBDA_ARGUMENT) {
+            return inputColumns.contains(column);
+        }
+        return inputColumns.containsAll(operand.getUsedColumns());
+    }
 
     /**
      * Conditions should contain:
@@ -370,6 +400,16 @@ public class JoinHelper {
             BinaryPredicateOperator binaryPredicate = (BinaryPredicateOperator) predicate;
             if (!binaryPredicate.getBinaryType().isEquivalence()) {
                 return false;
+            }
+
+            if (binaryPredicate.getChild(0) instanceof ColumnRefOperator left &&
+                    binaryPredicate.getChild(1) instanceof ColumnRefOperator right) {
+                if (left.getOpType() == OperatorType.LAMBDA_ARGUMENT ||
+                        right.getOpType() == OperatorType.LAMBDA_ARGUMENT) {
+                    return false;
+                }
+                return leftColumns.contains(left) && rightColumns.contains(right) ||
+                        leftColumns.contains(right) && rightColumns.contains(left);
             }
 
             ColumnRefSet leftUsedColumns = binaryPredicate.getChild(0).getUsedColumns();
@@ -410,8 +450,8 @@ public class JoinHelper {
 
             // Only apply to comparison operators (>, <, >=, <=)
             if (binaryPred.getBinaryType().isRange()) {
-                if (!leftColumns.containsAll(binaryPred.getChild(0).getUsedColumns()) &&
-                        rightColumns.containsAll(binaryPred.getChild(0).getUsedColumns())) {
+                ColumnRefSet usedColumns = binaryPred.getChild(0).getUsedColumns();
+                if (!leftColumns.containsAll(usedColumns) && rightColumns.containsAll(usedColumns)) {
                     return binaryPred.commutative();
                 } else {
                     return predicate;

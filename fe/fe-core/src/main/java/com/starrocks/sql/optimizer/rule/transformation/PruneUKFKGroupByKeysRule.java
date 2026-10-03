@@ -116,7 +116,8 @@ public class PruneUKFKGroupByKeysRule extends TransformationRule {
         }
 
         for (ColumnRefOperator groupBy : aggOp.getGroupingKeys()) {
-            if (requiredOutputColumns.contains(groupBy) || ukGroupBys.contains(groupBy)) {
+            if (groupBysToRemove.contains(groupBy) || requiredOutputColumns.contains(groupBy) ||
+                    ukGroupBys.contains(groupBy)) {
                 continue;
             }
 

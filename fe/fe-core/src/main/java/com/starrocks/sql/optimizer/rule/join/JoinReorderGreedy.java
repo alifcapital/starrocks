@@ -21,12 +21,12 @@ import com.google.common.collect.Sets;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Reorder multi join node by greedy algorithm
@@ -71,7 +71,7 @@ public class JoinReorderGreedy extends JoinOrder {
 
     @Override
     public List<OptExpression> getResult() {
-        List<OptExpression> result = Lists.newArrayList();
+        List<OptExpression> result = new ArrayList<>(topKExpr.size());
         while (!topKExpr.isEmpty()) {
             result.add(topKExpr.pollFirst().expr);
         }
@@ -88,7 +88,6 @@ public class JoinReorderGreedy extends JoinOrder {
         List<GroupInfo> bestLeftGroups = getBestGroupList(leftGroupInfos, curLevel);
         for (GroupInfo leftGroup : bestLeftGroups) {
             BitSet leftBitset = leftGroup.atoms;
-            double bestCost = Double.MAX_VALUE;
 
             for (GroupInfo rightGroup : rightGroupInfos) {
                 BitSet rightBitset = rightGroup.atoms;
@@ -109,10 +108,6 @@ public class JoinReorderGreedy extends JoinOrder {
 
                 computeCost(joinExpr.get());
                 getOrCreateGroupInfo(curLevel, joinBitSet, joinExpr.get());
-                double joinCost = joinExpr.get().cost;
-                if (joinCost < bestCost) {
-                    bestCost = joinCost;
-                }
             }
         }
     }
@@ -123,41 +118,32 @@ public class JoinReorderGreedy extends JoinOrder {
             return groupInfos;
         } else {
             Set<GroupInfo> bestGroupInfos = Sets.newHashSet();
-            // Get join level 1 used atoms
-            List<BitSet> levelOneGroups = Lists.newArrayList();
-            getGroupForLevel(1).forEach(groupInfo -> levelOneGroups.add(groupInfo.atoms));
             // For each atom, choose at least one group info to return.
-            for (BitSet levelOneGroup : levelOneGroups) {
-                List<GroupInfo> candidateGroups = groupInfos.stream().filter(
-                                groupInfo -> groupInfo.atoms.intersects(levelOneGroup) && !bestGroupInfos.contains(groupInfo)).
-                        collect(Collectors.toList());
-                // Get best group info from candidate group info
-                if (!candidateGroups.isEmpty()) {
-                    bestGroupInfos.add(getBestGroupInfo(candidateGroups));
+            for (GroupInfo atomGroup : getGroupForLevel(1)) {
+                boolean foundCandidate = false;
+                double bestCost = Double.MAX_VALUE;
+                GroupInfo bestGroup = null;
+                for (GroupInfo groupInfo : groupInfos) {
+                    if (groupInfo.atoms.intersects(atomGroup.atoms) && !bestGroupInfos.contains(groupInfo)) {
+                        foundCandidate = true;
+                        if (groupInfo.bestExprInfo.cost < bestCost) {
+                            bestGroup = groupInfo;
+                            bestCost = groupInfo.bestExprInfo.cost;
+                        }
+                    }
+                }
+                if (foundCandidate) {
+                    bestGroupInfos.add(bestGroup);
                 }
             }
             return Lists.newArrayList(bestGroupInfos);
         }
     }
 
-    private GroupInfo getBestGroupInfo(List<GroupInfo> groupInfos) {
-        double bestCost = Double.MAX_VALUE;
-        GroupInfo bestExpr = null;
-        for (GroupInfo groupInfo : groupInfos) {
-            if (groupInfo.bestExprInfo.cost < bestCost) {
-                bestExpr = groupInfo;
-                bestCost = groupInfo.bestExprInfo.cost;
-            }
-        }
-        return bestExpr;
-    }
-
     protected GroupInfo getOrCreateGroupInfo(JoinLevel joinLevel, BitSet atoms,
                                              ExpressionInfo exprInfo) {
-        GroupInfo groupInfo;
-        if (bitSetToGroupInfo.containsKey(atoms)) {
-            groupInfo = bitSetToGroupInfo.get(atoms);
-        } else {
+        GroupInfo groupInfo = bitSetToGroupInfo.get(atoms);
+        if (groupInfo == null) {
             groupInfo = new GroupInfo(atoms);
             joinLevel.groups.add(groupInfo);
             if (joinLevel.level > 1) {

@@ -41,7 +41,6 @@ import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -93,7 +92,7 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
         // hoists ON expressions into child projections before this rule runs, so an offspring
         // that looks like a bare column may in fact denote e.g. mod(v, 100) one level down —
         // the safe-target check must judge the defining expression, not the slot.
-        Map<ColumnRefOperator, ScalarOperator> slotDefinitions = collectSlotDefinitions(leftChild, rightChild);
+        SlotDefinitions slotDefinitions = new SlotDefinitions(leftChild, rightChild);
 
         OptExpression result = null;
         if (joinOperator.getJoinType().isAnyInnerJoin() || joinOperator.getJoinType().isSemiJoin()) {
@@ -116,19 +115,19 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
             } else if (toLeftPredicate == null) {
                 LogicalFilterOperator filter = new LogicalFilterOperator(toRightPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(input.inputAt(0), OptExpression.create(filter, input.inputAt(1)))
+                        input.inputAt(0), OptExpression.create(filter, input.inputAt(1))
                 );
             } else if (toRightPredicate == null) {
                 LogicalFilterOperator filter = new LogicalFilterOperator(toLeftPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(OptExpression.create(filter, input.inputAt(0)), input.inputAt(1))
+                        OptExpression.create(filter, input.inputAt(0)), input.inputAt(1)
                 );
             } else {
                 LogicalFilterOperator toLeftFilter = new LogicalFilterOperator(toLeftPredicate);
                 LogicalFilterOperator toRightFilter = new LogicalFilterOperator(toRightPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(OptExpression.create(toLeftFilter, input.inputAt(0)),
-                                OptExpression.create(toRightFilter, input.inputAt(1)))
+                        OptExpression.create(toLeftFilter, input.inputAt(0)),
+                        OptExpression.create(toRightFilter, input.inputAt(1))
                 );
             }
         } else if (joinOperator.getJoinType() == JoinOperator.LEFT_ANTI_JOIN) {
@@ -141,7 +140,7 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
             if (toRightPredicate != null) {
                 LogicalFilterOperator filter = new LogicalFilterOperator(toRightPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(input.inputAt(0), OptExpression.create(filter, input.inputAt(1)))
+                        input.inputAt(0), OptExpression.create(filter, input.inputAt(1))
                 );
             }
         } else if (joinOperator.getJoinType().isAnyLeftOuterJoin()) {
@@ -154,7 +153,7 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
             if (toRightPredicate != null) {
                 LogicalFilterOperator filter = new LogicalFilterOperator(toRightPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(input.inputAt(0), OptExpression.create(filter, input.inputAt(1)))
+                        input.inputAt(0), OptExpression.create(filter, input.inputAt(1))
                 );
             }
         } else if (joinOperator.getJoinType().isRightOuterJoin()) {
@@ -167,7 +166,7 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
             if (toLeftPredicate != null) {
                 LogicalFilterOperator filter = new LogicalFilterOperator(toLeftPredicate);
                 result = OptExpression.create(joinOperator,
-                        Lists.newArrayList(OptExpression.create(filter, input.inputAt(0)), input.inputAt(1))
+                        OptExpression.create(filter, input.inputAt(0)), input.inputAt(1)
                 );
             }
         }
@@ -225,20 +224,20 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
     private ScalarOperator derivePredicate(BinaryPredicateOperator binaryPredicate, DomainProperty domainProperty,
                                            DomainProperty existDomainProperty, boolean toLeft,
                                            boolean enableMonotonicDerive,
-                                           Map<ColumnRefOperator, ScalarOperator> slotDefinitions) {
+                                           SlotDefinitions slotDefinitions) {
         int idx = toLeft ? 1 : 0;
         ScalarOperator seed = binaryPredicate.getChild(idx);
         ScalarOperator offspring = binaryPredicate.getChild(1 - idx);
         BinaryType binaryType = binaryPredicate.getBinaryType();
         ScalarOperator rewriteResult = null;
         if (binaryType.isEqual()) {
-            if (domainProperty.contains(seed)) {
+            DomainProperty.DomainWrapper seedDomain = domainProperty.getValueWrapper(seed);
+            if (seedDomain != null) {
                 // a domain computed from an image may move only onto a safe target;
                 // user-written domains keep the old unconditional transfer
-                if (!domainProperty.getValueWrapper(seed).isMonotonicDerived()
-                        || isSafeDeriveTarget(offspring, slotDefinitions)) {
+                if (!seedDomain.isMonotonicDerived() || isSafeDeriveTarget(offspring, slotDefinitions)) {
                     ReplaceShuttle shuttle = new ReplaceShuttle(Map.of(seed, offspring));
-                    rewriteResult = shuttle.rewrite(domainProperty.getPredicateDesc(seed));
+                    rewriteResult = shuttle.rewrite(seedDomain.getPredicateDesc());
                 }
             } else if (enableMonotonicDerive && isSafeDeriveTarget(offspring, slotDefinitions)) {
                 // seed = date_format(e.datadate, '%Y%m'), domain(datadate) = ['2024-03-05',
@@ -251,11 +250,11 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
                 rewriteResult = image == null ? null : buildEqualImagePredicate(offspring, image);
             }
         } else if (binaryType == BinaryType.LT || binaryType == BinaryType.LE) {
-            if (domainProperty.contains(seed)) {
+            DomainProperty.DomainWrapper seedDomain = domainProperty.getValueWrapper(seed);
+            if (seedDomain != null) {
                 // same safe-target gate as in the EQ branch
-                if (!domainProperty.getValueWrapper(seed).isMonotonicDerived()
-                        || isSafeDeriveTarget(offspring, slotDefinitions)) {
-                    MinMax minMax = domainProperty.getValueWrapper(seed).getMinMax();
+                if (!seedDomain.isMonotonicDerived() || isSafeDeriveTarget(offspring, slotDefinitions)) {
+                    MinMax minMax = seedDomain.getMinMax();
                     rewriteResult = deriveLessPredicate(offspring, minMax, toLeft);
                 }
             } else if (enableMonotonicDerive && isSafeDeriveTarget(offspring, slotDefinitions)) {
@@ -269,10 +268,10 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
                         toLeft ? image.upperEndpoint() : image.lowerEndpoint());
             }
         } else if (binaryType == BinaryType.GT || binaryType == BinaryType.GE) {
-            if (domainProperty.contains(seed)) {
-                if (!domainProperty.getValueWrapper(seed).isMonotonicDerived()
-                        || isSafeDeriveTarget(offspring, slotDefinitions)) {
-                    MinMax minMax = domainProperty.getValueWrapper(seed).getMinMax();
+            DomainProperty.DomainWrapper seedDomain = domainProperty.getValueWrapper(seed);
+            if (seedDomain != null) {
+                if (!seedDomain.isMonotonicDerived() || isSafeDeriveTarget(offspring, slotDefinitions)) {
+                    MinMax minMax = seedDomain.getMinMax();
                     rewriteResult = deriveGreaterPredicate(offspring, minMax, toLeft);
                 }
             } else if (enableMonotonicDerive && isSafeDeriveTarget(offspring, slotDefinitions)) {
@@ -305,26 +304,56 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
      * the predicate put on that slot turns back into mod(f.v, 100) when pushed down through
      * the projection.
      */
-    private boolean isSafeDeriveTarget(ScalarOperator offspring, Map<ColumnRefOperator, ScalarOperator> slotDefinitions) {
+    private boolean isSafeDeriveTarget(ScalarOperator offspring, SlotDefinitions slotDefinitions) {
         ScalarOperator target = offspring.isColumnRef()
-                ? slotDefinitions.getOrDefault((ColumnRefOperator) offspring, offspring) : offspring;
+                ? slotDefinitions.resolve((ColumnRefOperator) offspring) : offspring;
         if (target.isColumnRef() || target instanceof CastOperator) {
             return true;
         }
         return MonotonicImage.isMonotonicExpression(target);
     }
 
-    private Map<ColumnRefOperator, ScalarOperator> collectSlotDefinitions(OptExpression... children) {
-        Map<ColumnRefOperator, ScalarOperator> definitions = new HashMap<>();
-        for (OptExpression child : children) {
-            if (child.getOp() instanceof LogicalProjectOperator) {
-                definitions.putAll(((LogicalProjectOperator) child.getOp()).getColumnRefMap());
-            }
-            if (child.getOp().getProjection() != null) {
-                definitions.putAll(child.getOp().getProjection().getColumnRefMap());
-            }
+    /**
+     * We expect few lookups against wide child projection maps, so slots are resolved on demand. The right
+     * child wins over the left one, and within a child the generic projection wins over the project operator.
+     */
+    private static final class SlotDefinitions {
+        private final OptExpression left;
+        private final OptExpression right;
+
+        private SlotDefinitions(OptExpression left, OptExpression right) {
+            this.left = left;
+            this.right = right;
         }
-        return definitions;
+
+        private ScalarOperator resolve(ColumnRefOperator slot) {
+            Map<ColumnRefOperator, ScalarOperator> definitions = projectionMap(right);
+            if (definitions != null && definitions.containsKey(slot)) {
+                return definitions.get(slot);
+            }
+            definitions = projectOperatorMap(right);
+            if (definitions != null && definitions.containsKey(slot)) {
+                return definitions.get(slot);
+            }
+            definitions = projectionMap(left);
+            if (definitions != null && definitions.containsKey(slot)) {
+                return definitions.get(slot);
+            }
+            definitions = projectOperatorMap(left);
+            if (definitions != null && definitions.containsKey(slot)) {
+                return definitions.get(slot);
+            }
+            return slot;
+        }
+
+        private static Map<ColumnRefOperator, ScalarOperator> projectionMap(OptExpression child) {
+            return child.getOp().getProjection() == null ? null : child.getOp().getProjection().getColumnRefMap();
+        }
+
+        private static Map<ColumnRefOperator, ScalarOperator> projectOperatorMap(OptExpression child) {
+            return child.getOp() instanceof LogicalProjectOperator
+                    ? ((LogicalProjectOperator) child.getOp()).getColumnRefMap() : null;
+        }
     }
 
     /**
@@ -343,6 +372,9 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
      * inside imageRange.
      */
     private Range<ConstantOperator> monotonicImageOfSeed(ScalarOperator seed, DomainProperty domainProperty) {
+        if (seed.isColumnRef()) {
+            return null;
+        }
         Set<ColumnRefOperator> usedColumns = Sets.newHashSet(seed.getColumnRefs());
         if (usedColumns.size() != 1) {
             return null;
@@ -350,11 +382,14 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
         ColumnRefOperator column = usedColumns.iterator().next();
         // a bare-column seed either had its own domain entry (handled by the pre-existing
         // branches) or has no domain at all — nothing to map either way
-        if (column.equals(seed) || !domainProperty.contains(column)) {
+        if (column.equals(seed)) {
             return null;
         }
-        return MonotonicImage.imageRange(seed, column, domainProperty.getValueWrapper(column).getMinMaxForMonotonicImage())
-                .orElse(null);
+        DomainProperty.DomainWrapper columnDomain = domainProperty.getValueWrapper(column);
+        if (columnDomain == null) {
+            return null;
+        }
+        return MonotonicImage.imageRange(seed, column, columnDomain.getMinMaxForMonotonicImage()).orElse(null);
     }
 
     /**
@@ -377,11 +412,12 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
 
     private ScalarOperator removeRedundantPredicate(ScalarOperator offspring, ScalarOperator rewriteResult,
                                                     DomainProperty existDomainProperty) {
-        if (!existDomainProperty.contains(offspring)) {
+        DomainProperty.DomainWrapper existDomain = existDomainProperty.getValueWrapper(offspring);
+        if (existDomain == null) {
             return rewriteResult;
         }
         Set<ScalarOperator> set = Sets.newLinkedHashSet();
-        set.addAll(Utils.extractConjuncts(existDomainProperty.getPredicateDesc(offspring)));
+        set.addAll(Utils.extractConjuncts(existDomain.getPredicateDesc()));
         rewriteResult = Utils.compoundAnd(Utils.extractConjuncts(rewriteResult).stream()
                 .filter(e  -> !set.contains(e)).collect(Collectors.toList()));
         if (rewriteResult == null) {
@@ -390,7 +426,7 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
 
         DomainPropertyDeriver deriver = new DomainPropertyDeriver();
         DomainProperty newDomainProperty = deriver.derive(rewriteResult);
-        MinMax existMinMax = existDomainProperty.getValueWrapper(offspring).getMinMax();
+        MinMax existMinMax = existDomain.getMinMax();
         MinMax newMinMax = newDomainProperty.getValueWrapper(offspring).getMinMax();
         if (existMinMax.isAll()) {
             return newMinMax.isAll() ? null : rewriteResult;

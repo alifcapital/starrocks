@@ -16,21 +16,19 @@ package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalTopNOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class PushDownTopNBelowOuterJoinRule extends TransformationRule {
     public PushDownTopNBelowOuterJoinRule() {
@@ -79,12 +77,13 @@ public class PushDownTopNBelowOuterJoinRule extends TransformationRule {
             return false;
         }
 
-        List<Integer> colIds = topn.getOrderByElements().stream()
-                .map(Ordering::getColumnRef)
-                .map(ColumnRefOperator::getId)
-                .collect(Collectors.toList());
-
-        return joinChild.getOutputColumns().containsAll(colIds);
+        ColumnRefSet childOutput = joinChild.getOutputColumns();
+        for (Ordering ordering : topn.getOrderByElements()) {
+            if (!childOutput.contains(ordering.getColumnRef().getId())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -111,10 +110,10 @@ public class PushDownTopNBelowOuterJoinRule extends TransformationRule {
         OptExpression newJoinOperator;
         if (joinOperator.getJoinType().isAnyLeftOuterJoin()) {
             newJoinOperator = OptExpression.create(joinOperator,
-                    Lists.newArrayList(newTopNOperator, childExpr.inputAt(1)));
+                    newTopNOperator, childExpr.inputAt(1));
         } else {
             newJoinOperator = OptExpression.create(joinOperator,
-                    Lists.newArrayList(childExpr.inputAt(0), newTopNOperator));
+                    childExpr.inputAt(0), newTopNOperator);
         }
 
         return Collections.singletonList(OptExpression.create(topn, newJoinOperator));

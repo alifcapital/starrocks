@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.expression.BinaryType;
@@ -115,7 +114,7 @@ public class JoinAssociativityRule extends JoinAssociateBaseRule {
             // and add the add->tblB.col + tblC.col map to projectMap
             JoinOnConditionShuttle shuttle = new JoinOnConditionShuttle(newBotJoinOutputCols, columnRefFactory);
             newTopOnCondition = shuttle.rewriteOnCondition(newTopOnCondition);
-            splitter.getBotJoinCols().addAll(shuttle.getColumnEntries());
+            shuttle.appendColumnEntries(splitter.getBotJoinCols());
         }
         return newTopOnCondition;
     }
@@ -149,11 +148,10 @@ public class JoinAssociativityRule extends JoinAssociateBaseRule {
             this.newBotJoinOutputCols = newBotJoinOutputCols;
         }
 
-        public List<ColumnOutputInfo> getColumnEntries() {
-            List<ColumnOutputInfo> entryList = Lists.newArrayList();
-            exprToColumnRefMap.entrySet().stream()
-                    .forEach(e -> entryList.add(new ColumnOutputInfo(e.getValue(), e.getKey())));
-            return entryList;
+        public void appendColumnEntries(List<ColumnOutputInfo> destination) {
+            for (Map.Entry<ScalarOperator, ColumnRefOperator> e : exprToColumnRefMap.entrySet()) {
+                destination.add(new ColumnOutputInfo(e.getValue(), e.getKey()));
+            }
         }
 
         public ScalarOperator rewriteOnCondition(ScalarOperator onCondition) {
@@ -248,13 +246,13 @@ public class JoinAssociativityRule extends JoinAssociateBaseRule {
         }
 
         private ScalarOperator addExprToColumnRefMap(ScalarOperator operator) {
-            if (!exprToColumnRefMap.containsKey(operator)) {
-                ColumnRefOperator columnRefOperator = createColumnRefOperator(operator);
-                exprToColumnRefMap.put(operator, columnRefOperator);
-                return columnRefOperator;
-            } else {
-                return exprToColumnRefMap.get(operator);
+            ColumnRefOperator existing = exprToColumnRefMap.get(operator);
+            if (existing != null) {
+                return existing;
             }
+            ColumnRefOperator columnRefOperator = createColumnRefOperator(operator);
+            exprToColumnRefMap.put(operator, columnRefOperator);
+            return columnRefOperator;
         }
 
         private ColumnRefOperator createColumnRefOperator(ScalarOperator operator) {

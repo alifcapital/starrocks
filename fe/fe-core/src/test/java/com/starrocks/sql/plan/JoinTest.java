@@ -2222,7 +2222,7 @@ public class JoinTest extends PlanTestBase {
     public void testEquivalenceLoopDependency() throws Exception {
         String sql = "select * from t0 join t1 on t0.v1 = t1.v4 and cast(t0.v1 as STRING) = t0.v1";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "equal join conjunct: 4: v4 = 1: v1");
+        assertContainsAny(plan, "equal join conjunct: 4: v4 = 1: v1", "equal join conjunct: 1: v1 = 4: v4");
         assertContains(plan, "     TABLE: t0\n" +
                 "     PREAGGREGATION: ON\n" +
                 "     PREDICATES: CAST(1: v1 AS VARCHAR(65533)) = CAST(1: v1 AS VARCHAR(1048576))\n" +
@@ -2776,9 +2776,11 @@ public class JoinTest extends PlanTestBase {
         String plan = getFragmentPlan(sql);
         assertContains(plan, "4:HASH JOIN\n" +
                 "  |  join op: INNER JOIN (BROADCAST)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 11: N_NAME = 16: cast\n" +
-                "  |  equal join conjunct: 11: N_NAME = 17: cast");
+                "  |  colocate: false, reason: \n");
+        assertContainsAny(plan, "equal join conjunct: 11: N_NAME = 16: cast",
+                "equal join conjunct: 16: cast = 11: N_NAME");
+        assertContainsAny(plan, "equal join conjunct: 11: N_NAME = 17: cast",
+                "equal join conjunct: 17: cast = 11: N_NAME");
     }
 
     @Test

@@ -37,6 +37,9 @@ public class JoinReorderDP extends JoinOrder {
 
     @Override
     protected void calculateStatistics(OptExpression expr) {
+        if (expr.getStatistics() != null) {
+            return;
+        }
         if (StatisticsCalculator.isInSkipPredicateColumnsCollectionScope()) {
             super.calculateStatistics(expr);
             return;
@@ -47,7 +50,7 @@ public class JoinReorderDP extends JoinOrder {
     }
 
     private final Map<BitSet, GroupInfo> bestPlanMemo = new HashMap<>();
-    List<GroupInfo> groups = new ArrayList<>();
+    List<GroupInfo> groups = List.of();
 
     @Override
     protected void enumerate() {
@@ -145,11 +148,13 @@ public class JoinReorderDP extends JoinOrder {
 
     public static List<BitSet> generatePartitions(BitSet totalNodes) {
         int first = totalNodes.nextSetBit(0);
-        if (first < 0 || totalNodes.cardinality() <= 1) {
+        if (first < 0) {
             return List.of();
         }
-
         int card = totalNodes.cardinality();
+        if (card <= 1) {
+            return List.of();
+        }
         int[] rest = new int[card - 1];
         int n = 0;
         for (int b = totalNodes.nextSetBit(first + 1); b >= 0; b = totalNodes.nextSetBit(b + 1)) {

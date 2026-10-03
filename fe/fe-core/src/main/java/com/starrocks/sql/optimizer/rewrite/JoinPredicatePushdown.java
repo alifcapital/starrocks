@@ -39,8 +39,8 @@ import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class JoinPredicatePushdown {
     // is it on predicate or normal predicate
@@ -250,7 +250,7 @@ public class JoinPredicatePushdown {
             conjunctList.removeAll(rightPushDown);
         }
 
-        ScalarOperator joinEqPredicate = Utils.compoundAnd(Lists.newArrayList(eqConjuncts));
+        ScalarOperator joinEqPredicate = Utils.compoundAnd(eqConjuncts);
         ScalarOperator postJoinPredicate = Utils.compoundAnd(conjunctList);
         ScalarOperator newJoinOnPredicate = Utils.compoundAnd(joinEqPredicate, postJoinPredicate);
 
@@ -427,9 +427,6 @@ public class JoinPredicatePushdown {
         ColumnRefSet leftOutputColumns = joinOpt.getInputs().get(0).getOutputColumns();
         ColumnRefSet rightOutputColumns = joinOpt.getInputs().get(1).getOutputColumns();
 
-        Set<ColumnRefOperator> leftOutputColumnOps = columnRefFactory.getColumnRefs(leftOutputColumns);
-        Set<ColumnRefOperator> rightOutputColumnOps = columnRefFactory.getColumnRefs(rightOutputColumns);
-
         ScalarOperator derivedPredicate = equivalenceDerive(predicate, false);
         List<ScalarOperator> derivedPredicates = Utils.extractConjuncts(derivedPredicate);
 
@@ -441,9 +438,16 @@ public class JoinPredicatePushdown {
                 }
             }
         } else if (join.getJoinType().isAnyLeftOuterJoin()) {
+            // We expect most derived predicates to be rejected by the column check, so the set is built lazily.
+            Set<ColumnRefOperator> rightOutputColumnOps = null;
             for (ScalarOperator p : derivedPredicates) {
-                if (rightOutputColumns.containsAll(p.getUsedColumns()) &&
-                        Utils.canEliminateNull(rightOutputColumnOps, p.clone())) {
+                if (!rightOutputColumns.containsAll(p.getUsedColumns())) {
+                    continue;
+                }
+                if (rightOutputColumnOps == null) {
+                    rightOutputColumnOps = columnRefFactory.getColumnRefs(rightOutputColumns);
+                }
+                if (Utils.canEliminateNull(rightOutputColumnOps, p)) {
                     p.setIsPushdown(true);
                     rightPushDown.add(p);
                 }
@@ -456,9 +460,15 @@ public class JoinPredicatePushdown {
                 }
             }
         } else if (join.getJoinType().isRightOuterJoin()) {
+            Set<ColumnRefOperator> leftOutputColumnOps = null;
             for (ScalarOperator p : derivedPredicates) {
-                if (leftOutputColumns.containsAll(p.getUsedColumns()) &&
-                        Utils.canEliminateNull(leftOutputColumnOps, p.clone())) {
+                if (!leftOutputColumns.containsAll(p.getUsedColumns())) {
+                    continue;
+                }
+                if (leftOutputColumnOps == null) {
+                    leftOutputColumnOps = columnRefFactory.getColumnRefs(leftOutputColumns);
+                }
+                if (Utils.canEliminateNull(leftOutputColumnOps, p)) {
                     p.setIsPushdown(true);
                     leftPushDown.add(p);
                 }
@@ -468,9 +478,12 @@ public class JoinPredicatePushdown {
 
     public ScalarOperator rangePredicateDerive(ScalarOperator predicate) {
         ScalarRangePredicateExtractor scalarRangePredicateExtractor = new ScalarRangePredicateExtractor();
-        return scalarRangePredicateExtractor.rewriteAll(Utils.compoundAnd(
-                Utils.extractConjuncts(predicate).stream().map(scalarRangePredicateExtractor::rewriteAll)
-                        .collect(Collectors.toList())));
+        List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
+        ListIterator<ScalarOperator> iterator = conjuncts.listIterator();
+        while (iterator.hasNext()) {
+            iterator.set(scalarRangePredicateExtractor.rewriteAll(iterator.next()));
+        }
+        return scalarRangePredicateExtractor.rewriteAll(Utils.compoundAnd(conjuncts));
     }
 
     ScalarOperator equivalenceDeriveOnPredicate(ScalarOperator on, OptExpression joinOpt, LogicalJoinOperator join) {
@@ -481,16 +494,15 @@ public class JoinPredicatePushdown {
             return on;
         }
 
-        List<ScalarOperator> pushDown = Lists.newArrayList(on);
-        ColumnRefSet leftOutputColumns = joinOpt.getInputs().get(0).getOutputColumns();
-        ColumnRefSet rightOutputColumns = joinOpt.getInputs().get(1).getOutputColumns();
-
         ScalarOperator derivedPredicate = equivalenceDerive(on, false);
-        List<ScalarOperator> derivedPredicates = Utils.extractConjuncts(derivedPredicate);
-
         if (join.getJoinType().isAnyInnerJoin() || join.getJoinType().isSemiJoin()) {
             return Utils.compoundAnd(on, derivedPredicate);
-        } else if (join.getJoinType().isAnyLeftOuterJoin()) {
+        }
+
+        List<ScalarOperator> pushDown = Lists.newArrayList(on);
+        List<ScalarOperator> derivedPredicates = Utils.extractConjuncts(derivedPredicate);
+        if (join.getJoinType().isAnyLeftOuterJoin()) {
+            ColumnRefSet rightOutputColumns = joinOpt.inputAt(1).getOutputColumns();
             for (ScalarOperator p : derivedPredicates) {
                 if (rightOutputColumns.containsAll(p.getUsedColumns())) {
                     p.setIsPushdown(true);
@@ -498,6 +510,7 @@ public class JoinPredicatePushdown {
                 }
             }
         } else if (join.getJoinType().isRightOuterJoin()) {
+            ColumnRefSet leftOutputColumns = joinOpt.inputAt(0).getOutputColumns();
             for (ScalarOperator p : derivedPredicates) {
                 if (leftOutputColumns.containsAll(p.getUsedColumns())) {
                     p.setIsPushdown(true);
@@ -544,7 +557,7 @@ public class JoinPredicatePushdown {
         if (!returnInputPredicate) {
             inputPredicates.forEach(allPredicate::remove);
         }
-        return Utils.compoundAnd(Lists.newArrayList(allPredicate));
+        return Utils.compoundAnd(allPredicate);
     }
 
     private OptExpression convertOuterToInner(OptExpression joinOpt, ScalarOperator predicateToPush) {
@@ -553,10 +566,8 @@ public class JoinPredicatePushdown {
         ColumnRefSet leftColumns = joinOpt.getInputs().get(0).getOutputColumns();
         ColumnRefSet rightColumns = joinOpt.getInputs().get(1).getOutputColumns();
 
-        Set<ColumnRefOperator> leftOutputColumnOps = columnRefFactory.getColumnRefs(leftColumns);
-        Set<ColumnRefOperator> rightOutputColumnOps = columnRefFactory.getColumnRefs(rightColumns);
-
         if (join.getJoinType().isAnyLeftOuterJoin()) {
+            Set<ColumnRefOperator> rightOutputColumnOps = columnRefFactory.getColumnRefs(rightColumns);
             if (Utils.canEliminateNull(rightOutputColumnOps, predicateToPush)
                     || hasPushdownNotNull(rightOutputColumnOps, optimizerContext.getPushdownNotNullPredicates())) {
                 JoinOperator newJoinType = join.getJoinType().isAsofLeftOuterJoin() ? JoinOperator.ASOF_INNER_JOIN :
@@ -568,6 +579,7 @@ public class JoinPredicatePushdown {
                 return newOpt;
             }
         } else if (join.getJoinType().isRightOuterJoin()) {
+            Set<ColumnRefOperator> leftOutputColumnOps = columnRefFactory.getColumnRefs(leftColumns);
             if (Utils.canEliminateNull(leftOutputColumnOps, predicateToPush)
                     || hasPushdownNotNull(leftOutputColumnOps, optimizerContext.getPushdownNotNullPredicates())) {
                 OptExpression newOpt = OptExpression.create(new LogicalJoinOperator.Builder().withOperator(join)
@@ -577,6 +589,8 @@ public class JoinPredicatePushdown {
                 return newOpt;
             }
         } else if (join.getJoinType().isFullOuterJoin()) {
+            Set<ColumnRefOperator> leftOutputColumnOps = columnRefFactory.getColumnRefs(leftColumns);
+            Set<ColumnRefOperator> rightOutputColumnOps = columnRefFactory.getColumnRefs(rightColumns);
             boolean canConvertLeft = false;
             boolean canConvertRight = false;
 
@@ -608,7 +622,18 @@ public class JoinPredicatePushdown {
     }
 
     private boolean hasPushdownNotNull(Set<ColumnRefOperator> outputColumnOps, List<IsNullPredicateOperator> pushdownNotNulls) {
-        return pushdownNotNulls.stream().anyMatch(p -> outputColumnOps.containsAll(p.getColumnRefs()));
+        if (pushdownNotNulls.isEmpty()) {
+            return false;
+        }
+        List<ColumnRefOperator> references = new ArrayList<>();
+        for (IsNullPredicateOperator predicate : pushdownNotNulls) {
+            references.clear();
+            predicate.getColumnRefs(references);
+            if (outputColumnOps.containsAll(references)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private ScalarOperator canonizePredicate(ScalarOperator predicate) {

@@ -34,13 +34,11 @@ import com.starrocks.sql.optimizer.operator.OperatorBuilderFactory;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.UKFKConstraints;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
-import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter;
 import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient;
-import com.starrocks.type.Type;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -85,7 +83,12 @@ public abstract class JoinOrder {
 
         @Override
         public int hashCode() {
-            return Objects.hash(expr.getOp().hashCode(), leftChildExpr, rightChildExpr);
+            int operatorHash = expr.getOp().hashCode();
+            GroupInfo left = leftChildExpr;
+            GroupInfo right = rightChildExpr;
+            int result = 31 + operatorHash;
+            result = 31 * result + (left == null ? 0 : left.hashCode());
+            return 31 * result + (right == null ? 0 : right.hashCode());
         }
 
         @Override
@@ -244,10 +247,16 @@ public abstract class JoinOrder {
                                     Map<ColumnRefOperator, ScalarOperator> expressionMap) {
         for (int i = 0; i < edgeSize; ++i) {
             ScalarOperator predicate = edges.get(i).predicate;
-            ColumnRefSet predicateColumn = predicate.getUsedColumns();
+            ColumnRefSet originalColumns = predicate.getUsedColumns();
+            ColumnRefSet predicateColumn = originalColumns;
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : expressionMap.entrySet()) {
-                if (predicate.getUsedColumns().contains(entry.getKey())) {
-                    predicateColumn.union(entry.getValue().getUsedColumns());
+                // Membership must use the original predicate, not columns added by an earlier
+                // mapping: edge coverage expands expressions once, not transitively.
+                if (originalColumns.contains(entry.getKey())) {
+                    if (predicateColumn == originalColumns) {
+                        predicateColumn = originalColumns.clone();
+                    }
+                    entry.getValue().collectUsedColumns(predicateColumn);
                 }
             }
 
@@ -317,7 +326,7 @@ public abstract class JoinOrder {
 
         Map<ColumnRefOperator, ScalarOperator> leftExpression = new HashMap<>();
         Map<ColumnRefOperator, ScalarOperator> rightExpression = new HashMap<>();
-        if (!onPredicates.isEmpty()) {
+        if (!onPredicates.isEmpty() && !expressionMap.isEmpty()) {
             ColumnRefSet allChildColumns = new ColumnRefSet();
             allChildColumns.union(leftExprInfo.expr.getOutputColumns());
             allChildColumns.union(rightExprInfo.expr.getOutputColumns());
@@ -441,16 +450,14 @@ public abstract class JoinOrder {
         RowOutputInfo fkRowOutputInfo = fkExprInfo.expr.getRowOutputInfo();
 
         double ukNormalizedRows = ukExprInfo.rowCount;
-        double ukTypeSize = ukRowOutputInfo.getColumnOutputInfo().stream()
-                .map(ColumnOutputInfo::getColumnRef)
-                .map(ColumnRefOperator::getType)
-                .map(Type::getTypeSize)
-                .reduce(1, Integer::sum);
-        double fkTypeSize = fkRowOutputInfo.getColumnOutputInfo().stream()
-                .map(ColumnOutputInfo::getColumnRef)
-                .map(ColumnRefOperator::getType)
-                .map(Type::getTypeSize)
-                .reduce(1, Integer::sum);
+        int ukTypeSize = 1;
+        for (ColumnOutputInfo column : ukRowOutputInfo.getColumnOutputInfo()) {
+            ukTypeSize += column.getColumnRef().getType().getTypeSize();
+        }
+        int fkTypeSize = 1;
+        for (ColumnOutputInfo column : fkRowOutputInfo.getColumnOutputInfo()) {
+            fkTypeSize += column.getColumnRef().getType().getTypeSize();
+        }
         double fkNormalizedRows = fkExprInfo.rowCount * fkTypeSize / ukTypeSize;
 
         double scaleRatio = fkNormalizedRows / Math.max(1, ukNormalizedRows);
@@ -537,14 +544,9 @@ public abstract class JoinOrder {
 
     protected boolean existsEqOnPredicate(OptExpression optExpression) {
         LogicalJoinOperator joinOp = optExpression.getOp().cast();
-        List<ScalarOperator> onPredicates = Utils.extractConjuncts(joinOp.getOnPredicate());
-
         ColumnRefSet leftChildColumns = optExpression.inputAt(0).getOutputColumns();
         ColumnRefSet rightChildColumns = optExpression.inputAt(1).getOutputColumns();
-
-        List<BinaryPredicateOperator> eqOnPredicates = JoinHelper.getEqualsPredicate(
-                leftChildColumns, rightChildColumns, onPredicates);
-        return !eqOnPredicates.isEmpty();
+        return JoinHelper.hasEqualsPredicate(leftChildColumns, rightChildColumns, joinOp.getOnPredicate());
     }
 
     public static double saturatingAdd(double a, double b) {
