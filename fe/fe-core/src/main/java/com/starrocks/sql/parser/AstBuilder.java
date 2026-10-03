@@ -999,6 +999,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             // except date_trunc, time_slice use generated column as partition column
             if (!FunctionSet.DATE_TRUNC.equals(functionName) && !FunctionSet.TIME_SLICE.equals(functionName)
                     && !FunctionSet.STR2DATE.equals(functionName)) {
+                rejectPartitionsInAdvance(context);
                 return generateMulitListPartitionDesc(context, Lists.newArrayList(functionCallExpr));
             }
             // If simple single expression partitioning is not supported,
@@ -1007,6 +1008,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             try {
                 columnList = AnalyzerUtils.checkAndExtractPartitionCol(functionCallExpr, columnDefs);
             } catch (Exception e) {
+                rejectPartitionsInAdvance(context);
                 return generateMulitListPartitionDesc(context, Lists.newArrayList(functionCallExpr));
             }
             String currentGranularity = null;
@@ -1097,6 +1099,16 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             ListPartitionDesc listPartitionDesc = new ListPartitionDesc(columnList, partitionDescList);
             listPartitionDesc.setAutoPartitionTable(true);
             return listPartitionDesc;
+        }
+    }
+
+    // An expression partition built from generated columns has no ranges, so it would drop the partitions that
+    // the statement creates in advance. We reject them.
+    private void rejectPartitionsInAdvance(com.starrocks.sql.parser.StarRocksParser.PartitionDescContext context) {
+        if (!context.rangePartitionDesc().isEmpty()) {
+            throw new ParsingException("Creating partitions in advance is only supported when the partition "
+                    + "expression is date_trunc, time_slice or str2date on a partition column",
+                    createPos(context.rangePartitionDesc(0)));
         }
     }
 
@@ -9302,6 +9314,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             // except date_trunc, time_slice, str_to_date use generated column as partition column
             if (!FunctionSet.DATE_TRUNC.equals(functionName) && !FunctionSet.TIME_SLICE.equals(functionName)
                     && !FunctionSet.STR2DATE.equals(functionName)) {
+                rejectPartitionsInAdvance(context);
                 return generateMulitListPartitionDesc(context, Lists.newArrayList(functionCallExpr));
             }
             for (com.starrocks.sql.parser.StarRocksParser.RangePartitionDescContext rangePartitionDescContext
