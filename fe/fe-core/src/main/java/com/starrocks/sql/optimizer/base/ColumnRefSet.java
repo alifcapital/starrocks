@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.base;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import org.roaringbitmap.RoaringBitmap;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
@@ -44,10 +45,12 @@ public class ColumnRefSet implements Cloneable {
 
     public ColumnRefSet(Collection<ColumnRefOperator> refs) {
         if (refs.size() > 1) {
-            bitSet = new RoaringBitmap();
+            int[] ids = new int[refs.size()];
+            int n = 0;
             for (ColumnRefOperator ref : refs) {
-                bitSet.add(ref.getId());
+                ids[n++] = ref.getId();
             }
+            bitSet = bitmapOf(ids);
         } else {
             for (ColumnRefOperator ref : refs) {
                 union(ref.getId());
@@ -57,8 +60,21 @@ public class ColumnRefSet implements Cloneable {
 
     public static ColumnRefSet createByIds(Collection<Integer> colIds) {
         ColumnRefSet columnRefSet = new ColumnRefSet();
-        colIds.forEach(columnRefSet::union);
+        if (colIds.size() > 1) {
+            columnRefSet.bitSet = bitmapOf(colIds.stream().mapToInt(Integer::intValue).toArray());
+        } else {
+            colIds.forEach(columnRefSet::union);
+        }
         return columnRefSet;
+    }
+
+    // The planner builds a set for every derived output, often from hundreds of column ids in hash order. Adding
+    // them one by one searches and shifts the array containers of the bitmap, so we sort the ids and append them.
+    private static RoaringBitmap bitmapOf(int[] ids) {
+        Arrays.sort(ids);
+        RoaringBitmap bitmap = new RoaringBitmap();
+        bitmap.addN(ids, 0, ids.length);
+        return bitmap;
     }
 
     public static ColumnRefSet of(ColumnRefOperator... columnRefs) {

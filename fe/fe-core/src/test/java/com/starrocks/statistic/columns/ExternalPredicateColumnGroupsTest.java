@@ -300,6 +300,27 @@ class ExternalPredicateColumnGroupsTest {
     }
 
     @Test
+    void aQueryRecordsEachGroupOnce() {
+        // The statistics of a query are derived many times; the group is recorded once per column ref factory.
+        IcebergTable table = table("t");
+        var x = column(table, 1, "x");
+        groups.record(List.of(x), ColumnUsage.UseCase.PREDICATE, factory, null);
+        assertEquals(Set.of(List.of("x")), columns());
+        groups.clear();
+        groups.record(List.of(x), ColumnUsage.UseCase.PREDICATE, factory, null);
+        assertTrue(groups.snapshot().isEmpty());
+        // Another use case of the same columns, and the same group in another query, are recorded.
+        groups.record(List.of(x), ColumnUsage.UseCase.GROUP_BY, factory, null);
+        assertEquals(1, groups.snapshot().size());
+        ColumnRefFactory nextQuery = new ColumnRefFactory();
+        ColumnRefOperator next = nextQuery.create("x", IntegerType.INT, true);
+        nextQuery.updateColumnRefToColumns(next, new Column("x", IntegerType.INT), table);
+        nextQuery.updateColumnToRelationIds(next.getId(), 1);
+        groups.record(List.of(next), ColumnUsage.UseCase.PREDICATE, nextQuery, null);
+        assertEquals(2, groups.snapshot().size());
+    }
+
+    @Test
     void namesCannotCollideByConcatenation() {
         var first = ExternalColumnGroupUsage.of(table("t"), List.of("a,b", "c"),
                 ColumnUsage.UseCase.PREDICATE, LocalDateTime.now());

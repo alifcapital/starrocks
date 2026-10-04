@@ -113,6 +113,28 @@ class ColumnRefSetTest {
     }
 
     @Test
+    void bulkConstructorsMatchUnionOfEachId() {
+        Random random = new Random(20261004);
+        int[] boundaries = {0, 1, 65535, 65536, Integer.MAX_VALUE, Integer.MIN_VALUE, -1};
+        for (int trial = 0; trial < 300; trial++) {
+            int size = random.nextInt(trial % 3 == 0 ? 3 : 400);
+            List<ColumnRefOperator> refs = new java.util.ArrayList<>();
+            List<Integer> ids = new java.util.ArrayList<>();
+            RoaringBitmap expected = new RoaringBitmap();
+            for (int i = 0; i < size; i++) {
+                // Unsorted ids with duplicates, across several bitmap containers.
+                int id = random.nextInt(10) == 0 ? boundaries[random.nextInt(boundaries.length)]
+                        : random.nextInt(200000);
+                refs.add(new ColumnRefOperator(id, IntegerType.INT, "c" + i, true));
+                ids.add(id);
+                expected.add(id);
+            }
+            check(new ColumnRefSet(refs), expected);
+            check(ColumnRefSet.createByIds(ids), expected);
+        }
+    }
+
+    @Test
     void collectionOverloadsAndMixedRepresentations() {
         ColumnRefOperator one = new ColumnRefOperator(1, IntegerType.INT, "a", true);
         ColumnRefOperator two = new ColumnRefOperator(2, IntegerType.INT, "b", true);

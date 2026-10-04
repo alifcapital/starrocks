@@ -58,11 +58,7 @@ public final class LogicalProjectOperator extends LogicalOperator {
 
     @Override
     public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
-        ColumnRefSet columns = new ColumnRefSet();
-        for (Map.Entry<ColumnRefOperator, ScalarOperator> kv : columnRefMap.entrySet()) {
-            columns.union(kv.getKey());
-        }
-        return columns;
+        return new ColumnRefSet(columnRefMap.keySet());
     }
 
     @Override
