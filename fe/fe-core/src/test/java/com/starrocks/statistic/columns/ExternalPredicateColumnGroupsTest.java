@@ -47,7 +47,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ExternalPredicateColumnGroupsTest {
@@ -318,6 +320,111 @@ class ExternalPredicateColumnGroupsTest {
         nextQuery.updateColumnToRelationIds(next.getId(), 1);
         groups.record(List.of(next), ColumnUsage.UseCase.PREDICATE, nextQuery, null);
         assertEquals(2, groups.snapshot().size());
+    }
+
+    private Set<List<String>> groupsOf(Table table, ColumnUsage.UseCase useCase) {
+        return manager.queryExternalPredicateColumnGroups(table).stream()
+                .filter(group -> group.useCase() == useCase)
+                .map(ExternalColumnGroupUsage::columns).collect(Collectors.toSet());
+    }
+
+    @Test
+    void aRepeatedRecordOfAQueryDoesNotResolveColumnsAgain() {
+        IcebergTable table = table("t");
+        var x = column(table, 1, "x");
+        var y = column(table, 1, "y");
+        var z = column(table, 2, "z");
+        var distinct = factory.create("distinct", IntegerType.BIGINT, true);
+        Runnable record = () -> {
+            manager.recordPredicateColumns(eq(x, y), factory, null);
+            manager.recordJoinPredicate(List.of(eq(x, z)), factory, null);
+            manager.recordGroupByColumns(Map.of(distinct,
+                    new CallOperator("count", IntegerType.BIGINT, List.of(x), null, true)), List.of(y), factory, null);
+        };
+        record.run();
+        Set<List<String>> predicate = groupsOf(table, ColumnUsage.UseCase.PREDICATE);
+        Set<List<String>> join = groupsOf(table, ColumnUsage.UseCase.JOIN);
+        assertEquals(Set.of(List.of("x", "y")), predicate);
+        assertEquals(Set.of(List.of("x"), List.of("z")), join);
+
+        clearInvocations(table);
+        record.run();
+        verifyNoInteractions(table);
+        assertEquals(predicate, groupsOf(table, ColumnUsage.UseCase.PREDICATE));
+        assertEquals(join, groupsOf(table, ColumnUsage.UseCase.JOIN));
+    }
+
+    @Test
+    void recordsOfOneQueryWithTheSameColumnsButAnotherKindAreNotMixedUp() {
+        IcebergTable table = table("t");
+        var x = column(table, 1, "x");
+        var z = column(table, 2, "z");
+        manager.recordPredicateColumns(eq(x, z), factory, null);
+        assertTrue(groupsOf(table, ColumnUsage.UseCase.JOIN).isEmpty());
+        manager.recordJoinPredicate(List.of(eq(x, z)), factory, null);
+        assertEquals(Set.of(List.of("x"), List.of("z")), groupsOf(table, ColumnUsage.UseCase.JOIN));
+        manager.recordGroupByColumns(Map.of(), List.of(x, z), factory, null);
+        assertEquals(Set.of(List.of("x"), List.of("z")), groupsOf(table, ColumnUsage.UseCase.GROUP_BY));
+    }
+
+    @Test
+    void distinctArgumentsAndGroupingKeysOfTwoRecordsDoNotShareAKey() {
+        IcebergTable table = table("t");
+        var x = column(table, 1, "x");
+        var y = column(table, 1, "y");
+        var call = factory.create("call", IntegerType.BIGINT, true);
+        manager.recordGroupByColumns(Map.of(call, new CallOperator("count", IntegerType.BIGINT, List.of(x, y), null,
+                true)), List.of(), factory, null);
+        manager.recordGroupByColumns(Map.of(call, new CallOperator("count", IntegerType.BIGINT, List.of(x), null,
+                true)), List.of(y), factory, null);
+        assertEquals(Set.of(List.of("x", "y"), List.of("x")), groupsOf(table, ColumnUsage.UseCase.DISTINCT));
+        assertEquals(Set.of(List.of("y")), groupsOf(table, ColumnUsage.UseCase.GROUP_BY));
+    }
+
+    @Test
+    void aColumnRefThatChangesItsSourceIsRecordedAgain() {
+        IcebergTable first = table("first");
+        IcebergTable second = table("second");
+        var ref = column(first, 1, "x");
+        var predicate = new BinaryPredicateOperator(BinaryType.EQ, ref, ConstantOperator.createInt(1));
+        manager.recordPredicateColumns(predicate, factory, null);
+        assertEquals(Set.of(List.of("x")), groupsOf(first, ColumnUsage.UseCase.PREDICATE));
+
+        factory.updateColumnRefToColumns(ref, new Column("y", IntegerType.INT), second);
+        manager.recordPredicateColumns(predicate, factory, null);
+        assertEquals(Set.of(List.of("y")), groupsOf(second, ColumnUsage.UseCase.PREDICATE));
+    }
+
+    @Test
+    void aColumnRefResolvedFromThePlanIsRecordedForEachPlan() {
+        IcebergTable table = table("t");
+        var x = column(table, 1, "x");
+        var y = column(table, 1, "y");
+        var alias = factory.create("alias", IntegerType.INT, true);
+        var predicate = new BinaryPredicateOperator(BinaryType.EQ, alias, ConstantOperator.createInt(1));
+        manager.recordPredicateColumns(predicate, factory,
+                OptExpression.create(new LogicalProjectOperator(Map.of(alias, x))));
+        manager.recordPredicateColumns(predicate, factory,
+                OptExpression.create(new LogicalProjectOperator(Map.of(alias, y))));
+        assertEquals(Set.of(List.of("x"), List.of("y")), groupsOf(table, ColumnUsage.UseCase.PREDICATE));
+    }
+
+    @Test
+    void enablingExternalCollectionInTheMiddleOfAQueryRecordsTheGroups() {
+        boolean previous = Config.enable_external_predicate_columns_collection;
+        try {
+            IcebergTable table = table("t");
+            var x = column(table, 1, "x");
+            var predicate = new BinaryPredicateOperator(BinaryType.EQ, x, ConstantOperator.createInt(1));
+            Config.enable_external_predicate_columns_collection = false;
+            manager.recordPredicateColumns(predicate, factory, null);
+            assertTrue(groupsOf(table, ColumnUsage.UseCase.PREDICATE).isEmpty());
+            Config.enable_external_predicate_columns_collection = true;
+            manager.recordPredicateColumns(predicate, factory, null);
+            assertEquals(Set.of(List.of("x")), groupsOf(table, ColumnUsage.UseCase.PREDICATE));
+        } finally {
+            Config.enable_external_predicate_columns_collection = previous;
+        }
     }
 
     @Test

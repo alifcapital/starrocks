@@ -40,11 +40,15 @@ import org.apache.commons.collections4.SetUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.lang.ref.WeakReference;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -68,6 +72,137 @@ public class PredicateColumnsMgr {
             .weigher((String key, List<ExternalColumnGroupUsage> groups) -> (int) Math.min(Integer.MAX_VALUE,
                     128L + groups.stream().mapToLong(ExternalColumnGroupUsage::estimatedMemoryBytes).sum()))
             .build();
+
+    // The optimizer derives the statistics of a query again for every plan alternative, so it records the same
+    // predicates, joins and group-bys of one query many times. Each record collects the column refs, resolves them to
+    // tables and merges a usage. A record says only that a query used the column, so we record once per query and
+    // skip the repeats. The query is identified by its column ref factory, which the thread holds weakly.
+    // We skip only a record that resolved every column ref from the factory alone: a ref resolved from the plan
+    // depends on the plan expression of the call, so the repeat could record something else.
+    private final ThreadLocal<QueryObservations> queryObservations = new ThreadLocal<>();
+    // Bumped by reset(), so that a thread does not skip a record of a state that was cleared meanwhile.
+    private volatile int resetCount;
+
+    // A query that records many different predicates must not make the thread hold a large set: the set stays with
+    // the thread until its next query, and FE has many planning threads.
+    private static final int MAX_OBSERVATIONS_PER_QUERY = 4096;
+    private static final int MAX_OBSERVED_IDS_PER_QUERY = 1 << 16;
+    private static final int PREDICATE_RECORD = 1;
+    private static final int JOIN_RECORD = 2;
+    private static final int GROUP_BY_RECORD = 3;
+    // Not a column ref id; ids start at 1.
+    private static final int END_OF_REFS = Integer.MIN_VALUE;
+    private static final int END_OF_SIDE = Integer.MIN_VALUE + 1;
+
+    private static final class QueryObservations {
+        private final WeakReference<ColumnRefFactory> query;
+        private final long sourceMappingVersion;
+        private final int resetCount;
+        private final boolean externalEnabled;
+        private final Set<ObservationKey> recorded = new HashSet<>();
+        private int recordedIds;
+
+        private QueryObservations(ColumnRefFactory query, int resetCount, boolean externalEnabled) {
+            this.query = new WeakReference<>(query);
+            this.sourceMappingVersion = query.getSourceMappingVersion();
+            this.resetCount = resetCount;
+            this.externalEnabled = externalEnabled;
+        }
+
+        private boolean isFor(ColumnRefFactory factory, int resetCount, boolean externalEnabled) {
+            return query.get() == factory && sourceMappingVersion == factory.getSourceMappingVersion()
+                    && this.resetCount == resetCount && this.externalEnabled == externalEnabled;
+        }
+    }
+
+    // The kind of the record and the ids of the column refs it was called with, in call order.
+    private static final class ObservationKey {
+        private int[] ids = new int[16];
+        private int size;
+        private int hash;
+
+        private ObservationKey(int kind) {
+            add(kind);
+        }
+
+        private void add(int id) {
+            if (size == ids.length) {
+                ids = Arrays.copyOf(ids, size * 2);
+            }
+            ids[size++] = id;
+        }
+
+        private void addRefs(ScalarOperator operator) {
+            if (operator instanceof ColumnRefOperator ref) {
+                add(ref.getId());
+                return;
+            }
+            List<ScalarOperator> children = operator.getChildren();
+            for (int i = 0; i < children.size(); i++) {
+                addRefs(children.get(i));
+            }
+        }
+
+        private ObservationKey stored() {
+            ObservationKey copy = new ObservationKey(0);
+            copy.ids = Arrays.copyOf(ids, size);
+            copy.size = size;
+            return copy;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof ObservationKey that) || size != that.size) {
+                return false;
+            }
+            for (int i = 0; i < size; i++) {
+                if (ids[i] != that.ids[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            int h = hash;
+            if (h == 0) {
+                h = 1;
+                for (int i = 0; i < size; i++) {
+                    h = 31 * h + ids[i];
+                }
+                hash = h;
+            }
+            return h;
+        }
+    }
+
+    private QueryObservations observations(ColumnRefFactory factory) {
+        boolean externalEnabled = Config.enable_external_predicate_columns_collection;
+        QueryObservations observations = queryObservations.get();
+        if (observations == null || !observations.isFor(factory, resetCount, externalEnabled)) {
+            observations = new QueryObservations(factory, resetCount, externalEnabled);
+            queryObservations.set(observations);
+        }
+        return observations;
+    }
+
+    private static boolean resolvesFromFactory(List<ColumnRefOperator> refs, ColumnRefFactory factory) {
+        for (ColumnRefOperator ref : refs) {
+            if (factory.getColumn(ref) == null || factory.getRelationId(ref.getId()) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void remember(QueryObservations observations, ObservationKey key) {
+        if (observations.recorded.size() < MAX_OBSERVATIONS_PER_QUERY
+                && observations.recordedIds + key.size <= MAX_OBSERVED_IDS_PER_QUERY) {
+            observations.recorded.add(key.stored());
+            observations.recordedIds += key.size;
+        }
+    }
 
     public static PredicateColumnsMgr getInstance() {
         return INSTANCE;
@@ -102,9 +237,22 @@ public class PredicateColumnsMgr {
         if (predicate == null) {
             return;
         }
+        QueryObservations observations = null;
+        ObservationKey key = null;
+        if (factory != null) {
+            key = new ObservationKey(PREDICATE_RECORD);
+            key.addRefs(predicate);
+            observations = observations(factory);
+            if (observations.recorded.contains(key)) {
+                return;
+            }
+        }
         List<ColumnRefOperator> refs = Utils.collect(predicate, ColumnRefOperator.class);
         addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.PREDICATE, optExpr);
         externalGroups.record(refs, ColumnUsage.UseCase.PREDICATE, factory, optExpr);
+        if (observations != null && resolvesFromFactory(refs, factory)) {
+            remember(observations, key);
+        }
     }
 
     public void recordJoinPredicate(List<BinaryPredicateOperator> onPredicates, ColumnRefFactory factory,
@@ -112,10 +260,30 @@ public class PredicateColumnsMgr {
         if (!Config.enable_predicate_columns_collection) {
             return;
         }
+        QueryObservations observations = null;
+        ObservationKey key = null;
+        if (factory != null) {
+            key = new ObservationKey(JOIN_RECORD);
+            for (BinaryPredicateOperator op : onPredicates) {
+                key.addRefs(op.getChild(0));
+                key.add(END_OF_SIDE);
+                key.addRefs(op.getChild(1));
+                key.add(END_OF_REFS);
+            }
+            observations = observations(factory);
+            if (observations.recorded.contains(key)) {
+                return;
+            }
+        }
         externalGroups.recordJoin(onPredicates, factory, optExpr);
+        boolean fromFactory = true;
         for (BinaryPredicateOperator op : onPredicates) {
             List<ColumnRefOperator> refs = Utils.collect(op, ColumnRefOperator.class);
             addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.JOIN, optExpr);
+            fromFactory = fromFactory && observations != null && resolvesFromFactory(refs, factory);
+        }
+        if (fromFactory && observations != null) {
+            remember(observations, key);
         }
     }
 
@@ -125,16 +293,40 @@ public class PredicateColumnsMgr {
         if (!Config.enable_predicate_columns_collection) {
             return;
         }
+        QueryObservations observations = null;
+        ObservationKey key = null;
+        if (factory != null && groupBys != null) {
+            key = new ObservationKey(GROUP_BY_RECORD);
+            for (var entry : aggregations.entrySet()) {
+                if (entry.getValue().isDistinct()) {
+                    key.addRefs(entry.getValue());
+                    key.add(END_OF_REFS);
+                }
+            }
+            key.add(END_OF_SIDE);
+            for (ColumnRefOperator groupBy : groupBys) {
+                key.add(groupBy.getId());
+            }
+            observations = observations(factory);
+            if (observations.recorded.contains(key)) {
+                return;
+            }
+        }
+        boolean fromFactory = observations != null;
         for (var entry : aggregations.entrySet()) {
             if (entry.getValue().isDistinct()) {
                 List<ColumnRefOperator> refs = Utils.collect(entry.getValue(), ColumnRefOperator.class);
                 addOrUpdateColumnUsage(refs, factory, ColumnUsage.UseCase.DISTINCT, optExpr);
                 externalGroups.record(refs, ColumnUsage.UseCase.DISTINCT, factory, optExpr);
+                fromFactory = fromFactory && resolvesFromFactory(refs, factory);
             }
         }
 
         addOrUpdateColumnUsage(groupBys, factory, ColumnUsage.UseCase.GROUP_BY, optExpr);
         externalGroups.record(groupBys, ColumnUsage.UseCase.GROUP_BY, factory, optExpr);
+        if (fromFactory && resolvesFromFactory(groupBys, factory)) {
+            remember(observations, key);
+        }
     }
 
     public void recordWindowPartitionBy(List<ScalarOperator> partitionByList, ColumnRefFactory factory,
@@ -289,6 +481,7 @@ public class PredicateColumnsMgr {
 
     @VisibleForTesting
     public void reset() {
+        resetCount++;
         id2columnUsage.clear();
         externalQueryCache.invalidateAll();
         externalGroups.clear();

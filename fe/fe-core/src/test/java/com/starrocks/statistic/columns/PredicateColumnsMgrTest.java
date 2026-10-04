@@ -16,12 +16,18 @@ package com.starrocks.statistic.columns;
 
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.scheduler.history.TableKeeper;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.base.ColumnRefFactory;
+import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.sql.plan.PlanTestBase;
 import com.starrocks.statistic.ExternalAnalyzeJob;
@@ -225,6 +231,58 @@ class PredicateColumnsMgrTest extends PlanTestBase {
         List<String> result = PredicateColumnsMgr.getInstance().queryExternalPredicateColumns(table);
         Assertions.assertEquals(1, result.size());
         Assertions.assertEquals("列".repeat(50), result.get(0));
+    }
+
+    private static ColumnRefOperator nativeColumnRef(ColumnRefFactory factory, Table table, String column) {
+        ColumnRefOperator ref = factory.create(column, IntegerType.BIGINT, true);
+        factory.updateColumnRefToColumns(ref, table.getColumn(column), table);
+        factory.updateColumnToRelationIds(ref.getId(), 1);
+        return ref;
+    }
+
+    @Test
+    public void testNativeUsageOfAQueryIsRecordedOnce() {
+        PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
+        Table t0 = starRocksAssert.getTable(connectContext.getDatabase(), "t0");
+        TableName t0Name = new TableName(connectContext.getDatabase(), "t0");
+        ColumnRefFactory factory = new ColumnRefFactory();
+        ColumnRefOperator v1 = nativeColumnRef(factory, t0, "v1");
+        ColumnRefOperator v2 = nativeColumnRef(factory, t0, "v2");
+        BinaryPredicateOperator predicate =
+                new BinaryPredicateOperator(BinaryType.EQ, v1, ConstantOperator.createBigint(1));
+
+        mgr.recordPredicateColumns(predicate, factory, null);
+        ColumnUsage usage = mgr.query(t0Name).get(0);
+        Assertions.assertEquals(Set.of(ColumnUsage.UseCase.PREDICATE), usage.getUseCases());
+        // A repeat of the same record in the same query finds the usage as it is.
+        usage.setLastUsed(LocalDateTime.MIN);
+        mgr.recordPredicateColumns(predicate, factory, null);
+        Assertions.assertEquals(LocalDateTime.MIN, usage.getLastUsed());
+
+        // Other columns, other kinds of records and other queries are recorded.
+        mgr.recordJoinPredicate(List.of(new BinaryPredicateOperator(BinaryType.EQ, v1, v2)), factory, null);
+        Assertions.assertEquals(Set.of(ColumnUsage.UseCase.PREDICATE, ColumnUsage.UseCase.JOIN),
+                usage.getUseCases());
+        Assertions.assertTrue(usage.getLastUsed().isAfter(LocalDateTime.MIN));
+        usage.setLastUsed(LocalDateTime.MIN);
+        ColumnRefFactory nextQuery = new ColumnRefFactory();
+        ColumnRefOperator nextV1 = nativeColumnRef(nextQuery, t0, "v1");
+        mgr.recordPredicateColumns(new BinaryPredicateOperator(BinaryType.EQ, nextV1, ConstantOperator.createBigint(1)),
+                nextQuery, null);
+        Assertions.assertTrue(usage.getLastUsed().isAfter(LocalDateTime.MIN));
+
+        // A column ref that a rewrite registers again with another column is recorded for the new column.
+        Assertions.assertEquals(2, mgr.query(t0Name).size());
+        factory.updateColumnRefToColumns(v1, t0.getColumn("v3"), t0);
+        mgr.recordPredicateColumns(predicate, factory, null);
+        Assertions.assertEquals(3, mgr.query(t0Name).size());
+
+        // A reset forgets what the query recorded.
+        mgr.reset();
+        mgr.recordPredicateColumns(predicate, factory, null);
+        List<ColumnUsage> recorded = mgr.query(t0Name);
+        Assertions.assertEquals(1, recorded.size());
+        Assertions.assertEquals("v3", recorded.get(0).getOlapColumnName((OlapTable) t0).orElseThrow());
     }
 
     @Test
