@@ -17,12 +17,14 @@ package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.SubqueryUtils;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalApplyOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
@@ -89,9 +91,29 @@ public class PushDownApplyLeftRule extends TransformationRule {
             return Collections.emptyList();
         }
 
+        // The predicate above uses the value of the subquery on every row. On the null-producing side of an outer
+        // join the value would be NULL for the rows that the join adds, so we keep the Apply above such a join.
+        if (left.getOp() instanceof LogicalJoinOperator &&
+                isNullProducingChild(((LogicalJoinOperator) left.getOp()).getJoinType(), index)) {
+            return Collections.emptyList();
+        }
+
         OptExpression newApply = OptExpression.create(apply, left.getInputs().get(index), input.getInputs().get(1));
         List<OptExpression> newChildren = Lists.newArrayList(left.getInputs());
         newChildren.set(index, newApply);
         return Lists.newArrayList(OptExpression.create(left.getOp(), newChildren));
+    }
+
+    private static boolean isNullProducingChild(JoinOperator joinType, int childIndex) {
+        if (joinType.isFullOuterJoin()) {
+            return true;
+        }
+        if (joinType.isAnyLeftOuterJoin()) {
+            return childIndex == 1;
+        }
+        if (joinType.isRightOuterJoin()) {
+            return childIndex == 0;
+        }
+        return false;
     }
 }

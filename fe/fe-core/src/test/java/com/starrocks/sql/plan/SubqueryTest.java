@@ -2037,4 +2037,65 @@ public class SubqueryTest extends PlanTestBase {
         String plan = getFragmentPlan(sql);
         assertContains(plan, "ASSERT NUMBER OF ROWS");
     }
+
+    @Test
+    public void testUncorrelatedScalarSubqueryOnNullProducingSide() throws Exception {
+        // The rows that an outer join adds must compare with the value of the subquery, not with NULL. So the
+        // subquery is joined above the outer join when the predicate uses only columns of the null-producing side.
+        String plan = getFragmentPlan("select t0.v1, t1.v4 from t0 left join t1 on t0.v1 = t1.v4 " +
+                "where ifnull(t1.v5, 0) <= (select count(*) from t2)");
+        assertContains(plan, "  10:NESTLOOP JOIN\n" +
+                "  |  join op: INNER JOIN\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  other join predicates: ifnull(5: v5, 0) <= 10: count\n" +
+                "  |  \n" +
+                "  |----9:EXCHANGE\n" +
+                "  |    \n" +
+                "  4:HASH JOIN\n" +
+                "  |  join op: RIGHT OUTER JOIN (PARTITIONED)\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  equal join conjunct: 4: v4 = 1: v1");
+
+        plan = getFragmentPlan("select t0.v1, t1.v4 from t0 right join t1 on t0.v1 = t1.v4 " +
+                "where ifnull(t0.v2, 0) <= (select count(*) from t2)");
+        assertContains(plan, "  10:NESTLOOP JOIN\n" +
+                "  |  join op: INNER JOIN\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  other join predicates: ifnull(2: v2, 0) <= 10: count\n" +
+                "  |  \n" +
+                "  |----9:EXCHANGE\n" +
+                "  |    \n" +
+                "  4:HASH JOIN\n" +
+                "  |  join op: RIGHT OUTER JOIN (PARTITIONED)\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  equal join conjunct: 1: v1 = 4: v4");
+
+        plan = getFragmentPlan("select t0.v1, t1.v4 from t0 full join t1 on t0.v1 = t1.v4 " +
+                "where ifnull(t1.v5, 0) <= (select count(*) from t2)");
+        assertContains(plan, "  10:NESTLOOP JOIN\n" +
+                "  |  join op: INNER JOIN\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  other join predicates: ifnull(5: v5, 0) <= 10: count\n" +
+                "  |  \n" +
+                "  |----9:EXCHANGE\n" +
+                "  |    \n" +
+                "  4:HASH JOIN\n" +
+                "  |  join op: FULL OUTER JOIN (PARTITIONED)\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  equal join conjunct: 4: v4 = 1: v1");
+
+        // The preserved side of an outer join keeps all its rows, so the subquery is still joined below the join.
+        plan = getFragmentPlan("select t0.v1, t1.v4 from t0 left join t1 on t0.v1 = t1.v4 " +
+                "where ifnull(t0.v2, 0) <= (select count(*) from t2)");
+        assertContains(plan, "LEFT OUTER JOIN (BROADCAST)");
+        assertContains(plan, "  6:NESTLOOP JOIN\n" +
+                "  |  join op: INNER JOIN\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  other join predicates: ifnull(2: v2, 0) <= 10: count\n" +
+                "  |  \n" +
+                "  |----5:EXCHANGE\n" +
+                "  |    \n" +
+                "  0:OlapScanNode\n" +
+                "     TABLE: t0");
+    }
 }

@@ -1,0 +1,34 @@
+-- name: test_uncorrelated_scalar_subquery_outer_join
+create table t_l (k int, v int) duplicate key(k) distributed by hash(k) buckets 3 properties("replication_num" = "1");
+-- result:
+-- !result
+create table t_r (k int, v int) duplicate key(k) distributed by hash(k) buckets 3 properties("replication_num" = "1");
+-- result:
+-- !result
+create table t_s (k int) duplicate key(k) distributed by hash(k) buckets 3 properties("replication_num" = "1");
+-- result:
+-- !result
+insert into t_l values (1, 10), (2, 20), (3, 30);
+-- result:
+-- !result
+insert into t_r values (1, 100);
+-- result:
+-- !result
+insert into t_s values (1), (2);
+-- result:
+-- !result
+select l.k, r.k from t_l l left join t_r r on l.k = r.k where ifnull(r.v, 0) <= (select count(*) from t_s) order by l.k;
+-- result:
+2	None
+3	None
+-- !result
+select l.k, r.k from t_r r right join t_l l on l.k = r.k where ifnull(r.v, 0) <= (select count(*) from t_s) order by l.k;
+-- result:
+2	None
+3	None
+-- !result
+select l.k, r.k from t_l l full join t_r r on l.k = r.k where ifnull(r.v, 0) <= (select count(*) from t_s) order by l.k;
+-- result:
+2	None
+3	None
+-- !result
