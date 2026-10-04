@@ -56,6 +56,13 @@ import static com.starrocks.sql.ast.expression.BinaryType.LT;
  * date_format is rewritten here only when the monotonic predicate rewrite is off.
  */
 public class SimplifiedDateColumnPredicateRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     private static final String DATE_PATTERN1 = "%Y%m%d";
     private static final String DATE_PATTERN2 = "%Y-%m-%d";
     private static final Pattern DATE_PATTERN_REG = Pattern.compile("\\d{8}");

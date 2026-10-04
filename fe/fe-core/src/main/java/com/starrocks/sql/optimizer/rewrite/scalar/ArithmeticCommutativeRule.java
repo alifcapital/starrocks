@@ -37,6 +37,13 @@ import java.util.Set;
 import static com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil.findArithmeticFunction;
 
 public class ArithmeticCommutativeRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     // Don't support DIVIDE, because DIVIDE will use double type, Double is not efficient and will lose precision
     private static final Map<String, String> LEFT_COMMUTATIVE_MAP = ImmutableMap.<String, String>builder()
             .put(FunctionSet.ADD, FunctionSet.SUBTRACT)

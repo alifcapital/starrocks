@@ -24,6 +24,13 @@ import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 import java.util.List;
 
 public class ExtractCommonPredicateRule extends TopDownScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     //
     // Extract Common Predicate
     // example:

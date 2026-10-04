@@ -55,6 +55,13 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public class SimplifiedPredicateRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     private static final ImmutableMap<String, List<String>> TIME_FNS = ImmutableMap.<String, List<String>>builder()
             .put("years_", ImmutableList.of(FunctionSet.YEARS_ADD, FunctionSet.YEARS_SUB))
             .put("quarters_", ImmutableList.of(FunctionSet.QUARTERS_ADD, FunctionSet.QUARTERS_SUB))

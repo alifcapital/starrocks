@@ -23,6 +23,13 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 
 public class SimplifiedScanColumnRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     //Simplify the comparison result of the same column
     //eg a >= a with not nullable transform to true constant;
     @Override

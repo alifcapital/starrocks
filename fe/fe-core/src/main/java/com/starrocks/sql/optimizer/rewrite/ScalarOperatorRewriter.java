@@ -19,6 +19,7 @@ import com.starrocks.common.Config;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.scalar.ArithmeticCommutativeRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ConsolidateLikesRule;
@@ -169,7 +170,17 @@ public class ScalarOperatorRewriter {
         return result;
     }
 
+    // A rule that leaves constants and column refs unchanged is not applied to them: with large IN lists most of
+    // the nodes are such leaves.
+    private static boolean skipLeaf(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        return (operator instanceof ConstantOperator || operator instanceof ColumnRefOperator)
+                && !rule.rewritesLeaves();
+    }
+
     private ScalarOperator applyRuleBottomUp(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        if (skipLeaf(operator, rule)) {
+            return operator;
+        }
         int childNum = operator.getChildren().size();
         for (int i = 0; i < childNum; i++) {
             ScalarOperator child = operator.getChild(i);
@@ -191,6 +202,9 @@ public class ScalarOperatorRewriter {
     }
 
     private ScalarOperator applyRuleTopDown(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        if (skipLeaf(operator, rule)) {
+            return operator;
+        }
         ScalarOperator op = rule.apply(operator, context);
         if (op != operator) {
             context.change();

@@ -50,6 +50,12 @@ import java.util.stream.Collectors;
 
 public class NormalizePredicateRule extends BottomUpScalarOperatorRewriteRule {
 
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     //
     // Normalize Binary Predicate
     //
