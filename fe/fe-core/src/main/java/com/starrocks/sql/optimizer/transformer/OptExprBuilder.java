@@ -66,6 +66,11 @@ public class OptExprBuilder {
         this.expressionMapping = expressionMapping;
     }
 
+    /** The root operator, without building the OptExpression tree of the whole plan as getRoot does. */
+    public Operator getRootOperator() {
+        return root;
+    }
+
     public OptExpression getRoot() {
         if (inputs.size() > 0) {
             return OptExpression

@@ -54,6 +54,13 @@ import java.util.Optional;
 //   a(String)
 //
 public class ReduceCastRule extends TopDownScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     @Override
     public ScalarOperator visitCastOperator(CastOperator operator, ScalarOperatorRewriteContext context) {
         if (SPMFunctions.isSPMFunctions(operator.getChild(0))) {

@@ -29,6 +29,8 @@ public class FunctionRef implements ParseNode {
     private final QualifiedName fnName;
     private final String alias;
     private final boolean isGlobalFunction;
+    // The name in lower case, computed on the first call: the analyzer asks for it many times per call expression.
+    private transient String functionName;
 
     public FunctionRef(QualifiedName fnName, String alias, NodePosition pos) {
         this(fnName, alias, pos, false);
@@ -56,9 +58,11 @@ public class FunctionRef implements ParseNode {
     }
 
     public String getFunctionName() {
-        List<String> parts = fnName.getParts();
-        String functionName = parts.get(parts.size() - 1);
-        return functionName.toLowerCase();
+        if (functionName == null) {
+            List<String> parts = fnName.getParts();
+            functionName = parts.get(parts.size() - 1).toLowerCase();
+        }
+        return functionName;
     }
 
     public String getAlias() {

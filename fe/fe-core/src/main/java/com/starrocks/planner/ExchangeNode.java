@@ -98,10 +98,10 @@ public class ExchangeNode extends PlanNode {
      * need to compute the cardinality here.
      */
     public ExchangeNode(PlanNodeId id, PlanNode inputNode, DataPartition dataPartition) {
-        super(id, inputNode, "EXCHANGE");
+        // An exchange has no conjuncts of its own, so it does not copy those of its input.
+        super(id, inputNode, "EXCHANGE", false);
         offset = 0;
         children.add(inputNode);
-        this.conjuncts = Lists.newArrayList();
         this.dataPartition = dataPartition;
         if (hasLimit()) {
             cardinality = Math.min(limit, inputNode.cardinality);

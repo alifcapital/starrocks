@@ -697,7 +697,10 @@ public class TypeManager {
         PrimitiveType largerType =
                 (t1.getType().ordinal() > t2.getType().ordinal() ? t1.getType() : t2.getType());
         PrimitiveType result = TypeCompatibilityMatrix.getCompatibleType(smallerType, largerType);
-        Preconditions.checkNotNull(result, String.format("No assignment from %s to %s", t1, t2));
+        // The message is formatted only on failure: this runs for every pair of types in an IN list.
+        if (result == null) {
+            throw new NullPointerException(String.format("No assignment from %s to %s", t1, t2));
+        }
         return TypeFactory.createType(result);
     }
 

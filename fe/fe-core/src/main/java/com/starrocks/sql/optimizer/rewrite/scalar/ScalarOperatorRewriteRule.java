@@ -25,5 +25,14 @@ public interface ScalarOperatorRewriteRule {
 
     boolean isOnlyOnce();
 
+    /**
+     * False only when applying this rule to a ConstantOperator or a ColumnRefOperator always returns the same
+     * instance, does not count a change and has no other effect. The bottom-up and top-down walks then skip the
+     * apply call for such leaves.
+     */
+    default boolean rewritesLeaves() {
+        return true;
+    }
+
     ScalarOperator apply(ScalarOperator root, ScalarOperatorRewriteContext context);
 }

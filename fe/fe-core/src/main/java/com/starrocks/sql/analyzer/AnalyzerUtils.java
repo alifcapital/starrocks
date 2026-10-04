@@ -216,6 +216,30 @@ public class AnalyzerUtils {
         }
     }
 
+    /**
+     * The checks of verifyNoAggregateFunctions, verifyNoWindowFunctions and verifyNoGroupingFunctions in one walk of
+     * the expression, with the same errors in the same order.
+     */
+    public static void verifyNoAggregateWindowOrGroupingFunctions(Expr expression, String clause) {
+        List<Expr> found = Lists.newArrayList();
+        expression.collectAll((Predicate<Expr>) arg -> isAggregateCall(arg) || arg instanceof AnalyticExpr
+                || arg instanceof GroupingFunctionCallExpr, found);
+        if (found.isEmpty()) {
+            return;
+        }
+        if (found.stream().anyMatch(AnalyzerUtils::isAggregateCall)) {
+            throw new SemanticException(clause + " clause cannot contain aggregations", expression.getPos());
+        }
+        if (found.stream().anyMatch(arg -> arg instanceof AnalyticExpr)) {
+            throw new SemanticException(clause + " clause cannot contain window function", expression.getPos());
+        }
+        throw new SemanticException(clause + " clause cannot contain grouping", expression.getPos());
+    }
+
+    private static boolean isAggregateCall(Expr expr) {
+        return expr instanceof FunctionCallExpr && ((FunctionCallExpr) expr).getFn() instanceof AggregateFunction;
+    }
+
     public static void verifyNoSubQuery(Expr expression, String clause) {
         List<Subquery> calls = Lists.newArrayList();
         expression.collectAll((Predicate<Expr>) arg -> arg instanceof Subquery, calls);

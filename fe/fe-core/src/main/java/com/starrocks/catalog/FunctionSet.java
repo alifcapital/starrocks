@@ -738,7 +738,38 @@ public class FunctionSet {
      * if we choose to use the vectorized function here. So... we need bind vectorized function
      * to row function when init.
      */
-    private final Map<String, List<Function>> vectorizedFunctions;
+    private final Map<String, OverloadGroup> vectorizedFunctions;
+
+    /**
+     * The overloads of one function name, in registration order, together with the sub-lists that getFunction
+     * matches against. The sub-lists are built while overloads are added so that a lookup does not have to
+     * filter the overloads again. The map is filled in init() and not changed afterwards, so lookups
+     * from many threads read it without locks as before.
+     */
+    private static final class OverloadGroup {
+        private final List<Function> all = Lists.newArrayList();
+        private final List<Function> standFns = Lists.newArrayList();
+        private final List<Function> polyFns = Lists.newArrayList();
+        // the same two lists restricted to the overloads that have named arguments
+        private final List<Function> namedStandFns = Lists.newArrayList();
+        private final List<Function> namedPolyFns = Lists.newArrayList();
+
+        private void add(Function fn) {
+            all.add(fn);
+            if (fn.isPolymorphic()) {
+                polyFns.add(fn);
+            } else {
+                standFns.add(fn);
+            }
+            if (fn.hasNamedArg()) {
+                if (fn.isPolymorphic()) {
+                    namedPolyFns.add(fn);
+                } else {
+                    namedStandFns.add(fn);
+                }
+            }
+        }
+    }
 
     // This contains the nullable functions, which cannot return NULL result directly for the NULL parameter.
     // This does not contain any user defined functions. All UDFs handle null values by themselves.
@@ -1190,24 +1221,26 @@ public class FunctionSet {
     }
 
     public Function getFunction(Function desc, Function.CompareMode mode) {
-        List<Function> fns = vectorizedFunctions.get(desc.functionName());
-        if (desc.hasNamedArg() && fns != null && !fns.isEmpty()) {
-            fns = fns.stream().filter(Function::hasNamedArg).collect(Collectors.toList());
+        OverloadGroup group = vectorizedFunctions.get(desc.functionName());
+        if (group == null) {
+            return null;
         }
-        if (fns == null || fns.isEmpty()) {
+        // Calls with named arguments only match overloads that have named arguments.
+        boolean named = desc.hasNamedArg();
+        List<Function> standFns = named ? group.namedStandFns : group.standFns;
+        List<Function> polyFns = named ? group.namedPolyFns : group.polyFns;
+        if (standFns.isEmpty() && polyFns.isEmpty()) {
             return null;
         }
 
         Function func;
         // To be back-compatible, we first choose the functions from the non-polymorphic functions, if we can't find
         // a suitable in non-polymorphic functions. We will try to search in the polymorphic functions.
-        List<Function> standFns = fns.stream().filter(fn -> !fn.isPolymorphic()).collect(Collectors.toList());
         func = matchStrictFunction(desc, mode, standFns);
         if (func != null) {
             return func;
         }
 
-        List<Function> polyFns = fns.stream().filter(Function::isPolymorphic).collect(Collectors.toList());
         func = matchPolymorphicFunction(desc, mode, polyFns, standFns);
         if (func != null) {
             return func;
@@ -1226,13 +1259,12 @@ public class FunctionSet {
             return;
         }
         fn.setIsNullable(!isAlwaysReturnNonNullableFunction(fn.functionName()));
-        List<Function> fns = vectorizedFunctions.computeIfAbsent(fn.functionName(), k -> Lists.newArrayList());
-        fns.add(fn);
+        vectorizedFunctions.computeIfAbsent(fn.functionName(), k -> new OverloadGroup()).add(fn);
     }
 
     public boolean isAggregateFunction(String functionName) {
-        List<Function> fns = vectorizedFunctions.getOrDefault(functionName, Collections.EMPTY_LIST);
-        return !fns.isEmpty() && fns.get(0) instanceof AggregateFunction;
+        OverloadGroup group = vectorizedFunctions.get(functionName);
+        return group != null && !group.all.isEmpty() && group.all.get(0) instanceof AggregateFunction;
     }
 
     // for vectorized engine
@@ -1246,8 +1278,7 @@ public class FunctionSet {
     private void addVectorizedBuiltin(Function fn) {
         fn.setCouldApplyDictOptimize(couldApplyDictOptimizationFunctions.contains(fn.functionName()));
         fn.setIsNullable(!isAlwaysReturnNonNullableFunction(fn.functionName()));
-        List<Function> fns = vectorizedFunctions.computeIfAbsent(fn.functionName(), k -> Lists.newArrayList());
-        fns.add(fn);
+        vectorizedFunctions.computeIfAbsent(fn.functionName(), k -> new OverloadGroup()).add(fn);
     }
 
     /**
@@ -2051,8 +2082,8 @@ public class FunctionSet {
 
     public List<Function> getBuiltinFunctions() {
         List<Function> builtinFunctions = Lists.newArrayList();
-        for (Map.Entry<String, List<Function>> entry : vectorizedFunctions.entrySet()) {
-            builtinFunctions.addAll(entry.getValue());
+        for (Map.Entry<String, OverloadGroup> entry : vectorizedFunctions.entrySet()) {
+            builtinFunctions.addAll(entry.getValue().all);
         }
         return builtinFunctions;
     }

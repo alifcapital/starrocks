@@ -856,7 +856,10 @@ public class QueryAnalyzer {
                 }
             } else {
                 List<Column> fullSchema = table.getFullSchema();
-                Set<Column> baseSchema = new HashSet<>(table.getBaseSchema());
+                // Only an OLAP table has a base schema other than its full schema. For the others every column of
+                // the full schema is in the base schema, so we skip the set and the hashing of each column.
+                List<Column> baseColumns = table.getBaseSchema();
+                Set<Column> baseSchema = baseColumns == fullSchema ? null : new HashSet<>(baseColumns);
 
                 List<String> pruneScanColumns = node.getPruneScanColumns();
                 boolean needPruneScanColumns = pruneScanColumns != null && !pruneScanColumns.isEmpty();
@@ -884,7 +887,7 @@ public class QueryAnalyzer {
                         continue;
                     }
                     // only output visible columns
-                    boolean visible = column.isVisible() && baseSchema.contains(column);
+                    boolean visible = column.isVisible() && (baseSchema == null || baseSchema.contains(column));
                     SlotRef slot = new SlotRef(tableName, column.getName(), column.getName());
                     Field field = new Field(column.getName(), column.getType(), tableName, slot, visible,
                             column.isAllowNull());
@@ -1084,9 +1087,7 @@ public class QueryAnalyzer {
                 joinScope.setParent(parentScope);
                 analyzeExpression(joinEqual, new AnalyzeState(), joinScope);
 
-                AnalyzerUtils.verifyNoAggregateFunctions(joinEqual, "JOIN");
-                AnalyzerUtils.verifyNoWindowFunctions(joinEqual, "JOIN");
-                AnalyzerUtils.verifyNoGroupingFunctions(joinEqual, "JOIN");
+                AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(joinEqual, "JOIN");
 
                 if (!joinEqual.getType().matchesType(BooleanType.BOOLEAN)
                         && !joinEqual.getType().matchesType(NullType.NULL)) {
@@ -1761,9 +1762,7 @@ public class QueryAnalyzer {
                 analyzeExpression(args.get(i), analyzeState, scope);
                 argTypes[i] = args.get(i).getType();
 
-                AnalyzerUtils.verifyNoAggregateFunctions(args.get(i), "Table Function");
-                AnalyzerUtils.verifyNoWindowFunctions(args.get(i), "Table Function");
-                AnalyzerUtils.verifyNoGroupingFunctions(args.get(i), "Table Function");
+                AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(args.get(i), "Table Function");
             }
             List<String> names = node.getFunctionParams().getExprsNames();
             String[] namesArray = null;

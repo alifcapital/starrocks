@@ -551,9 +551,7 @@ public class SelectAnalyzer {
         Expr predicate = pushNegationToOperands(whereClause);
         analyzeExpression(predicate, analyzeState, scope);
 
-        AnalyzerUtils.verifyNoAggregateFunctions(predicate, "WHERE");
-        AnalyzerUtils.verifyNoWindowFunctions(predicate, "WHERE");
-        AnalyzerUtils.verifyNoGroupingFunctions(predicate, "WHERE");
+        AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(predicate, "WHERE");
 
         if (predicate.getType().isBoolean() || predicate.getType().isNull()) {
             // do nothing
@@ -629,9 +627,7 @@ public class SelectAnalyzer {
                     }
 
                     if (analyzeState.getColumnReferences().get(groupingExpr) == null) {
-                        AnalyzerUtils.verifyNoAggregateFunctions(groupingExpr, "GROUP BY");
-                        AnalyzerUtils.verifyNoWindowFunctions(groupingExpr, "GROUP BY");
-                        AnalyzerUtils.verifyNoGroupingFunctions(groupingExpr, "GROUP BY");
+                        AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(groupingExpr, "GROUP BY");
                     }
 
                     groupByExpressions.add(groupingExpr);
@@ -1023,10 +1019,9 @@ public class SelectAnalyzer {
             for (Field field : originalFields) {
                 if (field.getName() != null && field.getOriginExpression() != null) {
                     NameExprKey key = new NameExprKey(field.getName(), field.getOriginExpression());
-                    if (visited.contains(key)) {
+                    if (!visited.add(key)) {
                         continue;
                     }
-                    visited.add(key);
                 }
                 allFields.add(field);
             }
@@ -1035,10 +1030,9 @@ public class SelectAnalyzer {
             Set<String> visited = new HashSet<>();
             for (Field field : originalFields) {
                 if (field.getName() != null) {
-                    if (visited.contains(field.getName())) {
+                    if (!visited.add(field.getName())) {
                         continue;
                     }
-                    visited.add(field.getName());
                 }
                 allFields.add(field);
             }

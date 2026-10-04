@@ -28,7 +28,7 @@ public class ConfigurableSerDesFactory {
     public static TSerializer getTSerializer(String protocol) throws TTransportException {
         Protocol p = Protocol.getProtocol(protocol);
         TProtocolFactory factory = ConfigurableTProtocolFactory.getTProtocolFactory(p);
-        return new TSerializer(factory);
+        return new ByteArrayTSerializer(factory);
     }
     public static TDeserializer getTDeserializer() throws TTransportException {
         return getTDeserializer(Protocol.BINARY.name());

@@ -4541,6 +4541,14 @@ public class Config extends ConfigBase {
     @ConfField
     public static boolean enable_concurrent_parse_optimization = false;
 
+    /**
+     * View definitions keep their ANTLR parse trees, so a query that reads a view only builds the AST.
+     * This limits the total number of tokens in the kept trees; a tree takes about 250 bytes of heap
+     * per token. 0 turns the cache off.
+     */
+    @ConfField
+    public static long view_definition_parse_cache_max_tokens = 131072;
+
     // Whether restore tables into colocate group if the
     // backuped table is colocated
     @ConfField(mutable = true)

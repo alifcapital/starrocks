@@ -16,10 +16,11 @@ package com.starrocks.sql.analyzer;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
-import com.google.common.collect.Multimap;
 import com.starrocks.catalog.TableName;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.SlotRef;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -31,7 +32,8 @@ public class RelationFields {
     private final List<Field> allFields;
 
     // NOTE: sort fields by name to speedup resolve performance
-    private final Multimap<String, Field> names;
+    // Built on the first lookup: many relations, such as the order scope of every select, never resolve a name.
+    private ImmutableListMultimap<String, Field> names;
     private final boolean resolveStruct;
     
     // Track if this RelationFields comes from FULL OUTER JOIN USING
@@ -49,16 +51,19 @@ public class RelationFields {
     public RelationFields(List<Field> fields, boolean fromFullOuterJoinUsing) {
         requireNonNull(fields, "fields is null");
         this.allFields = ImmutableList.copyOf(fields);
-        this.resolveStruct = fields.stream().anyMatch(x -> x.getType().isStructType());
-        this.fromFullOuterJoinUsing = fromFullOuterJoinUsing;
-        if (!resolveStruct) {
-            this.names = this.allFields.stream().collect(ImmutableListMultimap.toImmutableListMultimap(
-                    x -> x.getName().toLowerCase(), x -> x));
-        } else {
-            this.names = null;
+        boolean hasStruct = false;
+        for (Field field : allFields) {
+            hasStruct |= field.getType().isStructType();
         }
+        this.resolveStruct = hasStruct;
+        this.fromFullOuterJoinUsing = fromFullOuterJoinUsing;
     }
     
+    private static boolean isRelationAliasCaseInsensitive() {
+        ConnectContext context = ConnectContext.get();
+        return context != null && context.isRelationAliasCaseInsensitive();
+    }
+
     public boolean isFromFullOuterJoinUsing() {
         return fromFullOuterJoinUsing;
     }
@@ -91,13 +96,29 @@ public class RelationFields {
      */
     public List<Field> resolveFields(SlotRef name) {
         if (resolveStruct) {
-            return allFields.stream().filter(x -> x.canResolve(name)).collect(Collectors.toList());
+            // A struct field also resolves names that go into the struct, so every field is checked. The session
+            // flag for the case of relation aliases is the same for all of them.
+            boolean aliasCaseInsensitive = isRelationAliasCaseInsensitive();
+            List<Field> resolved = new ArrayList<>();
+            for (int i = 0; i < allFields.size(); i++) {
+                Field field = allFields.get(i);
+                if (field.canResolve(name, aliasCaseInsensitive)) {
+                    resolved.add(field);
+                }
+            }
+            return resolved;
         }
         // Resolve the slot based on column name first, then table name
         // For the case a table with thousands of columns, resolve by table name could not reduce the cardinality,
         // but resolve by column name first could reduce it a lot
-        List<Field> resolved =
-                names.get(name.getColumnName().toLowerCase()).stream().collect(ImmutableList.toImmutableList());
+        if (names == null) {
+            ImmutableListMultimap.Builder<String, Field> builder = ImmutableListMultimap.builder();
+            for (Field field : allFields) {
+                builder.put(field.getName().toLowerCase(), field);
+            }
+            names = builder.build();
+        }
+        ImmutableList<Field> resolved = names.get(name.getColumnName().toLowerCase());
         
         if (name.getTblNameWithoutAnalyzed() == null) {
             // For unqualified column references in FULL OUTER JOIN USING scope,
@@ -109,7 +130,9 @@ public class RelationFields {
             }
             return resolved;
         } else {
-            return resolved.stream().filter(input -> input.canResolve(name)).collect(toImmutableList());
+            boolean aliasCaseInsensitive = isRelationAliasCaseInsensitive();
+            return resolved.stream().filter(input -> input.canResolve(name, aliasCaseInsensitive))
+                    .collect(toImmutableList());
         }
     }
 

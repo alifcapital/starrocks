@@ -18,6 +18,13 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 
 public class SimplifiedCaseWhenRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     private final boolean skipComplexFunctions;
 
     private SimplifiedCaseWhenRule(boolean skipComplexFunctions) {

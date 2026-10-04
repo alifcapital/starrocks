@@ -410,7 +410,7 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
         int slotId = probeSlotRefExpr.getSlotId().asInt();
         boolean probeExprIsNotJoinColumn = eqJoinConjuncts.stream()
                 .filter(conj -> conj.getOp().equals(BinaryType.EQ))
-                .noneMatch(conj -> ExprUtils.getUsedSlotIds(conj).contains(slotId));
+                .noneMatch(conj -> ExprUtils.usesSlotId(conj, slotId));
 
         if (probeExprIsNotJoinColumn) {
             return Optional.empty();

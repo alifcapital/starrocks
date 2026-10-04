@@ -39,6 +39,12 @@ import java.util.stream.Stream;
 
 public class ConsolidateLikesRule extends TopDownScalarOperatorRewriteRule {
 
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     public static final ConsolidateLikesRule INSTANCE = new ConsolidateLikesRule();
     private static final Set<Character> REGEX_META_CHARS = "^$.*+?|(){}[]".chars()
             .mapToObj(c -> (char) c).collect(ImmutableSet.toImmutableSet());

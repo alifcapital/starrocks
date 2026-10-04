@@ -72,6 +72,13 @@ import java.util.stream.Collectors;
 //   a(String)          b(int)
 //
 public class ImplicitCastRule extends TopDownScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     @Override
     public ScalarOperator visitCall(CallOperator call, ScalarOperatorRewriteContext context) {
         Function fn = call.getFunction();

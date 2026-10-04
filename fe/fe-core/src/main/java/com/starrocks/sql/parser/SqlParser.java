@@ -14,6 +14,9 @@
 
 package com.starrocks.sql.parser;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
@@ -60,6 +63,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -166,16 +170,21 @@ public class SqlParser {
     }
 
     private static List<StatementBase> parseWithStarRocksDialect(String sql, SessionVariable sessionVariable) {
-        List<StatementBase> statements = Lists.newArrayList();
         Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> pair =
                 invokeParser(sql, sessionVariable, com.starrocks.sql.parser.StarRocksParser::sqlStatements);
-        com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext sqlStatementsContext =
-                (com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext) pair.first;
+        return buildStatements(sql, (com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext) pair.first,
+                (CommonTokenStream) pair.second.getTokenStream(), sessionVariable);
+    }
+
+    private static List<StatementBase> buildStatements(
+            String sql, com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext sqlStatementsContext,
+            CommonTokenStream tokenStream, SessionVariable sessionVariable) {
+        List<StatementBase> statements = Lists.newArrayList();
         List<com.starrocks.sql.parser.StarRocksParser.SingleStatementContext> singleStatementContexts =
                 sqlStatementsContext.singleStatement();
         for (int idx = 0; idx < singleStatementContexts.size(); ++idx) {
             // collect hint info
-            HintCollector collector = new HintCollector((CommonTokenStream) pair.second.getTokenStream(), sessionVariable);
+            HintCollector collector = new HintCollector(tokenStream, sessionVariable);
             collector.collect(singleStatementContexts.get(idx));
             AstBuilder astBuilder = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory.create(
                     sessionVariable.getSqlMode(),
@@ -211,6 +220,76 @@ public class SqlParser {
         SessionVariable sessionVariable = new SessionVariable();
         sessionVariable.setSqlMode(sqlMode);
         return parse(originSql, sessionVariable);
+    }
+
+    private record ViewDefinitionKey(String sql, long sqlMode, int tokenLimit, int exprLimit) {
+    }
+
+    private record ParsedViewDefinition(com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext tree,
+                                        CommonTokenStream tokenStream) {
+    }
+
+    // A holder class, so the cache is created on first use, after the FE config is loaded.
+    private static class ViewDefinitionCache {
+        private static final Cache<ViewDefinitionKey, ParsedViewDefinition> CACHE = Caffeine.newBuilder()
+                .maximumWeight(Config.view_definition_parse_cache_max_tokens)
+                .weigher((ViewDefinitionKey key, ParsedViewDefinition value) -> value.tokenStream().size())
+                .expireAfterAccess(1, TimeUnit.HOURS)
+                .build();
+    }
+
+    /**
+     * Same result as {@link #parse(String, long)}, for view definitions. Every query that reads a view parses
+     * its definition again, and lexing and parsing take most of that time. Their result depends only on the
+     * text, the SQL mode (the lexer reads it) and the token and expression limits, so we keep the parse tree
+     * under that key. The analyzer changes the AST it is given, so each call builds a new AST from the kept
+     * tree. Several threads can do this at once because the AST builder and the hint collector only read the
+     * tree and the tokens.
+     */
+    public static List<StatementBase> parseViewDefinition(String sql, long sqlMode) {
+        if (Config.view_definition_parse_cache_max_tokens <= 0) {
+            return parse(sql, sqlMode);
+        }
+        // parse(String, long) takes the StarRocks dialect path too: a new SessionVariable has that dialect.
+        SessionVariable sessionVariable = new SessionVariable();
+        sessionVariable.setSqlMode(sqlMode);
+        try {
+            int tokenLimit = tokenLimit(sessionVariable);
+            int exprLimit = exprLimit(sessionVariable);
+            ViewDefinitionKey key = new ViewDefinitionKey(sql, sqlMode, tokenLimit, exprLimit);
+            ParsedViewDefinition parsed = ViewDefinitionCache.CACHE.getIfPresent(key);
+            if (parsed != null) {
+                return buildStatements(sql, parsed.tree(), parsed.tokenStream(), sessionVariable);
+            }
+            Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> pair = invokeParser(sql,
+                    sessionVariable, com.starrocks.sql.parser.StarRocksParser::sqlStatements, tokenLimit, exprLimit);
+            CommonTokenStream tokenStream = (CommonTokenStream) pair.second.getTokenStream();
+            // The parser has already read up to EOF. We fill the stream anyway, so that a later read from
+            // another thread cannot change it.
+            tokenStream.fill();
+            parsed = new ParsedViewDefinition(
+                    (com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext) pair.first, tokenStream);
+            List<StatementBase> statements = buildStatements(sql, parsed.tree(), parsed.tokenStream(),
+                    sessionVariable);
+            ViewDefinitionCache.CACHE.put(key, parsed);
+            return statements;
+        } catch (OutOfMemoryError e) {
+            LOG.warn("parser out of memory, sql is:" + sql);
+            throw e;
+        }
+    }
+
+    @VisibleForTesting
+    public static boolean isViewDefinitionCached(String sql, long sqlMode) {
+        SessionVariable sessionVariable = new SessionVariable();
+        sessionVariable.setSqlMode(sqlMode);
+        return ViewDefinitionCache.CACHE.getIfPresent(new ViewDefinitionKey(sql, sqlMode,
+                tokenLimit(sessionVariable), exprLimit(sessionVariable))) != null;
+    }
+
+    @VisibleForTesting
+    public static void clearViewDefinitionCache() {
+        ViewDefinitionCache.CACHE.invalidateAll();
     }
 
     /**
@@ -334,9 +413,25 @@ public class SqlParser {
         }
     }
 
+    private static int tokenLimit(SessionVariable sessionVariable) {
+        return Math.max(MIN_TOKEN_LIMIT, sessionVariable.getParseTokensLimit());
+    }
+
+    private static int exprLimit(SessionVariable sessionVariable) {
+        return Math.max(Config.expr_children_limit, sessionVariable.getExprChildrenLimit());
+    }
+
     private static Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> invokeParser(
             String sql, SessionVariable sessionVariable,
             Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction) {
+        return invokeParser(sql, sessionVariable, parseFunction, tokenLimit(sessionVariable),
+                exprLimit(sessionVariable));
+    }
+
+    private static Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> invokeParser(
+            String sql, SessionVariable sessionVariable,
+            Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction,
+            int tokenLimit, int exprLimit) {
         com.starrocks.sql.parser.StarRocksLexer lexer =
                 new com.starrocks.sql.parser.StarRocksLexer(new CaseInsensitiveStream(CharStreams.fromString(sql)));
         lexer.setSqlMode(sessionVariable.getSqlMode());
@@ -353,8 +448,6 @@ public class SqlParser {
             ));
         }
         CommonTokenStream tokenStream = new CommonTokenStream(lexer);
-        int exprLimit = Math.max(Config.expr_children_limit, sessionVariable.getExprChildrenLimit());
-        int tokenLimit = Math.max(MIN_TOKEN_LIMIT, sessionVariable.getParseTokensLimit());
         com.starrocks.sql.parser.StarRocksParser parser = new com.starrocks.sql.parser.StarRocksParser(tokenStream);
         parser.removeErrorListeners();
         parser.addErrorListener(new ErrorHandler());

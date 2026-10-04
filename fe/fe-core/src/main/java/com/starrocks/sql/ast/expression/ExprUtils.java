@@ -109,6 +109,32 @@ public class ExprUtils {
         return usedSlotIds;
     }
 
+    /**
+     * Same as {@code slotIds.contains(getUsedSlotIds(expr))}. A plain slot reference is the common probe
+     * expression, so it is checked directly instead of building a bitmap for it.
+     */
+    public static boolean containsUsedSlotIds(RoaringBitmap slotIds, Expr expr) {
+        if (expr.getClass() == SlotRef.class) {
+            return slotIds.contains(((SlotRef) expr).getSlotId().asInt());
+        }
+        return slotIds.contains(getUsedSlotIds(expr));
+    }
+
+    /**
+     * Same as {@code getUsedSlotIds(expr).contains(slotId)}, without building the bitmap. It visits the
+     * whole tree, as the collect call does, so that an unanalyzed slot reference fails in the same way.
+     */
+    public static boolean usesSlotId(Expr expr, int slotId) {
+        if (expr.getClass() == SlotRef.class) {
+            return ((SlotRef) expr).getSlotId().asInt() == slotId;
+        }
+        boolean used = false;
+        for (Expr child : expr.getChildren()) {
+            used |= usesSlotId(child, slotId);
+        }
+        return used;
+    }
+
     public static Optional<Expr> replaceLargeStringLiteralImpl(Expr expr) {
         if (expr instanceof LargeStringLiteral) {
             return Optional.of(new StringLiteral(((LargeStringLiteral) expr).getValue()));

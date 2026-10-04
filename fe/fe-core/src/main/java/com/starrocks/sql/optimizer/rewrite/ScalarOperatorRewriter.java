@@ -19,6 +19,7 @@ import com.starrocks.common.Config;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.scalar.ArithmeticCommutativeRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ConsolidateLikesRule;
@@ -38,6 +39,7 @@ import com.starrocks.sql.optimizer.rewrite.scalar.SimplifiedDateColumnPredicateR
 import com.starrocks.sql.optimizer.rewrite.scalar.SimplifiedPredicateRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.SimplifiedScanColumnRule;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -113,11 +115,30 @@ public class ScalarOperatorRewriter {
         ScalarOperator result = root;
 
         context.reset();
+        // A bottom-up or top-down rule runs until a pass over the tree changes nothing. Until another rule changes
+        // the tree, running it again changes nothing either, so a round skips it. A rule that runs only once on the
+        // root does not count its changes, so it always runs, and a change it makes counts here for the others.
+        int uncountedChanges = 0;
+        int[] unchangedAt = new int[ruleList.size()];
+        Arrays.fill(unchangedAt, -1);
         int changeNums;
         do {
             changeNums = context.changeNum();
-            for (ScalarOperatorRewriteRule rule : ruleList) {
+            for (int i = 0; i < ruleList.size(); i++) {
+                ScalarOperatorRewriteRule rule = ruleList.get(i);
+                if (rule.isOnlyOnce()) {
+                    ScalarOperator before = result;
+                    result = rewriteByRule(result, rule);
+                    if (result != before) {
+                        uncountedChanges++;
+                    }
+                    continue;
+                }
+                if (unchangedAt[i] == context.changeNum() + uncountedChanges) {
+                    continue;
+                }
                 result = rewriteByRule(result, rule);
+                unchangedAt[i] = context.changeNum() + uncountedChanges;
             }
 
             if (changeNums > Config.max_planner_scalar_rewrite_num) {
@@ -149,7 +170,17 @@ public class ScalarOperatorRewriter {
         return result;
     }
 
+    // A rule that leaves constants and column refs unchanged is not applied to them: with large IN lists most of
+    // the nodes are such leaves.
+    private static boolean skipLeaf(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        return (operator instanceof ConstantOperator || operator instanceof ColumnRefOperator)
+                && !rule.rewritesLeaves();
+    }
+
     private ScalarOperator applyRuleBottomUp(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        if (skipLeaf(operator, rule)) {
+            return operator;
+        }
         int childNum = operator.getChildren().size();
         for (int i = 0; i < childNum; i++) {
             ScalarOperator child = operator.getChild(i);
@@ -171,6 +202,9 @@ public class ScalarOperatorRewriter {
     }
 
     private ScalarOperator applyRuleTopDown(ScalarOperator operator, ScalarOperatorRewriteRule rule) {
+        if (skipLeaf(operator, rule)) {
+            return operator;
+        }
         ScalarOperator op = rule.apply(operator, context);
         if (op != operator) {
             context.change();

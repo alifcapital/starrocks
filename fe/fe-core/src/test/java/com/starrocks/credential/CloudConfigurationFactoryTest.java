@@ -29,7 +29,9 @@ import org.apache.iceberg.aws.s3.S3FileIOProperties;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static com.starrocks.connector.share.credential.CloudConfigurationConstants.HDFS_AUTHENTICATION;
@@ -40,6 +42,84 @@ import static com.starrocks.credential.azure.AzureCloudConfigurationProvider.BLO
 import static com.starrocks.credential.gcp.GCPCloudConfigurationProvider.GCS_ACCESS_TOKEN;
 
 public class CloudConfigurationFactoryTest {
+
+    // The chain of buildCloudConfigurationForVendedCredentials before it ran the provider chain once
+    // for properties without vended keys.
+    private static CloudConfiguration vendedCredentialsByTrying(Map<String, String> properties, String path) {
+        CloudConfiguration cloudConfiguration =
+                CloudConfigurationFactory.buildCloudConfigurationForAWSVendedCredentials(properties);
+        if (cloudConfiguration.getCloudType() != CloudType.DEFAULT) {
+            return cloudConfiguration;
+        }
+        cloudConfiguration = CloudConfigurationFactory.buildCloudConfigurationForAzureVendedCredentials(properties, path);
+        if (cloudConfiguration.getCloudType() != CloudType.DEFAULT) {
+            return cloudConfiguration;
+        }
+        return CloudConfigurationFactory.buildCloudConfigurationForGCSVendedCredentials(properties, path);
+    }
+
+    private static void assertSameAsTrying(Map<String, String> properties, String path) {
+        CloudConfiguration expected = vendedCredentialsByTrying(properties, path);
+        CloudConfiguration actual = CloudConfigurationFactory.buildCloudConfigurationForVendedCredentials(properties, path);
+        Assertions.assertEquals(expected.getClass(), actual.getClass(), properties.toString());
+        Assertions.assertEquals(expected.getCloudType(), actual.getCloudType(), properties.toString());
+        Assertions.assertEquals(expected.toConfString(), actual.toConfString(), properties.toString());
+        TCloudConfiguration expectedThrift = new TCloudConfiguration();
+        TCloudConfiguration actualThrift = new TCloudConfiguration();
+        expected.toThrift(expectedThrift);
+        actual.toThrift(actualThrift);
+        Assertions.assertEquals(expectedThrift, actualThrift, properties.toString());
+    }
+
+    @Test
+    public void testVendedCredentialsSameAsTryingEachBuilder() {
+        String s3Path = "s3://bucket/db/table";
+        String adlsPath = "abfss://container@account.dfs.core.windows.net/path";
+        String blobPath = "wasbs://container@account.blob.core.windows.net/path";
+        List<Map<String, String>> propertiesList = new ArrayList<>();
+        propertiesList.add(new HashMap<>());
+        // No vended key, but other properties that the builders ignore or that look alike.
+        propertiesList.add(new HashMap<>(Map.of(S3FileIOProperties.ACCESS_KEY_ID, "ak")));
+        propertiesList.add(new HashMap<>(Map.of(S3FileIOProperties.ACCESS_KEY_ID, "ak",
+                S3FileIOProperties.SECRET_ACCESS_KEY, "sk")));
+        propertiesList.add(new HashMap<>(Map.of(AwsClientProperties.CLIENT_REGION, "region",
+                S3FileIOProperties.ENDPOINT, "endpoint", S3FileIOProperties.PATH_STYLE_ACCESS, "true")));
+        propertiesList.add(new HashMap<>(Map.of(ADLS_SAS_TOKEN + "account", "sas")));
+        propertiesList.add(new HashMap<>(Map.of("account." + ADLS_ENDPOINT, "sas")));
+        propertiesList.add(new HashMap<>(Map.of("gcs.oauth2.token-expires-at", "1")));
+        propertiesList.add(new HashMap<>(Map.of(HDFS_AUTHENTICATION, "simple", HDFS_USERNAME, "XX",
+                CloudConfigurationConstants.HDFS_PASSWORD, "XX")));
+        propertiesList.add(new HashMap<>(Map.of(CloudConfigurationConstants.AWS_S3_ACCESS_KEY, "ak",
+                CloudConfigurationConstants.AWS_S3_SECRET_KEY, "sk")));
+        propertiesList.add(new HashMap<>(Map.of(CloudConfigurationConstants.AZURE_ADLS2_SAS_TOKEN, "sas",
+                CloudConfigurationConstants.AZURE_ADLS2_ENDPOINT, "account.dfs.core.windows.net")));
+        propertiesList.add(new HashMap<>(Map.of(CloudConfigurationConstants.GCP_GCS_USE_COMPUTE_ENGINE_SERVICE_ACCOUNT,
+                "true")));
+        propertiesList.add(new HashMap<>(Map.of(HadoopExt.HADOOP_USERNAME, "user")));
+        // Vended keys.
+        propertiesList.add(new HashMap<>(Map.of(S3FileIOProperties.ACCESS_KEY_ID, "ak",
+                S3FileIOProperties.SECRET_ACCESS_KEY, "sk", S3FileIOProperties.SESSION_TOKEN, "token")));
+        propertiesList.add(new HashMap<>(Map.of(ADLS_SAS_TOKEN + "account." + ADLS_ENDPOINT, "sas")));
+        propertiesList.add(new HashMap<>(Map.of(ADLS_SAS_TOKEN + "account." + BLOB_ENDPOINT, "sas")));
+        propertiesList.add(new HashMap<>(Map.of(GCS_ACCESS_TOKEN, "token")));
+        propertiesList.add(new HashMap<>(Map.of(GCS_ACCESS_TOKEN, "token", "gcs.oauth2.token-expires-at", "1")));
+
+        for (Map<String, String> properties : propertiesList) {
+            for (String path : new String[] {"", s3Path, adlsPath, blobPath, "not a path"}) {
+                assertSameAsTrying(properties, path);
+            }
+        }
+    }
+
+    @Test
+    public void testVendedCredentialsWithoutVendedKeysUseTheStorageChain() {
+        CloudConfiguration empty = CloudConfigurationFactory.buildCloudConfigurationForVendedCredentials(
+                new HashMap<>(), "s3://bucket/db/table");
+        CloudConfiguration storage = CloudConfigurationFactory.buildCloudConfigurationForStorage(new HashMap<>());
+        Assertions.assertEquals(storage.getClass(), empty.getClass());
+        Assertions.assertEquals(storage.toConfString(), empty.toConfString());
+        Assertions.assertNotSame(storage, empty);
+    }
 
     @Test
     public void testBuildCloudConfigurationForAWSVendedCredentials() {

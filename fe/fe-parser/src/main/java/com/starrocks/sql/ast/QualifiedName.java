@@ -34,6 +34,9 @@ public class QualifiedName implements ParseNode {
 
     private final NodePosition pos;
 
+    // The joined name, computed on the first call: hashing and comparing function calls ask for it many times.
+    private transient String joined;
+
     public static QualifiedName of(String... originalParts) {
         return of(List.of(originalParts), NodePosition.ZERO);
     }
@@ -65,7 +68,10 @@ public class QualifiedName implements ParseNode {
 
     @Override
     public String toString() {
-        return Joiner.on('.').join(parts);
+        if (joined == null) {
+            joined = Joiner.on('.').join(parts);
+        }
+        return joined;
     }
 
     @Override

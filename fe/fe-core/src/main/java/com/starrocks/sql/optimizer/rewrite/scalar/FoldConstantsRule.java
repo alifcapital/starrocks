@@ -59,6 +59,13 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
+
+    // Applying this rule to a ConstantOperator or a ColumnRefOperator returns it unchanged.
+    @Override
+    public boolean rewritesLeaves() {
+        return false;
+    }
+
     private static final Logger LOG = LogManager.getLogger(FoldConstantsRule.class);
 
     private static final ImmutableSortedSet<String> NULL_PROPAGATING_FUNCTIONS =

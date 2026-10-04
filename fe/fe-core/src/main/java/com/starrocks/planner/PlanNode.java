@@ -181,11 +181,16 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
      * Copy c'tor. Also passes in new id.
      */
     protected PlanNode(PlanNodeId id, PlanNode node, String planNodeName) {
+        this(id, node, planNodeName, true);
+    }
+
+    /** As the constructor above, without copying the conjuncts of the node when the new node sets its own. */
+    protected PlanNode(PlanNodeId id, PlanNode node, String planNodeName, boolean copyConjuncts) {
         this.id = id;
         this.limit = node.limit;
         this.tupleIds = Lists.newArrayList(node.tupleIds);
         this.nullableTupleIds = Sets.newHashSet(node.nullableTupleIds);
-        this.conjuncts = ExprUtils.cloneList(node.conjuncts, null);
+        this.conjuncts = copyConjuncts ? ExprUtils.cloneList(node.conjuncts, null) : Lists.newArrayList();
         this.cardinality = -1;
         this.planNodeName = planNodeName;
     }
@@ -701,16 +706,21 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     }
 
     protected boolean checkHasNullableGenerateChild() {
-        List<RepeatNode> repeatNodes = Lists.newArrayList();
-        collectAll(Predicates.instanceOf(RepeatNode.class), repeatNodes);
-        if (repeatNodes.size() > 0) {
+        return hasRepeatOrOuterJoin(this);
+    }
+
+    // One walk of the subtree that stops at the first repeat or outer join. Every project, aggregation, sort,
+    // analytic and set node asks this of its whole subtree, across exchanges, so the plan is walked once per such
+    // node.
+    private static boolean hasRepeatOrOuterJoin(PlanNode node) {
+        if (node instanceof RepeatNode) {
             return true;
         }
-
-        List<JoinNode> joinNodes = Lists.newArrayList();
-        collectAll(Predicates.instanceOf(JoinNode.class), joinNodes);
-        for (JoinNode node : joinNodes) {
-            if (node.getJoinOp().isOuterJoin()) {
+        if (node instanceof JoinNode join && join.getJoinOp().isOuterJoin()) {
+            return true;
+        }
+        for (PlanNode child : node.getChildren()) {
+            if (hasRepeatOrOuterJoin(child)) {
                 return true;
             }
         }
@@ -932,7 +942,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             }
             return false;
         } else {
-            return getSlotIds(descTbl).contains(ExprUtils.getUsedSlotIds(probeExpr));
+            return ExprUtils.containsUsedSlotIds(getSlotIds(descTbl), probeExpr);
         }
     }
 
@@ -995,8 +1005,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         boolean accept = tryPushdownRuntimeFilterToChild(context, optProbeExprCandidates,
                 optPartitionByExprsCandidates, childIdx);
         RoaringBitmap slotIds = getSlotIds(descTbl);
-        boolean isBound = slotIds.contains(ExprUtils.getUsedSlotIds(probeExpr)) &&
-                partitionByExprs.stream().allMatch(expr -> slotIds.contains(ExprUtils.getUsedSlotIds(expr)));
+        boolean isBound = ExprUtils.containsUsedSlotIds(slotIds, probeExpr) &&
+                partitionByExprs.stream().allMatch(expr -> ExprUtils.containsUsedSlotIds(slotIds, expr));
         if (isBound) {
             checkRuntimeFilterOnNullValue(description, probeExpr);
         }
