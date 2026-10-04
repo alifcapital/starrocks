@@ -18,6 +18,7 @@ import com.google.common.base.Preconditions;
 import com.starrocks.sql.parser.NodePosition;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * FunctionRef is used to represent all Functions (UDF) with same FunctionName.
@@ -58,7 +59,7 @@ public class FunctionRef implements ParseNode {
     public String getFunctionName() {
         List<String> parts = fnName.getParts();
         String functionName = parts.get(parts.size() - 1);
-        return functionName.toLowerCase();
+        return functionName.toLowerCase(Locale.ROOT);
     }
 
     public String getAlias() {

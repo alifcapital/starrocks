@@ -38,6 +38,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
 
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -169,7 +170,7 @@ public class ScalarType extends Type implements Cloneable {
             case JSON:
             case VARIANT:
             case FUNCTION:
-                stringBuilder.append(type.toString().toLowerCase());
+                stringBuilder.append(type.toString().toLowerCase(Locale.ROOT));
                 break;
             default:
                 stringBuilder.append(type);
@@ -377,7 +378,7 @@ public class ScalarType extends Type implements Cloneable {
             case DECIMALV2:
                 return "decimal";
             default:
-                return type.toString().toLowerCase();
+                return type.toString().toLowerCase(Locale.ROOT);
         }
     }
 
@@ -404,11 +405,11 @@ public class ScalarType extends Type implements Cloneable {
             case DECIMAL64:
             case DECIMAL128:
             case DECIMAL256:
-                stringBuilder.append(type.toString().toLowerCase()).append("(").append(precision).append(", ")
+                stringBuilder.append(type.toString().toLowerCase(Locale.ROOT)).append("(").append(precision).append(", ")
                         .append(scale).append(")");
                 break;
             default:
-                stringBuilder.append(type.toString().toLowerCase());
+                stringBuilder.append(type.toString().toLowerCase(Locale.ROOT));
                 break;
         }
         return stringBuilder.toString();

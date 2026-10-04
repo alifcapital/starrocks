@@ -181,7 +181,7 @@ public class AnalyzeShowTest {
                 AstToStringBuilder.toString(showPartitionsStmt.getFilterMap().get("partitionname")));
 
         showPartitionsStmt = (ShowPartitionsStmt) analyzeSuccess("SHOW PARTITIONS FROM " +
-                "`test`.`t0` ORDER BY `PartitionId` ASC LIMIT 10\"");
+                "`test`.`t0` ORDER BY `PartitionId` ASC LIMIT 10");
         Assertions.assertEquals(" LIMIT 10",
                 AstToStringBuilder.toString(showPartitionsStmt.getLimitElement()));
     }

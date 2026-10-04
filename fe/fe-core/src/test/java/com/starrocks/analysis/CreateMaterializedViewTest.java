@@ -846,7 +846,8 @@ public class CreateMaterializedViewTest extends MVTestBase {
             UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
             Assertions.fail();
         } catch (Exception e) {
-            Assertions.assertEquals("Creating materialized view does not support explain query", e.getMessage());
+            Assertions.assertTrue(e.getMessage().contains(
+                    "EXPLAIN, TRACE and INTO OUTFILE are not supported in an embedded query"), e.getMessage());
         } finally {
             starRocksAssert.useDatabase("test");
         }

@@ -3176,6 +3176,12 @@ public class LocalMetastore implements ConnectorMetadata, MVRepairHandler, Memor
             throw new DdlException("create materialized failed. database:" + db.getFullName() + " not exist");
         }
         try {
+            // With IF NOT EXISTS an existing synchronous materialized view of the same name is not an error.
+            if (stmt.isIfNotExists() && olapTable.hasMaterializedIndex(stmt.getMVName())) {
+                LOG.info("materialized view {} already exists on table {}, skip creating it",
+                        stmt.getMVName(), tableName);
+                return;
+            }
             if (olapTable.getKeysType() == KeysType.PRIMARY_KEYS) {
                 throw new DdlException(
                         "Do not support create materialized view on primary key table[" + tableName + "]");

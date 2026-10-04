@@ -1,0 +1,14 @@
+{
+  "issue": "RB-028",
+  "scope": "AstBuilder nested struct-field paths; ADD/DROP, no declared type grammar widening",
+  "production_source_sha256": "bd65928af807318d2c6178b28c466c8a336cb2eb68b0f596de25bc10917d6e80",
+  "test_source_sha256": "68f3b1fa7eed819c00447a96933df364f90852c6856ab06b5fe6fc1047e7e5a4",
+  "remote_proof": "parity-struct-field-stage37-continuation-v1/results-v3/terminal-proof-v1.json",
+  "remote_proof_sha256": "97941974f3ea27eb7615ac027a5816fbee54b9f40b1a0b19d681947df12c3b9b",
+  "tested": "actual best branch source compilation, 2 JUnit methods per locale EN/TR, each in SLL and LL",
+  "successful_tests": 4,
+  "failed_tests": 0,
+  "frozen_loss_reproduction": "parity-struct-field-stage37-runtime-v2/results-v1/terminal-proof-v1.json",
+  "frozen_loss_proof_sha256": "642271aead2d8baa5d3799ccb05a6e9187f6e96ed1d576812e6ac1029831b72b",
+  "full_grammar_complete": false
+}

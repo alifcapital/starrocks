@@ -44,6 +44,7 @@ import com.starrocks.type.VariantType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import static com.starrocks.sql.parser.AstBuilderUtils.createPos;
 import static com.starrocks.sql.parser.AstBuilderUtils.getIdentifier;
@@ -77,6 +78,10 @@ public class TypeParser {
             return TypeFactory.createCharType(length);
         } else if (context.SIGNED() != null) {
             // Align with MySQL semantics: CAST(... AS SIGNED) returns a 64-bit signed integer (BIGINT).
+            return IntegerType.BIGINT;
+        } else if (context.UNSIGNED() != null) {
+            // MySQL reads UNSIGNED as a 64-bit unsigned integer. A 32-bit INT would turn a value above 2^31 into
+            // NULL, so we use BIGINT, which holds every value of a 32-bit unsigned column.
             return IntegerType.BIGINT;
         } else if (context.HLL() != null) {
             return HLLType.HLL;
@@ -113,7 +118,7 @@ public class TypeParser {
                         "execute cmd 'admin set frontend config (\"enable_decimal_v3\" = \"true\")' " +
                         "on every FE server");
             }
-            final PrimitiveType primitiveType = PrimitiveType.valueOf(context.children.get(0).getText().toUpperCase());
+            final PrimitiveType primitiveType = PrimitiveType.valueOf(context.children.get(0).getText().toUpperCase(Locale.ROOT));
             if (precision != null) {
                 if (scale != null) {
                     return TypeFactory.createDecimalV3Type(primitiveType, precision, scale);
@@ -143,12 +148,27 @@ public class TypeParser {
         List<com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext> subfields =
                 context.subfieldDescs().subfieldDesc();
         for (com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext type : subfields) {
-            Identifier fieldIdentifier = getIdentifier(type.identifier());
+            Identifier fieldIdentifier = getStructFieldIdentifier(type);
             String fieldName = fieldIdentifier.getValue();
             fields.add(new StructField(fieldName, getType(type.type()), null));
         }
 
         return new StructType(fields);
+    }
+
+    private static Identifier getStructFieldIdentifier(
+            com.starrocks.sql.parser.StarRocksParser.SubfieldDescContext field) {
+        if (field.identifier() != null) {
+            return getIdentifier(field.identifier());
+        }
+        var nested = field.nestedFieldName();
+        if (nested.subfieldName().size() != 1 || !nested.DOT_IDENTIFIER().isEmpty()) {
+            throw new ParsingException("Nested field paths are not allowed in STRUCT type declarations; " +
+                    "quote a literal field name", createPos(nested));
+        }
+        var single = nested.subfieldName(0);
+        return single.identifier() != null ? getIdentifier(single.identifier())
+                : new Identifier(single.ARRAY_ELEMENT().getText(), createPos(single));
     }
 
     public static MapType getMapType(com.starrocks.sql.parser.StarRocksParser.MapTypeContext context) {
@@ -167,7 +187,7 @@ public class TypeParser {
             return null;
         }
 
-        String upperTypeName = typeName.toUpperCase();
+        String upperTypeName = typeName.toUpperCase(Locale.ROOT);
         return switch (upperTypeName) {
             // Null type
             case "NULL_TYPE" -> NullType.NULL;
@@ -178,7 +198,7 @@ public class TypeParser {
             // Integer types
             case "TINYINT" -> IntegerType.TINYINT;
             case "SMALLINT" -> IntegerType.SMALLINT;
-            case "INTEGER", "UNSIGNED", "INT" -> IntegerType.INT;
+            case "INTEGER", "INT" -> IntegerType.INT;
             case "BIGINT" -> IntegerType.BIGINT;
             case "LARGEINT" -> IntegerType.LARGEINT;
 

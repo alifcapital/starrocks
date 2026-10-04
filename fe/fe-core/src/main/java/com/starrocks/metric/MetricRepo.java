@@ -87,6 +87,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.service.ExecuteEnv;
+import com.starrocks.sql.parser.ParserDfaCache;
 import com.starrocks.staros.StarMgrServer;
 import com.starrocks.system.Backend;
 import com.starrocks.system.ComputeNode;
@@ -654,6 +655,42 @@ public final class MetricRepo {
             }
         };
         STARROCKS_METRIC_REGISTER.addMetric(snapshotConsecutiveFailures);
+
+        // The shared ANTLR prediction cache grows with the statements that the parser sees, so we report its size
+        // next to parser_dfa_cache_max_states.
+        GaugeMetric<Long> parserDfaStates = new GaugeMetric<Long>(
+                "parser_dfa_states", MetricUnit.NOUNIT, "DFA states in the shared ANTLR parser cache") {
+            @Override
+            public Long getValue() {
+                return ParserDfaCache.parserStates();
+            }
+        };
+        STARROCKS_METRIC_REGISTER.addMetric(parserDfaStates);
+        GaugeMetric<Long> parserDfaContexts = new GaugeMetric<Long>(
+                "parser_dfa_contexts", MetricUnit.NOUNIT, "prediction contexts in the shared ANTLR parser cache") {
+            @Override
+            public Long getValue() {
+                return ParserDfaCache.parserContexts();
+            }
+        };
+        STARROCKS_METRIC_REGISTER.addMetric(parserDfaContexts);
+        GaugeMetric<Long> lexerDfaStates = new GaugeMetric<Long>(
+                "lexer_dfa_states", MetricUnit.NOUNIT, "DFA states in the shared ANTLR lexer cache") {
+            @Override
+            public Long getValue() {
+                return ParserDfaCache.lexerStates();
+            }
+        };
+        STARROCKS_METRIC_REGISTER.addMetric(lexerDfaStates);
+        GaugeMetric<Long> parserDfaCacheClears = new GaugeMetric<Long>(
+                "parser_dfa_cache_clears", MetricUnit.NOUNIT,
+                "times the shared ANTLR parser cache was cleared for exceeding parser_dfa_cache_max_states") {
+            @Override
+            public Long getValue() {
+                return ParserDfaCache.clears();
+            }
+        };
+        STARROCKS_METRIC_REGISTER.addMetric(parserDfaCacheClears);
 
         GaugeMetric<Long> recycleBinPartitionNum = new GaugeMetric<Long>(
                 "recycle_bin_partition_num", MetricUnit.NOUNIT, "number of partitions in the catalog recycle bin") {

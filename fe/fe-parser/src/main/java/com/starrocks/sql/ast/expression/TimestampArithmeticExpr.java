@@ -20,6 +20,7 @@ import com.starrocks.sql.ast.expression.ArithmeticExpr.Operator;
 import com.starrocks.sql.parser.NodePosition;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -55,7 +56,7 @@ public class TimestampArithmeticExpr extends Expr {
 
     public TimestampArithmeticExpr(String funcName, Expr e1, Expr e2, String timeUnitIdent, NodePosition pos) {
         super(pos);
-        this.funcName = funcName.toLowerCase();
+        this.funcName = funcName.toLowerCase(Locale.ROOT);
         this.timeUnitIdent = timeUnitIdent;
         this.intervalFirst = false;
         children.add(e1);

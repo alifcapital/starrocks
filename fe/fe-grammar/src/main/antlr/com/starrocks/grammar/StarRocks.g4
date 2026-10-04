@@ -13,7 +13,83 @@
 // limitations under the License.
 
 grammar StarRocks;
+options { contextSuperClass = CompactParserRuleContext; }
 import StarRocksLex;
+@lexer::members { private long sqlMode = 32L; public void setSqlMode(long mode) { sqlMode = mode; } }
+@parser::members {
+    private record ParenthesisBoundary(int closingIndex, boolean comma) {}
+    private static final class OpenParenthesis {
+        final int index;
+        boolean comma;
+        OpenParenthesis(int index) { this.index = index; }
+    }
+    private final java.util.Map<Integer, ParenthesisBoundary> parenthesisBoundaries = new java.util.HashMap<>();
+    private final java.util.Map<Integer, Boolean> intervalLookahead = new java.util.HashMap<>();
+    private org.antlr.v4.runtime.TokenStream intervalInput;
+
+    // INTERVAL (expression) DAY and an INTERVAL(expression) function call share
+    // their entire argument. Decide from the matching delimiter instead of
+    // predicting recursively through the argument. Cache nested delimiters so
+    // repeated predictions do not rescan the same expression.
+    private boolean genericCallAllowed() {
+        if (_input.LA(1) != INTERVAL || _input.LA(2) != getTokenType("'('")) return true;
+        if (intervalInput != _input) {
+            parenthesisBoundaries.clear();
+            intervalLookahead.clear();
+            intervalInput = _input;
+        }
+        int start = _input.index();
+        Boolean known = intervalLookahead.get(start);
+        if (known != null) return known;
+        int marker = _input.mark();
+        boolean allowed = true;
+        try {
+            _input.consume();
+            int open = getTokenType("'('"), close = getTokenType("')'"), comma = getTokenType("','");
+            int openingIndex = _input.index();
+            java.util.ArrayDeque<OpenParenthesis> stack = new java.util.ArrayDeque<>();
+            while (_input.LA(1) != org.antlr.v4.runtime.Token.EOF) {
+                int type = _input.LA(1);
+                if (type == open) {
+                    ParenthesisBoundary boundary = parenthesisBoundaries.get(_input.index());
+                    if (boundary != null) {
+                        _input.seek(boundary.closingIndex());
+                        _input.consume();
+                        if (stack.isEmpty()) {
+                            allowed = boundary.comma() || !isIntervalUnit(_input.LA(1));
+                            break;
+                        }
+                        continue;
+                    }
+                    stack.push(new OpenParenthesis(_input.index()));
+                } else if (type == close) {
+                    if (stack.isEmpty()) break;
+                    OpenParenthesis entry = stack.pop();
+                    ParenthesisBoundary boundary = new ParenthesisBoundary(_input.index(), entry.comma);
+                    parenthesisBoundaries.put(entry.index, boundary);
+                    _input.consume();
+                    if (entry.index == openingIndex) {
+                        allowed = boundary.comma() || !isIntervalUnit(_input.LA(1));
+                        break;
+                    }
+                    continue;
+                } else if (type == comma && !stack.isEmpty()) {
+                    stack.peek().comma = true;
+                }
+                _input.consume();
+            }
+        } finally {
+            _input.seek(start);
+            _input.release(marker);
+        }
+        intervalLookahead.put(start, allowed);
+        return allowed;
+    }
+    private static boolean isIntervalUnit(int type) {
+        return type == YEAR || type == MONTH || type == WEEK || type == DAY || type == HOUR ||
+                type == MINUTE || type == SECOND || type == QUARTER || type == MILLISECOND || type == MICROSECOND;
+    }
+}
 
 sqlStatements
     : singleStatement+ EOF
@@ -28,7 +104,7 @@ emptyStatement
 
 statement
     // Query Statement
-    : queryStatement
+    : rootQueryOrDmlStatement
 
     // Database Statement
     | useDatabaseStatement
@@ -100,8 +176,6 @@ statement
 
     // DML Statement
     | insertStatement
-    | updateStatement
-    | deleteStatement
 
     // Routine Statement
     | createRoutineLoadStatement
@@ -1349,11 +1423,11 @@ columnAliasesOrByName
     ;
 
 updateStatement
-    : explainDesc? withClause? UPDATE qualifiedName SET assignmentList fromClause (WHERE where=expression)?
+    : UPDATE qualifiedName SET assignmentList fromClause (WHERE where=expression)?
     ;
 
 deleteStatement
-    : explainDesc? withClause? DELETE FROM qualifiedName partitionNames? (USING using=relations)? (WHERE where=expression)?
+    : DELETE FROM qualifiedName partitionNames? (USING using=relations)? (WHERE where=expression)?
     ;
 
 // ------------------------------------------- Routine Statement -----------------------------------------------------------
@@ -2399,6 +2473,10 @@ callProcedureStatement
 
 // ------------------------------------------- Query Statement ---------------------------------------------------------
 
+rootQueryOrDmlStatement
+    : (explainDesc | optimizerTrace)? withClause? (queryNoWith outfile? | updateStatement | deleteStatement)
+    ;
+
 queryStatement
     : (explainDesc | optimizerTrace) ? queryRelation outfile?;
 
@@ -2415,7 +2493,7 @@ queryNoWith
     ;
 
 queryPeriod
-    : FOR? periodType BETWEEN expression AND expression
+    : FOR? periodType BETWEEN valueExpression AND valueExpression
     | FOR? periodType FROM expression TO expression
     | FOR? periodType ALL
     | FOR? periodType AS OF end=expression
@@ -2654,6 +2732,7 @@ replicaList
  * -, +
  * &
  * |
+ * BITSHIFTLEFT, BITSHIFTRIGHT, BITSHIFTRIGHTLOGICAL
  * = (comparison), <=>, >=, >, <=, <, <>, !=, IS, LIKE, REGEXP
  * BETWEEN, CASE WHEN
  * NOT
@@ -2688,6 +2767,8 @@ expression
     | NOT expression                                                                      #logicalNot
     | left=expression operator=(AND|LOGICAL_AND) right=expression                         #logicalBinary
     | left=expression operator=(OR|LOGICAL_OR) right=expression                           #logicalBinary
+    | (identifier | identifierList) '->' expression #lambdaFunctionExpr
+    | identifierList '->' '(' expressionList? ')' #lambdaFunctionExpr
     ;
 
 expressionList
@@ -2695,15 +2776,30 @@ expressionList
     ;
 
 booleanExpression
-    : predicate                                                                           #booleanExpressionDefault
-    | booleanExpression IS NOT? NULL                                                      #isNull
-    | left = booleanExpression comparisonOperator right = predicate                       #comparison
-    | booleanExpression comparisonOperator '(' queryRelation ')'                          #scalarSubquery
+    : primaryExpression #booleanExpressionDefault
+    | left = booleanExpression operator = BITXOR right = booleanExpression                    #flatArithmeticBinary
+    | left = booleanExpression operator = (
+              ASTERISK_SYMBOL
+            | SLASH_SYMBOL
+            | PERCENT_SYMBOL
+            | INT_DIV
+            | MOD)
+      right = booleanExpression                                                             #flatArithmeticBinary
+    | left = booleanExpression operator = (PLUS_SYMBOL | MINUS_SYMBOL)
+        right = booleanExpression                                                           #flatArithmeticBinary
+    | left = booleanExpression operator = BITAND right = booleanExpression                    #flatArithmeticBinary
+    | left = booleanExpression operator = BITOR right = booleanExpression                     #flatArithmeticBinary
+    | left = booleanExpression operator = (BIT_SHIFT_LEFT | BIT_SHIFT_RIGHT | BIT_SHIFT_RIGHT_LOGICAL)
+        right = booleanExpression                                                           #flatArithmeticBinary
+    | left=booleanExpression predicateOperations[$left.ctx] #predicatedBooleanExpression
+    | booleanExpression IS NOT? NULL #isNull
+    | left=booleanExpression comparisonOperator right=predicate #comparison
     ;
+
 
 predicate
     : valueExpression (predicateOperations[$valueExpression.ctx])?
-    | tupleInSubquery
+
     ;
 
 tupleInSubquery
@@ -2733,25 +2829,24 @@ valueExpression
         right = valueExpression                                                           #arithmeticBinary
     | left = valueExpression operator = BITAND right = valueExpression                    #arithmeticBinary
     | left = valueExpression operator = BITOR right = valueExpression                     #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_LEFT right = valueExpression              #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_RIGHT right = valueExpression             #arithmeticBinary
-    | left = valueExpression operator = BIT_SHIFT_RIGHT_LOGICAL right = valueExpression     #arithmeticBinary
+    | left = valueExpression operator = (BIT_SHIFT_LEFT | BIT_SHIFT_RIGHT | BIT_SHIFT_RIGHT_LOGICAL)
+        right = valueExpression                                                             #arithmeticBinary
     ;
 
 primaryExpression
     : userVariable                                                                        #userVariableExpression
     | systemVariable                                                                      #systemVariableExpression
     | DICTIONARY_GET '(' expressionList ')'                                               #dictionaryGetExpr
+    | literalExpression                                                                   #literal
     | functionCall                                                                        #functionCallExpression
     | '{' FN functionCall '}'                                                             #odbcFunctionCallExpression
     | primaryExpression COLLATE (identifier | string)                                     #collate
-    | literalExpression                                                                   #literal
     | columnReference                                                                     #columnRef
     | base = primaryExpression (DOT_IDENTIFIER | '.' fieldName = identifier )             #dereference
     | left = primaryExpression CONCAT right = primaryExpression                           #concat
     | operator = (MINUS_SYMBOL | PLUS_SYMBOL | BITNOT) primaryExpression                  #arithmeticUnary
     | operator = LOGICAL_NOT primaryExpression                                            #arithmeticUnary
-    | '(' expression ')'                                                                  #parenthesizedExpression
+    | '(' expression (')' | (',' expression)+ ')' NOT? IN '(' queryRelation ')')         #parenthesizedExpression
     | EXISTS '(' queryRelation ')'                                                        #exists
     | subquery                                                                            #subqueryExpression
     | CAST '(' expression AS type ')'                                                     #cast
@@ -2764,8 +2859,6 @@ primaryExpression
     | value=primaryExpression '[' index=valueExpression ']'                               #collectionSubscript
     | primaryExpression '[' start=INTEGER_VALUE? ':' end=INTEGER_VALUE? ']'               #arraySlice
     | primaryExpression ARROW string                                                      #arrowExpression
-    | (identifier | identifierList) '->' expression                                       #lambdaFunctionExpr
-    | identifierList '->' '('(expressionList)?')'                                         #lambdaFunctionExpr
     | left = primaryExpression NOT? matchOperator right = primaryExpression               #matchExpr
     ;
 
@@ -2792,11 +2885,15 @@ functionCall
     | GROUPING_ID '(' (expression (',' expression)*)? ')'                                 #groupingOperation
     | informationFunctionExpression                                                       #informationFunction
     | specialDateTimeExpression                                                           #specialDateTime
-    | specialFunctionExpression                                                           #specialFunction
-    | aggregationFunction filter? over?                                                   #aggregationFunctionCall
+    | timestampArithmeticExpression                                                       #timestampArithmeticFunction
+    | passwordFunctionExpression                                                          #passwordFunction
     | windowFunction over                                                                 #windowFunctionCall
     | TRANSLATE '(' (expression (',' expression)*)? ')'                                   #translateFunctionCall
-    | qualifiedName '(' (expression (',' expression)*)? ')'  over?                        #simpleFunctionCall
+    | {genericCallAllowed()}? functionName '(' (ASTERISK_SYMBOL | (setQuantifier bracketHint?)? (expression (',' expression)*)? (ORDER BY sortItem (',' sortItem)*)? (SEPARATOR expression)?) ')' filter? over?                        #simpleFunctionCall
+    ;
+
+functionName
+    : qualifiedName | CHAR | IF | LEFT | LIKE | MOD | REGEXP | REPLACE | RIGHT | RLIKE
     ;
 
 aggregationFunction
@@ -2842,6 +2939,15 @@ specialDateTimeExpression
     | name = LOCALTIMESTAMP ('(' ')')?
     ;
 
+passwordFunctionExpression
+    : PASSWORD '(' string ')'
+    ;
+
+timestampArithmeticExpression
+    : TIMESTAMPADD '(' unitIdentifier ',' expression ',' expression ')'
+    | TIMESTAMPDIFF '(' unitIdentifier ',' expression ',' expression ')'
+    ;
+
 specialFunctionExpression
     : CHAR '(' expression ')'
     | DAY '(' expression ')'
@@ -2863,8 +2969,6 @@ specialFunctionExpression
     //| WEEK '(' expression ')' TODO: Support week(expr) function
     | YEAR '(' expression ')'
     | PASSWORD '(' string ')'
-    | FLOOR '(' expression ')'
-    | CEIL '(' expression ')'
     ;
 
 windowFunction

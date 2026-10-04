@@ -36,7 +36,7 @@ public class IcebergMetadataCollectJob extends MetadataCollectJob {
             ", key_metadata " + // BINARY
             "FROM `$catalogName`.`$dbName`.`$tableName$logical_iceberg_metadata` " +
             "FOR VERSION AS OF $snapshotId " +
-            "WHERE $predicate'";
+            "WHERE $predicate";
 
     private final long snapshotId;
     private final String predicate;
