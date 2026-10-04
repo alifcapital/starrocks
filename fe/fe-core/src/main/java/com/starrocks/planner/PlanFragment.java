@@ -988,18 +988,18 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         }
     }
 
-    private RoaringBitmap collectNonBroadcastRfIds(PlanNode root) {
-        RoaringBitmap filterIds = root.getChildren().stream()
-                .filter(child -> child.getFragmentId().equals(root.getFragmentId()))
-                .map(this::collectNonBroadcastRfIds)
-                .reduce(RoaringBitmap.bitmapOf(), (a, b) -> RoaringBitmap.or(a, b));
+    private void collectNonBroadcastRfIds(PlanNode root, RoaringBitmap filterIds) {
+        for (PlanNode child : root.getChildren()) {
+            if (child.getFragmentId().equals(root.getFragmentId())) {
+                collectNonBroadcastRfIds(child, filterIds);
+            }
+        }
         if (root instanceof HashJoinNode) {
             HashJoinNode joinNode = (HashJoinNode) root;
             if (!joinNode.isBroadcast()) {
                 joinNode.getBuildRuntimeFilters().forEach(rf -> filterIds.add(rf.getFilterId()));
             }
         }
-        return filterIds;
     }
 
     /**
@@ -1013,24 +1013,34 @@ public class PlanFragment extends TreeNode<PlanFragment> {
      *          ExchangeSourceNode#4
      * }</pre>
      */
-    private RoaringBitmap collectLocalRightOffspringsOfBroadcastJoin(PlanNode root,
-                                                                     RoaringBitmap localRightOffsprings) {
-        List<RoaringBitmap> localOffspringsPerChild = root.getChildren().stream()
-                .filter(child -> child.getFragmentId().equals(root.getFragmentId()))
-                .map(child -> collectLocalRightOffspringsOfBroadcastJoin(child, localRightOffsprings))
-                .collect(Collectors.toList());
-        RoaringBitmap localOffsprings =
-                localOffspringsPerChild.stream().reduce(RoaringBitmap.bitmapOf(), (a, b) -> RoaringBitmap.or(a, b));
-        localOffsprings.add(root.getId().asInt());
+    private void collectLocalRightOffspringsOfBroadcastJoin(PlanNode root, RoaringBitmap localRightOffsprings) {
         if (root instanceof HashJoinNode) {
             HashJoinNode hashJoinNode = (HashJoinNode) root;
             boolean hasGlobalRuntimeFilter = hashJoinNode.getBuildRuntimeFilters()
                     .stream().anyMatch(RuntimeFilterDescription::isHasRemoteTargets);
-            if (hashJoinNode.isBroadcast() && hasGlobalRuntimeFilter && !localOffspringsPerChild.isEmpty()) {
-                localRightOffsprings.or(localOffspringsPerChild.get(1));
+            if (hashJoinNode.isBroadcast() && hasGlobalRuntimeFilter) {
+                List<PlanNode> localChildren = root.getChildren().stream()
+                        .filter(child -> child.getFragmentId().equals(root.getFragmentId()))
+                        .collect(Collectors.toList());
+                if (!localChildren.isEmpty()) {
+                    addLocalSubtree(localChildren.get(1), localRightOffsprings);
+                }
             }
         }
-        return localOffsprings;
+        for (PlanNode child : root.getChildren()) {
+            if (child.getFragmentId().equals(root.getFragmentId())) {
+                collectLocalRightOffspringsOfBroadcastJoin(child, localRightOffsprings);
+            }
+        }
+    }
+
+    private static void addLocalSubtree(PlanNode root, RoaringBitmap ids) {
+        ids.add(root.getId().asInt());
+        for (PlanNode child : root.getChildren()) {
+            if (child.getFragmentId().equals(root.getFragmentId())) {
+                addLocalSubtree(child, ids);
+            }
+        }
     }
 
     private void removeRfOfRightOffspring(PlanNode root, RoaringBitmap targetRightOffsprings, RoaringBitmap filterIds) {
@@ -1049,11 +1059,17 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     public void removeRfOnRightOffspringsOfBroadcastJoin() {
-        RoaringBitmap localRightOffsprings = RoaringBitmap.bitmapOf();
-        collectLocalRightOffspringsOfBroadcastJoin(getPlanRoot(), localRightOffsprings);
+        // Both sets are needed and neither depends on the other, so the one that is cheaper to build
+        // goes first and an empty result ends the work.
+        RoaringBitmap filterIds = new RoaringBitmap();
+        collectNonBroadcastRfIds(getPlanRoot(), filterIds);
+        if (filterIds.isEmpty()) {
+            return;
+        }
 
-        RoaringBitmap filterIds = collectNonBroadcastRfIds(getPlanRoot());
-        if (localRightOffsprings.isEmpty() || filterIds.isEmpty()) {
+        RoaringBitmap localRightOffsprings = new RoaringBitmap();
+        collectLocalRightOffspringsOfBroadcastJoin(getPlanRoot(), localRightOffsprings);
+        if (localRightOffsprings.isEmpty()) {
             return;
         }
 
