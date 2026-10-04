@@ -95,6 +95,13 @@ public class CloudConfigurationFactory {
 
     public static CloudConfiguration buildCloudConfigurationForVendedCredentials(Map<String, String> properties,
                                                                                  String path) {
+        if (!hasVendedCredentialProperties(properties)) {
+            // Each of the three builders below would pass an empty map to the same provider chain, which keeps no
+            // state, so they would all return an equal result. Most tables have no vended credentials, so we run
+            // the chain once.
+            return buildCloudConfigurationForStorage(new HashMap<>());
+        }
+
         CloudConfiguration cloudConfiguration = buildCloudConfigurationForAWSVendedCredentials(properties);
         if (cloudConfiguration.getCloudType() != CloudType.DEFAULT) {
             return cloudConfiguration;
@@ -107,6 +114,24 @@ public class CloudConfigurationFactory {
 
         cloudConfiguration = buildCloudConfigurationForGCSVendedCredentials(properties, path);
         return cloudConfiguration;
+    }
+
+    // False only when the AWS, Azure and GCS builders would each get an empty map. It must stay in step with
+    // the keys they read. A null key is left to them, so that it fails there as before.
+    private static boolean hasVendedCredentialProperties(Map<String, String> properties) {
+        if (properties.getOrDefault(S3FileIOProperties.ACCESS_KEY_ID, null) != null
+                && properties.getOrDefault(S3FileIOProperties.SECRET_ACCESS_KEY, null) != null
+                && properties.getOrDefault(S3FileIOProperties.SESSION_TOKEN, null) != null) {
+            return true;
+        }
+        for (String key : properties.keySet()) {
+            if (key == null
+                    || (key.startsWith(ADLS_SAS_TOKEN) && (key.endsWith(ADLS_ENDPOINT) || key.endsWith(BLOB_ENDPOINT)))
+                    || key.equals(GCS_ACCESS_TOKEN)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static CloudConfiguration buildCloudConfigurationForAWSVendedCredentials(Map<String, String> properties) {
