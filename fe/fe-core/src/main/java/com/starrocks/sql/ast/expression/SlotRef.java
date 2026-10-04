@@ -35,7 +35,6 @@
 package com.starrocks.sql.ast.expression;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.starrocks.catalog.Column;
@@ -43,6 +42,7 @@ import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.TableName;
 import com.starrocks.planner.SlotDescriptor;
 import com.starrocks.planner.SlotId;
+import com.starrocks.server.CatalogMgr;
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
 import com.starrocks.sql.ast.QualifiedName;
@@ -53,10 +53,15 @@ import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 
 import java.util.List;
+import java.util.Locale;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 public class SlotRef extends Expr {
+    // The name hash helpers keep a String.hashCode() state in the low 32 bits of a long, and return
+    // NOT_ASCII once they see a non-ASCII char.
+    private static final long NOT_ASCII = -1L;
+
     private TableName tblName;
     private String colName;
     private ColumnId columnId;
@@ -305,12 +310,83 @@ public class SlotRef extends Expr {
         if (desc != null) {
             return desc.getId().hashCode();
         }
+        // The value is Objects.hashCode(name) or Objects.hashCode(name, usedStructFieldPos), where name is
+        // (tblName == null ? "" : tblName.toSql() + "." + label).toLowerCase().
+        // The planner iterates hash maps keyed by expressions and that order decides column ref ids,
+        // so the value must stay the same.
+        int nameHash = lowerCaseNameHash();
         if (usedStructFieldPos != null) {
             // Means this SlotRef is going to access subfield in StructType
-            return Objects.hashCode((tblName == null ? "" : tblName.toSql() + "." + label).toLowerCase(), usedStructFieldPos);
+            return 31 * (31 + nameHash) + usedStructFieldPos.hashCode();
         } else {
-            return Objects.hashCode((tblName == null ? "" : tblName.toSql() + "." + label).toLowerCase());
+            return 31 + nameHash;
         }
+    }
+
+    // Returns (tblName.toSql() + "." + label).toLowerCase().hashCode(). We expect this to run for every slot
+    // in every expression hash, so for ASCII names we compute it without building the strings. For other
+    // characters, and for locales where toLowerCase() maps ASCII letters in a special way, we build the
+    // string, because then the lower case form can differ from a per-char mapping.
+    private int lowerCaseNameHash() {
+        TableName name = tblName;
+        if (name == null) {
+            return 0;
+        }
+        // Same characters as TableName.toSql() followed by "." and the label. StringBuilder.append and
+        // string concatenation write a null String as "null".
+        String catalog = name.getCatalog();
+        String db = name.getDb();
+        long h = isAsciiLowerCasePlain() ? 0 : NOT_ASCII;
+        if (catalog != null && !CatalogMgr.isInternalCatalog(catalog)) {
+            h = lowerCaseQuotedHash(h, catalog);
+        }
+        if (db != null) {
+            h = lowerCaseQuotedHash(h, db);
+        }
+        h = lowerCaseQuotedHash(h, String.valueOf(name.getTbl()));
+        h = lowerCaseHash(h, String.valueOf(label));
+        if (h == NOT_ASCII) {
+            return (name.toSql() + "." + label).toLowerCase().hashCode();
+        }
+        return (int) h;
+    }
+
+    // String.toLowerCase() uses the default locale. Only for these languages it may map ASCII letters
+    // to something other than 'a'..'z'.
+    private static boolean isAsciiLowerCasePlain() {
+        String lang = Locale.getDefault().getLanguage();
+        return !lang.equals("tr") && !lang.equals("az") && !lang.equals("lt");
+    }
+
+    // Continues the hash over "`" + s + "`." in lower case.
+    private static long lowerCaseQuotedHash(long h, String s) {
+        if (h == NOT_ASCII) {
+            return h;
+        }
+        h = lowerCaseHash(Integer.toUnsignedLong(31 * (int) h + '`'), s);
+        if (h == NOT_ASCII) {
+            return h;
+        }
+        return Integer.toUnsignedLong(31 * (31 * (int) h + '`') + '.');
+    }
+
+    // Continues the hash over s in lower case.
+    private static long lowerCaseHash(long h, String s) {
+        if (h == NOT_ASCII) {
+            return h;
+        }
+        int x = (int) h;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0x80) {
+                return NOT_ASCII;
+            }
+            if (c >= 'A' && c <= 'Z') {
+                c = (char) (c + ('a' - 'A'));
+            }
+            x = 31 * x + c;
+        }
+        return Integer.toUnsignedLong(x);
     }
 
     @Override
