@@ -277,10 +277,14 @@ public class LowCardinalityTest extends PlanTestBase {
                 "select cte1.L_SHIPMODE, cte1.L_COMMENT from cte1 join[broadcast] cte2 on cte1.L_SHIPMODE = cte2.P_COMMENT";
 
         long previousProbeMin = connectContext.getSessionVariable().getGlobalRuntimeFilterProbeMinSize();
+        String previousNdvEstimate = connectContext.getSessionVariable().getRfNdvEstimate();
         try {
             // Fixture estimates: build NDV=1, each UNION arm NDV=1, UNION NDV=2.
-            // The arms are not selective; the UNION's estimated 50% rejection is useful.
             connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(102400);
+
+            // Correlated: the build key is among the keys of each arm, so the arms are not selective and only
+            // the UNION, with an estimated 50% rejection, gets the filter.
+            connectContext.getSessionVariable().setRfNdvEstimate("correlated");
             List<PlanNode> costed = getExecPlan(sql).getFragments().stream()
                     .flatMap(fragment -> fragment.collectNodes().stream()).toList();
             Assertions.assertTrue(costed.stream().anyMatch(node -> node instanceof UnionNode
@@ -290,6 +294,18 @@ public class LowCardinalityTest extends PlanTestBase {
             for (PlanNode decode : decodes) {
                 Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
                 Assertions.assertTrue(decode.getChild(0).getProbeRuntimeFilters().isEmpty());
+            }
+
+            // Independent: the build key comes from the domain of P_COMMENT and an arm key from the much smaller
+            // domain of L_SHIPMODE, so an arm key rarely matches and the filter on the arms crosses Decode.
+            connectContext.getSessionVariable().setRfNdvEstimate("independent");
+            costed = getExecPlan(sql).getFragments().stream()
+                    .flatMap(fragment -> fragment.collectNodes().stream()).toList();
+            decodes = costed.stream().filter(node -> node instanceof DecodeNode).toList();
+            Assertions.assertFalse(decodes.isEmpty());
+            for (PlanNode decode : decodes) {
+                Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
+                Assertions.assertFalse(decode.getChild(0).getProbeRuntimeFilters().isEmpty());
             }
 
             // Test Decode traversal independently of the RF cost decision. Zero explicitly
@@ -306,6 +322,7 @@ public class LowCardinalityTest extends PlanTestBase {
             }
         } finally {
             connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(previousProbeMin);
+            connectContext.getSessionVariable().setRfNdvEstimate(previousNdvEstimate);
         }
     }
 

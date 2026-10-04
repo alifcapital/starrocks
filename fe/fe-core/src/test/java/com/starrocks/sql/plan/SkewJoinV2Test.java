@@ -317,6 +317,7 @@ public class SkewJoinV2Test extends PlanTestBase {
     public void testSkewJoinV2WithLowCardinality() throws Exception {
         boolean oldMockDictManager = FeConstants.USE_MOCK_DICT_MANAGER;
         boolean oldLowCardinality = connectContext.getSessionVariable().isEnableLowCardinalityOptimize();
+        String oldNdvEstimate = connectContext.getSessionVariable().getRfNdvEstimate();
         try {
             FeConstants.USE_MOCK_DICT_MANAGER = true;
             connectContext.getSessionVariable().setEnableLowCardinalityOptimize(true);
@@ -324,6 +325,17 @@ public class SkewJoinV2Test extends PlanTestBase {
             String sql = "select " +
                     "s1.S_ADDRESS, s2.S_ADDRESS from supplier s1 " +
                     "join[skew|s1.S_SUPPKEY(1,2)] supplier s2 on s1.S_SUPPKEY = s2.S_SUPPKEY";
+            // The fixture gives supplier one row while S_SUPPKEY has 10000 distinct values, so each side of
+            // the self join keeps one key of the 10000. The independent estimate takes them as two random keys
+            // that rarely match and keeps a filter; the correlated one takes them as the same key.
+            connectContext.getSessionVariable().setRfNdvEstimate("independent");
+            String independentPlan = getVerboseExplain(sql);
+            assertContains(independentPlan, "11:Decode\n" +
+                    "  |  <dict id 17> : <string id 3>\n" +
+                    "  |  <dict id 18> : <string id 11>\n");
+            assertContains(independentPlan, "build runtime filters");
+
+            connectContext.getSessionVariable().setRfNdvEstimate("correlated");
             String plan = getVerboseExplain(sql);
             assertCContains(plan, "11:Decode\n" +
                     "  |  <dict id 17> : <string id 3>\n" +
@@ -360,6 +372,7 @@ public class SkewJoinV2Test extends PlanTestBase {
         } finally {
             FeConstants.USE_MOCK_DICT_MANAGER = oldMockDictManager;
             connectContext.getSessionVariable().setEnableLowCardinalityOptimize(oldLowCardinality);
+            connectContext.getSessionVariable().setRfNdvEstimate(oldNdvEstimate);
         }
     }
 
