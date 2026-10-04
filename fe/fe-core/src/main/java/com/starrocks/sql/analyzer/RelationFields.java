@@ -32,7 +32,8 @@ public class RelationFields {
     private final List<Field> allFields;
 
     // NOTE: sort fields by name to speedup resolve performance
-    private final ImmutableListMultimap<String, Field> names;
+    // Built on the first lookup: many relations, such as the order scope of every select, never resolve a name.
+    private ImmutableListMultimap<String, Field> names;
     private final boolean resolveStruct;
     
     // Track if this RelationFields comes from FULL OUTER JOIN USING
@@ -56,15 +57,6 @@ public class RelationFields {
         }
         this.resolveStruct = hasStruct;
         this.fromFullOuterJoinUsing = fromFullOuterJoinUsing;
-        if (!resolveStruct) {
-            ImmutableListMultimap.Builder<String, Field> builder = ImmutableListMultimap.builder();
-            for (Field field : allFields) {
-                builder.put(field.getName().toLowerCase(), field);
-            }
-            this.names = builder.build();
-        } else {
-            this.names = null;
-        }
     }
     
     private static boolean isRelationAliasCaseInsensitive() {
@@ -119,6 +111,13 @@ public class RelationFields {
         // Resolve the slot based on column name first, then table name
         // For the case a table with thousands of columns, resolve by table name could not reduce the cardinality,
         // but resolve by column name first could reduce it a lot
+        if (names == null) {
+            ImmutableListMultimap.Builder<String, Field> builder = ImmutableListMultimap.builder();
+            for (Field field : allFields) {
+                builder.put(field.getName().toLowerCase(), field);
+            }
+            names = builder.build();
+        }
         ImmutableList<Field> resolved = names.get(name.getColumnName().toLowerCase());
         
         if (name.getTblNameWithoutAnalyzed() == null) {
