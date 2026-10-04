@@ -16,8 +16,13 @@ package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
 import com.starrocks.planner.AnalyticEvalNode;
+import com.starrocks.sql.StatementPlanner;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.StatementBase;
+import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.StarRocksAssert;
+import com.starrocks.utframe.UtFrameUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -2006,6 +2011,63 @@ public class WindowTest extends PlanTestBase {
                 "  |  \n" +
                 "  1:SORT\n" +
                 "  |  order by: <slot 1> 1: v1 ASC, <slot 2> 2: v2 DESC");
+    }
+
+    @Test
+    public void testFirstLastValueReverseInInlinedCte() throws Exception {
+        // Every reference of an inlined CTE is planned from the same analyzed query, so we expect each copy
+        // to get the same function and window as a query with one reference.
+        boolean cteReuse = connectContext.getSessionVariable().isCboCteReuse();
+        connectContext.getSessionVariable().setCboCteReuse(false);
+        try {
+            String plan = getFragmentPlan("with c as (select v1, v2, first_value(v3) over (order by v2" +
+                    " rows between 1 preceding and unbounded following) x from t0)" +
+                    " select * from c a join c b on a.v1 = b.v1 join c d on a.v1 = d.v1");
+            Assertions.assertEquals(3, StringUtils.countMatches(plan, ":ANALYTIC\n" +
+                    "  |  functions: [, last_value("));
+            Assertions.assertEquals(3, StringUtils.countMatches(plan,
+                    "window: ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING"));
+            assertNotContains(plan, "first_value");
+
+            plan = getFragmentPlan("with c as (select v1, v2, last_value(v3) over (order by v2" +
+                    " rows between 1 preceding and unbounded following) x from t0)" +
+                    " select * from c a join c b on a.v1 = b.v1 join c d on a.v1 = d.v1");
+            Assertions.assertEquals(3, StringUtils.countMatches(plan, ":ANALYTIC\n" +
+                    "  |  functions: [, first_value("));
+            Assertions.assertEquals(3, StringUtils.countMatches(plan,
+                    "window: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
+            assertNotContains(plan, "last_value");
+        } finally {
+            connectContext.getSessionVariable().setCboCteReuse(cteReuse);
+        }
+    }
+
+    @Test
+    public void testFirstLastValueReversePlannedAgain() throws Exception {
+        // The planner can plan the same analyzed statement again, for example on a retry, and we expect
+        // the same plan every time.
+        StatementBase stmt = UtFrameUtils.parseStmtWithNewParser("select v1, v2, first_value(v3) over" +
+                " (order by v2 rows between 1 preceding and unbounded following) from t0", connectContext);
+        String plan = StatementPlanner.plan(stmt, connectContext).getExplainString(TExplainLevel.NORMAL);
+        assertContains(plan, "  |  functions: [, last_value(3: v3), ]\n" +
+                "  |  order by: 2: v2 DESC\n" +
+                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING");
+        for (int i = 0; i < 2; i++) {
+            Assertions.assertEquals(plan,
+                    StatementPlanner.plan(stmt, connectContext).getExplainString(TExplainLevel.NORMAL));
+        }
+    }
+
+    @Test
+    public void testFirstLastValueReverseOrderByPosition() throws Exception {
+        // ORDER BY 3 refers to the same window function object as the select list.
+        String plan = getFragmentPlan("select v1, v2, first_value(v3) over (order by v2" +
+                " rows between 1 preceding and unbounded following) from t0 order by 3");
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, ":ANALYTIC"));
+        assertContains(plan, "  |  functions: [, last_value(3: v3), ]\n" +
+                "  |  order by: 2: v2 DESC\n" +
+                "  |  window: ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING");
+        assertContains(plan, "order by: <slot 4> 4: last_value(3: v3) ASC");
     }
 
     @Test

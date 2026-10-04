@@ -1,0 +1,31 @@
+-- name: test_first_last_value_reversed_frame_planned_again
+CREATE TABLE `t0` (
+    `k` int(11) NOT NULL,
+    `v` int(11) NOT NULL
+) ENGINE=OLAP
+DUPLICATE KEY(`k`)
+DISTRIBUTED BY HASH(`k`) BUCKETS 1
+PROPERTIES (
+    "replication_num" = "1"
+);
+
+INSERT INTO `t0` VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+
+-- A frame that ends with UNBOUNDED FOLLOWING is evaluated over the reversed order, with first_value and
+-- last_value swapped. Every reference of an inlined CTE must get the same result as a single reference.
+SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0` ORDER BY k;
+
+WITH c AS (SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse=false) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+
+WITH c AS (SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse_rate=0) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+
+WITH c AS (SELECT k, last_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse=false) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+
+-- ORDER BY a position refers to the same window function as the select list.
+SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0` ORDER BY 2, 1;

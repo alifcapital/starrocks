@@ -1,0 +1,61 @@
+-- name: test_first_last_value_reversed_frame_planned_again
+CREATE TABLE `t0` (
+    `k` int(11) NOT NULL,
+    `v` int(11) NOT NULL
+) ENGINE=OLAP
+DUPLICATE KEY(`k`)
+DISTRIBUTED BY HASH(`k`) BUCKETS 1
+PROPERTIES (
+    "replication_num" = "1"
+);
+-- result:
+-- !result
+INSERT INTO `t0` VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+-- result:
+-- !result
+SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0` ORDER BY k;
+-- result:
+1	10
+2	10
+3	20
+4	30
+5	40
+-- !result
+WITH c AS (SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse=false) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+-- result:
+1	10	10	10
+2	10	10	10
+3	20	20	20
+4	30	30	30
+5	40	40	40
+-- !result
+WITH c AS (SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse_rate=0) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+-- result:
+1	10	10	10
+2	10	10	10
+3	20	20	20
+4	30	30	30
+5	40	40	40
+-- !result
+WITH c AS (SELECT k, last_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0`)
+SELECT /*+SET_VAR(cbo_cte_reuse=false) */ a.k, a.x, b.x, d.x
+FROM c a JOIN c b ON a.k = b.k JOIN c d ON a.k = d.k ORDER BY a.k;
+-- result:
+1	50	50	50
+2	50	50	50
+3	50	50	50
+4	50	50	50
+5	50	50	50
+-- !result
+SELECT k, first_value(v) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) x FROM `t0` ORDER BY 2, 1;
+-- result:
+1	10
+2	10
+3	20
+4	30
+5	40
+-- !result
