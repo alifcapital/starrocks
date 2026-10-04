@@ -373,7 +373,10 @@ public class SqlParser {
         parser.removeParseListeners();
         PostProcessListener postProcessor = new PostProcessListener(tokenLimit, exprLimit);
         parser.addParseListener(postProcessor);
-        if (!Config.enable_parser_context_cache || Config.enable_concurrent_parse_optimization) {
+        boolean sharedCache = Config.enable_parser_context_cache && !Config.enable_concurrent_parse_optimization;
+        if (sharedCache) {
+            parser.setInterpreter(ParserDfaCache.interpreter(parser));
+        } else {
             DFA[] decisionDFA = new DFA[parser.getATN().getNumberOfDecisions()];
             for (int i = 0; i < parser.getATN().getNumberOfDecisions(); i++) {
                 decisionDFA[i] = new DFA(parser.getATN().getDecisionState(i), i);
@@ -381,6 +384,19 @@ public class SqlParser {
             parser.setInterpreter(new ParserATNSimulator(parser, parser.getATN(), decisionDFA, new PredictionContextCache()));
         }
 
+        try {
+            return parseWithFallback(parser, tokenStream, postProcessor, parseFunction);
+        } finally {
+            if (sharedCache) {
+                ParserDfaCache.afterParse();
+            }
+        }
+    }
+
+    private static Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> parseWithFallback(
+            com.starrocks.sql.parser.StarRocksParser parser, CommonTokenStream tokenStream,
+            PostProcessListener postProcessor,
+            Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction) {
         try {
             // inspire by https://github.com/antlr/antlr4/issues/192#issuecomment-15238595
             // try SLL mode with BailErrorStrategy firstly

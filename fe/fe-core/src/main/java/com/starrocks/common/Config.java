@@ -4486,11 +4486,18 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static int max_column_number_per_table = 10000;
 
-    @ConfField
+    @ConfField(mutable = true)
     public static boolean enable_parser_context_cache = true;
 
-    @ConfField
+    @ConfField(mutable = true)
     public static boolean enable_concurrent_parse_optimization = false;
+
+    /**
+     * The most DFA states that the shared ANTLR parser cache keeps. When the cache grows over this limit,
+     * the parser logs a warning and replaces the cache with an empty one. 0 means no limit.
+     */
+    @ConfField(mutable = true)
+    public static long parser_dfa_cache_max_states = 30000;
 
     // Whether restore tables into colocate group if the
     // backuped table is colocated
