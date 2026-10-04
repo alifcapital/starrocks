@@ -551,9 +551,7 @@ public class SelectAnalyzer {
         Expr predicate = pushNegationToOperands(whereClause);
         analyzeExpression(predicate, analyzeState, scope);
 
-        AnalyzerUtils.verifyNoAggregateFunctions(predicate, "WHERE");
-        AnalyzerUtils.verifyNoWindowFunctions(predicate, "WHERE");
-        AnalyzerUtils.verifyNoGroupingFunctions(predicate, "WHERE");
+        AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(predicate, "WHERE");
 
         if (predicate.getType().isBoolean() || predicate.getType().isNull()) {
             // do nothing
@@ -629,9 +627,7 @@ public class SelectAnalyzer {
                     }
 
                     if (analyzeState.getColumnReferences().get(groupingExpr) == null) {
-                        AnalyzerUtils.verifyNoAggregateFunctions(groupingExpr, "GROUP BY");
-                        AnalyzerUtils.verifyNoWindowFunctions(groupingExpr, "GROUP BY");
-                        AnalyzerUtils.verifyNoGroupingFunctions(groupingExpr, "GROUP BY");
+                        AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(groupingExpr, "GROUP BY");
                     }
 
                     groupByExpressions.add(groupingExpr);

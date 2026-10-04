@@ -1087,9 +1087,7 @@ public class QueryAnalyzer {
                 joinScope.setParent(parentScope);
                 analyzeExpression(joinEqual, new AnalyzeState(), joinScope);
 
-                AnalyzerUtils.verifyNoAggregateFunctions(joinEqual, "JOIN");
-                AnalyzerUtils.verifyNoWindowFunctions(joinEqual, "JOIN");
-                AnalyzerUtils.verifyNoGroupingFunctions(joinEqual, "JOIN");
+                AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(joinEqual, "JOIN");
 
                 if (!joinEqual.getType().matchesType(BooleanType.BOOLEAN)
                         && !joinEqual.getType().matchesType(NullType.NULL)) {
@@ -1764,9 +1762,7 @@ public class QueryAnalyzer {
                 analyzeExpression(args.get(i), analyzeState, scope);
                 argTypes[i] = args.get(i).getType();
 
-                AnalyzerUtils.verifyNoAggregateFunctions(args.get(i), "Table Function");
-                AnalyzerUtils.verifyNoWindowFunctions(args.get(i), "Table Function");
-                AnalyzerUtils.verifyNoGroupingFunctions(args.get(i), "Table Function");
+                AnalyzerUtils.verifyNoAggregateWindowOrGroupingFunctions(args.get(i), "Table Function");
             }
             List<String> names = node.getFunctionParams().getExprsNames();
             String[] namesArray = null;
