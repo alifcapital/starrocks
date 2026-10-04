@@ -325,6 +325,18 @@ public class SimplifiedDateColumnPredicateRuleTest {
         }
     }
 
+    @Test
+    public void testSubstrWithoutLengthIsKept() {
+        // substr(s, 1) has no length argument. The rule must keep it instead of failing on the missing argument.
+        ScalarOperator cast = new CastOperator(VarcharType.VARCHAR, new ColumnRefOperator(1, DateType.DATE, "dt", true));
+        for (String name : new String[] {"substr", "substring"}) {
+            ScalarOperator call = new CallOperator(name, VarcharType.VARCHAR,
+                    ImmutableList.of(cast, ConstantOperator.createInt(1)));
+            ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.GE, call, DATE_BEGIN2);
+            assertSame(predicate, rule.apply(predicate, null));
+        }
+    }
+
     private void verifyDate(ScalarOperator operator) {
         ScalarOperator result = rule.apply(operator, null);
         assertSame(PrimitiveType.DATE, result.getChild(0).getType().getPrimitiveType());

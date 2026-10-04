@@ -75,8 +75,9 @@ public class KeyInference extends OptExpressionVisitor<KeyInference.KeyPropertyS
         ColumnRefSet projectColumns = new ColumnRefSet(project.getOutputColumns());
 
         KeyPropertySet res = new KeyPropertySet();
+        // A unique key stays a key of the project only when the project still outputs all of its columns.
         for (KeyProperty key : input.getKeys()) {
-            if (key.unique && key.columns.containsAll(projectColumns)) {
+            if (key.unique && projectColumns.containsAll(key.columns)) {
                 res.addKey(key);
             }
         }
@@ -94,9 +95,16 @@ public class KeyInference extends OptExpressionVisitor<KeyInference.KeyPropertyS
         boolean unique = olapTable.getKeysType().equals(KeysType.PRIMARY_KEYS) &&
                 keyRefs.containsAll(tableKeyColumns);
 
-        KeyProperty key = KeyProperty.of(new ColumnRefSet(outputColumns), unique);
         KeyPropertySet res = new KeyPropertySet();
-        res.addKey(key);
+        if (unique) {
+            // The primary key columns alone are unique. Joins check whether a key lies within the join columns,
+            // so the key must not carry the other output columns.
+            Set<Column> primaryKey = Set.copyOf(tableKeyColumns);
+            res.addKey(KeyProperty.of(new ColumnRefSet(outputColumns.stream()
+                    .filter(ref -> primaryKey.contains(columnMap.get(ref))).collect(Collectors.toList())), true));
+        } else {
+            res.addKey(KeyProperty.of(new ColumnRefSet(outputColumns), false));
+        }
         return res;
     }
 
@@ -144,8 +152,14 @@ public class KeyInference extends OptExpressionVisitor<KeyInference.KeyPropertyS
         ColumnRefSet outputColumns = optExpression.getOutputColumns();
         KeyPropertySet resKeySet = new KeyPropertySet();
 
-        boolean rhsUnique = rhsKeySet.getKeys().stream().anyMatch(key -> key.unique && key.columns.containsAll(rhsJoinColumns));
-        boolean lhsUnique = lhsKeySet.getKeys().stream().anyMatch(key -> key.unique && key.columns.containsAll(lhsJoinColumns));
+        // A side is unique on its join columns when a unique key of that side lies within them. A key that only
+        // contains the join columns does not make them unique: a pk with v2 is unique, v2 alone is not.
+        ColumnRefSet lhsJoinColumnSet = ColumnRefSet.createByIds(lhsJoinColumns);
+        ColumnRefSet rhsJoinColumnSet = ColumnRefSet.createByIds(rhsJoinColumns);
+        boolean rhsUnique = rhsKeySet.getKeys().stream()
+                .anyMatch(key -> key.unique && rhsJoinColumnSet.containsAll(key.columns));
+        boolean lhsUnique = lhsKeySet.getKeys().stream()
+                .anyMatch(key -> key.unique && lhsJoinColumnSet.containsAll(key.columns));
         if (!lhsKeySet.empty() && rhsUnique) {
             for (KeyProperty key : lhsKeySet.getKeys()) {
                 if (key.unique && outputColumns.containsAll(key.columns)) {

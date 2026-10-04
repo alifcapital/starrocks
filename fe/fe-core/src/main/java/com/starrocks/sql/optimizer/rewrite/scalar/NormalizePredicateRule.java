@@ -252,7 +252,9 @@ public class NormalizePredicateRule extends BottomUpScalarOperatorRewriteRule {
             result.add(new InPredicateOperator(predicate.isNotIn(), constants));
         }
 
-        predicate.getChildren().stream().skip(1).filter(ScalarOperator::isVariable).forEach(child -> {
+        // A child that is not a constant is not always a variable: a call of a non-deterministic function such as
+        // random() is neither. We compare the left side with every such child, so that none of them is lost.
+        predicate.getChildren().stream().skip(1).filter(child -> !child.isConstant()).forEach(child -> {
             BinaryPredicateOperator newOp;
             if (isIn) {
                 newOp = new BinaryPredicateOperator(BinaryType.EQ, lhs, child);

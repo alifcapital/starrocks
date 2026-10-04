@@ -163,4 +163,15 @@ public class SimplifiedPredicateRuleTest extends PlanTestBase {
         starRocksAssert.query("SELECT hour(to_datetime(ts, 4)) FROM test_timestamp")
                 .explainWithout("hour_from_unixtime");
     }
+
+    @Test
+    public void hourOverAnotherFunctionIsKept() throws Exception {
+        // A function between hour() and the unix time conversion changes the hour, so the rewrite must not skip it.
+        for (String sql : new String[] {
+                "SELECT hour(hours_add(from_unixtime(ts), 5)) FROM test_timestamp",
+                "SELECT hour(convert_tz(from_unixtime(ts), 'UTC', 'Asia/Shanghai')) FROM test_timestamp",
+                "SELECT hour(hours_add(to_datetime(ts), 5)) FROM test_timestamp"}) {
+            starRocksAssert.query(sql).explainWithout("hour_from_unixtime");
+        }
+    }
 }

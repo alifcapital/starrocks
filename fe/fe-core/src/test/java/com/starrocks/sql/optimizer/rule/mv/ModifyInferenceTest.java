@@ -16,12 +16,15 @@
 package com.starrocks.sql.optimizer.rule.mv;
 
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalProjectOperator;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.sql.plan.PlanTestBase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 public class ModifyInferenceTest extends PlanTestBase {
 
@@ -65,5 +68,15 @@ public class ModifyInferenceTest extends PlanTestBase {
 
         assertInferenceModify("select v1, count(*) from t0 join t1 on t0.v1=t1.v4 group by v1", ModifyInference.ModifyOp.UPSERT);
         assertInferenceModify("select v4, count(*) from tprimary join t1 on pk=t1.v4 group by v4", ModifyInference.ModifyOp.ALL);
+    }
+
+    @Test
+    public void testProjectKeepsTheModifyKindsOfItsInput() throws Exception {
+        // A project neither adds nor removes changes, so it has the modify kinds of its input.
+        for (String sql : new String[] {"select v1, v2 from t0", "select pk, v1 from tprimary"}) {
+            OptExpression scan = getExecPlan(sql).getPhysicalPlan();
+            OptExpression project = OptExpression.create(new PhysicalProjectOperator(Map.of(), Map.of()), scan);
+            Assertions.assertEquals(ModifyInference.infer(scan), ModifyInference.infer(project), sql);
+        }
     }
 }

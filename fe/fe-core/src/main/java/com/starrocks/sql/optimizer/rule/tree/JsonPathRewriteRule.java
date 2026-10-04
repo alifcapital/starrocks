@@ -505,8 +505,10 @@ public class JsonPathRewriteRule extends TransformationRule {
         if (scalar == null) {
             return null;
         }
+        // The rewriter replaces children in place. A later expression of the same scan can still fail the rewrite,
+        // and the rule then returns the original scan, so the original expressions must stay unchanged.
         ScalarOperatorRewriter scalarOperatorRewriter = new ScalarOperatorRewriter();
-        return scalarOperatorRewriter.rewrite(scalar, Arrays.asList(rewriter));
+        return scalarOperatorRewriter.rewrite(scalar.clone(), Arrays.asList(rewriter));
     }
 
     /**

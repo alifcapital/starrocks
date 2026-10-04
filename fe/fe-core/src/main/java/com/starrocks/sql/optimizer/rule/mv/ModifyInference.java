@@ -52,7 +52,7 @@ public class ModifyInference extends OptExpressionVisitor<ModifyInference.Modify
 
     @Override
     public ModifyOp visitPhysicalProject(OptExpression optExpression, Void ctx) {
-        return visit(optExpression.inputAt(0), ctx);
+        return infer(optExpression.inputAt(0));
     }
 
     // TODO(murphy) read from user property, support custom the ModifyOp behavior

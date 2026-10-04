@@ -455,5 +455,21 @@ public class JsonPathRewriteTest extends PlanTestBase {
         }
     }
 
-}
+    @Test
+    public void testPathWithTwoTypesInPredicateAndProjectionFallsBack() throws Exception {
+        // The predicate reads f2 as BIGINT and the projection reads it as VARCHAR, so the rewrite of the scan
+        // fails after the predicate was handled. The plan must then keep both calls on the JSON column.
+        boolean enabled = connectContext.getSessionVariable().isEnableJSONV2Rewrite();
+        connectContext.getSessionVariable().setEnableJSONV2Rewrite(true);
+        try {
+            String plan = getVerboseExplain("select get_json_string(c2, 'f2') from extend_predicate " +
+                    "where get_json_int(c2, 'f2') = 1");
+            assertContains(plan, "get_json_int[([2: c2, JSON, true], 'f2')");
+            assertContains(plan, "get_json_string[([2: c2, JSON, true], 'f2')");
+            assertNotContains(plan, "ExtendedColumnAccessPath");
+        } finally {
+            connectContext.getSessionVariable().setEnableJSONV2Rewrite(enabled);
+        }
+    }
 
+}

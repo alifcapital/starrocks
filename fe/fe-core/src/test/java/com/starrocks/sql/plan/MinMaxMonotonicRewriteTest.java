@@ -29,12 +29,14 @@ import com.starrocks.type.VarcharType;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -78,7 +80,7 @@ public class MinMaxMonotonicRewriteTest extends PlanTestBase {
                     "select max(to_datetime(t1d)) from test_all_type " +
                             "| to_datetime(13: max) ",
                     "select min(to_datetime(t1d, 6)) from test_all_type " +
-                            "| to_datetime(13: min) ",
+                            "| to_datetime(13: min, 6) ",
 
                     "select max(from_unixtime(t1d)) from test_all_type " +
                             "| from_unixtime(13: max) ",
@@ -95,7 +97,7 @@ public class MinMaxMonotonicRewriteTest extends PlanTestBase {
                     "select date_diff('millisecond',    " +
                             "   min(to_datetime(get_json_int(v_json, 'ts'), 6)), " +
                             "   max(to_datetime(get_json_int(v_json, 'ts'), 6))) from tjson" +
-                            "|  to_datetime(8: min)",
+                            "|  to_datetime(8: min, 6)",
             })
     public void testRewriteMinMaxMonotonic(String sql, String expectedAggregation)
             throws Exception {
@@ -205,5 +207,21 @@ public class MinMaxMonotonicRewriteTest extends PlanTestBase {
                 "max(get_json_string(`json_col`, 'field2')) as max " +
                 "from `default_catalog`.`test_db`.`test_table`[_META_];";
         assertEquals(expectedSql3, sql3);
+    }
+
+    @Test
+    public void testEachAggregateNeedsItsOwnValidDomain() throws Exception {
+        // 1756099237001 is a valid microsecond value but out of range as seconds. to_datetime(t1d, 6) can be
+        // rewritten, to_datetime(t1d) cannot, so only the first aggregate moves below the function.
+        new MockUp<ColumnMinMaxMgr>() {
+            @Mock
+            public Optional<IMinMaxStatsMgr.ColumnMinMax> getStats(ColumnIdentifier identifier,
+                                                                   StatsVersion version) {
+                return Optional.of(new IMinMaxStatsMgr.ColumnMinMax("1", "1756099237001000"));
+            }
+        };
+        String plan = getFragmentPlan("select max(to_datetime(t1d, 6)), max(to_datetime(t1d)) from test_all_type");
+        Assertions.assertTrue(Pattern.compile("to_datetime\\(\\d+: max, 6\\)").matcher(plan).find(), plan);
+        Assertions.assertFalse(Pattern.compile("to_datetime\\(\\d+: max\\)").matcher(plan).find(), plan);
     }
 }

@@ -63,18 +63,21 @@ public class OrRangePredicate extends RangePredicate {
             children.add(rangePredicate.toScalarOperator());
         }
 
-        Map<String, List<ScalarOperator>> columnPredicatesMap = Maps.newHashMap();
+        // Two relations can have columns with the same name, for example both sides of a self join. Only values of
+        // the same column ref can be merged into one IN list, so the key is the column ref and not its name.
+        Map<ColumnRefOperator, List<ScalarOperator>> columnPredicatesMap = Maps.newHashMap();
         for (ScalarOperator rangePredicate : children) {
             if (ScalarOperator.isColumnEqualConstant(rangePredicate)) {
                 BinaryPredicateOperator binaryEqPredicate = (BinaryPredicateOperator) rangePredicate;
                 ColumnRefOperator columnRef = binaryEqPredicate.getChild(0).cast();
                 List<ScalarOperator> columnRangePredicates = columnPredicatesMap.computeIfAbsent(
-                        columnRef.getName(), k -> Lists.newArrayList());
+                        columnRef, k -> Lists.newArrayList());
                 columnRangePredicates.add(rangePredicate);
-            } else if (rangePredicate instanceof InPredicateOperator && rangePredicate.getChild(0).isColumnRef()) {
+            } else if (rangePredicate instanceof InPredicateOperator && !((InPredicateOperator) rangePredicate).isNotIn()
+                    && rangePredicate.getChild(0).isColumnRef()) {
                 InPredicateOperator inPredicate = rangePredicate.cast();
                 List<ScalarOperator> columnRangePredicates = columnPredicatesMap.computeIfAbsent(
-                        ((ColumnRefOperator) inPredicate.getChild(0)).getName(), k -> Lists.newArrayList());
+                        (ColumnRefOperator) inPredicate.getChild(0), k -> Lists.newArrayList());
                 columnRangePredicates.add(rangePredicate);
             }
         }

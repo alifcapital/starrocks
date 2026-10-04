@@ -85,6 +85,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.parquet.Strings;
@@ -123,7 +124,7 @@ public class PartitionSelector {
             "SELECT PARTITION_NAME, SUM(ROW_COUNT) as ROW_COUNT, CAST(SUM(DATA_SIZE) AS BIGINT) as DATA_SIZE FROM (" +
             "SELECT *, ROW_NUMBER() OVER (PARTITION BY PARTITION_NAME, COLUMN_NAME ORDER BY UPDATE_TIME DESC) AS RN " +
             "FROM _statistics_.external_column_statistics " +
-            "WHERE TABLE_UUID IN ('%s', '%s') AND PARTITION_NAME in ('%s')) DEDUP_T " +
+            "WHERE TABLE_UUID IN ('%s', '%s') AND PARTITION_NAME in (%s)) DEDUP_T " +
             "WHERE RN = 1 GROUP BY PARTITION_NAME;";
     // NOTE: `json` to `datetime` is not supported yet, so we use `string` here.
     private static final String JSON_QUERY_TEMPLATE = "CAST(CAST(JSON_QUERY(%s, '$[0].[%d]') AS STRING) AS %s)";
@@ -714,6 +715,23 @@ public class PartitionSelector {
         return Optional.of(false);
     }
 
+    // The recorder keeps the result of the last value it evaluated, and one recorder serves all partitions. A
+    // partition without values, such as the shadow partition of an automatic partition table, has nothing to
+    // evaluate and would take the result of the partition before it. We never drop such a partition and always
+    // retain it. For a partition with values we clear the result, so the partition is judged by its own values.
+    private static boolean selectPartitionWithoutValues(long partitionId, boolean noValues,
+                                                        boolean isDropPartitionCondition,
+                                                        List<Long> selectedPartitionIds, Recorder recorder) {
+        recorder.isConstTrue = false;
+        if (!noValues) {
+            return false;
+        }
+        if (!isDropPartitionCondition) {
+            selectedPartitionIds.add(partitionId);
+        }
+        return true;
+    }
+
     /**
      * Fetch selected partition ids by using FE's constant evaluation ability.
      */
@@ -739,6 +757,10 @@ public class PartitionSelector {
         Map<Long, List<LiteralExpr>> listPartitions = listPartitionInfo.getLiteralExprValues();
         final Recorder recorder = new Recorder();
         for (Map.Entry<Long, List<LiteralExpr>> e : listPartitions.entrySet()) {
+            if (selectPartitionWithoutValues(e.getKey(), e.getValue().isEmpty(), isDropPartitionCondition,
+                    selectedPartitionIds, recorder)) {
+                continue;
+            }
             for (LiteralExpr literalExpr : e.getValue()) {
                 Map<ColumnRefOperator, ScalarOperator> replaceMap = Maps.newHashMap();
                 ConstantOperator replace = (ConstantOperator) SqlToScalarOperatorTranslator.translate(literalExpr);
@@ -765,6 +787,10 @@ public class PartitionSelector {
         // multi partition columns
         Map<Long, List<List<LiteralExpr>>> multiListPartitions = listPartitionInfo.getMultiLiteralExprValues();
         for (Map.Entry<Long, List<List<LiteralExpr>>> e : multiListPartitions.entrySet()) {
+            if (selectPartitionWithoutValues(e.getKey(), e.getValue().isEmpty(), isDropPartitionCondition,
+                    selectedPartitionIds, recorder)) {
+                continue;
+            }
             for (List<LiteralExpr> values : e.getValue()) {
                 final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMap(colRefIdxMap, values);
                 final ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
@@ -788,6 +814,10 @@ public class PartitionSelector {
         if (inputCells != null && !inputCells.isEmpty()) {
             for (Map.Entry<Long, PCell> e : inputCells.entrySet()) {
                 PListCell pListCell = (PListCell) e.getValue();
+                if (selectPartitionWithoutValues(e.getKey(), pListCell.getPartitionItems().isEmpty(),
+                        isDropPartitionCondition, selectedPartitionIds, recorder)) {
+                    continue;
+                }
                 for (List<String> values : pListCell.getPartitionItems()) {
                     final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMapWithCell(colRefIdxMap, values);
                     if (replaceMap == null) {
@@ -822,8 +852,12 @@ public class PartitionSelector {
     public static Map<String, Pair<Long, Long>> getExternalTablePartitionStats(Table table, Set<String> needPartitionNames) {
         String rawTableUuid = table.getUUID();
         String hashedTableUuid = StatisticUtils.hashTableUuidForPkStorage(rawTableUuid);
+        // Each partition name is its own literal; one literal with the joined names matches no partition.
+        String partitionNames = needPartitionNames.stream()
+                .map(name -> "'" + StringEscapeUtils.escapeSql(name) + "'")
+                .collect(Collectors.joining(", "));
         String sql = String.format(EXTERNAL_TABLE_PARTITION_META_TEMPLATE, hashedTableUuid, rawTableUuid,
-                String.join(",", needPartitionNames));
+                partitionNames);
         LOG.info("Get external table partition stats by sql: {}", sql);
         List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
         return deserializeExternalStatisticsResult(batch);

@@ -238,7 +238,8 @@ public class RewriteSimpleAggToHDFSScanRule extends TransformationRule {
         }
 
         // not applicable if there is no aggregation functions, like `distinct x`.
-        if (aggregationOperator.getAggregations().isEmpty()) {
+        // The scan answers one count, so the rewrite also needs exactly one aggregation: count(*), count(1).
+        if (aggregationOperator.getAggregations().size() != 1) {
             return false;
         }
 

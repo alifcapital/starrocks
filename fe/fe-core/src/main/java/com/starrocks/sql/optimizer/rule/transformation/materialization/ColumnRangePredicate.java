@@ -241,9 +241,13 @@ public class ColumnRangePredicate extends RangePredicate {
         // for a < 100 || a > 100
         RangeSet<ConstantOperator> complement = columnRanges.complement();
         if (complement.asRanges().size() == 1 && isEqualRange(complement.asRanges().iterator().next())) {
-            // complement will be [100, 100]
+            // complement will be [100, 100]. Its value is not always the lower endpoint: for a <= 7 || a > 8 the
+            // complement is (7, 8], so we take the single value of the range.
             Range<ConstantOperator> range = complement.asRanges().iterator().next();
-            return BinaryPredicateOperator.ne(expression, range.lowerEndpoint());
+            Optional<ConstantOperator> value = getValue(range);
+            if (value.isPresent()) {
+                return BinaryPredicateOperator.ne(expression, value.get());
+            }
         }
 
         return toScalarOperatorImpl(columnRanges);
@@ -409,7 +413,7 @@ public class ColumnRangePredicate extends RangePredicate {
                 && range.upperEndpoint().predecessor().isPresent()
                 && range.lowerEndpoint().successor().isPresent()) {
             // 7 < a < 9
-            return range.upperEndpoint().predecessor().equals(range.lowerEndpoint().successor().get());
+            return range.upperEndpoint().predecessor().get().equals(range.lowerEndpoint().successor().get());
         }
         return false;
     }
