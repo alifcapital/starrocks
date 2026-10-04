@@ -757,8 +757,9 @@ public class UtFrameUtils {
         if (!FeConstants.unitTestView) {
             return;
         }
-        if (statementBase instanceof QueryStatement && !connectContext.getDatabase().isEmpty() &&
-                !statementBase.isExplain()) {
+        // A view cannot hold INTO OUTFILE, so we do not test such a query as a view.
+        if (statementBase instanceof QueryStatement queryStatement && !connectContext.getDatabase().isEmpty() &&
+                !statementBase.isExplain() && !queryStatement.hasOutFileClause()) {
             String viewName = "view" + INDEX.getAndIncrement();
             String createView = "create view " + viewName + " as " + originStmt;
             CreateViewStmt createTableStmt;

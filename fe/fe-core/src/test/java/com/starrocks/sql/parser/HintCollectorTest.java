@@ -51,6 +51,18 @@ class HintCollectorTest {
 
     private static Stream<Arguments> generateHint() {
         List<Arguments> arguments = Lists.newArrayList();
+        arguments.add(Arguments.of("with c as (select /*+ set_var(abc = abc) */ * from tbl) " +
+                "select * from c", 0));
+        arguments.add(Arguments.of("with c as (select /*+ set_var(abc = abc) */ * from tbl) " +
+                "select /*+ set_var(abc = abc) */ * from c", 1));
+        arguments.add(Arguments.of("with c as (select /*+ set_var(abc = abc) */ * from tbl) " +
+                "update /*+ set_var(abc = abc) */ tbl set col = 1", 1));
+        arguments.add(Arguments.of("with c as (select /*+ set_var(abc = abc) */ * from tbl) " +
+                "delete /*+ set_var(abc = abc) */ from tbl", 1));
+        arguments.add(Arguments.of("select * from (with c as " +
+                "(select /*+ set_var(abc = abc) */ * from tbl) select * from c) t", 0));
+        arguments.add(Arguments.of("select * from tbl join " +
+                "(select /*+ set_var(abc = abc) */ * from tbl) t on tbl.col = t.col", 0));
         arguments.add(Arguments.of("select /*+ set_var(abc = abc) */ * from tbl union " +
                 "select /*+ set_var(abc = abc) */ * from tbl", 2));
         arguments.add(Arguments.of("insert  /*+ set_var(abc = abc) */ into tbl " +

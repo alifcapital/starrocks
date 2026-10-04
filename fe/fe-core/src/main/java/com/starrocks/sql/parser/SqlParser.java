@@ -46,10 +46,8 @@ import com.starrocks.type.StructField;
 import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 import io.trino.sql.parser.StatementSplitter;
-import org.antlr.v4.runtime.CharStreams;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.ParserRuleContext;
-import org.antlr.v4.runtime.atn.LexerATNSimulator;
 import org.antlr.v4.runtime.atn.ParserATNSimulator;
 import org.antlr.v4.runtime.atn.PredictionContextCache;
 import org.antlr.v4.runtime.atn.PredictionMode;
@@ -170,15 +168,29 @@ public class SqlParser {
     }
 
     private static List<StatementBase> parseWithStarRocksDialect(String sql, SessionVariable sessionVariable) {
+        AstBuilder.AstBuilderFactory astBuilderFactory = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory;
+        List<StatementBase> fastStatements = FastQueryParser.tryParse(sql, sessionVariable, astBuilderFactory);
+        if (fastStatements != null) {
+            return fastStatements;
+        }
+        return parseWithAntlr(sql, sessionVariable);
+    }
+
+    static List<StatementBase> parseWithAntlr(String sql, SessionVariable sessionVariable) {
         Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> pair =
                 invokeParser(sql, sessionVariable, com.starrocks.sql.parser.StarRocksParser::sqlStatements);
         return buildStatements(sql, (com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext) pair.first,
-                (CommonTokenStream) pair.second.getTokenStream(), sessionVariable);
+                (CommonTokenStream) pair.second.getTokenStream(), sessionVariable, pair.second);
     }
 
+    /**
+     * Builds the AST of each statement. {@code parser} is the parser that produced the tree; it knows where the
+     * parameter markers are. It is null for a kept view definition tree, which never has parameter markers.
+     */
     private static List<StatementBase> buildStatements(
             String sql, com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext sqlStatementsContext,
-            CommonTokenStream tokenStream, SessionVariable sessionVariable) {
+            CommonTokenStream tokenStream, SessionVariable sessionVariable,
+            com.starrocks.sql.parser.StarRocksParser parser) {
         List<StatementBase> statements = Lists.newArrayList();
         List<com.starrocks.sql.parser.StarRocksParser.SingleStatementContext> singleStatementContexts =
                 sqlStatementsContext.singleStatement();
@@ -190,6 +202,8 @@ public class SqlParser {
                     sessionVariable.getSqlMode(),
                     GlobalVariable.enableTableNameCaseInsensitive,
                     collector.getContextWithHintMap());
+            astBuilder.initializeParameterContext(parser == null ? null :
+                    LexicalParameterContext.forRule(parser, singleStatementContexts.get(idx)));
             StatementBase statement = (StatementBase) astBuilder.visitSingleStatement(singleStatementContexts.get(idx));
             if (astBuilder.getParameters() != null && astBuilder.getParameters().size() != 0
                     && !(statement instanceof PrepareStmt)) {
@@ -204,11 +218,13 @@ public class SqlParser {
     }
 
     public static Expr parseExpression(String expressionSql, SessionVariable sessionVariable) {
-        ParserRuleContext expressionContext = invokeParser(expressionSql, sessionVariable,
-                com.starrocks.sql.parser.StarRocksParser::expressionSingleton).first;
-        return (Expr) GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
-                .create(sessionVariable.getSqlMode(), GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>())
-                .visit(expressionContext);
+        var parsed = invokeParser(expressionSql, sessionVariable,
+                com.starrocks.sql.parser.StarRocksParser::expressionSingleton);
+        ParserRuleContext expressionContext = parsed.first;
+        AstBuilder builder = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
+                .create(sessionVariable.getSqlMode(), GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>());
+        builder.initializeParameterContext(LexicalParameterContext.forRule(parsed.second, expressionContext));
+        return (Expr) builder.visit(expressionContext);
     }
 
     /**
@@ -259,7 +275,7 @@ public class SqlParser {
             ViewDefinitionKey key = new ViewDefinitionKey(sql, sqlMode, tokenLimit, exprLimit);
             ParsedViewDefinition parsed = ViewDefinitionCache.CACHE.getIfPresent(key);
             if (parsed != null) {
-                return buildStatements(sql, parsed.tree(), parsed.tokenStream(), sessionVariable);
+                return buildStatements(sql, parsed.tree(), parsed.tokenStream(), sessionVariable, null);
             }
             Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> pair = invokeParser(sql,
                     sessionVariable, com.starrocks.sql.parser.StarRocksParser::sqlStatements, tokenLimit, exprLimit);
@@ -270,7 +286,15 @@ public class SqlParser {
             parsed = new ParsedViewDefinition(
                     (com.starrocks.sql.parser.StarRocksParser.SqlStatementsContext) pair.first, tokenStream);
             List<StatementBase> statements = buildStatements(sql, parsed.tree(), parsed.tokenStream(),
-                    sessionVariable);
+                    sessionVariable, pair.second);
+            // A kept tree is built without its parser, so we keep only trees without parameter markers. A view
+            // definition has none; we check anyway rather than build a wrong AST from a kept tree.
+            for (com.starrocks.sql.parser.StarRocksParser.SingleStatementContext statement :
+                    parsed.tree().singleStatement()) {
+                if (LexicalParameterContext.forRule(pair.second, statement) != null) {
+                    return statements;
+                }
+            }
             ViewDefinitionCache.CACHE.put(key, parsed);
             return statements;
         } catch (OutOfMemoryError e) {
@@ -322,19 +346,21 @@ public class SqlParser {
     public static Expr parseSqlToExpr(String expressionSql, long sqlMode) {
         SessionVariable sessionVariable = new SessionVariable();
         sessionVariable.setSqlMode(sqlMode);
-        ParserRuleContext expressionContext = invokeParser(expressionSql, sessionVariable,
-                com.starrocks.sql.parser.StarRocksParser::expressionSingleton).first;
-        return (Expr) GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
-                .create(sqlMode, GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>()).visit(expressionContext);
+        var parsed = invokeParser(expressionSql, sessionVariable,
+                com.starrocks.sql.parser.StarRocksParser::expressionSingleton);
+        ParserRuleContext expressionContext = parsed.first;
+        AstBuilder builder = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
+                .create(sqlMode, GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>());
+        builder.initializeParameterContext(LexicalParameterContext.forRule(parsed.second, expressionContext));
+        return (Expr) builder.visit(expressionContext);
     }
 
     public static List<Expr> parseSqlToExprs(String expressions, SessionVariable sessionVariable) {
-        com.starrocks.sql.parser.StarRocksParser.ExpressionListContext expressionListContext =
-                (com.starrocks.sql.parser.StarRocksParser.ExpressionListContext)
-                        invokeParser(expressions, sessionVariable,
-                                com.starrocks.sql.parser.StarRocksParser::expressionList).first;
+        var parsed = invokeParser(expressions, sessionVariable, com.starrocks.sql.parser.StarRocksParser::expressionList);
+        var expressionListContext = (StarRocksParser.ExpressionListContext) parsed.first;
         AstBuilder astBuilder = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
                 .create(sessionVariable.getSqlMode(), GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>());
+        astBuilder.initializeParameterContext(LexicalParameterContext.forRule(parsed.second, expressionListContext));
         return expressionListContext.expression().stream()
                 .map(e -> (Expr) astBuilder.visit(e))
                 .collect(Collectors.toList());
@@ -343,11 +369,13 @@ public class SqlParser {
     public static ImportColumnsStmt parseImportColumns(String expressionSql, long sqlMode) {
         SessionVariable sessionVariable = new SessionVariable();
         sessionVariable.setSqlMode(sqlMode);
-        ParserRuleContext importColumnsContext = invokeParser(expressionSql, sessionVariable,
-                com.starrocks.sql.parser.StarRocksParser::importColumns).first;
-        return (ImportColumnsStmt) GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
-                .create(sqlMode, GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>())
-                .visit(importColumnsContext);
+        var parsed = invokeParser(expressionSql, sessionVariable,
+                com.starrocks.sql.parser.StarRocksParser::importColumns);
+        ParserRuleContext importColumnsContext = parsed.first;
+        AstBuilder builder = GlobalStateMgr.getCurrentState().getSqlParser().astBuilderFactory
+                .create(sqlMode, GlobalVariable.enableTableNameCaseInsensitive, new IdentityHashMap<>());
+        builder.initializeParameterContext(LexicalParameterContext.forRule(parsed.second, importColumnsContext));
+        return (ImportColumnsStmt) builder.visit(importColumnsContext);
     }
 
     public static List<Column> parseFilesSchema(String schemaStr) {
@@ -433,27 +461,37 @@ public class SqlParser {
             Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction,
             int tokenLimit, int exprLimit) {
         com.starrocks.sql.parser.StarRocksLexer lexer =
-                new com.starrocks.sql.parser.StarRocksLexer(new CaseInsensitiveStream(CharStreams.fromString(sql)));
+                new com.starrocks.sql.parser.StarRocksLexer(new CaseInsensitiveStream(SqlTextStream.create(sql)));
+        lexer.removeErrorListeners();
+        lexer.addErrorListener(new ErrorHandler());
         lexer.setSqlMode(sessionVariable.getSqlMode());
         if (Config.enable_concurrent_parse_optimization) {
             DFA[] lexerDecisionDFA = new DFA[StarRocksLexer._ATN.getNumberOfDecisions()];
             for (int i = 0; i < StarRocksLexer._ATN.getNumberOfDecisions(); i++) {
                 lexerDecisionDFA[i] = new DFA(StarRocksLexer._ATN.getDecisionState(i), i);
             }
-            lexer.setInterpreter(new LexerATNSimulator(
+            lexer.setInterpreter(new UnicodeLexerATNSimulator(
                     lexer,
                     StarRocksLexer._ATN,
                     lexerDecisionDFA,
                     new PredictionContextCache()
             ));
         }
+        if (!Config.enable_concurrent_parse_optimization) {
+            lexer.setInterpreter(new UnicodeLexerATNSimulator(lexer, lexer.getATN(),
+                    StarRocksLexer._decisionToDFA, StarRocksLexer._sharedContextCache));
+        }
         CommonTokenStream tokenStream = new CommonTokenStream(lexer);
         com.starrocks.sql.parser.StarRocksParser parser = new com.starrocks.sql.parser.StarRocksParser(tokenStream);
         parser.removeErrorListeners();
         parser.addErrorListener(new ErrorHandler());
         parser.removeParseListeners();
-        parser.addParseListener(new PostProcessListener(tokenLimit, exprLimit));
-        if (!Config.enable_parser_context_cache || Config.enable_concurrent_parse_optimization) {
+        PostProcessListener postProcessor = new PostProcessListener(tokenLimit, exprLimit);
+        parser.addParseListener(postProcessor);
+        boolean sharedCache = Config.enable_parser_context_cache && !Config.enable_concurrent_parse_optimization;
+        if (sharedCache) {
+            parser.setInterpreter(ParserDfaCache.interpreter(parser));
+        } else {
             DFA[] decisionDFA = new DFA[parser.getATN().getNumberOfDecisions()];
             for (int i = 0; i < parser.getATN().getNumberOfDecisions(); i++) {
                 decisionDFA[i] = new DFA(parser.getATN().getDecisionState(i), i);
@@ -462,19 +500,37 @@ public class SqlParser {
         }
 
         try {
+            return parseWithFallback(parser, tokenStream, postProcessor, parseFunction);
+        } finally {
+            if (sharedCache) {
+                ParserDfaCache.afterParse();
+            }
+        }
+    }
+
+    private static Pair<ParserRuleContext, com.starrocks.sql.parser.StarRocksParser> parseWithFallback(
+            com.starrocks.sql.parser.StarRocksParser parser, CommonTokenStream tokenStream,
+            PostProcessListener postProcessor,
+            Function<com.starrocks.sql.parser.StarRocksParser, ParserRuleContext> parseFunction) {
+        try {
             // inspire by https://github.com/antlr/antlr4/issues/192#issuecomment-15238595
             // try SLL mode with BailErrorStrategy firstly
             parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
             parser.setErrorHandler(new StarRocksBailErrorStrategy());
-            return Pair.create(parseFunction.apply(parser), parser);
+            ParserRuleContext tree = parseFunction.apply(parser);
+            postProcessor.validateTupleContexts();
+            return Pair.create(tree, parser);
         } catch (ParseCancellationException e) {
             // if we fail, parse with LL mode with our own error strategy
             // rewind input stream
             tokenStream.seek(0);
             parser.reset();
+            postProcessor.resetTupleContexts();
             parser.getInterpreter().setPredictionMode(PredictionMode.LL);
             parser.setErrorHandler(new StarRocksDefaultErrorStrategy());
-            return Pair.create(parseFunction.apply(parser), parser);
+            ParserRuleContext tree = parseFunction.apply(parser);
+            postProcessor.validateTupleContexts();
+            return Pair.create(tree, parser);
         }
     }
 }

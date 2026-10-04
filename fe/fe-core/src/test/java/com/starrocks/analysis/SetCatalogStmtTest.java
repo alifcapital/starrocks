@@ -49,13 +49,13 @@ public class SetCatalogStmtTest {
 
     @Test
     public void testParserAndAnalyzer() {
-        String sql = "SET CATALOG hive_catalog'";
+        String sql = "SET CATALOG hive_catalog";
         AnalyzeTestUtil.analyzeSuccess(sql);
 
-        String sql_2 = "SET CATALOG default_catalog'";
+        String sql_2 = "SET CATALOG default_catalog";
         AnalyzeTestUtil.analyzeSuccess(sql_2);
 
-        String sql_3 = "SET xxxx default_catalog'";
+        String sql_3 = "SET xxxx default_catalog";
         AnalyzeTestUtil.analyzeFail(sql_3);
     }
 

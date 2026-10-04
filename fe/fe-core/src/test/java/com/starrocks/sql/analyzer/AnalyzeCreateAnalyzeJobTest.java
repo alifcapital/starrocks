@@ -101,6 +101,10 @@ public class AnalyzeCreateAnalyzeJobTest {
     public void testCreateAnalyzeJob() throws Exception {
         String sql = "create analyze table db.tbl";
         CreateAnalyzeJobStmt analyzeStmt = (CreateAnalyzeJobStmt) analyzeSuccess(sql);
+        // Without FULL or SAMPLE the job collects sampled statistics.
+        Assertions.assertEquals(StatsConstants.AnalyzeType.SAMPLE, analyzeStmt.getAnalyzeType());
+        Assertions.assertEquals(StatsConstants.AnalyzeType.FULL,
+                ((CreateAnalyzeJobStmt) analyzeSuccess("create analyze full table db.tbl")).getAnalyzeType());
 
         DDLStmtExecutor.execute(analyzeStmt, starRocksAssert.getCtx());
         Assertions.assertEquals(1,

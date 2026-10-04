@@ -1,0 +1,364 @@
+{"sql": "SELECT map(1,2) OVER () FROM t"}
+{"sql": "SELECT map() OVER (PARTITION BY a) FROM t"}
+{"sql": "SELECT map(a,b) OVER (PARTITION BY a ORDER BY b ROWS UNBOUNDED PRECEDING) AS m FROM t"}
+{"sql": "SELECT map(1,2) OVER (ORDER BY a) m FROM t WHERE a > 1"}
+{"sql": "SELECT map(1,2) OVER () + 1 FROM t"}
+{"sql": "SELECT map(1,2) OVER (ROWS 'x' PRECEDING) FROM t"}
+{"sql": "SELECT map(1,2) OVER ([foo] PARTITION BY a) FROM t"}
+{"sql": "SELECT map(1,2) OVER ([hash] PARTITION BY a) FROM t"}
+{"sql": "SELECT map(1,2) OVER (PARTITION BY a) FROM t WHERE map(1,2) OVER () IS NOT NULL ORDER BY time_slice(dt, 5) OVER ()"}
+{"sql": "SELECT * FROM (SELECT map(1,2) OVER (ORDER BY a) m FROM t) s"}
+{"sql": "SELECT concat(substr(a, 1) OVER (), 'x') FROM t"}
+{"sql": "SELECT db.map(1,2) OVER () FROM t"}
+{"sql": "SELECT `map`(1,2) OVER () FROM t"}
+{"sql": "SELECT dict_mapping('t', a) OVER (PARTITION BY a ORDER BY b) FROM t"}
+{"sql": "SELECT dict_mapping(1) OVER () x FROM t"}
+{"sql": "SELECT time_slice(dt, INTERVAL 5 MINUTE) OVER (PARTITION BY a) FROM t"}
+{"sql": "SELECT time_slice(dt, 5) OVER () FROM t"}
+{"sql": "SELECT time_slice(dt, 5, floor) OVER () FROM t"}
+{"sql": "SELECT time_slice(dt, 5, 'DAY', 'floor') OVER () FROM t"}
+{"sql": "SELECT db.time_slice(dt, 5) OVER () FROM t"}
+{"sql": "SELECT date_slice(dt, 5, 'DAY', 'ceil') OVER (ORDER BY a) x FROM t"}
+{"sql": "SELECT date_slice(dt, INTERVAL 1 WEEK, ceil) OVER () FROM t"}
+{"sql": "SELECT array_generate(a, b, INTERVAL 1 DAY) OVER (PARTITION BY c) FROM t"}
+{"sql": "SELECT array_generate(a, b, INTERVAL 1 DAY) OVER () x FROM t WHERE a > 1"}
+{"sql": "SELECT array_generate(a, b, 1) OVER () FROM t"}
+{"sql": "SELECT date_add(a, 1) OVER () FROM t"}
+{"sql": "SELECT date_add(a, INTERVAL 1 DAY) OVER (ORDER BY b) FROM t"}
+{"sql": "SELECT adddate(a, 1) OVER () FROM t"}
+{"sql": "SELECT days_sub(a, 1) OVER () FROM t"}
+{"sql": "SELECT element_at(a, 1) OVER () FROM t"}
+{"sql": "SELECT isnull(a) OVER () FROM t"}
+{"sql": "SELECT isnotnull(a) OVER (ORDER BY b) FROM t"}
+{"sql": "SELECT multiply(a, b) OVER () FROM t"}
+{"sql": "SELECT str_to_map(a) OVER () FROM t"}
+{"sql": "SELECT str_to_map(a, b, c) OVER (PARTITION BY d) FROM t"}
+{"sql": "SELECT connection_id() OVER () FROM t"}
+{"sql": "SELECT session_user() OVER () FROM t"}
+{"sql": "SELECT session_id() OVER () FROM t"}
+{"sql": "SELECT connection_id(1) OVER () FROM t"}
+{"sql": "SELECT substr(a, 1) OVER () FROM t"}
+{"sql": "SELECT substr(a, 1, 2) OVER (ORDER BY b) FROM t"}
+{"sql": "SELECT substring(a) OVER () FROM t"}
+{"sql": "SELECT substring(a, 1, 2, 3) OVER () FROM t"}
+{"sql": "SELECT db.substr(a, 1) OVER () FROM t"}
+{"sql": "SELECT `substr`(a, 1) OVER () FROM t"}
+{"sql": "SELECT lpad(a, 1) OVER () FROM t"}
+{"sql": "SELECT rpad(a, 1) OVER (PARTITION BY b) FROM t"}
+{"sql": "SELECT lpad(a, 1, 'x') OVER () FROM t"}
+{"sql": "SELECT {fn substr(a, 1) OVER ()} FROM t"}
+{"sql": "SELECT map(1) OVER () FROM t"}
+{"sql": "SELECT map(1,2) OVER FROM t"}
+{"sql": "SELECT map(1,2) OVER (PARTITION BY) FROM t"}
+{"sql": "SELECT map(1,2) OVER (ORDER BY) FROM t"}
+{"sql": "SELECT map(1,2) OVER ([hash] ORDER BY a) FROM t"}
+{"sql": "SELECT map(1,2) FILTER (WHERE a) OVER () FROM t"}
+{"sql": "SELECT map(DISTINCT 1,2) OVER () FROM t"}
+{"sql": "SELECT time_slice(dt) OVER (ORDER BY a) FROM t"}
+{"sql": "SELECT time_slice(dt, 5, 'DAY', 'floor', 'x') OVER () FROM t"}
+{"sql": "SELECT time_slice(dt, 5, 'DAY', 1) OVER () FROM t"}
+{"sql": "SELECT date_slice(dt, 5, 'DAY', 1) OVER (ORDER BY a) FROM t"}
+{"sql": "SELECT date_add(a) OVER () FROM t"}
+{"sql": "SELECT element_at(a) OVER () FROM t"}
+{"sql": "SELECT isnull(a, b) OVER () FROM t"}
+{"sql": "SELECT str_to_map() OVER () FROM t"}
+{"sql": "SELECT {fn map(1,2) OVER ()}"}
+{"sql": "SELECT {fn time_slice(dt, 5) OVER ()} FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([sort] PARTITION BY b ORDER BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([SORT] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([Hash] PARTITION BY b, c ORDER BY d DESC) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([SKEWED] PARTITION BY b ORDER BY c ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash, skewed] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash, sort] PARTITION BY b) FROM t"}
+{"sql": "SELECT ROW_NUMBER() OVER ([hash] PARTITION BY b ORDER BY c) FROM t"}
+{"sql": "SELECT LAG(a) OVER ([sort] PARTITION BY b ORDER BY c) rn FROM t"}
+{"sql": "SELECT COUNT(DISTINCT a) OVER ([hash] PARTITION BY b) FROM t"}
+{"sql": "SELECT foo(a) OVER ([hash] PARTITION BY b) FROM t"}
+{"sql": "SELECT a FROM t WHERE SUM(b) OVER ([hash] PARTITION BY c) > 1"}
+{"sql": "SELECT * FROM (SELECT SUM(a) OVER ([sort] PARTITION BY b ORDER BY c) s FROM t) x"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2)] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([foo] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skew] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([`hash`] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash, foo] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash] ORDER BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash]) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash,] PARTITION BY b) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash] PARTITION BY) FROM t"}
+{"sql": "SELECT ROW_NUMBER() OVER ([foo] PARTITION BY b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] a) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew, bucket] a, b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] a) AS c FROM t GROUP BY b"}
+{"sql": "SELECT COUNT(DISTINCT [a] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [`skew`] a) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] (a)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] [1]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] [a]) FROM t"}
+{"sql": "SELECT COUNT(ALL [skew]) FROM t"}
+{"sql": "SELECT COUNT(ALL [a, b]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] + 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] - 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] - b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] +b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] ~b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] !b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a][0]) FROM t"}
+{"sql": "SELECT COUNT(ALL [a]) FILTER (WHERE b) FROM t"}
+{"sql": "SELECT COUNT(ALL [a] b) FILTER (WHERE c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] a) OVER (PARTITION BY b) FROM t"}
+{"sql": "SELECT COUNT(ALL [a]) OVER () FROM t"}
+{"sql": "SELECT COUNT(ALL [a]) OVER ([hash] PARTITION BY b ORDER BY c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] & 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] ^ 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NULL) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] TRUE) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] CASE WHEN a THEN b END) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] CAST(a AS INT)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] date '2020-01-01') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] INTERVAL 1 DAY) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] EXISTS (SELECT 1)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] map{1:2}) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] array<int>[1]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] {fn abs(1)}) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT LIKE 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment) FROM t"}
+{"sql": "SELECT * FROM t WHERE COUNT(DISTINCT [skew] a) > 1"}
+{"sql": "SELECT x FROM t GROUP BY x HAVING COUNT(DISTINCT [skew] a) > 1 ORDER BY COUNT(DISTINCT [skew] b)"}
+{"sql": "SELECT * FROM (SELECT COUNT(DISTINCT [skew] a) c FROM t) s"}
+{"sql": "SELECT COUNT(DISTINCT [1, 2]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [1, a]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT []) FROM t"}
+{"sql": "SELECT COUNT(ALL []) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a.b]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [1,2]) OVER () FROM t"}
+{"sql": "SELECT COUNT(ALL [1, 2]) FROM t"}
+{"sql": "SELECT COUNT(ALL [a, b], c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a], b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a, b], c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a], [b]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] * 2) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] OR b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] AND b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] IS NULL) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] = b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] IN (1)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] BETWEEN 1 AND 2) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a].x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] -> 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] || b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] LIKE 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] RLIKE 'x') FROM t"}
+{"sql": "SELECT SUM(DISTINCT [1, 2]) FROM t"}
+{"sql": "SELECT SUM(DISTINCT [a] * 2) FROM t"}
+{"sql": "SELECT AVG(ALL [1]) FROM t"}
+{"sql": "SELECT GROUP_CONCAT(DISTINCT [a], b) FROM t"}
+{"sql": "SELECT ARRAY_AGG(DISTINCT [1]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a, b]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)]) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [1] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a, 1] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] AS x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a]) x FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] a) FILTER (WHERE b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a]) FILTER (WHERE b) FROM t"}
+{"sql": "SELECT COUNT([skew] a) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [skew] a, ) FROM t"}
+{"sql": "SELECT SUM(DISTINCT [a]) FROM t"}
+{"sql": "SELECT SUM(DISTINCT [a, b]) FROM t"}
+{"sql": "SELECT SUM(ALL [a] + 1) FROM t"}
+{"sql": "SELECT SUM(DISTINCT [a][0]) FROM t"}
+{"sql": "SELECT SUM(DISTINCT [a] b) FROM t"}
+{"sql": "SELECT AVG(DISTINCT [a]) FROM t"}
+{"sql": "SELECT MAX(ALL [a]) FROM t"}
+{"sql": "SELECT MIN(ALL [a]) FROM t"}
+{"sql": "SELECT ARRAY_AGG(DISTINCT [a]) FROM t"}
+{"sql": "SELECT GROUP_CONCAT(DISTINCT [a]) FROM t"}
+{"sql": "SELECT foo(DISTINCT [a]) FROM t"}
+{"sql": "SELECT foo(ALL [1, 2]) FROM t"}
+{"sql": "SELECT PASSWORD('abc')"}
+{"sql": "SELECT PASSWORD(\"abc\")"}
+{"sql": "SELECT PASSWORD('')"}
+{"sql": "SELECT PASSWORD('a''b\\n')"}
+{"sql": "SELECT PASSWORD('abc') x"}
+{"sql": "SELECT password('abc') AS x FROM t"}
+{"sql": "SELECT PASSWORD('abc') filter FROM t"}
+{"sql": "SELECT PASSWORD('abc')[1]"}
+{"sql": "SELECT PASSWORD('abc') + 1"}
+{"sql": "SELECT PASSWORD('abc') COLLATE x"}
+{"sql": "SELECT PASSWORD('abc').x"}
+{"sql": "SELECT CONCAT(PASSWORD('abc'), 'x') FROM t WHERE PASSWORD('x') = a ORDER BY PASSWORD('y')"}
+{"sql": "SELECT * FROM t WHERE a = PASSWORD('abc')"}
+{"sql": "SELECT * FROM (SELECT PASSWORD('abc') p FROM t) s"}
+{"sql": "SELECT PASSWORD(1) FROM t"}
+{"sql": "SELECT PASSWORD(a) FROM t"}
+{"sql": "SELECT PASSWORD(('abc')) FROM t"}
+{"sql": "SELECT PASSWORD('a', 'b') FROM t"}
+{"sql": "SELECT PASSWORD() FROM t"}
+{"sql": "SELECT db.PASSWORD('abc') FROM t"}
+{"sql": "SELECT `PASSWORD`('abc') FROM t"}
+{"sql": "SELECT PASSWORD('abc') OVER () FROM t"}
+{"sql": "SELECT PASSWORD('abc') OVER (PARTITION BY a ORDER BY b) FROM t"}
+{"sql": "SELECT PASSWORD(a) OVER () FROM t"}
+{"sql": "SELECT PASSWORD('abc') FILTER (WHERE a) FROM t"}
+{"sql": "SELECT PASSWORD('abc') OVER FROM t"}
+{"sql": "SELECT PASSWORD(DISTINCT 'abc') FROM t"}
+{"sql": "SELECT {fn PASSWORD('abc')}"}
+{"sql": "SELECT PASSWORD('abc'"}
+{"sql": "SELECT PASSWORD(abc') FROM t"}
+{"sql": "SELECT SUM(a) FILTER FROM t"}
+{"sql": "SELECT SUM(a) filter, b FROM t"}
+{"sql": "SELECT SUM(a) AS filter FROM t"}
+{"sql": "SELECT foo(a) FILTER FROM t"}
+{"sql": "SELECT COUNT(*) FILTER FROM t"}
+{"sql": "SELECT COUNT(DISTINCT a) FILTER FROM t"}
+{"sql": "SELECT a, MAX(b) FILTER FROM t GROUP BY a"}
+{"sql": "SELECT SUM(a) FILTER (WHERE b > 1) FROM t"}
+{"sql": "SELECT SUM(a) FILTER (WHERE b > 1) FILTER FROM t"}
+{"sql": "SELECT SUM(a) FILTER (WHERE b > 1) OVER () FROM t"}
+{"sql": "SELECT * FROM (SELECT SUM(a) FILTER FROM t) s"}
+{"sql": "INSERT INTO t2 SELECT SUM(a) FILTER FROM t"}
+{"sql": "SELECT COUNT(ALL [a]) FILTER FROM t"}
+{"sql": "SELECT SUM(a) FILTER (b > 1) FROM t"}
+{"sql": "SELECT COUNT(*) FILTER x FROM t"}
+{"sql": "SELECT SUM(a) FILTER ("}
+{"sql": "SELECT SUM(a) FILTER FILTER FROM t"}
+{"sql": "SELECT SUM(a) FILTER OVER () FROM t"}
+{"sql": "SELECT 1 FROM t WHERE SUM(a) FILTER > 1"}
+{"sql": "SELECT 1 FROM t ORDER BY SUM(a) FILTER"}
+{"sql": "SELECT rank() FROM t"}
+{"sql": "SELECT cume_dist(), percent_rank() FROM t"}
+{"sql": "SELECT RANK() AS r FROM t WHERE rank() > 1 ORDER BY rank()"}
+{"sql": "SELECT rank() rank FROM t"}
+{"sql": "SELECT rank(1) FROM t"}
+{"sql": "SELECT rank(1) OVER (ORDER BY a) FROM t"}
+{"sql": "SELECT rank(a, b) OVER (PARTITION BY c) FROM t"}
+{"sql": "SELECT percent_rank() FILTER (WHERE a > 1) FROM t"}
+{"sql": "SELECT x FROM (SELECT cume_dist() c FROM t) s WHERE x > rank()"}
+{"sql": "SELECT rank() OVER (ORDER BY a), rank(), cume_dist() OVER () FROM t"}
+{"sql": "SELECT t.rank() FROM t"}
+{"sql": "SELECT rank FROM t"}
+{"sql": "SELECT rank(distinct a) FROM t"}
+{"sql": "SELECT rank(*) FROM t"}
+{"sql": "SELECT rank( FROM t"}
+{"sql": "SELECT rank() OVER FROM t"}
+{"sql": "SELECT rank() OVER (ORDER BY) FROM t"}
+{"sql": "SELECT row_number() FROM t"}
+{"sql": "SELECT dense_rank() FROM t"}
+{"sql": "SELECT ntile(2) FROM t"}
+{"sql": "SELECT lead(a) FROM t"}
+{"sql": "SELECT first_value(a) FROM t"}
+{"sql": "SELECT last_value(a) FILTER (WHERE a > 1) FROM t"}
+{"sql": "SELECT COUNT(ALL [a] COLLATE x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a, b] COLLATE x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE x, c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE x) FROM t WHERE COUNT(DISTINCT [b] COLLATE y) > 1"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment, b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment + 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment comment) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment) OVER (PARTITION BY b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment ORDER BY b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment SEPARATOR 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment + date 'bad') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] version) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] status, name) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment + (SELECT 1)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE (SELECT 1)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT b, c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT IN (1, 2)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT BETWEEN 1 AND 2) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT REGEXP 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT LIKE 'x', b) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] NOT LIKE) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] MATCH 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] MATCH_ANY 'x') FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] DIV 2) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] OVER ()) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] FILTER (WHERE x)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] COLLATE x COUNT(DISTINCT [b] COLLATE y)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a] comment COUNT(DISTINCT [b] comment)) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] c, d) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(-1,2.5,'x')] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)]) FROM t"}
+{"sql": "SELECT COUNT(ALL [a|b(1,2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|f(x)(1,2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b.c(1)] d) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|1(2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(date 'bad')] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|map(1)(1)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] c) OVER (PARTITION BY d) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] c) FROM t WHERE COUNT(DISTINCT [a|b(3)] d) > 1"}
+{"sql": "SELECT COUNT(DISTINCT [a|b()] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,x)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|(1,2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)(3)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2) x] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] c d) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] COLLATE x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] comment) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] NOT c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b(1,2)] + 1) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|(SELECT 1)(1)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b] COLLATE x) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|1] c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1)] PARTITION BY c ORDER BY d) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([hash|b(1,2)] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2)] PARTITION BY c ROWS UNBOUNDED PRECEDING) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2)] ORDER BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b()] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2) PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([unknown|b(1)] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(date 'bad')] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|f(x)(1)] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2)] PARTITION BY c) FROM t WHERE SUM(a) OVER ([skewed|b(3)] PARTITION BY d) > 1"}
+{"sql": "SELECT SUM(a) OVER ([skewed|(SELECT 1)(1)] PARTITION BY c) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|b(1,2)]) FROM t"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR k IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1, 2, 3) FOR k IN (1, 2))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (sum(date 'bad') FOR k IN (date 'bad'))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (count(distinct) FOR k IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (sum(v) AS s, map(1) m FOR (k, j) IN ((1, 2) AS x, (3, 4)))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR k IN (1)) WHERE dst.a = src.a"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (sum((SELECT date 'bad')) FOR k IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR k IN ())"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1 FOR k IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (1 FOR k IN (1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR k IN (1 + 1))"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1) FOR k IN (1)) garbage"}
+{"sql": "UPDATE dst SET v = 1 FROM src PIVOT (map(1,) FOR k IN (1))"}
+{"sql": "SELECT * FROM src PIVOT (map(1) FOR k IN (1))"}
+{"sql": "SELECT * FROM t VERSION FROM 1 TO (SELECT date 'bad')"}
+{"sql": "SELECT * FROM t FOR VERSION BETWEEN (SELECT date 'bad') AND (SELECT 1)"}
+{"sql": "SELECT * FROM t FOR SYSTEM_TIME BETWEEN (SELECT 1) AND (SELECT datetime 'bad')"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT date 'bad' FROM u WHERE x IN (SELECT date 'bad2')) TO 1"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT 1 FROM (SELECT datetime 'bad') s) TO 2"}
+{"sql": "SELECT * FROM t u FOR VERSION FROM (SELECT date 'bad') TO 1 JOIN v ON u.a = v.a"}
+{"sql": "SELECT * FROM t VERSION FROM map(1) TO 2"}
+{"sql": "SELECT * FROM t VERSION FROM date 'bad' + date 'bad2' TO 1"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT date 'bad') 1"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT) TO 1"}
+{"sql": "SELECT * FROM t VERSION FROM (SELECT date 'bad' TO 1"}
+{"sql": "SELECT * FROM t FOR VERSION AS OF (SELECT date 'bad')"}
+{"sql": "SELECT * FROM t FOR TIMESTAMP AS OF (SELECT date 'bad')"}
+{"sql": "SELECT * FROM t VERSION BETWEEN (SELECT date 'bad') TO 1"}
+{"sql": "SELECT COUNT(DISTINCT [a|(SELECT x FROM u WHERE y IN (SELECT 2))(1,2)] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|b((SELECT 1))] c) FROM t"}
+{"sql": "SELECT COUNT(DISTINCT [a|(SELECT date 'bad')(1)] c), COUNT(DISTINCT [a] comment + (SELECT 1)) FROM t"}
+{"sql": "SELECT SUM(a) OVER ([skewed|(SELECT date 'bad')(1)] PARTITION BY c) FROM t"}

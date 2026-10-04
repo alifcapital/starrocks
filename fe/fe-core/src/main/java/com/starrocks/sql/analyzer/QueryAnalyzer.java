@@ -642,7 +642,7 @@ public class QueryAnalyzer {
                         tableFunctionRelation.setTable(preResolved);
                     }
                     if (preResolved.isListFilesOnly()) {
-                        return convertFileTableFunctionRelation(preResolved);
+                        return convertFileTableFunctionRelation(preResolved, tableFunctionRelation.getAlias());
                     }
                     return relation;
                 }
@@ -651,7 +651,7 @@ public class QueryAnalyzer {
                         tableFunctionRelation.getProperties(), tableFunctionRelation.getPushDownSchemaFunc());
                 TableFunctionTable tableFunctionTable = (TableFunctionTable) table;
                 if (tableFunctionTable.isListFilesOnly()) {
-                    return convertFileTableFunctionRelation(tableFunctionTable);
+                    return convertFileTableFunctionRelation(tableFunctionTable, tableFunctionRelation.getAlias());
                 } else {
                     tableFunctionRelation.setTable(table);
                     return relation;
@@ -713,6 +713,18 @@ public class QueryAnalyzer {
                     table = resolveTable(tableRelation);
                 }
                 table = QueryPeriodResolver.resolveAndBindTable(tableRelation, table, session, metadataMgr);
+                // A view and a table that is not temporal would read their current data, so we reject the clause.
+                if (tableRelation.getQueryPeriodString() != null && !table.isTemporal()) {
+                    throw unsupportedException("Unsupported table type for temporal clauses, table type: " +
+                            table.getType());
+                }
+                // The parser builds a query period only for AS OF. A MySQL table sends the clause text to MySQL,
+                // but other temporal tables would read the current snapshot, so we reject the other forms there.
+                if (tableRelation.getQueryPeriodString() != null && tableRelation.getQueryPeriod() == null &&
+                        table.getType() != Table.TableType.MYSQL) {
+                    throw unsupportedException("Only the AS OF temporal clause is supported, table type: " +
+                            table.getType());
+                }
 
                 Relation r;
                 if (table instanceof View) {
@@ -742,11 +754,6 @@ public class QueryAnalyzer {
 
                     r = viewRelation;
                 } else {
-                    if (tableRelation.getQueryPeriodString() != null && !table.isTemporal()) {
-                        throw unsupportedException("Unsupported table type for temporal clauses, table type: " +
-                                table.getType());
-                    }
-
                     if (table.isSupported()) {
                         tableRelation.setTable(table);
                         r = tableRelation;
@@ -805,7 +812,7 @@ public class QueryAnalyzer {
         }
 
         // convert FileTableFunctionRelation to ValuesRelation if only list files
-        private ValuesRelation convertFileTableFunctionRelation(TableFunctionTable table) {
+        private ValuesRelation convertFileTableFunctionRelation(TableFunctionTable table, TableName alias) {
             List<Column> columns = table.getFullSchema();
             List<String> columnNames = columns.stream().map(Column::getName).collect(Collectors.toList());
             List<Type> outputColumnTypes = columns.stream().map(Column::getType).collect(Collectors.toList());
@@ -822,7 +829,10 @@ public class QueryAnalyzer {
                 }
                 rows.add(row);
             }
-            return new ValuesRelation(rows, columnNames, outputColumnTypes);
+            ValuesRelation relation = new ValuesRelation(rows, columnNames, outputColumnTypes);
+            // The listing replaces FILES(), so it keeps the alias that the query refers to.
+            relation.setAlias(alias);
+            return relation;
         }
 
         @Override

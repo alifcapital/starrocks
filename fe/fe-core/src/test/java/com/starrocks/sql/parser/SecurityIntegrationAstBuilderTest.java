@@ -415,15 +415,9 @@ public class SecurityIntegrationAstBuilderTest {
                 "\"jwks_url\" = \"jwks.json\", " +
                 "\"type\" = \"authentication_jwt\")";
 
-        CreateSecurityIntegrationStatement stmt =
-                (CreateSecurityIntegrationStatement) SqlParser.parseSingleStatement(sql, ctx.getSessionVariable().getSqlMode());
-
-        Assertions.assertNotNull(stmt, "Statement should parse successfully");
-        Assertions.assertEquals("oidc", stmt.getName(), "Integration name should match");
-
-        // Duplicate properties should be handled (last one wins or validation error)
-        Assertions.assertEquals("authentication_jwt", stmt.getPropertyMap().get("type"),
-                "Duplicate type property should be handled");
+        ParsingException error = Assertions.assertThrows(ParsingException.class,
+                () -> SqlParser.parseSingleStatement(sql, ctx.getSessionVariable().getSqlMode()));
+        Assertions.assertTrue(error.getMessage().contains("Duplicate property key: type"), error.getMessage());
     }
 
     /**

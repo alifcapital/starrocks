@@ -269,6 +269,13 @@ public class CreateSyncMaterializedViewTest {
             Assertions.assertTrue(e.getMessage().contains("Materialized view[sync_mv1] already exists in " +
                     "the table tbl1"));
         }
+
+        // with IF NOT EXISTS the existing sync_mv1 is not an error
+        sql = "create materialized view if not exists sync_mv1 as select k1, sum(v1) from tbl1 group by k1;";
+        createTableStmt = (CreateMaterializedViewStmt) UtFrameUtils.parseStmtWithNewParser(sql, connectContext);
+        Assertions.assertTrue(createTableStmt.isIfNotExists());
+        GlobalStateMgr.getCurrentState().getLocalMetastore().createMaterializedView(createTableStmt);
+        Assertions.assertTrue(tbl1.hasMaterializedIndex("sync_mv1"));
         starRocksAssert.dropMaterializedView("sync_mv1");
     }
 

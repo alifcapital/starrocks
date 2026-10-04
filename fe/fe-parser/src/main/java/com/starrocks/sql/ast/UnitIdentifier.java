@@ -17,6 +17,8 @@ package com.starrocks.sql.ast;
 
 import com.starrocks.sql.parser.NodePosition;
 
+import java.util.Locale;
+
 public class UnitIdentifier implements ParseNode {
     private final String description;
 
@@ -28,7 +30,7 @@ public class UnitIdentifier implements ParseNode {
 
     public UnitIdentifier(String description, NodePosition pos) {
         this.pos = pos;
-        this.description = description.toUpperCase();
+        this.description = description.toUpperCase(Locale.ROOT);
     }
 
     public String getDescription() {
