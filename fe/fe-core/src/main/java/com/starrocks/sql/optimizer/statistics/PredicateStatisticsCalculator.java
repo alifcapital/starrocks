@@ -257,6 +257,7 @@ public class PredicateStatisticsCalculator {
                         ColumnStatistic.builder()
                                 .setDistinctValuesCount(Math.min(inColumnStatistic.getDistinctValuesCount(),
                                         otherChildrenList.size()))
+                                .setSourceDistinctValuesCount(inColumnStatistic.getSourceDistinctValuesCount())
                                 .setAverageRowSize(inColumnStatistic.getAverageRowSize())
                                 .setNullsFraction(0)
                                 .build();

@@ -77,7 +77,24 @@ public class ExpressionStatisticCalculator {
             LOG.debug("found a NaN row count when calculating column statistic for expr: {}", operator);
             return ColumnStatistic.unknown();
         }
-        return operator.accept(new ExpressionStatisticVisitor(input, rowCount), null);
+        ColumnStatistic statistic = operator.accept(new ExpressionStatisticVisitor(input, rowCount), null);
+        return keepsSourceDomain(operator) ? statistic : statistic.withoutSource();
+    }
+
+    // Statistics derived from a column keep the NDV of that column before filters, which a runtime filter reads
+    // as the domain of its keys. Most expressions map the column to other values, for example year(date), so only
+    // the column itself and a widening cast between integers or from a string to VARCHAR keep that domain.
+    private static boolean keepsSourceDomain(ScalarOperator operator) {
+        if (operator instanceof ColumnRefOperator) {
+            return true;
+        }
+        if (!(operator instanceof CastOperator) || !(operator.getChild(0) instanceof ColumnRefOperator)) {
+            return false;
+        }
+        Type from = operator.getChild(0).getType();
+        Type to = operator.getType();
+        return (from.isFixedPointType() && to.isFixedPointType() && to.getTypeSize() >= from.getTypeSize())
+                || (from.isStringType() && to.isVarchar());
     }
 
     private record NullableBooleanProbabilities(double pTrue, double pFalse, double pNull) {

@@ -229,6 +229,20 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
     }
 
     @Test
+    public void testTPCDS22RuntimeFilterFollowsNdvEstimate() throws Exception {
+        // date_dim filtered by month keeps 335 of its 72542 dates. CORRELATED assumes the 260 dates of inventory
+        // are among them and drops the filter, INDEPENDENT expects 335 / 72542 of the probe rows to pass.
+        String dump = getDumpInfoFromFile("query_dump/tpcds22");
+        SessionVariable session = getDumpInfoFromJson(dump).getSessionVariable();
+        session.setRfNdvEstimate("correlated");
+        String plan = getCostPlanFragment(dump, session).second;
+        Assertions.assertFalse(plan.contains("build_expr = (5: d_date_sk)"), plan);
+        session.setRfNdvEstimate("independent");
+        plan = getCostPlanFragment(dump, session).second;
+        Assertions.assertTrue(plan.contains("build_expr = (5: d_date_sk)"), plan);
+    }
+
+    @Test
     public void testTPCDS64() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/tpcds64"), null, TExplainLevel.NORMAL);
@@ -556,13 +570,14 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
     public void testHiveTPCH05UsingResource() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/hive_tpch05_resource"), null, TExplainLevel.COSTS);
+        // The build side is the whole customer table, so every order has its customer and a filter on c_custkey
+        // would pass every probe row. The planner does not build it.
         Assertions.assertTrue(replayPair.second.contains("  20:HASH JOIN\n" +
                 "  |  join op: INNER JOIN (PARTITIONED)\n" +
                 "  |  equal join conjunct: [10: o_custkey, INT, true] = [1: c_custkey, INT, true]\n" +
-                "  |  build runtime filters:\n" +
-                "  |  - filter_id = 3, build_expr = (1: c_custkey), remote = false\n" +
                 "  |  output columns: 4, 9\n" +
                 "  |  cardinality: 22765073"), replayPair.second);
+        Assertions.assertFalse(replayPair.second.contains("build_expr = (1: c_custkey)"), replayPair.second);
     }
 
     @Test

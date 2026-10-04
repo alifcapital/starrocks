@@ -589,6 +589,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String GLOBAL_RUNTIME_FILTER_PROBE_MIN_SIZE = "global_runtime_filter_probe_min_size";
     public static final String GLOBAL_RUNTIME_FILTER_PROBE_MIN_SELECTIVITY =
             "global_runtime_filter_probe_min_selectivity";
+    public static final String RF_NDV_ESTIMATE = "rf_ndv_estimate";
     public static final String GLOBAL_RUNTIME_FILTER_WAIT_TIMEOUT = "global_runtime_filter_wait_timeout";
     public static final String GLOBAL_RUNTIME_FILTER_RPC_TIMEOUT = "global_runtime_filter_rpc_timeout";
     public static final String RUNTIME_FILTER_EARLY_RETURN_SELECTIVITY = "runtime_filter_early_return_selectivity";
@@ -2050,6 +2051,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     private long globalRuntimeFilterProbeMinSize = 100L * 1024L;
     @VariableMgr.VarAttr(name = GLOBAL_RUNTIME_FILTER_PROBE_MIN_SELECTIVITY, flag = VariableMgr.INVISIBLE)
     private float globalRuntimeFilterProbeMinSelectivity = 0.5f;
+    // How NDV and MCV statistics estimate the probe rows that a runtime filter passes when JOIN statistics cannot:
+    // correlated, independent or off. See RuntimeFilterStatistics.NdvEstimate.
+    @VariableMgr.VarAttr(name = RF_NDV_ESTIMATE)
+    private String rfNdvEstimate = "independent";
     @VariableMgr.VarAttr(name = GLOBAL_RUNTIME_FILTER_WAIT_TIMEOUT, flag = VariableMgr.INVISIBLE)
     private int globalRuntimeFilterWaitTimeout = 20;
     @VariableMgr.VarAttr(name = GLOBAL_RUNTIME_FILTER_RPC_TIMEOUT, flag = VariableMgr.INVISIBLE)
@@ -4752,6 +4757,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public float getGlobalRuntimeFilterProbeMinSelectivity() {
         return globalRuntimeFilterProbeMinSelectivity;
+    }
+
+    public String getRfNdvEstimate() {
+        return rfNdvEstimate;
+    }
+
+    public void setRfNdvEstimate(String rfNdvEstimate) {
+        this.rfNdvEstimate = rfNdvEstimate;
     }
 
     public void setEnablePipelineLevelMultiPartitionedRf(boolean on) {

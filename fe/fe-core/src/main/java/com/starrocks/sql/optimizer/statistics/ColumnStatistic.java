@@ -52,6 +52,11 @@ public class ColumnStatistic {
     private final String maxString;
     private final double collectionSize;
 
+    // A runtime filter needs the domain of its keys: we expect a dimension filtered to a few of its keys to pass
+    // few probe rows, even when the probe side has fewer distinct keys than the build side. So we keep the NDV of
+    // the column before filters, joins and aggregations reduced it. NaN means this statistic is the original one.
+    private double sourceDistinctValuesCount = NaN;
+
     public ColumnStatistic(
             double minValue,
             double maxValue,
@@ -126,6 +131,15 @@ public class ColumnStatistic {
         return collectionSize;
     }
 
+    /**
+     * The NDV of the column before operators reduced it. It is never below the current NDV, and equals it when
+     * nothing is known about the original column.
+     */
+    public double getSourceDistinctValuesCount() {
+        return Double.isNaN(sourceDistinctValuesCount) ? distinctValuesCount
+                : Math.max(sourceDistinctValuesCount, distinctValuesCount);
+    }
+
     public Histogram getHistogram() {
         return histogram;
     }
@@ -190,7 +204,16 @@ public class ColumnStatistic {
     public static Builder buildFrom(ColumnStatistic other) {
         return new Builder(other.minString, other.maxString, other.minValue, other.maxValue,
                 other.nullsFraction, other.averageRowSize, other.distinctValuesCount, other.histogram,
-                other.collectionSize, other.type);
+                other.collectionSize, other.type)
+                .setSourceDistinctValuesCount(other.getSourceDistinctValuesCount());
+    }
+
+    /** The same statistic for a value whose domain is not the domain of the column it was derived from. */
+    public ColumnStatistic withoutSource() {
+        if (Double.isNaN(sourceDistinctValuesCount)) {
+            return this;
+        }
+        return buildFrom(this).setSourceDistinctValuesCount(NaN).build();
     }
 
     public static Builder buildFrom(String columnStatistic) {
@@ -290,6 +313,7 @@ public class ColumnStatistic {
         private String minString = null;
         private String maxString = null;
         private double collectionSize = DEFAULT_COLLECTION_SIZE;
+        private double sourceDistinctValuesCount = NaN;
 
         private Builder() {
         }
@@ -372,9 +396,16 @@ public class ColumnStatistic {
             return this;
         }
 
+        public Builder setSourceDistinctValuesCount(double sourceDistinctValuesCount) {
+            this.sourceDistinctValuesCount = sourceDistinctValuesCount;
+            return this;
+        }
+
         public ColumnStatistic build() {
-            return new ColumnStatistic(minValue, maxValue, nullsFraction, averageRowSize,
+            ColumnStatistic columnStatistic = new ColumnStatistic(minValue, maxValue, nullsFraction, averageRowSize,
                     distinctValuesCount, collectionSize, histogram, type, minString, maxString);
+            columnStatistic.sourceDistinctValuesCount = sourceDistinctValuesCount;
+            return columnStatistic;
         }
     }
 }
