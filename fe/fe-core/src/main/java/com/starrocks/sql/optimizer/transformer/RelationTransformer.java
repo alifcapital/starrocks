@@ -159,7 +159,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.isResourceMappingCatalog;
@@ -788,8 +787,7 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
             scanBuilder = scanBuilder.withNewRoot(filterOperator);
         }
         LogicalProjectOperator projectOperator =
-                new LogicalProjectOperator(outputVariables.stream().distinct()
-                        .collect(Collectors.toMap(Function.identity(), Function.identity())));
+                new LogicalProjectOperator(identityProjection(outputVariables));
 
         return new LogicalPlan(scanBuilder.withNewRoot(projectOperator), outputVariables, List.of());
     }
@@ -1069,8 +1067,7 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
                     expressionMapping);
 
             LogicalProjectOperator projectOperator =
-                    new LogicalProjectOperator(expressionMapping.getFieldMappings().stream().distinct()
-                            .collect(Collectors.toMap(Function.identity(), Function.identity())));
+                    new LogicalProjectOperator(identityProjection(expressionMapping.getFieldMappings()));
             return new LogicalPlan(joinOptExprBuilder.withNewRoot(projectOperator),
                     expressionMapping.getFieldMappings(), List.of());
         }
@@ -1130,8 +1127,7 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
         }
 
         LogicalProjectOperator projectOperator =
-                new LogicalProjectOperator(outputExpressionMapping.getFieldMappings().stream().distinct()
-                        .collect(Collectors.toMap(Function.identity(), Function.identity())));
+                new LogicalProjectOperator(identityProjection(outputExpressionMapping.getFieldMappings()));
         return new LogicalPlan(joinOptExprBuilder.withNewRoot(projectOperator),
                 outputExpressionMapping.getFieldMappings(), List.of());
     }
@@ -1620,5 +1616,15 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
                         Map.Entry::getKey,
                         Map.Entry::getValue,
                         (existing, replacement) -> existing));
+    }
+
+    // The same map as collecting the distinct columns with Collectors.toMap: a HashMap of the default capacity filled
+    // in the order of the columns, so it iterates in the same order, without a stream per scan and join.
+    private static Map<ColumnRefOperator, ScalarOperator> identityProjection(List<ColumnRefOperator> columns) {
+        Map<ColumnRefOperator, ScalarOperator> projection = new HashMap<>();
+        for (ColumnRefOperator column : columns) {
+            projection.putIfAbsent(column, column);
+        }
+        return projection;
     }
 }
