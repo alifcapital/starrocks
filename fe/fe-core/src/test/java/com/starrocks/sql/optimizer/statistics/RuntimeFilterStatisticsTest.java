@@ -212,6 +212,28 @@ public class RuntimeFilterStatisticsTest {
     }
 
     @Test
+    public void testHeadOfAFilteredBuildKeepsOnlyValuesThatSurvive() {
+        // The MCV group was collected on 1M rows. A filter on another column left 1000 rows and kept the group.
+        // Value 1 expects 900 of its rows to remain, value 2 expects 0.01.
+        MultiColumnCombinedStats group = new MultiColumnCombinedStats(100, 1_000_000, List.of(KEY), List.of(
+                new MultiColumnCombinedStats.McvEntry(List.of("1"), 900_000),
+                new MultiColumnCombinedStats.McvEntry(List.of("2"), 10)), List.of(0L));
+        ColumnStatistic basic = ColumnStatistic.builder().setDistinctValuesCount(100).setNullsFraction(0).build();
+        RuntimeFilterStatistics filtered = RuntimeFilterStatistics.from(KEY, basic, List.of(group), 1000);
+        Assertions.assertEquals(1, filtered.knownMembership(IntegerType.BIGINT, "1", false).orElseThrow());
+        Assertions.assertTrue(filtered.knownMembership(IntegerType.BIGINT, "2", false).isEmpty());
+        Assertions.assertEquals(100, filtered.getNdv());
+        // Half of the probe rows have value 2. The filter is not sure to pass them, so it is not certain to pass
+        // more than the rows of value 1 that the probe does not have.
+        RuntimeFilterStatistics probe = stats(1000, 0, Map.of("2", 5000L), 10000);
+        Assertions.assertTrue(filtered.probePassFraction(probe, false).orElseThrow() < 0.5);
+        // Without the filter, the operator has all rows of the group and the whole head.
+        RuntimeFilterStatistics unfiltered = RuntimeFilterStatistics.from(KEY, basic, List.of(group), 1_000_000);
+        Assertions.assertEquals(1, unfiltered.knownMembership(IntegerType.BIGINT, "2", false).orElseThrow());
+        Assertions.assertTrue(unfiltered.probePassFraction(probe, false).orElseThrow() >= 0.5);
+    }
+
+    @Test
     public void testParseNdvEstimate() {
         Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.CORRELATED,
                 RuntimeFilterStatistics.NdvEstimate.parse("Correlated"));

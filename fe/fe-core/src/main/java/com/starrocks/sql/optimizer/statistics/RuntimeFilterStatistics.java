@@ -27,6 +27,10 @@ import java.util.OptionalDouble;
 
 /** The NDV and MCV distribution of one runtime filter key at its build or probe operator. */
 public final class RuntimeFilterStatistics {
+    // A value with an expected count of 3 rows after a filter keeps at least one row with a probability of
+    // 1 - e^-3, about 95%, if the filter is independent of the value.
+    private static final double SURVIVING_ROWS = 3;
+
     /**
      * How the NDV and MCV statistics of the keys estimate the probe rows that pass a filter, when the JOIN
      * statistics cannot answer. CORRELATED assumes that the keys of the smaller side are among the keys of the
@@ -128,6 +132,7 @@ public final class RuntimeFilterStatistics {
         double nulls = basic.isUnknown() || !Double.isFinite(basic.getNullsFraction()) ? 0 : basic.getNullsFraction();
         Map<String, Double> head = Map.of();
         double headMass = 0;
+        double headRows = 0;
         if (MultiColumnMcvEstimator.isEnabled()) {
             for (MultiColumnCombinedStats group : groups) {
                 int position = group.getColumns().indexOf(column);
@@ -148,6 +153,7 @@ public final class RuntimeFilterStatistics {
                 if (prepared.mass > headMass || (head.isEmpty() && (single || completeHead))) {
                     head = candidate;
                     headMass = prepared.mass;
+                    headRows = group.getRowCount();
                     nulls = groupNulls;
                     if (single) {
                         ndv = Math.max(0, group.getNdv() - (groupNulls > 0 ? 1 : 0));
@@ -161,6 +167,22 @@ public final class RuntimeFilterStatistics {
             ndv = -1;
         } else {
             ndv = Math.max(head.size(), ndv);
+        }
+        if (rows >= 0 && headRows > rows && !head.isEmpty()) {
+            // A predicate on other columns keeps the head of this group, but it may remove every row of a value.
+            // The runtime filter estimate reads the head as the values that the operator has, so we keep only the
+            // values that we expect to keep at least SURVIVING_ROWS rows, which they do with a probability of 95%
+            // or more. The other values may or may not remain, and they count as keys outside the head.
+            Map<String, Double> surviving = new HashMap<>();
+            head.forEach((key, share) -> {
+                if (share * rows >= SURVIVING_ROWS) {
+                    surviving.put(key, share);
+                }
+            });
+            if (surviving.size() < head.size()) {
+                head = surviving;
+                headMass = mass(surviving);
+            }
         }
         double mass = headMass;
         if (mass > 1 - nulls && mass > 0) {
