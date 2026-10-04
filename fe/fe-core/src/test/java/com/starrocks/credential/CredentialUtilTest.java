@@ -136,6 +136,11 @@ public class CredentialUtilTest {
         path = CredentialUtil.parseAzureStoragePath(uri);
         Assertions.assertEquals("", path.getContainer());
         Assertions.assertEquals("", path.getStorageAccount());
+
+        uri = "s3://bottle@smith/warehouse/db/table";
+        path = CredentialUtil.parseAzureStoragePath(uri);
+        Assertions.assertEquals("", path.getContainer());
+        Assertions.assertEquals("", path.getStorageAccount());
     }
 
     @Test

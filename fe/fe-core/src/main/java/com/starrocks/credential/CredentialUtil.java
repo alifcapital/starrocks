@@ -107,6 +107,11 @@ public class CredentialUtil {
      *      wasb[s]://<container>@<storage_account>.blob.core.windows.net/<path>/<path>/<file_name>
      */
     public static AzureStoragePath parseAzureStoragePath(String path) {
+        // The planner asks for every scan, and most paths are not Azure paths: S3 paths, or the empty path of a
+        // catalog that sets none. We check the Azure host first, so that such a path does not build an exception.
+        if (!path.contains(".blob.core.windows.net") && !path.contains(".dfs.core.windows.net")) {
+            return new AzureStoragePath("", "");
+        }
         try {
             URI uri = new URI(path);
             String rawAuthority = uri.getRawAuthority();
