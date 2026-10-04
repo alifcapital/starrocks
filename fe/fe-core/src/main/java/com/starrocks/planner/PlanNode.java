@@ -942,7 +942,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             }
             return false;
         } else {
-            return getSlotIds(descTbl).contains(ExprUtils.getUsedSlotIds(probeExpr));
+            return ExprUtils.containsUsedSlotIds(getSlotIds(descTbl), probeExpr);
         }
     }
 
@@ -1005,8 +1005,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         boolean accept = tryPushdownRuntimeFilterToChild(context, optProbeExprCandidates,
                 optPartitionByExprsCandidates, childIdx);
         RoaringBitmap slotIds = getSlotIds(descTbl);
-        boolean isBound = slotIds.contains(ExprUtils.getUsedSlotIds(probeExpr)) &&
-                partitionByExprs.stream().allMatch(expr -> slotIds.contains(ExprUtils.getUsedSlotIds(expr)));
+        boolean isBound = ExprUtils.containsUsedSlotIds(slotIds, probeExpr) &&
+                partitionByExprs.stream().allMatch(expr -> ExprUtils.containsUsedSlotIds(slotIds, expr));
         if (isBound) {
             checkRuntimeFilterOnNullValue(description, probeExpr);
         }
