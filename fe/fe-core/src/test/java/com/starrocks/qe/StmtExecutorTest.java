@@ -34,7 +34,6 @@ import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.metric.WarehouseMetricMgr;
-import com.starrocks.mysql.MysqlSerializer;
 import com.starrocks.planner.DataPartition;
 import com.starrocks.planner.DescriptorTable;
 import com.starrocks.planner.PlanFragment;
@@ -64,7 +63,6 @@ import com.starrocks.sql.ast.txn.RollbackStmt;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.LargeInPredicateException;
 import com.starrocks.sql.common.StarRocksPlannerException;
-import com.starrocks.sql.parser.AstBuilder;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.thrift.TDescriptorTable;
@@ -120,8 +118,10 @@ public class StmtExecutorTest {
     private static final List<ExecPlan> PROFILED_PLANS = Lists.newArrayList();
 
     @Test
-    public void testIsForwardToLeader(@Mocked ConnectContext ctx) {
-        MysqlSerializer serializer = MysqlSerializer.newInstance();
+    public void testIsForwardToLeader() {
+        // A real context, created before GlobalStateMgr is faked. Expectations on a mocked context would also
+        // record calls from daemon threads.
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
         GlobalStateMgr state = Deencapsulation.newInstance(GlobalStateMgr.class);
         Thread testThread = Thread.currentThread();
         AtomicInteger leaderCallCount = new AtomicInteger(0);
@@ -151,59 +151,41 @@ public class StmtExecutorTest {
             }
         };
 
-        new Expectations(ctx) {
-            {
-                ctx.getSerializer();
-                minTimes = 0;
-                result = serializer;
-            }
-        };
-
         Assertions.assertFalse(new StmtExecutor(ctx, new ShowFrontendsStmt()).isForwardToLeader());
     }
 
     @Test
-    public void testForwardExplicitTxnSelectOnFollower(@Mocked GlobalStateMgr state,
-                                                       @Mocked ConnectContext ctx) {
-        StatementBase stmt;
-        MysqlSerializer serializer = MysqlSerializer.newInstance();
+    public void testForwardExplicitTxnSelectOnFollower() {
+        // Daemon threads that earlier tests started keep calling GlobalStateMgr while this test runs. Expectations
+        // record such a call as an expected invocation of this test, so we fake the follower with a MockUp, which
+        // records nothing, and use a real connection context.
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            public boolean isLeader() {
+                return false;
+            }
 
-        new Expectations() {
-            {
-                GlobalStateMgr.getCurrentState();
-                minTimes = 0;
-                result = state;
+            @Mock
+            public boolean isInTransferringToLeader() {
+                return false;
+            }
 
-                state.getSqlParser();
-                minTimes = 0;
-                result = new SqlParser(AstBuilder.getInstance());
-
-                state.isLeader();
-                minTimes = 0;
-                result = false;
-
-                state.isInTransferringToLeader();
-                minTimes = 0;
-                result = false;
-
-                ctx.getSerializer();
-                minTimes = 0;
-                result = serializer;
-
-                ctx.getTxnId();
-                minTimes = 0;
-                result = 1L;
-
-                ctx.isQueryStmt((StatementBase) any);
-                minTimes = 0;
-                result = true;
+            @Mock
+            public boolean canRead() {
+                return true;
             }
         };
-
-        // Parse after expectations to ensure GlobalStateMgr.getSqlParser() is properly mocked
-        stmt = SqlParser.parseSingleStatement("select 1", SqlModeHelper.MODE_DEFAULT);
-        StmtExecutor executor = new StmtExecutor(ctx, stmt);
-        Assertions.assertTrue(executor.isForwardToLeader());
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        ConnectContext.threadLocalInfo.set(ctx);
+        try {
+            StatementBase stmt = SqlParser.parseSingleStatement("select 1", SqlModeHelper.MODE_DEFAULT);
+            // A follower that can read runs the query itself, unless the query is in an explicit transaction.
+            Assertions.assertFalse(new StmtExecutor(ctx, stmt).isForwardToLeader());
+            ctx.setTxnId(1L);
+            Assertions.assertTrue(new StmtExecutor(ctx, stmt).isForwardToLeader());
+        } finally {
+            ConnectContext.remove();
+        }
     }
 
     @Test
