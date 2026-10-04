@@ -35,11 +35,14 @@ public class TaskScheduler {
     }
 
     public void executeTasks(TaskContext context) {
+        // A query runs thousands of tasks on this thread, so we read the thread-local tracers once.
+        Tracers tracers = Tracers.get();
         while (!tasks.empty()) {
             context.getOptimizerContext().checkTimeout();
             OptimizerTask task = tasks.pop();
             context.getOptimizerContext().setTaskContext(context);
-            try (Timer ignore = Tracers.watchScope(Tracers.Module.OPTIMIZER, task.getClass().getSimpleName())) {
+            try (Timer ignore = Tracers.watchScope(tracers, Tracers.Module.OPTIMIZER,
+                    task.getClass().getSimpleName())) {
                 task.execute();
             }
         }
