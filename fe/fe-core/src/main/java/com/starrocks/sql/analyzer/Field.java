@@ -24,6 +24,7 @@ import com.starrocks.type.StructField;
 import com.starrocks.type.StructType;
 import com.starrocks.type.Type;
 
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -44,8 +45,8 @@ public class Field {
     private final Expr originExpression;
     private boolean isNullable;
 
-    // Record tmp match record.
-    private final List<Integer> tmpUsedStructFieldPos = new LinkedList<>();
+    // Record tmp match record. We expect most fields to never match into a struct, so the list is made on demand.
+    private List<Integer> tmpUsedStructFieldPos;
 
     public Field(String name, Type type, TableName relationAlias, Expr originExpression) {
         this(name, type, relationAlias, originExpression, true);
@@ -111,6 +112,11 @@ public class Field {
     }
 
     public boolean canResolve(SlotRef expr) {
+        return canResolve(expr, isRelationAliasCaseInsensitive());
+    }
+
+    /** As canResolve(expr), with the session flag for the case of relation aliases read once by the caller. */
+    public boolean canResolve(SlotRef expr, boolean aliasCaseInsensitive) {
         if (type.isStructType()) {
             return tryToParseAsStructType(expr);
         }
@@ -120,7 +126,8 @@ public class Field {
             if (relationAlias == null) {
                 return false;
             }
-            return matchesPrefix(expr.getTblNameWithoutAnalyzed()) && expr.getColumnName().equalsIgnoreCase(this.name);
+            // Most fields fail on the name, which is cheaper to compare than the qualifier.
+            return expr.getColumnName().equalsIgnoreCase(this.name) && matchesPrefix(tableName, aliasCaseInsensitive);
         } else {
             return expr.getColumnName().equalsIgnoreCase(this.name);
         }
@@ -128,7 +135,9 @@ public class Field {
 
     private boolean tryToParseAsStructType(SlotRef slotRef) {
         QualifiedName qualifiedName = slotRef.getQualifiedName();
-        tmpUsedStructFieldPos.clear();
+        if (tmpUsedStructFieldPos != null) {
+            tmpUsedStructFieldPos.clear();
+        }
 
         if (qualifiedName == null) {
             return slotRef.getColumnName().equalsIgnoreCase(this.name);
@@ -146,35 +155,51 @@ public class Field {
                 relationAlias.getTbl(),
                 name
         };
+        // The matches from each start compare the same parts, so each part is turned to lower case once.
+        List<String> slotRefParts = qualifiedName.getParts();
+        String[] lowerSlotRefParts = new String[slotRefParts.size()];
+        String[] lowerFieldParts = new String[fieldFullQualifiedName.length];
 
         // First start matching from CatalogName, if it fails, then start matching from DatabaseName, and so on.
         for (int i = 0; i < 4; i++) {
-            if (tryToMatch(fieldFullQualifiedName, i, qualifiedName)) {
+            if (tryToMatch(fieldFullQualifiedName, lowerFieldParts, i, slotRefParts, lowerSlotRefParts)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean tryToMatch(String[] fieldFullQualifiedName, int index, QualifiedName qualifiedName) {
-        String[] slotRefPartsArray = qualifiedName.getParts().toArray(new String[0]);
+    private boolean tryToMatch(String[] fieldFullQualifiedName, String[] lowerFieldParts, int index,
+                               List<String> slotRefParts, String[] lowerSlotRefParts) {
         int matchIndex = 0;
         // i = 0 means match from catalog name,
         // i = 1, match from database name,
         // i = 2, match from table name, only table name is case-sensitive,
         // i = 3, match from column name.
-        for (; index < 4 && matchIndex < slotRefPartsArray.length; index++) {
+        for (; index < 4 && matchIndex < slotRefParts.size(); index++) {
             if (fieldFullQualifiedName[index] == null) {
                 return false;
             }
 
-            String part = slotRefPartsArray[matchIndex++];
-            String comparedPart = fieldFullQualifiedName[index];
+            String part;
+            String comparedPart;
             // Only table name is case-sensitive, we will convert other parts to lower case.
             if (index != 2) {
-                part = part.toLowerCase();
-                comparedPart = comparedPart.toLowerCase();
+                part = lowerSlotRefParts[matchIndex];
+                if (part == null) {
+                    part = slotRefParts.get(matchIndex).toLowerCase();
+                    lowerSlotRefParts[matchIndex] = part;
+                }
+                comparedPart = lowerFieldParts[index];
+                if (comparedPart == null) {
+                    comparedPart = fieldFullQualifiedName[index].toLowerCase();
+                    lowerFieldParts[index] = comparedPart;
+                }
+            } else {
+                part = slotRefParts.get(matchIndex);
+                comparedPart = fieldFullQualifiedName[index];
             }
+            matchIndex++;
             boolean matches = !GlobalVariable.enableTableNameCaseInsensitive
                     ? part.equals(comparedPart)
                     : part.equalsIgnoreCase(comparedPart);
@@ -189,22 +214,25 @@ public class Field {
             return false;
         }
 
-        // matchIndex reach the end of slotRefPartsArray, means this SlotRef matched all.
-        if (matchIndex == slotRefPartsArray.length) {
+        // matchIndex reach the end of the slot ref parts, means this SlotRef matched all.
+        if (matchIndex == slotRefParts.size()) {
             return true;
         }
 
-        // matchIndex not reach end of slotRefPartsArray, it must be StructType.
+        // matchIndex not reach end of the slot ref parts, it must be StructType.
         Type tmpType = type;
-        for (; matchIndex < slotRefPartsArray.length; matchIndex++) {
+        for (; matchIndex < slotRefParts.size(); matchIndex++) {
             if (!tmpType.isStructType()) {
                 return false;
             }
-            StructField structField = ((StructType) tmpType).getField(slotRefPartsArray[matchIndex]);
+            StructField structField = ((StructType) tmpType).getField(slotRefParts.get(matchIndex));
             if (structField == null) {
                 return false;
             }
             // Record the struct field position that matches successfully.
+            if (tmpUsedStructFieldPos == null) {
+                tmpUsedStructFieldPos = new LinkedList<>();
+            }
             tmpUsedStructFieldPos.add(structField.getPosition());
             tmpType = structField.getType();
         }
@@ -212,10 +240,14 @@ public class Field {
     }
 
     public List<Integer> getTmpUsedStructFieldPos() {
-        return tmpUsedStructFieldPos;
+        return tmpUsedStructFieldPos == null ? Collections.emptyList() : tmpUsedStructFieldPos;
     }
 
     public boolean matchesPrefix(TableName tableName) {
+        return matchesPrefix(tableName, isRelationAliasCaseInsensitive());
+    }
+
+    private boolean matchesPrefix(TableName tableName, boolean aliasCaseInsensitive) {
         if (tableName.getCatalog() != null && relationAlias.getCatalog() != null &&
                 !tableName.getCatalog().equals(relationAlias.getCatalog())) {
             return false;
@@ -225,11 +257,16 @@ public class Field {
             return false;
         }
 
-        if (ConnectContext.get() != null && ConnectContext.get().isRelationAliasCaseInsensitive()) {
+        if (aliasCaseInsensitive) {
             return tableName.getTbl().equalsIgnoreCase(relationAlias.getTbl());
         } else {
             return tableName.getTbl().equals(relationAlias.getTbl());
         }
+    }
+
+    private static boolean isRelationAliasCaseInsensitive() {
+        ConnectContext context = ConnectContext.get();
+        return context != null && context.isRelationAliasCaseInsensitive();
     }
 
     @Override
