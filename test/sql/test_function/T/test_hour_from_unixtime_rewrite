@@ -1,0 +1,9 @@
+-- name: test_hour_from_unixtime_rewrite
+create table t_hour (id int, ts bigint) duplicate key(id) distributed by hash(id) buckets 3 properties("replication_num" = "1");
+insert into t_hour values (1, 18000);
+set time_zone = 'UTC';
+select hour(from_unixtime(ts)) from t_hour;
+select hour(hours_add(from_unixtime(ts), 3)) from t_hour;
+select hour(hours_add(to_datetime(ts), 3)) from t_hour;
+select hour(convert_tz(from_unixtime(ts), 'UTC', 'Asia/Shanghai')) from t_hour;
+select hour(cast(from_unixtime(ts) as date)) from t_hour;

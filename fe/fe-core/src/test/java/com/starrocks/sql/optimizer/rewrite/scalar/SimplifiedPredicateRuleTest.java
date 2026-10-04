@@ -303,4 +303,21 @@ public class SimplifiedPredicateRuleTest extends PlanTestBase {
             assertSame(date, rule.apply(cancelled, null));
         }
     }
+
+    @Test
+    public void hourOverAnotherExpressionIsNotRewritten() throws Exception {
+        // hour_from_unixtime(ts) is the hour of from_unixtime(ts) itself. An expression between hour() and the
+        // conversion changes the hour, so it must stay in the plan.
+        String[] sqls = {
+                "SELECT hour(hours_add(from_unixtime(ts), 3)) FROM test_timestamp",
+                "SELECT hour(hours_add(to_datetime(ts), 3)) FROM test_timestamp",
+                "SELECT hour(convert_tz(from_unixtime(ts), 'UTC', 'Asia/Shanghai')) FROM test_timestamp",
+                "SELECT hour(cast(from_unixtime(ts) as date)) FROM test_timestamp",
+                "SELECT hour(date(from_unixtime(ts))) FROM test_timestamp"};
+        for (String sql : sqls) {
+            starRocksAssert.query(sql).explainWithout("hour_from_unixtime");
+        }
+        starRocksAssert.query("SELECT hour(hours_add(from_unixtime(ts), 3)) FROM test_timestamp")
+                .explainContains("hour(hours_add(CAST(from_unixtime(2: ts) AS DATETIME), 3))");
+    }
 }
