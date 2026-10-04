@@ -43,6 +43,7 @@ import com.starrocks.thrift.TDescriptorTable;
 import com.starrocks.thrift.TExecBatchPlanFragmentsParams;
 import com.starrocks.thrift.TExecPlanFragmentParams;
 import com.starrocks.thrift.TNetworkAddress;
+import com.starrocks.thrift.TPlanFragment;
 import com.starrocks.thrift.TQueryOptions;
 import com.starrocks.thrift.TStatusCode;
 import org.apache.logging.log4j.LogManager;
@@ -270,6 +271,7 @@ public class Deployer {
         Preconditions.checkState(totalTableSinkDop >= 0,
                 "tableSinkTotalDop = %d should be >= 0", totalTableSinkDop);
 
+        TPlanFragment sharedPlanFragment = tFragmentInstanceFactory.createSharedPlanFragment(fragment);
         int accTabletSinkDop = 0;
         for (int stageIndex = 0; stageIndex < threeStageInstancesToDeploy.size(); stageIndex++) {
             List<FragmentInstance> stageInstances = threeStageInstancesToDeploy.get(stageIndex);
@@ -286,7 +288,8 @@ public class Deployer {
 
             for (FragmentInstance instance : stageInstances) {
                 TExecPlanFragmentParams request =
-                        tFragmentInstanceFactory.create(instance, curDescTable, accTabletSinkDop, totalTableSinkDop);
+                        tFragmentInstanceFactory.create(instance, curDescTable, accTabletSinkDop, totalTableSinkDop,
+                                sharedPlanFragment);
                 if (enablePipelineTableSinkDop) {
                     accTabletSinkDop += instance.getTableSinkDop();
                 }
