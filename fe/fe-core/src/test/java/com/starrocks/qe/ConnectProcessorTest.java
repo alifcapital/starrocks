@@ -76,6 +76,7 @@ import com.starrocks.warehouse.DefaultWarehouse;
 import com.starrocks.warehouse.cngroup.WarehouseComputeResourceProvider;
 import mockit.Mock;
 import mockit.MockUp;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -116,6 +117,12 @@ public class ConnectProcessorTest extends DDLTestBase {
     }
 
     private static PQueryStatistics statistics = new PQueryStatistics();
+
+    // Each test drives one command through ConnectProcessor.processOnce(). We expect it to reset the
+    // packet sequence id of the channel exactly once and to check the kill flag at most three times,
+    // so the mocks made by mockChannel() and initMockContext() are verified after every test.
+    private static final List<MysqlChannel> MOCKED_CHANNELS = new ArrayList<>();
+    private static final List<ConnectContext> MOCKED_CONTEXTS = new ArrayList<>();
 
     @BeforeAll
     public static void setUpClass() {
@@ -219,11 +226,27 @@ public class ConnectProcessorTest extends DDLTestBase {
         super.setUp();
     }
 
+    @AfterEach
+    public void verifyMockedChannelsAndContexts() {
+        try {
+            for (MysqlChannel channel : MOCKED_CHANNELS) {
+                Mockito.verify(channel, Mockito.times(1)).setSequenceId(0);
+            }
+            for (ConnectContext context : MOCKED_CONTEXTS) {
+                Mockito.verify(context, Mockito.atMost(3)).isKilled();
+            }
+        } finally {
+            MOCKED_CHANNELS.clear();
+            MOCKED_CONTEXTS.clear();
+        }
+    }
+
     private static MysqlChannel mockChannel(ByteBuffer packet) {
         try {
             MysqlChannel channel = Mockito.mock(MysqlChannel.class);
             Mockito.when(channel.fetchOnePacket()).thenReturn(packet);
             Mockito.when(channel.getRemoteHostPortString()).thenReturn("127.0.0.1:12345");
+            MOCKED_CHANNELS.add(channel);
             return channel;
         } catch (IOException e) {
             return null;
@@ -286,6 +309,7 @@ public class ConnectProcessorTest extends DDLTestBase {
         Mockito.doReturn(new PlainPasswordAuthenticationProvider(MysqlPassword.EMPTY_PASSWORD))
                 .when(context).getAuthenticationProvider();
 
+        MOCKED_CONTEXTS.add(context);
         return context;
     }
 

@@ -51,6 +51,7 @@ import com.starrocks.sql.analyzer.DDLTestBase;
 import com.starrocks.sql.ast.PrepareStmt;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.utframe.UtFrameUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,6 +61,8 @@ import org.mockito.Mockito;
 import org.xnio.StreamConnection;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doNothing;
@@ -89,6 +92,12 @@ public class ConnectProcessorExecuteTest extends DDLTestBase {
     }
 
     private static PQueryStatistics statistics = new PQueryStatistics();
+
+    // Each test drives one command through ConnectProcessor.processOnce(). We expect it to reset the
+    // packet sequence id of the channel exactly once and to check the kill flag at most three times,
+    // so the mocks made by mockChannel() and initMockContext() are verified after every test.
+    private static final List<MysqlChannel> MOCKED_CHANNELS = new ArrayList<>();
+    private static final List<ConnectContext> MOCKED_CONTEXTS = new ArrayList<>();
 
 
     @BeforeAll
@@ -193,11 +202,27 @@ public class ConnectProcessorExecuteTest extends DDLTestBase {
         super.setUp();
     }
 
+    @AfterEach
+    public void verifyMockedChannelsAndContexts() {
+        try {
+            for (MysqlChannel channel : MOCKED_CHANNELS) {
+                Mockito.verify(channel, Mockito.times(1)).setSequenceId(0);
+            }
+            for (ConnectContext context : MOCKED_CONTEXTS) {
+                Mockito.verify(context, Mockito.atMost(3)).isKilled();
+            }
+        } finally {
+            MOCKED_CHANNELS.clear();
+            MOCKED_CONTEXTS.clear();
+        }
+    }
+
     private static MysqlChannel mockChannel(ByteBuffer packet) {
         try {
             MysqlChannel channel = mock(MysqlChannel.class);
             when(channel.fetchOnePacket()).thenReturn(packet);
             when(channel.getRemoteHostPortString()).thenReturn("127.0.0.1:12345");
+            MOCKED_CHANNELS.add(channel);
             return channel;
         } catch (Exception e) {
             return null;
@@ -260,6 +285,7 @@ public class ConnectProcessorExecuteTest extends DDLTestBase {
         doReturn(new PlainPasswordAuthenticationProvider(MysqlPassword.EMPTY_PASSWORD))
                 .when(context).getAuthenticationProvider();
 
+        MOCKED_CONTEXTS.add(context);
         return context;
     }
 
