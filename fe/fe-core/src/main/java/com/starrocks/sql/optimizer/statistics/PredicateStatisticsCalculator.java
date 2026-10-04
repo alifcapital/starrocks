@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Sets;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
 import com.starrocks.sql.ast.expression.BinaryType;
@@ -36,10 +37,14 @@ import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
 import org.apache.commons.math3.util.Precision;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.statistics.HistogramStatisticsUtils.estimateInPredicateWithHistogram;
@@ -78,6 +83,35 @@ public class PredicateStatisticsCalculator {
             }
         }
         return McvStatisticsPropagation.filter(predicate, statistics, output);
+    }
+
+    static boolean allConstantOperators(List<ScalarOperator> operators, int from) {
+        for (int i = from; i < operators.size(); i++) {
+            if (!(operators.get(i) instanceof ConstantOperator)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The distinct values of operators[from..] after the mapping, in the order of their first occurrence. An IN list
+    // can hold thousands of literals and its statistics are derived many times per query, so we use a presized set
+    // and a plain loop instead of a stream.
+    static List<ScalarOperator> distinctFrom(List<ScalarOperator> operators, int from,
+                                             UnaryOperator<ScalarOperator> mapping) {
+        int count = operators.size() - from;
+        if (count <= 0) {
+            return List.of();
+        }
+        List<ScalarOperator> result = new ArrayList<>(count);
+        Set<ScalarOperator> seen = Sets.newHashSetWithExpectedSize(count);
+        for (int i = from; i < operators.size(); i++) {
+            ScalarOperator value = mapping.apply(operators.get(i));
+            if (seen.add(value)) {
+                result.add(value);
+            }
+        }
+        return Collections.unmodifiableList(result);
     }
 
     private static long countDisConsecutiveOr(ScalarOperator root, long count, boolean isConsecutive) {
@@ -219,16 +253,15 @@ public class PredicateStatisticsCalculator {
             // Unknown columns use fixed selectivity. With input NDV <= 1, the final NDV is
             // unchanged by duplicate non-null literals: min(input NDV, positive count) is
             // already saturated. Bounds are duplicate-insensitive, so avoid building a set.
+            List<ScalarOperator> children = predicate.getChildren();
             boolean skipLiteralDedup = inColumnStatistic.isUnknown()
                     && inColumnStatistic.getDistinctValuesCount() <= 1
                     && !Double.isNaN(statistics.getOutputRowCount())
-                    && predicate.getChildren().stream().skip(1).allMatch(op -> op instanceof ConstantOperator);
+                    && allConstantOperators(children, 1);
             List<ScalarOperator> otherChildrenList = skipLiteralDedup
-                    ? predicate.getChildren().subList(1, predicate.getChildren().size())
-                    : predicate.getChildren().stream().skip(1)
-                            .map(this::getChildForCastOperator).distinct().toList();
-            boolean allConstants = skipLiteralDedup
-                    || otherChildrenList.stream().allMatch(op -> op instanceof ConstantOperator);
+                    ? children.subList(1, children.size())
+                    : distinctFrom(children, 1, this::getChildForCastOperator);
+            boolean allConstants = skipLiteralDedup || allConstantOperators(otherChildrenList, 0);
 
             if (!predicate.isSubquery() && firstChild.isColumnRef() && !inColumnStatistic.isUnknown() &&
                     inColumnStatistic.getHistogram() != null && allConstants) {

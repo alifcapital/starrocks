@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
@@ -36,6 +37,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.function.UnaryOperator;
 
 public class InPredicateLiteralStatisticsTest {
     // IN and NOT IN over a list of literals read the literal bounds and NDV directly. We expect the same
@@ -126,5 +129,91 @@ public class InPredicateLiteralStatisticsTest {
                 }
             }
         }
+    }
+
+    @Test
+    public void distinctValuesKeepTheOrderOfTheFirstOccurrence() {
+        ColumnRefOperator a = new ColumnRefOperator(1, IntegerType.INT, "a", true);
+        ColumnRefOperator sameAsA = new ColumnRefOperator(1, IntegerType.INT, "a", false);
+        ColumnRefOperator b = new ColumnRefOperator(2, IntegerType.INT, "b", true);
+        List<ScalarOperator> items = List.of(a, ConstantOperator.createInt(3), ConstantOperator.createInt(1),
+                ConstantOperator.createInt(3), b, sameAsA, ConstantOperator.createNull(IntegerType.INT),
+                ConstantOperator.createNull(IntegerType.INT), ConstantOperator.createBigint(3),
+                ConstantOperator.createInt(1), new CastOperator(IntegerType.BIGINT, ConstantOperator.createInt(1)),
+                new CastOperator(IntegerType.BIGINT, ConstantOperator.createInt(1)), b);
+        UnaryOperator<ScalarOperator> identity = item -> item;
+        UnaryOperator<ScalarOperator> collapse = item -> item instanceof CastOperator ? a : item;
+        for (UnaryOperator<ScalarOperator> mapping : List.of(identity, collapse)) {
+            for (int from = 0; from <= items.size() + 1; from++) {
+                Assertions.assertEquals(items.stream().skip(from).map(mapping).distinct().toList(),
+                        PredicateStatisticsCalculator.distinctFrom(items, from, mapping), "from " + from);
+            }
+        }
+        Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> PredicateStatisticsCalculator.distinctFrom(items, 1, identity).add(a));
+        Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> PredicateStatisticsCalculator.distinctFrom(items, items.size(), identity).add(a));
+    }
+
+    @Test
+    public void distinctValuesOfLongListsMatchTheStream() {
+        Random random = new Random(7);
+        for (int size : new int[] {2, 17, 1000, 20000}) {
+            List<ScalarOperator> items = new ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                int value = random.nextInt(Math.max(1, size / 3));
+                items.add(i % 11 == 0 ? ConstantOperator.createNull(IntegerType.BIGINT)
+                        : i % 5 == 0 ? ConstantOperator.createInt(value) : ConstantOperator.createBigint(value));
+            }
+            UnaryOperator<ScalarOperator> identity = item -> item;
+            Assertions.assertEquals(items.stream().skip(1).distinct().toList(),
+                    PredicateStatisticsCalculator.distinctFrom(items, 1, identity));
+        }
+    }
+
+    @Test
+    public void allConstantOperatorsSkipsTheFirstOnesAndStopsAtAnyOther() {
+        ColumnRefOperator a = new ColumnRefOperator(1, IntegerType.INT, "a", true);
+        ConstantOperator one = ConstantOperator.createInt(1);
+        Assertions.assertTrue(PredicateStatisticsCalculator.allConstantOperators(List.of(), 0));
+        Assertions.assertTrue(PredicateStatisticsCalculator.allConstantOperators(List.of(a), 1));
+        Assertions.assertTrue(PredicateStatisticsCalculator.allConstantOperators(List.of(a, one, one), 1));
+        Assertions.assertFalse(PredicateStatisticsCalculator.allConstantOperators(List.of(a, one, a), 1));
+        Assertions.assertFalse(PredicateStatisticsCalculator.allConstantOperators(List.of(a, one, one), 0));
+    }
+
+    @Test
+    public void duplicatesAndCastsInTheListDoNotChangeTheEstimate() {
+        ColumnRefOperator left = new ColumnRefOperator(1, IntegerType.BIGINT, "input", true);
+        ColumnRefOperator right = new ColumnRefOperator(2, IntegerType.BIGINT, "other", true);
+        Statistics input = Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(left, new ColumnStatistic(0, 100, 0, 8, 50))
+                .addColumnStatistic(right, new ColumnStatistic(10, 20, 0, 8, 5)).build();
+        List<ScalarOperator> distinct = List.of(ConstantOperator.createBigint(3), ConstantOperator.createBigint(7),
+                right, ConstantOperator.createNull(IntegerType.BIGINT));
+        List<ScalarOperator> repeated = List.of(ConstantOperator.createBigint(3), ConstantOperator.createBigint(3),
+                ConstantOperator.createBigint(7), right,
+                new CastOperator(IntegerType.BIGINT, ConstantOperator.createBigint(7)), right,
+                ConstantOperator.createNull(IntegerType.BIGINT), ConstantOperator.createNull(IntegerType.BIGINT));
+        for (boolean notIn : List.of(false, true)) {
+            Statistics expected = PredicateStatisticsCalculator.statisticsCalculate(
+                    new InPredicateOperator(notIn, concat(left, distinct)), input);
+            Statistics actual = PredicateStatisticsCalculator.statisticsCalculate(
+                    new InPredicateOperator(notIn, concat(left, repeated)), input);
+            Assertions.assertEquals(Double.doubleToLongBits(expected.getOutputRowCount()),
+                    Double.doubleToLongBits(actual.getOutputRowCount()));
+            ColumnStatistic e = expected.getColumnStatistic(left);
+            ColumnStatistic a = actual.getColumnStatistic(left);
+            Assertions.assertEquals(Double.doubleToLongBits(e.getMinValue()), Double.doubleToLongBits(a.getMinValue()));
+            Assertions.assertEquals(Double.doubleToLongBits(e.getMaxValue()), Double.doubleToLongBits(a.getMaxValue()));
+            Assertions.assertEquals(e.getDistinctValuesCount(), a.getDistinctValuesCount());
+        }
+    }
+
+    private static List<ScalarOperator> concat(ScalarOperator first, List<ScalarOperator> rest) {
+        List<ScalarOperator> result = new ArrayList<>();
+        result.add(first);
+        result.addAll(rest);
+        return result;
     }
 }
