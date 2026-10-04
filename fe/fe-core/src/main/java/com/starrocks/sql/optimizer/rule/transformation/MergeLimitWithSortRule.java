@@ -36,11 +36,6 @@ public class MergeLimitWithSortRule extends TransformationRule {
         LogicalTopNOperator topN = (LogicalTopNOperator) input.getInputs().get(0).getOp();
         LogicalLimitOperator limit = ((LogicalLimitOperator) input.getOp());
 
-        // A TopN cannot have a zero limit. When the offset of the limit skips every row of the TopN, the query
-        // returns no rows, so we keep both operators and let them produce the empty result.
-        if (topN.hasLimit() && limit.getOffset() >= topN.getLimit()) {
-            return false;
-        }
         // Merge Init-Limit/Local-limit and Sort
         // Local-limit may be generate at MergeLimitWithLimitRule
         return limit.isInit() || limit.isLocal();
@@ -52,16 +47,12 @@ public class MergeLimitWithSortRule extends TransformationRule {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
         LogicalTopNOperator sort = (LogicalTopNOperator) input.getInputs().get(0).getOp();
 
-        long newLimit = limit.getLimit();
-        long newOffset = limit.getOffset();
+        long minLimit = limit.getLimit();
         if (sort.hasLimit()) {
-            // The TopN keeps rows [sort offset, sort offset + sort limit) of the order, and the limit above it takes
-            // rows [offset, offset + limit) of those. The merged TopN must keep only the rows that both keep.
-            newLimit = Math.min(newLimit, sort.getLimit() - limit.getOffset());
-            newOffset = sort.getOffset() + limit.getOffset();
+            minLimit = Math.min(minLimit, sort.getLimit());
         }
         OptExpression result = new OptExpression(
-                new LogicalTopNOperator(sort.getOrderByElements(), newLimit, newOffset));
+                new LogicalTopNOperator(sort.getOrderByElements(), limit.getLimit(), limit.getOffset()));
         result.getInputs().addAll(input.getInputs().get(0).getInputs());
         return Lists.newArrayList(result);
     }
