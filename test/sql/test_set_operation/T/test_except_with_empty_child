@@ -1,0 +1,6 @@
+-- name: test_except_with_empty_child
+create table t_except_dup (id int, k int) duplicate key(id) distributed by hash(id) buckets 3 properties("replication_num" = "1");
+insert into t_except_dup values (1, 1), (2, 1), (3, 2), (4, 2), (5, null), (6, null);
+select k from t_except_dup except select k from t_except_dup where false order by k;
+select count(*) from (select k from t_except_dup except select k from t_except_dup where 1 = 0) x;
+select k from t_except_dup except (select k from t_except_dup limit 0) order by k;

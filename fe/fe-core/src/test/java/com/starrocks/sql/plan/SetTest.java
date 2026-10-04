@@ -374,6 +374,38 @@ public class SetTest extends PlanTestBase {
     }
 
     @Test
+    public void testExceptWithOneNonEmptyChildKeepsDistinct() throws Exception {
+        // EXCEPT returns distinct rows. When every child but the first is empty, the rows of the first child must
+        // still be deduplicated.
+        String plan = getFragmentPlan("select v1 from t0 except select v1 from t0 where false");
+        assertContains(plan, "  2:AGGREGATE (update finalize)\n" +
+                "  |  group by: 7: v1\n" +
+                "  |  \n" +
+                "  1:Project\n" +
+                "  |  <slot 7> : 1: v1\n" +
+                "  |  \n" +
+                "  0:OlapScanNode");
+
+        plan = getFragmentPlan("select v1 from t0 except select v4 from t1 where false " +
+                "except select v7 from t2 where false");
+        assertContains(plan, "  2:AGGREGATE (update finalize)\n" +
+                "  |  group by: 10: v1\n" +
+                "  |  \n" +
+                "  1:Project\n" +
+                "  |  <slot 10> : 1: v1\n" +
+                "  |  \n" +
+                "  0:OlapScanNode");
+
+        plan = getFragmentPlan("select v1 from t0 except (select v4 from t1 limit 0) limit 3");
+        assertContains(plan, "  2:AGGREGATE (update finalize)\n" +
+                "  |  group by: 7: v1\n" +
+                "  |  limit: 3\n" +
+                "  |  \n" +
+                "  1:Project\n" +
+                "  |  <slot 7> : 1: v1");
+    }
+
+    @Test
     public void testUnionEmptyNode() throws Exception {
         String sql;
         String plan;
