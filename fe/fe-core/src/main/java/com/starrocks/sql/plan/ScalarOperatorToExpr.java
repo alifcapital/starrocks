@@ -175,13 +175,14 @@ public class ScalarOperatorToExpr {
         }
 
         private static boolean needSyncVarcharExprType(ColumnRefOperator node, Expr expr) {
+            // The flag is off by default, and the checks below build the SQL of both types for every column.
+            if (!GlobalVariable.isEnableReduceCastVarcharExprSyncType()) {
+                return false;
+            }
             if (!node.getType().isVarchar() || !expr.getType().isVarchar()) {
                 return false;
             }
-            if (node.getType().toSql().equalsIgnoreCase(expr.getType().toSql())) {
-                return false;
-            }
-            return GlobalVariable.isEnableReduceCastVarcharExprSyncType();
+            return !node.getType().toSql().equalsIgnoreCase(expr.getType().toSql());
         }
         @Override
         public Expr visit(ScalarOperator scalarOperator, FormatterContext context) {
