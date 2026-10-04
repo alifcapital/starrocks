@@ -73,6 +73,12 @@ public class SubqueryUtils {
             return Pair.create(null, builder);
         }
 
+        // The replace rule only acts on keys of subqueryPlaceholders, so with no placeholders it can neither
+        // rewrite the operator nor change the builder, and there is no semi/anti conjunct to remove.
+        if (subqueryPlaceholders.isEmpty()) {
+            return Pair.create(Utils.compoundAnd(Utils.extractConjuncts(scalarOperator)), builder);
+        }
+
         List<ScalarOperatorRewriteRule> rules = Lists.newArrayList();
         ReplaceSubqueryRewriteRule subqueryRewriteRule = new ReplaceSubqueryRewriteRule(subqueryPlaceholders, builder);
         rules.add(subqueryRewriteRule);
@@ -85,8 +91,8 @@ public class SubqueryUtils {
         Iterator<ScalarOperator> it = conjuncts.iterator();
         while (it.hasNext()) {
             ScalarOperator conjunct = it.next();
-            if (subqueryPlaceholders.containsKey(conjunct)) {
-                SubqueryOperator subqueryOperator = subqueryPlaceholders.get(conjunct);
+            SubqueryOperator subqueryOperator = subqueryPlaceholders.get(conjunct);
+            if (subqueryOperator != null) {
                 LogicalApplyOperator applyOperator = subqueryOperator.getApplyOperator();
                 if ((applyOperator.isQuantified() || applyOperator.isExistential()) && applyOperator.isUseSemiAnti()) {
                     it.remove();

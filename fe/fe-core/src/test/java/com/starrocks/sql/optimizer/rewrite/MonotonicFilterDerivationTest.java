@@ -92,6 +92,15 @@ public class MonotonicFilterDerivationTest {
     }
 
     @Test
+    public void testNoBoundsPreservesDuplicateConjunctsAndRoot() {
+        ScalarOperator plain = new BinaryPredicateOperator(BinaryType.GE, epoch, ConstantOperator.createBigint(0));
+        ScalarOperator predicate = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                plain, plain.clone());
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+        assertEquals(2, Utils.extractConjuncts(predicate).size());
+    }
+
+    @Test
     public void testBoundsAreRedundant() {
         ScalarOperator comparison = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
         List<ScalarOperator> bounds = addedBounds(comparison);

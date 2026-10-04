@@ -1045,7 +1045,13 @@ public class SystemInfoService implements GsonPostProcessable {
     }
 
     public int getAliveBackendNumber() {
-        return getBackendIds(true).size();
+        int count = 0;
+        for (ComputeNode node : idToBackendRef.values()) {
+            if (node.isAlive()) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public int getRetainedBackendNumber() {
@@ -1068,7 +1074,13 @@ public class SystemInfoService implements GsonPostProcessable {
     }
 
     public int getAliveComputeNodeNumber() {
-        return getComputeNodeIds(true).size();
+        int count = 0;
+        for (ComputeNode node : idToComputeNodeRef.values()) {
+            if (node.isAlive()) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public ComputeNode getComputeNodeWithBePort(String host, int bePort) {

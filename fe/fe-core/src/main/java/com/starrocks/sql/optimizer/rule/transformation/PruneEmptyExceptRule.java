@@ -53,23 +53,32 @@ public class PruneEmptyExceptRule extends TransformationRule {
 
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
-        return input.getInputs().stream().map(OptExpression::getOp).filter(op -> op instanceof LogicalValuesOperator)
-                .anyMatch(op -> ((LogicalValuesOperator) op).getRows().isEmpty());
+        for (OptExpression child : input.getInputs()) {
+            if (child.getOp() instanceof LogicalValuesOperator values && values.getRows().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         Preconditions.checkState(input.getOp().getProjection() == null);
         LogicalExceptOperator exceptOperator = (LogicalExceptOperator) input.getOp();
+        OptExpression first = input.inputAt(0);
+        if (first.getOp() instanceof LogicalValuesOperator &&
+                ((LogicalValuesOperator) first.getOp()).getRows().isEmpty()) {
+            return Lists.newArrayList(OptExpression
+                    .create(new LogicalValuesOperator(exceptOperator.getOutputColumnRefOp(), Collections.emptyList())));
+        }
+
         List<OptExpression> newInputs = Lists.newArrayList();
         List<List<ColumnRefOperator>> childOutputs = Lists.newArrayList();
 
-        boolean firstIsEmpty = false;
         for (int i = 0; i < input.getInputs().size(); i++) {
             OptExpression child = input.getInputs().get(i);
             if ((child.getOp() instanceof LogicalValuesOperator) &&
                     ((LogicalValuesOperator) child.getOp()).getRows().isEmpty()) {
-                firstIsEmpty = i == 0 || firstIsEmpty;
                 continue;
             }
 
@@ -77,10 +86,7 @@ public class PruneEmptyExceptRule extends TransformationRule {
             childOutputs.add(exceptOperator.getChildOutputColumns().get(i));
         }
 
-        if (firstIsEmpty) {
-            return Lists.newArrayList(OptExpression
-                    .create(new LogicalValuesOperator(exceptOperator.getOutputColumnRefOp(), Collections.emptyList())));
-        } else if (newInputs.size() > 1) {
+        if (newInputs.size() > 1) {
             return Lists.newArrayList(OptExpression
                     .create(new LogicalExceptOperator.Builder().withOperator(exceptOperator)
                             .setChildOutputColumns(childOutputs).build(), newInputs));

@@ -22,10 +22,8 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalNestLoopJoinOperator;
-import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.transformation.JoinCommutativityRule;
-import org.apache.commons.collections.CollectionUtils;
 
 import java.util.List;
 
@@ -47,8 +45,7 @@ public class NestLoopJoinImplementationRule extends JoinImplementationRule {
     // 2. JoinType is INNER/CROSS/OUTER/LEFT ANTI/LEFT SEMI
     @Override
     public boolean check(final OptExpression input, OptimizerContext context) {
-        List<BinaryPredicateOperator> eqPredicates = extractEqPredicate(input, context);
-        if (CollectionUtils.isNotEmpty(eqPredicates)) {
+        if (hasEqPredicate(input, context)) {
             return false;
         } else {
             JoinOperator joinType = getJoinType(input);

@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.collect.Lists;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.type.Type;
 
@@ -44,8 +45,15 @@ public abstract class ArgsScalarOperator extends ScalarOperator {
     }
 
     @Override
+    public void collectUsedColumns(ColumnRefSet destination) {
+        for (ScalarOperator child : arguments) {
+            child.collectUsedColumns(destination);
+        }
+    }
+
+    @Override
     public int hashCode() {
-        return Objects.hash(hashCodeSelf(), arguments);
+        return 31 * (31 + hashCodeSelf()) + Objects.hashCode(arguments);
     }
 
     @Override

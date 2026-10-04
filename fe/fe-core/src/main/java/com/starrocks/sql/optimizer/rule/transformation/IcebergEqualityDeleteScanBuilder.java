@@ -31,7 +31,6 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergEqualityDelete
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.PredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarbinaryType;
@@ -76,7 +75,7 @@ public class IcebergEqualityDeleteScanBuilder {
 
     public static ScalarOperator buildOnPredicate(Map<String, ColumnRefOperator> leftCols,
                                                   List<ColumnRefOperator> rightCols) {
-        List<BinaryPredicateOperator> onPredicates = new ArrayList<>();
+        List<ScalarOperator> onPredicates = new ArrayList<>(rightCols.size());
         for (ColumnRefOperator rightColRef : rightCols) {
             String icebergIdentifierColumnName = rightColRef.getName();
             ColumnRefOperator leftColRef = leftCols.get(icebergIdentifierColumnName);
@@ -89,13 +88,13 @@ public class IcebergEqualityDeleteScanBuilder {
             BinaryType binaryType = icebergIdentifierColumnName.equals(DATA_SEQUENCE_NUMBER)
                     ? BinaryType.LT
                     : BinaryType.EQ_FOR_NULL;
+            // Keep argument ownership independent from the scan refs without cloning a temporary predicate.
             BinaryPredicateOperator binaryPredicateOperator = new BinaryPredicateOperator(binaryType,
-                    List.of(leftColRef, rightColRef));
+                    leftColRef.clone(), rightColRef.clone());
             onPredicates.add(binaryPredicateOperator);
         }
 
-        List<ScalarOperator> onOps = onPredicates.stream().map(PredicateOperator::clone).collect(Collectors.toList());
-        return Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, onOps);
+        return Utils.createCompound(CompoundPredicateOperator.CompoundType.AND, onPredicates);
     }
 
     public static LogicalIcebergEqualityDeleteScanOperator buildEqualityDeleteScanOperator(

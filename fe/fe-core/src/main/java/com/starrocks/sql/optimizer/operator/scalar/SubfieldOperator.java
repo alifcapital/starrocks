@@ -129,8 +129,8 @@ public class SubfieldOperator extends ArgsScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        return getChild(0).getUsedColumns();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        getChild(0).collectUsedColumns(destination);
     }
 
     public String getPath() {

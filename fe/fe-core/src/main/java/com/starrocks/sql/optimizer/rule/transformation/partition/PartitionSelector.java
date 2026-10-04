@@ -172,7 +172,7 @@ public class PartitionSelector {
         if (column.isGeneratedColumn()) {
             String definedQuery = column.generatedColumnExprToString();
             if (!Strings.isNullOrEmpty(definedQuery)) {
-                return "`" + column.generatedColumnExprToString() + "`";
+                return "`" + definedQuery + "`";
             }
             Expr deinfedExpr = column.getGeneratedColumnExpr(olapTable.getIdToColumn());
             if (deinfedExpr != null) {
@@ -271,7 +271,7 @@ public class PartitionSelector {
         // validate scalar operator
         validateRetentionConditionPredicate(olapTable, scalarOperator);
 
-        LOG.debug("Get partition ids by where expression: {}", scalarOperator.toString());
+        LOG.debug("Get partition ids by where expression: {}", scalarOperator);
 
         // deduce generated column expr to partition slotRef
         try {
@@ -280,7 +280,7 @@ public class PartitionSelector {
             LOG.debug("Failed to deduce generated column expr to partition slotRef: " + e.getMessage());
         }
 
-        LOG.debug("Get partition ids by where expression after deduce: {}", scalarOperator.toString());
+        LOG.debug("Get partition ids by where expression after deduce: {}", scalarOperator);
 
         List<ColumnRefOperator> usedPartitionColumnRefs = Lists.newArrayList();
         scalarOperator.getColumnRefs(usedPartitionColumnRefs);
@@ -747,8 +747,9 @@ public class PartitionSelector {
         List<ColumnRefOperator> usedPartitionColumnRefs = Lists.newArrayList();
         scalarOperator.getColumnRefs(usedPartitionColumnRefs);
         for (ColumnRefOperator colRef : usedPartitionColumnRefs) {
-            Preconditions.checkArgument(partitionColNames.contains(colRef.getName()));
-            colRefIdxMap.put(colRef, partitionColNames.indexOf(colRef.getName()));
+            int partitionColIdx = partitionColNames.indexOf(colRef.getName());
+            Preconditions.checkArgument(partitionColIdx >= 0);
+            colRefIdxMap.put(colRef, partitionColIdx);
         }
 
         ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter();

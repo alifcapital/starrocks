@@ -29,14 +29,13 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.transformation.pruner.CPBiRel;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -107,7 +106,13 @@ public class JoinReorderCardinalityPreserving extends JoinOrder {
                 // put the longest chain in the front.
                 components.sort(Comparator.comparingInt(List::size));
                 Collections.reverse(components);
-                return components.stream().flatMap(Collection::stream).collect(Collectors.toList());
+                List<OptExpression> order = new ArrayList<>(visited.size());
+                for (List<OptExpression> component : components) {
+                    for (OptExpression node : component) {
+                        order.add(node);
+                    }
+                }
+                return order;
             } else {
                 // no source nodes, travel all node, find the longest chain.
                 List<OptExpression> longestOrders = Collections.emptyList();
@@ -128,20 +133,19 @@ public class JoinReorderCardinalityPreserving extends JoinOrder {
 
         // BFS travel
         void travel(OptExpression root, Set<OptExpression> visited, List<OptExpression> component) {
-            Queue<OptExpression> q0 = new LinkedList<>();
-            Queue<OptExpression> q1 = new LinkedList<>();
+            Queue<OptExpression> q0 = new ArrayDeque<>();
+            Queue<OptExpression> q1 = new ArrayDeque<>();
             ToLongFunction<OptExpression> getTableId =
                     optExpr -> ((LogicalScanOperator) optExpr.getOp()).getTable().getId();
             q0.add(root);
             while (!q0.isEmpty()) {
                 while (!q0.isEmpty()) {
                     OptExpression curr = q0.remove();
-                    if (visited.contains(curr)) {
+                    if (!visited.add(curr)) {
                         continue;
                     }
-                    visited.add(curr);
                     component.add(curr);
-                    Long currTableId = getTableId.applyAsLong(curr);
+                    long currTableId = getTableId.applyAsLong(curr);
                     // permute LogicalScanOperator originates from the same table together will give
                     // CboTablePruneRule more chance to prune tables.
                     List<OptExpression> children =
@@ -178,19 +182,21 @@ public class JoinReorderCardinalityPreserving extends JoinOrder {
             }
             ScalarOperator lhs = binPredicate.getChild(0);
             ScalarOperator rhs = binPredicate.getChild(1);
-            if (!(lhs instanceof ColumnRefOperator) && (rhs instanceof ColumnRefOperator)) {
+            if (!(lhs instanceof ColumnRefOperator) || !(rhs instanceof ColumnRefOperator)) {
                 continue;
             }
 
             ColumnRefOperator lhsColRef = lhs.cast();
             ColumnRefOperator rhsColRef = rhs.cast();
+            OptExpression lhsOptExpr = colRefToScanNodes.get(lhsColRef);
             // column ref references real column
-            if (!(colRefToScanNodes.containsKey(lhsColRef) && colRefToScanNodes.containsKey(rhsColRef))) {
+            if (lhsOptExpr == null) {
                 continue;
             }
-
-            OptExpression lhsOptExpr = colRefToScanNodes.get(lhsColRef);
             OptExpression rhsOptExpr = colRefToScanNodes.get(rhsColRef);
+            if (rhsOptExpr == null) {
+                continue;
+            }
             // Pair(OptExprA, OptExprB) and Pair(OptExprB, OptExprA) are the same, so normalize them into
             // one form.
             if (lhsOptExpr.hashCode() < rhsOptExpr.hashCode()) {
@@ -216,16 +222,24 @@ public class JoinReorderCardinalityPreserving extends JoinOrder {
             OptExpression lhsOptExpr = e.getKey().first;
             OptExpression rhsOptExpr = e.getKey().second;
             Set<Pair<ColumnRefOperator, ColumnRefOperator>> pairs = e.getValue();
-            Set<Pair<ColumnRefOperator, ColumnRefOperator>> inversePairs = pairs.stream().map(Pair::inverse).collect(
-                    Collectors.toSet());
-            List<CPBiRel> cpBiRels = Lists.newArrayList();
-            cpBiRels.addAll(CPBiRel.extractCPBiRels(lhsOptExpr, rhsOptExpr, true));
-            cpBiRels.addAll(CPBiRel.extractCPBiRels(rhsOptExpr, lhsOptExpr, false));
-            for (CPBiRel biRel : cpBiRels) {
-                if (biRel.isLeftToRight() && biRel.getPairs().equals(pairs)) {
-                    graph.addEdge(lhsOptExpr, rhsOptExpr);
-                } else if (!biRel.isLeftToRight() && biRel.getPairs().equals(inversePairs)) {
-                    graph.addEdge(rhsOptExpr, lhsOptExpr);
+            List<CPBiRel> forwardRels = CPBiRel.extractCPBiRels(lhsOptExpr, rhsOptExpr, true);
+            List<CPBiRel> reverseRels = CPBiRel.extractCPBiRels(rhsOptExpr, lhsOptExpr, false);
+            Set<Pair<ColumnRefOperator, ColumnRefOperator>> inversePairs = null;
+            for (int direction = 0; direction < 2; ++direction) {
+                List<CPBiRel> cpBiRels = direction == 0 ? forwardRels : reverseRels;
+                for (CPBiRel biRel : cpBiRels) {
+                    if (biRel.isLeftToRight()) {
+                        if (biRel.getPairs().equals(pairs)) {
+                            graph.addEdge(lhsOptExpr, rhsOptExpr);
+                        }
+                    } else {
+                        if (inversePairs == null) {
+                            inversePairs = pairs.stream().map(Pair::inverse).collect(Collectors.toSet());
+                        }
+                        if (biRel.getPairs().equals(inversePairs)) {
+                            graph.addEdge(rhsOptExpr, lhsOptExpr);
+                        }
+                    }
                 }
             }
         });
@@ -244,18 +258,8 @@ public class JoinReorderCardinalityPreserving extends JoinOrder {
         for (OptExpression optExpr : order) {
             atoms.add(optExprToAtoms.get(optExpr));
         }
-        boolean[] used = new boolean[atomSize];
         GroupInfo leftGroup = atoms.get(0);
-        used[0] = true;
-        int next = 1;
-        while (next < atomSize) {
-            if (used[next]) {
-                next++;
-                continue;
-            }
-            int index = next;
-            used[index] = true;
-
+        for (int index = 1; index < atomSize; ++index) {
             GroupInfo rightGroup = atoms.get(index);
             Optional<ExpressionInfo> joinExpr = buildJoinExpr(leftGroup, atoms.get(index));
             if (!joinExpr.isPresent()) {

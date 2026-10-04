@@ -85,7 +85,9 @@ public class PhysicalPropertySet {
 
     @Override
     public int hashCode() {
-        return Objects.hash(sortProperty, distributionProperty, cteProperty);
+        int hash = 31 + Objects.hashCode(sortProperty);
+        hash = 31 * hash + Objects.hashCode(distributionProperty);
+        return 31 * hash + Objects.hashCode(cteProperty);
     }
 
     @Override

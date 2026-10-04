@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -46,6 +47,7 @@ import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rewrite.scalar.FoldConstantsRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.SimplifiedPredicateRule;
 import com.starrocks.sql.optimizer.rule.RuleType;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.type.Type;
 
@@ -154,6 +156,25 @@ public class PushDownAggregateGroupingSetsRule extends TransformationRule {
         return OptExpression.create(union, repeatConsume, selectConsume);
     }
 
+    @VisibleForTesting
+    static ColumnRefOperator findLargestNdvColumn(List<ColumnRefOperator> refs, Statistics statistics) {
+        ColumnRefOperator best = null;
+        double bestNdv = 0;
+        for (ColumnRefOperator ref : refs) {
+            ColumnStatistic columnStatistic = statistics.getColumnStatistic(ref);
+            if (columnStatistic.isUnknown()) {
+                continue;
+            }
+            double ndv = columnStatistic.getDistinctValuesCount();
+            // Preserve stable descending-sort order, including NaN and signed zero.
+            if (best == null || Double.compare(ndv, bestNdv) > 0) {
+                best = ref;
+                bestNdv = ndv;
+            }
+        }
+        return best;
+    }
+
     private OptExpression buildCTEProduce(OptimizerContext context, OptExpression input, int cteId) {
         OptExpression repeatInput = input.inputAt(0);
         LogicalAggregationOperator aggregate = (LogicalAggregationOperator) input.getOp();
@@ -167,17 +188,15 @@ public class PushDownAggregateGroupingSetsRule extends TransformationRule {
         if (null == repeatInput.getStatistics()) {
             Utils.calculateStatistics(input, context);
         }
-        if (null != repeatInput.getStatistics()) {
+        if (context.getSessionVariable().isCboPushDownGroupingSetReshuffle()
+                && repeatInput.getStatistics() != null) {
             // use one column to shuffle
-            Statistics statistics = repeatInput.getStatistics();
-            partitionRefs = allGroupByRefs.stream()
-                    .filter(ref -> !statistics.getColumnStatistic(ref).isUnknown())
-                    .sorted((o1, o2) -> Double.compare(statistics.getColumnStatistic(o2).getDistinctValuesCount(),
-                            statistics.getColumnStatistic(o1).getDistinctValuesCount()))
-                    .limit(1)
-                    .collect(Collectors.toList());
+            ColumnRefOperator partitionRef = findLargestNdvColumn(allGroupByRefs, repeatInput.getStatistics());
+            if (partitionRef != null) {
+                partitionRefs = Lists.newArrayList(partitionRef);
+            }
         }
-        if (!context.getSessionVariable().isCboPushDownGroupingSetReshuffle() || partitionRefs.isEmpty()) {
+        if (partitionRefs.isEmpty()) {
             partitionRefs = allGroupByRefs;
         }
 

@@ -34,7 +34,6 @@ import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashAggregateOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalOlapScanOperator;
-import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CaseWhenOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
@@ -398,6 +397,16 @@ public class PreAggregateTurnOnRule implements TreeRewriteRule {
             return visitPhysicalJoin(optExpr, context);
         }
 
+        private static List<ScalarOperator> groupingsUsingColumns(List<ScalarOperator> groupings, ColumnRefSet columns) {
+            List<ScalarOperator> result = Lists.newArrayList();
+            for (ScalarOperator g : groupings) {
+                if (g.getUsedColumns().isIntersect(columns)) {
+                    result.add(g);
+                }
+            }
+            return result;
+        }
+
         public Void visitPhysicalJoin(OptExpression optExpression, PreAggregationContext context) {
             PhysicalJoinOperator joinOperator = (PhysicalJoinOperator) optExpression.getOp();
             OptExpression leftChild = optExpression.getInputs().get(0);
@@ -406,10 +415,9 @@ public class PreAggregateTurnOnRule implements TreeRewriteRule {
             ColumnRefSet leftOutputColumns = optExpression.getInputs().get(0).getOutputColumns();
             ColumnRefSet rightOutputColumns = optExpression.getInputs().get(1).getOutputColumns();
 
-            List<BinaryPredicateOperator> eqOnPredicates = JoinHelper.getEqualsPredicate(leftOutputColumns,
-                    rightOutputColumns, Utils.extractConjuncts(joinOperator.getOnPredicate()));
             // cross join can not do pre-aggregation
-            if (joinOperator.getJoinType().isCrossJoin() || eqOnPredicates.isEmpty()) {
+            if (joinOperator.getJoinType().isCrossJoin() ||
+                    !JoinHelper.hasEqualsPredicate(leftOutputColumns, rightOutputColumns, joinOperator.getOnPredicate())) {
                 context.notPreAggregationJoin = true;
                 context.groupings.clear();
                 context.aggregations.clear();
@@ -424,20 +432,9 @@ public class PreAggregateTurnOnRule implements TreeRewriteRule {
             // the olap scan node will turn off pre aggregation if aggregation function used both sides columns,
             // this can be guaranteed by checkAggregations in visitPhysicalOlapScan.
             ColumnRefSet aggregationColumns = new ColumnRefSet();
-            List<ScalarOperator> leftGroupOperator = Lists.newArrayList();
-            List<ScalarOperator> rightGroupOperator = Lists.newArrayList();
-
-            context.groupings.forEach(g -> {
-                if (g.getUsedColumns().isIntersect(leftOutputColumns)) {
-                    leftGroupOperator.add(g);
-                }
-            });
-            context.groupings.forEach(g -> {
-                if (g.getUsedColumns().isIntersect(rightOutputColumns)) {
-                    rightGroupOperator.add(g);
-                }
-            });
-            context.aggregations.forEach(a -> aggregationColumns.union(a.getUsedColumns()));
+            for (ScalarOperator a : context.aggregations) {
+                a.collectUsedColumns(aggregationColumns);
+            }
             boolean checkLeft = leftOutputColumns.containsAll(aggregationColumns);
             boolean checkRight = rightOutputColumns.containsAll(aggregationColumns);
             // Add join on predicate and predicate to context
@@ -452,11 +449,11 @@ public class PreAggregateTurnOnRule implements TreeRewriteRule {
             disableContext.notPreAggregationJoin = true;
 
             if (checkLeft) {
-                context.groupings = leftGroupOperator;
+                context.groupings = groupingsUsingColumns(context.groupings, leftOutputColumns);
                 process(leftChild, context);
                 process(rightChild, disableContext);
             } else if (checkRight) {
-                context.groupings = rightGroupOperator;
+                context.groupings = groupingsUsingColumns(context.groupings, rightOutputColumns);
                 process(rightChild, context);
                 process(leftChild, disableContext);
             } else {

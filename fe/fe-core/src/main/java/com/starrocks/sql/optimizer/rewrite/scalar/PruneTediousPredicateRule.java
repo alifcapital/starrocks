@@ -114,6 +114,8 @@ public class PruneTediousPredicateRule extends OnlyOnceScalarOperatorRewriteRule
         if (root == null) {
             return null;
         }
-        return Utils.compoundAnd(Utils.extractConjuncts(root)).accept(TEDIOUS_PREDICATE_PRUNER, null).orElse(root);
+        ScalarOperator normalized = root instanceof CompoundPredicateOperator &&
+                ((CompoundPredicateOperator) root).isAnd() ? Utils.compoundAnd(Utils.extractConjuncts(root)) : root;
+        return normalized.accept(TEDIOUS_PREDICATE_PRUNER, null).orElse(root);
     }
 }

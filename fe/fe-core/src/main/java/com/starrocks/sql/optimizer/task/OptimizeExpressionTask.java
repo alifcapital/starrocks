@@ -18,7 +18,6 @@ package com.starrocks.sql.optimizer.task;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.optimizer.GroupExpression;
 import com.starrocks.sql.optimizer.rule.Rule;
-import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.Comparator;
 import java.util.List;
@@ -52,7 +51,7 @@ public class OptimizeExpressionTask extends OptimizerTask {
     }
 
     private List<Rule> getValidRules() {
-        List<Rule> validRules = Lists.newArrayListWithCapacity(RuleType.NUM_RULES.id());
+        List<Rule> validRules = Lists.newArrayList();
         List<Rule> logicalRules = context.getOptimizerContext().getRuleSet().getTransformRules();
         filterInValidRules(groupExpression, logicalRules, validRules);
 

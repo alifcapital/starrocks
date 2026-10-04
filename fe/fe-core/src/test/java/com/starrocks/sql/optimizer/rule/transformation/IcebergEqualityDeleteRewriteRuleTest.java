@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
+import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -55,6 +56,28 @@ public class IcebergEqualityDeleteRewriteRuleTest {
                 "identity column must use null-safe equals so NULL-key rows are deleted");
         Assertions.assertEquals(BinaryType.LT, byColumn.get(DATA_SEQUENCE_NUMBER),
                 "data sequence number bound must remain a strict less-than");
+    }
+
+    @Test
+    public void testPredicateOwnsMutableArgumentsWithoutChangingScanReferences() {
+        ColumnRefOperator left = new ColumnRefOperator(1, IntegerType.INT, "id", true);
+        ColumnRefOperator right = new ColumnRefOperator(2, IntegerType.INT, "id", true);
+        BinaryPredicateOperator predicate = (BinaryPredicateOperator)
+                IcebergEqualityDeleteScanBuilder.buildOnPredicate(Map.of("id", left), List.of(right));
+        Assertions.assertEquals(left, predicate.getChild(0));
+        Assertions.assertEquals(right, predicate.getChild(1));
+        Assertions.assertNotSame(left, predicate.getChild(0));
+        Assertions.assertNotSame(right, predicate.getChild(1));
+        ((ColumnRefOperator) predicate.getChild(0)).setNullable(false);
+        ((ColumnRefOperator) predicate.getChild(1)).setNullable(false);
+        Assertions.assertTrue(left.isNullable());
+        Assertions.assertTrue(right.isNullable());
+        ColumnRefOperator replacement = new ColumnRefOperator(3, IntegerType.INT, "other", true);
+        predicate.setChild(0, replacement);
+        Assertions.assertSame(replacement, predicate.getChild(0));
+        Assertions.assertNull(IcebergEqualityDeleteScanBuilder.buildOnPredicate(Map.of(), List.of()));
+        Assertions.assertThrows(StarRocksConnectorException.class,
+                () -> IcebergEqualityDeleteScanBuilder.buildOnPredicate(Map.of(), List.of(right)));
     }
 
     // Walk the AND tree and index each leaf comparison by the name of its right-hand (delete-table) column.

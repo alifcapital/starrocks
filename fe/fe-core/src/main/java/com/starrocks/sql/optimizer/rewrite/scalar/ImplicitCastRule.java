@@ -51,7 +51,6 @@ import com.starrocks.type.MapType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -126,8 +125,8 @@ public class ImplicitCastRule extends TopDownScalarOperatorRewriteRule {
                 return call;
             }
             if (!call.isAggregate() || FunctionSet.AVG.equalsIgnoreCase(fn.functionName())) {
-                Preconditions.checkArgument(Arrays.stream(fn.getArgs()).noneMatch(Type::isWildcardDecimal),
-                        String.format("Resolved function %s has wildcard decimal as argument type", fn.functionName()));
+                Preconditions.checkArgument(!hasWildcardDecimalArg(fn),
+                        "Resolved function %s has wildcard decimal as argument type", fn.functionName());
             }
 
             boolean needAdjustScale = ArithmeticExpr.DECIMAL_SCALE_ADJUST_OPERATOR_SET
@@ -206,9 +205,9 @@ public class ImplicitCastRule extends TopDownScalarOperatorRewriteRule {
         }
 
         // we will try cast const operator to variable operator
-        if ((rightChild.isVariable() && leftChild.isConstantRef()) ||
-                (leftChild.isVariable() && rightChild.isConstantRef())) {
-            int constant = leftChild.isVariable() ? 1 : 0;
+        if ((leftChild.isConstantRef() && rightChild.isVariable()) ||
+                (rightChild.isConstantRef() && leftChild.isVariable())) {
+            int constant = leftChild.isConstantRef() ? 0 : 1;
             int variable = 1 - constant;
             Optional<BinaryPredicateOperator> optional = optimizeConstantAndVariable(predicate, constant, variable);
             if (optional.isPresent()) {
@@ -356,8 +355,16 @@ public class ImplicitCastRule extends TopDownScalarOperatorRewriteRule {
     }
 
     private ScalarOperator castForBetweenAndIn(ScalarOperator predicate, boolean isBetween) {
-        Type firstType = predicate.getChildren().get(0).getType();
-        if (predicate.getChildren().stream().skip(1).allMatch(o -> firstType.matchesType(o.getType()))) {
+        List<ScalarOperator> children = predicate.getChildren();
+        Type firstType = children.get(0).getType();
+        boolean allMatch = true;
+        for (int i = 1; i < children.size(); i++) {
+            if (!firstType.matchesType(children.get(i).getType())) {
+                allMatch = false;
+                break;
+            }
+        }
+        if (allMatch) {
             return predicate;
         }
 
@@ -387,6 +394,15 @@ public class ImplicitCastRule extends TopDownScalarOperatorRewriteRule {
             }
         }
         return predicate;
+    }
+
+    private static boolean hasWildcardDecimalArg(Function fn) {
+        for (Type argType : fn.getArgs()) {
+            if (argType.isWildcardDecimal()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void addCastChild(Type returnType, ScalarOperator node, int index) {

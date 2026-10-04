@@ -19,6 +19,7 @@ import com.google.common.collect.BiMap;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.EquivalenceClasses;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -45,6 +46,7 @@ public class RewriteContext {
     private final ReplaceColumnRefRewriter mvColumnRefRewriter;
     private final Map<ColumnRefOperator, ColumnRefOperator> outputMapping;
     private final Set<ColumnRefOperator> queryColumnSet;
+    private ColumnRefSet queryColumnRefSet;
     private final OptimizerContext optimizerContext;
     private BiMap<Integer, Integer> queryToMvRelationIdMapping;
     private ScalarOperator unionRewriteQueryExtraPredicate;
@@ -156,6 +158,17 @@ public class RewriteContext {
 
     public Set<ColumnRefOperator> getQueryColumnSet() {
         return queryColumnSet;
+    }
+
+    /**
+     * The query column set as a ColumnRefSet. It is built once on the first call, because the query column set holds
+     * every column ref of the query and the callers only read it. The caller must not modify the returned set.
+     */
+    public ColumnRefSet getQueryColumnRefSet() {
+        if (queryColumnRefSet == null) {
+            queryColumnRefSet = new ColumnRefSet(queryColumnSet);
+        }
+        return queryColumnRefSet;
     }
 
     public Map<ColumnRefOperator, ScalarOperator> getMVColumnRefToScalarOp() {

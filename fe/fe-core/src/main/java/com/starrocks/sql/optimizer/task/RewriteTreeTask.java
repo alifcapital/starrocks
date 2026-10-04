@@ -15,11 +15,13 @@
 package com.starrocks.sql.optimizer.task;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.starrocks.common.profile.Timer;
 import com.starrocks.common.profile.Tracers;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerTraceUtil;
+import com.starrocks.sql.optimizer.base.LogicalProperty;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.rule.Rule;
@@ -50,7 +52,7 @@ public class RewriteTreeTask extends OptimizerTask {
     }
 
     public RewriteTreeTask(TaskContext context, OptExpression root, Rule rule, boolean onlyOnce) {
-        this(context, root, List.of(rule), onlyOnce);
+        this(context, root, ImmutableList.of(rule), onlyOnce);
     }
 
     public OptExpression getResult() {
@@ -96,43 +98,55 @@ public class RewriteTreeTask extends OptimizerTask {
     }
 
     protected OptExpression applyRules(OptExpression parent, int childIndex, OptExpression root, List<Rule> rules) {
-        for (Rule rule : rules) {
-            if (context.getOptimizerContext().getOptimizerOptions().isRuleDisable(rule.type())) {
-                continue;
+        // Immutable rule sequences need no iterator; mutable lists retain fail-fast traversal.
+        if (rules instanceof ImmutableList) {
+            for (int i = 0; i < rules.size(); i++) {
+                root = applyRule(parent, childIndex, root, rules.get(i));
             }
-            if (rule.exhausted(context.getOptimizerContext())) {
-                continue;
+        } else {
+            for (Rule rule : rules) {
+                root = applyRule(parent, childIndex, root, rule);
             }
-            if (!match(rule.getPattern(), root) || !rule.check(root, context.getOptimizerContext())) {
-                continue;
-            }
+        }
+        return root;
+    }
 
-            if (!rule.predecessorRules().isEmpty()) {
-                root = applyRules(parent, childIndex, root, rule.predecessorRules());
-            }
+    private OptExpression applyRule(OptExpression parent, int childIndex, OptExpression root, Rule rule) {
+        if (context.getOptimizerContext().getOptimizerOptions().isRuleDisable(rule.type())) {
+            return root;
+        }
+        if (rule.exhausted(context.getOptimizerContext())) {
+            return root;
+        }
+        if (!match(rule.getPattern(), root) || !rule.check(root, context.getOptimizerContext())) {
+            return root;
+        }
 
-            OptimizerTraceUtil.logApplyRuleBefore(context.getOptimizerContext(), rule, root);
-            
-            List<OptExpression> result;
-            try (Timer ignore = Tracers.watchScope(Tracers.Module.OPTIMIZER, rule.toString())) {
-                result = rule.transform(root, context.getOptimizerContext());
-            }
-            Preconditions.checkState(result.size() <= 1, "Rewrite rule should provide at most 1 expression");
+        if (!rule.predecessorRules().isEmpty()) {
+            root = applyRules(parent, childIndex, root, rule.predecessorRules());
+        }
 
-            OptimizerTraceUtil.logApplyRuleAfter(rule, result);
+        OptimizerTraceUtil.logApplyRuleBefore(context.getOptimizerContext(), rule, root);
 
-            if (result.isEmpty()) {
-                continue;
-            }
+        List<OptExpression> result;
+        try (Timer ignore = Tracers.watchScope(Tracers.Module.OPTIMIZER, rule.toString())) {
+            result = rule.transform(root, context.getOptimizerContext());
+        }
+        Preconditions.checkState(result.size() <= 1, "Rewrite rule should provide at most 1 expression");
 
-            parent.getInputs().set(childIndex, result.get(0));
-            root = result.get(0);
-            change++;
-            deriveLogicalProperty(root);
+        OptimizerTraceUtil.logApplyRuleAfter(rule, result);
 
-            if (!rule.successorRules().isEmpty()) {
-                root = applyRules(parent, childIndex, root, rule.successorRules());
-            }
+        if (result.isEmpty()) {
+            return root;
+        }
+
+        parent.getInputs().set(childIndex, result.get(0));
+        root = result.get(0);
+        change++;
+        deriveLogicalProperty(root);
+
+        if (!rule.successorRules().isEmpty()) {
+            root = applyRules(parent, childIndex, root, rule.successorRules());
         }
         return root;
     }
@@ -173,9 +187,7 @@ public class RewriteTreeTask extends OptimizerTask {
         }
 
         if (root.getLogicalProperty() == null) {
-            ExpressionContext context = new ExpressionContext(root);
-            context.deriveLogicalProperty();
-            root.setLogicalProperty(context.getRootProperty());
+            root.setLogicalProperty(LogicalProperty.deriveFrom(LogicalPropertyContext.of(root)));
         }
     }
 

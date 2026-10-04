@@ -103,8 +103,8 @@ public class TvrAggregateRule extends TvrTransformationRule {
         final List<ColumnRefOperator> groupingKeys = inputAggOperator.getGroupingKeys();
         final Map<ColumnRefOperator, CallOperator> inputAggMap = inputAggOperator.getAggregations();
         Preconditions.checkArgument(aggStateTableColumns.size() == inputAggMap.size(),
-                String.format("Aggregate state table columns size %s must match input aggregate map size %s",
-                        aggStateTableColumns.size(), inputAggMap.size()));
+                "Aggregate state table columns size %s must match input aggregate map size %s",
+                aggStateTableColumns.size(), inputAggMap.size());
 
         // build eq predicate for delta changes by row id
         List<ScalarOperator> inputAggUniqueKeys = inputAggOperator.getGroupingKeys()

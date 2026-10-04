@@ -21,6 +21,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -174,7 +175,7 @@ public class LogicalAggregationOperator extends LogicalOperator {
             return false;
         }
 
-        CallOperator call = aggregations.values().stream().iterator().next();
+        CallOperator call = aggregations.values().iterator().next();
         if (call.isDistinct() && call.getFnName().equalsIgnoreCase(FunctionSet.COUNT) &&
                 call.getChildren().size() == 1 && call.getChild(0).isColumnRef() &&
                 groupingKeys.stream().noneMatch(groupCol -> call.getChild(0).equals(groupCol))) {
@@ -191,7 +192,7 @@ public class LogicalAggregationOperator extends LogicalOperator {
     }
 
     public boolean checkGroupByCountDistinctWithSkewHint() {
-        return checkGroupByCountDistinct() && hasSkew();
+        return hasSkew() && checkGroupByCountDistinct();
     }
 
     public boolean hasRemoveDistinctFunc() {
@@ -199,9 +200,9 @@ public class LogicalAggregationOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(new ArrayList<>(projection.getColumnRefMap().keySet()));
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         } else {
             ColumnRefSet columns = new ColumnRefSet();
             columns.union(groupingKeys);

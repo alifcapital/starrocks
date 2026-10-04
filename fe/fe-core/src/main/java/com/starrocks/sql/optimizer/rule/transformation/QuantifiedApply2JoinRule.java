@@ -16,6 +16,7 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -37,8 +38,6 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 public class QuantifiedApply2JoinRule extends TransformationRule {
     public QuantifiedApply2JoinRule() {
@@ -104,10 +103,12 @@ public class QuantifiedApply2JoinRule extends TransformationRule {
 
         joinExpression.getInputs().addAll(input.getInputs());
 
-        Map<ColumnRefOperator, ScalarOperator> outputColumns = input.getOutputColumns().getStream().map(
-                id -> context.getColumnRefFactory().getColumnRef(id)
-        ).collect(Collectors.toMap(Function.identity(), Function.identity()));
+        Map<ColumnRefOperator, ScalarOperator> outputColumns = Maps.newHashMap();
+        for (int id : input.getOutputColumns().getColumnIds()) {
+            ColumnRefOperator ref = context.getColumnRefFactory().getColumnRef(id);
+            outputColumns.put(ref, ref);
+        }
         return Lists.newArrayList(
-                OptExpression.create(new LogicalProjectOperator(outputColumns), Lists.newArrayList(joinExpression)));
+                OptExpression.create(new LogicalProjectOperator(outputColumns), joinExpression));
     }
 }

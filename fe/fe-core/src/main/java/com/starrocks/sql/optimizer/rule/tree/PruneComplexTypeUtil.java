@@ -84,13 +84,13 @@ public class PruneComplexTypeUtil {
         }
 
         public void addAccessPaths(ColumnRefOperator columnRefOperator, ComplexTypeAccessPaths accessPaths) {
-            accessGroups.putIfAbsent(columnRefOperator, new ComplexTypeAccessGroup());
-            accessGroups.get(columnRefOperator).addAccessPaths(accessPaths);
+            accessGroups.computeIfAbsent(columnRefOperator, key -> new ComplexTypeAccessGroup())
+                    .addAccessPaths(accessPaths);
 
             ColumnRefOperator oriColRefOperator = getOriginalColRef(columnRefOperator);
             if (oriColRefOperator != columnRefOperator) {
-                accessGroups.putIfAbsent(oriColRefOperator, new ComplexTypeAccessGroup());
-                accessGroups.get(oriColRefOperator).addAccessPaths(accessPaths);
+                accessGroups.computeIfAbsent(oriColRefOperator, key -> new ComplexTypeAccessGroup())
+                        .addAccessPaths(accessPaths);
             }
         }
 
@@ -114,6 +114,11 @@ public class PruneComplexTypeUtil {
         }
 
         public void add(ColumnRefOperator outputColumnRefOperator, ScalarOperator scalarOperator) {
+            // A non-complex column reference records no access path, whatever access group its output has.
+            if (scalarOperator.isColumnRef() && !scalarOperator.getType().isComplexType()) {
+                return;
+            }
+
             ComplexTypeAccessGroup visitedAccessGroup = null;
             if (outputColumnRefOperator != null) {
                 // If outputColumnRefOperator is not null, it means it may have visited access group,
@@ -145,7 +150,7 @@ public class PruneComplexTypeUtil {
                             existing.addAccessPaths(paths);
                         }
                     }
-                    if (operator.getProjection() == null && operator.getOutputColRefs().contains(output)) {
+                    if (operator.getProjection() == null) {
                         add(input, input);
                     }
                 }
@@ -403,4 +408,3 @@ public class PruneComplexTypeUtil {
         }
     }
 }
-

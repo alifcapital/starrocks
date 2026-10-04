@@ -37,6 +37,9 @@ public class JsonExtractFusionRule extends BottomUpScalarOperatorRewriteRule {
 
     @Override
     public ScalarOperator visitCall(CallOperator call, ScalarOperatorRewriteContext context) {
+        if (!FunctionSet.JSON_QUERY.equalsIgnoreCase(call.getFnName()) || call.getChildren().size() != 2) {
+            return call;
+        }
         ConnectContext connectContext = ConnectContext.get();
         if (connectContext == null || !connectContext.getSessionVariable().isEnableJsonExtractFusion()) {
             return call;
@@ -46,18 +49,16 @@ public class JsonExtractFusionRule extends BottomUpScalarOperatorRewriteRule {
                 SqlModeHelper.MODE_ALLOW_THROW_EXCEPTION)) {
             return call;
         }
-        if (FunctionSet.JSON_QUERY.equalsIgnoreCase(call.getFnName()) && call.getChildren().size() == 2) {
-            ScalarOperator inner = call.getChild(0);
-            ScalarOperator path = call.getChild(1);
-            if (isParseJsonOverVarchar(inner) && isConstStringPath(path)) {
-                ScalarOperator x = inner.getChild(0);
-                Type[] argTypes = new Type[] {x.getType(), path.getType()};
-                Function fn = ExprUtils.getBuiltinFunction(FunctionSet.JSON_QUERY_FROM_STRING, argTypes,
-                        Function.CompareMode.IS_IDENTICAL);
-                if (fn != null) {
-                    return new CallOperator(fn.functionName(), JsonType.JSON,
-                            Lists.newArrayList(x, path), fn);
-                }
+        ScalarOperator inner = call.getChild(0);
+        ScalarOperator path = call.getChild(1);
+        if (isParseJsonOverVarchar(inner) && isConstStringPath(path)) {
+            ScalarOperator x = inner.getChild(0);
+            Type[] argTypes = new Type[] {x.getType(), path.getType()};
+            Function fn = ExprUtils.getBuiltinFunction(FunctionSet.JSON_QUERY_FROM_STRING, argTypes,
+                    Function.CompareMode.IS_IDENTICAL);
+            if (fn != null) {
+                return new CallOperator(fn.functionName(), JsonType.JSON,
+                        Lists.newArrayList(x, path), fn);
             }
         }
         return call;

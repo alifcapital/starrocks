@@ -138,9 +138,17 @@ public class OptimizerTraceUtil {
      * Used for mv preprocessor log, the log would be print into the query profile.
      */
     public static void logMVRewriteFailReason(String mvName, String format, Object... objects) {
-        String str = MessageFormatter.arrayFormat(format, objects).getMessage();
-        Tracers.reasoning(Tracers.Module.MV, "MV rewrite fail for {}: {} ", mvName, str);
+        if (isMVReasoningEnabled()) {
+            String str = MessageFormatter.arrayFormat(format, objects).getMessage();
+            Tracers.reasoning(Tracers.Module.MV, "MV rewrite fail for {}: {} ", mvName, str);
+        }
         logMVRewrite(mvName, format, objects);
+    }
+
+    // Formatting the arguments of a fail reason calls toString on operators and collections, so we only do it
+    // when the reasoning tracer would actually keep the text.
+    private static boolean isMVReasoningEnabled() {
+        return Tracers.isSetTraceMode(Tracers.Mode.REASON) && Tracers.isSetTraceModule(Tracers.Module.MV);
     }
 
     /**
@@ -148,11 +156,13 @@ public class OptimizerTraceUtil {
      */
     public static void logMVRewriteFailReason(MvRewriteContext mvContext, String format, Object... objects) {
         final String mvName = mvContext.getMVName();
-        final String str = MessageFormatter.arrayFormat(format, objects).getMessage();
-        final OptimizerContext optimizerContext = mvContext.getMaterializationContext().getOptimizerContext();
-        final String memoPhase = optimizerContext.isInMemoPhase() ? "CBO" : "RBO";
-        final String stage = optimizerContext.getQueryMaterializationContext().getCurrentRewriteStage().name();
-        Tracers.reasoning(Tracers.Module.MV, "[{}] [{}] MV rewrite fail for {}: {} ", memoPhase, stage, mvName, str);
+        if (isMVReasoningEnabled()) {
+            final String str = MessageFormatter.arrayFormat(format, objects).getMessage();
+            final OptimizerContext optimizerContext = mvContext.getMaterializationContext().getOptimizerContext();
+            final String memoPhase = optimizerContext.isInMemoPhase() ? "CBO" : "RBO";
+            final String stage = optimizerContext.getQueryMaterializationContext().getCurrentRewriteStage().name();
+            Tracers.reasoning(Tracers.Module.MV, "[{}] [{}] MV rewrite fail for {}: {} ", memoPhase, stage, mvName, str);
+        }
         logMVRewrite(mvName, format, objects);
     }
 

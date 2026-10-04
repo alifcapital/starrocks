@@ -83,13 +83,14 @@ public class JoinCommutativityRule extends TransformationRule {
             return Collections.emptyList();
         }
 
-        List<OptExpression> newChildren = Lists.newArrayList(input.inputAt(1), input.inputAt(0));
+        OptExpression rightChild = input.inputAt(1);
+        OptExpression leftChild = input.inputAt(0);
 
         LogicalJoinOperator newJoin = new LogicalJoinOperator.Builder().withOperator(oldJoin)
                 .setJoinType(commuteMap.get(oldJoin.getJoinType()))
                 .setTransformMask(oldJoin.getTransformMask() | JoinReorderProperty.COMMUTATIVITY_MASK)
                 .build();
-        OptExpression result = OptExpression.create(newJoin, newChildren);
+        OptExpression result = OptExpression.create(newJoin, rightChild, leftChild);
         return Lists.newArrayList(result);
     }
 

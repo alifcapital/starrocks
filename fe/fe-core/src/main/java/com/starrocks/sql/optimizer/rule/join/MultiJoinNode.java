@@ -142,10 +142,11 @@ public class MultiJoinNode {
         ColumnRefSet leftChildColumns = node.inputAt(0).getOutputColumns();
         ColumnRefSet rightChildColumns = node.inputAt(1).getOutputColumns();
         return joinOperator.getProjection().getColumnRefMap().values().stream().anyMatch(expression -> {
+            if (expression.isColumnRef()) {
+                return false;
+            }
             ColumnRefSet usedColumns = expression.getUsedColumns();
-            return !expression.isColumnRef()
-                    && usedColumns.isIntersect(leftChildColumns)
-                    && usedColumns.isIntersect(rightChildColumns);
+            return usedColumns.isIntersect(leftChildColumns) && usedColumns.isIntersect(rightChildColumns);
         });
     }
 

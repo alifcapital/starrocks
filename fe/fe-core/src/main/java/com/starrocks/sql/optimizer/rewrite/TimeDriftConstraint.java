@@ -30,6 +30,7 @@ import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.TimestampArithmeticExpr;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -40,6 +41,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class TimeDriftConstraint {
@@ -187,6 +189,15 @@ public class TimeDriftConstraint {
     public static ScalarOperator tryAddDerivedPredicates(ScalarOperator predicate,
                                                          Table table,
                                                          Map<String, ColumnRefOperator> columnNameToColumnRefMap) {
+        return tryAddDerivedPredicatesWithColumns(predicate, table, () -> columnNameToColumnRefMap);
+    }
+
+    public static ScalarOperator tryAddDerivedPredicates(ScalarOperator predicate, LogicalScanOperator scan) {
+        return tryAddDerivedPredicatesWithColumns(predicate, scan.getTable(), scan::getColumnNameToColRefMap);
+    }
+
+    private static ScalarOperator tryAddDerivedPredicatesWithColumns(
+            ScalarOperator predicate, Table table, Supplier<Map<String, ColumnRefOperator>> columns) {
         if (!(table instanceof OlapTable)) {
             return predicate;
         }
@@ -207,6 +218,7 @@ public class TimeDriftConstraint {
             return predicate;
         }
 
+        Map<String, ColumnRefOperator> columnNameToColumnRefMap = columns.get();
         if (!columnNameToColumnRefMap.containsKey(timeDriftConstraint.getTargetColumn()) ||
                 !columnNameToColumnRefMap.containsKey(timeDriftConstraint.getReferenceColumn())) {
             return predicate;

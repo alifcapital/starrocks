@@ -20,6 +20,7 @@ import com.starrocks.catalog.FunctionName;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.OperatorType;
+import com.starrocks.sql.optimizer.operator.scalar.ArrayOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
@@ -30,6 +31,7 @@ import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
+import com.starrocks.type.ArrayType;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
@@ -52,6 +54,51 @@ public class FoldConstantsRuleTest {
     private static final ConstantOperator OB_TRUE = ConstantOperator.createBoolean(true);
     private static final ConstantOperator OB_FALSE = ConstantOperator.createBoolean(false);
     private static final ConstantOperator OB_NULL = ConstantOperator.createNull(BooleanType.BOOLEAN);
+
+    @Test
+    public void testCaseInsensitiveArrayDispatchAndNullPropagation() {
+        ArrayType arrayType = new ArrayType(IntegerType.INT);
+        ArrayOperator array = new ArrayOperator(arrayType, false,
+                Lists.newArrayList(ConstantOperator.createInt(1), ConstantOperator.createInt(2)));
+        for (FoldConstantsRule foldingRule : Lists.newArrayList(rule, new FoldConstantsRule(true))) {
+            CallOperator length = new CallOperator("ArRaY_LeNgTh", IntegerType.INT, Lists.newArrayList(array));
+            assertEquals(ConstantOperator.createInt(2), foldingRule.apply(length, null));
+            CallOperator nullCall = new CallOperator("ArRaY_SoRt", arrayType,
+                    Lists.newArrayList(ConstantOperator.createNull(arrayType)));
+            assertEquals(ConstantOperator.createNull(arrayType), foldingRule.apply(nullCall, null));
+            CallOperator unrelated = new CallOperator("unrelated_function", IntegerType.INT,
+                    Lists.newArrayList(ConstantOperator.createNull(IntegerType.INT),
+                            new ColumnRefOperator(1, IntegerType.INT, "col", true)));
+            assertEquals(unrelated, foldingRule.apply(unrelated, null));
+        }
+    }
+
+    @Test
+    public void testArrayHandlersUseCurrentRuleReceiver() {
+        FoldConstantsRule unequalRule = new FoldConstantsRule(true) {
+            @Override
+            boolean constantEqual(ScalarOperator lhs, ScalarOperator rhs) {
+                return false;
+            }
+        };
+        ArrayOperator array = new ArrayOperator(new ArrayType(IntegerType.INT), false,
+                Lists.newArrayList(ConstantOperator.createInt(1)));
+        CallOperator contains = new CallOperator("ArRaY_CoNtAiNs", BooleanType.BOOLEAN,
+                Lists.newArrayList(array, ConstantOperator.createInt(1)));
+        assertEquals(OB_TRUE, rule.apply(contains, null));
+        assertEquals(OB_FALSE, unequalRule.apply(contains, null));
+        assertEquals(OB_TRUE, rule.apply(contains, null));
+    }
+
+    @Test
+    public void testMonotonicModePreservedForOtherFunctions() {
+        Function fn = new Function(new FunctionName(FunctionSet.CONCAT),
+                new Type[] {VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        CallOperator concat = new CallOperator(FunctionSet.CONCAT, VarcharType.VARCHAR,
+                Lists.newArrayList(ConstantOperator.createVarchar("a"), ConstantOperator.createVarchar("b")), fn);
+        assertEquals(ConstantOperator.createVarchar("ab"), rule.apply(concat, null));
+        assertEquals(concat, new FoldConstantsRule(true).apply(concat, null));
+    }
 
     @Test
     public void applyCall() {

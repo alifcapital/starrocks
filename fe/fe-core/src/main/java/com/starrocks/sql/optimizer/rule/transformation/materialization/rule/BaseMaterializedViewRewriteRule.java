@@ -85,7 +85,12 @@ public abstract class BaseMaterializedViewRewriteRule extends TransformationRule
         if (input.getInputs().isEmpty()) {
             return true;
         }
-        return input.getInputs().stream().allMatch(this::checkOlapScanWithoutTabletOrPartitionHints);
+        for (OptExpression child : input.getInputs()) {
+            if (!checkOlapScanWithoutTabletOrPartitionHints(child)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -173,9 +178,13 @@ public abstract class BaseMaterializedViewRewriteRule extends TransformationRule
         // 2. prune candidate mvs
         mvCandidateContexts = doPrune(queryExpression, context, mvCandidateContexts);
         // Order all candidate mvs by priority so can be rewritten fast.
-        MaterializationContext.RewriteOrdering ordering =
-                new MaterializationContext.RewriteOrdering(queryExpression, context.getColumnRefFactory());
-        mvCandidateContexts.sort(ordering);
+        // The ordering only compares two candidates and its construction is costly for an aggregate query,
+        // so we build it only when there are at least two candidates.
+        if (mvCandidateContexts.size() > 1) {
+            MaterializationContext.RewriteOrdering ordering =
+                    new MaterializationContext.RewriteOrdering(queryExpression, context.getColumnRefFactory());
+            mvCandidateContexts.sort(ordering);
+        }
         int numCandidates = context.getSessionVariable().getCboMaterializedViewRewriteCandidateLimit();
         if (numCandidates > 0 && mvCandidateContexts.size() > numCandidates) {
             logMVRewrite(context, this, "too many MV candidates, truncate them to " + numCandidates);
@@ -184,8 +193,10 @@ public abstract class BaseMaterializedViewRewriteRule extends TransformationRule
         if (mvCandidateContexts.isEmpty()) {
             return Lists.newArrayList();
         }
-        logMVRewrite(context, this, "MV Candidates: {}",
-                mvCandidateContexts.stream().map(x -> x.getMv().getName()).collect(Collectors.toList()));
+        if (Tracers.isSetTraceModule(Tracers.Module.MV)) {
+            logMVRewrite(context, this, "MV Candidates: {}",
+                    mvCandidateContexts.stream().map(x -> x.getMv().getName()).collect(Collectors.toList()));
+        }
 
         // 3. do rewrite with associated mvs
         return doTransform(mvCandidateContexts, queryExpression, context);

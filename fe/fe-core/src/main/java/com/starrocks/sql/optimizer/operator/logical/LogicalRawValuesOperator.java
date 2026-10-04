@@ -14,7 +14,7 @@
 
 package com.starrocks.sql.optimizer.operator.logical;
 
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -88,7 +88,7 @@ public class LogicalRawValuesOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         ColumnRefSet columnRefSet = new ColumnRefSet();
         for (ColumnRefOperator columnRef : this.columnRefSet) {
             columnRefSet.union(columnRef);

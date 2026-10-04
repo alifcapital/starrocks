@@ -39,6 +39,13 @@ public abstract class JoinImplementationRule extends ImplementationRule {
                 Utils.extractConjuncts(joinOperator.getOnPredicate()));
     }
 
+    protected boolean hasEqPredicate(OptExpression input, OptimizerContext context) {
+        ColumnRefSet leftChildColumns = input.inputAt(0).getLogicalProperty().getOutputColumns();
+        ColumnRefSet rightChildColumns = input.inputAt(1).getLogicalProperty().getOutputColumns();
+        LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
+        return JoinHelper.hasEqualsPredicate(leftChildColumns, rightChildColumns, joinOperator.getOnPredicate());
+    }
+
     protected JoinOperator getJoinType(OptExpression input) {
         LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
         return joinOperator.getJoinType();

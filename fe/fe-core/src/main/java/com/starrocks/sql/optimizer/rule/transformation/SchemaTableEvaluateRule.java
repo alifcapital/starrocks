@@ -99,9 +99,12 @@ public class SchemaTableEvaluateRule extends TransformationRule {
                 .collect(Collectors.toList());
 
         // Reorder the values according to output index
-        List<List<ScalarOperator>> reorderedValues = Lists.newArrayList();
+        List<List<ScalarOperator>> reorderedValues = Lists.newArrayListWithCapacity(values.size());
         for (List<ScalarOperator> row : values) {
-            List<ScalarOperator> result = outputIndex.stream().map(row::get).collect(Collectors.toList());
+            List<ScalarOperator> result = Lists.newArrayListWithCapacity(outputIndex.size());
+            for (Integer index : outputIndex) {
+                result.add(row.get(index));
+            }
             reorderedValues.add(result);
         }
 

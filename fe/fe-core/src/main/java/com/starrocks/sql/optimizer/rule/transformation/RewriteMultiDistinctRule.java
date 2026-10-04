@@ -63,6 +63,20 @@ public class RewriteMultiDistinctRule extends TransformationRule {
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
 
+        // Without a second distinct function only the complex constant count distinct case below can apply.
+        int distinctCallCount = 0;
+        for (CallOperator call : agg.getAggregations().values()) {
+            if (call.isDistinct() && ++distinctCallCount == 2) {
+                break;
+            }
+        }
+        if (distinctCallCount == 0) {
+            return false;
+        }
+        if (distinctCallCount == 1) {
+            return isComplexConstantCountDistinct(input);
+        }
+
         // any aggregate function is distinct and constant, we replace it to any_value
         if (isComplexConstantCountDistinct(input)) {
             return true;
@@ -214,8 +228,8 @@ public class RewriteMultiDistinctRule extends TransformationRule {
         }
 
         double inputRowCount = inputStatistics.getOutputRowCount();
-        List<Double> deduplicateOutputRows = Lists.newArrayList();
-        List<Double> distinctValueCounts = Lists.newArrayList();
+        boolean allDistinctCountsSmall = true;
+        boolean allDeduplicatedRowsSmall = true;
         for (CallOperator callOperator : distinctAggOperatorList) {
             List<ColumnRefOperator> distinctColumns = callOperator.getColumnRefs();
             if (distinctColumns.isEmpty()) {
@@ -224,15 +238,17 @@ public class RewriteMultiDistinctRule extends TransformationRule {
             Set<ColumnRefOperator> deduplicateKeys = Sets.newHashSet();
             deduplicateKeys.addAll(aggOp.getGroupingKeys());
             deduplicateKeys.addAll(distinctColumns);
-            deduplicateOutputRows.add(StatisticsCalculator.computeGroupByStatistics(Lists.newArrayList(deduplicateKeys),
-                    inputStatistics, Maps.newHashMap()));
-            distinctValueCounts.add(inputStatistics.getColumnStatistics().get(distinctColumns.get(0)).getDistinctValuesCount());
+            double deduplicatedRows = StatisticsCalculator.computeGroupByStatistics(Lists.newArrayList(deduplicateKeys),
+                    inputStatistics, Maps.newHashMap());
+            double distinctCount = inputStatistics.getColumnStatistics().get(distinctColumns.get(0)).getDistinctValuesCount();
+            allDistinctCountsSmall &= distinctCount < MEDIUM_AGGREGATE_EFFECT_COEFFICIENT;
+            allDeduplicatedRowsSmall &= deduplicatedRows * LOW_AGGREGATE_EFFECT_COEFFICIENT < inputRowCount;
         }
 
-        if (distinctValueCounts.stream().allMatch(d -> d < MEDIUM_AGGREGATE_EFFECT_COEFFICIENT)) {
+        if (allDistinctCountsSmall) {
             // distinct key with an extreme low cardinality use multi_distinct_func maybe more efficient
             return false;
-        } else if (deduplicateOutputRows.stream().allMatch(row -> row * LOW_AGGREGATE_EFFECT_COEFFICIENT < inputRowCount)) {
+        } else if (allDeduplicatedRowsSmall) {
             return false;
         }
         return true;

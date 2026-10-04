@@ -20,7 +20,6 @@ import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvPlanContext;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -86,15 +85,15 @@ public class MVCorrelation implements Comparable<MVCorrelation> {
 
     public static long getMvQueryIntersectedTableNum(List<BaseTableInfo> baseTableInfos,
                                                      Set<String> queryTableNames) {
-        return baseTableInfos.stream()
-                .filter(baseTableInfo -> {
-                    String baseTableName = baseTableInfo.getTableName();
-                    // assert not null
-                    if (Strings.isNullOrEmpty(baseTableName)) {
-                        return false;
-                    }
-                    return queryTableNames.contains(baseTableName);
-                }).count();
+        long count = 0;
+        for (BaseTableInfo baseTableInfo : baseTableInfos) {
+            String baseTableName = baseTableInfo.getTableName();
+            // assert not null
+            if (!Strings.isNullOrEmpty(baseTableName) && queryTableNames.contains(baseTableName)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public static int getMvQueryScanOpDiff(List<MvPlanContext> planContexts,
@@ -104,11 +103,16 @@ public class MVCorrelation implements Comparable<MVCorrelation> {
         if (planContexts == null || planContexts.isEmpty()) {
             return diff;
         }
-        return planContexts.stream()
-                .map(mvPlanContext -> mvPlanContext.getMvScanOpNum())
-                .map(num -> Math.abs(queryScanOpNum - num))
-                .min(Comparator.comparing(Integer::intValue))
-                .orElse(diff);
+        int minDiff = 0;
+        boolean first = true;
+        for (MvPlanContext mvPlanContext : planContexts) {
+            int planDiff = Math.abs(queryScanOpNum - mvPlanContext.getMvScanOpNum());
+            if (first || planDiff < minDiff) {
+                minDiff = planDiff;
+                first = false;
+            }
+        }
+        return first ? diff : minDiff;
     }
 
     /**

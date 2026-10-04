@@ -272,10 +272,11 @@ public class QuantifiedApply2OuterJoinRule extends TransformationRule {
             inPredicate = (BinaryPredicateOperator) inPredRewriter.rewrite(inPredicate);
 
             // update used columns
-            Preconditions.checkState(inPredRewriter.getColumnRefToExprMap().keySet().size() == 1);
-            inPredicateUsedRefs = new ColumnRefSet(inPredRewriter.getColumnRefToExprMap().keySet());
-            correlationPredicateInnerRefs = new ColumnRefSet(corPredRewriter
-                    .getColumnRefToExprMap().keySet());
+            Map<ColumnRefOperator, ScalarOperator> inColumnRefToExprMap = inPredRewriter.getColumnRefToExprMap();
+            Preconditions.checkState(inColumnRefToExprMap.keySet().size() == 1);
+            inPredicateUsedRefs = new ColumnRefSet(inColumnRefToExprMap.keySet());
+            Map<ColumnRefOperator, ScalarOperator> corColumnRefToExprMap = corPredRewriter.getColumnRefToExprMap();
+            correlationPredicateInnerRefs = new ColumnRefSet(corColumnRefToExprMap.keySet());
 
             // CTE produce filter
             if (null != apply.getPredicate()) {
@@ -287,12 +288,12 @@ public class QuantifiedApply2OuterJoinRule extends TransformationRule {
             }
 
             // CTE produce project
-            if (SubqueryUtils.existNonColumnRef(corPredRewriter.getColumnRefToExprMap().values()) ||
-                    SubqueryUtils.existNonColumnRef(inPredRewriter.getColumnRefToExprMap().values())) {
+            if (SubqueryUtils.existNonColumnRef(corColumnRefToExprMap.values()) ||
+                    SubqueryUtils.existNonColumnRef(inColumnRefToExprMap.values())) {
                 // has function, need project node
                 Map<ColumnRefOperator, ScalarOperator> projectMap = Maps.newHashMap();
-                projectMap.putAll(corPredRewriter.getColumnRefToExprMap());
-                projectMap.putAll(inPredRewriter.getColumnRefToExprMap());
+                projectMap.putAll(corColumnRefToExprMap);
+                projectMap.putAll(inColumnRefToExprMap);
                 projectMap = SubqueryUtils.generateChildOutColumns(cteProduceChild, projectMap, context);
 
                 cteProduceChild = OptExpression.create(new LogicalProjectOperator(projectMap), cteProduceChild);

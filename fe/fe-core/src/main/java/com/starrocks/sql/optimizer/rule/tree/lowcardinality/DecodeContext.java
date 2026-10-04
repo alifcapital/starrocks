@@ -35,7 +35,6 @@ import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -111,6 +110,20 @@ class DecodeContext {
         rewriteStringAggregations();
     }
 
+    // true when the list is non-empty and all its elements are the same column ref
+    static boolean isSingleDistinctRef(List<ColumnRefOperator> refs) {
+        if (refs.isEmpty()) {
+            return false;
+        }
+        ColumnRefOperator first = refs.get(0);
+        for (int i = 1; i < refs.size(); i++) {
+            if (!refs.get(i).equals(first)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private ColumnRefOperator getUseStringRef(ScalarOperator operator) {
         if (operator.isColumnRef()) {
             return (ColumnRefOperator) operator;
@@ -119,7 +132,7 @@ class DecodeContext {
         if (useStringRefs.isEmpty()) {
             return null;
         }
-        Preconditions.checkState(useStringRefs.stream().distinct().count() == 1);
+        Preconditions.checkState(isSingleDistinctRef(useStringRefs));
         return useStringRefs.get(0);
     }
 
@@ -137,8 +150,9 @@ class DecodeContext {
         }
 
         // rewrite string column define expression
-        for (Integer stringId : stringRefToDefineExprMap.keySet()) {
-            ScalarOperator stringDefineExpr = stringRefToDefineExprMap.get(stringId);
+        for (Map.Entry<Integer, ScalarOperator> defineEntry : stringRefToDefineExprMap.entrySet()) {
+            Integer stringId = defineEntry.getKey();
+            ScalarOperator stringDefineExpr = defineEntry.getValue();
             ColumnRefOperator stringRef = factory.getColumnRef(stringId);
             ColumnRefOperator dictRef = stringRefToDictRefMap.get(stringRef);
 
@@ -148,7 +162,7 @@ class DecodeContext {
                 useStringRef = (ColumnRefOperator) stringDefineExpr;
             } else {
                 List<ColumnRefOperator> useStringRefs = stringDefineExpr.getColumnRefs();
-                Preconditions.checkState(useStringRefs.stream().distinct().count() == 1);
+                Preconditions.checkState(isSingleDistinctRef(useStringRefs));
                 useStringRef = useStringRefs.get(0);
             }
             // return type is dict
@@ -207,10 +221,10 @@ class DecodeContext {
     private void rewriteStringExpressions() {
         // rewrite string expression
         DictExprRewrite exprRewriter = new DictExprRewrite();
-        for (Integer stringId : stringExprsMap.keySet()) {
-            ColumnRefOperator stringRef = factory.getColumnRef(stringId);
+        for (Map.Entry<Integer, List<ScalarOperator>> stringExprsEntry : stringExprsMap.entrySet()) {
+            ColumnRefOperator stringRef = factory.getColumnRef(stringExprsEntry.getKey());
             ColumnRefOperator dictRef = stringRefToDictRefMap.get(stringRef);
-            for (ScalarOperator stringExpr : stringExprsMap.getOrDefault(stringId, Collections.emptyList())) {
+            for (ScalarOperator stringExpr : stringExprsEntry.getValue()) {
                 if (stringExprToDictExprMap.containsKey(stringExpr)) {
                     continue;
                 }

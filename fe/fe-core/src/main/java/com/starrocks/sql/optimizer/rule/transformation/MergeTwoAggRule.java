@@ -27,6 +27,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.List;
@@ -66,8 +67,10 @@ public class MergeTwoAggRule extends TransformationRule {
                 (LogicalAggregationOperator) input.getInputs().get(0).getInputs().get(0).getOp();
 
         // Only handle column prune, forbidden expression
-        if (!project.getColumnRefMap().entrySet().stream().allMatch(e -> e.getKey().equals(e.getValue()))) {
-            return false;
+        for (Map.Entry<ColumnRefOperator, ScalarOperator> e : project.getColumnRefMap().entrySet()) {
+            if (!e.getKey().equals(e.getValue())) {
+                return false;
+            }
         }
 
         if (aggregateBelow.getPredicate() != null || aggregateBelow.hasLimit()) {
@@ -82,9 +85,10 @@ public class MergeTwoAggRule extends TransformationRule {
         Map<ColumnRefOperator, CallOperator> aggCallMapAbove = aggregateAbove.getAggregations();
         Map<ColumnRefOperator, CallOperator> aggCallMapBelow = aggregateBelow.getAggregations();
 
-        if (!aggCallMapAbove.values().stream().allMatch(
-                c -> c.isAggregate() && c.getUsedColumns().cardinality() == 1 && c.getChild(0).isColumnRef())) {
-            return false;
+        for (CallOperator c : aggCallMapAbove.values()) {
+            if (!(c.isAggregate() && c.getUsedColumns().cardinality() == 1 && c.getChild(0).isColumnRef())) {
+                return false;
+            }
         }
 
         for (CallOperator call : aggCallMapAbove.values()) {
@@ -93,7 +97,8 @@ public class MergeTwoAggRule extends TransformationRule {
                 return false;
             }
 
-            if (!aggCallMapBelow.containsKey(ref)) {
+            CallOperator belowOp = aggCallMapBelow.get(ref);
+            if (belowOp == null) {
                 // max/min on grouping column is equals with direct aggregate on column
                 if (!FunctionSet.MAX.equalsIgnoreCase(call.getFnName()) &&
                         !FunctionSet.MIN.equalsIgnoreCase(call.getFnName()) &&
@@ -101,8 +106,8 @@ public class MergeTwoAggRule extends TransformationRule {
                     return false;
                 }
             } else {
-                if (!aggCallMapBelow.get(ref).getFnName().equalsIgnoreCase(call.getFnName()) ||
-                        aggCallMapBelow.get(ref).isDistinct()) {
+                if (!belowOp.getFnName().equalsIgnoreCase(call.getFnName()) ||
+                        belowOp.isDistinct()) {
                     return false;
                 }
             }
@@ -132,7 +137,7 @@ public class MergeTwoAggRule extends TransformationRule {
                 newFn = new CallOperator(fn.getFnName(), fn.getType(), belowOp.getChildren(),
                         belowOp.getFunction(), fn.isDistinct());
             } else {
-                newFn = new CallOperator(fn.getFnName(), fn.getType(), Lists.newArrayList(ref), fn.getFunction(),
+                newFn = new CallOperator(fn.getFnName(), fn.getType(), List.of(ref), fn.getFunction(),
                         fn.isDistinct());
             }
 

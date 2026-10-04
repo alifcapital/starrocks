@@ -21,7 +21,6 @@ import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
-import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
@@ -30,9 +29,11 @@ import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Set;
 
@@ -171,20 +172,33 @@ public class OuterJoinEliminationRule extends TransformationRule {
             return true;
         }
 
-        List<ScalarOperator> conditions = Utils.extractConjuncts(joinCondition);
-        for (ScalarOperator condition : conditions) {
+        ArrayDeque<ScalarOperator> pending = null;
+        ScalarOperator condition = joinCondition;
+        while (true) {
+            if (OperatorType.COMPOUND.equals(condition.getOpType())) {
+                CompoundPredicateOperator compound = (CompoundPredicateOperator) condition;
+                if (compound.isAnd()) {
+                    if (pending == null) {
+                        pending = new ArrayDeque<>();
+                    }
+                    pending.addLast(compound.getChild(1));
+                    condition = compound.getChild(0);
+                    continue;
+                }
+            }
             if (!(condition instanceof BinaryPredicateOperator binary)) {
                 return false;
             }
-
             if (!binary.getBinaryType().equals(BinaryType.EQ)) {
                 return false;
             }
-
             if (!binary.getChild(0).isColumnRef() || !binary.getChild(1).isColumnRef()) {
                 return false;
             }
+            if (pending == null || pending.isEmpty()) {
+                return true;
+            }
+            condition = pending.removeLast();
         }
-        return true;
     }
 }

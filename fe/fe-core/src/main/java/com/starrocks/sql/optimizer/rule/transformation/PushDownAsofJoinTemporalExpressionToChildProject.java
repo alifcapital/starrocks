@@ -33,8 +33,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * Push down ASOF temporal expressions to child Projects for ASOF Join optimization.
@@ -113,10 +111,12 @@ public class PushDownAsofJoinTemporalExpressionToChildProject extends Transforma
         Map<ColumnRefOperator, ScalarOperator> leftProjectMap = new HashMap<>();
         Map<ColumnRefOperator, ScalarOperator> rightProjectMap = new HashMap<>();
 
-        boolean lhsOnLeft = leftCols.containsAll(lhs.getUsedColumns());
-        boolean lhsOnRight = rightCols.containsAll(lhs.getUsedColumns());
-        boolean rhsOnRight = rightCols.containsAll(rhs.getUsedColumns());
-        boolean rhsOnLeft = leftCols.containsAll(rhs.getUsedColumns());
+        ColumnRefSet lhsUsedColumns = lhs.getUsedColumns();
+        ColumnRefSet rhsUsedColumns = rhs.getUsedColumns();
+        boolean lhsOnLeft = leftCols.containsAll(lhsUsedColumns);
+        boolean lhsOnRight = rightCols.containsAll(lhsUsedColumns);
+        boolean rhsOnRight = rightCols.containsAll(rhsUsedColumns);
+        boolean rhsOnLeft = leftCols.containsAll(rhsUsedColumns);
 
         if ((lhsOnLeft && lhsOnRight) || (rhsOnLeft && rhsOnRight)) {
             return Collections.emptyList();
@@ -138,27 +138,27 @@ public class PushDownAsofJoinTemporalExpressionToChildProject extends Transforma
             return Collections.emptyList();
         }
 
-        Rewriter leftRewriter = new Rewriter(leftProjectMap);
-        Rewriter rightRewriter = new Rewriter(rightProjectMap);
-        ScalarOperator newOn = on.clone().accept(leftRewriter, null).accept(rightRewriter, null);
+        ScalarOperator newOn = on.clone();
+        if (!leftProjectMap.isEmpty()) {
+            newOn = newOn.accept(new Rewriter(leftProjectMap), null);
+        }
+        if (!rightProjectMap.isEmpty()) {
+            newOn = newOn.accept(new Rewriter(rightProjectMap), null);
+        }
 
         OptExpression newJoin = OptExpression.create(new LogicalJoinOperator.Builder().withOperator(join)
                 .setOnPredicate(newOn)
                 .build(), input.getInputs());
 
         if (!leftProjectMap.isEmpty()) {
-            leftProjectMap.putAll(leftCols.getStream()
-                    .map(id -> context.getColumnRefFactory().getColumnRef(id))
-                    .collect(Collectors.toMap(Function.identity(), Function.identity())));
+            leftProjectMap.putAll(context.getColumnRefFactory().getIdentityColumnRefMap(leftCols));
             LogicalProjectOperator leftProject = new LogicalProjectOperator(leftProjectMap);
             OptExpression leftProjOpt = OptExpression.create(leftProject, input.inputAt(0));
             newJoin.setChild(0, leftProjOpt);
         }
 
         if (!rightProjectMap.isEmpty()) {
-            rightProjectMap.putAll(rightCols.getStream()
-                    .map(id -> context.getColumnRefFactory().getColumnRef(id))
-                    .collect(Collectors.toMap(Function.identity(), Function.identity())));
+            rightProjectMap.putAll(context.getColumnRefFactory().getIdentityColumnRefMap(rightCols));
             LogicalProjectOperator rightProject = new LogicalProjectOperator(rightProjectMap);
             OptExpression rightProjOpt = OptExpression.create(rightProject, input.inputAt(1));
             newJoin.setChild(1, rightProjOpt);
@@ -170,16 +170,17 @@ public class PushDownAsofJoinTemporalExpressionToChildProject extends Transforma
     private static ScalarOperator findSingleAsofTemporalPredicate(List<ScalarOperator> otherJoin,
                                                                   ColumnRefSet leftColumns,
                                                                   ColumnRefSet rightColumns) {
-        List<ScalarOperator> candidates = Lists.newArrayList();
+        ScalarOperator candidate = null;
+        int candidateCount = 0;
         for (ScalarOperator p : otherJoin) {
             if (JoinHelper.isValidAsofTemporalPredicate(p, leftColumns, rightColumns)) {
-                candidates.add(p);
+                if (candidateCount == 0) {
+                    candidate = p;
+                }
+                candidateCount++;
             }
         }
-        if (candidates.size() != 1) {
-            return null;
-        }
-        return candidates.get(0);
+        return candidateCount == 1 ? candidate : null;
     }
 
     static class Rewriter extends ScalarOperatorVisitor<ScalarOperator, Void> {
@@ -193,8 +194,9 @@ public class PushDownAsofJoinTemporalExpressionToChildProject extends Transforma
 
         @Override
         public ScalarOperator visit(ScalarOperator scalarOperator, Void context) {
-            if (operatorMap.containsKey(scalarOperator)) {
-                return operatorMap.get(scalarOperator);
+            ColumnRefOperator replacement = operatorMap.get(scalarOperator);
+            if (replacement != null) {
+                return replacement;
             }
             for (int i = 0; i < scalarOperator.getChildren().size(); ++i) {
                 scalarOperator.setChild(i, scalarOperator.getChild(i).accept(this, null));

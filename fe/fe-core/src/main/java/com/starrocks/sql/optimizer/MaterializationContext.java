@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvUpdateInfo;
@@ -46,12 +45,12 @@ import org.apache.commons.collections4.SetUtils;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.starrocks.catalog.TableProperty.QueryRewriteConsistencyMode.CHECKED;
@@ -290,8 +289,7 @@ public class MaterializationContext {
         final ConnectContext connectContext = ctx.getConnectContext();
 
         // if a query has been applied this mv, return false directly.
-        List<LogicalScanOperator> scanOperators = MvUtils.getScanOperator(queryExpression);
-        if (scanOperators.stream().anyMatch(op -> op.isOpAppliedMV(mv.getId()))) {
+        if (isAppliedInScanOperators(queryExpression, mv.getId())) {
             logMVRewrite1(connectContext, mvName, "mv pruned: mv has been applied in query scan operators");
             return false;
         }
@@ -305,21 +303,7 @@ public class MaterializationContext {
         // Only care MatchMode.COMPLETE and VIEW_DELTA here, QUERY_DELTA also can be supported
         // because optimizer will match MV's pattern which is subset of query opt tree
         // from top-down iteration.
-        if (matchMode == MaterializedViewRewriter.MatchMode.COMPLETE) {
-            // Q  : A JOIN B JOIN C JOIN D
-            // MV : A JOIN B JOIN C
-            // To fast rewrite, only need to check `A JOIN B JOIN C` pattern rather than
-            // `A JOIN B JOIN C JOIN D`.
-            if (!optimizerContext.getSessionVariable().isEnableMaterializedViewRewriteGreedyMode()) {
-                for (OptExpression child : queryExpression.getInputs()) {
-                    final List<Table> childTables = MvUtils.getAllTables(child);
-                    if (Sets.newHashSet(childTables).contains(mvTables)) {
-                        logMVRewrite(mvName, "mv pruned: MV is pruned since subjoin could be rewritten");
-                        return false;
-                    }
-                }
-            }
-        } else if (matchMode == MaterializedViewRewriter.MatchMode.VIEW_DELTA) {
+        if (matchMode == MaterializedViewRewriter.MatchMode.VIEW_DELTA) {
             if (!optimizerContext.getSessionVariable().isEnableMaterializedViewViewDeltaRewrite()) {
                 return false;
             }
@@ -352,7 +336,7 @@ public class MaterializationContext {
                     return false;
                 }
             }
-        } else {
+        } else if (matchMode != MaterializedViewRewriter.MatchMode.COMPLETE) {
             return false;
         }
 
@@ -364,11 +348,27 @@ public class MaterializationContext {
         return true;
     }
 
+    private static boolean isAppliedInScanOperators(OptExpression root, long mvId) {
+        if (root.getOp() instanceof LogicalScanOperator) {
+            return root.getOp().isOpAppliedMV(mvId);
+        }
+        for (OptExpression child : root.getInputs()) {
+            if (isAppliedInScanOperators(child, mvId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static class RewriteOrdering implements Comparator<MaterializationContext> {
 
         private static final int LOWEST_ORDERING = 100;
         private final OptExpression query;
         private Set<String> queryDimensionNames;
+        // A sort calls compare O(n log n) times, and the per-mv keys below (a dimension name set and a scan over
+        // all partitions) do not change while sorting, so we compute each of them once per mv.
+        private final Map<MaterializationContext, Integer> aggregationOrderings = new IdentityHashMap<>();
+        private final Map<MaterializationContext, Long> rowCounts = new IdentityHashMap<>();
 
         public RewriteOrdering(OptExpression query, ColumnRefFactory factory) {
             this.query = query;
@@ -401,6 +401,10 @@ public class MaterializationContext {
          * Prefer MV with similar dimensions
          */
         private int orderingAggregation(MaterializationContext mv) {
+            return aggregationOrderings.computeIfAbsent(mv, this::computeOrderingAggregation);
+        }
+
+        private int computeOrderingAggregation(MaterializationContext mv) {
             if (mv.getMvExpression().getOp().getOpType() == OperatorType.LOGICAL_AGGR) {
                 // TODO: consider moving the dimension extraction to MV prepare
                 LogicalAggregationOperator aggregation = (LogicalAggregationOperator) mv.getMvExpression().getOp();
@@ -471,7 +475,11 @@ public class MaterializationContext {
         /**
          * Prefer small table to large table
          */
-        private static long orderingRowCount(MaterializationContext mvContext) {
+        private long orderingRowCount(MaterializationContext mvContext) {
+            return rowCounts.computeIfAbsent(mvContext, RewriteOrdering::computeOrderingRowCount);
+        }
+
+        private static long computeOrderingRowCount(MaterializationContext mvContext) {
             // prefer max partition row count to mv's total row count,
             // eg: a mv is with less partitions and smaller total row count but maxPartitionRowCount is larger.
             return mvContext.getMv().getMaxPartitionRowCount();
@@ -496,30 +504,49 @@ public class MaterializationContext {
                 // Actually `BestMvSelector` is the final place to judge which mv is used after rewrite rule.
                 boolean mvHasDifferentRows = orderingRowCount(o1) != 0 && orderingRowCount(o2) != 0
                         && orderingRowCount(o1) != orderingRowCount(o2);
-                return Comparator
-                        .comparing((Function<MaterializationContext, Long>) mv -> {
-                            int r = orderingAggregation(mv);
-                            if (r > 0 && mvHasDifferentRows) {
-                                return orderingRowCount(mv);
-                            }
-                            return (long) r;
-                        })
-                        .thenComparing(RewriteOrdering::orderingRowCount)
-                        .thenComparing(MaterializationContext::getMVUsedCount)
-                        .thenComparing(this::orderingTimeGranularity)
-                        .compare(o1, o2);
+                int result = Long.compare(orderingAggregationKey(o1, mvHasDifferentRows),
+                        orderingAggregationKey(o2, mvHasDifferentRows));
+                if (result != 0) {
+                    return result;
+                }
+                result = Long.compare(orderingRowCount(o1), orderingRowCount(o2));
+                if (result != 0) {
+                    return result;
+                }
+                result = Long.compare(o1.getMVUsedCount(), o2.getMVUsedCount());
+                if (result != 0) {
+                    return result;
+                }
+                return Integer.compare(orderingTimeGranularity(o1), orderingTimeGranularity(o2));
             } else if (o1Type == o2Type && o1Type == OperatorType.LOGICAL_JOIN) {
-                return Comparator.comparing(RewriteOrdering::orderingIntersectTables)
-                        .thenComparing(RewriteOrdering::orderingRowCount)
-                        .thenComparing(MaterializationContext::getMVUsedCount)
-                        .compare(o1, o2);
+                int result = Integer.compare(orderingIntersectTables(o1), orderingIntersectTables(o2));
+                if (result != 0) {
+                    return result;
+                }
+                result = Long.compare(orderingRowCount(o1), orderingRowCount(o2));
+                if (result != 0) {
+                    return result;
+                }
+                return Long.compare(o1.getMVUsedCount(), o2.getMVUsedCount());
             } else {
-                return Comparator.comparing(((MaterializationContext x) ->
-                                getOperatorOrdering(x.getMvExpression().getOp().getOpType())))
-                        .thenComparing(RewriteOrdering::orderingRowCount)
-                        .thenComparing(MaterializationContext::getMVUsedCount)
-                        .compare(o1, o2);
+                int result = Integer.compare(getOperatorOrdering(o1Type), getOperatorOrdering(o2Type));
+                if (result != 0) {
+                    return result;
+                }
+                result = Long.compare(orderingRowCount(o1), orderingRowCount(o2));
+                if (result != 0) {
+                    return result;
+                }
+                return Long.compare(o1.getMVUsedCount(), o2.getMVUsedCount());
             }
+        }
+
+        private long orderingAggregationKey(MaterializationContext mv, boolean mvHasDifferentRows) {
+            int r = orderingAggregation(mv);
+            if (r > 0 && mvHasDifferentRows) {
+                return orderingRowCount(mv);
+            }
+            return r;
         }
     }
 

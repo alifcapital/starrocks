@@ -120,6 +120,7 @@ public class PushDownAggToMetaScanRule extends TransformationRule {
 
         for (Map.Entry<ColumnRefOperator, CallOperator> kv : aggs.entrySet()) {
             CallOperator aggCall = kv.getValue();
+            ColumnRefSet usedColumns = aggCall.getUsedColumns();
             ColumnRefOperator usedColumn;
 
             String aggFuncName;
@@ -127,15 +128,14 @@ public class PushDownAggToMetaScanRule extends TransformationRule {
             // For count(*) and count(constant), use rows_<column> meta column
             // getUsedColumns().isEmpty() returns true for both count(*) and count(constant)
             // because constants don't produce column references
-            if (aggCall.getFnName().equals(FunctionSet.COUNT) && aggCall.getUsedColumns().isEmpty()) {
+            if (aggCall.getFnName().equals(FunctionSet.COUNT) && usedColumns.isEmpty()) {
                 usedColumn = metaScan.getOutputColumns().get(0);
                 aggFuncName = "rows";
                 metaColumnName = "rows_" + usedColumn.getName();
             } else if (MapUtils.isNotEmpty(project.getColumnRefMap())) {
-                ColumnRefSet usedColumns = aggCall.getUsedColumns();
                 Preconditions.checkArgument(usedColumns.cardinality() == 1);
-                List<ColumnRefOperator> columnRefOperators = usedColumns.getColumnRefOperators(columnRefFactory);
-                ScalarOperator projectValue = project.getColumnRefMap().get(columnRefOperators.get(0));
+                ScalarOperator projectValue = project.getColumnRefMap().get(
+                        columnRefFactory.getColumnRef(usedColumns.getFirstId()));
                 // If Project outputs a constant (e.g., count(1)), treat it as count(*) and use rows_ meta column
                 if (aggCall.getFnName().equals(FunctionSet.COUNT) && projectValue instanceof ConstantOperator) {
                     usedColumn = metaScan.getOutputColumns().get(0);
@@ -147,7 +147,6 @@ public class PushDownAggToMetaScanRule extends TransformationRule {
                     metaColumnName = aggFuncName + "_" + usedColumn.getName();
                 }
             } else {
-                ColumnRefSet usedColumns = aggCall.getUsedColumns();
                 Preconditions.checkArgument(usedColumns.cardinality() == 1);
                 usedColumn = columnRefFactory.getColumnRef(usedColumns.getFirstId());
                 aggFuncName = aggCall.getFnName();

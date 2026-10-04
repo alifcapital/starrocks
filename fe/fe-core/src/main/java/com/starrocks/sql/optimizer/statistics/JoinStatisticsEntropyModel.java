@@ -52,6 +52,7 @@ public final class JoinStatisticsEntropyModel {
     private final int attributes;
     private final int fullMask;
     private final boolean commonKeyStar;
+    private final ShapeCache shapes;
     private final java.util.Set<LinearConstraint> constraints = new java.util.LinkedHashSet<>();
     private final List<int[]> dependencies = new ArrayList<>();
     private boolean empty;
@@ -61,12 +62,17 @@ public final class JoinStatisticsEntropyModel {
     }
 
     private JoinStatisticsEntropyModel(int attributes, boolean commonKeyStar) {
+        this(attributes, commonKeyStar, null);
+    }
+
+    JoinStatisticsEntropyModel(int attributes, boolean commonKeyStar, ShapeCache shapes) {
         if (attributes < 1 || attributes > MAX_ATTRIBUTES) {
             throw new IllegalArgumentException("Unsupported entropy model size");
         }
         this.attributes = attributes;
         this.fullMask = (1 << attributes) - 1;
         this.commonKeyStar = commonKeyStar;
+        this.shapes = shapes;
     }
 
     /**
@@ -175,22 +181,27 @@ public final class JoinStatisticsEntropyModel {
             empty = true;
         } else {
             if (commonKeyStar) {
-                double[] reduced = new double[attributes];
-                for (int mask = 1; mask <= fullMask; mask++) {
-                    reduced[0] += coefficients[mask - 1];
-                    for (int row = 1; row < attributes; row++) {
-                        if ((mask & (1 << row)) != 0) {
-                            reduced[row] += coefficients[mask - 1];
-                        }
-                    }
-                }
-                coefficients = reduced;
+                coefficients = shapes == null ? starCoefficients(attributes, coefficients)
+                        : shapes.reduceStar(attributes, coefficients);
                 if (java.util.Arrays.stream(coefficients).allMatch(coefficient -> coefficient == 0)) {
                     return;
                 }
             }
             constraints.add(new LinearConstraint(coefficients, Relationship.LEQ, Math.log(value) / LOG_2));
         }
+    }
+
+    private static double[] starCoefficients(int attributes, double[] coefficients) {
+        double[] reduced = new double[attributes];
+        for (int mask = 1; mask <= coefficients.length; mask++) {
+            reduced[0] += coefficients[mask - 1];
+            for (int row = 1; row < attributes; row++) {
+                if ((mask & (1 << row)) != 0) {
+                    reduced[row] += coefficients[mask - 1];
+                }
+            }
+        }
+        return reduced;
     }
 
     /** Import constraints, mapping shared row/key identities only once. Never add cardinalities together. */
@@ -223,21 +234,124 @@ public final class JoinStatisticsEntropyModel {
                 coefficients[mapped - 1] += coefficient;
             }
             if (commonKeyStar) {
-                double[] reduced = new double[attributes];
-                for (int mask = 1; mask <= fullMask; mask++) {
-                    reduced[0] += coefficients[mask - 1];
-                    for (int row = 1; row < attributes; row++) {
-                        if ((mask & (1 << row)) != 0) {
-                            reduced[row] += coefficients[mask - 1];
-                        }
-                    }
-                }
-                coefficients = reduced;
+                coefficients = shapes == null ? starCoefficients(attributes, coefficients)
+                        : shapes.reduceStar(attributes, coefficients);
             }
             constraints.add(new LinearConstraint(coefficients, Relationship.LEQ, constraint.getValue()));
             if (constraints.size() > MAX_STATISTIC_CONSTRAINTS) {
                 throw new IllegalArgumentException("Too many composed entropy constraints");
             }
+        }
+    }
+
+    /** Query-local structural templates. Bounds and simplex tableaux are never shared. */
+    static final class ShapeCache {
+        private static final long MAX_BYTES = 4L * 1024 * 1024;
+        private record Key(int attributes, List<Long> dependencies) { }
+        private final Map<Key, Shape> shapes = new LinkedHashMap<>();
+        private record StarKey(int attributes, RealVector row) { }
+        private final Map<StarKey, double[]> starRows = new LinkedHashMap<>();
+
+        double[] reduceStar(int attributes, double[] coefficients) {
+            StarKey key = new StarKey(attributes, new ArrayRealVector(coefficients, false));
+            double[] reduced = starRows.get(key);
+            if (reduced != null) {
+                return reduced;
+            }
+            reduced = starCoefficients(attributes, coefficients);
+            long charge = 192L + 8L * (coefficients.length + reduced.length);
+            if (starRows.size() < 1024 && bytes + charge <= MAX_BYTES) {
+                starRows.put(new StarKey(attributes, key.row().copy()), reduced);
+                bytes += charge;
+            }
+            return reduced;
+        }
+
+        private long bytes;
+
+        private Shape get(JoinStatisticsEntropyModel model) {
+            List<Long> dependencies = model.dependencies.stream()
+                    .map(d -> ((long) d[0] << 32) | (d[1] & 0xffffffffL)).distinct().sorted().toList();
+            Key key = new Key(model.attributes, dependencies);
+            Shape shape = shapes.get(key);
+            if (shape != null) {
+                return shape;
+            }
+            int[] coordinates = model.closureCoordinates();
+            int variables = Arrays.stream(coordinates).max().orElseThrow() + 1;
+            List<LinearConstraint> shannon = quotientConstraints(SHANNON_CONSTRAINTS.computeIfAbsent(model.attributes,
+                    JoinStatisticsEntropyModel::shannonConstraints), coordinates, variables);
+            shape = new Shape(coordinates, variables, shannon);
+            long charge = 256L + 32L * dependencies.size() + 4L * coordinates.length
+                    + (128L + 8L * variables) * shannon.size();
+            if (shapes.size() < 64 && bytes + charge <= MAX_BYTES) {
+                shapes.put(key, shape);
+                bytes += charge;
+                shape.owner = this;
+            }
+            return shape;
+        }
+
+        long estimatedSize() {
+            return bytes;
+        }
+
+        void clear() {
+            shapes.clear();
+            starRows.clear();
+            bytes = 0;
+        }
+    }
+
+    private static final class Shape {
+        private final int[] coordinates;
+        private final int variables;
+        private final List<LinearConstraint> shannon;
+        private final Map<RealVector, RealVector> rows = new LinkedHashMap<>();
+        private ShapeCache owner;
+
+        private Shape(int[] coordinates, int variables, List<LinearConstraint> shannon) {
+            this.coordinates = coordinates;
+            this.variables = variables;
+            this.shannon = shannon;
+        }
+
+        private RealVector reduce(RealVector original) {
+            RealVector reduced = rows.get(original);
+            if (reduced != null) {
+                return reduced;
+            }
+            double[] values = new double[variables];
+            for (int i = 0; i < coordinates.length; i++) {
+                values[coordinates[i]] += original.getEntry(i);
+            }
+            reduced = new ArrayRealVector(values, false);
+            long charge = 192L + 8L * (coordinates.length + variables);
+            if (owner != null && rows.size() < 1024 && owner.bytes + charge <= ShapeCache.MAX_BYTES) {
+                rows.put(original.copy(), reduced);
+                owner.bytes += charge;
+            }
+            return reduced;
+        }
+
+        private List<LinearConstraint> constraints(java.util.Collection<LinearConstraint> dynamic) {
+            Map<RealVector, Double> bounds = new LinkedHashMap<>();
+            for (LinearConstraint constraint : shannon) {
+                bounds.put(constraint.getCoefficients(), constraint.getValue());
+            }
+            for (LinearConstraint constraint : dynamic) {
+                RealVector reduced = reduce(constraint.getCoefficients());
+                boolean nonzero = false;
+                for (int i = 0; i < variables; i++) {
+                    nonzero |= reduced.getEntry(i) != 0;
+                }
+                if (nonzero) {
+                    bounds.merge(reduced, constraint.getValue(), Math::min);
+                }
+            }
+            List<LinearConstraint> result = new ArrayList<>(bounds.size());
+            bounds.forEach((row, bound) -> result.add(new LinearConstraint(row, Relationship.LEQ, bound)));
+            return result;
         }
     }
 
@@ -319,16 +433,25 @@ public final class JoinStatisticsEntropyModel {
             return OptionalDouble.empty();
         }
         long started = System.nanoTime();
-        List<LinearConstraint> all = commonKeyStar ? new ArrayList<>()
-                : new ArrayList<>(SHANNON_CONSTRAINTS.computeIfAbsent(attributes,
-                        JoinStatisticsEntropyModel::shannonConstraints));
-        all.addAll(constraints);
-        int[] coordinates = !commonKeyStar && reduceDependencies && !dependencies.isEmpty()
-                ? closureCoordinates() : null;
+        List<LinearConstraint> all;
+        int[] coordinates = null;
         int variables = commonKeyStar ? attributes : fullMask;
-        if (coordinates != null) {
-            variables = Arrays.stream(coordinates).max().orElseThrow() + 1;
-            all = quotientConstraints(all, coordinates, variables);
+        if (!commonKeyStar && reduceDependencies && !dependencies.isEmpty() && shapes != null) {
+            Shape shape = shapes.get(this);
+            coordinates = shape.coordinates;
+            variables = shape.variables;
+            all = shape.constraints(constraints);
+        } else {
+            all = commonKeyStar ? new ArrayList<>()
+                    : new ArrayList<>(SHANNON_CONSTRAINTS.computeIfAbsent(attributes,
+                            JoinStatisticsEntropyModel::shannonConstraints));
+            all.addAll(constraints);
+            coordinates = !commonKeyStar && reduceDependencies && !dependencies.isEmpty()
+                    ? closureCoordinates() : null;
+            if (coordinates != null) {
+                variables = Arrays.stream(coordinates).max().orElseThrow() + 1;
+                all = quotientConstraints(all, coordinates, variables);
+            }
         }
         double[] coefficients = new double[variables];
         if (commonKeyStar) {

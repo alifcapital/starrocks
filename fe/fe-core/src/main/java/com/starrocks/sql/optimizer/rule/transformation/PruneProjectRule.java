@@ -16,7 +16,7 @@ package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -42,16 +42,14 @@ public class PruneProjectRule extends TransformationRule {
     public boolean check(OptExpression input, OptimizerContext context) {
         Map<ColumnRefOperator, ScalarOperator> projections = ((LogicalProjectOperator) input.getOp()).getColumnRefMap();
 
-        // avoid prune expression
-        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projections.entrySet()) {
-            if (!entry.getKey().equals(entry.getValue())) {
-                return false;
-            }
+        // transform only fills an empty projection; nonempty identity maps cannot change here either.
+        if (!projections.isEmpty()) {
+            return false;
         }
 
         // For count(*), the child output columns maybe empty, we needn't apply this rule
         LogicalOperator logicalOperator = (LogicalOperator) input.inputAt(0).getOp();
-        ColumnRefSet outputColumn = logicalOperator.getOutputColumns(new ExpressionContext(input.inputAt(0)));
+        ColumnRefSet outputColumn = logicalOperator.getOutputColumns(LogicalPropertyContext.of(input.inputAt(0)));
         return outputColumn.cardinality() > 0;
     }
 

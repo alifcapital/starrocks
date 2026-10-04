@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer.rewrite.scalar;
 import com.google.common.collect.ImmutableSet;
 import com.starrocks.common.Pair;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
@@ -160,13 +159,13 @@ public class ConsolidateLikesRule extends TopDownScalarOperatorRewriteRule {
         if (disjuncts.size() < consolidateMin) {
             return Optional.empty();
         }
-        if (disjuncts.stream().filter(ScalarOperatorUtil::isSimpleLike).count() < consolidateMin) {
-            return Optional.empty();
-        }
 
         Map<Boolean, List<ScalarOperator>> disjunctGroups = disjuncts.stream()
                 .collect(Collectors.partitioningBy(ScalarOperatorUtil::isSimpleLike));
         List<ScalarOperator> likeOps = disjunctGroups.get(true);
+        if (likeOps.size() < consolidateMin) {
+            return Optional.empty();
+        }
         List<ScalarOperator> otherDisjuncts = disjunctGroups.get(false);
 
         Map<ColumnRefOperator, List<LikePredicateOperator>> likeOpGroups = likeOps.stream()
@@ -200,13 +199,13 @@ public class ConsolidateLikesRule extends TopDownScalarOperatorRewriteRule {
         if (conjuncts.size() < consolidateMin) {
             return Optional.empty();
         }
-        if (conjuncts.stream().filter(ScalarOperatorUtil::isSimpleNotLike).count() < consolidateMin) {
-            return Optional.empty();
-        }
 
         Map<Boolean, List<ScalarOperator>> conjunctGroups = conjuncts.stream()
                 .collect(Collectors.partitioningBy(ScalarOperatorUtil::isSimpleNotLike));
         List<ScalarOperator> notLikeOps = conjunctGroups.get(true);
+        if (notLikeOps.size() < consolidateMin) {
+            return Optional.empty();
+        }
         List<ScalarOperator> otherConjuncts = conjunctGroups.get(false);
 
         Map<ColumnRefOperator, List<LikePredicateOperator>> likeOpGroups = notLikeOps.stream()
@@ -240,24 +239,45 @@ public class ConsolidateLikesRule extends TopDownScalarOperatorRewriteRule {
         return Optional.of(newConjuncts);
     }
 
+    // Counts the leaves that Utils.extractDisjunctive (or Utils.extractConjuncts) would return and that satisfy
+    // the simple LIKE test, and stops once the count reaches limit.
+    private static int countSimpleLeaves(ScalarOperator op, boolean disjunctive, int limit) {
+        if (op instanceof CompoundPredicateOperator compound && (disjunctive ? compound.isOr() : compound.isAnd())) {
+            int count = countSimpleLeaves(compound.getChild(0), disjunctive, limit);
+            if (count >= limit) {
+                return count;
+            }
+            return count + countSimpleLeaves(compound.getChild(1), disjunctive, limit - count);
+        }
+        return (disjunctive ? ScalarOperatorUtil.isSimpleLike(op) : ScalarOperatorUtil.isSimpleNotLike(op)) ? 1 : 0;
+    }
+
     @Override
     public ScalarOperator visitCompoundPredicate(CompoundPredicateOperator predicate,
                                                  ScalarOperatorRewriteContext context) {
-        int consolidateMin = Optional.ofNullable(ConnectContext.get())
-                .map(ConnectContext::getSessionVariable)
-                .map(SessionVariable::getLikePredicateConsolidateMin)
-                .orElse(0);
+        boolean isOr = predicate.isOr();
+        if (!isOr && !predicate.isAnd()) {
+            return predicate;
+        }
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext == null || connectContext.getSessionVariable() == null) {
+            return predicate;
+        }
+        int consolidateMin = connectContext.getSessionVariable().getLikePredicateConsolidateMin();
         if (consolidateMin < 1) {
             return predicate;
         }
-        if (predicate.isOr()) {
+        // Most compound nodes hold fewer than consolidateMin LIKE leaves, so we count them without building the
+        // leaf list.
+        if (countSimpleLeaves(predicate, isOr, consolidateMin) < consolidateMin) {
+            return predicate;
+        }
+        if (isOr) {
             List<ScalarOperator> disjuncts = Utils.extractDisjunctive(predicate);
             return handleDisjuncts(disjuncts, consolidateMin).map(Utils::compoundOr).orElse(predicate);
-        } else if (predicate.isAnd()) {
+        } else {
             List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
             return handleConjuncts(conjuncts, consolidateMin).map(Utils::compoundAnd).orElse(predicate);
-        } else {
-            return predicate;
         }
     }
 }

@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.type.Type;
 
@@ -84,14 +82,6 @@ public class DictionaryGetOperator extends ArgsScalarOperator {
         return operator;
     }
 
-    @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet used = new ColumnRefSet();
-        for (ScalarOperator child : arguments) {
-            used.union(child.getUsedColumns());
-        }
-        return used;
-    }
 
     public long getDictionaryId() {
         return this.dictionaryId;

@@ -38,6 +38,30 @@ import java.util.Map;
 
 public class ReplaceColumnRefRewriterTest {
     @Test
+    public void testReplacementsPreserveParentArityAndCloneOwnership() {
+        ColumnRefOperator column = createColumnRef(1);
+        CallOperator mapped = new CallOperator(FunctionSet.CONCAT, VarcharType.VARCHAR,
+                Lists.newArrayList(ConstantOperator.createVarchar("a"), ConstantOperator.createVarchar("b")));
+        CallOperator origin = new CallOperator(FunctionSet.CONCAT, VarcharType.VARCHAR,
+                Lists.newArrayList(column, column, ConstantOperator.createVarchar("c")));
+        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(Map.of(column, mapped));
+        ScalarOperator result = rewriter.rewrite(origin);
+        Assertions.assertEquals(3, result.getChildren().size());
+        Assertions.assertEquals(mapped, result.getChild(0));
+        Assertions.assertEquals(mapped, result.getChild(1));
+        Assertions.assertNotSame(mapped, result.getChild(0));
+        Assertions.assertNotSame(result.getChild(0), result.getChild(1));
+        Assertions.assertSame(column, origin.getChild(0));
+        Assertions.assertEquals(2, mapped.getChildren().size());
+
+        Assertions.assertSame(origin, rewriter.rewriteWithoutClone(origin));
+        Assertions.assertEquals(3, origin.getChildren().size());
+        Assertions.assertEquals(mapped, origin.getChild(0));
+        Assertions.assertEquals(mapped, origin.getChild(1));
+        Assertions.assertNotSame(origin.getChild(0), origin.getChild(1));
+    }
+
+    @Test
     public void testRecursiveWithoutChildren() {
         Map<ColumnRefOperator, ScalarOperator> operatorMap = Maps.newHashMap();
         ColumnRefOperator columnRef1 = createColumnRef(1);

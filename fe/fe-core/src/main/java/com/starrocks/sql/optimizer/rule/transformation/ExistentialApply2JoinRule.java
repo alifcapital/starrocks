@@ -35,8 +35,10 @@ import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ExistsPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.type.IntegerType;
 
@@ -143,15 +145,27 @@ public class ExistentialApply2JoinRule extends TransformationRule {
 
     private List<OptExpression> transformCorrelation(OptExpression input, LogicalApplyOperator apply,
                                                      ExistsPredicateOperator epo) {
-        boolean hasEqPredicate = Utils.extractConjuncts(apply.getCorrelationConjuncts()).stream()
-                .anyMatch(d -> OperatorType.BINARY.equals(d.getOpType()) && BinaryType.EQ
-                        .equals(((BinaryPredicateOperator) d).getBinaryType()));
+        boolean hasEqPredicate = hasEqConjunct(apply.getCorrelationConjuncts());
 
         if (hasEqPredicate) {
             return transformCorrelationWithEQ(input, apply, epo);
         } else {
             return transformCorrelationWithOther();
         }
+    }
+
+    private static boolean hasEqConjunct(ScalarOperator predicate) {
+        if (predicate == null) {
+            return false;
+        }
+        if (OperatorType.COMPOUND.equals(predicate.getOpType())) {
+            CompoundPredicateOperator compound = (CompoundPredicateOperator) predicate;
+            if (compound.isAnd()) {
+                return hasEqConjunct(compound.getChild(0)) || hasEqConjunct(compound.getChild(1));
+            }
+        }
+        return OperatorType.BINARY.equals(predicate.getOpType())
+                && BinaryType.EQ.equals(((BinaryPredicateOperator) predicate).getBinaryType());
     }
 
     // EQ conjuncts:

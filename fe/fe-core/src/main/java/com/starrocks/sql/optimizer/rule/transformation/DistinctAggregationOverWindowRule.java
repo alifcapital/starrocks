@@ -52,7 +52,6 @@ import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.sql.optimizer.task.TaskContext;
-import org.apache.commons.math3.util.Pair;
 
 import java.util.Collections;
 import java.util.Comparator;
@@ -187,6 +186,9 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
     private static final Visitor INSTANCE = new Visitor();
 
     private static class Visitor extends OptExpressionVisitor<Optional<OptExpression>, TaskContext> {
+        private static final Set<String> DISTINCT_AGG_FUNCTIONS =
+                ImmutableSet.of(FunctionSet.SUM, FunctionSet.COUNT, FunctionSet.AVG);
+
         @Override
         public Optional<OptExpression> visit(OptExpression optExpression, TaskContext context) {
             return Optional.empty();
@@ -205,10 +207,9 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
         }
 
         int classifyWindowCall(Map.Entry<ColumnRefOperator, CallOperator> call) {
-            Set<String> funcNames = ImmutableSet.of(FunctionSet.SUM, FunctionSet.COUNT, FunctionSet.AVG);
             if (FunctionSet.onlyAnalyticUsedFunctions.contains(call.getValue().getFnName())) {
                 return 0;
-            } else if (call.getValue().isDistinct() && funcNames.contains(call.getValue().getFnName())) {
+            } else if (call.getValue().isDistinct() && DISTINCT_AGG_FUNCTIONS.contains(call.getValue().getFnName())) {
                 return 1;
             } else {
                 return 2;
@@ -264,15 +265,17 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
                     break;
                 }
 
-                Map<Integer, Map<ColumnRefOperator, CallOperator>> windowCallGroups =
-                        windowOp.getWindowCall().entrySet().stream()
-                                .collect(Collectors.groupingBy(this::classifyWindowCall,
-                                        Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
-                Map<ColumnRefOperator, CallOperator> analyticCalls =
-                        windowCallGroups.getOrDefault(0, Maps.newHashMap());
-                Map<ColumnRefOperator, CallOperator> distinctAggCalls =
-                        windowCallGroups.getOrDefault(1, Maps.newHashMap());
-                if (!analyticCalls.isEmpty() || distinctAggCalls.isEmpty()) {
+                boolean hasAnalyticCall = false;
+                boolean hasDistinctAggCall = false;
+                for (Map.Entry<ColumnRefOperator, CallOperator> call : windowOp.getWindowCall().entrySet()) {
+                    int kind = classifyWindowCall(call);
+                    if (kind == 0) {
+                        hasAnalyticCall = true;
+                        break;
+                    }
+                    hasDistinctAggCall |= kind == 1;
+                }
+                if (hasAnalyticCall || !hasDistinctAggCall) {
                     break;
                 }
             }
@@ -291,13 +294,14 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
                     windowOp.getWindowCall().entrySet().stream().collect(Collectors.groupingBy(this::classifyWindowCall,
                             Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
 
-            Map<ColumnRefOperator, CallOperator> analyticCalls = windowCallGroups.getOrDefault(0, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> distinctAggCalls = windowCallGroups.getOrDefault(1, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> aggCalls = windowCallGroups.getOrDefault(2, Maps.newHashMap());
-            if (!analyticCalls.isEmpty()) {
+            if (windowCallGroups.containsKey(0)) {
                 return OptExpression.builder().with(optExpression).setInputs(Lists.newArrayList(childOpt)).build();
             }
 
+            Map<ColumnRefOperator, CallOperator> distinctAggCalls =
+                    windowCallGroups.getOrDefault(1, Collections.emptyMap());
+            Map<ColumnRefOperator, CallOperator> aggCalls =
+                    windowCallGroups.computeIfAbsent(2, ignored -> Maps.newHashMap());
             aggCalls.putAll(distinctAggCalls);
             List<ColumnRefOperator> groupBy = Optional.ofNullable(windowOp.getPartitionExpressions())
                     .map(exprs -> exprs.stream().map(e -> (ColumnRefOperator) e).collect(Collectors.toList()))
@@ -380,18 +384,23 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
                     windowOp.getWindowCall().entrySet().stream().collect(Collectors.groupingBy(this::classifyWindowCall,
                             Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
 
-            Map<ColumnRefOperator, CallOperator> analyticCalls = windowCallGroups.getOrDefault(0, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> distinctAggCalls = windowCallGroups.getOrDefault(1, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> aggCalls = windowCallGroups.getOrDefault(2, Maps.newHashMap());
+            Map<ColumnRefOperator, CallOperator> distinctAggCalls =
+                    windowCallGroups.getOrDefault(1, Collections.emptyMap());
             if (distinctAggCalls.isEmpty()) {
                 return Optional.empty();
             }
-            Map<ScalarOperator, ColumnRefOperator> pushDownDistinctArgs = Maps.newHashMap();
+            Map<ColumnRefOperator, CallOperator> analyticCalls =
+                    windowCallGroups.computeIfAbsent(0, ignored -> Maps.newHashMap());
+            Map<ColumnRefOperator, CallOperator> aggCalls = windowCallGroups.getOrDefault(2, Collections.emptyMap());
+            Map<ScalarOperator, ColumnRefOperator> pushDownDistinctArgs = null;
             for (CallOperator call : distinctAggCalls.values()) {
                 Preconditions.checkArgument(call.getChildren().size() == 1);
                 ScalarOperator arg = call.getChild(0);
                 if (arg.isColumnRef()) {
                     continue;
+                }
+                if (pushDownDistinctArgs == null) {
+                    pushDownDistinctArgs = Maps.newHashMap();
                 }
                 Optional<ColumnRefOperator> optColRef = Optional.ofNullable(pushDownDistinctArgs.get(arg));
                 ColumnRefOperator colRef = optColRef.orElseGet(() -> context.getOptimizerContext().getColumnRefFactory()
@@ -403,7 +412,7 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
             }
 
             OptExpression child = optExpression.inputAt(0);
-            if (!pushDownDistinctArgs.isEmpty()) {
+            if (pushDownDistinctArgs != null) {
                 Map<ColumnRefOperator, ScalarOperator> childColRefMap =
                         Optional.ofNullable(child.getOp().getProjection())
                                 .map(Projection::getColumnRefMap)
@@ -452,6 +461,19 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
 
         public Optional<OptExpression> handleDistinctAggOverOverallWindow(OptExpression optExpression,
                                                                           TaskContext context) {
+            // A window without a distinct aggregation call has nothing to rewrite, with or without commutative windows.
+            LogicalWindowOperator windowOp = optExpression.getOp().cast();
+            boolean hasDistinctAggCall = false;
+            for (Map.Entry<ColumnRefOperator, CallOperator> call : windowOp.getWindowCall().entrySet()) {
+                if (classifyWindowCall(call) == 1) {
+                    hasDistinctAggCall = true;
+                    break;
+                }
+            }
+            if (!hasDistinctAggCall) {
+                return Optional.empty();
+            }
+
             List<OptExpression> windowOpts = getCommutativeWindows(optExpression);
             // if there are no commutative windows, we try to use fused_multi_distinct to rewrite
             // count/avg/sum(distinct) over window.
@@ -528,24 +550,24 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
 
         private List<DistinctAggRewriteResult> rewriteDistinctAgg(Map<ColumnRefOperator, CallOperator> distinctAgg,
                                                                   ColumnRefFactory columnRefFactory) {
-            Map<List<ScalarOperator>, List<Pair<ColumnRefOperator, CallOperator>>> sameArgsDistinctAggGroups =
-                    distinctAgg.entrySet().stream().map(e -> Pair.create(e.getKey(), e.getValue()))
-                            .collect(Collectors.groupingBy(p -> p.getSecond().getArguments()));
+            Map<List<ScalarOperator>, List<Map.Entry<ColumnRefOperator, CallOperator>>> sameArgsDistinctAggGroups =
+                    distinctAgg.entrySet().stream()
+                            .collect(Collectors.groupingBy(e -> e.getValue().getArguments()));
 
             List<DistinctAggRewriteResult> results = Lists.newArrayList();
-            for (Map.Entry<List<ScalarOperator>, List<Pair<ColumnRefOperator, CallOperator>>> e :
+            for (Map.Entry<List<ScalarOperator>, List<Map.Entry<ColumnRefOperator, CallOperator>>> e :
                     sameArgsDistinctAggGroups.entrySet()) {
                 Preconditions.checkArgument(e.getKey().size() == 1 && e.getKey().get(0) instanceof ColumnRefOperator);
                 ColumnRefOperator arg = (ColumnRefOperator) e.getKey().get(0);
-                List<CallOperator> calls = e.getValue().stream().map(Pair::getSecond).collect(Collectors.toList());
+                List<CallOperator> calls = e.getValue().stream().map(Map.Entry::getValue).collect(Collectors.toList());
                 CallOperator fusedMultiDistinct = ScalarOperatorUtil.buildFusedMultiDistinct(calls, arg);
                 ColumnRefOperator fusedMultiDistinctColRef =
                         columnRefFactory.create(fusedMultiDistinct, fusedMultiDistinct.getType(),
                                 fusedMultiDistinct.isNullable());
 
                 Map<ColumnRefOperator, ScalarOperator> outputExprs = e.getValue().stream().collect(
-                        Collectors.toMap(Pair::getFirst,
-                                p -> new SubfieldOperator(fusedMultiDistinctColRef, p.getSecond().getType(),
+                        Collectors.toMap(Map.Entry::getKey,
+                                p -> new SubfieldOperator(fusedMultiDistinctColRef, p.getValue().getType(),
                                         List.of(p.getValue().getFnName()))));
                 Map<ColumnRefOperator, CallOperator> windowCalls = Maps.newHashMap();
                 windowCalls.put(fusedMultiDistinctColRef, fusedMultiDistinct);
@@ -673,15 +695,14 @@ public class DistinctAggregationOverWindowRule implements TreeRewriteRule {
                 return Optional.empty();
             }
 
-            Map<Integer, Map<ColumnRefOperator, CallOperator>> windowCallGroups =
-                    windowOp.getWindowCall().entrySet().stream().collect(Collectors.groupingBy(this::classifyWindowCall,
-                            Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
-
-            Map<ColumnRefOperator, CallOperator> analyticCalls = windowCallGroups.getOrDefault(0, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> distinctAggCalls = windowCallGroups.getOrDefault(1, Maps.newHashMap());
-            Map<ColumnRefOperator, CallOperator> aggCalls = windowCallGroups.getOrDefault(2, Maps.newHashMap());
-
-            if (distinctAggCalls.isEmpty()) {
+            boolean hasDistinctAggCall = false;
+            for (Map.Entry<ColumnRefOperator, CallOperator> call : windowOp.getWindowCall().entrySet()) {
+                if (classifyWindowCall(call) == 1) {
+                    hasDistinctAggCall = true;
+                    break;
+                }
+            }
+            if (!hasDistinctAggCall) {
                 return Optional.empty();
             }
 

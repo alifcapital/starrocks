@@ -18,6 +18,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.catalog.ColumnAccessPath;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -26,10 +27,9 @@ import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldAccessPathNor
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldExpressionCollector;
 import com.starrocks.sql.optimizer.task.TaskContext;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /*
 Phase 1: for the most common case, subfield expr only exists in one on the ColumnRefMap's value of projection.
@@ -56,20 +56,33 @@ public class SubfieldExprNoCopyRule implements TreeRewriteRule {
 
         public void rewriteProject(OptExpression optExpression) {
             Projection projection = optExpression.getOp().getProjection();
-            List<ScalarOperator> projectMapValues = Stream.of(projection.getColumnRefMap().values(),
-                            projection.getCommonSubOperatorMap().values()).
-                    flatMap(Collection::stream)
-                    .collect(Collectors.toList());
+            Collection<ScalarOperator> refMapValues = projection.getColumnRefMap().values();
+            Collection<ScalarOperator> commonSubValues = projection.getCommonSubOperatorMap().values();
+            List<ScalarOperator> projectMapValues = new ArrayList<>(refMapValues.size() + commonSubValues.size());
+            projectMapValues.addAll(refMapValues);
+            projectMapValues.addAll(commonSubValues);
+            // The expressions are not structurally changed below, so the used columns of each one are computed
+            // at most once and shared by all subfield candidates of this projection.
+            ColumnRefSet[] usedColumns = null;
             for (int i = 0; i < projectMapValues.size(); i++) {
                 ScalarOperator value = projectMapValues.get(i);
                 // only deal with subfield expr of slotRef
                 if (value instanceof SubfieldOperator && value.getChild(0) instanceof ColumnRefOperator) {
+                    if (usedColumns == null) {
+                        usedColumns = new ColumnRefSet[projectMapValues.size()];
+                    }
                     SubfieldOperator subfield = value.cast();
                     ColumnRefOperator col = value.getChild(0).cast();
                     SubfieldExpressionCollector collector = new SubfieldExpressionCollector(false);
                     // collect other expr that used the same root slot
                     for (int j = 0; j < projectMapValues.size(); j++) {
-                        if (j != i && projectMapValues.get(j).getUsedColumns().contains(col)) {
+                        if (j == i) {
+                            continue;
+                        }
+                        if (usedColumns[j] == null) {
+                            usedColumns[j] = projectMapValues.get(j).getUsedColumns();
+                        }
+                        if (usedColumns[j].contains(col)) {
                             projectMapValues.get(j).accept(collector, null);
                         }
                     }

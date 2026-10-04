@@ -41,6 +41,7 @@ public class PushDownPredicateTableFunctionRule extends TransformationRule {
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalFilterOperator filterOperator = (LogicalFilterOperator) input.getOp();
         List<ScalarOperator> filters = Utils.extractConjuncts(filterOperator.getPredicate());
+        int originalConjunctCount = filters.size();
         LogicalTableFunctionOperator tvfOperator = (LogicalTableFunctionOperator) input.inputAt(0).getOp();
         ColumnRefSet tvfOuterColSet = new ColumnRefSet(tvfOperator.getOuterColRefs());
         List<ScalarOperator> pushDownPredicates = Lists.newArrayList();
@@ -57,6 +58,10 @@ public class PushDownPredicateTableFunctionRule extends TransformationRule {
             }
         }
 
+        if (!filters.isEmpty() && filters.size() == originalConjunctCount) {
+            return Collections.emptyList();
+        }
+
         OptExpression optExpression = OptExpression.create(input.inputAt(0).getOp(), input.inputAt(0).getInputs());
         if (pushDownPredicates.size() > 0) {
             LogicalFilterOperator newFilter = new LogicalFilterOperator(Utils.compoundAnd(pushDownPredicates));
@@ -69,8 +74,6 @@ public class PushDownPredicateTableFunctionRule extends TransformationRule {
 
         if (filters.isEmpty()) {
             return Lists.newArrayList(optExpression);
-        } else if (filters.size() == Utils.extractConjuncts(filterOperator.getPredicate()).size()) {
-            return Collections.emptyList();
         } else {
             filterOperator.setPredicate(Utils.compoundAnd(filters));
             input.setChild(0, optExpression);

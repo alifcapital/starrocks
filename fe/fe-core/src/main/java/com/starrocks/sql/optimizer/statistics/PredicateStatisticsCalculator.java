@@ -18,6 +18,7 @@ import com.google.common.base.Preconditions;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
 import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.ConstantOperatorUtils;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -90,6 +91,28 @@ public class PredicateStatisticsCalculator {
         }
 
         return count;
+    }
+
+    // Preserve signed zero and NaN payloads as well as numerical values when deciding whether to reuse.
+    private static boolean sameOrColumnValues(ColumnStatistic column, double min, double max,
+                                              double distinct, double nulls) {
+        return Double.doubleToRawLongBits(column.getMinValue()) == Double.doubleToRawLongBits(min)
+                && Double.doubleToRawLongBits(column.getMaxValue()) == Double.doubleToRawLongBits(max)
+                && Double.doubleToRawLongBits(column.getDistinctValuesCount()) == Double.doubleToRawLongBits(distinct)
+                && Double.doubleToRawLongBits(column.getNullsFraction()) == Double.doubleToRawLongBits(nulls);
+    }
+
+    private static Statistics finishOrStatistics(Statistics input, Statistics.Builder builder, double rowCount) {
+        if (builder != null) {
+            return builder.build();
+        }
+        // withOutputRowCount treats NaNs as equal. The old OR builder retained the newly computed
+        // payload, so keep its behavior when only the raw NaN row-count bits differ.
+        if (Double.isNaN(rowCount) && Double.isNaN(input.getOutputRowCount())
+                && Double.doubleToRawLongBits(rowCount) != Double.doubleToRawLongBits(input.getOutputRowCount())) {
+            return Statistics.buildFrom(input).setOutputRowCount(rowCount).build();
+        }
+        return input.withOutputRowCount(rowCount);
     }
 
     private static class BaseCalculatingVisitor extends ScalarOperatorVisitor<Statistics, Void> {
@@ -193,9 +216,19 @@ public class PredicateStatisticsCalculator {
             // 1. compute the inPredicate children column statistics
             ColumnStatistic inColumnStatistic = getExpressionStatistic(firstChild);
 
-            List<ScalarOperator> otherChildrenList = predicate.getChildren().stream().skip(1).toList();
-            otherChildrenList = otherChildrenList.stream().map(this::getChildForCastOperator).distinct().toList();
-            boolean allConstants = otherChildrenList.stream().allMatch(op -> op instanceof ConstantOperator);
+            // Unknown columns use fixed selectivity. With input NDV <= 1, the final NDV is
+            // unchanged by duplicate non-null literals: min(input NDV, positive count) is
+            // already saturated. Bounds are duplicate-insensitive, so avoid building a set.
+            boolean skipLiteralDedup = inColumnStatistic.isUnknown()
+                    && inColumnStatistic.getDistinctValuesCount() <= 1
+                    && !Double.isNaN(statistics.getOutputRowCount())
+                    && predicate.getChildren().stream().skip(1).allMatch(op -> op instanceof ConstantOperator);
+            List<ScalarOperator> otherChildrenList = skipLiteralDedup
+                    ? predicate.getChildren().subList(1, predicate.getChildren().size())
+                    : predicate.getChildren().stream().skip(1)
+                            .map(this::getChildForCastOperator).distinct().toList();
+            boolean allConstants = skipLiteralDedup
+                    || otherChildrenList.stream().allMatch(op -> op instanceof ConstantOperator);
 
             if (!predicate.isSubquery() && firstChild.isColumnRef() && !inColumnStatistic.isUnknown() &&
                     inColumnStatistic.getHistogram() != null && allConstants) {
@@ -209,9 +242,6 @@ public class PredicateStatisticsCalculator {
                         statistics
                 );
             }
-
-            List<ColumnStatistic> otherChildrenColumnStatisticList =
-                    otherChildrenList.stream().distinct().map(this::getExpressionStatistic).toList();
 
             // using ndv to estimate string col inPredicate
             if (!predicate.isNotIn() && firstChild.getType().getPrimitiveType().isCharFamily()
@@ -240,22 +270,52 @@ public class PredicateStatisticsCalculator {
             double columnMinVal = inColumnStatistic.getMinValue();
             double columnDistinctValues = inColumnStatistic.getDistinctValuesCount();
 
-            double otherChildrenMaxValue =
-                    otherChildrenColumnStatisticList.stream().mapToDouble(ColumnStatistic::getMaxValue).max()
-                            .orElse(Double.POSITIVE_INFINITY);
-            double otherChildrenMinValue =
-                    otherChildrenColumnStatisticList.stream().mapToDouble(ColumnStatistic::getMinValue).min()
-                            .orElse(Double.NEGATIVE_INFINITY);
-            double otherChildrenDistinctValues =
-                    otherChildrenColumnStatisticList.stream().mapToDouble(ColumnStatistic::getDistinctValuesCount)
-                            .sum();
+            double otherChildrenMaxValue;
+            double otherChildrenMinValue;
+            double otherChildrenDistinctValues;
+            boolean hasUnknownOrNaN;
+            if (allConstants && !Double.isNaN(statistics.getOutputRowCount())) {
+                // IN consumes only bounds/NDV here. General expression statistics also build a
+                // singleton histogram and string key for each literal, neither of which is read.
+                otherChildrenMaxValue = Double.NEGATIVE_INFINITY;
+                otherChildrenMinValue = Double.POSITIVE_INFINITY;
+                otherChildrenDistinctValues = 0;
+                for (ScalarOperator child : otherChildrenList) {
+                    ConstantOperator constant = (ConstantOperator) child;
+                    OptionalDouble value = constant.isNull() ? OptionalDouble.empty()
+                            : ConstantOperatorUtils.doubleValueFromConstant(constant);
+                    otherChildrenMaxValue = Math.max(otherChildrenMaxValue,
+                            value.orElse(Double.POSITIVE_INFINITY));
+                    otherChildrenMinValue = Math.min(otherChildrenMinValue,
+                            value.orElse(Double.NEGATIVE_INFINITY));
+                    // Literal NDVs are 0 or 1: their sum is exact for any Java list size.
+                    if (!constant.isNull()) {
+                        otherChildrenDistinctValues++;
+                    }
+                }
+                if (otherChildrenList.isEmpty()) {
+                    otherChildrenMaxValue = Double.POSITIVE_INFINITY;
+                    otherChildrenMinValue = Double.NEGATIVE_INFINITY;
+                }
+                hasUnknownOrNaN = Double.isNaN(otherChildrenMaxValue) || Double.isNaN(otherChildrenMinValue);
+            } else {
+                List<ColumnStatistic> valueStatistics = otherChildrenList.stream()
+                        .map(this::getExpressionStatistic).toList();
+                otherChildrenMaxValue = valueStatistics.stream().mapToDouble(ColumnStatistic::getMaxValue).max()
+                        .orElse(Double.POSITIVE_INFINITY);
+                otherChildrenMinValue = valueStatistics.stream().mapToDouble(ColumnStatistic::getMinValue).min()
+                        .orElse(Double.NEGATIVE_INFINITY);
+                // Preserve DoubleStream's compensated summation for arbitrary expression NDVs.
+                otherChildrenDistinctValues = valueStatistics.stream()
+                        .mapToDouble(ColumnStatistic::getDistinctValuesCount).sum();
+                hasUnknownOrNaN = valueStatistics.stream().anyMatch(value -> value.hasNaNValue() || value.isUnknown());
+            }
             boolean hasOverlap =
                     Math.max(columnMinVal, otherChildrenMinValue) <= Math.min(columnMaxVal, otherChildrenMaxValue);
 
             // 2 .compute the in predicate selectivity
             if (inColumnStatistic.isUnknown() || inColumnStatistic.hasNaNValue() ||
-                    otherChildrenColumnStatisticList.stream().anyMatch(
-                            columnStatistic -> columnStatistic.hasNaNValue() || columnStatistic.isUnknown()) ||
+                    hasUnknownOrNaN ||
                     !(firstChild.isColumnRef())) {
                 // use default selectivity if column statistic is unknown or has NaN values.
                 // can not get accurate column statistics if it is not ColumnRef operator
@@ -276,8 +336,7 @@ public class PredicateStatisticsCalculator {
             double rowCount = Math.min(statistics.getOutputRowCount() * selectivity, statistics.getOutputRowCount());
 
             // 3. compute the inPredicate first child column statistics after in predicate
-            if (otherChildrenColumnStatisticList.stream()
-                    .noneMatch(columnStatistic -> columnStatistic.hasNaNValue() || columnStatistic.isUnknown()) &&
+            if (!hasUnknownOrNaN &&
                     !predicate.isNotIn() && hasOverlap) {
                 columnMaxVal = Math.min(columnMaxVal, otherChildrenMaxValue);
                 columnMinVal = Math.max(columnMinVal, otherChildrenMinValue);
@@ -494,17 +553,17 @@ public class PredicateStatisticsCalculator {
 
         protected Statistics computeOrPredicateStatistics(Statistics cumulativeStatistics, Statistics orItemStatistics,
                                                           Statistics andStatistics, double rowCount) {
-            Statistics.Builder builder = Statistics.buildFrom(cumulativeStatistics);
-            builder.setOutputRowCount(rowCount);
-
-            cumulativeStatistics.getColumnStatistics().forEach((columnRefOperator, columnStatistic) -> {
-                ColumnStatistic.Builder columnBuilder = ColumnStatistic.buildFrom(columnStatistic);
+            Statistics.Builder builder = null;
+            for (Map.Entry<ColumnRefOperator, ColumnStatistic> entry :
+                    cumulativeStatistics.getColumnStatistics().entrySet()) {
+                ColumnRefOperator columnRefOperator = entry.getKey();
+                ColumnStatistic columnStatistic = entry.getValue();
                 ColumnStatistic rightColumnStatistic = orItemStatistics.getColumnStatistic(columnRefOperator);
-                columnBuilder.setMinValue(Math.min(columnStatistic.getMinValue(), rightColumnStatistic.getMinValue()));
-                columnBuilder.setMaxValue(Math.max(columnStatistic.getMaxValue(), rightColumnStatistic.getMaxValue()));
+                double min = Math.min(columnStatistic.getMinValue(), rightColumnStatistic.getMinValue());
+                double max = Math.max(columnStatistic.getMaxValue(), rightColumnStatistic.getMaxValue());
                 double originalNdv = statistics.getColumnStatistic(columnRefOperator).getDistinctValuesCount();
                 double accumulatedNdv = columnStatistic.getDistinctValuesCount() + rightColumnStatistic.getDistinctValuesCount();
-                columnBuilder.setDistinctValuesCount(Math.min(originalNdv, accumulatedNdv));
+                double distinct = Math.min(originalNdv, accumulatedNdv);
                 double origNulls =
                         statistics.getColumnStatistic(columnRefOperator).getNullsFraction() * statistics.getOutputRowCount();
                 double leftNulls = cumulativeStatistics.getOutputRowCount() * columnStatistic.getNullsFraction();
@@ -518,11 +577,16 @@ public class PredicateStatisticsCalculator {
                 double unionNulls = Math.max(0.0, leftNulls + rightNulls - cappedIntersectionNulls);
                 double cappedUnionNulls = Math.min(unionNulls, Math.min(origNulls, rowCount));
                 double nullsFraction = rowCount > 0 ? Math.min(1.0, cappedUnionNulls / rowCount) : 0.0;
-                columnBuilder.setNullsFraction(nullsFraction);
-
-                builder.addColumnStatistic(columnRefOperator, columnBuilder.build());
-            });
-            return builder.build();
+                if (!sameOrColumnValues(columnStatistic, min, max, distinct, nullsFraction)) {
+                    if (builder == null) {
+                        builder = Statistics.buildFrom(cumulativeStatistics).setOutputRowCount(rowCount);
+                    }
+                    builder.addColumnStatistic(columnRefOperator, ColumnStatistic.buildFrom(columnStatistic)
+                            .setMinValue(min).setMaxValue(max).setDistinctValuesCount(distinct)
+                            .setNullsFraction(nullsFraction).build());
+                }
+            }
+            return finishOrStatistics(cumulativeStatistics, builder, rowCount);
         }
 
         @Override
@@ -661,25 +725,29 @@ public class PredicateStatisticsCalculator {
         protected Statistics computeOrPredicateStatistics(Statistics baseStatistics, Statistics orItemStatistics,
                                                           Statistics andStatistics, double rowCount) {
             // support simple avg statistics
-            Statistics.Builder builder = Statistics.buildFrom(baseStatistics);
-            builder.setOutputRowCount(rowCount);
-
-            baseStatistics.getColumnStatistics().forEach((columnRefOperator, columnStatistic) -> {
-                ColumnStatistic.Builder columnBuilder = ColumnStatistic.buildFrom(columnStatistic);
+            Statistics.Builder builder = null;
+            for (Map.Entry<ColumnRefOperator, ColumnStatistic> entry : baseStatistics.getColumnStatistics().entrySet()) {
+                ColumnRefOperator columnRefOperator = entry.getKey();
+                ColumnStatistic columnStatistic = entry.getValue();
                 ColumnStatistic rightColumnStatistic = orItemStatistics.getColumnStatistic(columnRefOperator);
-                columnBuilder.setMinValue(Math.min(columnStatistic.getMinValue(), rightColumnStatistic.getMinValue()));
-                columnBuilder.setMaxValue(Math.max(columnStatistic.getMaxValue(), rightColumnStatistic.getMaxValue()));
+                double min = Math.min(columnStatistic.getMinValue(), rightColumnStatistic.getMinValue());
+                double max = Math.max(columnStatistic.getMaxValue(), rightColumnStatistic.getMaxValue());
                 double distinct = Math.max(1,
                         (columnStatistic.getDistinctValuesCount() + rightColumnStatistic.getDistinctValuesCount()) / 2);
                 // nullsFraction is a ratio, not a count like distinct/NDV above it - cap at 1
                 // instead of flooring at 1, which forced every merge to the constant 1.0.
                 double nulls = Math.min(1.0,
                         (columnStatistic.getNullsFraction() + rightColumnStatistic.getNullsFraction()) / 2);
-                columnBuilder.setDistinctValuesCount(distinct);
-                columnBuilder.setNullsFraction(nulls);
-                builder.addColumnStatistic(columnRefOperator, columnBuilder.build());
-            });
-            return builder.build();
+                if (!sameOrColumnValues(columnStatistic, min, max, distinct, nulls)) {
+                    if (builder == null) {
+                        builder = Statistics.buildFrom(baseStatistics).setOutputRowCount(rowCount);
+                    }
+                    builder.addColumnStatistic(columnRefOperator, ColumnStatistic.buildFrom(columnStatistic)
+                            .setMinValue(min).setMaxValue(max).setDistinctValuesCount(distinct)
+                            .setNullsFraction(nulls).build());
+                }
+            }
+            return finishOrStatistics(baseStatistics, builder, rowCount);
         }
 
     }

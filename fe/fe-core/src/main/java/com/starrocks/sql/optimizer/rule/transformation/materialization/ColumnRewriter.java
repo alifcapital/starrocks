@@ -247,10 +247,11 @@ public class ColumnRewriter {
                 if (relationColumns == null) {
                     return result;
                 }
-                if (!relationColumns.containsKey(columnRef.getName())) {
+                ColumnRefOperator relationColumn = relationColumns.get(columnRef.getName());
+                if (relationColumn == null) {
                     return result;
                 }
-                result = relationColumns.get(columnRef.getName());
+                result = relationColumn;
             }
             if (enableEquivalenceClassesRewrite && equivalenceClasses != null) {
                 Set<ColumnRefOperator> equalities = equivalenceClasses.getEquivalenceClass(result);

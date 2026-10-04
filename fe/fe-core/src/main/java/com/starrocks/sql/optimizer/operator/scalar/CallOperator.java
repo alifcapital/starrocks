@@ -19,7 +19,6 @@ import com.starrocks.catalog.AggregateFunction;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.ast.expression.FunctionCallExpr;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.type.Type;
 
@@ -157,15 +156,6 @@ public class CallOperator extends ArgsScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet used = new ColumnRefSet();
-        for (ScalarOperator child : arguments) {
-            used.union(child.getUsedColumns());
-        }
-        return used;
-    }
-
-    @Override
     public boolean isConstant() {
         if (FunctionSet.nonDeterministicFunctions.contains(fnName)) {
             return false;
@@ -180,7 +170,8 @@ public class CallOperator extends ArgsScalarOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(fnName, isDistinct, ignoreNulls);
+        return 31 * (31 * (31 + Objects.hashCode(fnName)) + Boolean.hashCode(isDistinct))
+                + Boolean.hashCode(ignoreNulls);
     }
 
     @Override

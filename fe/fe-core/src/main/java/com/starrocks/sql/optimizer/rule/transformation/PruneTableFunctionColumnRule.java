@@ -52,6 +52,13 @@ public class PruneTableFunctionColumnRule extends TransformationRule {
             requiredOutputColumns.union(pair.first);
         }
 
+        // withOperator preserves every equality field except the outer columns.
+        // Keep the original equality path for subclasses with different equality semantics.
+        if (logicalTableFunctionOperator.getClass() == LogicalTableFunctionOperator.class &&
+                logicalTableFunctionOperator.getOuterColRefs().equals(newOuterCols)) {
+            return Collections.emptyList();
+        }
+
         LogicalTableFunctionOperator newOperator = (new LogicalTableFunctionOperator.Builder())
                 .withOperator(logicalTableFunctionOperator)
                 .setOuterColRefs(newOuterCols).build();

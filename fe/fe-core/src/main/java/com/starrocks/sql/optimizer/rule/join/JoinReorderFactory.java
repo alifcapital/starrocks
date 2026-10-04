@@ -13,10 +13,10 @@
 // limitations under the License.
 package com.starrocks.sql.optimizer.rule.join;
 
-import com.google.api.client.util.Lists;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.OptimizerContext;
 
+import java.util.ArrayList;
 import java.util.List;
 
 // JoinReorderFactory is used to choose join reorder algorithm in RBO phase,
@@ -45,7 +45,7 @@ public interface JoinReorderFactory {
 
     static JoinReorderFactory createJoinReorderAdaptive() {
         return (context, multiJoinNode) -> {
-            List<JoinOrder> algorithms = Lists.newArrayList();
+            List<JoinOrder> algorithms = new ArrayList<>(3);
             algorithms.add(new JoinReorderLeftDeep(context));
 
             SessionVariable sv = context.getSessionVariable();

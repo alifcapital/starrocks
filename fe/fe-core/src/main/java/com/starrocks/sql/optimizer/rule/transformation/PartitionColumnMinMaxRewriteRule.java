@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.BoundType;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
@@ -32,6 +31,7 @@ import com.starrocks.catalog.PartitionType;
 import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Pair;
+import com.starrocks.common.util.RangeUtils;
 import com.starrocks.sql.ast.KeysType;
 import com.starrocks.sql.ast.expression.DateLiteral;
 import com.starrocks.sql.ast.expression.Expr;
@@ -52,6 +52,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
@@ -120,8 +121,8 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
                     CallOperator aggregator = entry.getValue();
                     AggregateFunction aggregateFunction = (AggregateFunction) aggregator.getFunction();
                     String functionName = aggregateFunction.functionName();
-                    ColumnRefSet usedColumns = aggregator.getUsedColumns();
                     if (functionName.equals(FunctionSet.MAX) || functionName.equals(FunctionSet.MIN)) {
+                        ColumnRefSet usedColumns = aggregator.getUsedColumns();
                         if (usedColumns.size() != 1) {
                             return false;
                         }
@@ -163,20 +164,20 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         LogicalAggregationOperator aggregationOperator = input.getOp().cast();
         LogicalOlapScanOperator scanOperator = input.getInputs().get(0).getInputs().get(0).getOp().cast();
         OlapTable table = (OlapTable) scanOperator.getTable();
-        Pair<Boolean, Boolean> minMax = checkMinMax(aggregationOperator);
-
         try {
             OptExpression result = null;
             if (checkRewritePartitionValues(aggregationOperator, scanOperator, table)) {
-                result = optimizeWithPartitionValues(aggregationOperator, table,
-                        Pair.create(this::getMinListPartitionValue, this::getMaxListPartitionValue));
+                result = optimizeWithListPartitionValues(aggregationOperator, table);
             } else if (checkRewriteDayRangePartition(aggregationOperator, scanOperator, table)) {
                 result = optimizeWithPartitionValues(aggregationOperator, table,
                         Pair.create(this::getRangePartitionValue, this::getRangePartitionValue));
-            } else if (checkPartitionPrune(aggregationOperator, scanOperator, table)) {
-                result = optimizeWithPartitionPrune(input, aggregationOperator, scanOperator, table, minMax);
-            } else if (checkRewriteTopN(aggregationOperator, scanOperator, table, minMax)) {
-                result = optimizeWithTopN(input, aggregationOperator, scanOperator, table, minMax);
+            } else {
+                Pair<Boolean, Boolean> minMax = checkMinMax(aggregationOperator);
+                if (checkPartitionPrune(aggregationOperator, scanOperator, table)) {
+                    result = optimizeWithPartitionPrune(input, aggregationOperator, scanOperator, table, minMax);
+                } else if (checkRewriteTopN(aggregationOperator, scanOperator, table, minMax)) {
+                    result = optimizeWithTopN(input, aggregationOperator, scanOperator, table, minMax);
+                }
             }
             if (result != null) {
                 return Lists.newArrayList(result);
@@ -304,8 +305,62 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
     }
 
     /**
-     * For List Partition, we can evaluate the MAX(pt) based on the partition values
+     * For a list partition, the partition values are the values a partition allows, not the values it holds. We
+     * evaluate MIN/MAX from them only when every nonempty partition allows a single value.
      */
+    private OptExpression optimizeWithListPartitionValues(LogicalAggregationOperator aggregationOperator,
+                                                          OlapTable table) {
+        PartitionInfo partitionInfo = table.getPartitionInfo();
+        if (partitionInfo.getClass() != ListPartitionInfo.class || partitionInfo.getPartitionColumnsSize() != 1) {
+            return null;
+        }
+        List<Partition> nonEmpty = table.getNonEmptyPartitions();
+        if (nonEmpty.isEmpty()) {
+            return null;
+        }
+        Map<Long, List<LiteralExpr>> partitionValues = ((ListPartitionInfo) partitionInfo).getLiteralExprValues();
+        LiteralExpr min = null;
+        LiteralExpr max = null;
+        for (Partition partition : nonEmpty) {
+            List<LiteralExpr> values = partitionValues.get(partition.getId());
+            // Allowed values prove an actual extremum only when the nonempty partition has a single value.
+            if (values == null || values.size() != 1 || values.get(0) == null) {
+                return null;
+            }
+            LiteralExpr value = values.get(0);
+            if (value.isConstantNull()) {
+                continue;
+            }
+            if (min == null || value.compareTo(min) < 0) {
+                min = value;
+            }
+            if (max == null || value.compareTo(max) > 0) {
+                max = value;
+            }
+        }
+
+        List<ScalarOperator> valueRow = Lists.newArrayList();
+        List<ColumnRefOperator> columns = Lists.newArrayList();
+        for (var entry : aggregationOperator.getAggregations().entrySet()) {
+            LiteralExpr value;
+            if (isMin(entry.getValue())) {
+                value = min;
+            } else if (isMax(entry.getValue())) {
+                value = max;
+            } else {
+                continue;
+            }
+            valueRow.add(value == null ? ConstantOperator.createNull(entry.getKey().getType())
+                    : SqlToScalarOperatorTranslator.translate(value));
+            columns.add(entry.getKey());
+        }
+        LogicalValuesOperator values = new LogicalValuesOperator.Builder()
+                .setRows(List.of(valueRow))
+                .setColumnRefSet(columns)
+                .build();
+        return OptExpression.create(values);
+    }
+
     private OptExpression optimizeWithPartitionValues(LogicalAggregationOperator aggregationOperator,
                                                       OlapTable table,
                                                       Pair<BiFunction<Long, PartitionInfo, ScalarOperator>,
@@ -317,22 +372,26 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
 
         List<ScalarOperator> valueRow = Lists.newArrayList();
         List<ColumnRefOperator> columns = Lists.newArrayList();
+        Long minPartitionId = null;
+        Long maxPartitionId = null;
         for (var entry : aggregationOperator.getAggregations().entrySet()) {
             if (isMin(entry.getValue())) {
-                List<Long> sorted = partitionInfo.getSortedPartitions(true);
-                sorted.retainAll(nonEmptyPartitionIds);
-                if (CollectionUtils.isEmpty(sorted)) {
+                if (minPartitionId == null) {
+                    minPartitionId = getFirstNonEmptyPartitionId(partitionInfo, nonEmptyPartitionIds, true);
+                }
+                if (minPartitionId == null) {
                     return null;
                 }
-                valueRow.add(minMaxFunction.first.apply(sorted.get(0), partitionInfo));
+                valueRow.add(minMaxFunction.first.apply(minPartitionId, partitionInfo));
                 columns.add(entry.getKey());
             } else if (isMax(entry.getValue())) {
-                List<Long> sorted = partitionInfo.getSortedPartitions(false);
-                sorted.retainAll(nonEmptyPartitionIds);
-                if (CollectionUtils.isEmpty(sorted)) {
+                if (maxPartitionId == null) {
+                    maxPartitionId = getFirstNonEmptyPartitionId(partitionInfo, nonEmptyPartitionIds, false);
+                }
+                if (maxPartitionId == null) {
                     return null;
                 }
-                valueRow.add(minMaxFunction.second.apply(sorted.get(0), partitionInfo));
+                valueRow.add(minMaxFunction.second.apply(maxPartitionId, partitionInfo));
                 columns.add(entry.getKey());
             }
         }
@@ -343,18 +402,26 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         return OptExpression.create(values);
     }
 
-    public ScalarOperator getMinListPartitionValue(long partitionId, PartitionInfo partitionInfo) {
-        ListPartitionInfo.ListPartitionCell partitionValues =
-                ((ListPartitionInfo) partitionInfo).getPartitionListExpr(partitionId);
-        Preconditions.checkState(!partitionValues.isEmpty());
-        return partitionValues.minValue().toConstant();
-    }
-
-    public ScalarOperator getMaxListPartitionValue(long partitionId, PartitionInfo partitionInfo) {
-        ListPartitionInfo.ListPartitionCell partitionValues =
-                ((ListPartitionInfo) partitionInfo).getPartitionListExpr(partitionId);
-        Preconditions.checkState(!partitionValues.isEmpty());
-        return partitionValues.maxValue().toConstant();
+    private Long getFirstNonEmptyPartitionId(PartitionInfo partitionInfo, Set<Long> nonEmptyPartitionIds,
+                                             boolean asc) {
+        // Unknown subclasses may override ordering. Keep their original sorting contract.
+        if (partitionInfo.getClass() == RangePartitionInfo.class
+                || partitionInfo.getClass() == ExpressionRangePartitionInfo.class
+                || partitionInfo.getClass() == ExpressionRangePartitionInfoV2.class) {
+            var comparator = asc ? RangeUtils.RANGE_MAP_ENTRY_COMPARATOR
+                    : RangeUtils.RANGE_MAP_ENTRY_COMPARATOR.reversed();
+            Map.Entry<Long, Range<PartitionKey>> best = null;
+            for (var entry : ((RangePartitionInfo) partitionInfo).getIdToRange(false).entrySet()) {
+                if (nonEmptyPartitionIds.contains(entry.getKey())
+                        && (best == null || comparator.compare(entry, best) < 0)) {
+                    best = entry;
+                }
+            }
+            return best == null ? null : best.getKey();
+        }
+        List<Long> sorted = partitionInfo.getSortedPartitions(asc);
+        sorted.retainAll(nonEmptyPartitionIds);
+        return sorted.isEmpty() ? null : sorted.get(0);
     }
 
     public ScalarOperator getRangePartitionValue(long partitionId, PartitionInfo partitionInfo) {
@@ -506,9 +573,7 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         final long limit = 1;
         final long offset = 0;
 
-        List<Map.Entry<ColumnRefOperator, CallOperator>> entries =
-                Lists.newArrayList(aggregation.getAggregations().entrySet());
-        CallOperator agg = entries.get(0).getValue();
+        CallOperator agg = aggregation.getAggregations().values().iterator().next();
         ColumnRefOperator columnRefOperator = agg.getColumnRefs().get(0);
 
         boolean asc = hasMinMax.first;

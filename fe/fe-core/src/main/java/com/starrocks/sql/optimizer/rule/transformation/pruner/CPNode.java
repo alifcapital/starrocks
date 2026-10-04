@@ -20,7 +20,6 @@ import com.google.common.collect.Sets;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
@@ -49,7 +48,9 @@ public class CPNode {
 
     public static CPNode createHubNode(CPNode... children) {
         CPNode hubNode = new CPNode(null, null, true);
-        Arrays.stream(children).forEach(hubNode::addChild);
+        for (CPNode child : children) {
+            hubNode.addChild(child);
+        }
         return hubNode;
     }
 
@@ -124,8 +125,17 @@ public class CPNode {
 
     public boolean intersect(Set<OptExpression> optExpressions) {
         if (hubFlag) {
-            return children.stream().anyMatch(node -> optExpressions.contains(node.getValue())) ||
-                    nonCPChildren.stream().anyMatch(node -> optExpressions.contains(node.getValue()));
+            for (CPNode child : children) {
+                if (optExpressions.contains(child.getValue())) {
+                    return true;
+                }
+            }
+            for (CPNode child : nonCPChildren) {
+                if (optExpressions.contains(child.getValue())) {
+                    return true;
+                }
+            }
+            return false;
         } else {
             return optExpressions.contains(value);
         }

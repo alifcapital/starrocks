@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
-import com.google.common.collect.Lists;
 import com.starrocks.common.Pair;
 import com.starrocks.sql.RankingWindowUtils;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -169,7 +168,7 @@ public class PushDownLimitRankingWindowRule extends TransformationRule {
         OptExpression grandChildExpr = childExpr.inputAt(0);
         LogicalWindowOperator rankRelatedWindowOperator = grandChildExpr.getOp().cast();
 
-        ColumnRefOperator windowCol = Lists.newArrayList(rankRelatedWindowOperator.getWindowCall().keySet()).get(0);
+        ColumnRefOperator windowCol = rankRelatedWindowOperator.getWindowCall().keySet().iterator().next();
         CallOperator callOperator = rankRelatedWindowOperator.getWindowCall().get(windowCol);
 
         List<ColumnRefOperator> partitionByColumns = rankRelatedWindowOperator.getPartitionExpressions().stream()

@@ -20,9 +20,7 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalHashJoinOperator;
-import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
-import org.apache.commons.collections.CollectionUtils;
 
 import java.util.List;
 
@@ -40,8 +38,8 @@ public class HashJoinImplementationRule extends JoinImplementationRule {
     @Override
     public boolean check(final OptExpression input, OptimizerContext context) {
         JoinOperator joinType = getJoinType(input);
-        List<BinaryPredicateOperator> eqPredicates = extractEqPredicate(input, context);
-        return !joinType.isCrossJoin() && CollectionUtils.isNotEmpty(eqPredicates);
+        boolean hasEqPredicate = hasEqPredicate(input, context);
+        return !joinType.isCrossJoin() && hasEqPredicate;
     }
 
     @Override

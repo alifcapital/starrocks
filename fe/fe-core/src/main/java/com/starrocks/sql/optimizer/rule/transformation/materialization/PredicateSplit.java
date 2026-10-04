@@ -19,7 +19,6 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class PredicateSplit {
     // column equality predicates conjuncts
@@ -72,10 +71,8 @@ public class PredicateSplit {
         if (predicate == null) {
             return null;
         }
-        List<ScalarOperator> filterPredicate = Utils.extractConjuncts(predicate)
-                .stream()
-                .filter(x -> !x.isConstantTrue())
-                .collect(Collectors.toList());
+        List<ScalarOperator> filterPredicate = Utils.extractConjuncts(predicate);
+        filterPredicate.removeIf(ScalarOperator::isConstantTrue);
         return Utils.compoundAnd(filterPredicate);
     }
 

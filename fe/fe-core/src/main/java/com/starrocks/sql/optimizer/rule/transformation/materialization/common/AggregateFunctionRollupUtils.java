@@ -102,11 +102,14 @@ public class AggregateFunctionRollupUtils {
      */
     public static String getRollupFunctionName(CallOperator aggFunc, boolean isUnionRewrite) {
         String fn = aggFunc.getFnName();
-        if ((isUnionRewrite || !aggFunc.isDistinct()) && REWRITE_ROLLUP_FUNCTION_MAP.containsKey(fn)) {
-            return REWRITE_ROLLUP_FUNCTION_MAP.get(fn);
+        if (isUnionRewrite || !aggFunc.isDistinct()) {
+            String rollup = REWRITE_ROLLUP_FUNCTION_MAP.get(fn);
+            if (rollup != null) {
+                return rollup;
+            }
         }
 
-        if (aggFunc.isDistinct() && SUPPORTED_DISTINCT_ROLLUP_FUNCTIONS.containsKey(fn)) {
+        if (aggFunc.isDistinct()) {
             return SUPPORTED_DISTINCT_ROLLUP_FUNCTIONS.get(fn);
         }
         return null;
@@ -130,8 +133,9 @@ public class AggregateFunctionRollupUtils {
             // NOTE: This can only happen when query has no group-by keys.
             // The behavior is different between count(NULL) and sum(NULL),  count(NULL) = 0, sum(NULL) = NULL.
             // Add `coalesce(count_col, 0)` to avoid return NULL instead of 0 for count rollup.
-            List<ScalarOperator> args = Arrays.asList(oldColRef, ConstantOperator.createBigint(0L));
-            Type[] argTypes = args.stream().map(a -> a.getType()).toArray(Type[]::new);
+            ConstantOperator zero = ConstantOperator.createBigint(0L);
+            List<ScalarOperator> args = Arrays.asList(oldColRef, zero);
+            Type[] argTypes = { oldColRef.getType(), zero.getType() };
             return new CallOperator(FunctionSet.COALESCE, aggCall.getType(), args,
                     ExprUtils.getBuiltinFunction(FunctionSet.COALESCE, argTypes, IS_NONSTRICT_SUPERTYPE_OF));
         } else {
@@ -161,8 +165,10 @@ public class AggregateFunctionRollupUtils {
         }
 
         // case2: equivalent supported functions
-        if (RewriteEquivalent.AGGREGATE_EQUIVALENTS.stream().anyMatch(x -> x.isSupportPushDownRewrite(call))) {
-            return true;
+        for (var equivalent : RewriteEquivalent.AGGREGATE_EQUIVALENTS) {
+            if (equivalent.isSupportPushDownRewrite(call)) {
+                return true;
+            }
         }
         return false;
     }

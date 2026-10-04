@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class CTEProduceAddProjectionRule extends TransformationRule {
 
@@ -46,7 +47,11 @@ public class CTEProduceAddProjectionRule extends TransformationRule {
             final RowOutputInfo rowOutputInfo = repeatOpt.getInputs().get(0).getRowOutputInfo();
             final ImmutableMap.Builder<ColumnRefOperator, ScalarOperator> builder = ImmutableMap.builder();
 
-            for (ColumnOutputInfo columnOutputInfo : rowOutputInfo.getColumnOutputInfo()) {
+            Map<Integer, ColumnOutputInfo> outputInfo = rowOutputInfo.getColOutputInfo();
+            if (outputInfo.isEmpty()) {
+                outputInfo = rowOutputInfo.getOriginalColOutputInfo();
+            }
+            for (ColumnOutputInfo columnOutputInfo : outputInfo.values()) {
                 final ColumnRefOperator columnRef = columnOutputInfo.getColumnRef();
                 builder.put(columnRef, columnRef);
             }

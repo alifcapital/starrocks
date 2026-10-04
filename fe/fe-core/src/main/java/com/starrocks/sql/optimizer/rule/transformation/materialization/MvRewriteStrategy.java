@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rule.transformation.materialization;
 
-import com.google.common.base.Preconditions;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.MaterializationContext;
@@ -22,6 +21,7 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.OptimizerOptions;
 import com.starrocks.sql.optimizer.QueryMaterializationContext;
+import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import org.apache.commons.collections4.CollectionUtils;
 
@@ -78,6 +78,7 @@ public class MvRewriteStrategy {
         private final OptimizerOptions optimizerOptions;
         private final OptimizerContext optimizerContext;
         private final SessionVariable sessionVariable;
+        private int queryScanOccurrences = -1;
 
         public MvStrategyArbitrator(OptimizerContext optimizerContext,
                                     ConnectContext connectContext) {
@@ -123,7 +124,7 @@ public class MvRewriteStrategy {
             }
             // If query only has one table use single table rewrite, view delta only rewrites multi-tables query.
             if (!sessionVariable.isEnableMaterializedViewSingleTableViewDeltaRewrite() &&
-                    MvUtils.getAllTables(queryPlan).size() <= 1) {
+                    hasAtMostOneScan(queryPlan)) {
                 return true;
             }
             // If view delta is enabled and there are multi-table mvs, return false.
@@ -135,9 +136,32 @@ public class MvRewriteStrategy {
             return true;
         }
 
+        private boolean hasAtMostOneScan(OptExpression queryPlan) {
+            if (queryScanOccurrences == -1) {
+                queryScanOccurrences = countScanOccurrences(queryPlan, 2);
+            }
+            return queryScanOccurrences <= 1;
+        }
+
+        private static int countScanOccurrences(OptExpression root, int limit) {
+            // Match getAllTables: each logical scan occurrence counts once and hides its children.
+            // No visited set: self-joins and shared DAG edges must count repeatedly.
+            if (root.getOp() instanceof LogicalScanOperator) {
+                return 1;
+            }
+            int count = 0;
+            for (OptExpression child : root.getInputs()) {
+                count += countScanOccurrences(child, limit - count);
+                if (count == limit) {
+                    break;
+                }
+            }
+            return count;
+        }
+
         private boolean isEnableMultiTableRewrite(OptExpression queryPlan) {
             if (!sessionVariable.isEnableMaterializedViewSingleTableViewDeltaRewrite() &&
-                    MvUtils.getAllTables(queryPlan).size() <= 1) {
+                    hasAtMostOneScan(queryPlan)) {
                 return false;
             }
             return true;
@@ -153,14 +177,13 @@ public class MvRewriteStrategy {
     public static MvRewriteStrategy prepareRewriteStrategy(OptimizerContext optimizerContext,
                                                            ConnectContext connectContext,
                                                            OptExpression queryPlan) {
-        MvRewriteStrategy strategy = new MvRewriteStrategy();
-        Preconditions.checkState(strategy != null, "MvRewriteStrategy is null");
         MvStrategyArbitrator arbitrator = new MvStrategyArbitrator(optimizerContext, connectContext);
-        strategy.enableMaterializedViewRewrite = arbitrator.isEnableMaterializedViewRewrite();
         // only rewrite when enableMaterializedViewRewrite is enabled
-        if (!strategy.enableMaterializedViewRewrite) {
+        if (!arbitrator.isEnableMaterializedViewRewrite()) {
             return DEFAULT;
         }
+        MvRewriteStrategy strategy = new MvRewriteStrategy();
+        strategy.enableMaterializedViewRewrite = true;
         SessionVariable sessionVariable = connectContext.getSessionVariable();
 
         // only enable multi-stages when force rewrite is enabled

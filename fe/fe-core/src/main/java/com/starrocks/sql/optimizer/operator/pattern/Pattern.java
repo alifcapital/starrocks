@@ -70,7 +70,7 @@ public abstract class Pattern {
             return false;
         }
         if (expression.getInputs().size() < children.size()
-                && children.stream().noneMatch(p -> p.is(OperatorType.PATTERN_MULTI_LEAF))) {
+                && !hasMultiLeafChild()) {
             return false;
         }
         return matchWithoutChild(expression.getOp().getOpType());
@@ -79,10 +79,19 @@ public abstract class Pattern {
     public boolean matchWithoutChild(OptExpression expression) {
         Preconditions.checkNotNull(expression);
         if (expression.getInputs().size() < this.children().size()
-                && children.stream().noneMatch(p -> p.is(OperatorType.PATTERN_MULTI_LEAF))) {
+                && !hasMultiLeafChild()) {
             return false;
         }
         return matchWithoutChild(expression.getOp().getOpType());
+    }
+
+    private boolean hasMultiLeafChild() {
+        for (int i = 0; i < children.size(); ++i) {
+            if (children.get(i).is(OperatorType.PATTERN_MULTI_LEAF)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static Pattern create(OperatorType type, OperatorType... children) {

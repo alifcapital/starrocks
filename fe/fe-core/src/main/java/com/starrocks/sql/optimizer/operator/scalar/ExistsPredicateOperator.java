@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer.operator.scalar;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 
 import java.util.List;
-import java.util.Objects;
 
 public class ExistsPredicateOperator extends PredicateOperator {
     private final boolean isNotExists;
@@ -87,6 +86,6 @@ public class ExistsPredicateOperator extends PredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), isNotExists);
+        return 31 * (31 + super.hashCodeSelf()) + Boolean.hashCode(isNotExists);
     }
 }

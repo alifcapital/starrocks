@@ -27,6 +27,7 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableProperty;
 import com.starrocks.catalog.mv.MVTimelinessArbiter;
 import com.starrocks.common.Pair;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.metric.IMaterializedViewMetricsEntity;
@@ -138,8 +139,7 @@ public class TextMatchBasedRewriteRule extends Rule {
             return null;
         }
 
-        CachingMvPlanContextBuilder.AstKey astKey = new CachingMvPlanContextBuilder.AstKey(parseNode);
-        OptExpression rewritten = rewriteByTextMatch(input, context, astKey);
+        OptExpression rewritten = rewriteByTextMatch(input, context, parseNode);
         if (rewritten != null) {
             return rewritten;
         }
@@ -206,17 +206,20 @@ public class TextMatchBasedRewriteRule extends Rule {
 
     private OptExpression rewriteByTextMatch(OptExpression input,
                                              OptimizerContext context,
-                                             CachingMvPlanContextBuilder.AstKey ast) {
+                                             ParseNode parseNode) {
         if (!isSupportForTextBasedRewrite(input)) {
             logMVRewrite(context, this, "TEXT_BASED_REWRITE is not supported for this input");
             return null;
         }
+        CachingMvPlanContextBuilder.AstKey ast = new CachingMvPlanContextBuilder.AstKey(parseNode);
 
         QueryMaterializationContext queryMaterializationContext = context.getQueryMaterializationContext();
         try {
             Set<MaterializedView> candidateMvs = getMaterializedViewsByAst(input, ast);
-            logMVRewrite(context, this, "TEXT_BASED_REWRITE matched mvs: {}",
-                    candidateMvs.stream().map(mv -> mv.getName()).collect(Collectors.toList()));
+            if (Tracers.isSetTraceModule(Tracers.Module.MV)) {
+                logMVRewrite(context, this, "TEXT_BASED_REWRITE matched mvs: {}",
+                        candidateMvs.stream().map(mv -> mv.getName()).collect(Collectors.toList()));
+            }
             if (candidateMvs.isEmpty()) {
                 return null;
             }
@@ -439,8 +442,7 @@ public class TextMatchBasedRewriteRule extends Rule {
 
             // try to rewrite by text match
             ParseNode parseNode = mvTransformerContext.getOpAST(op);
-            OptExpression rewritten = rewriteByTextMatch(input, optimizerContext,
-                    new CachingMvPlanContextBuilder.AstKey(parseNode));
+            OptExpression rewritten = rewriteByTextMatch(input, optimizerContext, parseNode);
             if (rewritten != null) {
                 return rewritten;
             }

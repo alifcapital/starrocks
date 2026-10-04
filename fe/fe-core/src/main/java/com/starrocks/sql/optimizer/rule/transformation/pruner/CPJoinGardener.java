@@ -80,6 +80,8 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
     private final Map<ColumnRefOperator, Map<OptExpression, ColumnRefOperator>> foreignKeyColRefs = Maps.newHashMap();
     private final Map<OptExpression, Integer> scanNodeOrdinals = Maps.newHashMap();
     private final List<OptExpression> ordinalToScanNodes = Lists.newArrayList();
+    // We never modify a stored bitmap in place, so every node without scans can share one empty bitmap.
+    private final RoaringBitmap emptyScanOps = new RoaringBitmap();
 
     public CPJoinGardener(ColumnRefFactory columnRefFactory) {
         this.columnRefFactory = columnRefFactory;
@@ -97,8 +99,12 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         colRefMap.forEach((col, scalarOp) -> {
             if (!columnOrigins.containsKey(col.getId())) {
                 ColumnRefSet columnRefSet = new ColumnRefSet();
-                scalarOp.getUsedColumns().getStream()
-                        .forEach(id -> columnRefSet.union(columnOrigins.getOrDefault(id, new ColumnRefSet())));
+                for (int id : scalarOp.getUsedColumns().getColumnIds()) {
+                    ColumnRefSet origins = columnOrigins.get(id);
+                    if (origins != null) {
+                        columnRefSet.union(origins);
+                    }
+                }
                 columnOrigins.put(col.getId(), columnRefSet);
             }
         });
@@ -113,57 +119,69 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         List<CPBiRel> biRels = Lists.newArrayList();
         if ((joinOp.getJoinType().isInnerJoin() || joinOp.getJoinType().isLeftOuterJoin()) &&
                 scanOps.containsKey(lhs) && cpScanOps.containsKey(rhs)) {
-            List<CPBiRel> leftToRightBiRels =
-                    Utils.getIntStream(scanOps.get(lhs)).map(ordinalToScanNodes::get)
-                            .filter(candidateLhsScanOpSet::contains)
-                            .flatMap(lhsScan -> Utils.getIntStream(cpScanOps.get(rhs)).map(
-                                            ordinalToScanNodes::get)
-                                    .filter(candidateRhsScanOpSet::contains)
-                                    .flatMap(rhsScan -> CPBiRel.extractCPBiRels(lhsScan, rhsScan, true).stream()
-                                    )).collect(Collectors.toList());
-            biRels.addAll(leftToRightBiRels);
+            List<OptExpression> lhsScans = candidateScans(scanOps.get(lhs), candidateLhsScanOpSet);
+            if (!lhsScans.isEmpty()) {
+                List<OptExpression> rhsScans = candidateScans(cpScanOps.get(rhs), candidateRhsScanOpSet);
+                for (OptExpression lhsScan : lhsScans) {
+                    for (OptExpression rhsScan : rhsScans) {
+                        biRels.addAll(CPBiRel.extractCPBiRels(lhsScan, rhsScan, true));
+                    }
+                }
+            }
         }
         if ((joinOp.getJoinType().isInnerJoin() || joinOp.getJoinType().isRightOuterJoin()) &&
                 scanOps.containsKey(rhs) && cpScanOps.containsKey(lhs)) {
-            List<CPBiRel> rightToLeftBiRels =
-                    Utils.getIntStream(scanOps.get(rhs)).map(ordinalToScanNodes::get)
-                            .filter(candidateRhsScanOpSet::contains)
-                            .flatMap(rhsScan -> Utils.getIntStream(cpScanOps.get(lhs)).map(
-                                            ordinalToScanNodes::get)
-                                    .filter(candidateLhsScanOpSet::contains)
-                                    .flatMap(lhsScan -> CPBiRel.extractCPBiRels(rhsScan, lhsScan, false).stream()
-                                    )).collect(Collectors.toList());
-            biRels.addAll(rightToLeftBiRels);
+            List<OptExpression> rhsScans = candidateScans(scanOps.get(rhs), candidateRhsScanOpSet);
+            if (!rhsScans.isEmpty()) {
+                List<OptExpression> lhsScans = candidateScans(cpScanOps.get(lhs), candidateLhsScanOpSet);
+                for (OptExpression rhsScan : rhsScans) {
+                    for (OptExpression lhsScan : lhsScans) {
+                        biRels.addAll(CPBiRel.extractCPBiRels(rhsScan, lhsScan, false));
+                    }
+                }
+            }
         }
         if (joinOp.getJoinType().isInnerJoin()) {
-            biRels = biRels.stream()
-                    .filter(biRel -> biRel.getPairs().stream()
-                            .allMatch(p -> !p.first.isNullable() && !p.second.isNullable()))
-                    .collect(Collectors.toList());
+            biRels.removeIf(biRel -> {
+                for (Pair<ColumnRefOperator, ColumnRefOperator> p : biRel.getPairs()) {
+                    if (p.first.isNullable() || p.second.isNullable()) {
+                        return true;
+                    }
+                }
+                return false;
+            });
         }
         return biRels;
     }
 
+    private List<OptExpression> candidateScans(RoaringBitmap ordinals, Set<OptExpression> candidateScanOpSet) {
+        List<OptExpression> scans = Lists.newArrayList();
+        for (int ordinal : ordinals) {
+            OptExpression scan = ordinalToScanNodes.get(ordinal);
+            if (candidateScanOpSet.contains(scan)) {
+                scans.add(scan);
+            }
+        }
+        return scans;
+    }
+
     private Pair<Set<OptExpression>, Set<OptExpression>> getCandidateScanOpSet(
             Set<Pair<ColumnRefOperator, ColumnRefOperator>> eqColumnRefPairs) {
-        Set<Pair<Integer, Integer>> joinColumnEqClasses =
-                eqColumnRefPairs.stream().map(biCol ->
-                        Pair.create(
-                                columnRefEquivClasses.getGroupIdOrAdd(biCol.first),
-                                columnRefEquivClasses.getGroupIdOrAdd(biCol.second))
-                ).filter(p -> !Objects.equals(p.first, p.second)).collect(Collectors.toSet());
-
-        Set<OptExpression> candidateLhsScanOpSet =
-                joinColumnEqClasses.stream()
-                        .flatMap(p ->
-                                columnRefEquivClasses.getGroup(p.first).stream().map(columnToScans::get))
-                        .collect(Collectors.toSet());
-
-        Set<OptExpression> candidateRhsScanOpSet =
-                joinColumnEqClasses.stream()
-                        .flatMap(p ->
-                                columnRefEquivClasses.getGroup(p.second).stream().map(columnToScans::get))
-                        .collect(Collectors.toSet());
+        Set<OptExpression> candidateLhsScanOpSet = Sets.newHashSet();
+        Set<OptExpression> candidateRhsScanOpSet = Sets.newHashSet();
+        for (Pair<ColumnRefOperator, ColumnRefOperator> biCol : eqColumnRefPairs) {
+            int lhsGroupId = columnRefEquivClasses.getGroupIdOrAdd(biCol.first);
+            int rhsGroupId = columnRefEquivClasses.getGroupIdOrAdd(biCol.second);
+            if (lhsGroupId == rhsGroupId) {
+                continue;
+            }
+            for (ColumnRefOperator colRef : columnRefEquivClasses.getGroup(lhsGroupId)) {
+                candidateLhsScanOpSet.add(columnToScans.get(colRef));
+            }
+            for (ColumnRefOperator colRef : columnRefEquivClasses.getGroup(rhsGroupId)) {
+                candidateRhsScanOpSet.add(columnToScans.get(colRef));
+            }
+        }
         return Pair.create(candidateLhsScanOpSet, candidateRhsScanOpSet);
     }
 
@@ -174,10 +192,6 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         RoaringBitmap lhsCardPreservingScanOps = cpScanOps.get(lhsOpt);
         RoaringBitmap rhsCardPreservingScanOps = cpScanOps.get(rhsOpt);
 
-        RoaringBitmap lhsScanOps = scanOps.get(lhsOpt);
-        RoaringBitmap rhsScanOps = scanOps.get(rhsOpt);
-
-        scanOps.put(joinOpt, RoaringBitmap.or(lhsScanOps, rhsScanOps));
         LogicalJoinOperator joinOp = joinOpt.getOp().cast();
         JoinOperator joinType = joinOp.getJoinType();
         Set<Pair<ColumnRefOperator, ColumnRefOperator>> pairs = biRel.getPairs();
@@ -185,10 +199,16 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         if (!biRel.isFromForeignKey() && joinType.isInnerJoin()) {
             cpEdges.add(new CPEdge(biRel.getLhs(), biRel.getRhs(), false, eqColumnRefs));
             currCPScanOps = RoaringBitmap.or(lhsCardPreservingScanOps, rhsCardPreservingScanOps);
-            uniqueKeyColRefs.computeIfAbsent(biRel.getLhs(), k -> Sets.newHashSet())
-                    .addAll(pairs.stream().map(p -> p.first).collect(Collectors.toList()));
-            uniqueKeyColRefs.computeIfAbsent(biRel.getRhs(), k -> Sets.newHashSet())
-                    .addAll(pairs.stream().map(p -> p.second).collect(Collectors.toList()));
+            Set<ColumnRefOperator> lhsUniqueKeyColRefs =
+                    uniqueKeyColRefs.computeIfAbsent(biRel.getLhs(), k -> Sets.newHashSet());
+            for (Pair<ColumnRefOperator, ColumnRefOperator> p : pairs) {
+                lhsUniqueKeyColRefs.add(p.first);
+            }
+            Set<ColumnRefOperator> rhsUniqueKeyColRefs =
+                    uniqueKeyColRefs.computeIfAbsent(biRel.getRhs(), k -> Sets.newHashSet());
+            for (Pair<ColumnRefOperator, ColumnRefOperator> p : pairs) {
+                rhsUniqueKeyColRefs.add(p.second);
+            }
             pairs.forEach(p -> {
                 foreignKeyColRefs.computeIfAbsent(p.first, k -> Maps.newHashMap()).put(biRel.getRhs(), p.second);
                 foreignKeyColRefs.computeIfAbsent(p.second, k -> Maps.newHashMap()).put(biRel.getLhs(), p.first);
@@ -196,8 +216,11 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         } else {
             CPEdge edge = new CPEdge(biRel.getLhs(), biRel.getRhs(), true, eqColumnRefs);
             currCPScanOps = biRel.isLeftToRight() ? lhsCardPreservingScanOps : rhsCardPreservingScanOps;
-            uniqueKeyColRefs.computeIfAbsent(biRel.getRhs(), k -> Sets.newHashSet())
-                    .addAll(pairs.stream().map(p -> p.second).collect(Collectors.toList()));
+            Set<ColumnRefOperator> rhsUniqueKeyColRefs =
+                    uniqueKeyColRefs.computeIfAbsent(biRel.getRhs(), k -> Sets.newHashSet());
+            for (Pair<ColumnRefOperator, ColumnRefOperator> p : pairs) {
+                rhsUniqueKeyColRefs.add(p.second);
+            }
             pairs.forEach(p -> foreignKeyColRefs.computeIfAbsent(p.second, k -> Maps.newHashMap())
                     .put(biRel.getLhs(), p.first));
             cpEdges.add(edge);
@@ -216,7 +239,19 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
             return visit(optExpression, context);
         }
 
+        collectCPScanOpsOfJoin(optExpression, joinType);
+        if (!joinOp.hasLimit() && cpScanOps.containsKey(optExpression)) {
+            return true;
+        } else {
+            return visit(optExpression, context);
+        }
+    }
+
+    private void collectCPScanOpsOfJoin(OptExpression optExpression, JoinOperator joinType) {
         Set<Pair<ColumnRefOperator, ColumnRefOperator>> eqColumnRefPairs = Utils.getJoinEqualColRefPairs(optExpression);
+        if (eqColumnRefPairs.isEmpty()) {
+            return;
+        }
         Pair<Set<OptExpression>, Set<OptExpression>> candidateScanOpSets = getCandidateScanOpSet(eqColumnRefPairs);
         Set<OptExpression> lhsCandidateScanOpSet = candidateScanOpSets.first;
         Set<OptExpression> rhsCandidateScanOpSet = candidateScanOpSets.second;
@@ -224,6 +259,7 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         List<CPBiRel> biRels =
                 getCardinalityPreserving(optExpression, lhsCandidateScanOpSet, rhsCandidateScanOpSet);
 
+        boolean scanOpsPut = false;
         for (CPBiRel biRel : biRels) {
             Set<Pair<ColumnRefOperator, ColumnRefOperator>> pairs = biRel.getPairs();
             Set<Pair<ColumnRefOperator, ColumnRefOperator>> targetPairs = pairs;
@@ -243,12 +279,12 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
                 eqColumnRefs = pairs.stream().collect(Collectors.toMap(p -> p.first, p -> p.second));
             }
             eqColumnRefs.forEach(columnRefEquivClasses::union);
+            if (!scanOpsPut) {
+                scanOps.put(optExpression, RoaringBitmap.or(scanOps.get(optExpression.inputAt(0)),
+                        scanOps.get(optExpression.inputAt(1))));
+                scanOpsPut = true;
+            }
             synthesizeCPScanOpsOfJoin(optExpression, biRel, eqColumnRefs);
-        }
-        if (!joinOp.hasLimit() && cpScanOps.containsKey(optExpression)) {
-            return true;
-        } else {
-            return visit(optExpression, context);
         }
     }
 
@@ -260,8 +296,8 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
                 cpFrontiers.put(child, Pair.create(optExpression, i));
             }
         }
-        scanOps.put(optExpression, RoaringBitmap.bitmapOf());
-        cpScanOps.put(optExpression, RoaringBitmap.bitmapOf());
+        scanOps.put(optExpression, emptyScanOps);
+        cpScanOps.put(optExpression, emptyScanOps);
         computeOriginsOfColumnRefs(optExpression);
         return false;
     }
@@ -367,14 +403,18 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
             }
 
             if (!edge.isUnilateral()) {
-                if (!mergedEdges.contains(edge.inverse())) {
+                if (!mergedEdges.contains(edge.inverseLookupKey())) {
                     mergedEdges.add(edge);
                 }
-            } else if (!mergedEdges.contains(edge.toBiLateral()) &&
-                    !mergedEdges.contains(edge.toBiLateral().inverse())) {
-                if (mergedEdges.contains(edge.inverse())) {
-                    mergedEdges.remove(edge.inverse());
-                    mergedEdges.add(edge.toBiLateral());
+            } else {
+                CPEdge bilateral = edge.toBiLateral();
+                if (mergedEdges.contains(bilateral) || mergedEdges.contains(bilateral.inverseLookupKey())) {
+                    continue;
+                }
+                CPEdge inverse = edge.inverseLookupKey();
+                if (mergedEdges.contains(inverse)) {
+                    mergedEdges.remove(inverse);
+                    mergedEdges.add(bilateral);
                 } else {
                     mergedEdges.add(edge);
                 }
@@ -454,7 +494,7 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
                 //  parent and and new parent, for an example:
                 //  cp-chain#0: A->B->C->D->E
                 //  cp-chain#1: A->E
-                CPEdge edge = new CPEdge(lhsNode.value, parent.value, true, Collections.emptyMap());
+                CPEdge edge = CPEdge.lookupKey(lhsNode.value, parent.value, true);
                 if (edges.contains(edge)) {
                     parent.getChildren().remove(rhsNode);
                     lhsNode.addChild(rhsNode);
@@ -494,26 +534,33 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
         if (pairsA.isEmpty() || pairsB.isEmpty()) {
             return false;
         }
-        Set<Pair<Integer, Integer>> eqClassPairsA =
-                pairsA.stream().map(biCol ->
-                        Pair.create(colRefEquivClasses.getGroupIdOrAdd(biCol.first),
-                                colRefEquivClasses.getGroupIdOrAdd(biCol.second))
-                ).collect(Collectors.toSet());
-
-        Set<Pair<Optional<Integer>, Optional<Integer>>> optEqClassPairsB =
-                pairsB.stream().map(biCol ->
-                        Pair.create(colRefEquivClasses.getGroupId(biCol.first),
-                                colRefEquivClasses.getGroupId(biCol.second))
-                ).collect(Collectors.toSet());
-
-        if (!optEqClassPairsB.stream().allMatch(p -> p.first.isPresent() && p.second.isPresent())) {
-            return false;
+        Set<Pair<Integer, Integer>> eqClassPairsA = Sets.newHashSet();
+        for (Pair<ColumnRefOperator, ColumnRefOperator> biCol : pairsA) {
+            eqClassPairsA.add(Pair.create(colRefEquivClasses.getGroupIdOrAdd(biCol.first),
+                    colRefEquivClasses.getGroupIdOrAdd(biCol.second)));
         }
-        Set<Pair<Integer, Integer>> eqClassPairsB =
-                optEqClassPairsB.stream().map(p -> Pair.create(p.first.get(), p.second.get()))
-                        .collect(Collectors.toSet());
-        Set<Pair<Integer, Integer>> symDiff = Sets.symmetricDifference(eqClassPairsA, eqClassPairsB);
-        return symDiff.isEmpty() || symDiff.stream().allMatch(p -> Objects.equals(p.first, p.second));
+
+        Set<Pair<Integer, Integer>> eqClassPairsB = Sets.newHashSet();
+        for (Pair<ColumnRefOperator, ColumnRefOperator> biCol : pairsB) {
+            Optional<Integer> first = colRefEquivClasses.getGroupId(biCol.first);
+            Optional<Integer> second = colRefEquivClasses.getGroupId(biCol.second);
+            if (first.isEmpty() || second.isEmpty()) {
+                return false;
+            }
+            eqClassPairsB.add(Pair.create(first.get(), second.get()));
+        }
+
+        for (Pair<Integer, Integer> p : eqClassPairsA) {
+            if (!eqClassPairsB.contains(p) && !Objects.equals(p.first, p.second)) {
+                return false;
+            }
+        }
+        for (Pair<Integer, Integer> p : eqClassPairsB) {
+            if (!eqClassPairsA.contains(p) && !Objects.equals(p.first, p.second)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void collect(OptExpression root) {
@@ -905,6 +952,9 @@ public class CPJoinGardener extends OptExpressionVisitor<Boolean, Void> {
 
         @Override
         public Optional<OptExpression> visitLogicalTableScan(OptExpression optExpression, Void context) {
+            if (extraPredicates.isEmpty() && extraColRefMap.isEmpty()) {
+                return Optional.empty();
+            }
             List<ScalarOperator> remainPredicates = Lists.newArrayList();
             List<ScalarOperator> selectedPredicates = Lists.newArrayList();
             LogicalScanOperator scanOperator = optExpression.getOp().cast();

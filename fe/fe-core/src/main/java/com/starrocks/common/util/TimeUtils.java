@@ -143,9 +143,14 @@ public class TimeUtils {
         return TimeZone.getTimeZone(ZoneId.of(ZoneId.systemDefault().getId(), TIME_ZONE_ALIAS_MAP));
     }
 
+    // return the zone id of current system, without the TimeZone round trip of getSystemTimeZone
+    public static ZoneId getSystemZoneId() {
+        return ZoneId.of(ZoneId.systemDefault().getId(), TIME_ZONE_ALIAS_MAP);
+    }
+
     // Return now with system timezone
     public static LocalDateTime getSystemNow() {
-        return LocalDateTime.now(getSystemTimeZone().toZoneId());
+        return LocalDateTime.now(getSystemZoneId());
     }
 
     // get time zone of given zone name, or return system time zone if name is null.

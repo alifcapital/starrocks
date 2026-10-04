@@ -256,14 +256,12 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
 
     private static boolean isAllowedMonotonicFunction(ScalarOperator op) {
         if (op instanceof CallOperator call) {
-            if (!OperatorFunctionChecker.onlyContainMonotonicFunctions(call).first) {
-                return false;
-            }
             if (!SUPPORTED_FUNCTION_SET.contains(call.getFnName().toLowerCase())) {
                 return false;
             }
             // require one child which is column
-            return !call.getChildren().isEmpty() && call.getChild(0).isColumnRef();
+            return !call.getChildren().isEmpty() && call.getChild(0).isColumnRef()
+                    && OperatorFunctionChecker.onlyContainMonotonicFunctions(call).first;
         }
         return false;
     }

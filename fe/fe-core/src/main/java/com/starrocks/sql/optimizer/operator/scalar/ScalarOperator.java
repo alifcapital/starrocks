@@ -52,6 +52,7 @@ public abstract class ScalarOperator implements Cloneable {
 
     protected boolean isJoinDerived = false;
 
+    // Immutable snapshot, safe to share when cloning the otherwise mutable operator.
     private List<String> hints = Collections.emptyList();
 
     private boolean isIndexOnlyFilter = false;
@@ -232,7 +233,11 @@ public abstract class ScalarOperator implements Cloneable {
         if (args == null) {
             return;
         }
-        this.depth += args.stream().map(ScalarOperator::getDepth).max(Integer::compareTo).orElse(0);
+        int maxChildDepth = 0;
+        for (ScalarOperator arg : args) {
+            maxChildDepth = Math.max(maxChildDepth, arg.getDepth());
+        }
+        this.depth += maxChildDepth;
     }
 
     /**
@@ -267,7 +272,6 @@ public abstract class ScalarOperator implements Cloneable {
         ScalarOperator operator = null;
         try {
             operator = (ScalarOperator) super.clone();
-            operator.hints = Lists.newArrayList(hints);
             operator.isRedundant = this.isRedundant;
             operator.isPushdown = this.isPushdown;
             // Clear cache after cloning, as the cloned operator may be modified
@@ -281,7 +285,18 @@ public abstract class ScalarOperator implements Cloneable {
      * Return the columns that this scalar operator used.
      * For a + b, the used columns are a and b.
      */
-    public abstract ColumnRefSet getUsedColumns();
+    public final ColumnRefSet getUsedColumns() {
+        ColumnRefSet used = new ColumnRefSet();
+        collectUsedColumns(used);
+        return used;
+    }
+
+    /**
+     * Adds this expression's visible column references without allocating sets for its children.
+     * Subclasses must implement their used-column semantics here, so recursive collection and
+     * getUsedColumns() agree. Scope boundaries may use a local set before adding to the destination.
+     */
+    public abstract void collectUsedColumns(ColumnRefSet destination);
 
     public List<ColumnRefOperator> getColumnRefs() {
         List<ColumnRefOperator> columns = Lists.newArrayList();
@@ -333,10 +348,13 @@ public abstract class ScalarOperator implements Cloneable {
         return isConstantNull() || isConstantFalse();
     }
 
+    /** Replaces hints with an immutable snapshot; later changes to the input list do not affect this operator. */
     public void setHints(List<String> hints) {
-        this.hints = hints;
+        this.hints = hints.isEmpty() ? Collections.emptyList()
+                : Collections.unmodifiableList(Lists.newArrayList(hints));
     }
 
+    /** Returns the immutable hint snapshot. Use setHints to replace it. */
     public List<String> getHints() {
         return hints;
     }

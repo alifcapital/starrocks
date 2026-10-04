@@ -89,6 +89,10 @@ public class MVColumnPruner {
                         Utils.findSmallestColumnRefFromTable(scanOperator.getColRefToColumnMetaMap(), scanOperator.getTable()));
             }
 
+            if (outputColumns.containsAll(scanOperator.getColRefToColumnMetaMap().keySet())) {
+                return optExpression;
+            }
+
             ImmutableMap.Builder<ColumnRefOperator, Column> columnRefColumnMapBuilder = new ImmutableMap.Builder<>();
             scanOperator.getColRefToColumnMetaMap().keySet().stream()
                     .filter(outputColumns::contains)
@@ -151,7 +155,7 @@ public class MVColumnPruner {
                         .stream()
                         .filter(e -> requiredOutputColumns.contains(e.getKey()))
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-                newAggregations.values().stream().forEach(s -> requiredOutputColumns.union(s.getUsedColumns()));
+                newAggregations.values().forEach(s -> s.collectUsedColumns(requiredOutputColumns));
                 final LogicalAggregationOperator newAggOp = new LogicalAggregationOperator.Builder()
                         .withOperator(aggregationOperator)
                         .setGroupingKeys(newGroupByKeys)
@@ -255,7 +259,7 @@ public class MVColumnPruner {
             // projection columns
             Projection projection = operator.getProjection();
             if (projection != null && projection.getColumnRefMap() != null) {
-                projection.getColumnRefMap().values().forEach(s -> requiredOutputColumns.union(s.getUsedColumns()));
+                projection.getColumnRefMap().values().forEach(s -> s.collectUsedColumns(requiredOutputColumns));
             }
         }
     }

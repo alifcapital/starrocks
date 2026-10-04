@@ -14,7 +14,7 @@
 
 package com.starrocks.sql.optimizer.operator.logical;
 
-import com.starrocks.sql.optimizer.ExpressionContext;
+import com.starrocks.sql.optimizer.LogicalPropertyContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.RowOutputInfo;
@@ -25,7 +25,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.property.DomainProperty;
 import com.starrocks.sql.optimizer.property.DomainPropertyDeriver;
 
-import java.util.ArrayList;
 import java.util.List;
 
 public class LogicalFilterOperator extends LogicalOperator {
@@ -47,9 +46,9 @@ public class LogicalFilterOperator extends LogicalOperator {
     }
 
     @Override
-    public ColumnRefSet getOutputColumns(ExpressionContext expressionContext) {
+    public ColumnRefSet getOutputColumns(LogicalPropertyContext expressionContext) {
         if (projection != null) {
-            return new ColumnRefSet(new ArrayList<>(projection.getColumnRefMap().keySet()));
+            return new ColumnRefSet(projection.getColumnRefMap().keySet());
         } else {
             return expressionContext.getChildLogicalProperty(0).getOutputColumns();
         }

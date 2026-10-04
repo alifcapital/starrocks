@@ -119,6 +119,19 @@ public class Statistics {
                 multiColumnCombinedStats);
     }
 
+    /**
+     * Like withOutputRowCount, share the existing read-only maps when only provenance changes.
+     * The source builder must be finished before publication; buildFrom creates detached maps
+     * for subsequent writes. This does not turn build() into a snapshot of a still-live builder.
+     */
+    public Statistics withJoinStatisticsProvenance(JoinStatisticsScope scope, JoinStatisticsPlanner planner) {
+        if (joinStatisticsScope == scope && joinStatisticsPlanner == planner) {
+            return this;
+        }
+        return new Statistics(outputRowCount, columnStatistics, tableRowCountMayInaccurate, shadowColumns,
+                statsSource, partitionRestricted, scope, planner, multiColumnCombinedStats);
+    }
+
     public double getOutputSize(ColumnRefSet outputColumns) {
         double totalSize = 0;
         boolean nonEmpty = false;

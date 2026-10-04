@@ -20,6 +20,7 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.Ordering;
+import com.starrocks.sql.optimizer.operator.ColumnOutputInfo;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
@@ -31,8 +32,8 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.type.PrimitiveType;
 
-import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,7 +55,12 @@ public class HoistHeavyCostExprsUponTopnRule extends TransformationRule {
                 return true;
             }
         }
-        return op.getChildren().stream().anyMatch(this::isHeavyCost);
+        for (ScalarOperator child : op.getChildren()) {
+            if (isHeavyCost(child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -67,10 +73,10 @@ public class HoistHeavyCostExprsUponTopnRule extends TransformationRule {
             return false;
         }
         OptExpression child = input.inputAt(0);
-        Set<ColumnRefOperator> heavyCostColumnRefs = child.getRowOutputInfo().getColumnRefMap().entrySet()
+        Set<ColumnRefOperator> heavyCostColumnRefs = child.getRowOutputInfo().getColumnOutputInfo()
                 .stream()
-                .filter(e -> isHeavyCost(e.getValue()))
-                .map(Map.Entry::getKey)
+                .filter(e -> isHeavyCost(e.getScalarOp()))
+                .map(ColumnOutputInfo::getColumnRef)
                 .collect(Collectors.toSet());
 
         if (heavyCostColumnRefs.isEmpty()) {
@@ -85,42 +91,39 @@ public class HoistHeavyCostExprsUponTopnRule extends TransformationRule {
             return false;
         }
 
-        Set<ColumnRefOperator> orderByColumnRefs = topnOp.getOrderByElements().stream()
-                .map(Ordering::getColumnRef)
-                .collect(Collectors.toSet());
-
-        ColumnRefSet heavyColumnUsedAsOrderBy = ColumnRefSet.of();
-        heavyColumnUsedAsOrderBy.union(orderByColumnRefs);
         ColumnRefSet heavyCostColumnRefSet = ColumnRefSet.of();
         heavyCostColumnRefSet.union(heavyCostColumnRefs);
-        heavyColumnUsedAsOrderBy.intersect(heavyCostColumnRefSet);
-        return heavyColumnUsedAsOrderBy.isEmpty();
+        for (Ordering ordering : topnOp.getOrderByElements()) {
+            if (heavyCostColumnRefSet.contains(ordering.getColumnRef().getId())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalTopNOperator topnOp = input.getOp().cast();
         OptExpression child = input.inputAt(0);
-        Map<Boolean, Map<ColumnRefOperator, ScalarOperator>> columnRefMaps =
-                child.getRowOutputInfo().getColumnRefMap().entrySet()
-                        .stream()
-                        .collect(Collectors.partitioningBy(e -> isHeavyCost(e.getValue()),
-                                Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+        Map<ColumnRefOperator, ScalarOperator> heavyCostColumnRefMap = new HashMap<>();
+        Map<ColumnRefOperator, ScalarOperator> childColumnRefMap = new HashMap<>();
+        for (ColumnOutputInfo entry : child.getRowOutputInfo().getColumnOutputInfo()) {
+            if (isHeavyCost(entry.getScalarOp())) {
+                heavyCostColumnRefMap.put(entry.getColumnRef(), entry.getScalarOp());
+            } else {
+                childColumnRefMap.put(entry.getColumnRef(), entry.getScalarOp());
+            }
+        }
 
-        Map<ColumnRefOperator, ScalarOperator> heavyCostColumnRefMap = columnRefMaps.get(true);
-        Map<ColumnRefOperator, ScalarOperator> childColumnRefMap = columnRefMaps.get(false);
-
-        Set<ColumnRefOperator> usedColumnRefs = heavyCostColumnRefMap.values().stream()
-                .map(ScalarOperator::getColumnRefs)
-                .flatMap(Collection::stream)
-                .collect(Collectors.toSet());
-
-        if (!childColumnRefMap.keySet().containsAll(usedColumnRefs)) {
-            return Collections.emptyList();
+        Set<ColumnRefOperator> childColumnRefs = childColumnRefMap.keySet();
+        for (ScalarOperator expression : heavyCostColumnRefMap.values()) {
+            if (!childColumnRefs.containsAll(expression.getColumnRefs())) {
+                return Collections.emptyList();
+            }
         }
 
         Map<ColumnRefOperator, ScalarOperator> topnColumnRefMap = input.getRowOutputInfo().getColumnRefMap();
-        topnColumnRefMap.putAll(columnRefMaps.get(true));
+        topnColumnRefMap.putAll(heavyCostColumnRefMap);
         LogicalProjectOperator projectOp = child.getOp().cast();
 
         Operator newProjectOp = LogicalProjectOperator.builder().withOperator(projectOp)

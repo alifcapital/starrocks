@@ -213,14 +213,21 @@ public class MvPartitionCompensator {
             // aggregate operators, it should be handled in MVColumnPruner.
             // 2. For mv rewrite, it's safe to prune aggregate columns in mv compensate plan, but it cannot determine
             // required columns in the transparent rule.
-            List<LogicalAggregationOperator> list = Lists.newArrayList();
-            Utils.extractOperator(newMvQueryPlan, list, op -> op instanceof LogicalAggregationOperator);
-            list.stream().forEach(op -> op.setOpRuleBit(OP_MV_AGG_PRUNE_COLUMNS));
+            markAggregatePruneColumns(newMvQueryPlan);
         }
         // Adjust query output columns to mv's output columns to make sure the output columns are the same as
         // expectOutputColumns which are mv scan operator's output columns.
         return adjustOptExpressionOutputColumnType(mvContext.getQueryRefFactory(),
                 newMvQueryPlan, mvQueryOutputColumnRefs, originalOutputColumns);
+    }
+
+    private static void markAggregatePruneColumns(OptExpression root) {
+        if (root.getOp() instanceof LogicalAggregationOperator) {
+            root.getOp().setOpRuleBit(OP_MV_AGG_PRUNE_COLUMNS);
+        }
+        for (OptExpression input : root.getInputs()) {
+            markAggregatePruneColumns(input);
+        }
     }
 
     public static OptExpression getMvCompensateQueryPlan(MaterializationContext mvContext,
@@ -296,33 +303,42 @@ public class MvPartitionCompensator {
      * @param expectOutputColumns the expected output columns
      * @return the new opt expression and the new output columns if it needs to cast, otherwise return the original
      */
-    private static Pair<OptExpression, List<ColumnRefOperator>> adjustOptExpressionOutputColumnType(
+    @VisibleForTesting
+    static Pair<OptExpression, List<ColumnRefOperator>> adjustOptExpressionOutputColumnType(
             ColumnRefFactory columnRefFactory,
             OptExpression optExpression,
             List<ColumnRefOperator> curOutputColumns,
             List<ColumnRefOperator> expectOutputColumns) {
         Preconditions.checkState(curOutputColumns.size() == expectOutputColumns.size());
-        Map<ColumnRefOperator, ScalarOperator> projections = Maps.newHashMap();
-        List<ColumnRefOperator> newChildOutputs = new ArrayList<>();
+        // the containers are only needed when some output must be cast, so they are created at the first mismatch
+        Map<ColumnRefOperator, ScalarOperator> projections = null;
+        List<ColumnRefOperator> newChildOutputs = null;
         int len = curOutputColumns.size();
-        boolean isNeedCast = false;
         for (int i = 0; i < len; i++) {
             ColumnRefOperator outOp = curOutputColumns.get(i);
             Type outputType = outOp.getType();
             ColumnRefOperator expectOp = expectOutputColumns.get(i);
             Type expectType = expectOp.getType();
             if (!outputType.equals(expectType)) {
-                isNeedCast = true;
+                if (projections == null) {
+                    projections = Maps.newHashMap();
+                    newChildOutputs = new ArrayList<>();
+                    for (int j = 0; j < i; j++) {
+                        ColumnRefOperator prevOp = curOutputColumns.get(j);
+                        projections.put(prevOp, prevOp);
+                        newChildOutputs.add(prevOp);
+                    }
+                }
                 ColumnRefOperator newColRef = columnRefFactory.create("cast", expectType, expectOp.isNullable());
-                ScalarOperator cast = new CastOperator(outputType, outOp, true);
+                ScalarOperator cast = new CastOperator(expectType, outOp, true);
                 projections.put(newColRef, cast);
                 newChildOutputs.add(newColRef);
-            } else {
+            } else if (projections != null) {
                 projections.put(outOp, outOp);
                 newChildOutputs.add(outOp);
             }
         }
-        if (isNeedCast) {
+        if (projections != null) {
             OptExpression newOptExpression = Utils.mergeProjection(optExpression, projections);
             return Pair.create(newOptExpression, newChildOutputs);
         } else {

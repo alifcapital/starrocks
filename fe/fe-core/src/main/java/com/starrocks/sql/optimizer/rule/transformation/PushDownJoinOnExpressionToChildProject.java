@@ -34,8 +34,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * Because the children of Join need to shuffle data
@@ -56,10 +54,7 @@ public class PushDownJoinOnExpressionToChildProject extends TransformationRule {
         ColumnRefSet leftOutputColumns = input.inputAt(0).getOutputColumns();
         ColumnRefSet rightOutputColumns = input.inputAt(1).getOutputColumns();
 
-        List<BinaryPredicateOperator> equalConjs = JoinHelper.
-                getEqualsPredicate(leftOutputColumns, rightOutputColumns, Utils.extractConjuncts(onPredicate));
-
-        return !equalConjs.isEmpty();
+        return JoinHelper.hasEqualsPredicate(leftOutputColumns, rightOutputColumns, onPredicate);
     }
 
     @Override
@@ -78,36 +73,48 @@ public class PushDownJoinOnExpressionToChildProject extends TransformationRule {
         for (BinaryPredicateOperator binaryPredicateOperator : equalsPredicate) {
             ScalarOperator left = binaryPredicateOperator.getChild(0);
             ScalarOperator right = binaryPredicateOperator.getChild(1);
-            if (leftOutputColumns.containsAll(left.getUsedColumns()) && !left.isColumnRef()) {
-                leftProjectMaps.put(context.getColumnRefFactory().create(left, left.getType(), left.isNullable()),
-                        left);
+            if (!left.isColumnRef()) {
+                ColumnRefSet leftUsedColumns = left.getUsedColumns();
+                if (leftOutputColumns.containsAll(leftUsedColumns)) {
+                    leftProjectMaps.put(context.getColumnRefFactory().create(left, left.getType(), left.isNullable()),
+                            left);
+                }
+                if (rightOutputColumns.containsAll(leftUsedColumns)) {
+                    rightProjectMaps.put(
+                            context.getColumnRefFactory().create(left, left.getType(), left.isNullable()), left);
+                }
             }
-            if (rightOutputColumns.containsAll(left.getUsedColumns()) && !left.isColumnRef()) {
-                rightProjectMaps.put(context.getColumnRefFactory().create(left, left.getType(), left.isNullable()),
-                        left);
-            }
-            if (rightOutputColumns.containsAll(right.getUsedColumns()) && !right.isColumnRef()) {
-                rightProjectMaps.put(context.getColumnRefFactory().create(right, right.getType(), right.isNullable()),
-                        right);
-            }
-            if (leftOutputColumns.containsAll(right.getUsedColumns()) && !right.isColumnRef()) {
-                leftProjectMaps.put(context.getColumnRefFactory().create(right, right.getType(), right.isNullable()),
-                        right);
+            if (!right.isColumnRef()) {
+                ColumnRefSet rightUsedColumns = right.getUsedColumns();
+                if (rightOutputColumns.containsAll(rightUsedColumns)) {
+                    rightProjectMaps.put(
+                            context.getColumnRefFactory().create(right, right.getType(), right.isNullable()), right);
+                }
+                if (leftOutputColumns.containsAll(rightUsedColumns)) {
+                    leftProjectMaps.put(
+                            context.getColumnRefFactory().create(right, right.getType(), right.isNullable()), right);
+                }
             }
         }
 
-        Rewriter leftRewriter = new Rewriter(leftProjectMaps);
-        Rewriter rightRewriter = new Rewriter(rightProjectMaps);
-        ScalarOperator newJoinOnPredicate = onPredicate.clone().accept(leftRewriter, null).accept(rightRewriter, null);
+        if (leftProjectMaps.isEmpty() && rightProjectMaps.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        ScalarOperator newJoinOnPredicate = onPredicate.clone();
+        if (!leftProjectMaps.isEmpty()) {
+            newJoinOnPredicate = newJoinOnPredicate.accept(new Rewriter(leftProjectMaps), null);
+        }
+        if (!rightProjectMaps.isEmpty()) {
+            newJoinOnPredicate = newJoinOnPredicate.accept(new Rewriter(rightProjectMaps), null);
+        }
 
         OptExpression newJoinOpt = OptExpression.create(new LogicalJoinOperator.Builder().withOperator(joinOperator)
                 .setOnPredicate(newJoinOnPredicate)
                 .build(), input.getInputs());
 
         if (!leftProjectMaps.isEmpty()) {
-            leftProjectMaps.putAll(leftOutputColumns.getStream()
-                    .map(columnRefId -> context.getColumnRefFactory().getColumnRef(columnRefId))
-                    .collect(Collectors.toMap(Function.identity(), Function.identity())));
+            leftProjectMaps.putAll(context.getColumnRefFactory().getIdentityColumnRefMap(leftOutputColumns));
 
             LogicalProjectOperator leftProject = new LogicalProjectOperator(leftProjectMaps);
             OptExpression leftProjectOpt = OptExpression.create(leftProject, input.inputAt(0));
@@ -115,20 +122,14 @@ public class PushDownJoinOnExpressionToChildProject extends TransformationRule {
         }
 
         if (!rightProjectMaps.isEmpty()) {
-            rightProjectMaps.putAll(rightOutputColumns.getStream()
-                    .map(columnRefId -> context.getColumnRefFactory().getColumnRef(columnRefId))
-                    .collect(Collectors.toMap(Function.identity(), Function.identity())));
+            rightProjectMaps.putAll(context.getColumnRefFactory().getIdentityColumnRefMap(rightOutputColumns));
 
             LogicalProjectOperator rightProject = new LogicalProjectOperator(rightProjectMaps);
             OptExpression rightProjectOpt = OptExpression.create(rightProject, input.inputAt(1));
             newJoinOpt.setChild(1, rightProjectOpt);
         }
 
-        if (leftProjectMaps.isEmpty() && rightProjectMaps.isEmpty()) {
-            return Collections.emptyList();
-        } else {
-            return Lists.newArrayList(newJoinOpt);
-        }
+        return Lists.newArrayList(newJoinOpt);
     }
 
     static class Rewriter extends ScalarOperatorVisitor<ScalarOperator, Void> {
@@ -142,8 +143,9 @@ public class PushDownJoinOnExpressionToChildProject extends TransformationRule {
 
         @Override
         public ScalarOperator visit(ScalarOperator scalarOperator, Void context) {
-            if (operatorMap.containsKey(scalarOperator)) {
-                return operatorMap.get(scalarOperator);
+            ColumnRefOperator replacement = operatorMap.get(scalarOperator);
+            if (replacement != null) {
+                return replacement;
             }
 
             for (int i = 0; i < scalarOperator.getChildren().size(); ++i) {

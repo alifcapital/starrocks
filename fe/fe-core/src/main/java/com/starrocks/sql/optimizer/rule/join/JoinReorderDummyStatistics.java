@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.rule.join;
 
-import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.statistics.DummyStatisticsCalculator;
@@ -39,10 +38,6 @@ public class JoinReorderDummyStatistics extends JoinReorderGreedy {
             calculateStatistics(child);
         }
 
-        ExpressionContext expressionContext = new ExpressionContext(expr);
-        DummyStatisticsCalculator statisticsCalculator = new DummyStatisticsCalculator(
-                expressionContext, context.getColumnRefFactory(), context);
-        statisticsCalculator.estimatorStats();
-        expr.setStatistics(expressionContext.getStatistics());
+        expr.setStatistics(DummyStatisticsCalculator.estimate(expr));
     }
 }

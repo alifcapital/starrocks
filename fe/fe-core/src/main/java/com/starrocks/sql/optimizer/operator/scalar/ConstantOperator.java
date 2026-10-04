@@ -307,8 +307,8 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
     public void setChild(int index, ScalarOperator child) {
     }
 
-    public ColumnRefSet getUsedColumns() {
-        return new ColumnRefSet();
+    public void collectUsedColumns(ColumnRefSet destination) {
+        // No visible column references.
     }
 
     public boolean getBoolean() {
@@ -407,6 +407,11 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
             // align zero, keep same with BE
             int scale = ((ScalarType) type).getScalarScale();
             BigDecimal val = (BigDecimal) value;
+            if (val.scale() <= scale) {
+                // We expect this call for every constant of a long IN list, and building a DecimalFormat costs more
+                // than the formatting. Padding with zeros to the scale gives the same text without rounding.
+                return val.setScale(scale).toPlainString();
+            }
             DecimalFormat df = new DecimalFormat((scale == 0 ? "0" : "0.") + StringUtils.repeat("0", scale));
             return df.format(val);
         }
@@ -416,7 +421,8 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(value, type.getPrimitiveType(), isNull);
+        return 31 * (31 * (31 + Objects.hashCode(value)) + Objects.hashCode(type.getPrimitiveType()))
+                + Boolean.hashCode(isNull);
     }
 
     @Override

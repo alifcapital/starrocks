@@ -70,6 +70,9 @@ public class DeferProjectAfterTopNRule extends TransformationRule {
     private boolean mayBenefitFromPruningSubField(OptimizerContext context,
                                                   Map<ColumnRefOperator, Column> refToColumn,
                                                   Set<String> columnAccessPaths, ScalarOperator scalarOperator) {
+        if (columnAccessPaths.isEmpty()) {
+            return false;
+        }
         return scalarOperator.getUsedColumns().getColumnRefOperators(context.getColumnRefFactory())
                 .stream().map(refToColumn::get).filter(Objects::nonNull)
                 .anyMatch(column -> columnAccessPaths.contains(column.getColumnId().getId()));

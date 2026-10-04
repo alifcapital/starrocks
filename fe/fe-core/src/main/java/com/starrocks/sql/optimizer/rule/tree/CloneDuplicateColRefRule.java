@@ -24,10 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.task.TaskContext;
 
-import java.util.Comparator;
-import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 // ProjectOperator or Projection of Operator may have several ColumnRefs remapped to the same ColumnRef, for an example:
 // 1.ColumnRef(1)->ColumnRef(1);
@@ -53,24 +50,29 @@ public class CloneDuplicateColRefRule implements TreeRewriteRule {
                 return;
             }
 
-            List<Map.Entry<ColumnRefOperator, ScalarOperator>> entries =
-                    colRefMap.entrySet().stream()
-                            .sorted(Comparator.comparing(entry -> entry.getKey().getId()))
-                            .collect(Collectors.toList());
-
-            Map<ScalarOperator, Integer> duplicateColRefs = Maps.newHashMap();
-            colRefMap.forEach((k, v) -> {
+            Map<ScalarOperator, Integer> duplicateColRefs = null;
+            for (ScalarOperator v : colRefMap.values()) {
                 if (!v.isColumnRef()) {
-                    return;
+                    continue;
                 }
-                duplicateColRefs.put(v, duplicateColRefs.getOrDefault(v, 0) + 1);
-            });
+                if (duplicateColRefs == null) {
+                    duplicateColRefs = Maps.newHashMap();
+                }
+                duplicateColRefs.merge(v, 1, Integer::sum);
+            }
+            if (duplicateColRefs == null) {
+                return;
+            }
 
-            for (ColumnRefOperator key : colRefMap.keySet()) {
-                ScalarOperator value = colRefMap.get(key);
-                if (value.isColumnRef() && duplicateColRefs.get(value) > 1 && !key.equals(value)) {
-                    duplicateColRefs.put(value, duplicateColRefs.get(value) - 1);
-                    colRefMap.put(key, new CloneOperator(value));
+            for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : colRefMap.entrySet()) {
+                ScalarOperator value = entry.getValue();
+                if (!value.isColumnRef() || entry.getKey().equals(value)) {
+                    continue;
+                }
+                int count = duplicateColRefs.get(value);
+                if (count > 1) {
+                    duplicateColRefs.put(value, count - 1);
+                    entry.setValue(new CloneOperator(value));
                 }
             }
         }

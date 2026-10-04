@@ -28,10 +28,18 @@ import com.starrocks.schema.MTable;
 import com.starrocks.sql.optimizer.MaterializationContext;
 import com.starrocks.sql.optimizer.MvRewritePreprocessor;
 import com.starrocks.sql.optimizer.MvRewritePreprocessor.MvCopyFailurePolicy;
+import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalOlapScanOperator;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalProjectOperator;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalUnionOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.plan.PlanTestBase;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.utframe.StarRocksAssert;
+import com.starrocks.utframe.UtFrameUtils;
 import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
@@ -41,6 +49,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -801,7 +810,17 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                             String plan = getFragmentPlan(query);
                             PlanTestBase.assertContains(plan, ":UNION");
                             PlanTestBase.assertContains(plan, "mv0");
-                            PlanTestBase.assertContains(plan, expects[i]);
+                            String expected = expects[i]
+                                    .replace("CAST(20: k2 AS VARCHAR(65533))", "CAST(20: k2 AS "
+                                            + mv1.getColumn("k2").getType().toString() + ")")
+                                    .replace("CAST(23: v3 AS CHAR(20))", "CAST(23: v3 AS "
+                                            + mv1.getColumn("v3").getType().toString() + ")")
+                                    .replace("CAST(24: v4 AS VARCHAR(20))", "CAST(24: v4 AS "
+                                            + mv1.getColumn("v4").getType().toString() + ")");
+                            PlanTestBase.assertContains(plan, expected);
+                            OptExpression physical = UtFrameUtils.getPlanAndFragment(connectContext, query)
+                                    .second.getPhysicalPlan();
+                            Assertions.assertEquals(1, assertTransparentCharCastInvariant(physical, mv1));
                         }
                     });
         });
@@ -863,7 +882,17 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                             String plan = getFragmentPlan(query);
                             PlanTestBase.assertContains(plan, ":UNION");
                             PlanTestBase.assertContains(plan, "mv0");
-                            PlanTestBase.assertContains(plan, expects[i]);
+                            String expected = expects[i]
+                                    .replace("CAST(20: k2 AS VARCHAR(65533))", "CAST(20: k2 AS "
+                                            + mv1.getColumn("k2").getType().toString() + ")")
+                                    .replace("CAST(23: v3 AS CHAR(20))", "CAST(23: v3 AS "
+                                            + mv1.getColumn("v3").getType().toString() + ")")
+                                    .replace("CAST(24: v4 AS VARCHAR(20))", "CAST(24: v4 AS "
+                                            + mv1.getColumn("v4").getType().toString() + ")");
+                            PlanTestBase.assertContains(plan, expected);
+                            OptExpression physical = UtFrameUtils.getPlanAndFragment(connectContext, query)
+                                    .second.getPhysicalPlan();
+                            Assertions.assertEquals(1, assertTransparentCharCastInvariant(physical, mv1));
                         }
                     });
         });
@@ -925,7 +954,14 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                             String plan = getFragmentPlan(query);
                             PlanTestBase.assertContains(plan, ":UNION");
                             PlanTestBase.assertContains(plan, "mv0");
-                            PlanTestBase.assertContains(plan, expects[i]);
+                            String expected = expects[i]
+                                    .replace("CAST(20: k2 AS VARCHAR(65533))", "CAST(20: k2 AS "
+                                            + mv1.getColumn("k2").getType().toString() + ")")
+                                    .replace("CAST(23: v3 AS CHAR(20))", "CAST(23: v3 AS "
+                                            + mv1.getColumn("v3").getType().toString() + ")")
+                                    .replace("CAST(24: v4 AS VARCHAR(20))", "CAST(24: v4 AS "
+                                            + mv1.getColumn("v4").getType().toString() + ")");
+                            PlanTestBase.assertContains(plan, expected);
                         }
                     });
         });
@@ -973,7 +1009,17 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                             String plan = getFragmentPlan(query);
                             PlanTestBase.assertContains(plan, ":UNION");
                             PlanTestBase.assertContains(plan, "mv0");
-                            PlanTestBase.assertContains(plan, expects[i]);
+                            String expected = expects[i]
+                                    .replace("CAST(20: k2 AS VARCHAR(65533))", "CAST(20: k2 AS "
+                                            + mv1.getColumn("k2").getType().toString() + ")")
+                                    .replace("CAST(23: v3 AS CHAR(20))", "CAST(23: v3 AS "
+                                            + mv1.getColumn("v3").getType().toString() + ")")
+                                    .replace("CAST(24: v4 AS VARCHAR(20))", "CAST(24: v4 AS "
+                                            + mv1.getColumn("v4").getType().toString() + ")");
+                            PlanTestBase.assertContains(plan, expected);
+                            OptExpression physical = UtFrameUtils.getPlanAndFragment(connectContext, query)
+                                    .second.getPhysicalPlan();
+                            Assertions.assertEquals(1, assertTransparentCharCastInvariant(physical, mv1));
                         }
                     });
         });
@@ -1069,7 +1115,7 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                                     "  |      [7, VARCHAR(1048576), false]\n" +
                                     "  |  child exprs:\n" +
                                     "  |      [11: dt, VARCHAR, false]\n" +
-                                    "  |      [17: cast, VARCHAR(10), false]");
+                                    "  |      [17: cast, " + mv1.getColumn("dt").getType().toString() + ", false]");
                         }
                     });
         });
@@ -1100,7 +1146,8 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                                     "  |      [6, VARCHAR(1048576), false] | [8, SMALLINT, true]\n" +
                                     "  |  child exprs:\n" +
                                     "  |      [9: province, VARCHAR, false] | [11: min(age), SMALLINT, true]\n" +
-                                    "  |      [17: cast, VARCHAR(64), false] | [16: min, SMALLINT, true]");
+                                    "  |      [17: cast, " + mv1.getColumn("province").getType().toString()
+                                            + ", false] | [16: min, SMALLINT, true]");
                         }
                     });
         });
@@ -1508,4 +1555,74 @@ public class MvTransparentRewriteWithOlapTableTest extends MVTestBase {
                     });
         });
     }
+    private static int assertTransparentCharCastInvariant(OptExpression input, MaterializedView mv) {
+        int matches = 0;
+        if (input.getOp() instanceof PhysicalUnionOperator union && containsScan(input, mv.getName())
+                && containsScan(input, "m3")) {
+            Assertions.assertEquals(2, input.getInputs().size());
+            int outputIndex = -1;
+            for (int i = 0; i < union.getOutputColumnRefOp().size(); i++) {
+                if (union.getOutputColumnRefOp().get(i).getName().equals("v3")) {
+                    outputIndex = i;
+                    break;
+                }
+            }
+            Assertions.assertTrue(outputIndex >= 0, "transparent union must expose CHAR source column v3");
+            var expectedType = mv.getColumn("v3").getType();
+            Assertions.assertTrue(expectedType.isVarchar(), "MV catalog converts CHAR column to VARCHAR");
+            Assertions.assertEquals(expectedType, union.getOutputColumnRefOp().get(outputIndex).getType());
+            int compensationBranches = 0;
+            for (int side = 0; side < input.getInputs().size(); side++) {
+                ColumnRefOperator childOutput = union.getChildOutputColumns().get(side).get(outputIndex);
+                Assertions.assertEquals(expectedType, childOutput.getType());
+                OptExpression child = input.inputAt(side);
+                if (containsScan(child, "m3")) {
+                    compensationBranches++;
+                    ScalarOperator expression = findProjectedExpression(child, childOutput);
+                    Assertions.assertNotNull(expression, "compensation output must have an actual projection");
+                    Assertions.assertTrue(expression instanceof CastOperator);
+                    Assertions.assertTrue(((CastOperator) expression).isImplicit());
+                    Assertions.assertTrue(expression.getChild(0).getType().isChar());
+                    Assertions.assertEquals("v3", ((ColumnRefOperator) expression.getChild(0)).getName());
+                    Assertions.assertEquals(childOutput.getType(), expression.getType(),
+                            "transparent compensation projection key and scalar must have matching target types");
+                }
+            }
+            Assertions.assertEquals(1, compensationBranches);
+            matches++;
+        }
+        for (OptExpression child : input.getInputs()) {
+            matches += assertTransparentCharCastInvariant(child, mv);
+        }
+        return matches;
+    }
+
+    private static boolean containsScan(OptExpression input, String tableName) {
+        if (input.getOp() instanceof PhysicalOlapScanOperator scan && scan.getTable().getName().equals(tableName)) {
+            return true;
+        }
+        for (OptExpression child : input.getInputs()) {
+            if (containsScan(child, tableName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ScalarOperator findProjectedExpression(OptExpression input, ColumnRefOperator output) {
+        Map<ColumnRefOperator, ScalarOperator> projection = input.getOp() instanceof PhysicalProjectOperator project
+                ? project.getColumnRefMap() : input.getOp().getProjection() == null
+                        ? null : input.getOp().getProjection().getColumnRefMap();
+        if (projection != null && projection.containsKey(output)) {
+            return projection.get(output);
+        }
+        for (OptExpression child : input.getInputs()) {
+            ScalarOperator result = findProjectedExpression(child, output);
+            if (result != null) {
+                return result;
+            }
+        }
+        return null;
+    }
+
 }

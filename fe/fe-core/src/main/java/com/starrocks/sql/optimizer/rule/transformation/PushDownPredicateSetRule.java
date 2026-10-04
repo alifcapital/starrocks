@@ -46,8 +46,11 @@ public class PushDownPredicateSetRule {
             filterPredicate = rewriter.rewrite(filterPredicate);
         }
 
+        // Each branch replaces every value for the same output keys. rewrite() clones its
+        // result, so later mappings cannot change predicates already attached to other branches.
+        Map<ColumnRefOperator, ScalarOperator> operatorMap = new HashMap<>();
+        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(operatorMap);
         for (int setChildIdx = 0; setChildIdx < setOptExpression.getInputs().size(); ++setChildIdx) {
-            Map<ColumnRefOperator, ScalarOperator> operatorMap = new HashMap<>();
             for (int i = 0; i < setOperator.getOutputColumnRefOp().size(); ++i) {
                 /*
                  * getChildOutputColumns records the output list of child children.
@@ -58,7 +61,6 @@ public class PushDownPredicateSetRule {
                 operatorMap.put(setOperator.getOutputColumnRefOp().get(i), c);
             }
 
-            ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(operatorMap);
             ScalarOperator rewriteExpr = rewriter.rewrite(filterPredicate);
 
             Operator child = setOptExpression.inputAt(setChildIdx).getOp();

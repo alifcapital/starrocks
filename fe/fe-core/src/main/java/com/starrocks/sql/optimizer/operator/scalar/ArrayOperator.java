@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.collect.Lists;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.type.Type;
 
 import java.util.List;
@@ -47,13 +46,6 @@ public class ArrayOperator extends ArgsScalarOperator {
     @Override
     public String toString() {
         return arguments.stream().map(ScalarOperator::toString).collect(Collectors.joining(","));
-    }
-
-    @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet usedColumns = new ColumnRefSet();
-        arguments.forEach(arg -> usedColumns.union(arg.getUsedColumns()));
-        return usedColumns;
     }
 
     @Override

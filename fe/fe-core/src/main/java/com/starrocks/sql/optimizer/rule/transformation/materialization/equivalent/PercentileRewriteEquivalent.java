@@ -154,10 +154,7 @@ public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
     private static double extractQueryCompression(CallOperator percentileApprox) {
         // percentile_approx(v, q[, c]) — compression is the third arg if present.
         if (percentileApprox.getChildren().size() > 2) {
-            Double c = readDoubleConstant(percentileApprox.getChild(2));
-            if (c != null) {
-                return c;
-            }
+            return readDoubleConstant(percentileApprox.getChild(2), PercentileCompression.DEFAULT);
         }
         // Query without an explicit compression is interpreted as exact DEFAULT
         // (mirrors BE's PercentileApproxAggregateFunction::get_compression_factor).
@@ -193,10 +190,7 @@ public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
             return LEGACY_STORAGE;
         }
         if (hashCall.getChildren().size() > 1) {
-            Double c = readDoubleConstant(hashCall.getChild(1));
-            if (c != null) {
-                return c;
-            }
+            return readDoubleConstant(hashCall.getChild(1), LEGACY_STORAGE);
         }
         return LEGACY_STORAGE;
     }
@@ -205,20 +199,20 @@ public class PercentileRewriteEquivalent extends IAggregateRewriteEquivalent {
     // int→double casts are folded before this matcher runs, so the tree always
     // carries a plain ConstantOperator here. Finite-value post-filter is an
     // extra invariant.
-    private static Double readDoubleConstant(ScalarOperator op) {
+    private static double readDoubleConstant(ScalarOperator op, double fallback) {
         if (!(op instanceof ConstantOperator)) {
-            return null;
+            return fallback;
         }
         ConstantOperator c = (ConstantOperator) op;
         if (c.isNull()) {
-            return null;
+            return fallback;
         }
         OptionalDouble v = ConstantOperatorUtils.doubleValueFromConstant(c);
         if (!v.isPresent()) {
-            return null;
+            return fallback;
         }
         double d = v.getAsDouble();
-        return Double.isFinite(d) ? d : null;
+        return Double.isFinite(d) ? d : fallback;
     }
 
     private CallOperator makePercentileUnion(ScalarOperator replace) {

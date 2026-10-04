@@ -78,6 +78,9 @@ public class UniquenessBasedTablePruneRule implements TreeRewriteRule {
     public OptExpression rewrite(OptExpression root, TaskContext taskContext) {
         Collector collector = new Collector();
         collector.collect(root);
+        if (collector.getCandidateJoins().isEmpty()) {
+            return root;
+        }
         Pruner pruner = new Pruner(collector.getCandidateJoins());
         return pruner.prune(root);
     }
@@ -92,7 +95,6 @@ public class UniquenessBasedTablePruneRule implements TreeRewriteRule {
 
         @Override
         public Boolean visit(OptExpression optExpression, Void context) {
-            optToUniqueKeys.put(optExpression, Collections.emptyList());
             return false;
         }
 
@@ -130,6 +132,9 @@ public class UniquenessBasedTablePruneRule implements TreeRewriteRule {
 
         public List<ColumnRefSet> propagateThroughProjection(OptExpression optExpression,
                                                              List<ColumnRefSet> uniqueKeys) {
+            if (uniqueKeys.isEmpty()) {
+                return uniqueKeys;
+            }
             Map<ColumnRefOperator, ScalarOperator> columnRefMap = Collections.emptyMap();
             if (optExpression.getOp() instanceof LogicalProjectOperator) {
                 LogicalProjectOperator projectOp = optExpression.getOp().cast();

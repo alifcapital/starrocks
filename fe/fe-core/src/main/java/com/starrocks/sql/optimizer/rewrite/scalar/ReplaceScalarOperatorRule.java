@@ -31,10 +31,7 @@ public class ReplaceScalarOperatorRule extends TopDownScalarOperatorRewriteRule 
 
     @Override
     public ScalarOperator visit(ScalarOperator scalarOperator, ScalarOperatorRewriteContext context) {
-        if (translateMap.containsKey(scalarOperator)) {
-            return translateMap.get(scalarOperator);
-        }
-
-        return scalarOperator;
+        ColumnRefOperator replacement = translateMap.get(scalarOperator);
+        return replacement != null ? replacement : scalarOperator;
     }
 }

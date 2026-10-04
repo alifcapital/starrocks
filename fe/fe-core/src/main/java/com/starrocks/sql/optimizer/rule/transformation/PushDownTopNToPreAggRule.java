@@ -119,10 +119,7 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
             return false;
         }
 
-        // Check if the scan under local agg is an external table scan.
-        boolean isExternalScan = isExternalScanOperator(aggGlobalChild);
-
-        if (!isSupportedTopN(topn, isExternalScan)) {
+        if (!isSupportedTopN(topn, aggGlobalChild)) {
             return false;
         }
 
@@ -198,7 +195,7 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
                 : expression.getGroupExpression().getGroup().getStatistics();
     }
 
-    private boolean isSupportedTopN(LogicalTopNOperator topn, boolean isExternalScan) {
+    private boolean isSupportedTopN(LogicalTopNOperator topn, OptExpression localAgg) {
         if (topn.isSplit()) {
             return false;
         }
@@ -206,7 +203,7 @@ public class PushDownTopNToPreAggRule extends TransformationRule {
             return true;
         }
         // Only allow FINAL topN pushdown for external scans to avoid native OLAP regressions.
-        return isExternalScan && topn.getSortPhase() == SortPhase.FINAL;
+        return topn.getSortPhase() == SortPhase.FINAL && isExternalScanOperator(localAgg);
     }
 
     /**

@@ -24,10 +24,9 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.task.TaskContext;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 public class SimplifyCaseWhenPredicateRule implements TreeRewriteRule {
     public static final SimplifyCaseWhenPredicateRule INSTANCE = new SimplifyCaseWhenPredicateRule();
@@ -64,10 +63,10 @@ public class SimplifyCaseWhenPredicateRule implements TreeRewriteRule {
         @Override
         public Optional<OptExpression> visit(OptExpression optExpression, Void context) {
             ScalarOperator predicate = optExpression.getOp().getPredicate();
-            if (hasNullableGenerateChild(optExpression)) {
+            if (predicate == null) {
                 return Optional.empty();
             }
-            if (predicate == null) {
+            if (hasNullableGenerateChild(optExpression)) {
                 return Optional.empty();
             }
             ScalarOperator newPredicate = ScalarOperatorRewriter.simplifyCaseWhen(predicate, true);
@@ -104,15 +103,22 @@ public class SimplifyCaseWhenPredicateRule implements TreeRewriteRule {
         }
 
         private Optional<OptExpression> processImpl(OptExpression optExpression) {
-            List<Optional<OptExpression>> optNewInputs =
-                    optExpression.getInputs().stream()
-                            .map(this::processImpl)
-                            .collect(Collectors.toList());
-            List<OptExpression> newInputs = IntStream.range(0, optNewInputs.size())
-                    .mapToObj(i -> optNewInputs.get(i).orElse(optExpression.getInputs().get(i)))
-                    .collect(Collectors.toList());
+            List<OptExpression> inputs = optExpression.getInputs();
+            List<OptExpression> newInputs = null;
+            for (int i = 0; i < inputs.size(); i++) {
+                Optional<OptExpression> optNewInput = processImpl(inputs.get(i));
+                if (optNewInput.isPresent()) {
+                    if (newInputs == null) {
+                        newInputs = new ArrayList<>(inputs);
+                    }
+                    newInputs.set(i, optNewInput.get());
+                }
+            }
 
-            OptExpression newExpression = OptExpression.create(optExpression.getOp(), newInputs);
+            // visit methods read only the operator, its predicate and the inputs, and build their result from
+            // fresh expressions, so the original node can stand in when no input changed.
+            OptExpression newExpression =
+                    newInputs == null ? optExpression : OptExpression.create(optExpression.getOp(), newInputs);
             return optExpression.getOp().accept(this, newExpression, null);
         }
 

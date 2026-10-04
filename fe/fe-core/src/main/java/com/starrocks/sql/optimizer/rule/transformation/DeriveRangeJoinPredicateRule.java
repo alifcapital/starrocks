@@ -45,7 +45,6 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 public class DeriveRangeJoinPredicateRule extends TransformationRule {
 
@@ -92,8 +91,11 @@ public class DeriveRangeJoinPredicateRule extends TransformationRule {
                 columnToRange.computeIfAbsent(left, k -> Lists.newArrayList()).add(binaryPredicate);
                 columnToRange.computeIfAbsent(right, k -> Lists.newArrayList()).add(binaryPredicate);
             } else if (rightChildColumns.containsAll(left) && leftChildColumns.containsAll(right)) {
-                columnToRange.computeIfAbsent(left, k -> Lists.newArrayList()).add(binaryPredicate.commutative());
-                columnToRange.computeIfAbsent(right, k -> Lists.newArrayList()).add(binaryPredicate.commutative());
+                List<BinaryPredicateOperator> normalizedPredicates =
+                        columnToRange.computeIfAbsent(left, k -> Lists.newArrayList());
+                BinaryPredicateOperator normalized = binaryPredicate.commutative();
+                normalizedPredicates.add(normalized);
+                columnToRange.computeIfAbsent(right, k -> Lists.newArrayList()).add(normalized);
             }
         }
 
@@ -101,8 +103,20 @@ public class DeriveRangeJoinPredicateRule extends TransformationRule {
         columnToRange.entrySet().removeIf(entry -> {
             List<BinaryPredicateOperator> predicates = entry.getValue();
             ColumnRefSet key = entry.getKey();
-            if (predicates.stream().map(BinaryPredicateOperator::getBinaryType)
-                    .map(t -> BinaryType.GE.equals(t) || BinaryType.GT.equals(t)).distinct().count() < 2) {
+            boolean hasGreater = false;
+            boolean hasLess = false;
+            for (BinaryPredicateOperator predicate : predicates) {
+                BinaryType type = predicate.getBinaryType();
+                if (BinaryType.GE.equals(type) || BinaryType.GT.equals(type)) {
+                    hasGreater = true;
+                } else {
+                    hasLess = true;
+                }
+                if (hasGreater && hasLess) {
+                    break;
+                }
+            }
+            if (!hasGreater || !hasLess) {
                 return true;
             }
 
@@ -126,19 +140,14 @@ public class DeriveRangeJoinPredicateRule extends TransformationRule {
         List<ScalarOperator> leftPredicates = Lists.newArrayList();
         List<ScalarOperator> rightPredicates = Lists.newArrayList();
         for (ColumnRefSet refs : columnToRange.keySet()) {
-            Optional<ColumnRefOperator> optional =
-                    refs.getStream().map(context.getColumnRefFactory()::getColumnRef).findFirst();
-            if (!optional.isPresent()) {
-                continue;
+            // The anchor comes from either child. Statistics.getColumnStatistic throws for a column that the
+            // statistics do not have, so we look the anchor up in both maps.
+            ColumnRefOperator anchor = context.getColumnRefFactory().getColumnRef(refs.getFirstId());
+            ColumnStatistic columnStatistic = leftStatics.getColumnStatistics().get(anchor);
+            if (columnStatistic == null) {
+                columnStatistic = rightStatics.getColumnStatistics().get(anchor);
             }
-
-            ColumnStatistic columnStatistic;
-            ColumnRefOperator anchor = optional.get();
-            if (leftStatics.getColumnStatistic(anchor) != null) {
-                columnStatistic = leftStatics.getColumnStatistic(anchor);
-            } else if (rightStatics.getColumnStatistic(anchor) != null) {
-                columnStatistic = rightStatics.getColumnStatistic(anchor);
-            } else {
+            if (columnStatistic == null) {
                 continue;
             }
             if (StringUtils.isEmpty(columnStatistic.getMinString()) ||

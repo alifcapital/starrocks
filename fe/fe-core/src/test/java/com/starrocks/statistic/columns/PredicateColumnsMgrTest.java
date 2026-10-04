@@ -127,6 +127,61 @@ class PredicateColumnsMgrTest extends PlanTestBase {
     }
 
     @Test
+    public void testNativeRepeatedObservationRetainsRecordAndCreationTime() {
+        PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
+        Table table = starRocksAssert.getTable(connectContext.getDatabase(), "t0");
+        Column column = table.getColumn("v1");
+        TableName name = new TableName(connectContext.getDatabase(), "t0");
+        mgr.recordColumnUsageForTest(table, column, ColumnUsage.UseCase.NORMAL);
+        ColumnUsage original = mgr.query(name).get(0);
+        LocalDateTime created = original.getCreated();
+        TableName originalName = original.getTableName();
+        Assertions.assertEquals(created, original.getLastUsed());
+        original.setLastUsed(LocalDateTime.MIN);
+
+        mgr.recordColumnUsageForTest(table, column, ColumnUsage.UseCase.JOIN);
+        mgr.recordColumnUsageForTest(table, column, ColumnUsage.UseCase.PREDICATE);
+        List<ColumnUsage> result = mgr.query(name);
+        Assertions.assertEquals(1, result.size());
+        Assertions.assertSame(original, result.get(0));
+        Assertions.assertSame(originalName, original.getTableName());
+        Assertions.assertEquals(created, original.getCreated());
+        Assertions.assertTrue(original.getLastUsed().isAfter(LocalDateTime.MIN));
+        Assertions.assertEquals(Set.of(ColumnUsage.UseCase.NORMAL, ColumnUsage.UseCase.JOIN,
+                ColumnUsage.UseCase.PREDICATE), original.getUseCases());
+    }
+
+    @Test
+    public void testConcurrentNativeObservationsKeepEveryUseCase() throws Exception {
+        PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
+        Table table = starRocksAssert.getTable(connectContext.getDatabase(), "t0");
+        Column column = table.getColumn("v1");
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(ColumnUsage.UseCase.values().length);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var tasks = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (ColumnUsage.UseCase useCase : ColumnUsage.UseCase.values()) {
+                tasks.add(executor.submit(() -> {
+                    start.await();
+                    for (int i = 0; i < 100; i++) {
+                        mgr.recordColumnUsageForTest(table, column, useCase);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var task : tasks) {
+                task.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            List<ColumnUsage> result = mgr.query(new TableName(connectContext.getDatabase(), "t0"));
+            Assertions.assertEquals(1, result.size());
+            Assertions.assertEquals(ColumnUsage.UseCase.all(), result.get(0).getUseCases());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     public void testNativeTableStillRecordsIntoInternalPath() {
         PredicateColumnsMgr mgr = PredicateColumnsMgr.getInstance();
         Table t0 = starRocksAssert.getTable(connectContext.getDatabase(), "t0");

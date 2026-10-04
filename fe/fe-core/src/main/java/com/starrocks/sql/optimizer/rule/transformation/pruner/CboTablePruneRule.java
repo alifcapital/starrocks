@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer.rule.transformation.pruner;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
@@ -126,21 +125,24 @@ public class CboTablePruneRule extends TransformationRule {
         if (joinType.isInnerJoin()) {
             return handleInnerJoin(input, eqColRefPairs, optOtherJoinOnPredicate);
         } else {
-            List<ColumnRefOperator> lhsJoinCols =
-                    eqColRefPairs.stream().map(p -> p.first).collect(Collectors.toList());
-            List<ColumnRefOperator> rhsJoinCols =
-                    eqColRefPairs.stream().map(p -> p.second).collect(Collectors.toList());
-
             List<OptExpression> result =
                     tryToHandleLeftOrRightJoinOnSameTableAsInnerJoin(input, eqColRefPairs, optOtherJoinOnPredicate);
             if (!result.isEmpty()) {
                 return result;
             }
 
-            if (joinType.isLeftOuterJoin() && matchUniqueConstraints(rhsScanOp, rhsJoinCols)) {
-                return handleLeftOrRightJoin(input, lhs);
-            } else if (joinType.isRightOuterJoin() && matchUniqueConstraints(lhsScanOp, lhsJoinCols)) {
-                return handleLeftOrRightJoin(input, rhs);
+            if (joinType.isLeftOuterJoin()) {
+                List<ColumnRefOperator> rhsJoinCols =
+                        eqColRefPairs.stream().map(p -> p.second).collect(Collectors.toList());
+                if (matchUniqueConstraints(rhsScanOp, rhsJoinCols)) {
+                    return handleLeftOrRightJoin(input, lhs);
+                }
+            } else if (joinType.isRightOuterJoin()) {
+                List<ColumnRefOperator> lhsJoinCols =
+                        eqColRefPairs.stream().map(p -> p.first).collect(Collectors.toList());
+                if (matchUniqueConstraints(lhsScanOp, lhsJoinCols)) {
+                    return handleLeftOrRightJoin(input, rhs);
+                }
             }
         }
         return Collections.emptyList();
@@ -167,33 +169,33 @@ public class CboTablePruneRule extends TransformationRule {
         }
         OptExpression lhs = input.inputAt(0);
         OptExpression rhs = input.inputAt(1);
-        List<CPBiRel> biRels = Lists.newArrayList();
         List<CPBiRel> lhsToRhsBiRels = CPBiRel.extractCPBiRels(lhs, rhs, true);
         List<CPBiRel> rhsToLhsBiRels = CPBiRel.extractCPBiRels(rhs, lhs, false);
-        biRels.addAll(lhsToRhsBiRels);
-        biRels.addAll(rhsToLhsBiRels);
 
         Set<Pair<ColumnRefOperator, ColumnRefOperator>> reverseEqColRefPairs =
                 eqColRefPairs.stream().map(Pair::inverse).collect(Collectors.toSet());
-        List<CPBiRel> matchedBiRels =
-                biRels.stream().filter(biRel -> biRel.isLeftToRight() ? biRel.getPairs().equals(eqColRefPairs) :
-                        biRel.getPairs().equals(reverseEqColRefPairs)).collect(Collectors.toList());
-        if (matchedBiRels.isEmpty()) {
-            return Collections.emptyList();
-        }
         boolean sameTableJoinUK = false;
         boolean hasLeftToRightFK = false;
         boolean hasRightToLeftFK = false;
-        for (CPBiRel biRel : matchedBiRels) {
-            if (!biRel.isFromForeignKey()) {
-                sameTableJoinUK = true;
-                continue;
+        for (int direction = 0; direction < 2; direction++) {
+            List<CPBiRel> biRels = direction == 0 ? lhsToRhsBiRels : rhsToLhsBiRels;
+            for (CPBiRel biRel : biRels) {
+                Set<Pair<ColumnRefOperator, ColumnRefOperator>> joinPairs =
+                        biRel.isLeftToRight() ? eqColRefPairs : reverseEqColRefPairs;
+                if (!biRel.getPairs().equals(joinPairs)) {
+                    continue;
+                }
+                if (!biRel.isFromForeignKey()) {
+                    sameTableJoinUK = true;
+                } else if (biRel.isLeftToRight()) {
+                    hasLeftToRightFK = true;
+                } else {
+                    hasRightToLeftFK = true;
+                }
             }
-            if (biRel.isLeftToRight()) {
-                hasLeftToRightFK = true;
-            } else {
-                hasRightToLeftFK = true;
-            }
+        }
+        if (!sameTableJoinUK && !hasLeftToRightFK && !hasRightToLeftFK) {
+            return Collections.emptyList();
         }
         boolean mutualJoinOnFK = hasLeftToRightFK && hasRightToLeftFK;
 
@@ -357,9 +359,9 @@ public class CboTablePruneRule extends TransformationRule {
     }
 
     List<OptExpression> handleLeftOrRightJoin(OptExpression joinOpt, OptExpression retainOpt) {
-        Optional<Projection> joinProjection = Optional.ofNullable(joinOpt.getOp().getProjection());
-        ColumnRefSet usedColRefSet =
-                joinProjection.map(Projection::getUsedColumns).orElse(joinOpt.getRowOutputInfo().getUsedColumnRefSet());
+        Projection joinProjection = joinOpt.getOp().getProjection();
+        ColumnRefSet usedColRefSet = joinProjection != null ? joinProjection.getUsedColumns() :
+                joinOpt.getRowOutputInfo().getUsedColumnRefSet();
 
         // If not all of used columns of output exprs of join operator only references retain-side
         // column refs, prune-side ScanOperator can not be pruned.
@@ -369,11 +371,11 @@ public class CboTablePruneRule extends TransformationRule {
 
         // Try to represent output exprs of join operator in retain-side column refs
         Projection newProjection = null;
-        if (joinProjection.isPresent()) {
+        if (joinProjection != null) {
             ReplaceColumnRefRewriter replacer =
                     new ReplaceColumnRefRewriter(retainOpt.getRowOutputInfo().getColumnRefMap(), false);
             Map<ColumnRefOperator, ScalarOperator> newColRefMap = Maps.newHashMap();
-            joinProjection.get().getColumnRefMap().forEach((k, v) -> newColRefMap.put(k, replacer.rewrite(v)));
+            joinProjection.getColumnRefMap().forEach((k, v) -> newColRefMap.put(k, replacer.rewrite(v)));
             newProjection = new Projection(newColRefMap);
         }
 

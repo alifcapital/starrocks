@@ -24,6 +24,7 @@ import com.starrocks.catalog.MaterializedIndexMeta;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.ExpressionContext;
@@ -117,10 +118,10 @@ public class BestMvSelector {
         }
     }
 
-    private void calculateStatistics(List<OptExpression> expressions, OptimizerContext context) {
-        for (OptExpression expression : expressions) {
+    private void calculateStatistics(OptimizerContext context) {
+        for (BaseMaterializedViewRewriteRule.RewriteResult candidate : mvCandidates) {
             try {
-                calculateStatistics(expression, context);
+                calculateStatistics(candidate.expression(), context);
             } catch (Exception e) {
                 logMVRewrite(context, rule, "calculate statistics failed: {}", DebugUtil.getStackTrace(e));
             }
@@ -163,7 +164,7 @@ public class BestMvSelector {
             return candidateExpressions();
         }
         // compute the statistics of OptExpression
-        calculateStatistics(candidateExpressions(), optimizerContext);
+        calculateStatistics(optimizerContext);
 
         // split predicates' columns to equivalence and non-equivalence sets which its names are all lower case.
         Set<ScalarOperator> queryPredicates = MvUtils.getAllValidPredicatesFromScans(queryPlan);
@@ -181,14 +182,16 @@ public class BestMvSelector {
         // add all mvs' context first
         for (int i = 0; i < candidateCount(); i++) {
             OptExpression mvOptExpression = expressionAt(i);
-            List<Table> mvTables = MvUtils.getAllTables(mvOptExpression);
-            queryTables.stream().forEach(originalTable -> mvTables.remove(originalTable));
             CandidateContext candidateContext = buildCandidateContext(
                     mvOptExpression, distEqCols, equivalenceColumns, nonEquivalenceColumns, globalIdx, false);
             if (candidateContext == null) {
-                logMVRewrite(optimizerContext, rule,
-                        "[ChooseBestMV] Skip mv {} for building candidate context failed.",
-                        mvTables.stream().map(Table::getName).collect(Collectors.joining(",")));
+                if (Tracers.isSetTraceModule(Tracers.Module.MV) && Tracers.isSetTraceMode(Tracers.Mode.LOGS)) {
+                    List<Table> mvTables = MvUtils.getAllTables(mvOptExpression);
+                    queryTables.forEach(mvTables::remove);
+                    logMVRewrite(optimizerContext, rule,
+                            "[ChooseBestMV] Skip mv {} for building candidate context failed.",
+                            mvTables.stream().map(Table::getName).collect(Collectors.joining(",")));
+                }
                 continue;
             }
             // Per-rewrite carrier read from RewriteResult — see CandidateScore.
@@ -218,16 +221,21 @@ public class BestMvSelector {
             return Lists.newArrayList();
         }
         CandidateContext bestContext = bestContextOpt.get();
-        List<String> debugScores = contexts.stream()
-                .map(context -> context.score.toString())
-                .collect(Collectors.toUnmodifiableList());
+        if (Tracers.isSetTraceModule(Tracers.Module.MV) && Tracers.isSetTraceMode(Tracers.Mode.LOGS)) {
+            List<String> debugScores = contexts.stream()
+                    .map(context -> context.score.toString())
+                    .collect(Collectors.toUnmodifiableList());
+            if (bestContext.isQueryOpt) {
+                logMVRewrite(optimizerContext, rule, "[ChooseBestMV] Only left input query after cost comparing," +
+                        " scores:[{}]", debugScores);
+            } else {
+                logMVRewrite(optimizerContext, rule, "[ChooseBestMV] Choose mv with table {}. Scores:[{}]",
+                        bestContext.score.baseTable.getName(), debugScores);
+            }
+        }
         if (bestContext.isQueryOpt) {
-            logMVRewrite(optimizerContext, rule, "[ChooseBestMV] Only left input query after cost comparing," +
-                    " scores:[{}]", debugScores);
             return Lists.newArrayList();
         }
-        logMVRewrite(optimizerContext, rule, "[ChooseBestMV] Choose mv with table {}. Scores:[{}]",
-                bestContext.score.baseTable.getName(), debugScores);
         return Lists.newArrayList(bestContext.getResult());
     }
 
@@ -546,16 +554,13 @@ public class BestMvSelector {
 
     private static Set<String> getJoinOnPredicateColumns(List<ScalarOperator> joinOnPredicates) {
         Set<String> joinOnColumns = Sets.newHashSet();
-        for (ScalarOperator joinOnPredOp : joinOnPredicates) {
-            List<ScalarOperator> joinOnPreds = Utils.extractConjuncts(joinOnPredOp);
-            for (ScalarOperator joinOnPred : joinOnPreds) {
-                if (joinOnPred instanceof BinaryPredicateOperator) {
-                    BinaryPredicateOperator binaryPredicate = (BinaryPredicateOperator) joinOnPred;
-                    if (binaryPredicate.getBinaryType().isEquivalence()) {
-                        List<ColumnRefOperator> columns = Utils.extractColumnRef(binaryPredicate);
-                        for (ColumnRefOperator column : columns) {
-                            joinOnColumns.add(column.getName().toLowerCase());
-                        }
+        for (ScalarOperator joinOnPred : joinOnPredicates) {
+            if (joinOnPred instanceof BinaryPredicateOperator) {
+                BinaryPredicateOperator binaryPredicate = (BinaryPredicateOperator) joinOnPred;
+                if (binaryPredicate.getBinaryType().isEquivalence()) {
+                    List<ColumnRefOperator> columns = Utils.extractColumnRef(binaryPredicate);
+                    for (ColumnRefOperator column : columns) {
+                        joinOnColumns.add(column.getName().toLowerCase());
                     }
                 }
             }

@@ -761,14 +761,14 @@ public class OptExpressionDuplicator {
         private void updateDistributionUnionFind(UnionFind<DistributionCol> newUnionFind,
                                                  UnionFind<DistributionCol> oldUnionFind) {
             for (Set<DistributionCol> distributionColSet : oldUnionFind.getAllGroups()) {
-                DistributionCol first = null;
+                DistributionCol newFirst = null;
                 for (DistributionCol next : distributionColSet) {
-                    if (first == null) {
-                        first = next;
-                    }
-                    final ColumnRefOperator newFirstCol = getNewDistributionColRef(first);
                     final ColumnRefOperator newNextCol = getNewDistributionColRef(next);
-                    newUnionFind.union(first.updateColId(newFirstCol.getId()), next.updateColId(newNextCol.getId()));
+                    final DistributionCol newNext = next.updateColId(newNextCol.getId());
+                    if (newFirst == null) {
+                        newFirst = newNext;
+                    }
+                    newUnionFind.union(newFirst, newNext);
                 }
             }
         }

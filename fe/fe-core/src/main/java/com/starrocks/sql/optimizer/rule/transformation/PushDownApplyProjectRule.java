@@ -30,7 +30,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -72,8 +71,10 @@ public class PushDownApplyProjectRule extends TransformationRule {
         Map<ColumnRefOperator, ScalarOperator> allOutput = Maps.newHashMap();
 
         // add all left outer column
-        Arrays.stream(input.getInputs().get(0).getOutputColumns().getColumnIds()).mapToObj(factory::getColumnRef)
-                .forEach(d -> allOutput.put(d, d));
+        for (int id : input.getInputs().get(0).getOutputColumns().getColumnIds()) {
+            ColumnRefOperator ref = factory.getColumnRef(id);
+            allOutput.put(ref, ref);
+        }
         allOutput.put(apply.getOutput(), apply.getOutput());
 
         OptExpression newProject = new OptExpression(new LogicalProjectOperator(allOutput));

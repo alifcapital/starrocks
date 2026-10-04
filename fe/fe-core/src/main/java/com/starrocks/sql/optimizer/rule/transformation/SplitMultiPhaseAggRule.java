@@ -76,7 +76,7 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
             return false;
         }
         LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
-        if (agg.checkGroupByCountDistinctWithSkewHint()) {
+        if (!agg.getType().isGlobal() || agg.isSplit() || agg.getDistinctColumnDataSkew() != null) {
             return false;
         }
 
@@ -84,11 +84,11 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
             return false;
         }
 
-        if (!Utils.couldGenerateMultiStageAggregate(input.getLogicalProperty(), input.getOp(), input.inputAt(0).getOp())) {
+        if (agg.checkGroupByCountDistinctWithSkewHint()) {
             return false;
         }
 
-        return agg.getType().isGlobal() && !agg.isSplit() && agg.getDistinctColumnDataSkew() == null;
+        return Utils.couldGenerateMultiStageAggregate(input.getLogicalProperty(), input.getOp(), input.inputAt(0).getOp());
     }
 
     @Override
@@ -145,12 +145,8 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
 
         // in DISTINCT_LOCAL phase, may rewrite the aggregate function, we use the rewrite function in GLOBAL phase
         Map<ColumnRefOperator, CallOperator> reRewriteAggregate = Maps.newHashMap(oldAgg.getAggregations());
-        Map<ColumnRefOperator, CallOperator> countDistinctMap = oldAgg.getAggregations().entrySet().stream().
-                filter(entry -> entry.getValue().isDistinct() &&
-                        entry.getValue().getFnName().equalsIgnoreCase(FunctionSet.COUNT)).
-                collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-        if (!countDistinctMap.isEmpty()) {
-            for (Map.Entry<ColumnRefOperator, CallOperator> entry : countDistinctMap.entrySet()) {
+        for (Map.Entry<ColumnRefOperator, CallOperator> entry : oldAgg.getAggregations().entrySet()) {
+            if (entry.getValue().isDistinct() && entry.getValue().getFnName().equalsIgnoreCase(FunctionSet.COUNT)) {
                 reRewriteAggregate.put(entry.getKey(), distinctLocal.getAggregations().get(entry.getKey()));
             }
         }
@@ -276,8 +272,8 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
 
             // Add distinct column to group by column
             if (aggregation.isDistinct()) {
-                for (int i = 0; i < aggregation.getUsedColumns().cardinality(); ++i) {
-                    newGroupKeys.add(columnRefFactory.getColumnRef(aggregation.getUsedColumns().getColumnIds()[i]));
+                for (int columnId : aggregation.getUsedColumns().getColumnIds()) {
+                    newGroupKeys.add(columnRefFactory.getColumnRef(columnId));
                 }
                 continue;
             }
@@ -338,6 +334,8 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
                             aggregation.getFunction());
                 }
             } else {
+                List<ScalarOperator> distinctArguments = aggregation.getChildren();
+                Function distinctFunction = aggregation.getFunction();
                 if (aggregation.getFnName().equalsIgnoreCase(FunctionSet.COUNT)) {
                     // COUNT(DISTINCT ...) -> COUNT(IF(IsNull(<agg slot 1>), NULL, IF(IsNull(<agg slot 2>), NULL, ...)))
                     // We need the nested IF to make sure that we do not count
@@ -345,15 +343,14 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
                     // This behavior is consistent with MySQL.
                     ScalarOperator newChildren = createCountDistinctAggParam(aggregation.getChildren());
                     // because of the change of children, we need to get function again.
-                    Function fn = ExprUtils.getBuiltinFunction(FunctionSet.COUNT, new Type[] {newChildren.getType()},
+                    distinctFunction = ExprUtils.getBuiltinFunction(FunctionSet.COUNT, new Type[] {newChildren.getType()},
                             Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
-                    aggregation = new CallOperator(aggregation.getFnName(), aggregation.getType(),
-                            Lists.newArrayList(newChildren), fn);
+                    distinctArguments = List.of(newChildren);
                 }
                 // Remove distinct
                 callOperator = new CallOperator(aggregation.getFnName(), aggType.isAnyGlobal() ?
                         aggregation.getType() : intermediateType,
-                        aggregation.getChildren(), aggregation.getFunction(), false, true);
+                        distinctArguments, distinctFunction, false, true);
             }
             newAggregationMap.put(column, callOperator);
         }
@@ -376,14 +373,15 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
 
         ScalarOperator elseOperator = children.get(lastIdx);
         for (int i = lastIdx - 1; i >= firstIdx; --i) {
-            ArrayList<ScalarOperator> ifArgs = Lists.newArrayList();
+            ArrayList<ScalarOperator> ifArgs = new ArrayList<>(3);
             ScalarOperator isNullColumn = children.get(i);
             // Build expr: IF(IsNull(slotRef), NULL, elseExpr)
             IsNullPredicateOperator isNullPredicateOperator = new IsNullPredicateOperator(isNullColumn);
             ifArgs.add(isNullPredicateOperator);
-            ifArgs.add(ConstantOperator.createNull(elseOperator.getType()));
+            ConstantOperator nullValue = ConstantOperator.createNull(elseOperator.getType());
+            ifArgs.add(nullValue);
             ifArgs.add(elseOperator);
-            Type[] argumentTypes = ifArgs.stream().map(arg -> arg.getType()).toArray(Type[]::new);
+            Type[] argumentTypes = {isNullPredicateOperator.getType(), nullValue.getType(), elseOperator.getType()};
 
             Function fn = ExprUtils.getBuiltinFunction(FunctionSet.IF, argumentTypes,
                     Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
@@ -437,6 +435,8 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
         // To take full advantage of all compute nodes, should select the four stages
         List<ColumnStatistic> partitionByColumnStatistics = partitionByColumns.stream().
                 map(inputStatistics::getColumnStatistic).collect(Collectors.toList());
+        double partitionByOutputRow = 0;
+        boolean partitionByComputedOnOriginalStatistics = false;
         if (partitionByColumnStatistics.stream().noneMatch(ColumnStatistic::isUnknown)) {
             Statistics statistics = inputStatistics;
             if (inputStatistics.getOutputRowCount() <= 1) {
@@ -446,9 +446,10 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
                 }
                 statistics = inputStatistics.withOutputRowCount(rowCount);
             }
-            double aggOutputRow = StatisticsCalculator.computeGroupByStatistics(partitionByColumns, statistics,
+            partitionByOutputRow = StatisticsCalculator.computeGroupByStatistics(partitionByColumns, statistics,
                     Maps.newHashMap());
-            if (aggOutputRow <= LOW_AGGREGATE_EFFECT_COEFFICIENT) {
+            partitionByComputedOnOriginalStatistics = statistics == inputStatistics;
+            if (partitionByOutputRow <= LOW_AGGREGATE_EFFECT_COEFFICIENT) {
                 return false;
             }
         }
@@ -460,15 +461,21 @@ public class SplitMultiPhaseAggRule extends SplitAggregateRule {
         LogicalAggregationOperator aggOp = input.getOp().cast();
 
         double inputRowCount = inputStatistics.getOutputRowCount();
-        double aggOutputRow = StatisticsCalculator.computeGroupByStatistics(aggOp.getGroupingKeys(), inputStatistics,
-                Maps.newHashMap());
+        if (inputRowCount < SMALL_SCALE_ROWS_LIMIT) {
+            return true;
+        }
+        double aggOutputRow = partitionByComputedOnOriginalStatistics
+                && partitionByColumns.equals(aggOp.getGroupingKeys()) ? partitionByOutputRow
+                : StatisticsCalculator.computeGroupByStatistics(aggOp.getGroupingKeys(), inputStatistics,
+                        Maps.newHashMap());
+        if (aggOutputRow > LOW_AGGREGATE_EFFECT_COEFFICIENT) {
+            return true;
+        }
 
         double distinctOutputRow = StatisticsCalculator.computeGroupByStatistics(groupKeys, inputStatistics,
                 Maps.newHashMap());
 
-        return inputRowCount < SMALL_SCALE_ROWS_LIMIT
-                || aggOutputRow > LOW_AGGREGATE_EFFECT_COEFFICIENT
-                || distinctOutputRow * MEDIUM_AGGREGATE_EFFECT_COEFFICIENT < inputRowCount;
+        return distinctOutputRow * MEDIUM_AGGREGATE_EFFECT_COEFFICIENT < inputRowCount;
     }
 
 }

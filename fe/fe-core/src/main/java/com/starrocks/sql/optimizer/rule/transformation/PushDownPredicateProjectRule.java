@@ -41,7 +41,6 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 public class PushDownPredicateProjectRule extends TransformationRule {
@@ -63,16 +62,12 @@ public class PushDownPredicateProjectRule extends TransformationRule {
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalProjectOperator secondProject = (LogicalProjectOperator) input.getInputs().get(0).getOp();
-        Optional<ScalarOperator> assertColumn = secondProject.getColumnRefMap().values()
-                .stream()
-                .filter((op) -> {
-                    if (!(op instanceof CallOperator)) {
-                        return false;
-                    }
-                    return FunctionSet.ASSERT_TRUE.equals(((CallOperator) op).getFnName());
-                })
-                .findAny();
-        return !assertColumn.isPresent();
+        for (ScalarOperator op : secondProject.getColumnRefMap().values()) {
+            if (op instanceof CallOperator call && FunctionSet.ASSERT_TRUE.equals(call.getFnName())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean hasLambda(ScalarOperator op) {

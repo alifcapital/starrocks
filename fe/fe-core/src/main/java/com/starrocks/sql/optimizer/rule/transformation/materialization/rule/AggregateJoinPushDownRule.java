@@ -16,7 +16,6 @@
 package com.starrocks.sql.optimizer.rule.transformation.materialization.rule;
 
 import com.google.api.client.util.Lists;
-import com.google.common.base.Predicate;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Table;
 import com.starrocks.sql.optimizer.MaterializationContext;
@@ -37,9 +36,9 @@ import com.starrocks.sql.optimizer.rule.transformation.materialization.Aggregate
 import com.starrocks.sql.optimizer.rule.transformation.materialization.IMaterializedViewRewriter;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.OptimizerTraceUtil.logMVRewrite;
 import static com.starrocks.sql.optimizer.operator.OpRuleBit.OP_MV_AGG_PUSH_DOWN_REWRITE;
@@ -156,9 +155,10 @@ public class AggregateJoinPushDownRule extends BaseMaterializedViewRewriteRule {
         // where CONNECTOR_ID_GENERATOR may assign different numeric ids to the same logical table.
         Table mvBaseTable = mvContext.getBaseTables().get(0);
         Set<ColumnRefOperator> mvUsedColRefs = MvUtils.collectScanColumn(mvContext.getMvExpression());
-        Set<String> mvUsedColNames = mvUsedColRefs.stream()
-                .map(ColumnRefOperator::getName)
-                .collect(Collectors.toSet());
+        Set<String> mvUsedColNames = new HashSet<>();
+        for (ColumnRefOperator mvUsedColRef : mvUsedColRefs) {
+            mvUsedColNames.add(mvUsedColRef.getName());
+        }
         boolean baseTableFoundInMv = false;
         for (LogicalScanOperator scanOperator : scanOperators) {
             if (!mvBaseTable.equals(scanOperator.getTable())) {
@@ -196,8 +196,12 @@ public class AggregateJoinPushDownRule extends BaseMaterializedViewRewriteRule {
     }
 
     private boolean mvContainsAllColumnsUsedInScan(Set<String> mvUsedColNames, LogicalScanOperator scanOperator) {
-        return scanOperator.getColRefToColumnMetaMap().values().stream().allMatch(
-                (Predicate<Column>) c -> mvUsedColNames.contains(c.getName()));
+        for (Column column : scanOperator.getColRefToColumnMetaMap().values()) {
+            if (!mvUsedColNames.contains(column.getName())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

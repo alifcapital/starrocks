@@ -22,7 +22,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -236,7 +235,7 @@ public final class MonotonicFunctionRegistry {
             return null;
         }
         List<ColumnRefOperator> usedColumns = call.getColumnRefs();
-        if (new HashSet<>(usedColumns).size() != 1 || usedColumns.size() != 1) {
+        if (usedColumns.size() != 1) {
             return null;
         }
         ScalarOperator dataChild = null;

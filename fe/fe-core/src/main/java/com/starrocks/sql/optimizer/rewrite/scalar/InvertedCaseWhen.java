@@ -30,18 +30,15 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.Type;
 
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator.CompoundType;
@@ -224,32 +221,61 @@ public class InvertedCaseWhen {
             return Optional.of(new InvertedCaseWhen(false, operator, thenToWhen, thenToOrdinal));
         }
 
+        private static boolean existsComplexFunction(ScalarOperator op) {
+            List<ScalarOperator> children = op.getChildren();
+            if (op instanceof CallOperator) {
+                for (ScalarOperator child : children) {
+                    Type type = child.getType();
+                    if (type.isComplexType() || type.isJsonType()) {
+                        return true;
+                    }
+                }
+            }
+            for (ScalarOperator child : children) {
+                if (existsComplexFunction(child)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         @Override
         public Optional<InvertedCaseWhen> visitCaseWhenOperator(CaseWhenOperator operator, Context context) {
+            int whenSize = operator.getWhenClauseSize();
+            for (int i = 0; i < whenSize; i++) {
+                if (!operator.getThenClause(i).isConstantRef()) {
+                    return visit(operator, context);
+                }
+            }
+            if (operator.hasElse() && !operator.getElseClause().isConstantRef()) {
+                return visit(operator, context);
+            }
+
             if (context.isSkipComplexFunctions()) {
-                Predicate<ScalarOperator> isComplexFunction = op -> (op instanceof CallOperator)
-                        && op.getChildren().stream()
-                        .map(ScalarOperator::getType)
-                        .anyMatch(t -> t.isComplexType() || t.isJsonType());
-
-                boolean existsComplexFunctions = operator.getAllConditionClause()
-                        .stream()
-                        .anyMatch(when -> ScalarOperatorUtil.getStream(when).anyMatch(isComplexFunction));
-
-                if (existsComplexFunctions) {
+                if (operator.hasCase() && existsComplexFunction(operator.getCaseClause())) {
                     return Optional.empty();
+                }
+                for (int i = 0; i < whenSize; i++) {
+                    if (existsComplexFunction(operator.getWhenClause(i))) {
+                        return Optional.empty();
+                    }
                 }
             }
 
-            if (!operator.getAllValuesClause().stream().allMatch(ScalarOperator::isConstantRef)) {
-                return visit(operator, context);
-            }
-            if (operator.hasCase() &&
-                    operator.getAllConditionClause().stream().skip(1).allMatch(ScalarOperator::isConstantRef)) {
+            if (operator.hasCase() && allWhenClausesConstant(operator)) {
                 return handleCaseWhenWithCaseAndConstantWhens(operator);
             } else {
                 return handleCaseWhen(operator);
             }
+        }
+
+        private static boolean allWhenClausesConstant(CaseWhenOperator operator) {
+            for (int i = 0; i < operator.getWhenClauseSize(); i++) {
+                if (!operator.getWhenClause(i).isConstantRef()) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         @Override
@@ -304,39 +330,43 @@ public class InvertedCaseWhen {
 
         @Override
         public Optional<ScalarOperator> visitInPredicate(InPredicateOperator predicate, Context context) {
-            Set<ScalarOperator> inSet = predicate.getChildren().stream().skip(1).collect(Collectors.toSet());
             // col in (1, 2, 3) is not equal with col in (1, 2, 3, null). For col = 4, the first return false
             // while the second return null.
             // If there exists null value, we forbid rewriting the predicate.
-            if (!inSet.stream().allMatch(e -> e.isConstantRef() && !e.isNullable())) {
-                return Optional.empty();
+            List<ScalarOperator> inValues = predicate.getChildren();
+            for (int i = 1; i < inValues.size(); i++) {
+                ScalarOperator e = inValues.get(i);
+                if (!e.isConstantRef() || e.isNullable()) {
+                    return Optional.empty();
+                }
             }
             Optional<InvertedCaseWhen> maybeInvertedCaseWhen = from(predicate.getChild(0), context);
             if (!maybeInvertedCaseWhen.isPresent()) {
                 return Optional.empty();
             }
 
-            if (inSet.isEmpty()) {
+            if (inValues.size() == 1) {
                 return Optional.of(ConstantOperator.NULL);
             }
+            Set<ScalarOperator> inSet = inValues.stream().skip(1).collect(Collectors.toSet());
             InvertedCaseWhen invertedCaseWhen = maybeInvertedCaseWhen.get();
             boolean isNotIn = predicate.isNotIn();
             Map<ScalarOperator, WhenAndOrdinal> selected = Maps.newLinkedHashMap();
             Map<ScalarOperator, WhenAndOrdinal> unSelected = Maps.newLinkedHashMap();
-            invertedCaseWhen.thenMap.entrySet().forEach(e -> {
+            int selectedMaxOrdinal = 0;
+            int unSelectedMaxOrdinal = 0;
+            for (Map.Entry<ConstantOperator, WhenAndOrdinal> e : invertedCaseWhen.thenMap.entrySet()) {
                 if (!e.getKey().isConstantNull()) {
                     if (inSet.contains(e.getKey()) ^ isNotIn) {
                         selected.put(e.getKey(), e.getValue());
+                        selectedMaxOrdinal = Math.max(selectedMaxOrdinal, e.getValue().getOrdinal());
                     } else {
                         unSelected.put(e.getKey(), e.getValue());
+                        unSelectedMaxOrdinal = Math.max(unSelectedMaxOrdinal, e.getValue().getOrdinal());
                     }
                 }
-            });
+            }
 
-            int selectedMaxOrdinal = selected.values().stream()
-                    .map(WhenAndOrdinal::getOrdinal).max(Comparator.comparingInt(v -> v)).orElse(0);
-            int unSelectedMaxOrdinal = unSelected.values().stream()
-                    .map(WhenAndOrdinal::getOrdinal).max(Comparator.comparingInt(v -> v)).orElse(0);
             Optional<ScalarOperator> branchToNull = invertedCaseWhen.getBranchToNull();
             Optional<ScalarOperator> result = Optional.empty();
 
@@ -443,9 +473,13 @@ public class InvertedCaseWhen {
             if (!binaryType.isEqual() && !binaryType.isNotEqual()) {
                 return Optional.empty();
             }
+            ScalarOperator rhs = predicate.getChild(1);
+            if (!rhs.isConstantRef() || rhs.isNullable()) {
+                return Optional.empty();
+            }
             return in(binaryType.isNotEqual(),
                     predicate.getChild(0),
-                    Lists.newArrayList(predicate.getChild(1))).accept(this, context);
+                    Lists.newArrayList(rhs)).accept(this, context);
         }
 
         @Override
@@ -487,6 +521,18 @@ public class InvertedCaseWhen {
     private static final SimplifyVisitor SIMPLIFY_VISITOR = new SimplifyVisitor();
 
     public static ScalarOperator simplify(ScalarOperator op, boolean skipComplexFunctions) {
+        // These are the only predicate kinds handled by SimplifyVisitor. InvertCaseWhenVisitor
+        // only handles CASE, IF and NULLIF roots. Reject other inputs before allocating context,
+        // translating binary predicates to IN, or walking and hashing an existing IN list.
+        if (!(op instanceof InPredicateOperator || op instanceof BinaryPredicateOperator
+                || op instanceof IsNullPredicateOperator)) {
+            return op;
+        }
+        ScalarOperator lhs = op.getChild(0);
+        if (!(lhs instanceof CaseWhenOperator) && !(lhs instanceof CallOperator call
+                && (FunctionSet.IF.equals(call.getFnName()) || FunctionSet.NULLIF.equals(call.getFnName())))) {
+            return op;
+        }
         return op.accept(SIMPLIFY_VISITOR, new Context(skipComplexFunctions)).orElse(op);
     }
 }

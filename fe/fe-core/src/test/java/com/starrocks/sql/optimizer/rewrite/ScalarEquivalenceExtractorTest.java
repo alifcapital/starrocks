@@ -26,6 +26,8 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,6 +41,26 @@ public class ScalarEquivalenceExtractorTest {
     public static final ConstantOperator CONSTANT_1 = ConstantOperator.createInt(1);
     public static final ConstantOperator CONSTANT_2 = ConstantOperator.createInt(2);
     public static final ConstantOperator CONSTANT_3 = ConstantOperator.createInt(3);
+
+    @Test
+    public void preservesBreadthFirstOrderAndSeesSubsequentUnions() {
+        ColumnRefOperator d = new ColumnRefOperator(4, IntegerType.INT, "d", true);
+        ColumnRefOperator e = new ColumnRefOperator(5, IntegerType.INT, "e", true);
+        ColumnRefOperator f = new ColumnRefOperator(6, IntegerType.INT, "f", true);
+        ScalarEquivalenceExtractor extractor = new ScalarEquivalenceExtractor();
+        extractor.union(List.of(
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_B),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_C),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_B, d),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_C, e),
+                new BinaryPredicateOperator(BinaryType.EQ, d, f),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_C, CONSTANT_1)));
+        assertEquals(List.of(COLUMN_B, COLUMN_C, d, e, CONSTANT_1, f),
+                new ArrayList<>(extractor.getEquivalentColumnRefs(COLUMN_A)));
+        extractor.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, e, CONSTANT_2)));
+        assertEquals(List.of(COLUMN_B, COLUMN_C, d, e, CONSTANT_1, f, CONSTANT_2),
+                new ArrayList<>(extractor.getEquivalentColumnRefs(COLUMN_A)));
+    }
 
     @Test
     public void equivalentReplaceEQTransit() {
@@ -208,4 +230,87 @@ public class ScalarEquivalenceExtractorTest {
         assertTrue(list.contains(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A,
                 new CallOperator("abs", IntegerType.INT, Lists.newArrayList(COLUMN_C)))));
     }
+
+    @Test
+    public void disconnectedAndOwnValueOnlyResultsStayFreshAndMutable() {
+        ScalarEquivalenceExtractor extractor = new ScalarEquivalenceExtractor();
+        extractor.union(List.of(new BinaryPredicateOperator(BinaryType.LT, COLUMN_A, CONSTANT_1)));
+        for (ColumnRefOperator column : List.of(COLUMN_A, COLUMN_B)) {
+            Set<ScalarOperator> scalars = extractor.getEquivalentScalar(column);
+            Set<ScalarOperator> references = extractor.getEquivalentColumnRefs(column);
+            assertTrue(scalars.isEmpty());
+            assertTrue(references.isEmpty());
+            scalars.add(CONSTANT_2);
+            references.add(COLUMN_C);
+            assertTrue(extractor.getEquivalentScalar(column).isEmpty());
+            assertTrue(extractor.getEquivalentColumnRefs(column).isEmpty());
+        }
+    }
+
+    @Test
+    public void incrementalUnionAfterEmptySearchDerivesOrderedIndependentResults() {
+        ScalarEquivalenceExtractor extractor = new ScalarEquivalenceExtractor();
+        BinaryPredicateOperator bound = new BinaryPredicateOperator(BinaryType.LT, COLUMN_B, CONSTANT_3);
+        ScalarOperator original = bound.clone();
+        extractor.union(List.of(bound));
+        assertTrue(extractor.getEquivalentScalar(COLUMN_A).isEmpty());
+        extractor.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_B),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_B, COLUMN_C)));
+        assertEquals(List.of(COLUMN_B, COLUMN_C), new ArrayList<>(extractor.getEquivalentColumnRefs(COLUMN_A)));
+        assertEquals(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_B),
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_C),
+                new BinaryPredicateOperator(BinaryType.LT, COLUMN_A, CONSTANT_3)),
+                new ArrayList<>(extractor.getEquivalentScalar(COLUMN_A)));
+        assertEquals(original, bound);
+        Set<ScalarOperator> result = extractor.getEquivalentScalar(COLUMN_A);
+        result.clear();
+        assertEquals(3, extractor.getEquivalentScalar(COLUMN_A).size());
+        extractor.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_C, CONSTANT_2)));
+        assertTrue(extractor.getEquivalentScalar(COLUMN_A).contains(
+                new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, CONSTANT_2)));
+    }
+
+    @Test
+    public void selfEdgesConstantsAndRejectedMultiColumnFunctionsKeepTheirSemantics() {
+        ScalarEquivalenceExtractor extractor = new ScalarEquivalenceExtractor();
+        extractor.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_A),
+                new BinaryPredicateOperator(BinaryType.LT, COLUMN_A, CONSTANT_3)));
+        assertTrue(extractor.getEquivalentColumnRefs(COLUMN_A).isEmpty());
+        assertEquals(Set.of(new BinaryPredicateOperator(BinaryType.LT, COLUMN_A, CONSTANT_3)),
+                extractor.getEquivalentScalar(COLUMN_A));
+
+        ScalarEquivalenceExtractor constants = new ScalarEquivalenceExtractor();
+        constants.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_B, CONSTANT_2)));
+        assertEquals(Set.of(CONSTANT_2), constants.getEquivalentColumnRefs(COLUMN_B));
+        assertEquals(Set.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_B, CONSTANT_2)),
+                constants.getEquivalentScalar(COLUMN_B));
+
+        ScalarEquivalenceExtractor rejected = new ScalarEquivalenceExtractor();
+        rejected.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A,
+                new CallOperator("add", IntegerType.INT, List.of(COLUMN_B, COLUMN_C)))));
+        assertTrue(rejected.getEquivalentScalar(COLUMN_A).isEmpty());
+        assertTrue(rejected.getEquivalentColumnRefs(COLUMN_A).isEmpty());
+        rejected.union(List.of(new BinaryPredicateOperator(BinaryType.EQ, COLUMN_A, COLUMN_B)));
+        assertEquals(Set.of(COLUMN_B), rejected.getEquivalentColumnRefs(COLUMN_A));
+    }
+
+    @Test
+    public void valueAddedAfterColumnOnlySearchIsRewrittenAndRemainsIndependent() {
+        ScalarEquivalenceExtractor extractor = new ScalarEquivalenceExtractor();
+        ScalarOperator ab = BinaryPredicateOperator.eq(COLUMN_A, COLUMN_B);
+        ScalarOperator bc = BinaryPredicateOperator.eq(COLUMN_B, COLUMN_C);
+        extractor.union(List.of(ab, bc));
+        List<ScalarOperator> references = List.of(ab, BinaryPredicateOperator.eq(COLUMN_A, COLUMN_C));
+        assertEquals(references, new ArrayList<>(extractor.getEquivalentScalar(COLUMN_A)));
+        BinaryPredicateOperator bound = new BinaryPredicateOperator(BinaryType.LT, COLUMN_C, CONSTANT_3);
+        extractor.union(List.of(bound));
+        List<ScalarOperator> expected = new ArrayList<>(references);
+        expected.add(new BinaryPredicateOperator(BinaryType.LT, COLUMN_A, CONSTANT_3));
+        List<ScalarOperator> result = new ArrayList<>(extractor.getEquivalentScalar(COLUMN_A));
+        assertEquals(expected, result);
+        result.get(2).setChild(1, CONSTANT_1);
+        assertEquals(CONSTANT_3, bound.getChild(1));
+        assertEquals(expected, new ArrayList<>(extractor.getEquivalentScalar(COLUMN_A)));
+    }
+
 }

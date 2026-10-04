@@ -100,6 +100,6 @@ public class LikePredicateOperator extends PredicateOperator {
 
     @Override
     public int hashCodeSelf() {
-        return Objects.hash(super.hashCodeSelf(), likeType);
+        return 31 * (31 + super.hashCodeSelf()) + Objects.hashCode(likeType);
     }
 }

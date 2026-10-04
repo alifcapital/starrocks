@@ -45,6 +45,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -169,9 +170,32 @@ public class BaseScalarOperatorShuttle extends ScalarOperatorVisitor<ScalarOpera
         if (preprocessed.isPresent()) {
             return preprocessed.get();
         }
-        boolean[] update = {false};
-        List<ScalarOperator> clonedChildOperators = visitList(operator.getChildren(), update);
-        if (update[0]) {
+        return shuttleChildrenIfUpdate(operator);
+    }
+
+    // The part of shuttleIfUpdate after preprocess. A subclass whose preprocess has already returned empty for the
+    // operator can call this to skip a repeated preprocess.
+    protected ScalarOperator shuttleChildrenIfUpdate(ScalarOperator operator) {
+        List<ScalarOperator> children = operator.getChildren();
+        if (children == null) {
+            return operator;
+        }
+        // The cloned list is only needed once some child changes, and then it holds every child in order
+        List<ScalarOperator> clonedChildOperators = null;
+        for (int i = 0; i < children.size(); i++) {
+            ScalarOperator child = children.get(i);
+            ScalarOperator clonedChild = child == null ? null : child.accept(this, null);
+            if (clonedChildOperators == null && clonedChild != child) {
+                clonedChildOperators = new ArrayList<>(children.size());
+                for (int j = 0; j < i; j++) {
+                    clonedChildOperators.add(children.get(j));
+                }
+            }
+            if (clonedChildOperators != null) {
+                clonedChildOperators.add(clonedChild);
+            }
+        }
+        if (clonedChildOperators != null) {
             BiFunction<ScalarOperator, List<ScalarOperator>, ScalarOperator> cloningFunction =
                     CLONE_FUNCTIONS.get(operator.getClass());
             Preconditions.checkNotNull(cloningFunction);

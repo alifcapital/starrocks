@@ -33,10 +33,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.regex.Pattern;
 
 public class MvNormalizePredicateRule extends NormalizePredicateRule {
     private static final Logger LOG = LogManager.getLogger(MvNormalizePredicateRule.class);
+
+    private static final Pattern COLUMN_ID_PREFIX = Pattern.compile("\\d+: ");
 
     // Comparator to normalize predicates, only use scalar operators' string to compare.
     private static final Comparator<ScalarOperator> SCALAR_OPERATOR_COMPARATOR_IGNORE_COLUMN_ID =
@@ -59,8 +61,8 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
                     } else {
                         String s1 = o1.toString().toLowerCase();
                         String s2 = o2.toString().toLowerCase();
-                        String n1 = s1.replaceAll("\\d+: ", "");
-                        String n2 = s2.replaceAll("\\d+: ", "");
+                        String n1 = COLUMN_ID_PREFIX.matcher(s1).replaceAll("");
+                        String n2 = COLUMN_ID_PREFIX.matcher(s2).replaceAll("");
                         int ret = n1.compareTo(n2);
                         return (ret == 0) ? s1.compareTo(s2) : ret;
                     }
@@ -75,8 +77,8 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
                                                  ScalarOperatorRewriteContext context) {
         // sort the children of compound predicate, but not use insensitive to compare which may cause wrong result:/
         // eg: a in ('a', 'A') will be normalized to a = 'a'
-        Map<String, ScalarOperator> sorted = Maps.newTreeMap();
         if (predicate.isAnd()) {
+            Map<String, ScalarOperator> sorted = Maps.newTreeMap();
             List<ScalarOperator> before = Utils.extractConjuncts(predicate);
             before.forEach(x -> sorted.put(x.toString(), x));
             List<ScalarOperator> after = Lists.newArrayList(sorted.values());
@@ -85,6 +87,7 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
             }
             return Utils.compoundAnd(after);
         } else if (predicate.isOr()) {
+            Map<String, ScalarOperator> sorted = Maps.newTreeMap();
             List<ScalarOperator> before = Utils.extractDisjunctive(predicate);
             before.forEach(x -> sorted.put(x.toString(), x));
             List<ScalarOperator> after = Lists.newArrayList(sorted.values());
@@ -119,44 +122,27 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
 
     @Override
     public ScalarOperator visitInPredicate(InPredicateOperator predicate, ScalarOperatorRewriteContext context) {
-        List<ScalarOperator> rhs = predicate.getChildren().subList(1, predicate.getChildren().size());
+        List<ScalarOperator> children = predicate.getChildren();
         if (predicate.isSubquery()) {
             return predicate;
         }
-        if (!rhs.stream().allMatch(ScalarOperator::isConstant)) {
+        // add a size limit to protect in with large number of children
+        if (children.size() - 1 > 1024) {
             return predicate;
+        }
+        for (int i = 1; i < children.size(); i++) {
+            if (!children.get(i).isConstant()) {
+                return predicate;
+            }
         }
 
         List<ScalarOperator> result = new ArrayList<>();
         ScalarOperator lhs = predicate.getChild(0);
         boolean isIn = !predicate.isNotIn();
-
-        List<ScalarOperator> constants = predicate.getChildren().stream().skip(1).filter(ScalarOperator::isConstant)
-                .collect(Collectors.toList());
-        if (constants.size() == 1) {
-            BinaryType op =
-                    isIn ? BinaryType.EQ : BinaryType.NE;
-            result.add(new BinaryPredicateOperator(op, lhs, constants.get(0)));
-        } else if (constants.size() > 1024) {
-            // add a size limit to protect in with large number of children
-            return predicate;
-        } else if (!constants.isEmpty()) {
-            for (ScalarOperator constant : constants) {
-                BinaryType op =
-                        isIn ? BinaryType.EQ : BinaryType.NE;
-                result.add(new BinaryPredicateOperator(op, lhs, constant));
-            }
+        BinaryType op = isIn ? BinaryType.EQ : BinaryType.NE;
+        for (int i = 1; i < children.size(); i++) {
+            result.add(new BinaryPredicateOperator(op, lhs, children.get(i)));
         }
-
-        predicate.getChildren().stream().skip(1).filter(ScalarOperator::isVariable).forEach(child -> {
-            BinaryPredicateOperator newOp;
-            if (isIn) {
-                newOp = new BinaryPredicateOperator(BinaryType.EQ, lhs, child);
-            } else {
-                newOp = new BinaryPredicateOperator(BinaryType.NE, lhs, child);
-            }
-            result.add(newOp);
-        });
 
         return isIn ? Utils.compoundOr(result) : Utils.compoundAnd(result);
     }
@@ -194,7 +180,7 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
 
     // a = b & b = a => a = b
     private static List<ScalarOperator> pruneEqualBinaryPredicates(List<ScalarOperator> scalarOperators) {
-        Map<ColumnRefOperator, ColumnRefOperator> visited = Maps.newHashMap();
+        Map<ColumnRefOperator, ColumnRefOperator> visited = null;
         List<ScalarOperator> prunedPredicates = Lists.newArrayList();
         for (ScalarOperator scalarOperator : scalarOperators) {
             if (!(scalarOperator instanceof BinaryPredicateOperator)) {
@@ -212,11 +198,13 @@ public class MvNormalizePredicateRule extends NormalizePredicateRule {
             }
             ColumnRefOperator col0 = (ColumnRefOperator) (binaryPred.getChild(0));
             ColumnRefOperator col1 = (ColumnRefOperator) (binaryPred.getChild(1));
-            if (visited.containsKey(col0) && visited.get(col0).equals(col1) ||
-                    visited.containsKey(col1) && visited.get(col1).equals(col0)) {
+            if (visited != null && (col1.equals(visited.get(col0)) || col0.equals(visited.get(col1)))) {
                 continue;
             }
             prunedPredicates.add(scalarOperator);
+            if (visited == null) {
+                visited = Maps.newHashMap();
+            }
             visited.put(col0, col1);
         }
         return prunedPredicates;

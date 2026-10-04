@@ -97,10 +97,10 @@ public class EliminateAggRule extends TransformationRule {
             return false;
         }
 
-        boolean supportedAllAggFunctions = aggOp.getAggregations().values().stream()
-                .allMatch(call -> !call.isDistinct() && SUPPORTED_AGG_FUNCTIONS.contains(call.getFnName()));
-        if (!supportedAllAggFunctions) {
-            return false;
+        for (CallOperator call : aggOp.getAggregations().values()) {
+            if (call.isDistinct() || !SUPPORTED_AGG_FUNCTIONS.contains(call.getFnName())) {
+                return false;
+            }
         }
 
         UKFKConstraintsCollector.collectColumnConstraintsForce(input);
@@ -110,9 +110,13 @@ public class EliminateAggRule extends TransformationRule {
             return false;
         }
 
-        ColumnRefSet groupByIds = new ColumnRefSet();
-        groupBys.stream().map(ColumnRefOperator::getId).forEach(groupByIds::union);
-        return uniqueKeys.stream().anyMatch(constraint -> groupByIds.containsAll(constraint.ukColumnRefs));
+        ColumnRefSet groupByIds = new ColumnRefSet(groupBys);
+        for (UKFKConstraints.UniqueConstraintWrapper constraint : uniqueKeys) {
+            if (groupByIds.containsAll(constraint.ukColumnRefs)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override

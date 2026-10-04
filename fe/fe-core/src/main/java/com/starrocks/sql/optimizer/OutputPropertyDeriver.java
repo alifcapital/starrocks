@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.starrocks.catalog.ColocateTableIndex;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
@@ -34,6 +33,7 @@ import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.DistributionCol;
 import com.starrocks.sql.optimizer.base.DistributionProperty;
 import com.starrocks.sql.optimizer.base.DistributionSpec;
+import com.starrocks.sql.optimizer.base.EmptyCTEProperty;
 import com.starrocks.sql.optimizer.base.EmptyDistributionProperty;
 import com.starrocks.sql.optimizer.base.EmptySortProperty;
 import com.starrocks.sql.optimizer.base.EquivalentDescriptor;
@@ -123,12 +123,12 @@ public class OutputPropertyDeriver extends PropertyDeriverBase<PhysicalPropertyS
     @NotNull
     private PhysicalPropertySet mergeCTEProperty(PhysicalPropertySet output) {
         // set cte property
-        Set<Integer> cteIds = Sets.newHashSet();
+        CTEProperty ctes = EmptyCTEProperty.INSTANCE;
         for (PhysicalPropertySet childrenOutputProperty : childrenOutputProperties) {
-            cteIds.addAll(childrenOutputProperty.getCteProperty().getCteIds());
+            ctes = ctes.union(childrenOutputProperty.getCteProperty());
         }
         output = output.copy();
-        output.setCteProperty(CTEProperty.createProperty(cteIds));
+        output.setCteProperty(ctes);
         return output;
     }
 
@@ -718,10 +718,9 @@ public class OutputPropertyDeriver extends PropertyDeriverBase<PhysicalPropertyS
     public PhysicalPropertySet visitPhysicalCTEAnchor(PhysicalCTEAnchorOperator node, ExpressionContext context) {
         checkState(childrenOutputProperties.size() == 2);
         PhysicalPropertySet output = childrenOutputProperties.get(1).copy();
-        Set<Integer> cteIds = Sets.newHashSet(childrenOutputProperties.get(1).getCteProperty().getCteIds());
-        cteIds.remove(node.getCteId());
-        cteIds.addAll(childrenOutputProperties.get(0).getCteProperty().getCteIds());
-        output.setCteProperty(CTEProperty.createProperty(cteIds));
+        CTEProperty ctes = childrenOutputProperties.get(1).getCteProperty().withoutCTE(node.getCteId())
+                .union(childrenOutputProperties.get(0).getCteProperty());
+        output.setCteProperty(ctes);
         return output;
     }
 

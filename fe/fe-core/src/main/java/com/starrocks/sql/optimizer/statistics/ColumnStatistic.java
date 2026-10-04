@@ -21,6 +21,10 @@ import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
 
+/**
+ * Immutable scalar column statistics. Histogram contents retain their existing shallow-sharing contract.
+ * Use a Builder to derive a modified value.
+ */
 public class ColumnStatistic {
     public enum StatisticType {
         UNKNOWN,
@@ -44,13 +48,9 @@ public class ColumnStatistic {
     private final Histogram histogram;
     private final StatisticType type;
 
-    // for iceberg test
-    // @todo refactor this!
-    private String minString = null;
-    private String maxString = null;
-
-
-    private double collectionSize = DEFAULT_COLLECTION_SIZE;
+    private final String minString;
+    private final String maxString;
+    private final double collectionSize;
 
     public ColumnStatistic(
             double minValue,
@@ -61,6 +61,13 @@ public class ColumnStatistic {
             double collectionSize,
             Histogram histogram,
             StatisticType type) {
+        this(minValue, maxValue, nullsFraction, averageRowSize, distinctValuesCount,
+                collectionSize, histogram, type, null, null);
+    }
+
+    private ColumnStatistic(double minValue, double maxValue, double nullsFraction, double averageRowSize,
+                            double distinctValuesCount, double collectionSize, Histogram histogram,
+                            StatisticType type, String minString, String maxString) {
         this.minValue = minValue;
         this.maxValue = maxValue;
         this.nullsFraction = nullsFraction;
@@ -69,24 +76,14 @@ public class ColumnStatistic {
         this.histogram = histogram;
         this.collectionSize = collectionSize;
         this.type = type;
+        this.minString = minString;
+        this.maxString = maxString;
     }
 
-    // TODO deal with string max, min
-    public ColumnStatistic(
-            double minValue,
-            double maxValue,
-            double nullsFraction,
-            double averageRowSize,
-            double distinctValuesCount,
-            Histogram histogram,
-            StatisticType type) {
-        this.minValue = minValue;
-        this.maxValue = maxValue;
-        this.nullsFraction = nullsFraction;
-        this.averageRowSize = averageRowSize;
-        this.distinctValuesCount = distinctValuesCount;
-        this.histogram = histogram;
-        this.type = type;
+    public ColumnStatistic(double minValue, double maxValue, double nullsFraction, double averageRowSize,
+                           double distinctValuesCount, Histogram histogram, StatisticType type) {
+        this(minValue, maxValue, nullsFraction, averageRowSize, distinctValuesCount,
+                DEFAULT_COLLECTION_SIZE, histogram, type);
     }
 
     public ColumnStatistic(double minValue,
@@ -101,16 +98,8 @@ public class ColumnStatistic {
         return minString;
     }
 
-    public void setMinString(String minString) {
-        this.minString = minString;
-    }
-
     public String getMaxString() {
         return maxString;
-    }
-
-    public void setMaxString(String maxString) {
-        this.maxString = maxString;
     }
 
     public double getMinValue() {
@@ -384,11 +373,8 @@ public class ColumnStatistic {
         }
 
         public ColumnStatistic build() {
-            ColumnStatistic columnStatistic = new ColumnStatistic(
-                    minValue, maxValue, nullsFraction, averageRowSize, distinctValuesCount, collectionSize, histogram, type);
-            columnStatistic.setMaxString(maxString);
-            columnStatistic.setMinString(minString);
-            return columnStatistic;
+            return new ColumnStatistic(minValue, maxValue, nullsFraction, averageRowSize,
+                    distinctValuesCount, collectionSize, histogram, type, minString, maxString);
         }
     }
 }

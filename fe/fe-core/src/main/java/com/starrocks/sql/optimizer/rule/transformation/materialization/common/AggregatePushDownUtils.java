@@ -47,7 +47,6 @@ import com.starrocks.type.TypeFactory;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static com.starrocks.sql.optimizer.OptimizerTraceUtil.logMVRewrite;
 import static com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils.deriveLogicalProperty;
@@ -114,9 +113,11 @@ public class AggregatePushDownUtils {
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregations.entrySet()) {
             ColumnRefOperator origAggColRef = entry.getKey();
             CallOperator aggCall = (CallOperator) entry.getValue().clone();
-            if (ctx.avgToSumCountMapping.containsKey(aggCall)) {
+            // hashing a call walks all its arguments, so skip the lookup when there is no avg to rewrite
+            Pair<ColumnRefOperator, ColumnRefOperator> newAggPair =
+                    ctx.avgToSumCountMapping.isEmpty() ? null : ctx.avgToSumCountMapping.get(aggCall);
+            if (newAggPair != null) {
                 // if it's an avg function, we need to rewrite it to sum and count function
-                Pair<ColumnRefOperator, ColumnRefOperator> newAggPair = ctx.avgToSumCountMapping.get(aggCall);
                 ColumnRefOperator sumColRef = newAggPair.first;
                 CallOperator sumAggCall = ctx.aggColRefToPushDownAggMap.get(sumColRef);
                 if (!getRollupFinalAggregate(mvRewriteContext, ctx, remapping, sumColRef, sumAggCall, newAggregations,
@@ -144,9 +145,10 @@ public class AggregatePushDownUtils {
             }
         }
 
-        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(aggColRefToAggMap);
+        ReplaceColumnRefRewriter rewriter = null;
         // add projection to make sure that the output columns keep the same with the origin query
         if (origAggregate.getProjection() != null) {
+            rewriter = new ReplaceColumnRefRewriter(aggColRefToAggMap);
             Map<ColumnRefOperator, ScalarOperator> originalMap = origAggregate.getProjection().getColumnRefMap();
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : originalMap.entrySet()) {
                 ScalarOperator rewritten = rewriter.rewrite(entry.getValue());
@@ -164,6 +166,9 @@ public class AggregatePushDownUtils {
         // rewrite aggregate's predicate
         ScalarOperator predicate = origAggregate.getPredicate();
         if (origAggregate.getPredicate() != null) {
+            if (rewriter == null) {
+                rewriter = new ReplaceColumnRefRewriter(aggColRefToAggMap);
+            }
             predicate = rewriter.rewrite(origAggregate.getPredicate());
         }
 
@@ -270,7 +275,7 @@ public class AggregatePushDownUtils {
                 logMVRewrite(mvRewriteContext, "Get rollup function name is null, aggCall:{}", aggCall);
                 return null;
             }
-            List<ScalarOperator> newArgs = aggCall.getChildren();
+            List<ScalarOperator> newArgs = Lists.newArrayList(aggCall.getChildren());
             newArgs.set(0, newArg0);
             Type[] argTypes = newArgs.stream().map(ScalarOperator::getType).toArray(Type[]::new);
             Function newFunc = ExprUtils.getBuiltinFunction(rollupFuncName, argTypes,
@@ -349,12 +354,12 @@ public class AggregatePushDownUtils {
         ColumnRefOperator newColRef =
                 columnRefFactory.create(newCallOp, newCallOp.getType(), newCallOp.isNullable());
         // reuse old aggregation functions if it has existed
-        Optional<CallOperator> existedOpt = aggregations.values().stream().filter(newCallOp::equals).findFirst();
-        if (existedOpt.isPresent()) {
-            return Pair.create(newColRef, existedOpt.get());
-        } else {
-            return Pair.create(newColRef, newCallOp);
+        for (CallOperator existedCall : aggregations.values()) {
+            if (newCallOp.equals(existedCall)) {
+                return Pair.create(newColRef, existedCall);
+            }
         }
+        return Pair.create(newColRef, newCallOp);
     }
 
     /**

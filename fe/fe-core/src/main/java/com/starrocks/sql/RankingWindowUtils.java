@@ -36,7 +36,7 @@ public class RankingWindowUtils {
             return false;
         }
 
-        ColumnRefOperator windowCol = Lists.newArrayList(operator.getWindowCall().keySet()).get(0);
+        ColumnRefOperator windowCol = operator.getWindowCall().keySet().iterator().next();
         CallOperator callOperator = operator.getWindowCall().get(windowCol);
 
         return FunctionSet.ROW_NUMBER.equals(callOperator.getFnName()) ||

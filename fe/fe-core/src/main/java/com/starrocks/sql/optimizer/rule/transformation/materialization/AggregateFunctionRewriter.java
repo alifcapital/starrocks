@@ -23,7 +23,6 @@ import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil;
-import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 
 import java.util.Map;
 
@@ -37,7 +36,6 @@ import static com.starrocks.sql.optimizer.rule.transformation.materialization.co
  * eg: AVG -> SUM / COUNT
  */
 public class AggregateFunctionRewriter {
-    private final ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
     private final Map<ColumnRefOperator, CallOperator> newColumnRefToAggFuncMap = Maps.newHashMap();
 
     private final EquationRewriter equationRewriter;

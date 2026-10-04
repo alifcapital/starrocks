@@ -14,26 +14,24 @@
 
 package com.starrocks.sql.optimizer.operator;
 
-import com.google.common.collect.Maps;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
 
 import java.lang.reflect.Constructor;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class OperatorBuilderFactory {
-    private static final Map<String, Constructor> CONSTRUCTOR_MAP = Maps.newHashMap();
+    // Planner threads of concurrent queries read and fill the cache at the same time, so it must be thread safe.
+    private static final Map<Class<?>, Constructor<?>> CONSTRUCTOR_MAP = new ConcurrentHashMap<>();
 
     public static <T extends Operator.Builder> T build(Operator operator) {
-        String clazzName = operator.getClass().getName();
-        String builderName = clazzName + "$Builder";
-
         try {
-            if (CONSTRUCTOR_MAP.containsKey(builderName)) {
-                return (T) CONSTRUCTOR_MAP.get(builderName).newInstance();
+            Constructor<?> c = CONSTRUCTOR_MAP.get(operator.getClass());
+            if (c == null) {
+                c = Class.forName(operator.getClass().getName() + "$Builder").getConstructor();
+                CONSTRUCTOR_MAP.put(operator.getClass(), c);
             }
-            Constructor c = Class.forName(builderName).getConstructor();
-            CONSTRUCTOR_MAP.put(builderName, c);
             return (T) c.newInstance();
         } catch (Exception e) {
             throw new StarRocksPlannerException("not implement builder: " + operator.getOpType(),

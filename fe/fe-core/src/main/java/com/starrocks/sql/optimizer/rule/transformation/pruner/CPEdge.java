@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.rule.transformation.pruner;
 
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
+import com.google.common.collect.ImmutableBiMap;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 
@@ -38,6 +39,23 @@ public class CPEdge {
         this.rhs = rhs;
         this.unilateral = unilateral;
         this.eqColumnRefs = HashBiMap.create(eqColumnRefs);
+    }
+
+    private CPEdge(OptExpression lhs, OptExpression rhs, boolean unilateral) {
+        this.lhs = lhs;
+        this.rhs = rhs;
+        this.unilateral = unilateral;
+        this.eqColumnRefs = ImmutableBiMap.of();
+    }
+
+    // equals() and hashCode() ignore the column mapping, so an edge that is only used to probe a hash set
+    // does not need one. The result must not be stored or handed out.
+    static CPEdge lookupKey(OptExpression lhs, OptExpression rhs, boolean unilateral) {
+        return new CPEdge(lhs, rhs, unilateral);
+    }
+
+    CPEdge inverseLookupKey() {
+        return new CPEdge(rhs, lhs, unilateral);
     }
 
     CPEdge inverse() {

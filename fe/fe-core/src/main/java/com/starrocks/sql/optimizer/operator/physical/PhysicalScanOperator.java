@@ -88,10 +88,10 @@ public abstract class PhysicalScanOperator extends PhysicalOperator {
         if (this.projection != null) {
             ColumnRefSet usedColumns = new ColumnRefSet();
             for (ScalarOperator scalarOperator : this.projection.getColumnRefMap().values()) {
-                usedColumns.union(scalarOperator.getUsedColumns());
+                scalarOperator.collectUsedColumns(usedColumns);
             }
             for (ScalarOperator scalarOperator : this.projection.getCommonSubOperatorMap().values()) {
-                usedColumns.union(scalarOperator.getUsedColumns());
+                scalarOperator.collectUsedColumns(usedColumns);
             }
 
             ImmutableList.Builder<ColumnRefOperator> outputBuilder = ImmutableList.builder();

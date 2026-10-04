@@ -99,7 +99,9 @@ public class HashCachedScalarOperator extends ScalarOperator {
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        return null;
+    public void collectUsedColumns(ColumnRefSet destination) {
+        // This wrapper is only a temporary hash key, never an expression-tree node.
+        throw new UnsupportedOperationException("Hash keys do not expose used columns");
     }
+
 }

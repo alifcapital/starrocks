@@ -125,6 +125,7 @@ public class SplitWindowSkewToUnionRule extends TransformationRule {
             // and that expression is a direct ColumnReference (not a function or expression).
             return partitionExprs != null
                     && partitionExprs.size() == 1
+                    && partitionExprs.get(0) instanceof ColumnRefOperator
                     && lwo.getOrderByElements() != null
                     && !lwo.getOrderByElements().isEmpty();
         }
@@ -209,21 +210,15 @@ public class SplitWindowSkewToUnionRule extends TransformationRule {
                                                     OptExpression child,
                                                     LogicalWindowOperator window,
                                                     BranchResult unskewedBranch) {
-        List<ColumnRefOperator> outputColumns = Lists.newArrayList();
-        List<ColumnRefOperator> skewedChildColumns = Lists.newArrayList();
-        List<ColumnRefOperator> unskewedChildColumns = Lists.newArrayList();
-
-        // Combine window output columns and child pass-through columns
-        List<ColumnRefOperator> allColumns = Lists.newArrayList(window.getWindowCall().keySet());
+        // Combine window outputs and child pass-through columns in the original order.
+        List<ColumnRefOperator> outputColumns = Lists.newArrayList(window.getWindowCall().keySet());
         if (child.getOutputColumns() != null) {
-            allColumns.addAll(child.getOutputColumns().getColumnRefOperators(context.getColumnRefFactory()));
+            outputColumns.addAll(child.getOutputColumns().getColumnRefOperators(context.getColumnRefFactory()));
         }
-
-        // Populate lists based on mappings
-        for (ColumnRefOperator col : allColumns) {
-            outputColumns.add(col);
-            // For the skewed branch, we use the original columns.
-            skewedChildColumns.add(col);
+        // Keep independently mutable lists for the union output and both inputs.
+        List<ColumnRefOperator> skewedChildColumns = Lists.newArrayList(outputColumns);
+        List<ColumnRefOperator> unskewedChildColumns = Lists.newArrayListWithCapacity(outputColumns.size());
+        for (ColumnRefOperator col : outputColumns) {
             unskewedChildColumns.add(unskewedBranch.columnMapping.get(col));
         }
 
@@ -238,7 +233,7 @@ public class SplitWindowSkewToUnionRule extends TransformationRule {
                                      boolean needsDuplication) {
 
         OptExpression filterExpr = OptExpression.create(new LogicalFilterOperator(predicate), child);
-        Map<ColumnRefOperator, ColumnRefOperator> mapping = Maps.newHashMap();
+        Map<ColumnRefOperator, ColumnRefOperator> mapping = Collections.emptyMap();
 
         LogicalWindowOperator.Builder windowBuilder = new LogicalWindowOperator.Builder()
                 .withOperator(originalWindow)
@@ -246,6 +241,7 @@ public class SplitWindowSkewToUnionRule extends TransformationRule {
                 .setIsSkewed(partitionExprs.isEmpty() && originalWindow.isSkewed());
 
         if (needsDuplication) {
+            mapping = Maps.newHashMap();
             OptExpressionDuplicator duplicator = new OptExpressionDuplicator(context.getColumnRefFactory(), context);
             filterExpr = duplicator.duplicate(filterExpr);
 

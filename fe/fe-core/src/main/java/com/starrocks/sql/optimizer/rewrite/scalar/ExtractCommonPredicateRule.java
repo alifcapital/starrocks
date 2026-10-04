@@ -42,25 +42,27 @@ public class ExtractCommonPredicateRule extends TopDownScalarOperatorRewriteRule
     @Override
     public ScalarOperator visitCompoundPredicate(CompoundPredicateOperator predicate,
                                                  ScalarOperatorRewriteContext context) {
+        if (!predicate.isOr()) {
+            return predicate;
+        }
         List<ScalarOperator> orLists = Utils.extractDisjunctive(predicate);
         if (orLists.size() <= 1) {
             return predicate;
         }
 
         List<List<ScalarOperator>> orAndPredicates = Lists.newArrayList();
-
-        for (ScalarOperator or : orLists) {
-            orAndPredicates.add(Utils.extractConjuncts(or));
-        }
+        orAndPredicates.add(Utils.extractConjuncts(orLists.get(0)));
 
         // extract common predicate
+        // Common only shrinks, so we stop at the first empty one and do not extract the remaining disjuncts.
         List<ScalarOperator> common = Lists.newArrayList(orAndPredicates.get(0));
-        for (int i = 1; i < orAndPredicates.size(); i++) {
-            common.retainAll(orAndPredicates.get(i));
-        }
-
-        if (common.isEmpty()) {
-            return predicate;
+        for (int i = 1; i < orLists.size(); i++) {
+            List<ScalarOperator> andPredicates = Utils.extractConjuncts(orLists.get(i));
+            orAndPredicates.add(andPredicates);
+            common.retainAll(andPredicates);
+            if (common.isEmpty()) {
+                return predicate;
+            }
         }
 
         for (List<ScalarOperator> andPredicates : orAndPredicates) {
@@ -74,7 +76,9 @@ public class ExtractCommonPredicateRule extends TopDownScalarOperatorRewriteRule
 
         ScalarOperator newOr = null;
         for (List<ScalarOperator> andPredicates : orAndPredicates) {
-            newOr = Utils.compoundOr(newOr, Utils.compoundAnd(andPredicates));
+            ScalarOperator and = Utils.compoundAnd(andPredicates);
+            newOr = newOr == null ? and :
+                    new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR, newOr, and);
         }
 
         return Utils.compoundAnd(Utils.compoundAnd(common), newOr);

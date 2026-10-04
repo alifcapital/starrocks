@@ -134,14 +134,14 @@ public final class AggregatedMaterializedViewPushDownRewriter extends Materializ
     }
 
     private boolean checkInputCols(ColumnRefSet inputCols, ColumnRefSet usedCols, String extraInfo) {
+        if (inputCols.containsAll(usedCols)) {
+            return true;
+        }
         ColumnRefSet missedCols = usedCols.clone();
         missedCols.except(inputCols);
-        if (!missedCols.isEmpty()) {
-            logMVRewrite(mvRewriteContext, "Aggregate join pushdown rewrite failed {}, missed cols: {}",
-                    extraInfo, missedCols);
-            return false;
-        }
-        return true;
+        logMVRewrite(mvRewriteContext, "Aggregate join pushdown rewrite failed {}, missed cols: {}",
+                extraInfo, missedCols);
+        return false;
     }
 
     private class PreVisitor extends OptExpressionVisitor<AggregatePushDownContext, AggregatePushDownContext> {
@@ -557,9 +557,6 @@ public final class AggregatedMaterializedViewPushDownRewriter extends Materializ
 
             LogicalProjectOperator project = optExpression.getOp().cast();
             Map<ColumnRefOperator, ScalarOperator> columnRefMap = project.getColumnRefMap();
-            ColumnRefSet columnRefSet = new ColumnRefSet();
-            columnRefSet.union(columnRefMap.keySet());
-            columnRefSet.union(getReferencedColumnRef(columnRefMap.values()));
             Map<ColumnRefOperator, ScalarOperator> newColumnRefMap =
                     replaceColumnRefMap(rewriteInfo.getCtx(), childRemapping,
                             columnRefMap);
@@ -588,8 +585,8 @@ public final class AggregatedMaterializedViewPushDownRewriter extends Materializ
                 }
             }
             // Remove original aggregate column ref from column ref map
-            final ColumnRefSet aggColumnRefSet = getReferencedColumnRef(new ArrayList<>(ctx.aggregations.values()));
-            final ColumnRefSet groupColumnRefSet = getReferencedColumnRef(new ArrayList<>(ctx.groupBys.values()));
+            final ColumnRefSet aggColumnRefSet = getReferencedColumnRef(ctx.aggregations.values());
+            final ColumnRefSet groupColumnRefSet = getReferencedColumnRef(ctx.groupBys.values());
             aggColumnRefSet.except(groupColumnRefSet);
             if (columnRefMap != null) {
                 for (Map.Entry<ColumnRefOperator, ScalarOperator> e : columnRefMap.entrySet()) {
@@ -604,9 +601,9 @@ public final class AggregatedMaterializedViewPushDownRewriter extends Materializ
         }
     }
 
-    public static ColumnRefSet getReferencedColumnRef(Collection<ScalarOperator> operators) {
+    public static ColumnRefSet getReferencedColumnRef(Collection<? extends ScalarOperator> operators) {
         ColumnRefSet refSet = new ColumnRefSet();
-        operators.stream().map(ScalarOperator::getUsedColumns).forEach(refSet::union);
+        operators.forEach(operator -> operator.collectUsedColumns(refSet));
         return refSet;
     }
 

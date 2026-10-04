@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
@@ -28,6 +27,7 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient;
 
+import java.util.Collections;
 import java.util.List;
 
 /*
@@ -63,7 +63,7 @@ public class IntersectAddDistinctRule extends TransformationRule {
         OptExpression childOpt = intersectOpt.inputAt(child);
 
         LogicalAggregationOperator agg = new LogicalAggregationOperator(AggType.GLOBAL,
-                Lists.newArrayList(intersect.getChildOutputColumns().get(child)), Maps.newHashMap());
+                Lists.newArrayList(intersect.getChildOutputColumns().get(child)), Collections.emptyMap());
 
         OptExpression aggOpt = OptExpression.create(agg, childOpt);
         calculateStatistics(aggOpt, context);

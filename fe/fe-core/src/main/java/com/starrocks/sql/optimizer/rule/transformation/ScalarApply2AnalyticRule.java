@@ -59,6 +59,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.sql.optimizer.rewrite.BaseScalarOperatorShuttle;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
@@ -180,10 +181,6 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
         private final List<LogicalOperator> leftOps = Lists.newArrayList();
         private final List<LogicalOperator> rightOps = Lists.newArrayList();
 
-        // ColumnRefMap which contains all the project's columnRefMap of the right subtree, and the mapping of the
-        // higher node will be replaced by the lower node
-        private final Map<ColumnRefOperator, ScalarOperator> rightColumnRefMap = Maps.newHashMap();
-
         // Equivalent ColumnRefOperator peer, key comes from subquery's relation while value comes from outer block's
         private final Map<ColumnRefOperator, ColumnRefOperator> peerColumnRefMap = Maps.newHashMap();
 
@@ -240,14 +237,6 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
         private void initOps() {
             collectInLevelOrder(apply.inputAt(0), leftOps);
             collectInLevelOrder(apply.inputAt(1), rightOps);
-
-            // All the operators are collected in level order, so the mapping from upper project node will be
-            // replaced with the lower project node
-            rightOps.stream()
-                    .filter(LogicalProjectOperator.class::isInstance)
-                    .map(Operator::<LogicalProjectOperator>cast)
-                    .map(LogicalProjectOperator::getColumnRefMap)
-                    .forEach(rightColumnRefMap::putAll);
         }
 
         private boolean checkOperatorType() {
@@ -373,6 +362,8 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
          */
         private boolean checkPredicate() {
             List<ScalarOperator> outerConjuncts = Utils.extractConjuncts(filterOp.getPredicate());
+            PredicateComparator comparator = new PredicateComparator(context.getColumnRefFactory());
+            List<ColumnRefOperator> subqueryOutput = Collections.singletonList(applyOp.getOutput());
 
             // First, check correlated predicate exists in outerConjuncts, and remove it if found
             // E.g. t0.v1 = t1.v4 in the above case
@@ -386,8 +377,7 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
 
                     while (subIt.hasNext()) {
                         ScalarOperator correlationConjunct = subIt.next();
-                        if (PredicateComparator.isIdentical(correlationConjunct, outerConjunct,
-                                context.getColumnRefFactory())) {
+                        if (comparator.isIdentical(correlationConjunct, outerConjunct)) {
                             outerCorrelatedConjuncts.add(outerConjunct);
                             outerIt.remove();
                             subIt.remove();
@@ -406,8 +396,7 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
                 Iterator<ScalarOperator> outerIt = outerConjuncts.iterator();
                 while (outerIt.hasNext()) {
                     ScalarOperator outerConjunct = outerIt.next();
-                    if (Utils.collect(outerConjunct, ColumnRefOperator.class).stream()
-                            .anyMatch(columnRefOperator -> Objects.equals(applyOp.getOutput(), columnRefOperator))) {
+                    if (Utils.containAnyColumnRefs(subqueryOutput, outerConjunct)) {
                         outerSubqueryConjunct = outerConjunct;
                         outerIt.remove();
                         break;
@@ -470,8 +459,7 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
                     boolean found = false;
                     while (subIt.hasNext()) {
                         ScalarOperator subConjunct = subIt.next();
-                        if (PredicateComparator.isIdentical(outerConjunct, subConjunct,
-                                context.getColumnRefFactory())) {
+                        if (comparator.isIdentical(outerConjunct, subConjunct)) {
                             found = true;
                             outerIt.remove();
                             subIt.remove();
@@ -491,15 +479,25 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
 
         private void createWindowOp() {
             outerColumnRefOperators = getAllColumnRefOperators(leftOps);
+            Map<ColumnRefOperator, ScalarOperator> rightColumnRefMap = Maps.newHashMap();
+            // Level order keeps the lower project's mapping when the same column is defined more than once.
+            for (LogicalOperator op : rightOps) {
+                if (op instanceof LogicalProjectOperator rightProject) {
+                    rightColumnRefMap.putAll(rightProject.getColumnRefMap());
+                }
+            }
 
             Map<ColumnRefOperator, CallOperator> windows = Maps.newHashMap();
             Map<ColumnRefOperator, CallOperator> aggregations = subAggOp.getAggregations();
+            ScalarOperatorCloneShuttle visitor =
+                    new ScalarOperatorCloneShuttle(context.getColumnRefFactory(), peerColumnRefMap,
+                            rightColumnRefMap, outerColumnRefOperators);
 
             for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregations.entrySet()) {
                 ColumnRefOperator columnRefOperator = entry.getKey();
                 CallOperator callOp = entry.getValue();
 
-                CallOperator newCallOp = cloneCallOperator(callOp);
+                CallOperator newCallOp = callOp.accept(visitor, null).cast();
                 ColumnRefOperator newColumnRefOperator = context.getColumnRefFactory()
                         .create(newCallOp, newCallOp.getType(), newCallOp.isNullable());
                 windows.put(newColumnRefOperator, newCallOp);
@@ -561,25 +559,24 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
         }
 
         private void collectInLevelOrder(OptExpression root, List<LogicalOperator> collect) {
-            Queue<OptExpression> queue = Lists.newLinkedList();
+            Queue<OptExpression> queue = new ArrayDeque<>();
             queue.offer(root);
             while (!queue.isEmpty()) {
                 OptExpression top = queue.poll();
                 collect.add(top.getOp().cast());
-                top.getInputs().forEach(queue::offer);
+                for (OptExpression child : top.getInputs()) {
+                    queue.offer(child);
+                }
             }
         }
 
         private List<Table> getAllTables(List<LogicalOperator> ops) {
             List<Table> tables = Lists.newArrayList();
 
-            List<LogicalScanOperator> scanOps = ops.stream()
-                    .filter(LogicalScanOperator.class::isInstance)
-                    .map(Operator::<LogicalScanOperator>cast)
-                    .collect(Collectors.toList());
-
-            for (LogicalScanOperator scanOp : scanOps) {
-                tables.add(scanOp.getTable());
+            for (LogicalOperator op : ops) {
+                if (op instanceof LogicalScanOperator scanOp) {
+                    tables.add(scanOp.getTable());
+                }
             }
 
             return tables;
@@ -588,28 +585,13 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
         private Set<ColumnRefOperator> getAllColumnRefOperators(List<LogicalOperator> ops) {
             Set<ColumnRefOperator> columnRefOperators = Sets.newHashSet();
 
-            List<LogicalProjectOperator> projectOps = ops.stream()
-                    .filter(LogicalProjectOperator.class::isInstance)
-                    .map(Operator::<LogicalProjectOperator>cast)
-                    .collect(Collectors.toList());
-
-            for (LogicalProjectOperator projectOp : projectOps) {
-                columnRefOperators.addAll(projectOp.getColumnRefMap().keySet());
+            for (LogicalOperator op : ops) {
+                if (op instanceof LogicalProjectOperator projectOp) {
+                    columnRefOperators.addAll(projectOp.getColumnRefMap().keySet());
+                }
             }
 
             return columnRefOperators;
-        }
-
-        /**
-         * Clone callOperator using the columnRefOperators from the outer block's relation, since the window function
-         * comprises columnRefOperators which come from the subquery's relation. And in the meanwhile maintain the
-         * columnRefOperator(from subquery relation) -> columnRefOperator(from outer block relation) mapping
-         */
-        private CallOperator cloneCallOperator(CallOperator callOp) {
-            ScalarOperatorCloneShuttle visitor =
-                    new ScalarOperatorCloneShuttle(context.getColumnRefFactory(), peerColumnRefMap,
-                            rightColumnRefMap, outerColumnRefOperators);
-            return callOp.accept(visitor, null).cast();
         }
     }
 
@@ -625,10 +607,8 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
             this.columnRefFactory = columnRefFactory;
         }
 
-        public static boolean isIdentical(ScalarOperator expected, ScalarOperator target,
-                                          ColumnRefFactory columnRefFactory) {
-            PredicateComparator visitor = new PredicateComparator(columnRefFactory);
-            return expected.accept(visitor, target);
+        public boolean isIdentical(ScalarOperator expected, ScalarOperator target) {
+            return expected.accept(this, target);
         }
 
         private boolean isClassMismatch(ScalarOperator expected, ScalarOperator target) {
@@ -656,11 +636,10 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
             }
             if (BinaryType.EQ.equals(predicate.getBinaryType())) {
                 // For equal, we need to compare children in another order
-                return compareChildrenOfBinaryOperator(predicate, peer)
-                        || compareChildrenOfBinaryOperator(predicate, peer.commutative());
-            } else {
-                return compareChildrenOfBinaryOperator(predicate, peer);
+                return predicate.getChild(0).accept(this, peer.getChild(1))
+                        && predicate.getChild(1).accept(this, peer.getChild(0));
             }
+            return false;
         }
 
         private boolean compareChildrenOfBinaryOperator(BinaryPredicateOperator predicate,
@@ -787,6 +766,8 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
         private final Map<ColumnRefOperator, ColumnRefOperator> columnRefMapping;
         private final Map<ColumnRefOperator, ScalarOperator> rightColumnRefMap;
         private final Set<ColumnRefOperator> outerColumnRefOperators;
+        private Map<Column, ColumnRefOperator> firstOuterColumnRefs;
+        private Map<Column, ColumnRefOperator> secondOuterColumnRefs;
 
         public ScalarOperatorCloneShuttle(ColumnRefFactory columnRefFactory,
                                           Map<ColumnRefOperator, ColumnRefOperator> columnRefMapping,
@@ -806,6 +787,33 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
             return scalarOperator.getChildren().stream()
                     .map(this::clone)
                     .collect(Collectors.toList());
+        }
+
+        private ColumnRefOperator getPeer(Column column, ColumnRefOperator source) {
+            if (firstOuterColumnRefs == null) {
+                // This shuttle is invocation-local; window outputs do not change source-column mappings.
+                firstOuterColumnRefs = Maps.newHashMap();
+                for (Map.Entry<ColumnRefOperator, Column> entry :
+                        columnRefFactory.getColumnRefToColumns().entrySet()) {
+                    ColumnRefOperator ref = entry.getKey();
+                    if (!outerColumnRefOperators.contains(ref)) {
+                        continue;
+                    }
+                    Column mappedColumn = entry.getValue();
+                    if (firstOuterColumnRefs.putIfAbsent(mappedColumn, ref) != null) {
+                        // Only the source itself is excluded, so the first two eligible refs suffice.
+                        if (secondOuterColumnRefs == null) {
+                            secondOuterColumnRefs = Maps.newHashMap();
+                        }
+                        secondOuterColumnRefs.putIfAbsent(mappedColumn, ref);
+                    }
+                }
+            }
+            ColumnRefOperator first = firstOuterColumnRefs.get(column);
+            if (!Objects.equals(first, source)) {
+                return first;
+            }
+            return secondOuterColumnRefs == null ? null : secondOuterColumnRefs.get(column);
         }
 
         @Override
@@ -867,39 +875,19 @@ public class ScalarApply2AnalyticRule extends TransformationRule {
 
         @Override
         public ScalarOperator visitCaseWhenOperator(CaseWhenOperator operator, Void context) {
-            List<ScalarOperator> clonedWhenThenClauses = Lists.newArrayList();
-            for (int i = 0; i < operator.getWhenClauseSize(); i++) {
-                clonedWhenThenClauses.add(clone(operator.getWhenClause(i)));
-            }
-            return new CaseWhenOperator(operator.getType(), clone(operator.getCaseClause()),
-                    clone(operator.getElseClause()), clonedWhenThenClauses);
+            return new CaseWhenOperator(operator, cloneChildren(operator));
         }
 
         @Override
         public ScalarOperator visitVariableReference(ColumnRefOperator columnRefOperator, Void context) {
             Column column = columnRefFactory.getColumn(columnRefOperator);
             if (column != null) {
-                Map<Column, List<ColumnRefOperator>> columnToColumnRefs = Maps.newHashMap();
-                Map<ColumnRefOperator, Column> columnRefToColumns = columnRefFactory.getColumnRefToColumns();
-                for (Map.Entry<ColumnRefOperator, Column> entry : columnRefToColumns.entrySet()) {
-                    ColumnRefOperator key = entry.getKey();
-                    Column value = entry.getValue();
-                    if (!columnToColumnRefs.containsKey(value)) {
-                        columnToColumnRefs.put(value, Lists.newArrayList());
-                    }
-                    columnToColumnRefs.get(value).add(key);
-                }
                 Preconditions.checkNotNull(column);
 
-                List<ColumnRefOperator> columnRefOperators = columnToColumnRefs.get(column);
-                for (ColumnRefOperator alternative : columnRefOperators) {
-                    if (!Objects.equals(alternative, columnRefOperator)) {
-                        // The alternative must exist in the left subtree of apply
-                        if (outerColumnRefOperators.contains(alternative)) {
-                            columnRefMapping.put(columnRefOperator, alternative);
-                            return alternative;
-                        }
-                    }
+                ColumnRefOperator alternative = getPeer(column, columnRefOperator);
+                if (alternative != null) {
+                    columnRefMapping.put(columnRefOperator, alternative);
+                    return alternative;
                 }
             } else {
                 ScalarOperator scalarOperator = rightColumnRefMap.get(columnRefOperator);

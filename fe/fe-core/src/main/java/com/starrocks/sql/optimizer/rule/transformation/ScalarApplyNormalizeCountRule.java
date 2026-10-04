@@ -79,7 +79,7 @@ public class ScalarApplyNormalizeCountRule extends TransformationRule {
             }
         });
 
-        if (!apply.getSubqueryOperator().getUsedColumns().containsAny(countRefs)) {
+        if (countRefs.isEmpty() || !apply.getSubqueryOperator().getUsedColumns().containsAny(countRefs)) {
             return Collections.emptyList();
         }
 

@@ -15,9 +15,11 @@ package com.starrocks.sql.optimizer.rule.tree;
 
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalNoCTEOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.task.TaskContext;
 
 public class InlineCteProjectPruneRule implements TreeRewriteRule {
@@ -54,7 +56,15 @@ public class InlineCteProjectPruneRule implements TreeRewriteRule {
             }
 
             Projection childProjection = child.getProjection();
-            if (!parentProjection.getUsedColumns().containsAny(childProjection.getOutputColumns())) {
+            ColumnRefSet parentUsedColumns = parentProjection.getUsedColumns();
+            boolean childOutputUsed = false;
+            for (ColumnRefOperator column : childProjection.getColumnRefMap().keySet()) {
+                if (parentUsedColumns.contains(column)) {
+                    childOutputUsed = true;
+                    break;
+                }
+            }
+            if (!childOutputUsed) {
                 child.setProjection(null);
             }
 

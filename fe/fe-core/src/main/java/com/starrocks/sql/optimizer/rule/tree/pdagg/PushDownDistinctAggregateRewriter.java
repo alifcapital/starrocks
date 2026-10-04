@@ -43,7 +43,6 @@ import com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter;
 import com.starrocks.sql.optimizer.task.TaskContext;
 import com.starrocks.type.Type;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
@@ -367,7 +366,7 @@ public class PushDownDistinctAggregateRewriter {
             }
 
             ReplaceColumnRefRewriter replacer = rewriteInfo.getRemapping().get().getReplacer();
-            ColumnRefSet columnRefSet = getReferencedColumnRef(new ArrayList<>(windowOp.getWindowCall().values()));
+            ColumnRefSet columnRefSet = getReferencedColumnRef(windowOp.getWindowCall().values());
             if (!rewriteInfo.getRemapping().get().getColumnRefSet().isIntersect(columnRefSet)) {
                 return AggRewriteInfo.NOT_REWRITE;
             }
@@ -411,9 +410,11 @@ public class PushDownDistinctAggregateRewriter {
                 .collect(Collectors.toList());
     }
 
-    public static ColumnRefSet getReferencedColumnRef(Collection<ScalarOperator> operators) {
+    public static ColumnRefSet getReferencedColumnRef(Collection<? extends ScalarOperator> operators) {
         ColumnRefSet refSet = new ColumnRefSet();
-        operators.stream().map(ScalarOperator::getUsedColumns).forEach(refSet::union);
+        for (ScalarOperator operator : operators) {
+            operator.collectUsedColumns(refSet);
+        }
         return refSet;
     }
 

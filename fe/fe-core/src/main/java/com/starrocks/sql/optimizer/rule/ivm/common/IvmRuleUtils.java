@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.rule.ivm.common;
 
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.thrift.TOpType;
 import com.starrocks.type.IntegerType;
@@ -71,8 +72,13 @@ public class IvmRuleUtils {
                 .append(node.getOp())
                 .append(']');
         if (node.getLogicalProperty() != null) {
-            int[] outputColumnIds = node.getOutputColumns().getColumnIds();
-            Arrays.sort(outputColumnIds);
+            ColumnRefSet outputColumns = node.getOutputColumns();
+            int[] outputColumnIds = outputColumns.getColumnIds();
+            // Native sets export unsigned ascending IDs; keep signed sorting for negative IDs and subclasses.
+            if (outputColumnIds.length > 1 && (outputColumns.getClass() != ColumnRefSet.class
+                    || outputColumnIds[outputColumnIds.length - 1] < 0)) {
+                Arrays.sort(outputColumnIds);
+            }
             sb.append("out=").append(Arrays.toString(outputColumnIds));
         }
         sb.append('(');

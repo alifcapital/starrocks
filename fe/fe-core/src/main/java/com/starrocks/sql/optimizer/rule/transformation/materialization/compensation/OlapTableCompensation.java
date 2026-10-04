@@ -85,6 +85,14 @@ public final class OlapTableCompensation extends TableCompensation {
                                           Optional<LogicalScanOperator> scanOperatorOpt) {
         MaterializedView mv = mvUpdateInfo.getMv();
         PCellSortedSet toRefreshPartitionNames = mvUpdateInfo.getBaseTableToRefreshPartitionNames(refBaseTable);
+        return build(refBaseTable, scanOperatorOpt, mv, toRefreshPartitionNames);
+    }
+
+    // The caller owns this fresh set; OLAP selection may narrow its contents.
+    static TableCompensation build(Table refBaseTable,
+                                   Optional<LogicalScanOperator> scanOperatorOpt,
+                                   MaterializedView mv,
+                                   PCellSortedSet toRefreshPartitionNames) {
         if (toRefreshPartitionNames == null) {
             logMVRewrite(mv.getName(), "MV's ref base table {} to refresh partition is null, unknown state",
                     refBaseTable.getName());

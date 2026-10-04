@@ -57,7 +57,6 @@ import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -107,6 +106,7 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
         // see more details in the description of https://github.com/StarRocks/starrocks/pull/17619
 
         ColumnRefOperator countPlaceHolderColumn = null;
+        ColumnRefOperator countSourceColumn = null;
         for (Map.Entry<ColumnRefOperator, CallOperator> kv : aggs.entrySet()) {
             CallOperator aggCall = kv.getValue();
             ColumnRefOperator usedColumn;
@@ -119,7 +119,10 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
                 aggFuncName = aggCall.getFnName();
                 metaColumnName = aggFuncName + "_" + usedColumn.getName();
             } else {
-                usedColumn = scanOperator.getOutputColumns().get(0);
+                if (countSourceColumn == null) {
+                    countSourceColumn = scanOperator.getOutputColumns().get(0);
+                }
+                usedColumn = countSourceColumn;
                 // for count, distinguish between count(*) and count(column)
                 if (aggCall.getUsedColumns().isEmpty()) {
                     // count(*) - should count all rows including NULLs, use "rows" as field name
@@ -372,10 +375,9 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
             return Optional.empty();
         }
 
-        LocalDateTime lastUpdateTime = StatisticUtils.getTableLastUpdateTime(table);
         Long lastUpdateTimestamp = StatisticUtils.getTableLastUpdateTimestamp(table);
 
-        if (lastUpdateTime == null || lastUpdateTimestamp == null) {
+        if (lastUpdateTimestamp == null) {
             return Optional.empty();
         }
         if (table.inputHasTempPartition(scanOperator.getSelectedPartitionId())) {
@@ -389,8 +391,7 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregationOperator.getAggregations().entrySet()) {
             CallOperator call = entry.getValue();
             if (call.getFnName().equals(FunctionSet.MAX) || call.getFnName().equals(FunctionSet.MIN)) {
-                List<ColumnRefOperator> minMaxRefs = call.getUsedColumns().getColumnRefOperators(factory);
-                ColumnRefOperator ref = minMaxRefs.get(0);
+                ColumnRefOperator ref = factory.getColumnRef(call.getUsedColumns().getFirstId());
                 if (!ref.getType().isNumericType() && !ref.getType().isDate()) {
                     newAggCalls.put(entry.getKey(), entry.getValue());
                     continue;
@@ -412,7 +413,11 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
                     mm = new ConstantOperator(minMax.get().minValue(), VarcharType.VARCHAR);
                 }
                 Optional<ConstantOperator> re = mm.castTo(call.getType());
-                re.ifPresent(cc -> constantMap.put(entry.getKey(), cc));
+                if (re.isPresent()) {
+                    constantMap.put(entry.getKey(), re.get());
+                } else {
+                    newAggCalls.put(entry.getKey(), call);
+                }
             } else if (call.getFnName().equals(FunctionSet.COUNT) && !call.isDistinct()
                     && call.getUsedColumns().size() <= 1 && provenRowCount.get().isPresent()) {
                 constantMap.put(entry.getKey(), ConstantOperator.createBigint(provenRowCount.get().get()));
@@ -438,6 +443,8 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
         }
 
         // some aggregations can be replaced, but not all
+        // Keep residual outputs available to the parent before MergeTwoProjectRule combines the projections.
+        newAggCalls.keySet().forEach(c -> constantMap.put(c, c));
         LogicalAggregationOperator newAgg = LogicalAggregationOperator.builder()
                 .withOperator(aggregationOperator)
                 .setAggregations(newAggCalls)

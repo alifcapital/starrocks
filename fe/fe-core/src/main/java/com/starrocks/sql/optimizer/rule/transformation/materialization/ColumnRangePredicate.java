@@ -76,19 +76,27 @@ public class ColumnRangePredicate extends RangePredicate {
 
     public ColumnRangePredicate(ScalarOperator expression, TreeRangeSet<ConstantOperator> columnRanges) {
         this.expression = expression;
-        List<ColumnRefOperator> columns = Utils.collect(expression, ColumnRefOperator.class);
-        Preconditions.checkState(columns.size() == 1);
-        this.columnRef = columns.get(0);
+        if (expression instanceof ColumnRefOperator) {
+            this.columnRef = (ColumnRefOperator) expression;
+        } else {
+            List<ColumnRefOperator> columns = Utils.collect(expression, ColumnRefOperator.class);
+            Preconditions.checkState(columns.size() == 1);
+            this.columnRef = columns.get(0);
+        }
         this.columnRanges = columnRanges;
-        List<Range<ConstantOperator>> canonicalRanges = new ArrayList<>();
         if (ConstantOperatorDiscreteDomain.isSupportedType(this.expression.getType())) {
+            List<Range<ConstantOperator>> canonicalRanges = new ArrayList<>();
             // for open range (+∞, +∞), it can not be canonicalized into a close-open range and
             // IllegalArgumentException/AssertionError is thrown. open range (+∞, +∞) is generated when trying
             // to canonicalize the range (MAX_VALUE, +∞) yielded by column > MAX_VALUE. for an
             // example: col > 9223372036854775807 (col is bigint type)
             try {
+                ConstantOperatorDiscreteDomain domain = null;
                 for (Range range : this.columnRanges.asRanges()) {
-                    Range canonicalRange = range.canonical(new ConstantOperatorDiscreteDomain());
+                    if (domain == null) {
+                        domain = new ConstantOperatorDiscreteDomain();
+                    }
+                    Range canonicalRange = range.canonical(domain);
                     canonicalRanges.add(canonicalRange);
                 }
             } catch (Throwable ignored) {
@@ -263,7 +271,8 @@ public class ColumnRangePredicate extends RangePredicate {
                 equalRangeSet.add(r);
             }
         });
-        if (equalRangeSet.size() > 1) {
+        boolean combineEqualRanges = equalRangeSet.size() > 1;
+        if (combineEqualRanges) {
             List<ConstantOperator> constants = equalRangeSet.stream()
                     .map(this::getValue)
                     .filter(Optional::isPresent)
@@ -271,15 +280,18 @@ public class ColumnRangePredicate extends RangePredicate {
                     .sorted()
                     .collect(Collectors.toList());
 
-            List<ScalarOperator> arguments = Lists.newLinkedList();
+            List<ScalarOperator> arguments = new ArrayList<>(constants.size() + 1);
             arguments.add(expression);
             arguments.addAll(constants);
 
             InPredicateOperator inPredicateOperator = new InPredicateOperator(false, arguments);
             orOperators.add(inPredicateOperator);
-            rangeSet.removeAll(equalRangeSet);
         }
         for (Range<ConstantOperator> range : rangeSet) {
+            // asRanges() is a live view: rendering must not remove ranges from this predicate.
+            if (combineEqualRanges && equalRangeSet.contains(range)) {
+                continue;
+            }
             List<ScalarOperator> andOperators = Lists.newArrayList();
             if (range.hasLowerBound() && range.hasUpperBound()) {
                 if (range.lowerBoundType() == BoundType.CLOSED

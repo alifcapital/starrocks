@@ -36,7 +36,7 @@ import java.util.function.Predicate;
  * A ExpressionHandle handle is attached to
  * either an {@link GroupExpression} or a {@link OptExpression}
  */
-public class ExpressionContext {
+public class ExpressionContext implements LogicalPropertyContext {
 
     private OptExpression expression;
     private GroupExpression groupExpression;
@@ -174,8 +174,7 @@ public class ExpressionContext {
     }
 
     public void deriveLogicalProperty() {
-        rootProperty = new LogicalProperty();
-        rootProperty.derive(this);
+        rootProperty = LogicalProperty.deriveFrom(this);
     }
 
     public boolean isGroupExprContext() {

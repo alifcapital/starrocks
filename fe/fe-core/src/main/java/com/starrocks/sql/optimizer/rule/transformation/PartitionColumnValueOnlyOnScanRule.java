@@ -23,6 +23,7 @@ import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
@@ -60,7 +61,7 @@ public class PartitionColumnValueOnlyOnScanRule extends TransformationRule {
             return false;
         }
 
-        boolean allValid = aggregationOperator.getAggregations().values().stream().allMatch(aggregator -> {
+        for (CallOperator aggregator : aggregationOperator.getAggregations().values()) {
             AggregateFunction aggregateFunction = (AggregateFunction) aggregator.getFunction();
             String functionName = aggregateFunction.functionName();
 
@@ -69,10 +70,8 @@ public class PartitionColumnValueOnlyOnScanRule extends TransformationRule {
                     (functionName.equals(FunctionSet.COUNT) && aggregator.isDistinct()))) {
                 return false;
             }
-
-            return true;
-        });
-        return allValid;
+        }
+        return true;
     }
 
     private static boolean allPartitionColumnInScanOperator(LogicalScanOperator scanOperator) {

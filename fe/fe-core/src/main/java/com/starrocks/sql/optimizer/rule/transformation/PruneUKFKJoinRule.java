@@ -128,7 +128,7 @@ public class PruneUKFKJoinRule extends TransformationRule {
         if (joinOp.getOnPredicate() != null) {
             Utils.extractConjuncts(joinOp.getOnPredicate())
                     .stream().filter(p -> !Objects.equals(property.predicate, p))
-                    .forEach(p -> joinUsedColumns.union(p.getUsedColumns()));
+                    .forEach(p -> p.collectUsedColumns(joinUsedColumns));
         }
 
         return joinUsedColumns.containsAny(ukTableColumnRefs);
@@ -137,14 +137,13 @@ public class PruneUKFKJoinRule extends TransformationRule {
     private boolean isNonUKTableColumnUsedByUKSideChildren(UKFKConstraints.JoinProperty property,
                                                            OptExpression ukChildOpt,
                                                            boolean exceptUK) {
+        // The constraint is shared with later attempts of this rule, so we must not add the unique key to its
+        // column set. We check the unique key column separately.
         ColumnRefSet ukTableColumnRefs = property.ukConstraint.nonUKColumnRefs;
-        if (!exceptUK) {
-            ukTableColumnRefs.union(Collections.singletonList(property.ukColumnRef));
-        }
-
         ColumnRefSet childrenUsedColumns = UsedColumnRefCollector.collect(ukChildOpt);
 
-        return childrenUsedColumns.containsAny(ukTableColumnRefs);
+        return childrenUsedColumns.containsAny(ukTableColumnRefs) ||
+                (!exceptUK && childrenUsedColumns.contains(property.ukColumnRef));
     }
 
     private ScalarOperator collectUKPredicate(OptExpression ukChildOpt) {
@@ -229,7 +228,7 @@ public class PruneUKFKJoinRule extends TransformationRule {
         public Void visit(OptExpression optExpression, ColumnRefSet context) {
             LogicalOperator op = optExpression.getOp().cast();
             if (op.getPredicate() != null) {
-                context.union(op.getPredicate().getUsedColumns());
+                op.getPredicate().collectUsedColumns(context);
             }
             for (OptExpression input : optExpression.getInputs()) {
                 input.getOp().accept(this, input, context);

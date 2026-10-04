@@ -197,7 +197,7 @@ public abstract class SplitAggregateRule extends TransformationRule {
         LogicalAggregationOperator aggOp = input.getOp().cast();
         Statistics inputStatistics = input.getGroupExpression().inputAt(0).getStatistics();
         Collection<ColumnStatistic> inputsColumnStatistics = inputStatistics.getColumnStatistics().values();
-        if (inputsColumnStatistics.stream().anyMatch(ColumnStatistic::isUnknown) || !aggOp.hasLimit()) {
+        if (!aggOp.hasLimit() || inputsColumnStatistics.stream().anyMatch(ColumnStatistic::isUnknown)) {
             return false;
         }
 

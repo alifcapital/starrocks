@@ -22,6 +22,7 @@ import com.google.common.collect.Sets;
 import com.starrocks.common.Pair;
 import com.starrocks.sql.common.DebugOperatorTracer;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
+import com.starrocks.sql.optimizer.base.LogicalProperty;
 import com.starrocks.sql.optimizer.base.OutputPropertyGroup;
 import com.starrocks.sql.optimizer.base.PhysicalPropertySet;
 import com.starrocks.sql.optimizer.operator.Operator;
@@ -281,9 +282,7 @@ public class GroupExpression {
 
     // This function assume the child group logical property has been derived
     public void deriveLogicalPropertyItself() {
-        ExpressionContext context = new ExpressionContext(this);
-        context.deriveLogicalProperty();
-        getGroup().setLogicalProperty(context.getRootProperty());
+        getGroup().setLogicalProperty(LogicalProperty.deriveFrom(LogicalPropertyContext.of(this)));
     }
 
     public ColumnRefSet getChildOutputColumns(int index) {

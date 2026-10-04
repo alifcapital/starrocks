@@ -57,15 +57,15 @@ public class SplitTwoPhaseAggRule extends SplitAggregateRule {
             return false;
         }
         LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
+        if (!agg.getType().isGlobal() || agg.isSplit() || agg.getDistinctColumnDataSkew() != null) {
+            return false;
+        }
+
         if (agg.checkGroupByCountDistinctWithSkewHint()) {
             return false;
         }
 
-        if (!Utils.couldGenerateMultiStageAggregate(input.getLogicalProperty(), input.getOp(), input.inputAt(0).getOp())) {
-            return false;
-        }
-
-        return agg.getType().isGlobal() && !agg.isSplit() && agg.getDistinctColumnDataSkew() == null;
+        return Utils.couldGenerateMultiStageAggregate(input.getLogicalProperty(), input.getOp(), input.inputAt(0).getOp());
     }
 
     @Override
