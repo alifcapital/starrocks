@@ -386,6 +386,7 @@ public class AnalyzeMgrTest {
             Assertions.assertEquals(List.of("SAMPLE", "FULL"), deletes);
             Assertions.assertNull(manager.getBasicStatsMetaMap().get(table.getId()));
             Assertions.assertTrue(manager.getMultiColumnStatsMetaMap().containsValue(multi));
+            Assertions.assertTrue(manager.hasMultiColumnStatsMeta(table.getId()));
             Assertions.assertSame(histogram, manager.getHistogramStatsMetaMap().get(new Pair<>(table.getId(), "a")));
             org.mockito.Mockito.verify(storage).expireTableAndColumnStatistics(table, List.of("a", "b"));
             org.mockito.Mockito.verifyNoMoreInteractions(storage);
@@ -399,6 +400,7 @@ public class AnalyzeMgrTest {
             Assertions.assertEquals(List.of("MULTIPLE"), deletes);
             Assertions.assertSame(basic, manager.getBasicStatsMetaMap().get(table.getId()));
             Assertions.assertFalse(manager.getMultiColumnStatsMetaMap().containsValue(multi));
+            Assertions.assertFalse(manager.hasMultiColumnStatsMeta(table.getId()));
             Assertions.assertSame(histogram, manager.getHistogramStatsMetaMap().get(new Pair<>(table.getId(), "a")));
             org.mockito.Mockito.verify(storage).expireMultiColumnStatistics(table.getId());
             org.mockito.Mockito.verifyNoMoreInteractions(storage);
