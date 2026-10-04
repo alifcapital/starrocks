@@ -14,10 +14,10 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 /** Immutable scan domain. Used only to share an in-flight/finished result within one optimization. */
 public final class ExternalStatisticsRequest {
@@ -41,8 +41,25 @@ public final class ExternalStatisticsRequest {
         this.tableUUID = tableUUID;
         this.unpartitioned = unpartitioned;
         this.wholeTable = wholeTable;
-        this.partitions = partitions.stream().distinct().sorted().collect(Collectors.toUnmodifiableList());
-        this.columns = columns.stream().distinct().sorted().collect(Collectors.toUnmodifiableList());
+        this.partitions = sortedDistinct(partitions);
+        this.columns = sortedDistinct(columns);
+    }
+
+    // A request is built for every derivation of the statistics of an external scan, and most requests name no
+    // partition and a few columns, so we avoid a stream for each list.
+    private static List<String> sortedDistinct(Collection<String> values) {
+        if (values.isEmpty()) {
+            return List.of();
+        }
+        String[] sorted = values.toArray(new String[0]);
+        Arrays.sort(sorted);
+        int size = 0;
+        for (String value : sorted) {
+            if (size == 0 || !sorted[size - 1].equals(value)) {
+                sorted[size++] = value;
+            }
+        }
+        return List.of(size == sorted.length ? sorted : Arrays.copyOf(sorted, size));
     }
 
     @Override

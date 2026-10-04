@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.operator.operator;
 
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.CharType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.DecimalType;
@@ -36,6 +37,7 @@ import java.text.DecimalFormatSymbols;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 
 public class ConstantOperatorTest {
@@ -307,5 +309,40 @@ public class ConstantOperatorTest {
             Assertions.assertEquals(10, var1.distance(var2));
             Assertions.assertEquals(-10, var2.distance(var1));
         }
+    }
+
+    private static int expectedHash(Object value, PrimitiveType type, boolean isNull) {
+        return 31 * (31 * (31 + Objects.hashCode(value)) + Objects.hashCode(type)) + Boolean.hashCode(isNull);
+    }
+
+    @Test
+    public void testHashIsKeptAndFollowsTheType() {
+        ConstantOperator seven = ConstantOperator.createInt(7);
+        int expected = expectedHash(7, PrimitiveType.INT, false);
+        Assertions.assertEquals(expected, seven.hashCode());
+        Assertions.assertEquals(expected, seven.hashCode());
+        Assertions.assertEquals(expected, seven.clone().hashCode());
+
+        // A hash read before the type changes is not kept after it.
+        seven.setType(IntegerType.BIGINT);
+        Assertions.assertEquals(expectedHash(7, PrimitiveType.BIGINT, false), seven.hashCode());
+
+        // A clone that changes its type leaves the hash of the original as it was.
+        ConstantOperator bigint = ConstantOperator.createBigint(7L);
+        Assertions.assertEquals(expectedHash(7L, PrimitiveType.BIGINT, false), bigint.hashCode());
+        ScalarOperator copy = bigint.clone();
+        copy.setType(IntegerType.INT);
+        Assertions.assertEquals(expectedHash(7L, PrimitiveType.INT, false), copy.hashCode());
+        Assertions.assertEquals(expectedHash(7L, PrimitiveType.BIGINT, false), bigint.hashCode());
+
+        Assertions.assertEquals(expectedHash(null, PrimitiveType.VARCHAR, true),
+                ConstantOperator.createNull(VarcharType.VARCHAR).hashCode());
+        Assertions.assertEquals(expectedHash("abc", PrimitiveType.VARCHAR, false),
+                ConstantOperator.createVarchar("abc").hashCode());
+        Assertions.assertEquals(expectedHash("", PrimitiveType.VARCHAR, false),
+                ConstantOperator.createVarchar("").hashCode());
+        LocalDateTime time = LocalDateTime.of(2026, 10, 5, 1, 2, 3);
+        Assertions.assertEquals(expectedHash(time, PrimitiveType.DATETIME, false),
+                ConstantOperator.createDatetime(time).hashCode());
     }
 }
