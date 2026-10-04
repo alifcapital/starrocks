@@ -229,6 +229,20 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
     }
 
     @Test
+    public void testTPCDS22RuntimeFilterFollowsNdvEstimate() throws Exception {
+        // date_dim filtered by month keeps 335 of its 72542 dates. CORRELATED assumes the 260 dates of inventory
+        // are among them and drops the filter, INDEPENDENT expects 335 / 72542 of the probe rows to pass.
+        String dump = getDumpInfoFromFile("query_dump/tpcds22");
+        SessionVariable session = getDumpInfoFromJson(dump).getSessionVariable();
+        session.setRfNdvEstimate("correlated");
+        String plan = getCostPlanFragment(dump, session).second;
+        Assertions.assertFalse(plan.contains("build_expr = (5: d_date_sk)"), plan);
+        session.setRfNdvEstimate("independent");
+        plan = getCostPlanFragment(dump, session).second;
+        Assertions.assertTrue(plan.contains("build_expr = (5: d_date_sk)"), plan);
+    }
+
+    @Test
     public void testTPCDS64() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/tpcds64"), null, TExplainLevel.NORMAL);

@@ -160,6 +160,35 @@ public class RuntimeFilterKeyStatisticsTest {
     }
 
     @Test
+    public void testNdvEstimateModesForAFilteredDimension() {
+        // TPC-DS q22: the build side is date_dim filtered by month to 335 of its 72542 dates, the probe side is
+        // inventory with 260 dates. A remote filter has no local fallback, so only the estimate decides.
+        ColumnStatistic dates = new ColumnStatistic(2415022, 2488070, 0, 4, 72542);
+        Node build = new Node();
+        build.computeStatistics(Statistics.builder().setOutputRowCount(335)
+                .addColumnStatistic(COLUMN, ColumnStatistic.buildFrom(dates).setDistinctValuesCount(335).build())
+                .build());
+        Node probe = new Node();
+        probe.computeStatistics(Statistics.builder().setOutputRowCount(399_330_000)
+                .addColumnStatistic(COLUMN, new ColumnStatistic(2450815, 2452635, 0, 4, 260)).build());
+        SessionVariable session = new SessionVariable();
+        RuntimeFilterDescription filter = new RuntimeFilterDescription(session);
+        filter.setJoinMode(JoinNode.DistributionMode.BROADCAST);
+        filter.setBuildCardinality(335);
+        filter.setBuildKeyStatistics(build.getRuntimeFilterStatistics(SLOT));
+        filter.enterExchangeNode();
+
+        Assertions.assertEquals("independent", session.getRfNdvEstimate());
+        Assertions.assertTrue(filter.canProbeUse(probe, SLOT, null));
+        session.setRfNdvEstimate("correlated");
+        Assertions.assertFalse(filter.canProbeUse(probe, SLOT, null));
+        // Without an estimate the filter falls back to the build and probe row counts.
+        session.setRfNdvEstimate("off");
+        session.setGlobalRuntimeFilterBuildMinSize(1);
+        Assertions.assertTrue(filter.canProbeUse(probe, SLOT, null));
+    }
+
+    @Test
     public void testCastUsesCurrentOperatorStatisticsAndPreservesUnknown() {
         ColumnRefOperator text = new ColumnRefOperator(1, VarcharType.VARCHAR, "text", true);
         SlotRef slot = new SlotRef(new SlotId(1));

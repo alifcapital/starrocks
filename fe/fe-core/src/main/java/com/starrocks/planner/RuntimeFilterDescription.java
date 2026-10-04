@@ -262,7 +262,8 @@ public class RuntimeFilterDescription {
         }
         RuntimeFilterStatistics probe = node.getRuntimeFilterStatistics(probeExpr);
         OptionalDouble passFraction = runtimeFilterType() == RuntimeFilterType.JOIN_FILTER
-                && buildKeyStatistics != null ? buildKeyStatistics.probePassFraction(probe, equalForNull)
+                && buildKeyStatistics != null ? buildKeyStatistics.probePassFraction(probe, equalForNull,
+                        RuntimeFilterStatistics.NdvEstimate.parse(sessionVariable.getRfNdvEstimate()))
                 : OptionalDouble.empty();
         float acceptedFilterRatioLB = 1.0f - sessionVariable.getGlobalRuntimeFilterProbeMinSelectivity();
         if (passFraction.isPresent()) {

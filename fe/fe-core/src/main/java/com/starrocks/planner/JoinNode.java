@@ -49,6 +49,7 @@ import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.optimizer.operator.UKFKConstraints;
+import com.starrocks.sql.optimizer.statistics.RuntimeFilterStatistics;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TJoinDistributionMode;
 import org.apache.logging.log4j.LogManager;
@@ -281,8 +282,11 @@ public abstract class JoinNode extends PlanNode implements RuntimeFilterBuildNod
     }
 
     private void selectComponentRuntimeFilters(SessionVariable session) {
+        // The joint selection reads MCV heads, which rf_ndv_estimate = off does not trust.
         if (!session.isEnableJointRuntimeFilterSelection() || buildRuntimeFilters.size() < 2
                 || session.getGlobalRuntimeFilterProbeMinSize() == 0
+                || RuntimeFilterStatistics.NdvEstimate.parse(session.getRfNdvEstimate())
+                        == RuntimeFilterStatistics.NdvEstimate.OFF
                 || (this instanceof HashJoinNode hashJoin && hashJoin.isSkewJoin())) {
             // Skew friends publish contributions to the same filter; select only after their
             // probe distributions and filter identities can be considered together.

@@ -419,8 +419,12 @@ public class BinaryPredicateStatisticCalculator {
             rowCount = statistics.getOutputRowCount() * selectivity;
         }
 
-        ColumnStatistic.Builder newLeftStatisticBuilder = ColumnStatistic.buildFrom(newEstimateColumnStatistics.build());
-        ColumnStatistic.Builder newRightStatisticBuilder = ColumnStatistic.buildFrom(newEstimateColumnStatistics.build());
+        // Each key keeps the NDV of its own column before the join, which a runtime filter above reads as the
+        // domain of the key.
+        ColumnStatistic.Builder newLeftStatisticBuilder = ColumnStatistic.buildFrom(newEstimateColumnStatistics.build())
+                .setSourceDistinctValuesCount(leftColumnStatistic.getSourceDistinctValuesCount());
+        ColumnStatistic.Builder newRightStatisticBuilder = ColumnStatistic.buildFrom(newEstimateColumnStatistics.build())
+                .setSourceDistinctValuesCount(rightColumnStatistic.getSourceDistinctValuesCount());
         if (!isEqualForNull) {
             newLeftStatisticBuilder.setNullsFraction(0).setAverageRowSize(leftColumnStatistic.getAverageRowSize());
             newRightStatisticBuilder.setNullsFraction(0).setAverageRowSize(rightColumnStatistic.getAverageRowSize());
@@ -687,6 +691,7 @@ public class BinaryPredicateStatisticCalculator {
                 setMinValue(intersectRange.getLow()).
                 setNullsFraction(0).
                 setDistinctValuesCount(columnStatistic.getDistinctValuesCount()).
+                setSourceDistinctValuesCount(columnStatistic.getSourceDistinctValuesCount()).
                 setType(columnStatistic.getType()).
                 build();
         return columnRefOperator.map(operator -> Statistics.buildFrom(statistics).setOutputRowCount(rowCount).
@@ -875,6 +880,7 @@ public class BinaryPredicateStatisticCalculator {
                 setMaxValue(max).
                 setNullsFraction(0).
                 setDistinctValuesCount(columnStatistic.getDistinctValuesCount()).
+                setSourceDistinctValuesCount(columnStatistic.getSourceDistinctValuesCount()).
                 setType(columnStatistic.getType());
 
         newEstimateColumnStatistics.setHistogram(histogram);

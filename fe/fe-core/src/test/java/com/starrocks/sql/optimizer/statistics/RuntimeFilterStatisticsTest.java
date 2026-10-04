@@ -124,6 +124,107 @@ public class RuntimeFilterStatisticsTest {
         }
     }
 
+    // The key statistic of a column with sourceNdv distinct values that filters reduced to ndv.
+    private RuntimeFilterStatistics reduced(double sourceNdv, double ndv, Map<String, Long> head, double rows) {
+        ColumnStatistic source = ColumnStatistic.builder().setDistinctValuesCount(sourceNdv).setNullsFraction(0).build();
+        ColumnStatistic basic = ColumnStatistic.buildFrom(source).setDistinctValuesCount(ndv).build();
+        // A single column MCV group sets the key NDV, so it carries the reduced NDV as well.
+        List<MultiColumnCombinedStats> groups = head.isEmpty() ? List.of() : List.of(new MultiColumnCombinedStats(
+                (long) ndv, rows, List.of(KEY), head.entrySet().stream().map(entry ->
+                        new MultiColumnCombinedStats.McvEntry(List.of(entry.getKey()), entry.getValue())).toList(),
+                List.of(0L)));
+        return RuntimeFilterStatistics.from(KEY, basic, groups, rows);
+    }
+
+    @Test
+    public void testFilteredDimensionPassesItsShareOfTheSourceKeys() {
+        // TPC-DS q22: date_dim filtered by month to 335 of its 72542 dates, inventory refers to 260 dates.
+        RuntimeFilterStatistics build = reduced(72542, 72542, Map.of(), 335);
+        RuntimeFilterStatistics probe = reduced(260, 260, Map.of(), 399_330_000);
+        Assertions.assertEquals(1, build.probePassFraction(probe, false,
+                RuntimeFilterStatistics.NdvEstimate.CORRELATED).orElseThrow(), 1e-12);
+        Assertions.assertEquals(335.0 / 72542, build.probePassFraction(probe, false,
+                RuntimeFilterStatistics.NdvEstimate.INDEPENDENT).orElseThrow(), 1e-12);
+        Assertions.assertTrue(build.probePassFraction(probe, false, RuntimeFilterStatistics.NdvEstimate.OFF).isEmpty());
+    }
+
+    @Test
+    public void testWholeDimensionPassesEveryProbeKey() {
+        // Without a filter on the dimension every key of the fact has its row, in both modes.
+        RuntimeFilterStatistics build = reduced(72542, 72542, Map.of(), 72542);
+        RuntimeFilterStatistics probe = reduced(260, 260, Map.of(), 399_330_000);
+        for (RuntimeFilterStatistics.NdvEstimate mode : List.of(RuntimeFilterStatistics.NdvEstimate.CORRELATED,
+                RuntimeFilterStatistics.NdvEstimate.INDEPENDENT)) {
+            Assertions.assertEquals(1, build.probePassFraction(probe, false, mode).orElseThrow(), 1e-12);
+        }
+    }
+
+    @Test
+    public void testIndependentKeepsAMatchedHotProbeKey() {
+        // 90% of the probe rows have key 1, which the build head has. The other keys of the probe are spread
+        // over the 10000 source keys, of which the build has 9 more.
+        RuntimeFilterStatistics build = reduced(10000, 10, Map.of("1", 100L), 1000);
+        RuntimeFilterStatistics probe = reduced(10000, 1000, Map.of("1", 9000L), 10000);
+        double independent = build.probePassFraction(probe, false,
+                RuntimeFilterStatistics.NdvEstimate.INDEPENDENT).orElseThrow();
+        Assertions.assertEquals(0.9 + 0.1 * 9 / 9999, independent, 1e-12);
+        Assertions.assertTrue(independent <= build.probePassFraction(probe, false,
+                RuntimeFilterStatistics.NdvEstimate.CORRELATED).orElseThrow());
+    }
+
+    @Test
+    public void testIndependentNeverPassesMoreThanCorrelated() {
+        Random random = new Random(7);
+        for (int trial = 0; trial < 500; trial++) {
+            Map<String, Long> buildHead = new HashMap<>();
+            Map<String, Long> probeHead = new HashMap<>();
+            for (int key = 0; key < 8; key++) {
+                if (random.nextInt(3) == 0) {
+                    buildHead.put(Integer.toString(key), 1L + random.nextInt(100));
+                }
+                if (random.nextInt(3) == 0) {
+                    probeHead.put(Integer.toString(key), 1L + random.nextInt(100));
+                }
+            }
+            double source = 10 + random.nextInt(10000);
+            double buildNdv = Math.min(source, buildHead.size() + random.nextInt(1000));
+            double probeNdv = Math.min(source, probeHead.size() + 1 + random.nextInt(1000));
+            double buildRows = 1 + buildHead.values().stream().mapToLong(Long::longValue).sum() + random.nextInt(10000);
+            double probeRows = 1 + probeHead.values().stream().mapToLong(Long::longValue).sum() + random.nextInt(10000);
+            RuntimeFilterStatistics build = reduced(source, buildNdv, buildHead, buildRows);
+            RuntimeFilterStatistics probe = reduced(source * (1 + random.nextInt(2)), probeNdv, probeHead, probeRows);
+            double correlated = build.probePassFraction(probe, false,
+                    RuntimeFilterStatistics.NdvEstimate.CORRELATED).orElseThrow();
+            double independent = build.probePassFraction(probe, false,
+                    RuntimeFilterStatistics.NdvEstimate.INDEPENDENT).orElseThrow();
+            Assertions.assertTrue(independent >= 0 && independent <= correlated + 1e-12,
+                    "trial " + trial + ": " + independent + " > " + correlated);
+        }
+    }
+
+    @Test
+    public void testUnreducedKeysEstimateAsCorrelated() {
+        // Statistics that never were reduced have their own NDV as the source NDV, so both modes agree.
+        RuntimeFilterStatistics build = stats(10, 0, Map.of(), 10000);
+        RuntimeFilterStatistics probe = stats(1000, 0, Map.of(), 10000);
+        Assertions.assertEquals(build.probePassFraction(probe, false).orElseThrow(), build.probePassFraction(probe,
+                false, RuntimeFilterStatistics.NdvEstimate.INDEPENDENT).orElseThrow(), 1e-12);
+    }
+
+    @Test
+    public void testParseNdvEstimate() {
+        Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.CORRELATED,
+                RuntimeFilterStatistics.NdvEstimate.parse("Correlated"));
+        Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.OFF, RuntimeFilterStatistics.NdvEstimate.parse(" off"));
+        Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.INDEPENDENT,
+                RuntimeFilterStatistics.NdvEstimate.parse("independent"));
+        // A mistyped value keeps the default and does not fail the query.
+        Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.INDEPENDENT,
+                RuntimeFilterStatistics.NdvEstimate.parse("indpendent"));
+        Assertions.assertEquals(RuntimeFilterStatistics.NdvEstimate.INDEPENDENT,
+                RuntimeFilterStatistics.NdvEstimate.parse(null));
+    }
+
     @Test
     public void testCompleteMcvAgainstExactMembership() {
         Random random = new Random(391);
