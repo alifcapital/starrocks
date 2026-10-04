@@ -382,13 +382,13 @@ public class DecimalV3FunctionAnalyzer {
                     (((ArrayType) argumentTypes[0]).getItemType().isDecimalV3() || argumentTypes[1].isDecimalV3());
         }
 
-        if (Arrays.stream(argumentTypes).anyMatch(Type::isDecimalV3)) {
-            return true;
+        // check the type and the item type of an array; this runs for every function call that is analyzed
+        for (Type type : argumentTypes) {
+            if (type.isDecimalV3() || (type.isArrayType() && ((ArrayType) type).getItemType().isDecimalV3())) {
+                return true;
+            }
         }
-
-        // check array child type
-        return Arrays.stream(argumentTypes).filter(Type::isArrayType).map(t -> (ArrayType) t)
-                .anyMatch(t -> t.getItemType().isDecimalV3());
+        return false;
     }
 
     // Multi parameters decimalV2 function will match decimalV3 function, and doesn't set decimalV3 precision&scale.
