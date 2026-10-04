@@ -36,6 +36,12 @@ public class MergeLimitWithSortRule extends TransformationRule {
         LogicalTopNOperator topN = (LogicalTopNOperator) input.getInputs().get(0).getOp();
         LogicalLimitOperator limit = ((LogicalLimitOperator) input.getOp());
 
+        // A TopN cannot have a zero limit. When the offset of the limit skips every row of the TopN, we keep both
+        // operators, and they return no rows.
+        if (topN.hasLimit() && limit.getOffset() >= topN.getLimit()) {
+            return false;
+        }
+
         // Merge Init-Limit/Local-limit and Sort
         // Local-limit may be generate at MergeLimitWithLimitRule
         return limit.isInit() || limit.isLocal();
@@ -47,12 +53,17 @@ public class MergeLimitWithSortRule extends TransformationRule {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
         LogicalTopNOperator sort = (LogicalTopNOperator) input.getInputs().get(0).getOp();
 
-        long minLimit = limit.getLimit();
+        // The TopN returns rows [sort offset, sort offset + sort limit) of the order, and the limit takes rows
+        // [offset, offset + limit) of those. The merged TopN must return only the rows that both keep. A TopN may
+        // have an offset without a limit, so the offsets always add up.
+        long newLimit = limit.getLimit();
+        long newOffset = sort.getOffset() + limit.getOffset();
         if (sort.hasLimit()) {
-            minLimit = Math.min(minLimit, sort.getLimit());
+            long sortRowsAfterOffset = sort.getLimit() - limit.getOffset();
+            newLimit = limit.hasLimit() ? Math.min(limit.getLimit(), sortRowsAfterOffset) : sortRowsAfterOffset;
         }
         OptExpression result = new OptExpression(
-                new LogicalTopNOperator(sort.getOrderByElements(), limit.getLimit(), limit.getOffset()));
+                new LogicalTopNOperator(sort.getOrderByElements(), newLimit, newOffset));
         result.getInputs().addAll(input.getInputs().get(0).getInputs());
         return Lists.newArrayList(result);
     }

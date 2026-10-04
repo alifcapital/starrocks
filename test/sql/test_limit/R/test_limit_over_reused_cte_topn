@@ -1,0 +1,18 @@
+-- name: test_limit_over_reused_cte_topn
+create table t_topn (k int) duplicate key(k) distributed by hash(k) buckets 3 properties("replication_num" = "1");
+-- result:
+-- !result
+insert into t_topn values (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
+-- result:
+-- !result
+set cbo_cte_reuse_rate = 0;
+-- result:
+-- !result
+with c as (select k from t_topn order by k limit 5) select count(*), sum(k) from ((select k from c limit 10) union all (select k from c limit 20)) u;
+-- result:
+10	30
+-- !result
+with c as (select k from t_topn order by k limit 5 offset 2) select count(*), sum(k) from ((select k from c limit 10) union all (select k from c limit 20)) u;
+-- result:
+10	50
+-- !result

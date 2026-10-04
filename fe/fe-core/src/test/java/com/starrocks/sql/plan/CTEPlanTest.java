@@ -1249,4 +1249,32 @@ public class CTEPlanTest extends PlanTestBase {
         // (CTE reuse decision will be based on other factors like ratio and consume count)
         // Note: The actual behavior depends on CTE reuse ratio and consume count
     }
+
+    @Test
+    public void testConsumerLimitDoesNotWidenProducerTopN() throws Exception {
+        // The consumer limits are pushed into the produce side above its TopN. The TopN must keep its own limit and
+        // offset, otherwise a consumer with a larger limit reads more rows than the CTE has.
+        String sql = "with c as (select v1 from t0 order by v1 limit 5) " +
+                "(select v1 from c limit 10) union all (select v1 from c limit 20)";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "MultiCastDataSinks");
+        assertContains(plan, "MERGING-EXCHANGE\n" +
+                "     limit: 5");
+        assertContains(plan, "TOP-N\n" +
+                "  |  order by: <slot 1> 1: v1 ASC\n" +
+                "  |  offset: 0\n" +
+                "  |  limit: 5");
+
+        sql = "with c as (select v1 from t0 order by v1 limit 5 offset 2) " +
+                "(select v1 from c limit 10) union all (select v1 from c limit 20)";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "MultiCastDataSinks");
+        assertContains(plan, "MERGING-EXCHANGE\n" +
+                "     offset: 2\n" +
+                "     limit: 5");
+        assertContains(plan, "TOP-N\n" +
+                "  |  order by: <slot 1> 1: v1 ASC\n" +
+                "  |  offset: 0\n" +
+                "  |  limit: 7");
+    }
 }
