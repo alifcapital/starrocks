@@ -1023,10 +1023,9 @@ public class SelectAnalyzer {
             for (Field field : originalFields) {
                 if (field.getName() != null && field.getOriginExpression() != null) {
                     NameExprKey key = new NameExprKey(field.getName(), field.getOriginExpression());
-                    if (visited.contains(key)) {
+                    if (!visited.add(key)) {
                         continue;
                     }
-                    visited.add(key);
                 }
                 allFields.add(field);
             }
@@ -1035,10 +1034,9 @@ public class SelectAnalyzer {
             Set<String> visited = new HashSet<>();
             for (Field field : originalFields) {
                 if (field.getName() != null) {
-                    if (visited.contains(field.getName())) {
+                    if (!visited.add(field.getName())) {
                         continue;
                     }
-                    visited.add(field.getName());
                 }
                 allFields.add(field);
             }
