@@ -256,6 +256,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -510,7 +511,7 @@ public class PlanFragmentBuilder {
 
         public PlanFragment translate(OptExpression optExpression, ExecPlan context) {
             PlanFragment fragment = visit(optExpression, context);
-            computeFragmentCost(context, fragment);
+            computeFragmentCost(context, fragment, Collections.newSetFromMap(new IdentityHashMap<>()));
             collectExecStatsIds(fragment.getPlanRoot());
             context.setExecGroups(execGroups.getExecGroups());
             context.setCollectExecStatsIds(collectExecStatsIds);
@@ -533,9 +534,13 @@ public class PlanFragmentBuilder {
             }
         }
 
-        private void computeFragmentCost(ExecPlan context, PlanFragment fragment) {
+        // A multi cast fragment of a CTE has a parent per consumer; its cost is computed once.
+        private void computeFragmentCost(ExecPlan context, PlanFragment fragment, Set<PlanFragment> computed) {
+            if (!computed.add(fragment)) {
+                return;
+            }
             for (PlanFragment child : fragment.getChildren()) {
-                computeFragmentCost(context, child);
+                computeFragmentCost(context, child, computed);
             }
             OptExpression output = getOptExpressionFromPlanNode(context, fragment.getPlanRoot());
 
