@@ -110,7 +110,7 @@ public class View extends Table {
         Preconditions.checkNotNull(inlineViewDef);
         ParseNode node;
         try {
-            node = com.starrocks.sql.parser.SqlParser.parse(inlineViewDef, sqlMode).get(0);
+            node = com.starrocks.sql.parser.SqlParser.parseViewDefinition(inlineViewDef, sqlMode).get(0);
         } catch (Exception e) {
             LOG.warn("stmt is {}", inlineViewDef);
             LOG.warn("exception because: ", e);
