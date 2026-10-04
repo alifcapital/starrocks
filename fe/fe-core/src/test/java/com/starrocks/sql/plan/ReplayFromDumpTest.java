@@ -570,13 +570,14 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
     public void testHiveTPCH05UsingResource() throws Exception {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/hive_tpch05_resource"), null, TExplainLevel.COSTS);
+        // The build side is the whole customer table, so every order has its customer and a filter on c_custkey
+        // would pass every probe row. The planner does not build it.
         Assertions.assertTrue(replayPair.second.contains("  20:HASH JOIN\n" +
                 "  |  join op: INNER JOIN (PARTITIONED)\n" +
                 "  |  equal join conjunct: [10: o_custkey, INT, true] = [1: c_custkey, INT, true]\n" +
-                "  |  build runtime filters:\n" +
-                "  |  - filter_id = 3, build_expr = (1: c_custkey), remote = false\n" +
                 "  |  output columns: 4, 9\n" +
                 "  |  cardinality: 22765073"), replayPair.second);
+        Assertions.assertFalse(replayPair.second.contains("build_expr = (1: c_custkey)"), replayPair.second);
     }
 
     @Test
