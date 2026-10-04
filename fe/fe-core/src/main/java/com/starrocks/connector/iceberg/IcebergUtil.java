@@ -19,6 +19,7 @@ import com.google.common.base.Preconditions;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.connector.CatalogConnector;
+import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.credential.CloudConfiguration;
 import com.starrocks.credential.CloudConfigurationFactory;
@@ -310,8 +311,7 @@ public final class IcebergUtil {
 
     public static CloudConfiguration getVendedCloudConfiguration(String catalogName, IcebergTable icebergTable) {
         CatalogConnector connector = GlobalStateMgr.getCurrentState().getConnectorMgr().getConnector(catalogName);
-        Preconditions.checkState(connector != null,
-                String.format("connector of catalog %s should not be null", catalogName));
+        Preconditions.checkState(connector != null, "connector of catalog %s should not be null", catalogName);
 
         // Try to get vended credentials from loadTable response
         CloudConfiguration vendedCredentialsCloudConfiguration = CloudConfigurationFactory.
@@ -323,17 +323,19 @@ public final class IcebergUtil {
 
         // Try to get credentials from catalog config (/v1/config response).
         // This is used as fallback when STS is unavailable (e.g., Apache Polaris without STS).
+        // getMetadata builds the metadata objects of the connector on every call, so this asks once.
+        ConnectorMetadata metadata = connector.getMetadata();
         CloudConfiguration catalogConfigCloudConfiguration = CloudConfigurationFactory.
-                buildCloudConfigurationForVendedCredentials(connector.getMetadata().getCatalogProperties(),
+                buildCloudConfigurationForVendedCredentials(metadata.getCatalogProperties(),
                         icebergTable.getNativeTable().location());
         if (catalogConfigCloudConfiguration.getCloudType() != CloudType.DEFAULT) {
             return catalogConfigCloudConfiguration;
         }
 
         // Fall back to user-provided catalog credentials
-        CloudConfiguration cloudConfiguration = connector.getMetadata().getCloudConfiguration();
+        CloudConfiguration cloudConfiguration = metadata.getCloudConfiguration();
         Preconditions.checkState(cloudConfiguration != null,
-                String.format("cloudConfiguration of catalog %s should not be null", catalogName));
+                "cloudConfiguration of catalog %s should not be null", catalogName);
         return cloudConfiguration;
     }
 
