@@ -170,6 +170,7 @@ struct FailingSubmitExecutor {
 // notify-on-submit-failure) can be asserted without a real driver.
 class CountingObserver final : public pipeline::PipelineObserver {
 public:
+    CountingObserver() : pipeline::PipelineObserver(nullptr) {}
     void source_trigger() override { source_count++; }
     void sink_trigger() override { sink_count++; }
     void cancel_trigger() override { cancel_count++; }
@@ -867,7 +868,7 @@ TEST_F(SpillTest, submit_failure_partitioned_flush_compensates) {
     ASSERT_OK(ctx_st.status());
 
     std::vector<ExprContext*> tuple;
-    ASSERT_OK(ExprFactory::create_expr_trees(&pool, tuple_slots, &tuple, &dummy_rt_st));
+    ASSERT_OK(Expr::create_expr_trees(&pool, tuple_slots, &tuple, &dummy_rt_st));
 
     RandomChunkBuilder chunk_builder;
     auto factory = spill::make_spilled_factory();

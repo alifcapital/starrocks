@@ -32,22 +32,22 @@
 #include <atomic>
 #include <memory>
 
-#include "testutil/assert.h"
 #include "common/object_pool.h"
-#include "util/runtime_profile.h"
 #include "exec/pipeline/fragment_context.h"
+#include "exec/pipeline/group_execution/execution_group.h"
 #include "exec/pipeline/operator.h"
-#include "exec/pipeline/pipeline_driver_queue.h"
+#include "exec/pipeline/pipeline.h"
 #include "exec/pipeline/pipeline_driver.h"
+#include "exec/pipeline/pipeline_driver_queue.h"
 #include "exec/pipeline/pipeline_metrics.h"
 #include "exec/pipeline/query_context.h"
-#include "exec/pipeline/source_operator.h"
-#include "exec/pipeline/group_execution/execution_group.h"
-#include "exec/pipeline/pipeline.h"
 #include "exec/pipeline/schedule/event_scheduler.h"
+#include "exec/pipeline/source_operator.h"
 #include "runtime/exec_env.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
+#include "util/runtime_profile.h"
 
 namespace starrocks::pipeline {
 
@@ -192,7 +192,7 @@ public:
 
         auto runtime_state = std::make_shared<RuntimeState>();
         auto* exec_env = ExecEnv::GetInstance();
-        runtime_state->set_exec_env(exec_env);
+        runtime_state->_exec_env = exec_env;
         runtime_state->_obj_pool = std::make_shared<ObjectPool>();
         // process() top-of-loop runs RETURN_IF_LIMIT_EXCEEDED against the instance mem tracker; the default
         // RuntimeState ctor leaves it null, so give it an unlimited one.

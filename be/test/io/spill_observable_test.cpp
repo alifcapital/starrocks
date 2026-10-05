@@ -18,23 +18,23 @@
 #include <memory>
 #include <thread>
 
-#include "testutil/assert.h"
 #include "common/object_pool.h"
-#include "util/runtime_profile.h"
 #include "exec/pipeline/empty_set_operator.h"
 #include "exec/pipeline/fragment_context.h"
-#include "exec/pipeline/noop_sink_operator.h"
-#include "exec/pipeline/pipeline_driver_queue.h"
-#include "exec/pipeline/pipeline_metrics.h"
-#include "exec/pipeline/schedule/observer.h"
-#include "exec/pipeline/query_context.h"
 #include "exec/pipeline/group_execution/execution_group.h"
+#include "exec/pipeline/noop_sink_operator.h"
 #include "exec/pipeline/pipeline.h"
 #include "exec/pipeline/pipeline_driver.h"
+#include "exec/pipeline/pipeline_driver_queue.h"
+#include "exec/pipeline/pipeline_metrics.h"
+#include "exec/pipeline/query_context.h"
 #include "exec/pipeline/schedule/event_scheduler.h"
+#include "exec/pipeline/schedule/observer.h"
 #include "gtest/gtest.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
+#include "util/runtime_profile.h"
 
 namespace starrocks::spill {
 
@@ -71,7 +71,7 @@ public:
         _exec_group = std::make_shared<NormalExecutionGroup>();
         _runtime_state = std::make_shared<RuntimeState>();
         auto* exec_env = ExecEnv::GetInstance();
-        _runtime_state->set_exec_env(exec_env);
+        _runtime_state->_exec_env = exec_env;
         _runtime_state->_obj_pool = std::make_shared<ObjectPool>();
         _runtime_state->set_query_ctx(_dummy_query_ctx.get());
         _runtime_state->set_fragment_ctx(_dummy_fragment_ctx.get());
