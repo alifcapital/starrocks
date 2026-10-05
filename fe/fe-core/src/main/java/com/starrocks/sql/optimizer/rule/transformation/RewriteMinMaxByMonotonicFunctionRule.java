@@ -261,7 +261,7 @@ public class RewriteMinMaxByMonotonicFunctionRule extends TransformationRule {
             }
             // require one child which is column
             return !call.getChildren().isEmpty() && call.getChild(0).isColumnRef()
-                    && OperatorFunctionChecker.onlyContainMonotonicFunctions(call).first;
+                    && OperatorFunctionChecker.onlyContainIncreasingFunctions(call).first;
         }
         return false;
     }

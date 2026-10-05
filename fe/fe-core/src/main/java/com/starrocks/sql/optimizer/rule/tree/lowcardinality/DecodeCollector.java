@@ -991,7 +991,15 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
                         PhysicalPartition::getVisibleVersionTime).max(Long::compareTo).orElse(0L);
                 versionComputed = true;
             }
-            Column columnObj = table.getColumn(column.getName());
+            // Extended json subfield columns are per-query artifacts and are not part of the table schema,
+            // so resolve them through the scan's own map first -- the same source checkExtendedColumn() uses.
+            Column columnObj = scan.getColRefToColumnMetaMap().get(column);
+            if (columnObj == null) {
+                columnObj = table.getColumn(column.getName());
+            }
+            if (columnObj == null) {
+                continue;
+            }
             if (!IDictManager.getInstance().hasGlobalDict(table.getId(), columnObj.getColumnId(), version)) {
                 LOG.debug("{} doesn't have global dict", column.getName());
                 continue;

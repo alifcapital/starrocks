@@ -851,6 +851,50 @@ public class CachingIcebergCatalogTest {
         Assertions.assertSame(reloadedTable, tableCache.getIfPresent(key));
     }
 
+    // A commit on this FE invalidates the table while a background refresh is still loading it. If the
+    // refresh published its table after the invalidation, the cache would serve metadata older than the
+    // commit. The invalidation therefore waits for the refresh and leaves no entry behind.
+    @Test
+    public void testInvalidationDuringRefreshWaitsAndWins() throws Exception {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        BaseTable cachedTable = mockRefreshCandidate(1L, "old.json");
+        BaseTable reloadedTable = mockRefreshCandidate(2L, "new.json");
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenAnswer(inv -> {
+            loading.countDown();
+            Assertions.assertTrue(finish.await(5, TimeUnit.SECONDS));
+            return reloadedTable;
+        });
+        Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
+                .thenReturn(Map.of());
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, cachedTable);
+
+            java.util.concurrent.Future<?> refresh = workers.submit(
+                    () -> catalog.refreshTable("db", "tbl", new ConnectContext(), workers));
+            Assertions.assertTrue(loading.await(5, TimeUnit.SECONDS));
+            java.util.concurrent.Future<?> invalidate = workers.submit(
+                    () -> catalog.invalidateTableCache("db", "tbl"));
+            Assertions.assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> invalidate.get(200, TimeUnit.MILLISECONDS),
+                    "The invalidation must wait for the refresh that is loading the table");
+
+            finish.countDown();
+            refresh.get(5, TimeUnit.SECONDS);
+            invalidate.get(5, TimeUnit.SECONDS);
+            Assertions.assertNull(tables.getIfPresent(key));
+        } finally {
+            finish.countDown();
+            workers.shutdownNow();
+        }
+    }
+
     @Test
     public void testRestTableCacheTtlIsCapped(@Mocked IcebergRESTCatalog restCatalog,
                                               @Mocked IcebergCatalog hiveCatalog) {

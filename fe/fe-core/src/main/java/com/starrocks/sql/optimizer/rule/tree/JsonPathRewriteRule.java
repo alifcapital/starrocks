@@ -208,23 +208,14 @@ public class JsonPathRewriteRule extends TransformationRule {
         }
 
         private Column createExtendedColumn(Table table, String path, ColumnAccessPath jsonPath) {
-            if (!table.containColumn(path)) {
-                Preconditions.checkState(table instanceof OlapTable, "Only support OlapTable");
-                // NOTE: The safety of adding a column dynamically is ensured by the fact that
-                // this rule is only applied during query planning, thus the Table here is already copied for the
-                // query. So this change would not affect the original table schema.
-                Column extendedColumn = new Column(path, jsonPath.getValueType(), true);
-
-                // Allocate the unique id for extended column
-                OlapTable olapTable = (OlapTable) table;
-                int nextUniqueId = olapTable.incAndGetMaxColUniqueId();
-                extendedColumn.setUniqueId(nextUniqueId);
-
-                table.addColumn(extendedColumn);
-                return extendedColumn;
-            } else {
-                return table.getColumn(path);
-            }
+            Preconditions.checkState(table instanceof OlapTable, "Only support OlapTable");
+            // The extended column is a per-query artifact: it only ever travels through the scan operator's
+            // colRefToColumnMetaMap and the ColumnAccessPath list, both of which are rebuilt for every scan.
+            // It must NOT be registered on the Table object. Doing so mutates the shared catalog instance for
+            // any statement whose source table is not copied (INSERT ... SELECT and MV refresh both reuse the
+            // live OlapTable), which leaks the column into InsertPlanner's sink schema and pins the path to
+            // whichever type happened to be resolved first.
+            return new Column(path, jsonPath.getValueType(), true);
         }
 
         public static ColumnAccessPath pathFromColumn(Column column) {
@@ -273,8 +264,7 @@ public class JsonPathRewriteRule extends TransformationRule {
 
             // Skip the JSON-path pushdown when two subfields of the same JSON column collide
             // case-insensitively (e.g. 'Campaign' vs 'campaign'); see hasCaseCollidingJsonSubfields.
-            if (hasCaseCollidingJsonSubfields(new ArrayList<>(project.getColumnRefMap().values()), columnRefFactory,
-                    null)) {
+            if (hasCaseCollidingJsonSubfields(new ArrayList<>(project.getColumnRefMap().values()), columnRefFactory)) {
                 return optExpr;
             }
 
@@ -348,8 +338,7 @@ public class JsonPathRewriteRule extends TransformationRule {
             if (scanOperator.getProjection() != null) {
                 jsonRoots.addAll(scanOperator.getProjection().getColumnRefMap().values());
             }
-            JsonSubfieldScan jsonSubfieldScan =
-                    scanJsonSubfields(jsonRoots, columnRefFactory, scanOperator.getTable());
+            JsonSubfieldScan jsonSubfieldScan = scanJsonSubfields(jsonRoots, columnRefFactory);
             // Only a call that passes the same checks as JsonPathExpressionRewriter can be rewritten, so
             // without one the rewrite below would hand back an equal copy of the scan.
             if (jsonSubfieldScan != JsonSubfieldScan.HAS_REWRITABLE_CALL) {
@@ -431,19 +420,18 @@ public class JsonPathRewriteRule extends TransformationRule {
      *
      * <p>JSON object keys are case-sensitive, so these are two distinct fields with distinct values.
      * The pushdown, however, materializes each as an extended {@link Column} whose name is the
-     * subfield path; those names collide in {@code Table.nameToColumn} (a case-insensitive map) and
-     * in every downstream name-keyed lookup (global-dict, min/max statistics). The result is a scan
-     * chunk with mismatched column row counts (BE crash) or a wrong global-dict mapping ("Dict Decode
-     * failed"). When such a collision is present we skip the rewrite for that scan entirely and let
+     * subfield path; those names collide in every downstream name-keyed lookup (global-dict, min/max
+     * statistics). The result is a scan chunk with mismatched column row counts (BE crash) or a wrong
+     * global-dict mapping ("Dict Decode failed"). When such a collision is present we skip the rewrite
+     * for that scan entirely and let
      * the query read the JSON column whole (identical to running with cbo_json_v2_rewrite=false),
      * which is correct — only the (rare) colliding query loses the subfield-pushdown optimization.
      *
      * <p>This is a side-effect-free pre-pass: it must run before any extended column is created,
      * because a partially-applied rewrite leaves dangling column refs that break later stages.
      */
-    private static boolean hasCaseCollidingJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory,
-                                                         Table scanTable) {
-        return scanJsonSubfields(roots, factory, scanTable) == JsonSubfieldScan.COLLISION;
+    private static boolean hasCaseCollidingJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory) {
+        return scanJsonSubfields(roots, factory) == JsonSubfieldScan.COLLISION;
     }
 
     private enum JsonSubfieldScan {
@@ -459,10 +447,8 @@ public class JsonPathRewriteRule extends TransformationRule {
      * The pre-pass behind {@link #hasCaseCollidingJsonSubfields}. It also reports whether any call passes
      * every check of {@link JsonPathExpressionRewriter}, which is the only kind of call the rewriter changes.
      */
-    private static JsonSubfieldScan scanJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory,
-                                                      Table scanTable) {
+    private static JsonSubfieldScan scanJsonSubfields(List<ScalarOperator> roots, ColumnRefFactory factory) {
         // key: case-folded extended-column name -> the actual (case-sensitive) name that first claimed it.
-        // Used for collisions WITHIN this scan; cross-scan collisions are caught against the table below.
         Map<String, String> claimed = null;
         boolean hasRewritableCall = false;
         Deque<ScalarOperator> stack = new ArrayDeque<>();
@@ -505,21 +491,15 @@ public class JsonPathRewriteRule extends TransformationRule {
             String name = ColumnAccessPath.createLinearPath(fullPath, call.getType()).getLinearPath();
 
             hasRewritableCall = true;
-            // (a) collision within this scan: two subfields whose extended-column names differ only by case.
+            // Collision within this scan: two subfields whose extended-column names differ only by case.
+            // The cross-scan branch that used to live here is gone together with createExtendedColumn()'s
+            // table-backed reuse: extended columns are no longer registered on the shared table, so aliases
+            // of the same table can no longer pick up each other's case-differing column.
             if (claimed == null) {
                 claimed = Maps.newHashMap();
             }
             String prior = claimed.putIfAbsent(name.toLowerCase(Locale.ROOT), name);
             if (prior != null && !prior.equals(name)) {
-                return JsonSubfieldScan.COLLISION;
-            }
-            // (b) cross-scan collision: aliases of the same table share one analyzer table copy
-            // (AnalyzerUtils.copyTable), so another scan may already have added a case-differing extended
-            // column (e.g. t1 read j->'Campaign', t2 reads j->'campaign'). createExtendedColumn() would then
-            // reuse that column case-insensitively and emit the wrong path for this scan.
-            Table targetTable = scanTable != null ? scanTable : tableAndColumn.first;
-            Column existing = targetTable.getColumn(name);
-            if (existing != null && !existing.getName().equals(name)) {
                 return JsonSubfieldScan.COLLISION;
             }
         }

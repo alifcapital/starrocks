@@ -93,6 +93,7 @@ set(EXEC_FILES
         ./exec/pipeline/fetch_task_test.cpp
         ./exec/pipeline/table_function_operator_test.cpp
         ./exec/pipeline/sink/export_sink_operator_test.cpp
+        ./exec/pipeline/sink/file_sink_operator_test.cpp
         ./exec/pipeline/sink/table_function_table_sink_operator_test.cpp
         ./exec/pipeline/sink/memory_scratch_sink_operator_test.cpp
         ./exec/pipeline/limit_operator_test.cpp
@@ -104,6 +105,7 @@ set(EXEC_FILES
         ./exec/pipeline/mem_limited_chunk_queue_test.cpp
         ./exec/pipeline/exec_group_test.cpp
         ./exec/pipeline/fragment_executor_test.cpp
+        ./exec/pipeline/lookup_operator_test.cpp
         ./exec/pipeline/scan/physical_split_morsel_queue_test.cpp
         ./exec/pipeline/scan/priority_morsel_queue_test.cpp
         ./exec/query_spill_manager_test.cpp
@@ -127,6 +129,7 @@ set(EXEC_FILES
         ./exec/stream/stream_pipeline_test.cpp
         ./exec/tablet_info_test.cpp
         ./exec/agg_hash_map_test.cpp
+        ./exec/compress_serializer_test.cpp
         ./exec/hash_variant_test.cpp
         ./storage/tablet_schema_helper.cpp
         ./exec/pipeline/olap_scan_operator_test.cpp
