@@ -57,6 +57,7 @@ import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.SubfieldAccessPathNormalizer;
 import com.starrocks.sql.optimizer.statistics.CacheDictManager;
+import com.starrocks.sql.optimizer.statistics.ColumnDict;
 import com.starrocks.sql.optimizer.statistics.ExternalPartitionStatistics;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsCacheKey;
 import com.starrocks.sql.optimizer.statistics.ExternalTableStatistics;
@@ -451,15 +452,16 @@ public class StatisticExecutor {
 
     private static Pair<List<TStatisticData>, Status> executeStatisticDQLWithoutContext(String sql) throws TException {
         RemoteFilesSampleStrategy strategy = new RemoteFilesSampleStrategy();
-        return executeStatisticDQLWithSample(sql, strategy);
+        return executeStatisticDQLWithSample(sql, strategy, false);
     }
 
     private static Pair<List<TStatisticData>, Status> executeStatisticDQLWithSample(
-            String sql, RemoteFilesSampleStrategy strategy) throws TException {
+            String sql, RemoteFilesSampleStrategy strategy, boolean lakeDictCollection) throws TException {
         ConnectContext context = StatisticUtils.buildConnectContext();
         // The parallelism degree of low-cardinality dict collect task is uniformly set to 1 to
         // prevent collection tasks from occupying a large number of be execution threads and scan threads.
         context.getSessionVariable().setPipelineDop(1);
+        context.setLakeDictCollection(lakeDictCollection);
         context.setThreadLocalInfo();
         StatementBase parsedStmt = SqlParser.parseOneWithStarRocksDialect(sql, context.getSessionVariable());
 
@@ -497,7 +499,9 @@ public class StatisticExecutor {
                 CacheDictManager.LOW_CARDINALITY_THRESHOLD + ") from " +
                 StatisticUtils.quoting(names.get(0), names.get(1), names.get(2));
 
-        return executeStatisticDQLWithSample(sql, strategy);
+        // The dict must also hold the values of deleted rows that are still stored in the data files, so this
+        // query reads the files without applying deletes.
+        return executeStatisticDQLWithSample(sql, strategy, true);
     }
 
     public static Pair<List<TStatisticData>, Status> queryDictSync(String tableUUID, String columnName, String fileName)
@@ -507,22 +511,45 @@ public class StatisticExecutor {
     }
 
     public static void updateDictSync(String tableUUID, String columnName, Optional<String> fileName) {
+        IRelaxDictManager manager = IRelaxDictManager.getInstance();
         try {
             if (fileName.isEmpty()) {
-                IRelaxDictManager.getInstance().updateGlobalDict(tableUUID, columnName, Optional.empty());
+                LOG.info("Global dict of {} column {} is not refreshed: the mismatch names no file",
+                        tableUUID, columnName);
+                manager.updateGlobalDict(tableUUID, columnName, Optional.empty());
                 return;
             }
             Pair<List<TStatisticData>, Status> result = queryDictSync(tableUUID, columnName, fileName.get());
             if (result.second.isGlobalDictError()) {
-                IRelaxDictManager.getInstance().updateGlobalDict(tableUUID, columnName, Optional.empty());
-            } else if (result.second.ok()) {
-                IRelaxDictManager.getInstance()
-                        .updateGlobalDict(tableUUID, columnName, Optional.of(result.first.get(0)));
+                LOG.info("Global dict of {} column {} is not refreshed from file {}: {}",
+                        tableUUID, columnName, fileName.get(), result.second.getErrorMsg());
+                manager.updateGlobalDict(tableUUID, columnName, Optional.empty());
+            } else if (!result.second.ok() || result.first.isEmpty()) {
+                LOG.info("Global dict of {} column {} is not refreshed from file {}: status {}, {} result rows",
+                        tableUUID, columnName, fileName.get(), result.second, result.first.size());
+            } else {
+                // We expect a refresh to add the values that made the CN reject the dict. When it adds none,
+                // the next query on this file fails the same way, so we log the sizes to find such columns.
+                Optional<ColumnDict> before = manager.getLoadedGlobalDict(tableUUID, columnName);
+                TStatisticData collected = result.first.get(0);
+                manager.updateGlobalDict(tableUUID, columnName, Optional.of(collected));
+                Optional<ColumnDict> after = manager.getLoadedGlobalDict(tableUUID, columnName);
+                if (before.isEmpty() || after.isEmpty() || after.get().getDictSize() <= before.get().getDictSize()) {
+                    LOG.info("Global dict of {} column {} got no new value from file {}: collected {} values, " +
+                                    "dict size {} -> {}, version {} -> {}",
+                            tableUUID, columnName, fileName.get(),
+                            collected.dict == null ? 0 : collected.dict.getIdsSize(),
+                            before.map(ColumnDict::getDictSize).orElse(null),
+                            after.map(ColumnDict::getDictSize).orElse(null),
+                            before.map(ColumnDict::getVersion).orElse(null),
+                            after.map(ColumnDict::getVersion).orElse(null));
+                }
             }
         } catch (TException e) {
-            // ignore
+            LOG.info("Global dict of {} column {} is not refreshed from file {}: {}",
+                    tableUUID, columnName, fileName.orElse(null), e.getMessage());
         } finally {
-            IRelaxDictManager.getInstance().removeTemporaryInvalid(tableUUID, columnName);
+            manager.removeTemporaryInvalid(tableUUID, columnName);
         }
     }
 

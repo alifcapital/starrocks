@@ -183,6 +183,11 @@ public class CacheRelaxDictManager implements IRelaxDictManager, MemoryTrackable
         if (!hasGlobalDict(tableUUID, columnName)) {
             return Optional.empty();
         }
+        return getLoadedGlobalDict(tableUUID, columnName);
+    }
+
+    @Override
+    public Optional<ColumnDict> getLoadedGlobalDict(String tableUUID, String columnName) {
         // Quiet lookup never starts a load or a refresh while deciding whether to use an existing dictionary.
         Optional<ColumnDict> value = dictStatistics.synchronous().policy()
                 .getIfPresentQuietly(new ConnectorTableColumnKey(tableUUID, columnName));

@@ -22,6 +22,7 @@ import com.starrocks.connector.iceberg.IcebergApiConverter;
 import com.starrocks.connector.iceberg.IcebergDeleteSchema;
 import com.starrocks.connector.iceberg.IcebergMORParams;
 import com.starrocks.connector.iceberg.IcebergTableMORParams;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.JoinOperator;
@@ -70,6 +71,14 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
 
         LogicalIcebergScanOperator scanOperator = op.cast();
         if (scanOperator.isFromEqDeleteRewriteRule()) {
+            return false;
+        }
+
+        // A global dict must cover every value stored in a data file, because the CN checks the whole
+        // dictionary page of a parquet column chunk, values of deleted rows included. So the query that
+        // collects the dict reads the data files as stored and keeps the rows that equality deletes remove.
+        ConnectContext connectContext = context.getConnectContext();
+        if (connectContext != null && connectContext.isLakeDictCollection()) {
             return false;
         }
 

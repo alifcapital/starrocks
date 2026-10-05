@@ -29,6 +29,11 @@ public interface IRelaxDictManager {
         return Optional.empty();
     }
 
+    // The loaded dict even while the column is marked as not usable; for logging and tests.
+    default Optional<ColumnDict> getLoadedGlobalDict(String tableUUID, String columnName) {
+        return Optional.empty();
+    }
+
     void updateGlobalDict(String tableUUID, String columnName, Optional<TStatisticData> stat);
     void removeGlobalDict(String tableUUID, String columnName);
     void invalidTemporarily(String tableUUID, String columnName);

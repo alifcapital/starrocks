@@ -29,6 +29,7 @@ import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.exception.GlobalDictNotMatchException;
 import com.starrocks.connector.exception.RemoteFileNotFoundException;
 import com.starrocks.connector.statistics.ConnectorTableColumnKey;
+import com.starrocks.metric.MetricRepo;
 import com.starrocks.planner.DeltaLakeScanNode;
 import com.starrocks.planner.HdfsScanNode;
 import com.starrocks.planner.HudiScanNode;
@@ -259,10 +260,43 @@ public class ExecuteExceptionHandler {
         return true;
     }
 
-    private static void tryTriggerRefreshDictAsync(GlobalDictNotMatchException e, RetryContext context) {
+    public static boolean usesLakeGlobalDict(ExecPlan plan) {
+        return plan.getScanNodes().stream().anyMatch(scanNode ->
+                (scanNode instanceof IcebergScanNode || scanNode instanceof HdfsScanNode) &&
+                        scanNode.hasAppliedDictStringColumns());
+    }
+
+    /**
+     * Called for every GLOBAL_DICT_NOT_MATCH, also on the last attempt, before the retry decision.
+     *
+     * <p>We want the dict to learn the missing values whatever happens to this statement, so the refresh from the
+     * file always starts here. A plan without lake dicts cannot hit this error again, so such a plan is worth one
+     * more attempt that does not count against max_query_retry_time. We give it only once per statement, and only
+     * when the client has not received rows yet, because the attempt runs the query again from the start.
+     *
+     * @return true when the statement gets one extra attempt planned without lake global dicts
+     */
+    public static boolean onGlobalDictNotMatch(GlobalDictNotMatchException e, RetryContext context,
+                                               boolean resultSent) {
+        MetricRepo.COUNTER_QUERY_GLOBAL_DICT_NOT_MATCH.increase(1L);
+        String column = triggerDictRefresh(e, context);
+        Pair<Optional<Integer>, Optional<String>> err = e.extract();
+        LOG.info("Global dict does not match a file. queryId={}, column={}, file={}, attempt={}, resultSent={}",
+                DebugUtil.printId(context.connectContext.getExecutionId()), column,
+                err.second.orElse(null), context.retryTime + 1, resultSent);
+        if (resultSent || context.lakeDictDisabled) {
+            return false;
+        }
+        context.lakeDictDisabled = true;
+        return true;
+    }
+
+    // Marks the column as temporarily without a dict and queues a refresh of the dict from the file named in the
+    // error. Returns the column as "<table uuid>.<column>", or null when the error names no known slot.
+    static String triggerDictRefresh(GlobalDictNotMatchException e, RetryContext context) {
         Pair<Optional<Integer>, Optional<String>> err = e.extract();
         if (err.first.isEmpty()) {
-            return;
+            return null;
         }
         SlotId slotId = new SlotId(err.first.get());
         for (ScanNode scanNode : context.execPlan.getScanNodes()) {
@@ -272,21 +306,18 @@ public class ExecuteExceptionHandler {
                 IRelaxDictManager.getInstance().invalidTemporarily(tableUUID, columnName);
                 GlobalStateMgr.getCurrentState().getConnectorTableTriggerAnalyzeMgr().
                         addDictUpdateTask(new ConnectorTableColumnKey(tableUUID, columnName), err.second);
-                return;
+                return tableUUID + "." + columnName;
             }
         }
+        return null;
     }
 
     private static void handleGlobalDictNotMatchException(GlobalDictNotMatchException e, RetryContext context)
             throws Exception {
-        // trigger async collect dict
-        tryTriggerRefreshDictAsync(e, context);
-
-        // rerun without low cardinality optimization
-        ConnectContext connectContext = context.connectContext;
-        connectContext.getSessionVariable().setUseLowCardinalityOptimizeOnLake(false);
+        // The refresh was started in onGlobalDictNotMatch. The rest of the statement runs without lake dicts.
+        context.lakeDictDisabled = true;
         rebuildExecPlan(e, context);
-        connectContext.getSessionVariable().setUseLowCardinalityOptimizeOnLake(true);
+        MetricRepo.COUNTER_QUERY_GLOBAL_DICT_REPLAN.increase(1L);
     }
 
     /**
@@ -323,6 +354,11 @@ public class ExecuteExceptionHandler {
     }
 
     private static void rebuildExecPlan(Exception e, RetryContext context) throws Exception {
+        SessionVariable sessionVariable = context.connectContext.getSessionVariable();
+        boolean useLakeDict = sessionVariable.isUseLowCardinalityOptimizeOnLake();
+        if (context.lakeDictDisabled) {
+            sessionVariable.setUseLowCardinalityOptimizeOnLake(false);
+        }
         try {
             context.execPlan = StatementPlanner.plan(context.parsedStmt, context.connectContext);
         } catch (Exception e1) {
@@ -336,6 +372,8 @@ public class ExecuteExceptionHandler {
                         e1);
             }
             throw e;
+        } finally {
+            sessionVariable.setUseLowCardinalityOptimizeOnLake(useLakeDict);
         }
     }
 
@@ -366,6 +404,10 @@ public class ExecuteExceptionHandler {
 
         private StatementBase parsedStmt;
 
+        // Set after a global dict mismatch. Every later plan of the statement reads lake scans without global
+        // dicts, also when it is rebuilt for another error.
+        private boolean lakeDictDisabled = false;
+
         public RetryContext(int retryTime, ExecPlan execPlan, ConnectContext connectContext,
                             StatementBase parsedStmt) {
             this.retryTime = retryTime;
@@ -387,6 +429,10 @@ public class ExecuteExceptionHandler {
 
         public void setRetryTime(int retryTime) {
             this.retryTime = retryTime;
+        }
+
+        public boolean isLakeDictDisabled() {
+            return lakeDictDisabled;
         }
     }
 }
