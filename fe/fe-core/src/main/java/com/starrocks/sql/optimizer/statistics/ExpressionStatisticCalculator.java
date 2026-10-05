@@ -920,6 +920,12 @@ public class ExpressionStatisticCalculator {
                     .build();
         }
 
+        // date_add, days_add, date_sub and days_sub shift a date or datetime by a number of days, while the
+        // statistics of a date or datetime are in seconds.
+        private double secondsPerDayOfShift(CallOperator callOperator) {
+            return callOperator.getChild(0).getType().isDateType() ? 24.0 * 3600 : 1.0;
+        }
+
         private ColumnStatistic binaryExpressionCalculate(CallOperator callOperator, ColumnStatistic left,
                                                           ColumnStatistic right) {
             final double minValue;
@@ -931,15 +937,28 @@ public class ExpressionStatisticCalculator {
             long interval;
             switch (callOperator.getFnName().toLowerCase()) {
                 case FunctionSet.ADD:
-                case FunctionSet.DATE_ADD:
-                case FunctionSet.DAYS_ADD:
                     minValue = left.getMinValue() + right.getMinValue();
                     maxValue = left.getMaxValue() + right.getMaxValue();
                     break;
+                case FunctionSet.DATE_ADD:
+                case FunctionSet.DAYS_ADD: {
+                    // The statistics of a date or datetime are in seconds and the second argument counts days, so
+                    // we scale it. Otherwise days_add('1970-01-01', d) on a column of days since 1970 ends a few
+                    // hours after 1970, and a range filter on it estimates almost no rows.
+                    double secondsPerUnit = secondsPerDayOfShift(callOperator);
+                    minValue = left.getMinValue() + right.getMinValue() * secondsPerUnit;
+                    maxValue = left.getMaxValue() + right.getMaxValue() * secondsPerUnit;
+                    break;
+                }
+                case FunctionSet.DATE_SUB:
+                case FunctionSet.DAYS_SUB: {
+                    double secondsPerUnit = secondsPerDayOfShift(callOperator);
+                    minValue = left.getMinValue() - right.getMaxValue() * secondsPerUnit;
+                    maxValue = left.getMaxValue() - right.getMinValue() * secondsPerUnit;
+                    break;
+                }
                 case FunctionSet.SUBTRACT:
                 case FunctionSet.TIMEDIFF:
-                case FunctionSet.DATE_SUB:
-                case FunctionSet.DAYS_SUB:
                 case FunctionSet.SECONDS_DIFF:
                     minValue = left.getMinValue() - right.getMaxValue();
                     maxValue = left.getMaxValue() - right.getMinValue();
