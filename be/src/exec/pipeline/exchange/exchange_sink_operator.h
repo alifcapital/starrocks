@@ -85,8 +85,8 @@ public:
     // For other chunk, only serialize the chunk data to ChunkPB.
     Status serialize_chunk(const Chunk* chunk, ChunkPB* dst, bool* is_first_chunk, int num_receivers = 1);
 
-    // Return the physical bytes of attachment.
-    int64_t construct_brpc_attachment(const PTransmitChunkParamsPtr& _chunk_request, butil::IOBuf& attachment);
+    // Move the serialized chunks of the request into an attachment that all destinations of the request share.
+    TransmitAttachmentPtr construct_brpc_attachment(const PTransmitChunkParamsPtr& chunk_request);
 
     std::string get_name() const override;
 

@@ -17,8 +17,15 @@
 #include <brpc/server.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <functional>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "common/config.h"
 #include "exec/pipeline/exchange/sink_buffer.h"
@@ -31,7 +38,9 @@
 #include "gen_cpp/data.pb.h"
 #include "gen_cpp/internal_service.pb.h"
 #include "gutil/casts.h"
+#include "runtime/current_thread.h"
 #include "runtime/exec_env.h"
+#include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
 #include "service/backend_options.h"
 #include "testutil/assert.h"
@@ -157,8 +166,7 @@ protected:
 
         auto params = std::make_shared<PTransmitChunkParams>();
         params->set_eos(false);
-        return TransmitChunkInfo{dest_id,        std::move(stub),         std::move(params),
-                                 butil::IOBuf(), /*request_byte_size*/ 0, addr};
+        return TransmitChunkInfo{dest_id, std::move(stub), std::move(params), nullptr, /*request_byte_size*/ 0, addr};
     }
 };
 
@@ -220,6 +228,280 @@ TEST_F(SinkBufferCancelTest, cancel_with_no_inflight_rpc_is_safe) {
 
     buffer->cancel_one_sinker(_runtime_state.get());
     EXPECT_TRUE(buffer->is_finished());
+}
+
+// A brpc PInternalService that counts the received transmit_chunk calls and holds every handler until
+// release(), so the RPCs stay in flight while the test looks at the trackers.
+class HoldingInternalService : public starrocks::PInternalService {
+public:
+    void transmit_chunk(google::protobuf::RpcController* /*controller*/,
+                        const starrocks::PTransmitChunkParams* /*request*/, starrocks::PTransmitChunkResult* response,
+                        google::protobuf::Closure* done) override {
+        received.fetch_add(1);
+        {
+            std::unique_lock lock(_mutex);
+            _cv.wait(lock, [this] { return _released; });
+        }
+        if (response != nullptr) {
+            response->mutable_status()->set_status_code(0);
+        }
+        done->Run();
+    }
+
+    void release() {
+        std::lock_guard lock(_mutex);
+        _released = true;
+        _cv.notify_all();
+    }
+
+    std::atomic<int> received{0};
+
+private:
+    std::mutex _mutex;
+    std::condition_variable _cv;
+    bool _released = false;
+};
+
+class SinkBufferAttachmentMemTest : public SinkBufferCancelTest {
+public:
+    void SetUp() override {
+        SinkBufferCancelTest::SetUp();
+        // The checks look at the instance tracker, and release_without_root() changes only the trackers below
+        // the root, so the instance tracker gets the query tracker as its parent.
+        _factory.reset();
+        _sink_buffer.reset();
+        _runtime_state->init_mem_trackers(_query_context->mem_tracker());
+        _saved_brpc_dop = config::pipeline_sink_brpc_dop;
+    }
+
+    void TearDown() override { config::pipeline_sink_brpc_dop = _saved_brpc_dop; }
+
+protected:
+    // The memory hook can count a few small objects around the checked calls, so the checks allow this much
+    // difference. The attachments are much larger, so a double count or a double release still fails.
+    static constexpr int64_t kNoise = 256 * 1024;
+    static constexpr size_t kPayload = 4 * 1024 * 1024;
+
+    MemTracker* fragment_tracker() { return _runtime_state->instance_mem_tracker(); }
+
+    std::shared_ptr<SinkBuffer> make_sink_buffer(int port, const std::vector<TUniqueId>& dest_ids) {
+        TNetworkAddress addr;
+        addr.__set_hostname("127.0.0.1");
+        addr.__set_port(port);
+        std::vector<TPlanFragmentDestination> destinations;
+        for (const auto& id : dest_ids) {
+            TPlanFragmentDestination dest;
+            dest.__set_fragment_instance_id(id);
+            dest.__set_brpc_server(addr);
+            destinations.push_back(dest);
+        }
+        return std::make_shared<SinkBuffer>(_fragment_context.get(), destinations, /*is_dest_merge*/ false);
+    }
+
+    TransmitAttachmentPtr make_attachment() {
+        const std::string payload(kPayload, 'x');
+        auto attachment = std::make_shared<TransmitAttachment>(fragment_tracker());
+        attachment->append(payload);
+        EXPECT_EQ(kPayload, attachment->size());
+        EXPECT_GE(attachment->charged_bytes(), 0);
+        return attachment;
+    }
+
+    // The exchange sink operator builds and queues requests on a driver thread under the instance tracker, and
+    // the sink buffer pops them under the same tracker. The test does the same, so the request objects
+    // themselves do not move bytes between trackers.
+    Status add_request(SinkBuffer* buffer, const TUniqueId& dest_id, int port,
+                       const std::shared_ptr<PInternalService_RecoverableStub>& stub,
+                       const TransmitAttachmentPtr& attachment) {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(fragment_tracker());
+        auto request = make_request(dest_id, port, stub);
+        request.attachment = attachment;
+        request.request_byte_size = request.attachment_size();
+        return buffer->add_request(request);
+    }
+
+    static bool wait_until(const std::function<bool()>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (!done()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return true;
+    }
+
+    static void start_server(brpc::Server* server, HoldingInternalService* service) {
+        brpc::ServerOptions options;
+        // Every held handler blocks a worker, so the server needs more workers than held RPCs.
+        options.num_threads = 16;
+        ASSERT_EQ(server->AddService(service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+        ASSERT_EQ(server->Start(0, &options), 0);
+    }
+
+    int64_t _saved_brpc_dop = 0;
+};
+
+// The owner tracker counts a shared attachment once while any holder keeps it, and gets the bytes back once when
+// the last holder lets it go, also when this happens under another tracker.
+TEST_F(SinkBufferAttachmentMemTest, shared_attachment_is_charged_once) {
+    MemTracker* fragment = fragment_tracker();
+    const int64_t base = fragment->consumption();
+
+    auto attachment = make_attachment();
+    const int64_t charged = attachment->charged_bytes();
+    EXPECT_NEAR(base + charged, fragment->consumption(), kNoise);
+
+    std::vector<TransmitAttachmentPtr> holders(3, attachment);
+    attachment.reset();
+    holders.pop_back();
+    holders.pop_back();
+    EXPECT_NEAR(base + charged, fragment->consumption(), kNoise);
+
+    MemTracker other(-1, "other");
+    {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(&other);
+        holders.clear();
+    }
+    EXPECT_NEAR(base, fragment->consumption(), kNoise);
+    EXPECT_NEAR(0, other.consumption(), kNoise);
+}
+
+// A broadcast sends one attachment to several remote destinations. The fragment tracker counts it once while a
+// request still waits in the buffer, and returns to its base value after the last request is sent. It never
+// goes below the base value by the attachment size.
+TEST_F(SinkBufferAttachmentMemTest, broadcast_attachment_is_released_once) {
+    brpc::Server server;
+    HoldingInternalService service;
+    ASSERT_NO_FATAL_FAILURE(start_server(&server, &service));
+    const int port = server.listen_address().port;
+    DeferOp stop_server([&] {
+        service.release();
+        server.Stop(0);
+        server.Join();
+    });
+
+    // One RPC in flight per destination, so a request to a busy destination waits in the buffer.
+    config::pipeline_sink_brpc_dop = 1;
+
+    const std::vector<TUniqueId> dest_ids{make_dest_id(1001), make_dest_id(1002), make_dest_id(1003)};
+    auto buffer = make_sink_buffer(port, dest_ids);
+    buffer->incr_sinker(_runtime_state.get());
+    auto stub = std::make_shared<PInternalService_RecoverableStub>(server.listen_address(), "");
+    ASSERT_OK(stub->reset_channel());
+
+    MemTracker* fragment = fragment_tracker();
+    MemTracker* query = fragment->parent();
+    ASSERT_NE(nullptr, query);
+
+    // Keep the third destination busy, so the broadcast request to it waits in the buffer.
+    ASSERT_OK(add_request(buffer.get(), dest_ids[2], port, stub, nullptr));
+    ASSERT_TRUE(wait_until([&] { return service.received.load() == 1; }));
+
+    const int64_t fragment_base = fragment->consumption();
+    const int64_t query_base = query->consumption();
+
+    auto attachment = make_attachment();
+    const int64_t charged = attachment->charged_bytes();
+    for (const auto& dest_id : dest_ids) {
+        ASSERT_OK(add_request(buffer.get(), dest_id, port, stub, attachment));
+    }
+    attachment.reset();
+
+    // Two broadcast requests are in flight and one waits in the buffer.
+    ASSERT_TRUE(wait_until([&] { return service.received.load() == 3; }));
+    EXPECT_NEAR(fragment_base + charged, fragment->consumption(), kNoise);
+    EXPECT_NEAR(query_base + charged, query->consumption(), kNoise);
+
+    // The response to the busy destination lets the waiting request go out, and the buffer drops the attachment.
+    service.release();
+    ASSERT_TRUE(wait_until([&] { return service.received.load() == 4; }));
+    ASSERT_TRUE(wait_until([&] { return std::abs(fragment->consumption() - fragment_base) <= kNoise; }));
+    EXPECT_NEAR(query_base, query->consumption(), kNoise);
+
+    buffer->cancel_one_sinker(_runtime_state.get());
+    ASSERT_TRUE(wait_until([&] { return buffer->is_finished(); }));
+    EXPECT_NEAR(fragment_base, fragment->consumption(), kNoise);
+}
+
+// A shuffle request goes to one destination. The fragment tracker counts the attachment until the request is
+// sent, and is back at its base value while the RPC is in flight and after the response.
+TEST_F(SinkBufferAttachmentMemTest, shuffle_attachment_is_released_once) {
+    brpc::Server server;
+    HoldingInternalService service;
+    ASSERT_NO_FATAL_FAILURE(start_server(&server, &service));
+    const int port = server.listen_address().port;
+    DeferOp stop_server([&] {
+        service.release();
+        server.Stop(0);
+        server.Join();
+    });
+
+    const auto dest_id = make_dest_id(2001);
+    auto buffer = make_sink_buffer(port, {dest_id});
+    buffer->incr_sinker(_runtime_state.get());
+    auto stub = std::make_shared<PInternalService_RecoverableStub>(server.listen_address(), "");
+    ASSERT_OK(stub->reset_channel());
+
+    MemTracker* fragment = fragment_tracker();
+    const int64_t base = fragment->consumption();
+
+    auto attachment = make_attachment();
+    EXPECT_NEAR(base + attachment->charged_bytes(), fragment->consumption(), kNoise);
+    ASSERT_OK(add_request(buffer.get(), dest_id, port, stub, attachment));
+    attachment.reset();
+
+    ASSERT_TRUE(wait_until([&] { return service.received.load() == 1; }));
+    EXPECT_NEAR(base, fragment->consumption(), kNoise);
+
+    service.release();
+    buffer->cancel_one_sinker(_runtime_state.get());
+    ASSERT_TRUE(wait_until([&] { return buffer->is_finished(); }));
+    EXPECT_NEAR(base, fragment->consumption(), kNoise);
+}
+
+// The buffer is cancelled while a request waits, so the request is never sent. The fragment tracker gets the
+// attachment back when the buffer drops the request.
+TEST_F(SinkBufferAttachmentMemTest, dropped_attachment_is_released_once) {
+    brpc::Server server;
+    HoldingInternalService service;
+    ASSERT_NO_FATAL_FAILURE(start_server(&server, &service));
+    const int port = server.listen_address().port;
+    DeferOp stop_server([&] {
+        service.release();
+        server.Stop(0);
+        server.Join();
+    });
+
+    config::pipeline_sink_brpc_dop = 1;
+
+    const auto dest_id = make_dest_id(3001);
+    auto buffer = make_sink_buffer(port, {dest_id});
+    buffer->incr_sinker(_runtime_state.get());
+    auto stub = std::make_shared<PInternalService_RecoverableStub>(server.listen_address(), "");
+    ASSERT_OK(stub->reset_channel());
+
+    ASSERT_OK(add_request(buffer.get(), dest_id, port, stub, nullptr));
+    ASSERT_TRUE(wait_until([&] { return service.received.load() == 1; }));
+
+    MemTracker* fragment = fragment_tracker();
+    const int64_t base = fragment->consumption();
+
+    auto attachment = make_attachment();
+    const int64_t charged = attachment->charged_bytes();
+    ASSERT_OK(add_request(buffer.get(), dest_id, port, stub, attachment));
+    attachment.reset();
+    EXPECT_NEAR(base + charged, fragment->consumption(), kNoise);
+
+    // Cancelling aborts the RPC in flight, and the waiting request is never sent.
+    buffer->cancel_one_sinker(_runtime_state.get());
+    ASSERT_TRUE(wait_until([&] { return buffer->is_finished(); }));
+    {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(fragment);
+        buffer.reset();
+    }
+    EXPECT_EQ(1, service.received.load());
+    EXPECT_NEAR(base, fragment->consumption(), kNoise);
 }
 
 } // namespace starrocks::pipeline

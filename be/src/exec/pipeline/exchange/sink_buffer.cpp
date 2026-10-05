@@ -31,6 +31,26 @@
 
 namespace starrocks::pipeline {
 
+void TransmitAttachment::append(const std::string& data) {
+    DCHECK(_owner != nullptr);
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_owner);
+    const int64_t before_bytes = CurrentThread::current().get_consumed_bytes();
+    // append() can throw bad_alloc after it took some blocks. We record the consumed bytes also in this case,
+    // because the destructor gives back exactly the recorded bytes.
+    DeferOp record([&]() { _charged_bytes += CurrentThread::current().get_consumed_bytes() - before_bytes; });
+    _buf.append(data);
+}
+
+TransmitAttachment::~TransmitAttachment() {
+    // We want the blocks to count on the process tracker wherever they are freed: here, or later by brpc in a
+    // bthread. So the owner tracker gives its bytes to the process tracker, and the blocks are dropped under it.
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(nullptr);
+    if (_owner != nullptr) {
+        _owner->release_without_root(_charged_bytes);
+    }
+    _buf.clear();
+}
+
 SinkBuffer::SinkBuffer(FragmentContext* fragment_ctx, const std::vector<TPlanFragmentDestination>& destinations,
                        bool is_dest_merge)
         : _fragment_ctx(fragment_ctx),
@@ -90,8 +110,8 @@ Status SinkBuffer::add_request(TransmitChunkInfo& request) {
         return Status::OK();
     }
     _buffered_mem_usage->consume(request.request_byte_size);
-    if (!request.attachment.empty()) {
-        _bytes_enqueued += request.attachment.size();
+    if (request.attachment_size() > 0) {
+        _bytes_enqueued += request.attachment_size();
         _request_enqueued++;
     }
     {
@@ -376,8 +396,8 @@ Status SinkBuffer::_try_to_send_rpc(const TUniqueId& instance_id, const std::fun
                     return Status::OK();
                 }
 
-                if (!request.attachment.empty()) {
-                    incr_sent_bytes(static_cast<int64_t>(request.attachment.size()));
+                if (request.attachment_size() > 0) {
+                    incr_sent_bytes(static_cast<int64_t>(request.attachment_size()));
                     _request_sent++;
                 }
                 // this is the last eos query, set query stats
@@ -389,8 +409,8 @@ Status SinkBuffer::_try_to_send_rpc(const TUniqueId& instance_id, const std::fun
         }
 
         if (!request.params->eos() || context.num_sinker > 1) {
-            if (!request.attachment.empty()) {
-                incr_sent_bytes(static_cast<int64_t>(request.attachment.size()));
+            if (request.attachment_size() > 0) {
+                incr_sent_bytes(static_cast<int64_t>(request.attachment_size()));
                 _request_sent++;
             }
         }
@@ -465,10 +485,6 @@ Status SinkBuffer::_try_to_send_rpc(const TUniqueId& instance_id, const std::fun
         ++_total_in_flight_rpc;
         ++context.num_in_flight_rpcs;
 
-        // Attachment will be released by process_mem_tracker in closure->Run() in bthread, when receiving the response,
-        // so decrease the memory usage of attachment from instance_mem_tracker immediately before sending the request.
-        _mem_tracker->release_without_root(request.attachment.size());
-
         closure->cntl.Reset();
         closure->cntl.set_timeout_ms(_brpc_timeout_ms);
         SET_IGNORE_OVERCROWDED(closure->cntl, query);
@@ -490,7 +506,7 @@ Status SinkBuffer::_try_to_send_rpc(const TUniqueId& instance_id, const std::fun
 
 Status SinkBuffer::_send_rpc(DisposableClosure<PTransmitChunkResult, ClosureContext>* closure,
                              const TransmitChunkInfo& request) {
-    auto expected_iobuf_size = request.attachment.size() + request.params->ByteSizeLong() + sizeof(size_t) * 2;
+    auto expected_iobuf_size = request.attachment_size() + request.params->ByteSizeLong() + sizeof(size_t) * 2;
     if (UNLIKELY(expected_iobuf_size > _rpc_http_min_size)) {
         butil::IOBuf iobuf;
         butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
@@ -500,9 +516,11 @@ Status SinkBuffer::_send_rpc(DisposableClosure<PTransmitChunkResult, ClosureCont
         closure->cntl.request_attachment().append(&params_size, sizeof(params_size));
         closure->cntl.request_attachment().append(iobuf);
         // append attachment
-        size_t attachment_size = request.attachment.size();
+        size_t attachment_size = request.attachment_size();
         closure->cntl.request_attachment().append(&attachment_size, sizeof(attachment_size));
-        closure->cntl.request_attachment().append(request.attachment);
+        if (request.attachment != nullptr) {
+            closure->cntl.request_attachment().append(request.attachment->buf());
+        }
         VLOG_ROW << "issue a http rpc, attachment's size = " << attachment_size
                  << " , total size = " << closure->cntl.request_attachment().size();
 
@@ -518,7 +536,9 @@ Status SinkBuffer::_send_rpc(DisposableClosure<PTransmitChunkResult, ClosureCont
         }
         res.value()->transmit_chunk_via_http(&closure->cntl, nullptr, &closure->result, closure);
     } else {
-        closure->cntl.request_attachment().append(request.attachment);
+        if (request.attachment != nullptr) {
+            closure->cntl.request_attachment().append(request.attachment->buf());
+        }
         request.brpc_stub->transmit_chunk(&closure->cntl, request.params.get(), &closure->result, closure);
     }
     return Status::OK();

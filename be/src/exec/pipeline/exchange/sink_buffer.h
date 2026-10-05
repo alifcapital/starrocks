@@ -21,6 +21,7 @@
 #include <list>
 #include <memory>
 #include <queue>
+#include <string>
 #include <unordered_set>
 
 #include "exec/pipeline/fragment_context.h"
@@ -41,6 +42,39 @@ struct ClosureContext {
     int64_t send_timestamp;
 };
 
+// The serialized chunks that one RPC request carries. A broadcast sends the same attachment to every
+// destination, so all these requests share one object.
+//
+// We want the owner tracker (the fragment instance tracker) to count the attachment while any request of the
+// fragment still holds it, and to count it once, whatever the number of destinations. append() allocates the
+// blocks under the owner tracker and remembers how many bytes that added. The destructor runs when the last
+// request lets the attachment go. It moves these bytes from the owner tracker to the process tracker and drops
+// its block references under the process tracker. brpc can keep the blocks until the RPC response and frees
+// them in a bthread, which also counts on the process tracker. So the owner tracker never gives back more than
+// it was charged, and it does not depend on the thread that frees the blocks.
+class TransmitAttachment {
+public:
+    explicit TransmitAttachment(MemTracker* owner) : _owner(owner) {}
+    ~TransmitAttachment();
+
+    TransmitAttachment(const TransmitAttachment&) = delete;
+    TransmitAttachment& operator=(const TransmitAttachment&) = delete;
+
+    void append(const std::string& data);
+
+    const butil::IOBuf& buf() const { return _buf; }
+    size_t size() const { return _buf.size(); }
+    bool empty() const { return _buf.empty(); }
+    // The bytes that the owner tracker counts for this attachment until it is destroyed.
+    int64_t charged_bytes() const { return _charged_bytes; }
+
+private:
+    MemTracker* const _owner;
+    butil::IOBuf _buf;
+    int64_t _charged_bytes = 0;
+};
+using TransmitAttachmentPtr = std::shared_ptr<TransmitAttachment>;
+
 struct TransmitChunkInfo {
     // For BUCKET_SHUFFLE_HASH_PARTITIONED, multiple channels may be related to
     // a same exchange source fragment instance, so we should use fragment_instance_id
@@ -48,11 +82,14 @@ struct TransmitChunkInfo {
     TUniqueId fragment_instance_id;
     std::shared_ptr<PInternalService_RecoverableStub> brpc_stub;
     PTransmitChunkParamsPtr params;
-    butil::IOBuf attachment;
+    // May be null for a request without serialized chunks.
+    TransmitAttachmentPtr attachment;
     // The byte size of this request
     // maybe passthrough or rpc request (physical attachment size)
     size_t request_byte_size;
     const TNetworkAddress brpc_addr;
+
+    size_t attachment_size() const { return attachment != nullptr ? attachment->size() : 0; }
 };
 
 // TimeTrace is introduced to estimate time more accurately.
