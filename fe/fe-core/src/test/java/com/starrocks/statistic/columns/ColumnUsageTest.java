@@ -180,7 +180,7 @@ class ColumnUsageTest extends PlanTestBase {
         starRocksAssert.query("select * from t0 where v1 > 1").explainQuery();
         starRocksAssert.getCtx().executeSql("analyze table t0 predicate columns with sync mode");
 
-        String analyzeSql = "create analyze table t0";
+        String analyzeSql = "create analyze full table t0";
         starRocksAssert.ddl(analyzeSql);
 
         List<AnalyzeJob> allAnalyzeJobList =
