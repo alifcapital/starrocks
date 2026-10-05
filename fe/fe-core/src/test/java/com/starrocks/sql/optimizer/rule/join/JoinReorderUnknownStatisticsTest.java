@@ -112,12 +112,17 @@ class JoinReorderUnknownStatisticsTest {
         return union;
     }
 
-    private MultiJoinNode region(OptExpression left, ColumnRefOperator leftKey, OptExpression right,
-                                 ColumnRefOperator rightKey) {
+    private OptExpression join(OptExpression left, ColumnRefOperator leftKey, OptExpression right,
+                               ColumnRefOperator rightKey) {
         OptExpression join = OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN,
                 BinaryPredicateOperator.eq(leftKey, rightKey)), left, right);
         join.deriveLogicalPropertyItself();
-        return MultiJoinNode.toMultiJoinNode(join);
+        return join;
+    }
+
+    private MultiJoinNode region(OptExpression left, ColumnRefOperator leftKey, OptExpression right,
+                                 ColumnRefOperator rightKey) {
+        return MultiJoinNode.toMultiJoinNode(join(left, leftKey, right, rightKey));
     }
 
     @Test
@@ -267,5 +272,59 @@ class JoinReorderUnknownStatisticsTest {
 
             assertEquals(keyStatistic == unknown, region.hasUnknownJoinColumnStatistics(optimizer));
         }
+    }
+
+    // The scans decide first: a region whose scans have statistics stays known, even when a join column that an atom
+    // computes has none, because DP and greedy run for such a region without a statistic of that column.
+    @Test
+    void regionWhoseScansHaveStatisticsStaysKnown() {
+        ColumnRefOperator key = column("key");
+        ColumnRefOperator other = column("other");
+        ColumnRefOperator rightKey = column("right_key");
+        ColumnRefOperator rightOther = column("right_other");
+        // The flag of a scan is false when the scan derived statistics and all its columns were known.
+        OptExpression scan = scan(key, known, other, known, 100);
+        ((LogicalIcebergScanOperator) scan.getOp()).setHasUnknownColumn(false);
+        OptExpression atom = OptExpression.create(new LogicalProjectOperator(Map.of(key, key)), scan);
+        atom.deriveLogicalPropertyItself();
+        atom.setStatistics(Statistics.builder().setOutputRowCount(100).addColumnStatistic(key, unknown).build());
+        OptExpression rightScan = scan(rightKey, known, rightOther, known, 100);
+        ((LogicalIcebergScanOperator) rightScan.getOp()).setHasUnknownColumn(false);
+        OptExpression join = join(atom, key, rightScan, rightKey);
+        MultiJoinNode region = MultiJoinNode.toMultiJoinNode(join);
+
+        assertTrue(region.hasUnknownJoinColumnStatistics(optimizer));
+        assertFalse(Utils.hasUnknownColumnsStats(join));
+        assertFalse(ReorderJoinRule.hasUnknownStatistics(join, region, optimizer));
+    }
+
+    @Test
+    void regionIsUnknownWhenTheScansAndTheJoinColumnsAreUnknown() {
+        ColumnRefOperator key = column("key");
+        ColumnRefOperator other = column("other");
+        ColumnRefOperator rightKey = column("right_key");
+        ColumnRefOperator rightOther = column("right_other");
+        OptExpression join = join(scan(key, unknown, other, known, 100), key,
+                scan(rightKey, known, rightOther, known, 100), rightKey);
+        MultiJoinNode region = MultiJoinNode.toMultiJoinNode(join);
+
+        assertTrue(ReorderJoinRule.hasUnknownStatistics(join, region, optimizer));
+    }
+
+    @Test
+    void regionIsKnownWhenOnlyTheFlagOfAScanIsStale() {
+        ColumnRefOperator key = column("key");
+        ColumnRefOperator other = column("other");
+        ColumnRefOperator rightKey = column("right_key");
+        ColumnRefOperator rightOther = column("right_other");
+        OptExpression atom = OptExpression.create(new LogicalProjectOperator(Map.of(key, key)),
+                scan(key, unknown, other, unknown, 100));
+        atom.deriveLogicalPropertyItself();
+        atom.setStatistics(Statistics.builder().setOutputRowCount(100).addColumnStatistic(key, known).build());
+        OptExpression join = join(atom, key, scan(rightKey, known, rightOther, known, 100), rightKey);
+        MultiJoinNode region = MultiJoinNode.toMultiJoinNode(join);
+
+        assertTrue(Utils.hasUnknownColumnsStats(join));
+        assertFalse(ReorderJoinRule.hasUnknownStatistics(join, region, optimizer));
     }
 }
