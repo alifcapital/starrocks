@@ -787,6 +787,7 @@ public class AddDecodeNodeForDictStringRule implements TreeRewriteRule {
             newHashAggregator.setDistinctColumnDataSkew(aggOperator.getDistinctColumnDataSkew());
             newHashAggregator.setForcePreAggregation(aggOperator.isForcePreAggregation());
             newHashAggregator.setLocalLimit(aggOperator.getLocalLimit());
+            newHashAggregator.setPartialAggregate(aggOperator.isPartialAggregate());
             newHashAggregator.setGroupByMinMaxStatistic(aggOperator.getGroupByMinMaxStatistic());
             return newHashAggregator;
         }

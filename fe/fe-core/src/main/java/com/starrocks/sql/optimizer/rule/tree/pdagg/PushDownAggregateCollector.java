@@ -20,7 +20,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
-import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -49,7 +48,6 @@ import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient;
 import com.starrocks.sql.optimizer.statistics.TopNAggregationCost;
 import com.starrocks.sql.optimizer.task.TaskContext;
-import com.starrocks.system.BackendResourceStat;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.logging.log4j.LogManager;
@@ -713,24 +711,14 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         if (!(rows > 0) || !Double.isFinite(groups)) {
             return false;
         }
-        double localGroups = TopNAggregationCost.concurrentLocalGroups(rows, groups, drivers());
+        double localGroups = TopNAggregationCost.concurrentLocalGroups(rows, groups,
+                StatisticsCalculator.aggregateDrivers());
         boolean push = rows >= StatisticsEstimateCoefficient.PUSH_DOWN_AGGREGATE_MIN_LOCAL_REDUCTION * localGroups;
         if (LOG.isDebugEnabled()) {
             LOG.debug("Push down aggregation {} group by {}: rows {}, groups {}, local groups {}, push {}",
                     context.aggregations.values(), groupBys, rows, groups, localGroups, push);
         }
         return push;
-    }
-
-    // The drivers that run the local phase, as in the cost model of aggregates.
-    private double drivers() {
-        ConnectContext connection = ConnectContext.get();
-        if (connection == null) {
-            return 1;
-        }
-        long warehouseId = connection.getCurrentWarehouseId();
-        return Math.max(1, BackendResourceStat.getInstance().getNumBes(warehouseId)) *
-                (double) Math.max(1, sessionVariable.getDegreeOfParallelism(warehouseId));
     }
 
     // high(2): row_count / cardinality < MEDIUM_AGGREGATE_EFFECT_COEFFICIENT

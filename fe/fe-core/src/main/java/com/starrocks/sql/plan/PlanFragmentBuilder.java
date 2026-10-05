@@ -2589,7 +2589,10 @@ public class PlanFragmentBuilder {
             ArrayList<Expr> intermediateAggrExprs = aggExpr.intermediateExpr;
 
             AggregationNode aggregationNode;
-            if (node.getType().isLocal() && node.isSplit()) {
+            // A partial aggregate is built as the first phase of a split aggregate: it emits the state of each
+            // function, which for a pushed aggregate has the type of the result, and it may stream. Its rows reach
+            // the aggregate above through whatever exchange that one needs, so it sets no output partition.
+            if ((node.getType().isLocal() && node.isSplit()) || node.isPartialAggregate()) {
                 if (hasRemovedDistinct) {
                     setMergeAggFn(aggregateExprList, aggExpr.removeDistinctFlags);
                 }
@@ -2603,7 +2606,7 @@ public class PlanFragmentBuilder {
                 aggregationNode.unsetNeedsFinalize();
                 aggregationNode.setIsPreagg(node.canUseStreamingPreAgg());
                 aggregationNode.setIntermediateTuple();
-                if (!partitionExpressions.isEmpty()) {
+                if (!partitionExpressions.isEmpty() && !node.isPartialAggregate()) {
                     inputFragment.setOutputPartition(DataPartition.hashPartitioned(partitionExpressions));
                 }
 

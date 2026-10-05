@@ -80,6 +80,13 @@ public class LogicalAggregationOperator extends LogicalOperator {
     // TopN information for filtering group by data during aggregation
     private LogicalTopNOperator.TopNSortInfo aggTopnSortInfo = null;
 
+    // A partial aggregate may emit several rows for one group key, because an aggregate above it merges them. The
+    // aggregate pushed below a join is one: it only has to cut the rows that reach the join. It runs as a streaming
+    // local phase with no exchange and no global phase, so it passes rows through when they do not reduce. Only an
+    // only-local aggregate without a predicate is partial: a rule that turns it into another type keeps it exact, and
+    // the streaming operators of the BE do not evaluate a predicate, so one with a predicate stays blocking.
+    private boolean partialAggregate = false;
+
     // If the AggType is not GLOBAL, it means we have split the agg hence the isSplit should be true.
     // `this.isSplit = !type.isGlobal() || isSplit;` helps us do the work.
     // If you want to manually set this value, you could invoke setOnlyLocalAggregate().
@@ -136,6 +143,10 @@ public class LogicalAggregationOperator extends LogicalOperator {
 
     public boolean isOnlyLocalAggregate() {
         return type.isLocal() && !isSplit;
+    }
+
+    public boolean isPartialAggregate() {
+        return partialAggregate && isOnlyLocalAggregate() && predicate == null;
     }
 
     public List<ColumnRefOperator> getPartitionByColumns() {
@@ -298,14 +309,14 @@ public class LogicalAggregationOperator extends LogicalOperator {
                 type == that.type && Objects.equals(aggregations, that.aggregations) &&
                 Objects.equals(groupingKeys, that.groupingKeys) &&
                 Objects.equals(partitionByColumns, that.partitionByColumns) &&
-                topNLocalAgg == that.topNLocalAgg &&
+                topNLocalAgg == that.topNLocalAgg && partialAggregate == that.partialAggregate &&
                 Objects.equals(aggTopnSortInfo, that.aggTopnSortInfo);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(super.hashCode(), type, isSplit, aggregations, groupingKeys, partitionByColumns, topNLocalAgg,
-                aggTopnSortInfo);
+                aggTopnSortInfo, partialAggregate);
     }
 
     public static Builder builder() {
@@ -341,6 +352,12 @@ public class LogicalAggregationOperator extends LogicalOperator {
             builder.topNLocalAgg = aggregationOperator.topNLocalAgg;
             builder.localLimit = aggregationOperator.localLimit;
             builder.aggTopnSortInfo = aggregationOperator.aggTopnSortInfo;
+            builder.partialAggregate = aggregationOperator.partialAggregate;
+            return this;
+        }
+
+        public Builder setPartialAggregate(boolean partialAggregate) {
+            builder.partialAggregate = partialAggregate;
             return this;
         }
 

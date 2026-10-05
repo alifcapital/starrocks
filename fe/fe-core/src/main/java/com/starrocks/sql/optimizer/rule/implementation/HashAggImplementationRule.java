@@ -47,6 +47,7 @@ public class HashAggImplementationRule extends ImplementationRule {
         physical.setTopNLocalAgg(logical.isTopNLocalAgg());
         physical.setTopNSortInfo(logical.getAggTopnSortInfo());
         physical.setLocalLimit(logical.getLocalLimit());
+        physical.setPartialAggregate(logical.isPartialAggregate());
         OptExpression result = OptExpression.create(physical, input.getInputs());
         return Lists.newArrayList(result);
     }

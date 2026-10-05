@@ -86,8 +86,9 @@ public class PruneAggregateColumnsRule extends TransformationRule {
         if (newAggregations.keySet().equals(aggregations.keySet())) {
             return Collections.emptyList();
         }
+        // Fewer aggregations do not change the groups, so a partial aggregate stays partial.
         LogicalAggregationOperator newAggOperator = new LogicalAggregationOperator.Builder().withOperator(aggOperator)
-                .setType(AggType.GLOBAL)
+                .setType(aggOperator.isPartialAggregate() ? aggOperator.getType() : AggType.GLOBAL)
                 .setAggregations(newAggregations)
                 .build();
 

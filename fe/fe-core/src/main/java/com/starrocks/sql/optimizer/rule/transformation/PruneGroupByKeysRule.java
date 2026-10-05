@@ -204,8 +204,9 @@ public class PruneGroupByKeysRule extends TransformationRule {
                 .stream().filter(columnRefOperator -> !removedGroupingKeys.contains(columnRefOperator))
                 .collect(Collectors.toList());
 
+        // Fewer keys do not change the groups, so a partial aggregate stays partial.
         LogicalAggregationOperator newAggOperator = new LogicalAggregationOperator.Builder().withOperator(aggOperator)
-                .setType(AggType.GLOBAL)
+                .setType(aggOperator.isPartialAggregate() ? aggOperator.getType() : AggType.GLOBAL)
                 .setGroupingKeys(newGroupingKeys)
                 .setPartitionByColumns(newPartitionColumns)
                 .setPredicate(newPredicate).build();

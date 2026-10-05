@@ -77,9 +77,11 @@ public class PushDownAggregationWithMVTest extends MVTestBase {
 
         // Get the execution plan with push down enabled
         String planWithPushDown = getFragmentPlan(sql);
-        PlanTestBase.assertContains(planWithPushDown, "  1:AGGREGATE (update finalize)\n" +
-                "  |  output: sum(19: amount)\n" +
-                "  |  group by: 18: city, 16: id\n" +
+        // The pushed aggregate is a partial aggregate: a streaming local phase right on the scan of the view.
+        PlanTestBase.assertContains(planWithPushDown, "  1:AGGREGATE (update serialize)\n" +
+                "  |  STREAMING\n" +
+                "  |  output: sum(18: amount)\n" +
+                "  |  group by: 17: city, 15: id\n" +
                 "  |  \n" +
                 "  0:OlapScanNode\n" +
                 "     TABLE: mv1\n" +

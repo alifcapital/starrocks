@@ -63,6 +63,9 @@ import java.util.stream.Collectors;
  *
  * */
 public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpression, AggregatePushDownContext> {
+    // cbo_push_down_aggregate value that builds the pushed aggregate as a partial aggregate
+    public static final String PARTIAL_FORM = "partial";
+
     private final ColumnRefFactory factory;
     private final PushDownAggregateCollector collector;
     private final SessionVariable sessionVariable;
@@ -441,8 +444,18 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
 
         LogicalAggregationOperator aggregate;
         List<ColumnRefOperator> groupBys = Lists.newArrayList(context.groupBys.keySet());
-        if ("local".equalsIgnoreCase(sessionVariable.getCboPushDownAggregate()) ||
-                ("auto".equalsIgnoreCase(sessionVariable.getCboPushDownAggregate()) && groupBys.size() <= 1)) {
+        String form = sessionVariable.getCboPushDownAggregate();
+        if (PARTIAL_FORM.equalsIgnoreCase(form) && canEmitPartialStates(context.aggregations)) {
+            // The aggregate above the join merges the rows of a key, so this one only cuts rows. As a streaming local
+            // phase it needs no exchange and no blocking phase, and it passes rows through when they do not reduce,
+            // so an estimate that was wrong costs one pass instead of a shuffle and a spill of every row.
+            aggregate = LogicalAggregationOperator.builder()
+                    .withOperator(new LogicalAggregationOperator(AggType.LOCAL, groupBys, context.aggregations))
+                    .setSplit(false)
+                    .setPartialAggregate(true)
+                    .build();
+        } else if ("local".equalsIgnoreCase(form) ||
+                ("auto".equalsIgnoreCase(form) && groupBys.size() <= 1)) {
             // local && un-split
             aggregate = new LogicalAggregationOperator(AggType.LOCAL, groupBys, context.aggregations);
             aggregate.setOnlyLocalAggregate();
@@ -451,6 +464,20 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
         }
 
         return OptExpression.create(aggregate, result);
+    }
+
+    // A partial aggregate runs only as the first phase, and its rows go to the aggregate above the join as they are.
+    // That aggregate reads them as values of the function result, so the state that the first phase emits must have
+    // the type of the result. This holds for every function that is pushed (sum, min, max and the unions of HLL,
+    // bitmap and percentile); with any other function the aggregate keeps the exact form.
+    private static boolean canEmitPartialStates(Map<ColumnRefOperator, CallOperator> aggregations) {
+        for (CallOperator call : aggregations.values()) {
+            if (!(call.getFunction() instanceof AggregateFunction function) ||
+                    !function.getIntermediateTypeOrReturnType().equals(function.getReturnType())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

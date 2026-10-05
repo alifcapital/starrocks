@@ -311,7 +311,9 @@ public class CostModel {
 
             if (node.getDistinctColumnDataSkew() != null) {
                 factor = computeDataSkewPenaltyOfGroupByCountDistinct(node, inputStatistics);
-            } else if (node.isSplit() && node.getType().isLocal() && !preferLocalShuffleOnePhaseAgg(node, context)) {
+            } else if ((node.isSplit() && node.getType().isLocal() && !preferLocalShuffleOnePhaseAgg(node, context))
+                    || node.isPartialAggregate()) {
+                // A partial aggregate is a streaming local phase too: it holds little and passes rows through.
                 factor = 0.1;
             }
 
@@ -683,7 +685,7 @@ public class CostModel {
                     factor = 0.0;
                 } else if (skewInfo != null && skewInfo.getStage() == 3) {
                     factor = skewInfo.getPenaltyFactor();
-                } else if (childAggOp.isSplit() && childAggOp.getType().isLocal()) {
+                } else if ((childAggOp.isSplit() && childAggOp.getType().isLocal()) || childAggOp.isPartialAggregate()) {
                     factor = 0.1;
                 }
             } else if (childOp instanceof PhysicalHashAggregateOperator) {
@@ -694,7 +696,7 @@ public class CostModel {
                     factor = 0.0;
                 } else if (skewInfo != null && skewInfo.getStage() == 3) {
                     factor = skewInfo.getPenaltyFactor();
-                } else if (childAggOp.isSplit() && childAggOp.getType().isLocal()) {
+                } else if ((childAggOp.isSplit() && childAggOp.getType().isLocal()) || childAggOp.isPartialAggregate()) {
                     factor = 0.1;
                 }
             }

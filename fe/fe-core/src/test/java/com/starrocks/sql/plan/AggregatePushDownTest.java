@@ -53,6 +53,8 @@ public class AggregatePushDownTest extends PlanTestBase {
                 ");");
         connectContext.getSessionVariable().setNewPlanerAggStage(1);
         connectContext.getSessionVariable().setCboPushDownAggregateMode(1);
+        // The plan files expect the exact form of a pushed aggregate.
+        connectContext.getSessionVariable().setCboPushDownAggregate("global");
         connectContext.getSessionVariable().setEnableRewriteSumByAssociativeRule(false);
         connectContext.getSessionVariable().setEnableEliminateAgg(false);
     }
