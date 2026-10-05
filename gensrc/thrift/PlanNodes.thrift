@@ -185,9 +185,10 @@ struct TBrokerRangeDesc {
     12: optional string jsonpaths
     13: optional string json_root
     14: optional Types.TCompressionType compression_type
+    // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
     // If true, the file path will be exposed as an additional column
     // The path column comes after columns_from_path in the schema
-    17: optional bool include_file_path_column
+    10000: optional bool include_file_path_column
 }
 
 enum TObjectStoreType {
@@ -951,12 +952,13 @@ struct TAggregationNode {
 
   31: optional list<Exprs.TExpr> group_by_min_max
 
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
   // FE NDV (cardinality) estimate of the group-by key, set only when the FE
   // proves the estimate is safe to reserve from (global/merged-local agg, known
   // stats, above the min-reserve threshold). BE uses it to reserve the aggregation
   // hash table once, avoiding incremental rehashing on high-cardinality keys.
   // Absent => no estimate; BE must not reserve.
-  32: optional i64 estimated_cardinality
+  10000: optional i64 estimated_cardinality
 
 }
 
@@ -1327,12 +1329,13 @@ struct THdfsScanNode {
     // describe distribution of local exchange
     25: optional list<Partitions.TBucketProperty> bucket_properties;
 
+    // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
     // TopN scan reorder/skip (ORDER BY <col> [ASC|DESC] LIMIT k). The leading sort-key slot. Its
     // min/max per file (carried in THdfsScanRange.min_max_values) is used to order morsels (best
     // first) and to skip whole files against the TopN runtime filter.
-    30: optional Types.TSlotId topn_reorder_slot_id
-    31: optional bool topn_reorder_desc
-    32: optional bool topn_reorder_nulls_first
+    10000: optional Types.TSlotId topn_reorder_slot_id
+    10001: optional bool topn_reorder_desc
+    10002: optional bool topn_reorder_nulls_first
 }
 
 struct TProjectNode {

@@ -78,12 +78,13 @@ message ColumnPB {
     optional bool is_auto_increment = 18;
     // agg_state type
     optional AggStateDescPB agg_state_desc = 19;
+    // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
     // Default value used to backfill rows that physically lack this column (added via fast
     // schema evolution). Frozen at column-add time; ALTER ... MODIFY ... DEFAULT does not
     // change it. Distinct from |default_value| (field 7), which is the default for newly
     // written rows. Absent for schemas written before this field existed; readers fall back
     // to |default_value| in that case.
-    optional bytes origin_default_value = 20;
+    optional bytes origin_default_value = 10000;
 }
 
 message TabletSchemaPB {

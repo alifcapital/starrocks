@@ -154,9 +154,10 @@ struct TRuntimeFilterDescription {
   22: optional bool is_nulls_first;
   23: optional i64 limit;
 
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
   // FE estimate of non-NULL distinct values of this key over the entire build input.
   // Used for components of composite join keys; absent retains hash-table sizing.
-  24: optional i64 estimated_build_ndv;
+  10000: optional i64 estimated_build_ndv;
 }
 
 struct TRuntimeFilterProberParams {

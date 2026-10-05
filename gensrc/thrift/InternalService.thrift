@@ -341,12 +341,13 @@ struct TQueryOptions {
   134: optional i32 datacache_priority;
   135: optional i64 datacache_ttl_seconds;
   136: optional bool enable_cache_select;
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
   // When true, CacheSelectScanner stops after the file footer is in block_cache and skips the
   // column data + Iceberg delete-file fetch. Set only by
   // IcebergMetadataRefreshFooterPrefetcher.warmup on its own cloned ConnectContext, never by
   // user sessions — the public user-facing knob is the FE-only Session var
   // enable_iceberg_metadata_refresh_footer_prefetch.
-  220: optional bool cache_select_footer_only = false;
+  10000: optional bool cache_select_footer_only = false;
   137: optional i64 datacache_sharing_work_period;
   138: optional bool enable_file_pagecache;
 
@@ -365,7 +366,7 @@ struct TQueryOptions {
   162: optional bool enable_hash_join_range_direct_mapping_opt;
   163: optional bool enable_hash_join_linear_chained_opt;
   164: optional bool enable_hash_join_serialize_fixed_size_string;
-  165: optional bool enable_agg_consecutive_keys_cache;
+  10001: optional bool enable_agg_consecutive_keys_cache;
 
   170: optional bool enable_parquet_reader_bloom_filter;
   171: optional bool enable_parquet_reader_page_index;
@@ -400,40 +401,40 @@ struct TQueryOptions {
   // Inline a qualifying aggregate's accumulator (count/sum/min/max) into the
   // group-by hash-map value slot for fixed-size keys, instead of a pointer to
   // an arena-allocated state.
-  219: optional bool enable_agg_inline_accumulator;
+  10002: optional bool enable_agg_inline_accumulator;
   // Evaluate an expensive value-branch of CASE/IF/IFNULL/COALESCE only on the rows that route to it
   // (two-phase conditional evaluation). Off by default until fuzz/perf gates pass.
-  240: optional bool enable_conditional_two_phase_eval = false;
+  10003: optional bool enable_conditional_two_phase_eval = false;
 
   // Enable fused JSON-extract fast path (simdjson::ondemand) for get_json_*(VARCHAR, VARCHAR)
   // and json_query_from_string. Default true; set false to fall back to the legacy
   // parse_json+JsonPath::extract pipeline.
-  228: optional bool enable_json_extract_fusion = true;
+  10004: optional bool enable_json_extract_fusion = true;
 
   // When true, percentile_approx* aggregation uses the compact intermediate
   // serialization format for transient exchange/spill state. Global-only on FE
   // and enabled only after a full cluster upgrade; see
   // SessionVariable.ENABLE_PERCENTILE_COMPACT_INTERMEDIATE.
-  227: optional bool enable_percentile_compact_intermediate = false;
+  10005: optional bool enable_percentile_compact_intermediate = false;
 
-  // Backport: preserve our inline accumulator field 219; use free IDs 245-250.
+  // Backported from upstream with the upstream field ids.
   // ---- TopN runtime-filter back-pressure tuning (lake/connector self-enabled path) ----
   // Max concurrent IO tasks a scan may submit while a TopN runtime filter is still pending.
   // Caps read-ahead so concurrent readers cannot overshoot the (non-concurrency-aware) row
   // budget before the filter arrives. Full DOP resumes once the filter lands. <=0 disables
   // the clamp (legacy overshoot behavior). Default 1.
-  245: optional i32 topn_filter_back_pressure_io_tasks = 1;
+  219: optional i32 topn_filter_back_pressure_io_tasks = 1;
   // Master switch for scans (both shared-nothing olap and shared-data lake/connector) to
   // self-enable TopN back-pressure even when the FE-side topn_filter_back_pressure_mode is 0.
   // Default true.
-  246: optional bool enable_topn_filter_back_pressure = true;
+  220: optional bool enable_topn_filter_back_pressure = true;
   // Back-pressure throttle window parameters used by the lake/connector self-enabled path
   // (the FE-driven olap path keeps using the per-scan-node thrift values). Defaults match the
   // tuned values: finer, exponentially-backing-off throttle quanta.
-  247: optional i32 topn_back_pressure_max_rounds = 8;
-  248: optional i64 topn_back_pressure_num_rows = 1024;
-  249: optional i64 topn_back_pressure_throttle_time_ms = 8;
-  250: optional i64 topn_back_pressure_throttle_time_upper_bound_ms = 100;
+  221: optional i32 topn_back_pressure_max_rounds = 8;
+  222: optional i64 topn_back_pressure_num_rows = 1024;
+  223: optional i64 topn_back_pressure_throttle_time_ms = 8;
+  224: optional i64 topn_back_pressure_throttle_time_upper_bound_ms = 100;
 }
 
 // A scan range plus the parameters needed to execute that scan.
@@ -533,8 +534,9 @@ enum InternalServiceVersion {
 struct TAdaptiveDopParam {
   1: optional i64 max_block_rows_per_driver_seq
   2: optional i64 max_output_amplification_factor
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
   // Zero or absent preserves the row-only buffering policy.
-  3: optional i64 max_block_bytes_per_driver_seq
+  10000: optional i64 max_block_bytes_per_driver_seq
 }
 
 struct TPredicateTreeParams {
