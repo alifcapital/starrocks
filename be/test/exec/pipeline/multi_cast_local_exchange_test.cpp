@@ -106,7 +106,7 @@ TEST(MultiCastLocalExchangeTest, spillableExchangerReportsPendingTasks) {
     RuntimeState state(query_ctx->query_id(), generate_uuid(), options, TQueryGlobals{}, ExecEnv::GetInstance());
     state.init_mem_trackers(query_ctx->mem_tracker());
     state.set_query_ctx(query_ctx.get());
-    auto exchanger = std::make_shared<SpillableMultiCastLocalExchanger>(&state, 1, 1);
+    auto exchanger = std::make_shared<SpillableMultiCastLocalExchanger>(&state, 1, 1, 1);
     MultiCastLocalExchangeSourceOperatorFactory source_factory(1, 1, 0, exchanger);
     MultiCastLocalExchangeSinkOperatorFactory sink_factory(2, 1, exchanger);
     auto source = source_factory.create(1, 0);

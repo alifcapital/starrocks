@@ -27,9 +27,9 @@
 
 #include <cstdint>
 
+#include "exec/pipeline/spill_process_operator.h"
 #include "util/metrics.h"
 #include "util/metrics/spill_metrics.h"
-#include "exec/pipeline/spill_process_operator.h"
 
 namespace starrocks::pipeline {
 
@@ -129,7 +129,6 @@ TEST(BlockReasonTest, uncovered_reason_flags_and_ticks_metric) {
 
     MetricRegistry registry("block_reason_test_registry");
     SpillMetrics metrics(&registry);
-    metrics.install(&registry);
     auto* counter = metrics.parked_with_uncovered_reason_total();
     ASSERT_NE(counter, nullptr);
 

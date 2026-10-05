@@ -25,22 +25,22 @@
 #include <atomic>
 #include <memory>
 
-#include "testutil/assert.h"
 #include "common/object_pool.h"
-#include "util/runtime_profile.h"
 #include "exec/pipeline/fragment_context.h"
+#include "exec/pipeline/group_execution/execution_group.h"
 #include "exec/pipeline/operator.h"
+#include "exec/pipeline/pipeline.h"
+#include "exec/pipeline/pipeline_driver.h"
 #include "exec/pipeline/query_context.h"
+#include "exec/pipeline/schedule/event_scheduler.h"
 #include "exec/pipeline/source_operator.h"
 #include "exec/query_cache/conjugate_operator.h"
 #include "exec/query_cache/multilane_operator.h"
-#include "exec/pipeline/group_execution/execution_group.h"
-#include "exec/pipeline/pipeline.h"
-#include "exec/pipeline/pipeline_driver.h"
-#include "exec/pipeline/schedule/event_scheduler.h"
 #include "runtime/exec_env.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
+#include "testutil/assert.h"
+#include "util/runtime_profile.h"
 
 namespace starrocks::query_cache {
 
@@ -240,7 +240,7 @@ public:
 
         auto runtime_state = std::make_shared<RuntimeState>();
         auto* exec_env = ExecEnv::GetInstance();
-        runtime_state->set_exec_env(exec_env);
+        runtime_state->_exec_env = exec_env;
         runtime_state->_obj_pool = std::make_shared<ObjectPool>();
         runtime_state->init_instance_mem_tracker();
         runtime_state->set_query_ctx(_query_ctx.get());
