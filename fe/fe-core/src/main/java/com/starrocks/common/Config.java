@@ -2916,6 +2916,17 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static volatile long statistic_join_cache_max_bytes = 512L * 1024 * 1024;
 
+    @ConfField(comment = "Load external table and partition statistics, and internal column statistics and "
+            + "row counts, into the FE caches after FE start. Read once at FE start")
+    public static boolean statistic_preload_on_start_basic = true;
+
+    @ConfField(comment = "Load external multi-column (MCV) statistics into the FE cache after FE start. "
+            + "Read once at FE start")
+    public static boolean statistic_preload_on_start_mcv = true;
+
+    @ConfField(comment = "Load join statistics into the FE cache after FE start. Read once at FE start")
+    public static boolean statistic_preload_on_start_join = true;
+
     @ConfField(mutable = true)
     public static int statistic_join_optimizer_budget_ms = 60;
 

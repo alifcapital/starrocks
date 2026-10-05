@@ -224,6 +224,7 @@ import com.starrocks.sql.ast.expression.LiteralExprFactory;
 import com.starrocks.sql.optimizer.CachingMvPlanContextBuilder;
 import com.starrocks.sql.optimizer.statistics.CachedStatisticStorage;
 import com.starrocks.sql.optimizer.statistics.StatisticStorage;
+import com.starrocks.sql.optimizer.statistics.StatisticsCachePreloader;
 import com.starrocks.sql.parser.AstBuilder;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.sql.spm.SPMAutoCapturer;
@@ -1645,6 +1646,9 @@ public class GlobalStateMgr {
 
         PredicateColumnsMgr.getInstance().startDaemon();
         SimpleScheduler.startAutoUpdate();
+
+        // The worker starts once per process, also when this runs again on a role change.
+        StatisticsCachePreloader.startOnce(statisticStorage);
     }
 
     private void transferToNonLeader(FrontendNodeType newType) {
