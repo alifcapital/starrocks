@@ -1123,6 +1123,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String STRING_DATE_PREDICATE_FORMAT = "string_date_predicate_format";
 
     public static final String ENABLE_MONOTONIC_PREDICATE_REWRITE = "enable_monotonic_predicate_rewrite";
+    public static final String ENABLE_MONOTONIC_PREDICATE_ESTIMATE = "enable_monotonic_predicate_estimate";
 
     public static final String JIT_LEVEL = "jit_level";
 
@@ -3420,6 +3421,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // different setting stop matching (rewrite misses, not wrong results).
     @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_REWRITE)
     private boolean enableMonotonicPredicateRewrite = true;
+
+    // Estimate f(col) cmp constant by the bound on col that follows from it. This changes only row estimates, not
+    // predicates, so the option can be switched to compare plans; when it is off, the comparison is estimated by the
+    // statistics of f(col).
+    @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_ESTIMATE)
+    private boolean enableMonotonicPredicateEstimate = true;
 
     @VarAttr(name = CONNECTOR_REMOTE_FILE_ASYNC_QUEUE_SIZE, flag = VariableMgr.INVISIBLE)
     private int connectorRemoteFileAsyncQueueSize = 1000;
@@ -6207,6 +6214,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMonotonicPredicateRewrite(boolean enableMonotonicPredicateRewrite) {
         this.enableMonotonicPredicateRewrite = enableMonotonicPredicateRewrite;
+    }
+
+    public boolean isEnableMonotonicPredicateEstimate() {
+        return enableMonotonicPredicateEstimate;
+    }
+
+    public void setEnableMonotonicPredicateEstimate(boolean enableMonotonicPredicateEstimate) {
+        this.enableMonotonicPredicateEstimate = enableMonotonicPredicateEstimate;
     }
 
     public boolean isEnableConstantExecuteInFE() {

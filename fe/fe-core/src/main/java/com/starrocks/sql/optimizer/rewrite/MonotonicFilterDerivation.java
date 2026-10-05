@@ -82,6 +82,7 @@ public final class MonotonicFilterDerivation {
      * <p>
      * It does not depend on enable_monotonic_predicate_rewrite: that option decides whether a plan gets more
      * predicates, while this only changes how the statistics read the predicate that the plan already has.
+     * enable_monotonic_predicate_estimate turns it off.
      */
     public static ColumnBounds columnBoundsForEstimate(BinaryPredicateOperator predicate) {
         if (!(predicate.getChild(0) instanceof CallOperator call)
@@ -91,6 +92,10 @@ public final class MonotonicFilterDerivation {
         if (!(call instanceof CastOperator)
                 && MonotonicFunctionRegistry.filterInverse(call.getFnName()) == null
                 && MonotonicFunctionRegistry.exactInverse(call.getFnName()) == null) {
+            return null;
+        }
+        ConnectContext context = ConnectContext.get();
+        if (context != null && !context.getSessionVariable().isEnableMonotonicPredicateEstimate()) {
             return null;
         }
         Bound bound = derive(predicate, true);

@@ -113,6 +113,30 @@ public class DerivedBoundEstimateTest {
     }
 
     @Test
+    public void testOptionOffDoesNotEstimateByTheColumn() {
+        // The call has no function, so the FE cannot fold it and hours_add gets no range of its own: only the
+        // bound on the column gives the comparison a range.
+        ColumnRefOperator ts = new ColumnRefOperator(3, DateType.DATETIME, "ts", true);
+        Statistics statistics = Statistics.builder().setOutputRowCount(ROWS)
+                .addColumnStatistic(ts, new ColumnStatistic(
+                        Utils.getLongFromDateTime(LocalDateTime.of(2024, 1, 1, 0, 0)),
+                        Utils.getLongFromDateTime(LocalDateTime.of(2025, 1, 1, 0, 0)), 0, 8, 10000))
+                .build();
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.GE,
+                new CallOperator("hours_add", DateType.DATETIME, ImmutableList.of(ts, ConstantOperator.createInt(7))),
+                ConstantOperator.createDatetime(LocalDateTime.of(2024, 10, 1, 7, 0)));
+        double estimated = rows(predicate, statistics);
+        ConnectContext.get().getSessionVariable().setEnableMonotonicPredicateEstimate(false);
+        double notEstimated = rows(predicate, statistics);
+        Assertions.assertTrue(Math.abs(estimated - notEstimated) > ROWS * 0.01, estimated + " " + notEstimated);
+        // The scan holds the bound without estimating it in either case
+        ScalarOperator original = fromYear2025();
+        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(original);
+        Assertions.assertTrue(Utils.extractConjuncts(withBound).stream()
+                .filter(conjunct -> conjunct != original).allMatch(ScalarOperator::isNotEvalEstimate));
+    }
+
+    @Test
     public void testFilterAboveAJoinIsEstimatedByTheColumn() {
         // Above a join the column keeps its statistics, narrowed by the join
         Statistics joined = Statistics.builder().setOutputRowCount(5e9)
