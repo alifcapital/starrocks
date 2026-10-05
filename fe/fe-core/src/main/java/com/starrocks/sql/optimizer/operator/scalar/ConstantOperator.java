@@ -419,10 +419,26 @@ public final class ConstantOperator extends ScalarOperator implements Comparable
         return String.valueOf(value);
     }
 
+    // The hash of a constant is read for every lookup of a predicate in a hash map or set, and the predicate of a
+    // scan with a long IN list holds thousands of constants. The value is final, so the hash changes only with the
+    // type. Zero means not computed; a constant whose hash is zero is hashed again on each call.
+    private int cachedHash;
+
+    @Override
+    public void setType(Type type) {
+        super.setType(type);
+        cachedHash = 0;
+    }
+
     @Override
     public int hashCodeSelf() {
-        return 31 * (31 * (31 + Objects.hashCode(value)) + Objects.hashCode(type.getPrimitiveType()))
-                + Boolean.hashCode(isNull);
+        int hash = cachedHash;
+        if (hash == 0) {
+            hash = 31 * (31 * (31 + Objects.hashCode(value)) + Objects.hashCode(type.getPrimitiveType()))
+                    + Boolean.hashCode(isNull);
+            cachedHash = hash;
+        }
+        return hash;
     }
 
     @Override

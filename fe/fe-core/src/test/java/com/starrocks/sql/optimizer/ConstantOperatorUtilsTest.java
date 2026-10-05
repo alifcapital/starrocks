@@ -15,9 +15,19 @@
 package com.starrocks.sql.optimizer;
 
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.type.BooleanType;
+import com.starrocks.type.DateType;
+import com.starrocks.type.DecimalType;
+import com.starrocks.type.FloatType;
+import com.starrocks.type.IntegerType;
+import com.starrocks.type.PrimitiveType;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.OptionalDouble;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -58,6 +68,59 @@ public class ConstantOperatorUtilsTest {
 
         assertEquals(ConstantOperatorUtils.getDoubleValue(constant11), Double.NaN, 0.0);
 
+    }
+
+    // The reference compares the type with each scalar type in turn.
+    private static OptionalDouble chainOfComparisons(ConstantOperator constantOperator) {
+        if (BooleanType.BOOLEAN.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getBoolean() ? 1.0 : 0.0);
+        } else if (IntegerType.TINYINT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getTinyInt());
+        } else if (IntegerType.SMALLINT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getSmallint());
+        } else if (IntegerType.INT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getInt());
+        } else if (IntegerType.BIGINT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getBigint());
+        } else if (IntegerType.LARGEINT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getLargeInt().doubleValue());
+        } else if (FloatType.FLOAT.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getFloat());
+        } else if (FloatType.DOUBLE.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getDouble());
+        } else if (DateType.DATE.equals(constantOperator.getType())) {
+            return OptionalDouble.of(Utils.getLongFromDateTime(constantOperator.getDate()));
+        } else if (DateType.DATETIME.equals(constantOperator.getType())) {
+            return OptionalDouble.of(Utils.getLongFromDateTime(constantOperator.getDatetime()));
+        } else if (DateType.TIME.equals(constantOperator.getType())) {
+            return OptionalDouble.of(constantOperator.getTime());
+        } else if (constantOperator.getType().isDecimalOfAnyVersion()) {
+            return OptionalDouble.of(constantOperator.getDecimal().doubleValue());
+        }
+        return OptionalDouble.empty();
+    }
+
+    @Test
+    public void doubleValueMatchesTheChainOfTypeComparisons() {
+        List<ConstantOperator> constants = List.of(
+                ConstantOperator.createBoolean(true), ConstantOperator.createBoolean(false),
+                ConstantOperator.createTinyInt((byte) -3), ConstantOperator.createSmallInt((short) 300),
+                ConstantOperator.createInt(Integer.MIN_VALUE), ConstantOperator.createBigint(Long.MAX_VALUE),
+                ConstantOperator.createLargeInt(new BigInteger("170141183460469231731687303715884105727")),
+                ConstantOperator.createFloat(1.5), ConstantOperator.createDouble(-0.0),
+                ConstantOperator.createDate(LocalDateTime.of(2026, 10, 5, 0, 0)),
+                ConstantOperator.createDatetime(LocalDateTime.of(2026, 10, 5, 12, 34, 56)),
+                ConstantOperator.createTime(3600),
+                ConstantOperator.createDecimal(new BigDecimal("1.25"), new DecimalType(PrimitiveType.DECIMAL32, 9, 2)),
+                ConstantOperator.createDecimal(new BigDecimal("1.25"), new DecimalType(PrimitiveType.DECIMAL64, 18, 2)),
+                ConstantOperator.createDecimal(new BigDecimal("1.25"),
+                        new DecimalType(PrimitiveType.DECIMAL128, 38, 20)),
+                ConstantOperator.createDecimal(new BigDecimal("1.25"), new DecimalType(PrimitiveType.DECIMALV2, 27, 9)),
+                ConstantOperator.createVarchar("1"), ConstantOperator.createChar("1"));
+        for (ConstantOperator constant : constants) {
+            assertEquals(chainOfComparisons(constant), ConstantOperatorUtils.doubleValueFromConstant(constant),
+                    constant.getType().toString());
+        }
     }
 
 }

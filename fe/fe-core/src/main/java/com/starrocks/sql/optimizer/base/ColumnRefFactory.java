@@ -45,6 +45,7 @@ public class ColumnRefFactory {
     // For table a join table a, the two unique ids for table a is different
     private int nextRelationId = 1;
     private long tableMappingVersion;
+    private long sourceMappingVersion;
     private final List<ColumnRefOperator> columnRefs = Lists.newArrayList();
     private final Map<Integer, Integer> columnToRelationIds = Maps.newHashMap();
     private final Map<ColumnRefOperator, Column> columnRefToColumns = Maps.newHashMap();
@@ -150,9 +151,13 @@ public class ColumnRefFactory {
     }
 
     public void updateColumnRefToColumns(ColumnRefOperator columnRef, Column column, Table table) {
-        columnRefToColumns.put(columnRef, column);
+        boolean changed = columnRefToColumns.put(columnRef, column) != column;
         if (columnRefToTable.put(columnRef, table) != table) {
             tableMappingVersion++;
+            changed = true;
+        }
+        if (changed) {
+            sourceMappingVersion++;
         }
     }
 
@@ -169,7 +174,10 @@ public class ColumnRefFactory {
     }
 
     public void updateColumnToRelationIds(int columnId, int tableId) {
-        columnToRelationIds.put(columnId, tableId);
+        Integer previous = columnToRelationIds.put(columnId, tableId);
+        if (previous == null || previous != tableId) {
+            sourceMappingVersion++;
+        }
     }
 
     public Integer getRelationId(int id) {
@@ -187,6 +195,14 @@ public class ColumnRefFactory {
     /** Changes when rewrites register or replace a column's source table. */
     public long getTableMappingVersion() {
         return tableMappingVersion;
+    }
+
+    /**
+     * Changes whenever the column, table or relation that a column ref comes from is registered or replaced.
+     * Whoever caches what it derived from these mappings can keep the result while the version stays the same.
+     */
+    public long getSourceMappingVersion() {
+        return sourceMappingVersion;
     }
 
     public Map<ColumnRefOperator, Table> getColumnRefToTable() {

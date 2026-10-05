@@ -22,6 +22,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.common.profile.Timer;
 import com.starrocks.common.profile.Tracers;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.LogicalPropertyContext;
@@ -48,6 +49,7 @@ import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -55,6 +57,10 @@ import java.util.Optional;
 import static com.starrocks.sql.optimizer.statistics.StatisticsCalcUtils.ensureStatistics;
 
 public class ReorderJoinRule extends Rule {
+    // Tests switch it off to compare against the passes that are skipped.
+    boolean skipRepeatedPasses = true;
+    int skippedRegions = 0;
+
     public ReorderJoinRule() {
         super(RuleType.TF_MULTI_JOIN_ORDER, Pattern.create(OperatorType.PATTERN));
     }
@@ -96,6 +102,47 @@ public class ReorderJoinRule extends Rule {
             OptExpression child = root.inputAt(i);
             extractRootInnerJoin(root, i, child, results, findNewRoot);
         }
+    }
+
+    /**
+     * A region of two atoms has one join, and the passes can differ only in which child goes left. We expect the
+     * passes after the first one to build the join that the first one built, so we skip them when:
+     * - the row counts differ, because {@link JoinOrder#buildJoinExpr} puts the child with more rows on the left
+     *   whatever the order of its arguments;
+     * - no predicate uses a column that is computed in the region, because only such a column makes buildJoinExpr
+     *   push an expression into a child, and which child gets it depends on the order of the arguments;
+     * - the join reorder with unique and foreign keys is off, because it decides the order by more than row counts.
+     * The row counts are read from the atoms, which the first pass has given statistics.
+     */
+    private boolean hasSingleJoinOrder(OptimizerContext context, MultiJoinNode multiJoinNode) {
+        ConnectContext connectContext = ConnectContext.get();
+        if (!skipRepeatedPasses || multiJoinNode.getAtoms().size() != 2
+                || context.getSessionVariable().isEnableUKFKJoinReorder()
+                || connectContext == null || connectContext.getSessionVariable().isEnableUKFKJoinReorder()) {
+            return false;
+        }
+        Map<ColumnRefOperator, ScalarOperator> expressions = multiJoinNode.getExpressionMap();
+        if (!expressions.isEmpty()) {
+            ColumnRefSet computed = new ColumnRefSet(expressions.keySet());
+            for (ScalarOperator predicate : multiJoinNode.getPredicates()) {
+                if (computed.isIntersect(predicate.getUsedColumns())) {
+                    return false;
+                }
+            }
+        }
+        Iterator<OptExpression> atoms = multiJoinNode.getAtoms().iterator();
+        Statistics first = atoms.next().getStatistics();
+        Statistics second = atoms.next().getStatistics();
+        if (first == null || second == null) {
+            return false;
+        }
+        double firstRows = first.getOutputRowCount();
+        double secondRows = second.getOutputRowCount();
+        return firstRows < secondRows || secondRows < firstRows;
+    }
+
+    private static boolean isRepeatedAfterLeftDeep(JoinOrder algorithm) {
+        return algorithm instanceof JoinReorderDP || algorithm.getClass() == JoinReorderGreedy.class;
     }
 
     Optional<OptExpression> enumerate(JoinOrder reorderAlgorithm, OptimizerContext context, OptExpression innerJoinRoot,
@@ -205,7 +252,8 @@ public class ReorderJoinRule extends Rule {
 
                 List<JoinOrder> orderAlgorithms = joinReorderFactory.create(context, multiJoinNode);
                 Optional<OptExpression> newChild = Optional.empty();
-                for (JoinOrder orderAlgorithm : orderAlgorithms) {
+                for (int i = 0; i < orderAlgorithms.size(); ++i) {
+                    JoinOrder orderAlgorithm = orderAlgorithms.get(i);
                     newChild = enumerate(orderAlgorithm, context, child, multiJoinNode, false);
                     if (newChild.isEmpty()) {
                         break;
@@ -214,6 +262,13 @@ public class ReorderJoinRule extends Rule {
                     // and the query plan degenerates to the left deep tree
                     if (Utils.hasUnknownColumnsStats(innerJoinRoot.first) &&
                             (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
+                        break;
+                    }
+                    if (orderAlgorithm.getClass() == JoinReorderLeftDeep.class && i + 1 < orderAlgorithms.size()
+                            && orderAlgorithms.subList(i + 1, orderAlgorithms.size()).stream()
+                            .allMatch(ReorderJoinRule::isRepeatedAfterLeftDeep)
+                            && hasSingleJoinOrder(context, multiJoinNode)) {
+                        ++skippedRegions;
                         break;
                     }
                 }
@@ -255,6 +310,10 @@ public class ReorderJoinRule extends Rule {
                 // and the query plan degenerates to the left deep tree
                 if (Utils.hasUnknownColumnsStats(innerJoinRoot) &&
                         (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
+                    continue;
+                }
+                if (hasSingleJoinOrder(context, multiJoinNode)) {
+                    ++skippedRegions;
                     continue;
                 }
                 int atomSize = multiJoinNode.getAtoms().size();

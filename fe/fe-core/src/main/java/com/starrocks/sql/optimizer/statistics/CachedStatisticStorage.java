@@ -38,6 +38,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ColumnStatsMeta;
+import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.StatisticUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.logging.log4j.LogManager;
@@ -594,6 +595,25 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     public Map<String, Histogram> getHistogramStatistics(Table table, List<String> columns) {
         Preconditions.checkState(table != null);
 
+        // Few tables have a histogram, so ask the meta first and skip the statistics table state
+        // check below, which is expensive, when no requested column has one.
+        Map<Pair<Long, String>, HistogramStatsMeta> histogramMetas =
+                GlobalStateMgr.getCurrentState().getAnalyzeMgr().getHistogramStatsMetaMap();
+        List<String> columnHasHistogram = Collections.emptyList();
+        if (!histogramMetas.isEmpty()) {
+            for (String columnName : columns) {
+                if (histogramMetas.get(new Pair<>(table.getId(), columnName)) != null) {
+                    if (columnHasHistogram.isEmpty()) {
+                        columnHasHistogram = new ArrayList<>();
+                    }
+                    columnHasHistogram.add(columnName);
+                }
+            }
+        }
+        if (columnHasHistogram.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
         // Skip loading histogram statistics when we are inside a statistics-collect connection
         // (recursion guard) or when the target is a statistics-internal table, or when the
         // statistics tables are not in a healthy state. Without this guard a histogram-collect
@@ -605,14 +625,6 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
         }
         if (!StatisticUtils.checkStatisticTableStateNormal()) {
             return Maps.newHashMap();
-        }
-
-        List<String> columnHasHistogram = new ArrayList<>();
-        for (String columnName : columns) {
-            if (GlobalStateMgr.getCurrentState().getAnalyzeMgr().getHistogramStatsMetaMap()
-                    .get(new Pair<>(table.getId(), columnName)) != null) {
-                columnHasHistogram.add(columnName);
-            }
         }
 
         List<ColumnStatsCacheKey> cacheKeys = new ArrayList<>();
@@ -665,6 +677,12 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     @Override
     public Map<String, Histogram> getConnectorHistogramStatistics(Table table, List<String> columns) {
         Preconditions.checkState(table != null);
+
+        // Few external tables have a histogram. Without histogram meta the cache can only answer
+        // "none", and asking it builds a key per column and may run a query.
+        if (!GlobalStateMgr.getCurrentState().getAnalyzeMgr().hasExternalHistogramStatsMeta(table)) {
+            return Collections.emptyMap();
+        }
 
         List<ConnectorTableColumnKey> cacheKeys = new ArrayList<>();
         for (String columnName : columns) {
@@ -750,6 +768,11 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     public MultiColumnCombinedStatistics getMultiColumnCombinedStatistics(Long tableId) {
+        // Few tables have multi-column statistics. Without meta the answer is none, so skip the
+        // blacklist and statistics table state checks and the cache.
+        if (!GlobalStateMgr.getCurrentState().getAnalyzeMgr().hasMultiColumnStatsMeta(tableId)) {
+            return MultiColumnCombinedStatistics.EMPTY;
+        }
         if (StatisticUtils.statisticTableBlackListCheck(tableId) ||
                 !StatisticUtils.checkStatisticTableStateNormal()) {
             return MultiColumnCombinedStatistics.EMPTY;

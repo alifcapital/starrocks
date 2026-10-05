@@ -120,6 +120,7 @@ import com.starrocks.sql.ast.HintNode;
 import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.StatementBase;
+import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.sql.ast.TableRelation;
 import com.starrocks.sql.ast.UserVariable;
@@ -154,6 +155,7 @@ import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.sql.plan.PlanFragmentBuilder;
 import com.starrocks.sql.plan.PlanTestBase;
 import com.starrocks.statistic.HistogramStatsMeta;
+import com.starrocks.statistic.MultiColumnStatsMeta;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.system.Backend;
 import com.starrocks.system.BackendResourceStat;
@@ -1290,6 +1292,13 @@ public class UtFrameUtils {
                 }
                 if (statistics != null) {
                     GlobalStateMgr.getCurrentState().getStatisticStorage().addMultiColumnStatistics(replayTable, statistics);
+                    // register meta too, else CachedStatisticStorage.getMultiColumnCombinedStatistics skips the table
+                    for (Set<Integer> groupColumnIds : statistics.getDistinctCounts().keySet()) {
+                        GlobalStateMgr.getCurrentState().getAnalyzeMgr().replayAddMultiColumnStatsMeta(
+                                new MultiColumnStatsMeta(replayDb.getId(), replayTable.getId(), groupColumnIds,
+                                        StatsConstants.AnalyzeType.FULL, List.of(StatisticsType.MCDISTINCT),
+                                        LocalDateTime.MIN, Maps.newHashMap()));
+                    }
                 }
                 continue;
             }

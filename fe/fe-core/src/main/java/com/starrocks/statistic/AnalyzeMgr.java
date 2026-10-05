@@ -112,6 +112,13 @@ public class AnalyzeMgr implements Writable {
     private final Map<StatsMetaColumnKey, ExternalHistogramStatsMeta> externalHistogramStatsMetaMap;
     private final Map<MultiColumnStatsKey, MultiColumnStatsMeta> multiColumnStatsMetaMap;
     private final Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> externalMcvStatsMetaMap;
+    // The two indexes below are updated together with externalHistogramStatsMetaMap and
+    // multiColumnStatsMetaMap. Query planning asks "does this table have any" for every scan, and
+    // the answer is almost always no, so it must not scan or build a key per column.
+    private final Map<StatsMetaKey, Set<StatsMetaColumnKey>> externalHistogramTables =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<Long, Set<MultiColumnStatsKey>> multiColumnTables =
+            new java.util.concurrent.ConcurrentHashMap<>();
     // Table-level lookup avoids scanning every collected column group during query planning.
     private final Map<StatsMetaKey, Map<ExternalMcvStatsKey, ExternalMcvStatsMeta>> externalMcvTables =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -375,7 +382,7 @@ public class AnalyzeMgr implements Writable {
             if (externalHistogramStatsMetaMap.containsKey(histogramKey)) {
                 GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalHistogramStatsMeta(
                         externalHistogramStatsMetaMap.get(histogramKey),
-                        wal -> externalHistogramStatsMetaMap.remove(histogramKey));
+                        wal -> removeExternalHistogramStatsMetaKey(histogramKey));
             }
         }
     }
@@ -387,17 +394,41 @@ public class AnalyzeMgr implements Writable {
 
     public void addMultiColumnStatsMeta(MultiColumnStatsMeta meta) {
         GlobalStateMgr.getCurrentState().getEditLog().logAddMultiColumnStatsMeta(meta, wal -> {
-            multiColumnStatsMetaMap.put(
+            putMultiColumnStatsMeta(
                     new MultiColumnStatsKey(meta.getTableId(), meta.getColumnIds(), meta.getStatsTypes()), meta);
         });
     }
 
     public void replayAddMultiColumnStatsMeta(MultiColumnStatsMeta meta) {
-        multiColumnStatsMetaMap.put(new MultiColumnStatsKey(meta.getTableId(), meta.getColumnIds(), meta.getStatsTypes()), meta);
+        putMultiColumnStatsMeta(
+                new MultiColumnStatsKey(meta.getTableId(), meta.getColumnIds(), meta.getStatsTypes()), meta);
     }
 
     public void replayRemoveMultiColumnStatsMeta(MultiColumnStatsMeta meta) {
-        multiColumnStatsMetaMap.remove(new MultiColumnStatsKey(meta.getTableId(), meta.getColumnIds(), meta.getStatsTypes()));
+        removeMultiColumnStatsMetaKey(
+                new MultiColumnStatsKey(meta.getTableId(), meta.getColumnIds(), meta.getStatsTypes()));
+    }
+
+    private synchronized void putMultiColumnStatsMeta(MultiColumnStatsKey key, MultiColumnStatsMeta meta) {
+        multiColumnStatsMetaMap.put(key, meta);
+        multiColumnTables.computeIfAbsent(key.getTableId(), ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+                .add(key);
+    }
+
+    private synchronized void removeMultiColumnStatsMetaKey(MultiColumnStatsKey key) {
+        multiColumnStatsMetaMap.remove(key);
+        Set<MultiColumnStatsKey> keys = multiColumnTables.get(key.getTableId());
+        if (keys != null) {
+            keys.remove(key);
+            if (keys.isEmpty()) {
+                multiColumnTables.remove(key.getTableId());
+            }
+        }
+    }
+
+    /** True when some multi-column statistics were collected for the table. Does not allocate. */
+    public boolean hasMultiColumnStatsMeta(Long tableId) {
+        return multiColumnTables.containsKey(tableId);
     }
 
     public Map<MultiColumnStatsKey, MultiColumnStatsMeta> getMultiColumnStatsMetaMap() {
@@ -445,7 +476,7 @@ public class AnalyzeMgr implements Writable {
     }
 
     public boolean hasExternalMcvStatsMeta(Table table) {
-        if (!table.isHiveTable() && !table.isIcebergTable()) {
+        if (externalMcvTables.isEmpty() || (!table.isHiveTable() && !table.isIcebergTable())) {
             return false;
         }
         Map<ExternalMcvStatsKey, ExternalMcvStatsMeta> groups = externalMcvTables.get(
@@ -646,22 +677,65 @@ public class AnalyzeMgr implements Writable {
 
     public void addExternalHistogramStatsMeta(ExternalHistogramStatsMeta histogramStatsMeta) {
         GlobalStateMgr.getCurrentState().getEditLog().logAddExternalHistogramStatsMeta(histogramStatsMeta, wal -> {
-            externalHistogramStatsMetaMap.put(new StatsMetaColumnKey(histogramStatsMeta.getCatalogName(),
-                            histogramStatsMeta.getDbName(),
-                            histogramStatsMeta.getTableName(),
-                            histogramStatsMeta.getColumn()), histogramStatsMeta);
+            putExternalHistogramStatsMeta(histogramStatsMeta);
         });
     }
 
     public void replayAddExternalHistogramStatsMeta(ExternalHistogramStatsMeta histogramStatsMeta) {
-        externalHistogramStatsMetaMap.put(new StatsMetaColumnKey(histogramStatsMeta.getCatalogName(),
-                histogramStatsMeta.getDbName(), histogramStatsMeta.getTableName(), histogramStatsMeta.getColumn()),
-                histogramStatsMeta);
+        putExternalHistogramStatsMeta(histogramStatsMeta);
     }
 
     public void replayRemoveExternalHistogramStatsMeta(ExternalHistogramStatsMeta histogramStatsMeta) {
-        externalHistogramStatsMetaMap.remove(new StatsMetaColumnKey(histogramStatsMeta.getCatalogName(),
+        removeExternalHistogramStatsMetaKey(new StatsMetaColumnKey(histogramStatsMeta.getCatalogName(),
                 histogramStatsMeta.getDbName(), histogramStatsMeta.getTableName(), histogramStatsMeta.getColumn()));
+    }
+
+    private synchronized void putExternalHistogramStatsMeta(ExternalHistogramStatsMeta histogramStatsMeta) {
+        StatsMetaColumnKey key = new StatsMetaColumnKey(histogramStatsMeta.getCatalogName(),
+                histogramStatsMeta.getDbName(), histogramStatsMeta.getTableName(), histogramStatsMeta.getColumn());
+        externalHistogramStatsMetaMap.put(key, histogramStatsMeta);
+        externalHistogramTables.computeIfAbsent(lowerCaseTableKey(key.getTableKey()),
+                ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(key);
+    }
+
+    private synchronized void removeExternalHistogramStatsMetaKey(StatsMetaColumnKey key) {
+        externalHistogramStatsMetaMap.remove(key);
+        StatsMetaKey tableKey = lowerCaseTableKey(key.getTableKey());
+        Set<StatsMetaColumnKey> columns = externalHistogramTables.get(tableKey);
+        if (columns != null) {
+            columns.remove(key);
+            if (columns.isEmpty()) {
+                externalHistogramTables.remove(tableKey);
+            }
+        }
+    }
+
+    // The meta is written with the names of the ANALYZE target and read with the names the table reports.
+    // We only use the index to decide that a table has no histogram, so we compare names without case:
+    // a name that differs only in case must not hide existing histograms.
+    private static StatsMetaKey lowerCaseTableKey(StatsMetaKey key) {
+        return lowerCaseTableKey(key.getCatalogName(), key.getDbName(), key.getTableName());
+    }
+
+    private static StatsMetaKey lowerCaseTableKey(String catalogName, String dbName, String tableName) {
+        return new StatsMetaKey(lower(catalogName), lower(dbName), lower(tableName));
+    }
+
+    private static String lower(String name) {
+        return name == null ? null : name.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * True when ANALYZE HISTOGRAM was run on some column of the external table. The key is the one the
+     * histogram meta is written with: catalog, database and table name, compared without case. Tables of
+     * types that cannot be analyzed never have histogram meta.
+     */
+    public boolean hasExternalHistogramStatsMeta(Table table) {
+        if (externalHistogramTables.isEmpty() || !table.isAnalyzableExternalTable()) {
+            return false;
+        }
+        return externalHistogramTables.containsKey(
+                lowerCaseTableKey(table.getCatalogName(), table.getCatalogDBName(), table.getName()));
     }
 
     public void refreshConnectorTableHistogramStatisticsCache(String catalogName, String dbName, String tableName,
@@ -1114,7 +1188,7 @@ public class AnalyzeMgr implements Writable {
         }
         GlobalStateMgr.getCurrentState().getEditLog().logRemoveMultiColumnStatsMetaBatch(metasToRemove, wal -> {
             for (MultiColumnStatsKey key : keysToRemove) {
-                multiColumnStatsMetaMap.remove(key);
+                removeMultiColumnStatsMetaKey(key);
             }
         });
     }

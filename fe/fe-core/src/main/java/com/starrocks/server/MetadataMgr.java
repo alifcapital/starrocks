@@ -986,9 +986,12 @@ public class MetadataMgr {
         if (names == null) {
             return null;
         }
-        List<String> columnNames = columns.entrySet().stream()
-                .filter(entry -> !FeNameFormat.FORBIDDEN_COLUMN_NAMES.contains(entry.getKey().getName()))
-                .map(entry -> entry.getValue().getName()).collect(Collectors.toList());
+        List<String> columnNames = new ArrayList<>(columns.size());
+        for (Map.Entry<ColumnRefOperator, Column> entry : columns.entrySet()) {
+            if (!FeNameFormat.FORBIDDEN_COLUMN_NAMES.contains(entry.getKey().getName())) {
+                columnNames.add(entry.getValue().getName());
+            }
+        }
         return new ExternalStatisticsRequest(table.getUUID(), names, columnNames, wholeTable, table.isUnPartitioned());
     }
 

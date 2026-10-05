@@ -139,6 +139,11 @@ public class OptimizerContext {
     private final Map<ExternalStatisticsScanKey, Statistics> externalStatisticsFallbacks = new ConcurrentHashMap<>();
 
     public Statistics getExternalStatisticsFallback(ExternalStatisticsScanKey key) {
+        // Hashing the key walks the whole predicate. A query whose scans use ANALYZE statistics never stores a
+        // fallback, so we expect the map to be empty and skip the hash.
+        if (externalStatisticsFallbacks.isEmpty()) {
+            return null;
+        }
         return externalStatisticsFallbacks.get(key);
     }
 

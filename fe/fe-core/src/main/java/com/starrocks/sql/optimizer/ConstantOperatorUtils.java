@@ -16,10 +16,8 @@
 package com.starrocks.sql.optimizer;
 
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
-import com.starrocks.type.BooleanType;
-import com.starrocks.type.DateType;
-import com.starrocks.type.FloatType;
-import com.starrocks.type.IntegerType;
+import com.starrocks.type.ScalarType;
+import com.starrocks.type.Type;
 
 import java.util.OptionalDouble;
 
@@ -60,29 +58,39 @@ public class ConstantOperatorUtils {
     }
 
     public static OptionalDouble doubleValueFromConstant(ConstantOperator constantOperator) {
-        if (BooleanType.BOOLEAN.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getBoolean() ? 1.0 : 0.0);
-        } else if (IntegerType.TINYINT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getTinyInt());
-        } else if (IntegerType.SMALLINT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getSmallint());
-        } else if (IntegerType.INT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getInt());
-        } else if (IntegerType.BIGINT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getBigint());
-        } else if (IntegerType.LARGEINT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getLargeInt().doubleValue());
-        } else if (FloatType.FLOAT.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getFloat());
-        } else if (FloatType.DOUBLE.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getDouble());
-        } else if (DateType.DATE.equals(constantOperator.getType())) {
-            return OptionalDouble.of(getLongFromDateTime(constantOperator.getDate()));
-        } else if (DateType.DATETIME.equals(constantOperator.getType())) {
-            return OptionalDouble.of(getLongFromDateTime(constantOperator.getDatetime()));
-        } else if (DateType.TIME.equals(constantOperator.getType())) {
-            return OptionalDouble.of(constantOperator.getTime());
-        } else if (constantOperator.getType().isDecimalOfAnyVersion()) {
+        Type type = constantOperator.getType();
+        // A scalar type equals another one of the same primitive type when it has no length, precision or scale,
+        // which holds for all types below. We expect this to run once per literal of an IN list, so we switch
+        // on the primitive type instead of comparing with each type in turn.
+        if (type instanceof ScalarType) {
+            switch (type.getPrimitiveType()) {
+                case BOOLEAN:
+                    return OptionalDouble.of(constantOperator.getBoolean() ? 1.0 : 0.0);
+                case TINYINT:
+                    return OptionalDouble.of(constantOperator.getTinyInt());
+                case SMALLINT:
+                    return OptionalDouble.of(constantOperator.getSmallint());
+                case INT:
+                    return OptionalDouble.of(constantOperator.getInt());
+                case BIGINT:
+                    return OptionalDouble.of(constantOperator.getBigint());
+                case LARGEINT:
+                    return OptionalDouble.of(constantOperator.getLargeInt().doubleValue());
+                case FLOAT:
+                    return OptionalDouble.of(constantOperator.getFloat());
+                case DOUBLE:
+                    return OptionalDouble.of(constantOperator.getDouble());
+                case DATE:
+                    return OptionalDouble.of(getLongFromDateTime(constantOperator.getDate()));
+                case DATETIME:
+                    return OptionalDouble.of(getLongFromDateTime(constantOperator.getDatetime()));
+                case TIME:
+                    return OptionalDouble.of(constantOperator.getTime());
+                default:
+                    break;
+            }
+        }
+        if (type.isDecimalOfAnyVersion()) {
             return OptionalDouble.of(constantOperator.getDecimal().doubleValue());
         }
         return OptionalDouble.empty();
