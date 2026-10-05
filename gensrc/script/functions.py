@@ -416,19 +416,19 @@ vectorized_functions = [
      'StringFunctions::ngram_search_close', {'selected': 'StringFunctions::ngram_search_case_insensitive_selected'}],
 
     # Levenshtein edit distance (UTF-8 aware, fuzzywuzzy-style Indel costs)
-    [30445, 'levenshtein_distance', True, False, 'INT', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_distance'],
+    [1100100, 'levenshtein_distance', True, False, 'INT', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_distance'],
     # Levenshtein similarity ratio (0.0 to 1.0)
-    [30446, 'levenshtein_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_ratio'],
+    [1100101, 'levenshtein_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_ratio'],
 
     # Tajik text normalization (lowercase + transliteration to Russian Cyrillic)
-    [30447, 'norm_tj', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::norm_tj'],
+    [1100102, 'norm_tj', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::norm_tj'],
 
     # Latin-to-Cyrillic transliteration for Tajik/Uzbek/English-spelled names
-    [30448, 'lat_to_cyr', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::lat_to_cyr'],
+    [1100103, 'lat_to_cyr', True, False, 'VARCHAR', ['VARCHAR'], 'StringFunctions::lat_to_cyr'],
 
     # Weighted Levenshtein for Tajik names: vowel-soft, ж↔ч soft, codepoint-level
-    [30462, 'levenshtein_tj_distance', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_distance'],
-    [30463, 'levenshtein_tj_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_ratio'],
+    [1100104, 'levenshtein_tj_distance', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_distance'],
+    [1100105, 'levenshtein_tj_ratio', True, False, 'DOUBLE', ['VARCHAR', 'VARCHAR'], 'StringFunctions::levenshtein_tj_ratio'],
 
     [30450, 'field', True, False, 'INT', ['VARCHAR', '...'], 'StringFunctions::field<TYPE_VARCHAR>',
      'StringFunctions::field_prepare<TYPE_VARCHAR>', 'StringFunctions::field_close<TYPE_VARCHAR>'],
@@ -867,8 +867,9 @@ vectorized_functions = [
     [100025, 'uuid_v7', True, False, 'VARCHAR', [], "UtilityFunctions::uuid_v7"],
     [100026, 'uuid_v7_numeric', True, False, 'LARGEINT', [], "UtilityFunctions::uuid_v7_numeric"],
     [100027, 'query_id', True, False, 'VARCHAR', [], "UtilityFunctions::query_id"],
-    # Fork-owned statistics IDs: 1100000-1100099. Keep stable across FE/BE versions.
-    # Do not reuse upstream's growing 1000xx utility-function range.
+    # Function IDs from 1100000 belong to our fork, so new upstream functions do not collide with them:
+    # statistics functions use 1100000-1100099, other functions start at 1100100.
+    # Keep them stable across FE/BE versions. Do not reuse upstream's growing 1000xx utility-function range.
     [1100001, 'stats_tuple_key', True, False, 'VARCHAR', ['VARCHAR', '...'], 'StatsFunctions::tuple_key'],
     [1100002, 'stats_degree_info', True, False, 'VARCHAR', ['VARBINARY'], 'StatsFunctions::degree_info'],
     [1100003, 'stats_degree_pair', True, False, 'VARCHAR', ['VARBINARY', 'VARBINARY'], 'StatsFunctions::degree_pair'],
@@ -904,7 +905,7 @@ vectorized_functions = [
     [110021, "get_json_bool", False, False, "BOOLEAN", ["JSON", "VARCHAR"], "JsonFunctions::get_native_json_bool",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::get_native_json_bool_selected'}],
     # get_json_bool over VARCHAR input — fused simdjson fast path on constant paths
-    [110030, "get_json_bool", False, False, "BOOLEAN", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bool",
+    [1100106, "get_json_bool", False, False, "BOOLEAN", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bool",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {"selected": "JsonFunctions::get_json_bool_selected"}],
 
 
@@ -915,10 +916,10 @@ vectorized_functions = [
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::json_query_selected'}],
     # VARCHAR-input json_query overload — fused simdjson path; FE rewrite uses this for
     # parse_json(x) -> 'p' and cast(json_query(parse_json(x), 'p') as JSON) patterns.
-    [110031, "json_query_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR"],
+    [1100107, "json_query_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR"],
      "JsonFunctions::json_query_from_string",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {"selected": "JsonFunctions::json_query_from_string_selected"}],
-    [110032, "json_query_many_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR", "..."],
+    [1100108, "json_query_many_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR", "..."],
      "JsonFunctions::json_query_many_from_string",
      "JsonFunctions::json_query_many_prepare", "JsonFunctions::json_query_many_close", {"selected": "JsonFunctions::json_query_many_from_string_selected"}],
     # [110006, "json_value", "JSON", ["JSON", "VARCHAR"], "JsonFunctions::json_query"],
@@ -1028,7 +1029,7 @@ vectorized_functions = [
     [130001, 'percentile_empty', True, False, 'PERCENTILE', [], 'PercentileFunctions::percentile_empty'],
     [130002, 'percentile_approx_raw', True, False, 'DOUBLE', ['PERCENTILE', 'DOUBLE'],
      'PercentileFunctions::percentile_approx_raw', {'selected': 'PercentileFunctions::percentile_approx_raw_selected'}],
-    [130003, 'percentile_hash', True, False, 'PERCENTILE', ['DOUBLE', 'DOUBLE'],
+    [1100109, 'percentile_hash', True, False, 'PERCENTILE', ['DOUBLE', 'DOUBLE'],
      'PercentileFunctions::percentile_hash_with_compression', {'selected': 'PercentileFunctions::percentile_hash_with_compression_selected'}],
 
     [140000, 'grouping_id', True, False, 'BIGINT', ['BIGINT'], 'GroupingSetsFunctions::grouping_id'],
@@ -1542,7 +1543,7 @@ vectorized_functions = [
     # struct functions
     [170500, 'row', True, False, 'ANY_STRUCT', ['ANY_ELEMENT', "..."], 'StructFunctions::new_struct'],
     [170501, 'named_struct', True, False, 'ANY_STRUCT', ['ANY_ELEMENT', "..."], 'StructFunctions::named_struct'],
-    [170502, 'debezium_decimal', True, False, 'DECIMAL128', ['ANY_STRUCT', 'INT', 'INT'],
+    [1100110, 'debezium_decimal', True, False, 'DECIMAL128', ['ANY_STRUCT', 'INT', 'INT'],
      'StructFunctions::debezium_decimal'],
 
     # user function
