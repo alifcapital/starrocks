@@ -253,6 +253,21 @@ public final class MetricRepo {
             new LongCounterMetric("publish_version_daemon_loop_total",
                     MetricUnit.OPERATIONS, "counter of publish version daemon loop runs");
 
+    // Global dicts on lake tables. A query attempt planned with a lake dict can fail when a data file holds a
+    // value that the dict misses; these counters show how often that happens and how it ends.
+    public static final LongCounterMetric COUNTER_QUERY_LAKE_GLOBAL_DICT =
+            new LongCounterMetric("query_lake_global_dict_total", MetricUnit.REQUESTS,
+                    "query attempts planned with a global dict on a lake table");
+    public static final LongCounterMetric COUNTER_QUERY_GLOBAL_DICT_NOT_MATCH =
+            new LongCounterMetric("query_global_dict_not_match_total", MetricUnit.REQUESTS,
+                    "query attempts failed because a file does not match a global dict");
+    public static final LongCounterMetric COUNTER_QUERY_GLOBAL_DICT_REPLAN =
+            new LongCounterMetric("query_global_dict_replan_total", MetricUnit.REQUESTS,
+                    "queries planned again without lake global dicts after a dict mismatch");
+    public static final LongCounterMetric COUNTER_QUERY_GLOBAL_DICT_ERR =
+            new LongCounterMetric("query_global_dict_err_total", MetricUnit.REQUESTS,
+                    "queries that returned a global dict mismatch error to the client");
+
     /**
      * Histogram tracking the lock held time (in milliseconds) when slow locks are detected.
      * Updated when lock hold time exceeds the slow_lock_threshold_ms configuration.
@@ -1034,6 +1049,10 @@ public final class MetricRepo {
         };
         STARROCKS_METRIC_REGISTER.addMetric(GAUGE_LAKE_COMPACTION_RUNNING_TASKS);
         STARROCKS_METRIC_REGISTER.addMetric(COUNTER_PUBLISH_VERSION_DAEMON_LOOP);
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_QUERY_LAKE_GLOBAL_DICT);
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_QUERY_GLOBAL_DICT_NOT_MATCH);
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_QUERY_GLOBAL_DICT_REPLAN);
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_QUERY_GLOBAL_DICT_ERR);
         COUNTER_ROUTINE_LOAD_ROWS =
                 new LongCounterMetric("routine_load_rows", MetricUnit.ROWS, "total rows of routine load");
         STARROCKS_METRIC_REGISTER.addMetric(COUNTER_ROUTINE_LOAD_ROWS);

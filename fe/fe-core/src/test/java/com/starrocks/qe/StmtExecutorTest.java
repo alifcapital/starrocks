@@ -32,8 +32,10 @@ import com.starrocks.common.util.ProfileManager;
 import com.starrocks.common.util.ProfilingExecPlan;
 import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.UUIDUtil;
+import com.starrocks.connector.exception.GlobalDictNotMatchException;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.metric.WarehouseMetricMgr;
+import com.starrocks.mysql.MysqlChannel;
 import com.starrocks.planner.DataPartition;
 import com.starrocks.planner.DescriptorTable;
 import com.starrocks.planner.PlanFragment;
@@ -1715,6 +1717,179 @@ public class StmtExecutorTest {
             Assertions.assertTrue(ctx.getState().isError());
             Assertions.assertTrue(ctx.getState().getErrorMessage().contains("stale bucket assignment"),
                     ctx.getState().getErrorMessage());
+        } finally {
+            Config.max_query_retry_time = oldRetryTime;
+        }
+    }
+
+    private static final String DICT_MISMATCH = "SlotId: 7, FileName: s3://bucket/t/data/f1.parquet , "
+            + "file doesn't match global dict. ";
+
+    /**
+     * Runs SELECT 1 with max_query_retry_time = 2 and lake dicts on. {@code failures} decides, per attempt, which
+     * exception the deployment throws (null: the attempt succeeds). Returns, per planning round, whether the plan
+     * was built with lake dicts, and fills {@code attempts} and {@code refreshes}.
+     */
+    private List<Boolean> runWithDictMismatches(DefaultCoordinator coordinator, ConnectContext ctx,
+                                                List<Exception> failures, AtomicInteger attempts,
+                                                AtomicInteger refreshes) throws Exception {
+        UUID queryId = UUIDUtil.genUUID();
+        ctx.setQueryId(queryId);
+        ctx.setExecutionId(UUIDUtil.toTUniqueId(queryId));
+        ctx.getSessionVariable().setEnableConstantExecuteInFE(false);
+        ctx.getSessionVariable().setUseLowCardinalityOptimizeOnLake(true);
+        StatementBase stmt = SqlParser.parseSingleStatement("SELECT 1", SqlModeHelper.MODE_DEFAULT);
+        StmtExecutor executor = new StmtExecutor(ctx, stmt);
+
+        new MockUp<StmtExecutor>() {
+            @Mock
+            public boolean isForwardToLeader() {
+                return false;
+            }
+        };
+        new MockUp<WarehouseMetricMgr>() {
+            @Mock
+            public static void increaseUnfinishedQueries(Long warehouseId, Long delta) {
+            }
+        };
+        List<Boolean> plannedWithLakeDict = Lists.newArrayList();
+        new MockUp<StatementPlanner>() {
+            @Mock
+            public ExecPlan plan(StatementBase ignoredStmt, ConnectContext planCtx) {
+                plannedWithLakeDict.add(planCtx.getSessionVariable().isUseLowCardinalityOptimizeOnLake());
+                return buildMinimalExecPlan(1);
+            }
+        };
+        new MockUp<DefaultCoordinator.Factory>() {
+            @Mock
+            public DefaultCoordinator createQueryScheduler(ConnectContext context, List<PlanFragment> fragments,
+                                                           List<ScanNode> scanNodes, TDescriptorTable descTable,
+                                                           ExecPlan plan) {
+                return coordinator;
+            }
+        };
+        new MockUp<ExecuteExceptionHandler>() {
+            @Mock
+            public String triggerDictRefresh(GlobalDictNotMatchException e,
+                                                    ExecuteExceptionHandler.RetryContext context) {
+                refreshes.incrementAndGet();
+                return "ice.db.t.c";
+            }
+        };
+        new MockUp<DefaultCoordinator>() {
+            @Mock
+            public void execWithQueryDeployExecutor(ConnectContext context) throws Exception {
+                int attempt = attempts.getAndIncrement();
+                if (attempt < failures.size() && failures.get(attempt) != null) {
+                    throw failures.get(attempt);
+                }
+            }
+
+            @Mock
+            public RowBatch getNext() {
+                return new RowBatch();
+            }
+        };
+
+        executor.execute();
+        return plannedWithLakeDict;
+    }
+
+    /**
+     * A dict mismatch on the last attempt gets one more attempt planned without lake dicts. It does not count
+     * against max_query_retry_time, and the dict refresh starts also on the last attempt.
+     */
+    @Test
+    public void testDictMismatchOnLastAttemptReplansWithoutLakeDict(@Mocked DefaultCoordinator coordinator)
+            throws Exception {
+        int oldRetryTime = Config.max_query_retry_time;
+        Config.max_query_retry_time = 2;
+        long notMatch = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_NOT_MATCH.getValue();
+        long replan = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_REPLAN.getValue();
+        long err = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue();
+        try {
+            ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+            ConnectContext.threadLocalInfo.set(ctx);
+            AtomicInteger attempts = new AtomicInteger();
+            AtomicInteger refreshes = new AtomicInteger();
+            List<Boolean> plans = runWithDictMismatches(coordinator, ctx, Lists.newArrayList(
+                    new StarRocksException(InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR, "Backend node not found."),
+                    new GlobalDictNotMatchException(DICT_MISMATCH)), attempts, refreshes);
+
+            Assertions.assertFalse(ctx.getState().isError(), ctx.getState().getErrorMessage());
+            Assertions.assertEquals(3, attempts.get());
+            // The first plan, the plan rebuilt after the node failure, the plan rebuilt after the dict mismatch.
+            Assertions.assertEquals(Lists.newArrayList(true, true, false), plans);
+            Assertions.assertEquals(1, refreshes.get());
+            Assertions.assertTrue(ctx.getSessionVariable().isUseLowCardinalityOptimizeOnLake());
+            Assertions.assertEquals(notMatch + 1, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_NOT_MATCH.getValue());
+            Assertions.assertEquals(replan + 1, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_REPLAN.getValue());
+            Assertions.assertEquals(err, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue());
+        } finally {
+            Config.max_query_retry_time = oldRetryTime;
+        }
+    }
+
+    /**
+     * After a dict mismatch the statement plans lake scans without dicts until it ends, also when a later
+     * attempt is re-planned for another error. The extra attempt is given once, so a statement that keeps
+     * failing ends after max_query_retry_time + 1 attempts.
+     */
+    @Test
+    public void testDictMismatchGetsOneExtraAttemptPerStatement(@Mocked DefaultCoordinator coordinator)
+            throws Exception {
+        int oldRetryTime = Config.max_query_retry_time;
+        Config.max_query_retry_time = 2;
+        long err = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue();
+        try {
+            ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+            ConnectContext.threadLocalInfo.set(ctx);
+            AtomicInteger attempts = new AtomicInteger();
+            AtomicInteger refreshes = new AtomicInteger();
+            List<Boolean> plans = runWithDictMismatches(coordinator, ctx, Lists.newArrayList(
+                    new GlobalDictNotMatchException(DICT_MISMATCH),
+                    new StarRocksException(InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR, "Backend node not found."),
+                    new GlobalDictNotMatchException(DICT_MISMATCH)), attempts, refreshes);
+
+            Assertions.assertTrue(ctx.getState().isError());
+            Assertions.assertEquals(3, attempts.get());
+            Assertions.assertEquals(Lists.newArrayList(true, false, false), plans);
+            Assertions.assertEquals(2, refreshes.get());
+            Assertions.assertEquals(err + 1, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue());
+        } finally {
+            Config.max_query_retry_time = oldRetryTime;
+        }
+    }
+
+    /**
+     * When the client already received rows, the statement cannot run again, so a dict mismatch goes to the
+     * client. The dict refresh still starts.
+     */
+    @Test
+    public void testDictMismatchAfterRowsWereSentFails(@Mocked DefaultCoordinator coordinator) throws Exception {
+        int oldRetryTime = Config.max_query_retry_time;
+        Config.max_query_retry_time = 2;
+        long replan = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_REPLAN.getValue();
+        long err = MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue();
+        try {
+            ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+            ConnectContext.threadLocalInfo.set(ctx);
+            new MockUp<MysqlChannel>() {
+                @Mock
+                public boolean isSend() {
+                    return true;
+                }
+            };
+            AtomicInteger attempts = new AtomicInteger();
+            AtomicInteger refreshes = new AtomicInteger();
+            runWithDictMismatches(coordinator, ctx, Lists.newArrayList(
+                    new GlobalDictNotMatchException(DICT_MISMATCH)), attempts, refreshes);
+
+            Assertions.assertTrue(ctx.getState().isError());
+            Assertions.assertEquals(1, attempts.get());
+            Assertions.assertEquals(1, refreshes.get());
+            Assertions.assertEquals(replan, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_REPLAN.getValue());
+            Assertions.assertEquals(err + 1, MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.getValue());
         } finally {
             Config.max_query_retry_time = oldRetryTime;
         }

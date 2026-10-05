@@ -121,6 +121,10 @@ public abstract class ScanNode extends PlanNode {
         return scanOptimizeOption;
     }
 
+    public boolean hasAppliedDictStringColumns() {
+        return !appliedDictStringColumns.isEmpty();
+    }
+
     public void updateAppliedDictStringColumns(Set<Integer> appliedColumnIds) {
         for (SlotDescriptor slot : desc.getSlots()) {
             if (appliedColumnIds.contains(slot.getId().asInt())) {

@@ -92,6 +92,7 @@ import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.connector.ConnectorMetadata;
+import com.starrocks.connector.exception.GlobalDictNotMatchException;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.IcebergMetadata;
 import com.starrocks.failpoint.FailPointExecutor;
@@ -1089,28 +1090,49 @@ public class StmtExecutor {
                             retryContext.prepareRetry();
                         }
 
+                        if (ExecuteExceptionHandler.usesLakeGlobalDict(attemptPlan)) {
+                            MetricRepo.COUNTER_QUERY_LAKE_GLOBAL_DICT.increase(1L);
+                        }
                         handleQueryStmt(attemptPlan);
                         break;
                     } catch (Exception e) {
-                        // For Arrow Flight SQL, FE doesn't know whether the client has already pull data from BE.
-                        // So FE cannot decide whether it is able to retry.
-                        if (i == retryTime - 1 || context.isArrowFlightSql()) {
-                            throw e;
-                        }
-                        ExecuteExceptionHandler.handle(e, retryContext);
-                        // sync lastExecPlan in case rebuildExecPlan produced a new plan
-                        lastExecPlan = retryContext.getExecPlan();
-                        if (!context.getMysqlChannel().isSend()) {
-                            String originStmt;
-                            if (parsedStmt.getOrigStmt() != null) {
-                                originStmt = parsedStmt.getOrigStmt().originStmt;
-                            } else {
-                                originStmt = this.originStmt.originStmt;
+                        try {
+                            // For Arrow Flight SQL, FE doesn't know whether the client has already pull data from BE.
+                            // So FE cannot decide whether it is able to retry.
+                            if (context.isArrowFlightSql()) {
+                                throw e;
                             }
-                            needRetry = true;
-                            LOG.warn("retry {} times. stmt: {}", (i + 1), SqlCredentialRedactor.redact(originStmt));
-                        } else {
-                            throw e;
+                            if (e instanceof GlobalDictNotMatchException) {
+                                boolean resultSent = context.getMysqlChannel().isSend();
+                                if (ExecuteExceptionHandler.onGlobalDictNotMatch(
+                                        (GlobalDictNotMatchException) e, retryContext, resultSent)) {
+                                    retryTime++;
+                                } else if (resultSent) {
+                                    throw e;
+                                }
+                            }
+                            if (i == retryTime - 1) {
+                                throw e;
+                            }
+                            ExecuteExceptionHandler.handle(e, retryContext);
+                            // sync lastExecPlan in case rebuildExecPlan produced a new plan
+                            lastExecPlan = retryContext.getExecPlan();
+                            if (!context.getMysqlChannel().isSend()) {
+                                String originStmt;
+                                if (parsedStmt.getOrigStmt() != null) {
+                                    originStmt = parsedStmt.getOrigStmt().originStmt;
+                                } else {
+                                    originStmt = this.originStmt.originStmt;
+                                }
+                                needRetry = true;
+                                LOG.warn("retry {} times. stmt: {}", (i + 1),
+                                        SqlCredentialRedactor.redact(originStmt));
+                            } else {
+                                throw e;
+                            }
+                        } catch (GlobalDictNotMatchException dictError) {
+                            MetricRepo.COUNTER_QUERY_GLOBAL_DICT_ERR.increase(1L);
+                            throw dictError;
                         }
                     } finally {
                         boolean isAsync = false;
