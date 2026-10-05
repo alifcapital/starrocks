@@ -191,6 +191,10 @@ struct TSpillOptions {
   26: optional bool spill_partitionwise_agg;
   27: optional i32 spill_partitionwise_agg_partition_num;
   28: optional bool spill_partitionwise_agg_skew_elimination;
+
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
+  // false: reservation checks ignore the memory booked by other spillable operators. Unset means false.
+  10000: optional bool spill_greedy_mem_reserve;
 }
 
 // Query options with their respective defaults

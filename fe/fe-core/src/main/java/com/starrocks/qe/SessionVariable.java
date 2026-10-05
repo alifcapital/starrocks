@@ -978,6 +978,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String SPILL_REVOCABLE_MAX_BYTES = "spill_revocable_max_bytes";
     public static final String SPILL_ENABLE_DIRECT_IO = "spill_enable_direct_io";
     public static final String SPILL_ENABLE_COMPACTION = "spill_enable_compaction";
+    public static final String SPILL_GREEDY_MEM_RESERVE = "spill_greedy_mem_reserve";
     // only used in test. spill_mode="RANDOM"
     public static final String SPILL_RAND_RATIO = "spill_rand_ratio";
     public static final String SPILL_ENCODE_LEVEL = "spill_encode_level";
@@ -1806,6 +1807,13 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = SPILL_STORAGE_VOLUME)
     private String spillStorageVolume = "";
+
+    // true: a spillable operator checks its memory reservation after subtracting the memory booked by all
+    // spillable operator instances. With hundreds of instances the bookings can exceed the limit and every
+    // operator spills although the real memory use is low.
+    // false: the reservation is checked against the real memory use only.
+    @VarAttr(name = SPILL_GREEDY_MEM_RESERVE)
+    private boolean spillGreedyMemReserve = false;
 
     @VarAttr(name = SPILL_RAND_RATIO, flag = VariableMgr.INVISIBLE)
     private double spillRandRatio = 0.1;
@@ -4508,6 +4516,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return this.spillPartitionWiseAggSkewElimination;
     }
 
+    public void setSpillGreedyMemReserve(boolean value) {
+        this.spillGreedyMemReserve = value;
+    }
+
+    public boolean isSpillGreedyMemReserve() {
+        return this.spillGreedyMemReserve;
+    }
+
     public boolean getForwardToLeader() {
         return forwardToLeader;
     }
@@ -6706,6 +6722,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
             spillOptions.setSpill_enable_direct_io(spillEnableDirectIO);
             spillOptions.setSpill_rand_ratio(spillRandRatio);
             spillOptions.setSpill_enable_compaction(spillEnableCompaction);
+            spillOptions.setSpill_greedy_mem_reserve(spillGreedyMemReserve);
             spillOptions.setSpill_mode(TSpillMode.valueOf(spillMode.toUpperCase()));
             spillOptions.setEnable_spill_buffer_read(enableSpillBufferRead);
             spillOptions.setMax_spill_read_buffer_bytes_per_driver(maxSpillReadBufferBytesPerDriver);

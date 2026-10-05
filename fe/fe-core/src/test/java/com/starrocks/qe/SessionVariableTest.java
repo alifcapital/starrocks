@@ -16,6 +16,7 @@ package com.starrocks.qe;
 import com.starrocks.thrift.TBinaryEncodingFormat;
 import com.starrocks.thrift.TBinaryEncodingLevel;
 import com.starrocks.thrift.TQueryOptions;
+import com.starrocks.thrift.TSpillOptions;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -50,6 +51,23 @@ public class SessionVariableTest {
         Assertions.assertFalse(options.isEnable_topn_filter_back_pressure());
         Assertions.assertEquals(0, options.getTopn_filter_back_pressure_io_tasks());
         Assertions.assertEquals(inline, options.isEnable_agg_inline_accumulator());
+    }
+
+    @Test
+    public void testSpillGreedyMemReserveDefaultAndToThrift() {
+        SessionVariable variables = new SessionVariable();
+        variables.setEnableSpill(true);
+        Assertions.assertFalse(variables.isSpillGreedyMemReserve());
+        TSpillOptions spillOptions = variables.toThrift().getSpill_options();
+        Assertions.assertTrue(spillOptions.isSetSpill_greedy_mem_reserve());
+        Assertions.assertFalse(spillOptions.isSpill_greedy_mem_reserve());
+        // Our own field uses an id from 10000, so it does not collide with upstream ids.
+        Assertions.assertTrue(TSpillOptions._Fields.SPILL_GREEDY_MEM_RESERVE.getThriftFieldId() >= 10000);
+
+        variables.setSpillGreedyMemReserve(true);
+        Assertions.assertTrue(variables.isSpillGreedyMemReserve());
+        Assertions.assertTrue(((SessionVariable) variables.clone()).toThrift().getSpill_options()
+                .isSpill_greedy_mem_reserve());
     }
 
     @Test

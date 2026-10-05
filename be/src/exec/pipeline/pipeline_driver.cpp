@@ -922,7 +922,13 @@ void PipelineDriver::_adjust_memory_usage(RuntimeState* state, MemTracker* track
             request_reserved = op->estimated_memory_reserved(chunk);
         }
         request_reserved += state->spill_mem_table_num() * state->spill_mem_table_size();
-        size_t shared_reserved = ExecEnv::GetInstance()->global_spill_manager()->spill_expected_reserved_bytes();
+        // The bookings of all operator instances can exceed the limit while the real consumption is far below it,
+        // and then every operator spills. With spill_greedy_mem_reserve=false we compare only the real consumption
+        // with the limits.
+        size_t shared_reserved =
+                state->spill_greedy_mem_reserve()
+                        ? ExecEnv::GetInstance()->global_spill_manager()->spill_expected_reserved_bytes()
+                        : 0;
 
         bool need_spill = false;
         if (!tls_thread_status.try_mem_reserve(request_reserved, shared_reserved)) {
@@ -938,7 +944,8 @@ void PipelineDriver::_adjust_memory_usage(RuntimeState* state, MemTracker* track
         TRACE_SPILL_LOG << "adjust memory spill:" << op->get_name() << " request: " << request_reserved
                         << " revocable: " << op->revocable_mem_bytes() << " set finishing: " << (chunk == nullptr)
                         << " need_spill:" << need_spill << " query_consumption:" << query_consumption
-                        << " limit:" << limited << " query reserved limit:" << reserved_limit;
+                        << " limit:" << limited << " query reserved limit:" << reserved_limit
+                        << " shared_reserved:" << shared_reserved;
     }
 }
 
@@ -952,7 +959,11 @@ void PipelineDriver::_try_to_release_buffer(RuntimeState* state, OperatorPtr& op
         auto query_mem_limit = query_mem_tracker->lowest_limit();
         DCHECK_GT(query_mem_limit, 0);
         auto spill_mem_threshold = query_mem_limit * state->spill_mem_limit_threshold();
-        size_t shared_reserved = ExecEnv::GetInstance()->global_spill_manager()->spill_expected_reserved_bytes();
+        // Same as in _adjust_memory_usage: without the greedy reserve only the real consumption is checked.
+        size_t shared_reserved =
+                state->spill_greedy_mem_reserve()
+                        ? ExecEnv::GetInstance()->global_spill_manager()->spill_expected_reserved_bytes()
+                        : 0;
         auto& current_thread = CurrentThread::current();
 
         if (query_consumption >= spill_mem_threshold * release_buffer_mem_ratio ||
@@ -962,7 +973,8 @@ void PipelineDriver::_try_to_release_buffer(RuntimeState* state, OperatorPtr& op
             TRACE_SPILL_LOG << "release operator due to mem pressure, consumption: " << query_consumption
                             << ", release buffer threshold: "
                             << static_cast<int64_t>(spill_mem_threshold * release_buffer_mem_ratio)
-                            << ", spill mem threshold: " << static_cast<int64_t>(spill_mem_threshold);
+                            << ", spill mem threshold: " << static_cast<int64_t>(spill_mem_threshold)
+                            << ", shared reserved: " << shared_reserved;
             mem_resource_mgr.to_low_memory_mode();
         }
     }

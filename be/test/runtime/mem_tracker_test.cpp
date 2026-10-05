@@ -192,4 +192,20 @@ TEST_F(MemTrackerTest, has_enough_reserved_memory) {
     ASSERT_FALSE(_query_1->has_enough_reserved_memory(1000));
 }
 
+// With spill_greedy_mem_reserve=false the caller passes 0 as the shared reserve. The bookings of many operator
+// instances can exceed the query pool limit, so a request that fits the real limit fails only if they are subtracted.
+TEST_F(MemTrackerTest, shared_reserve_exceeds_limit) {
+    _query_1->consume(50);
+    constexpr size_t shared_bookings = 600;
+
+    ASSERT_EQ(_query_1->try_consume_with_limited(10, shared_bookings), _query_pool_mem_tracker.get());
+    ASSERT_FALSE(_query_1->has_enough_reserved_memory(shared_bookings));
+    ASSERT_EQ(_query_1->consumption(), 50);
+
+    ASSERT_EQ(_query_1->try_consume_with_limited(10, 0), nullptr);
+    ASSERT_TRUE(_query_1->has_enough_reserved_memory(0));
+    ASSERT_EQ(_query_1->consumption(), 60);
+    ASSERT_EQ(_query_pool_mem_tracker->consumption(), 60);
+}
+
 } // namespace starrocks
