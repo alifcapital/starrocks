@@ -237,6 +237,12 @@ final class QueryGrammar {
         StringBuilder text = new StringBuilder();
         for (ATNState state : states) {
             text.append(number.get(state)).append(' ').append(state.getClass().getSimpleName()).append(':');
+            if (state instanceof RuleStopState) {
+                // The stop state has a transition to the follow state of every call of the rule in the whole
+                // grammar. A rule would change whenever a rule that the fast parser does not own calls it.
+                text.append('\n');
+                continue;
+            }
             for (Transition transition : state.getTransitions()) {
                 text.append(' ').append(transition.getClass().getSimpleName());
                 if (transition instanceof RuleTransition call) {
