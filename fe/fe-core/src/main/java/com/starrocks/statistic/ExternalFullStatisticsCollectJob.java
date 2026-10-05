@@ -343,7 +343,7 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
     }
 
     // table_uuid is always hashed for storage (StatisticUtils.hashTableUuidForPkStorage), so this
-    // never affects correctness. It's a diagnostic-only warning to confirm which tables actually
+    // never affects correctness. It's a diagnostic-only debug message to confirm which tables actually
     // would have hit "primary key size exceed the limit" pre-hashing (e.g. long Iceberg
     // catalog/db/table names combined with long partition_name values, see the Demandbase case).
     private void logIfRawKeyWouldExceedPkLimit(long jobId) {
@@ -352,7 +352,7 @@ public class ExternalFullStatisticsCollectJob extends StatisticsCollectJob {
         int maxColumnNameLen = columnNames.stream().mapToInt(String::length).max().orElse(0);
         int estimatedRawPkLen = rawTableUuid.length() + maxPartitionNameLen + maxColumnNameLen + PK_FIELD_OVERHEAD_ESTIMATE;
         if (estimatedRawPkLen > EXTERNAL_STATS_PK_LIMIT_ESTIMATE) {
-            LOG.warn("[ExternalStats] table_uuid hashed | jobId={} catalog={} db={} table={} rawTableUuidLen={} " +
+            LOG.debug("[ExternalStats] table_uuid hashed | jobId={} catalog={} db={} table={} rawTableUuidLen={} " +
                             "maxPartitionNameLen={} maxColumnNameLen={} estimatedRawPkLen={} limitEstimate={}",
                     jobId, catalogName, db.getOriginName(), table.getName(), rawTableUuid.length(),
                     maxPartitionNameLen, maxColumnNameLen, estimatedRawPkLen, EXTERNAL_STATS_PK_LIMIT_ESTIMATE);
