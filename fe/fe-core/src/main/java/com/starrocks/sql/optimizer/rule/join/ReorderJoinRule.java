@@ -114,6 +114,14 @@ public class ReorderJoinRule extends Rule {
      * - the join reorder with unique and foreign keys is off, because it decides the order by more than row counts.
      * The row counts are read from the atoms, which the first pass has given statistics.
      */
+    // We keep DP and greedy for every region whose scans have statistics. When the scans lack some, we turn DP and
+    // greedy off only if a column read by a join condition has no statistic in its atom: a missing statistic of a
+    // column no join reads, or a scan whose flag was never set because its atom already had statistics, does not
+    // change the join cardinalities.
+    static boolean hasUnknownStatistics(OptExpression root, MultiJoinNode multiJoinNode, OptimizerContext context) {
+        return Utils.hasUnknownColumnsStats(root) && multiJoinNode.hasUnknownJoinColumnStatistics(context);
+    }
+
     private boolean hasSingleJoinOrder(OptimizerContext context, MultiJoinNode multiJoinNode) {
         ConnectContext connectContext = ConnectContext.get();
         if (!skipRepeatedPasses || multiJoinNode.getAtoms().size() != 2
@@ -252,6 +260,7 @@ public class ReorderJoinRule extends Rule {
 
                 List<JoinOrder> orderAlgorithms = joinReorderFactory.create(context, multiJoinNode);
                 Optional<OptExpression> newChild = Optional.empty();
+                Boolean unknownStatistics = null;
                 for (int i = 0; i < orderAlgorithms.size(); ++i) {
                     JoinOrder orderAlgorithm = orderAlgorithms.get(i);
                     newChild = enumerate(orderAlgorithm, context, child, multiJoinNode, false);
@@ -260,7 +269,10 @@ public class ReorderJoinRule extends Rule {
                     }
                     // If there is no statistical information, the DP and greedy reorder algorithm are disabled,
                     // and the query plan degenerates to the left deep tree
-                    if (Utils.hasUnknownColumnsStats(innerJoinRoot.first) &&
+                    if (unknownStatistics == null) {
+                        unknownStatistics = hasUnknownStatistics(innerJoinRoot.first, multiJoinNode, context);
+                    }
+                    if (unknownStatistics &&
                             (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
                         break;
                     }
@@ -308,7 +320,7 @@ public class ReorderJoinRule extends Rule {
                 enumerate(new JoinReorderLeftDeep(context), context, innerJoinRoot, multiJoinNode, true);
                 // If there is no statistical information, the DP and greedy reorder algorithm are disabled,
                 // and the query plan degenerates to the left deep tree
-                if (Utils.hasUnknownColumnsStats(innerJoinRoot) &&
+                if (hasUnknownStatistics(innerJoinRoot, multiJoinNode, context) &&
                         (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
                     continue;
                 }
