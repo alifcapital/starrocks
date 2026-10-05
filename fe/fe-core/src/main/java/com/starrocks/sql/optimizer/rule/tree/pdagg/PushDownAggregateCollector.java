@@ -810,13 +810,6 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             return false;
         }
 
-        // An aggregate with no key is a scalar aggregate: on an empty input it still emits one row of NULLs, which
-        // the join would turn into result rows the query does not have. The original aggregate has a key, but the
-        // part of it pushed to one side of a cross join, or of a join on other columns, may have none.
-        if (context.groupBys.isEmpty()) {
-            return false;
-        }
-
         // distinct function, not support function can't push down
         if (context.aggregations.values().stream()
                 .anyMatch(v -> v.isDistinct() || !WHITE_FNS.contains(v.getFnName()))) {
@@ -827,6 +820,14 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
 
         ColumnRefSet allGroupByColumns = new ColumnRefSet();
         context.groupBys.values().forEach(c -> allGroupByColumns.union(c.getUsedColumns()));
+
+        // The pushed aggregate groups by the columns its keys use. With none it is a scalar aggregate: on an empty
+        // input it still emits one row of NULLs, which the join would turn into result rows the query does not have.
+        // The original aggregate has a key, but the part of it pushed to one side of a cross join, or of a join on
+        // other columns, may have none, and a constant key uses no column.
+        if (allGroupByColumns.isEmpty()) {
+            return false;
+        }
 
         for (int colId : allGroupByColumns.getColumnIds()) {
             ColumnRefOperator colRef = factory.getColumnRef(colId);

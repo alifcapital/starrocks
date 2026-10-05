@@ -62,12 +62,20 @@ public class AggregatePushDownTest extends PlanTestBase {
     @Test
     public void testNoPushDownWithoutKey() throws Exception {
         // Below the cross join no column of t0 is a key, so a pushed aggregate would be a scalar aggregate and emit
-        // a row of NULLs when t0 has no rows left, which the join would turn into result rows.
+        // a row of NULLs when t0 has no rows left, which the join would turn into result rows. A constant key uses no
+        // column, so it gives no key below the join either.
         String[] queries = {
                 "select t1.v5, sum(t0.v2), max(t0.v2) from t0 cross join t1 where t1.v4 < 30 and t0.v2 < -1000 " +
                         "group by t1.v5",
                 "select t1.v5, sum(t0.v2) from t0 join t1 on t1.v4 < 30 and t0.v2 < -1000 group by t1.v5",
-                "select t1.v5, sum(t0.v2) from t0 left join t1 on t1.v4 = 5 where t0.v2 < -1000 group by t1.v5"};
+                "select t1.v5, sum(t0.v2) from t0 left join t1 on t1.v4 = 5 where t0.v2 < -1000 group by t1.v5",
+                "select 'x' as c, max(t0.v2), sum(t0.v2) from t0 cross join t1 where t1.v4 < 30 and t0.v2 < -1000 " +
+                        "group by 'x'",
+                "select 'x' as c, max(t0.v2), sum(t0.v2) from t0 left join t1 on t1.v4 = 5 where t0.v2 < -1000 " +
+                        "group by 'x'",
+                "select 'x' as c, max(t0.v2), sum(t0.v2) from t0 join t1 on t1.v4 = 5 where t0.v2 < -1000 " +
+                        "group by 'x'",
+                "select 1 as c, 'y' as c2, max(t0.v2) from t0 cross join t1 where t0.v2 < -1000 group by 1, 2"};
         int mode = connectContext.getSessionVariable().getCboPushDownAggregateMode();
         try {
             for (String sql : queries) {

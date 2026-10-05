@@ -410,7 +410,9 @@ public class PushDownAggregateRewriter extends OptExpressionVisitor<OptExpressio
             return visit(optExpression, context);
         }
 
-        if (context.aggregations.isEmpty() && context.groupBys.isEmpty()) {
+        // Without a key the aggregate built here would be a scalar aggregate, which emits a row of NULLs on an empty
+        // input. The collector does not choose such a position; this keeps the rewrite safe on its own.
+        if (context.groupBys.isEmpty()) {
             return visit(optExpression, context);
         }
 
