@@ -275,13 +275,18 @@ public abstract class JoinOrder {
     }
 
     protected void calculateStatistics(OptExpression expr) {
+        deriveStatistics(expr, context);
+    }
+
+    // The statistics of an atom and of everything below it, derived once.
+    static void deriveStatistics(OptExpression expr, OptimizerContext context) {
         // Avoid repeated calculate
         if (expr.getStatistics() != null) {
             return;
         }
 
         for (OptExpression child : expr.getInputs()) {
-            calculateStatistics(child);
+            deriveStatistics(child, context);
         }
 
         ExpressionContext expressionContext = new ExpressionContext(expr);

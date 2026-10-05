@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.rule.join;
 
 import com.google.common.base.Preconditions;
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.Operator;
@@ -24,6 +25,7 @@ import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -71,6 +73,41 @@ public class MultiJoinNode {
             }
         }
         return true;
+    }
+
+    /**
+     * DP and greedy join reorder compare plans by the cardinalities of the region's joins. We expect these to depend
+     * on the statistics of the columns the join conditions read, so we ask whether one of these columns has an unknown
+     * statistic in the atom that outputs it, as the atom derives it. We do not look into the atoms: a scan below an
+     * atom can have a column that the atom does not output or that no join reads, and an atom that already carries
+     * statistics does not derive them again from its scans. Neither case changes the join cardinalities.
+     */
+    public boolean hasUnknownJoinColumnStatistics(OptimizerContext context) {
+        ColumnRefSet joinColumns = new ColumnRefSet();
+        for (ScalarOperator predicate : predicates) {
+            ColumnRefSet used = predicate.getUsedColumns();
+            joinColumns.union(used);
+            // A predicate on a column the region computes reads the columns of its expression.
+            for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : expressionMap.entrySet()) {
+                if (used.contains(entry.getKey())) {
+                    entry.getValue().collectUsedColumns(joinColumns);
+                }
+            }
+        }
+
+        for (OptExpression atom : atoms) {
+            JoinOrder.deriveStatistics(atom, context);
+            ColumnRefSet atomJoinColumns = atom.getOutputColumns().clone();
+            atomJoinColumns.intersect(joinColumns);
+            Map<ColumnRefOperator, ColumnStatistic> statistics = atom.getStatistics().getColumnStatistics();
+            for (int id : atomJoinColumns.getColumnIds()) {
+                ColumnStatistic columnStatistic = statistics.get(context.getColumnRefFactory().getColumnRef(id));
+                if (columnStatistic == null || columnStatistic.isUnknown()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static MultiJoinNode toMultiJoinNode(OptExpression node) {

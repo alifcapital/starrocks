@@ -252,6 +252,7 @@ public class ReorderJoinRule extends Rule {
 
                 List<JoinOrder> orderAlgorithms = joinReorderFactory.create(context, multiJoinNode);
                 Optional<OptExpression> newChild = Optional.empty();
+                Boolean unknownStatistics = null;
                 for (int i = 0; i < orderAlgorithms.size(); ++i) {
                     JoinOrder orderAlgorithm = orderAlgorithms.get(i);
                     newChild = enumerate(orderAlgorithm, context, child, multiJoinNode, false);
@@ -260,7 +261,10 @@ public class ReorderJoinRule extends Rule {
                     }
                     // If there is no statistical information, the DP and greedy reorder algorithm are disabled,
                     // and the query plan degenerates to the left deep tree
-                    if (Utils.hasUnknownColumnsStats(innerJoinRoot.first) &&
+                    if (unknownStatistics == null) {
+                        unknownStatistics = multiJoinNode.hasUnknownJoinColumnStatistics(context);
+                    }
+                    if (unknownStatistics &&
                             (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
                         break;
                     }
@@ -308,7 +312,7 @@ public class ReorderJoinRule extends Rule {
                 enumerate(new JoinReorderLeftDeep(context), context, innerJoinRoot, multiJoinNode, true);
                 // If there is no statistical information, the DP and greedy reorder algorithm are disabled,
                 // and the query plan degenerates to the left deep tree
-                if (Utils.hasUnknownColumnsStats(innerJoinRoot) &&
+                if (multiJoinNode.hasUnknownJoinColumnStatistics(context) &&
                         (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
                     continue;
                 }
