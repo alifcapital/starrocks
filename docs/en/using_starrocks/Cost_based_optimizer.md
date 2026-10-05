@@ -201,8 +201,8 @@ The following table describes the default settings. If you need to modify them, 
 | statistic_auto_analyze_start_time | STRING      | 00:00:00   | The start time of automatic collection. Value range: `00:00:00` - `23:59:59`. |
 | statistic_auto_analyze_end_time | STRING      | 23:59:59  | The end time of automatic collection. Value range: `00:00:00` - `23:59:59`. |
 | statistic_auto_collect_small_table_size     | LONG    | 5368709120   | The threshold for determining whether a table is a small table for automatic full collection. A table whose size is greater than this value is considered a large table, whereas a table whose size is less than or equal to this value is considered a small table. Unit: Byte. Default value: 5368709120 (5 GB).                         |
-| statistic_auto_collect_small_table_interval | LONG    | 604800         | The interval for automatically collecting full statistics of small tables. Unit: seconds.                              |
-| statistic_auto_collect_large_table_interval | LONG    | 604800        | The interval for automatically collecting full statistics of large tables. Unit: seconds. Default value: 604800 (one week).                               |
+| statistic_auto_collect_small_table_interval | LONG    | 0         | The interval for automatically collecting full statistics of small tables. Unit: seconds.                              |
+| statistic_auto_collect_large_table_interval | LONG    | 43200        | The interval for automatically collecting full statistics of large tables. Unit: seconds. Default value: 43200 (12 hours).                               |
 | enable_statistic_auto_collect_staggered_schedule | BOOLEAN | TRUE | Spread existing and new automatic collection jobs by table within the interval and daily analyze window; applies to native/external tables and database-wide jobs. |
 | statistic_auto_collect_ratio          | FLOAT    | 0.8               | The threshold for determining  whether the statistics for automatic collection are healthy. If statistics health is below this threshold, automatic collection is triggered. |
 | statistic_auto_collect_sample_threshold  | DOUBLE | 0.3   | The statistics health threshold for triggering automatic sampled collection. If the health value of statistics is lower than this threshold, automatic sampled collection is triggered. |
@@ -899,7 +899,7 @@ Query OK, 0 rows affected (0.01 sec)
 
 #### Spread automatic collection across the interval
 
-Set `enable_statistic_auto_collect_staggered_schedule=true` to distribute automatic collection by **table** within the configured collection interval and daily analyze window. The default in this 4.1 build is `true`; both small and large tables default to 604800 seconds (one week).
+Set `enable_statistic_auto_collect_staggered_schedule=true` to distribute automatic collection by **table** within the configured collection interval and daily analyze window. The default in this 4.1 build is `true`.
 
 For example, with a 604800-second interval and an analyze window of 01:00–05:00, tables receive different weekday/time slots inside those seven nightly windows. This applies to existing jobs as well as new jobs, including native and external tables and jobs covering a database or all databases. Recreating existing jobs is unnecessary.
 

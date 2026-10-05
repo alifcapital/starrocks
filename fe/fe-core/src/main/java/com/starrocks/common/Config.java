@@ -2809,13 +2809,13 @@ public class Config extends ConfigBase {
     public static int statistic_auto_collect_predicate_columns_threshold = 32;
 
     @ConfField(mutable = true, comment = "The interval of auto stats for small tables")
-    public static long statistic_auto_collect_small_table_interval = 7L * 24 * 3600; // unit: second, default 1 week
+    public static long statistic_auto_collect_small_table_interval = 0; // unit: second, default 0
 
     @ConfField(mutable = true, comment = "The interval of auto collecting histogram statistics")
     public static long statistic_auto_collect_histogram_interval = 3600L * 1; // 1h
 
     @ConfField(mutable = true, comment = "The interval of auto stats for large tables")
-    public static long statistic_auto_collect_large_table_interval = 7L * 24 * 3600; // unit: second, default 1 week
+    public static long statistic_auto_collect_large_table_interval = 3600L * 12; // unit: second, default 12h
 
     @ConfField(mutable = true, comment = "Spread automatic statistics collection by table across the collect interval " +
             "inside the configured daily analyze window. Applies to existing and new native/external jobs, " +
