@@ -219,6 +219,8 @@ public class ConnectContext {
     protected boolean isStatisticsConnection = false;
     protected boolean isStatisticsJob = false;
     protected boolean isStatisticsContext = false;
+    // Set only on the internal context of a query that collects a global dict of a lake table.
+    protected boolean isLakeDictCollection = false;
 
     protected boolean isMetadataContext = false;
     protected boolean needQueued = true;
@@ -1268,6 +1270,14 @@ public class ConnectContext {
 
     public void setStatisticsContext(boolean isStatisticsContext) {
         this.isStatisticsContext = isStatisticsContext;
+    }
+
+    public boolean isLakeDictCollection() {
+        return isLakeDictCollection;
+    }
+
+    public void setLakeDictCollection(boolean lakeDictCollection) {
+        isLakeDictCollection = lakeDictCollection;
     }
 
     public boolean isMetadataContext() {

@@ -82,6 +82,8 @@ public class IcebergScanNode extends ScanNode {
     // getAppliedEqualDeleteFiles(). The equality-delete -> position-delete conversion reads it back to
     // remove exactly the equality deletes that were scanned (paired with a live data file), not orphans.
     private boolean recordScanFiles = false;
+    // Set for the query that collects a global dict: it reads the data files as stored, deleted rows included.
+    private boolean ignorePositionDeletes = false;
 
     public IcebergScanNode(PlanNodeId id, TupleDescriptor desc, String planNodeName,
                            IcebergTableMORParams tableFullMORParams, IcebergMORParams morParams,
@@ -256,6 +258,7 @@ public class IcebergScanNode extends ScanNode {
         scanRangeSource = new IcebergConnectorScanRangeSource(icebergTable,
                 remoteFileInfoSource, morParams, desc, bucketProperties, partitionIdGenerator, recordScanFiles,
                 scanOptimizeOption.getCanUseMinMaxOpt(), usedForDelete);
+        scanRangeSource.setIgnorePositionDeletes(ignorePositionDeletes);
         applyTopnReorderToScanRangeSource();
     }
 
@@ -278,6 +281,14 @@ public class IcebergScanNode extends ScanNode {
 
     public void setRecordScanFiles(boolean recordScanFiles) {
         this.recordScanFiles = recordScanFiles;
+    }
+
+    public void setIgnorePositionDeletes(boolean ignorePositionDeletes) {
+        this.ignorePositionDeletes = ignorePositionDeletes;
+    }
+
+    public boolean isIgnorePositionDeletes() {
+        return ignorePositionDeletes;
     }
 
     public boolean isUsedForDelete() {

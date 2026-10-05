@@ -1702,6 +1702,9 @@ public class PlanFragmentBuilder {
                 if (isIcebergDeleteOperation(node)) {
                     icebergScanNode.setUsedForDelete(true);
                 }
+                // The query that collects a global dict reads the data files as stored, deleted rows included,
+                // for the reason given in IcebergEqualityDeleteRewriteRule.
+                icebergScanNode.setIgnorePositionDeletes(context.getConnectContext().isLakeDictCollection());
                 icebergScanNode.setupScanRangeLocations(
                         context.getConnectContext().getSessionVariable().isEnableConnectorIncrementalScanRanges());
                 if (!isEqDeleteScan) {

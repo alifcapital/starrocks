@@ -141,6 +141,8 @@ public class IcebergConnectorScanRangeSource extends ConnectorScanRangeSource {
     // Slot id of the leading ORDER BY column for TopN scan reorder/skip (-1 = disabled). When set,
     // per-file min/max is shipped (so BE can order morsels and skip files) even if useMinMaxOpt is off.
     private int topnReorderSlotId = -1;
+    // When set, scan ranges carry no position-delete files, so the CN returns every row stored in the data file.
+    private boolean ignorePositionDeletes = false;
 
     public IcebergConnectorScanRangeSource(IcebergTable table,
                                            RemoteFileInfoSource remoteFileInfoSource,
@@ -180,6 +182,10 @@ public class IcebergConnectorScanRangeSource extends ConnectorScanRangeSource {
 
     public void setTopnReorderSlotId(int slotId) {
         this.topnReorderSlotId = slotId;
+    }
+
+    public void setIgnorePositionDeletes(boolean ignorePositionDeletes) {
+        this.ignorePositionDeletes = ignorePositionDeletes;
     }
 
     public void clearScannedFiles() {
@@ -316,7 +322,7 @@ public class IcebergConnectorScanRangeSource extends ConnectorScanRangeSource {
         List<TIcebergDeleteFile> posDeleteFiles = new ArrayList<>();
         for (DeleteFile deleteFile : task.deletes()) {
             FileContent content = deleteFile.content();
-            if (content == FileContent.EQUALITY_DELETES) {
+            if (content == FileContent.EQUALITY_DELETES || ignorePositionDeletes) {
                 continue;
             }
 
