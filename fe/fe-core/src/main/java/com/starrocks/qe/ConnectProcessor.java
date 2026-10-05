@@ -169,10 +169,11 @@ public class ConnectProcessor {
         ctx.getState().setOk();
     }
 
-    // COM_QUIT: set killed flag and then return OK packet.
+    // COM_QUIT: set killed flag and send no response. A client closes its socket right after COM_QUIT and does
+    // not read a reply, so a reply would only be written into a connection that is already closing.
     private void handleQuit() {
         ctx.setKilled();
-        ctx.getState().setOk();
+        ctx.getState().setStateType(QueryState.MysqlStateType.NOOP);
     }
 
     // COM_CHANGE_USER: change current user within this connection

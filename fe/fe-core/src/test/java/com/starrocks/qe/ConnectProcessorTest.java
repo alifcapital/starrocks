@@ -439,7 +439,8 @@ public class ConnectProcessorTest extends DDLTestBase {
         ConnectProcessor processor = new ConnectProcessor(ctx);
         processor.processOnce();
         Assertions.assertEquals(MysqlCommand.COM_QUIT, myContext.getCommand());
-        Assertions.assertTrue(myContext.getState().toResponsePacket() instanceof MysqlOkPacket);
+        Assertions.assertEquals(QueryState.MysqlStateType.NOOP, myContext.getState().getStateType());
+        Assertions.assertNull(myContext.getState().toResponsePacket());
         Assertions.assertTrue(myContext.isKilled());
     }
 

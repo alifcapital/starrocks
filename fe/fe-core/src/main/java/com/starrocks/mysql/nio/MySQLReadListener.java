@@ -121,7 +121,10 @@ public class MySQLReadListener implements ChannelListener<ConduitStreamSourceCha
         if (!ctx.isKilled() && ctx.getState().isRunning()) {
             ctx.kill(false, "client closed");
         }
-        ctx.cleanup();
+        // A request read before the disconnect, such as COM_QUIT or the killed query, may still be running on
+        // another worker and write its response. We close the channel only after it completes, so that it does
+        // not write into a channel we closed; taskCompleted() then does the cleanup.
+        tryCleanup();
     }
 
     /**

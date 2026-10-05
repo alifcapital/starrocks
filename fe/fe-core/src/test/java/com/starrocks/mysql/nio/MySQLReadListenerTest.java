@@ -38,6 +38,7 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MySQLReadListenerTest {
     @Mocked
@@ -267,6 +268,58 @@ public class MySQLReadListenerTest {
             };
 
             handedToWorker.get(0).run();
+
+            new Verifications() {
+                {
+                    ctx.cleanup();
+                    times = 1;
+                }
+            };
+        } finally {
+            Config.mysql_service_kill_after_disconnect = savedKillAfterDisconnect;
+        }
+    }
+
+    @Test
+    public void testDisconnectKillWaitsForRunningRequest(@Mocked ConduitStreamSourceChannel channel,
+                                                         @Mocked XnioWorker worker) throws Exception {
+        boolean savedKillAfterDisconnect = Config.mysql_service_kill_after_disconnect;
+        Config.mysql_service_kill_after_disconnect = true;
+        List<Runnable> handedToWorker = new ArrayList<>();
+        try {
+            new Expectations() {
+                {
+                    channel.read((ByteBuffer) any);
+                    result = -1;
+                    channel.getWorker();
+                    result = worker;
+                    worker.execute((Runnable) any);
+                    result = new Delegate<Void>() {
+                        @SuppressWarnings("unused")
+                        void execute(Runnable task) {
+                            handedToWorker.add(task);
+                        }
+                    };
+                }
+            };
+
+            // A request read before the disconnect, such as COM_QUIT, is still running on another worker.
+            AtomicInteger pendingTasks = Deencapsulation.getField(listener, "pendingTasks");
+            pendingTasks.incrementAndGet();
+
+            listener.handleEvent(channel);
+            handedToWorker.get(0).run();
+
+            new Verifications() {
+                {
+                    ctx.cleanup();
+                    times = 0;
+                }
+            };
+
+            Method taskCompleted = MySQLReadListener.class.getDeclaredMethod("taskCompleted");
+            taskCompleted.setAccessible(true);
+            taskCompleted.invoke(listener);
 
             new Verifications() {
                 {
