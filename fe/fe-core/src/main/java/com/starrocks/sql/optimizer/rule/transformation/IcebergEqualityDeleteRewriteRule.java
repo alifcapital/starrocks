@@ -94,8 +94,11 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
             return false;
         }
 
-        Set<DeleteFile> deleteFiles = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                .getDeleteFiles(icebergTable, snapshotId.get(), scanOperator.getPredicate(), FileContent.EQUALITY_DELETES);
+        Set<DeleteFile> deleteFiles;
+        try (OptimizerContext.MetadataWait ignored = context.waitForMetadata()) {
+            deleteFiles = GlobalStateMgr.getCurrentState().getMetadataMgr().getDeleteFiles(icebergTable,
+                    snapshotId.get(), scanOperator.getPredicate(), FileContent.EQUALITY_DELETES);
+        }
 
         Set<IcebergDeleteSchema> deleteSchemas = deleteFiles.stream()
                 .map(f -> IcebergDeleteSchema.of(f.equalityFieldIds(), f.specId()))

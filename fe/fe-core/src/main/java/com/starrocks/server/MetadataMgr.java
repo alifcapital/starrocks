@@ -772,8 +772,11 @@ public class MetadataMgr {
                                          ScalarOperator predicate,
                                          long limit,
                                          TvrVersionRange versionRange) {
-        Statistics statistics = computeTableStatistics(session, catalogName, table, columns, partitionKeys,
-                predicate, limit, versionRange);
+        Statistics statistics;
+        try (OptimizerContext.MetadataWait ignored = session == null ? null : session.waitForMetadata()) {
+            statistics = computeTableStatistics(session, catalogName, table, columns, partitionKeys,
+                    predicate, limit, versionRange);
+        }
         captureExternalTableStatisticsToDump(session, catalogName, table, statistics);
         return statistics;
     }
@@ -957,6 +960,15 @@ public class MetadataMgr {
 
     /** Resolve the scan domain before loading any statistics. Null means this connector cannot name it. */
     public ExternalStatisticsRequest prepareExternalStatisticsRequest(OptimizerContext session, String catalogName,
+            Table table, Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
+            ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
+        try (OptimizerContext.MetadataWait ignored = session == null ? null : session.waitForMetadata()) {
+            return resolveExternalStatisticsRequest(session, catalogName, table, columns, partitionKeys, predicate,
+                    limit, versionRange);
+        }
+    }
+
+    private ExternalStatisticsRequest resolveExternalStatisticsRequest(OptimizerContext session, String catalogName,
             Table table, Map<ColumnRefOperator, Column> columns, List<PartitionKey> partitionKeys,
             ScalarOperator predicate, long limit, TvrVersionRange versionRange) {
         if (isIncrementalIcebergScan(table, versionRange)

@@ -339,15 +339,17 @@ public class OptExternalPartitionPruner {
                 // check if the partition predicate could be used for filter partition names
                 List<Optional<ScalarOperator>> effectivePartitionPredicate =
                         getEffectivePartitionPredicate(operator, partitionColumns, operator.getPredicate());
-                if (effectivePartitionPredicate.stream().anyMatch(Optional::isPresent)) {
-                    List<Optional<String>> partitionValues = getPartitionValue(effectivePartitionPredicate);
-                    partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                            .listPartitionNamesByValue(table.getCatalogName(), table.getCatalogDBName(),
-                                    table.getCatalogTableName(), partitionValues);
-                } else {
-                    partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr()
-                            .listPartitionNames(table.getCatalogName(), table.getCatalogDBName(),
-                                    table.getCatalogTableName(), ConnectorMetadataRequestContext.DEFAULT);
+                try (OptimizerContext.MetadataWait ignored = context.waitForMetadata()) {
+                    if (effectivePartitionPredicate.stream().anyMatch(Optional::isPresent)) {
+                        List<Optional<String>> partitionValues = getPartitionValue(effectivePartitionPredicate);
+                        partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                                .listPartitionNamesByValue(table.getCatalogName(), table.getCatalogDBName(),
+                                        table.getCatalogTableName(), partitionValues);
+                    } else {
+                        partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                                .listPartitionNames(table.getCatalogName(), table.getCatalogDBName(),
+                                        table.getCatalogTableName(), ConnectorMetadataRequestContext.DEFAULT);
+                    }
                 }
 
                 // For the query dump, capture the FULL (unfiltered) partition name list so replay can
@@ -474,7 +476,10 @@ public class OptExternalPartitionPruner {
             GetRemoteFilesParams params =
                     GetRemoteFilesParams.newBuilder().setPredicate(operator.getPredicate()).setFieldNames(fieldNames)
                             .setTableVersionRange(operator.getTvrVersionRange()).setLimit(operator.getLimit()).build();
-            List<RemoteFileInfo> fileInfos = GlobalStateMgr.getCurrentState().getMetadataMgr().getRemoteFiles(table, params);
+            List<RemoteFileInfo> fileInfos;
+            try (OptimizerContext.MetadataWait ignored = context.waitForMetadata()) {
+                fileInfos = GlobalStateMgr.getCurrentState().getMetadataMgr().getRemoteFiles(table, params);
+            }
             if (fileInfos.isEmpty()) {
                 return;
             }

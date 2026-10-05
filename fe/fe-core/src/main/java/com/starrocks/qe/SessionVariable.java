@@ -470,6 +470,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String BROADCAST_RIGHT_TABLE_SCALE_FACTOR =
             "broadcast_right_table_scale_factor";
     public static final String NEW_PLANNER_OPTIMIZER_TIMEOUT = "new_planner_optimize_timeout";
+    public static final String OPTIMIZER_TIMEOUT_EXCLUDE_METADATA_WAIT = "optimizer_timeout_exclude_metadata_wait";
     public static final String ENABLE_GROUPBY_USE_OUTPUT_ALIAS = "enable_groupby_use_output_alias";
     public static final String ENABLE_QUERY_DUMP = "enable_query_dump";
     public static final String QUERY_DEBUG_OPTIONS = "query_debug_options";
@@ -1939,6 +1940,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VariableMgr.VarAttr(name = NEW_PLANNER_OPTIMIZER_TIMEOUT)
     private long optimizerExecuteTimeout = 3000;
+
+    // A cold external catalog can make the optimizer wait seconds for file lists, partitions and statistics from
+    // object storage. We do not want such a wait to fail a query that the optimizer itself plans quickly, so the
+    // wait is left out of new_planner_optimize_timeout. query_timeout still bounds the whole query.
+    @VariableMgr.VarAttr(name = OPTIMIZER_TIMEOUT_EXCLUDE_METADATA_WAIT)
+    private boolean optimizerTimeoutExcludeMetadataWait = true;
 
     @VariableMgr.VarAttr(name = QUERY_DEBUG_OPTIONS, flag = VariableMgr.INVISIBLE)
     private String queryDebugOptions = "";
@@ -4654,6 +4661,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
             return 30_000;
         }
         return optimizerExecuteTimeout;
+    }
+
+    public boolean isOptimizerTimeoutExcludeMetadataWait() {
+        return optimizerTimeoutExcludeMetadataWait;
+    }
+
+    public void setOptimizerTimeoutExcludeMetadataWait(boolean optimizerTimeoutExcludeMetadataWait) {
+        this.optimizerTimeoutExcludeMetadataWait = optimizerTimeoutExcludeMetadataWait;
     }
 
     public void setOptimizerExecuteTimeout(long optimizerExecuteTimeout) {

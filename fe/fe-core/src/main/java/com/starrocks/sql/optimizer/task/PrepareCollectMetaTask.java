@@ -23,6 +23,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 
@@ -91,7 +92,9 @@ public class PrepareCollectMetaTask extends OptimizerTask {
                                             forked, connectContext),
                             executorService);
                 }
-                CompletableFuture.allOf(futures).join();
+                try (OptimizerContext.MetadataWait prepareWait = context.getOptimizerContext().waitForMetadata()) {
+                    CompletableFuture.allOf(futures).join();
+                }
                 // Merge all forks back on the owner thread (single-threaded, no race)
                 for (Tracers f : forks) {
                     ownerTracers.mergeFrom(f);

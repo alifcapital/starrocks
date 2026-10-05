@@ -98,6 +98,14 @@ public class OptimizerContext {
     private long uniquePartitionIdGenerator = 0L;
     private final Stopwatch optimizerTimer = Stopwatch.createStarted();
     private final Map<RuleType, Stopwatch> ruleWatchMap = Maps.newHashMap();
+    // Time the optimizer thread spends blocked on external catalog metadata, see MetadataWait. Only the outermost
+    // wait of the optimizer thread is counted: the waits are then disjoint intervals inside optimizerTimer, so their
+    // sum never exceeds the elapsed time. Waits on other threads, such as the parallel prepare pool, overlap the
+    // optimizer thread's own wait for them and are not counted.
+    private final Thread optimizerThread = Thread.currentThread();
+    private long metadataWaitNanos = 0;
+    private int metadataWaitDepth = 0;
+    private long metadataWaitStartNanos = 0;
 
     // ============================ Task Variables ============================
     // The options for join predicate pushdown rule
@@ -355,11 +363,44 @@ public class OptimizerContext {
     }
 
     /**
+     * Marks a call that blocks on external catalog metadata (file lists, partitions, statistics), so that
+     * checkTimeout() can leave its duration out of the optimizer budget. Use it in try-with-resources.
+     */
+    public MetadataWait waitForMetadata() {
+        return new MetadataWait();
+    }
+
+    public long getMetadataWaitMillis() {
+        return TimeUnit.NANOSECONDS.toMillis(metadataWaitNanos);
+    }
+
+    public final class MetadataWait implements AutoCloseable {
+        private final boolean counted;
+
+        private MetadataWait() {
+            counted = Thread.currentThread() == optimizerThread;
+            if (counted && metadataWaitDepth++ == 0) {
+                metadataWaitStartNanos = System.nanoTime();
+            }
+        }
+
+        @Override
+        public void close() {
+            if (counted && --metadataWaitDepth == 0) {
+                metadataWaitNanos += System.nanoTime() - metadataWaitStartNanos;
+            }
+        }
+    }
+
+    /**
      * Throw exception if reach optimizer timeout
      */
     public void checkTimeout() {
         long timeout = getSessionVariable().getOptimizerExecuteTimeout();
-        long now = optimizerTimer.elapsed(TimeUnit.MILLISECONDS);
+        long elapsed = optimizerTimer.elapsed(TimeUnit.MILLISECONDS);
+        long metadataWait = getMetadataWaitMillis();
+        long now = getSessionVariable().isOptimizerTimeoutExcludeMetadataWait()
+                ? Math.max(0, elapsed - metadataWait) : elapsed;
         // Use MIN to inject failure, which would not be used by normal case
         if (timeout > 0 && now > timeout || timeout == Long.MIN_VALUE) {
             ConnectContext context = ConnectContext.get();
@@ -371,7 +412,8 @@ public class OptimizerContext {
                     ", optimizerContextInUse=" + FormatUtil.formatBytes(optimizerInUseBytes);
 
             throw new StarRocksPlannerException("StarRocks planner use long time " + now +
-                    " ms in " + (inMemoPhase ? "memo" : "logical") + " phase, This probably because " +
+                    " ms in " + (inMemoPhase ? "memo" : "logical") + " phase (elapsed " + elapsed +
+                    " ms, waiting for external metadata " + metadataWait + " ms), This probably because " +
                     "1. FE Full GC, " + memoryInfo +
                     "2. Hive external table fetch metadata took a long time, " +
                     "3. The SQL is very complex. " +
