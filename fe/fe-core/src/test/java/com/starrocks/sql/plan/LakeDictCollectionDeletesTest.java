@@ -24,6 +24,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.statistic.StatisticExecutor;
+import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TResultBatch;
 import com.starrocks.thrift.TStatusCode;
@@ -61,6 +62,16 @@ public class LakeDictCollectionDeletesTest extends ConnectorPlanTestBase {
 
     @Test
     public void testStatisticsQueryAppliesDeletes() throws Exception {
+        // In unit tests MetadataMgr skips the internal statistics and leaves them null. On a statistics
+        // connection the statistics table blacklist then returns that null instead of asking the connector, so
+        // the scan gets no statistics. In production the internal statistics are never null. We keep the
+        // connector path open here so that only the dict decision depends on the statistics connection.
+        new MockUp<StatisticUtils>() {
+            @Mock
+            public static boolean statisticTableBlackListCheck(long tableId) {
+                return false;
+            }
+        };
         connectContext.setStatisticsConnection(true);
         connectContext.setStatisticsJob(true);
         try {

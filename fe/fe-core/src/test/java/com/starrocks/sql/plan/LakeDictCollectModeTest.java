@@ -19,6 +19,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.statistics.CacheRelaxDictManager;
 import com.starrocks.sql.optimizer.statistics.ColumnDict;
+import com.starrocks.statistic.StatisticUtils;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.AfterAll;
@@ -116,6 +117,16 @@ public class LakeDictCollectModeTest extends ConnectorPlanTestBase {
 
     @Test
     public void testStatisticsQueryDoesNotCollectOrUseDict() throws Exception {
+        // In unit tests MetadataMgr skips the internal statistics and leaves them null. On a statistics
+        // connection the statistics table blacklist then returns that null instead of asking the connector, so
+        // the scan gets no statistics. In production the internal statistics are never null. We keep the
+        // connector path open here so that only the dict decision depends on the statistics connection.
+        new MockUp<StatisticUtils>() {
+            @Mock
+            public static boolean statisticTableBlackListCheck(long tableId) {
+                return false;
+            }
+        };
         connectContext.getSessionVariable().setUseLowCardinalityOptimizeOnLake(true);
         connectContext.getSessionVariable().setCollectLowCardinalityDictOnLake(true);
         connectContext.setStatisticsConnection(true);
