@@ -176,8 +176,10 @@ import org.apache.logging.log4j.Logger;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -1280,9 +1282,75 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
             groupStatisticsMap.put(groupByColumn, statsBuilder.build());
         }
+        return estimateGroupCount(groupBys, groupStatisticsMap.keySet(), inputStatistics);
+    }
 
+    /**
+     * The number of groups of columns in statistics, NaN when a column has no usable NDV. Below a join with join
+     * statistics, a join key counts with its distinct values among the joined rows.
+     */
+    public static double estimateGroupCount(Statistics statistics, Set<ColumnRefOperator> columns) {
+        double rows = statistics.getOutputRowCount();
+        if (!Double.isFinite(rows) || rows <= 0 || columns.isEmpty()) {
+            return Double.NaN;
+        }
+        // Use the same conditional/projected NDV as GROUP BY, including an MCV superset.
+        // Never multiply base-table NDVs again on top of an already estimated JOIN cardinality.
+        var combined = statistics.getLargestSubsetMCStats(columns);
+        var projected = MultiColumnMcvEstimator.projectedNdv(columns, statistics);
+        if (projected.isEmpty() && statistics.getJoinStatisticsPlanner() != null) {
+            Statistics.Builder conditional = null;
+            for (ColumnRefOperator column : columns) {
+                if (combined != null && combined.first.contains(column)) {
+                    continue;
+                }
+                var key = statistics.getJoinStatisticsPlanner().keyStatistics(statistics.getJoinStatisticsScope(), column);
+                var basic = statistics.getColumnStatistics().get(column);
+                if (key == null || key.degree() == null || basic == null) {
+                    continue;
+                }
+                if (conditional == null) {
+                    conditional = Statistics.buildFrom(statistics);
+                }
+                var degree = key.degree();
+                double nulls = degree.getRowCount() > 0 ? degree.getNullCount() / (double) degree.getRowCount() : 0;
+                conditional.addColumnStatistic(column, ColumnStatistic.buildFrom(basic)
+                        .setDistinctValuesCount(degree.getDistinctCount()).setNullsFraction(nulls)
+                        .setType(ColumnStatistic.StatisticType.ESTIMATE).build());
+            }
+            if (conditional != null) {
+                statistics = conditional.build();
+            }
+        }
+        if (projected.isEmpty()) {
+            for (ColumnRefOperator column : columns) {
+                if (combined != null && combined.first.contains(column)) {
+                    continue;
+                }
+                ColumnStatistic stat = statistics.getColumnStatistics().get(column);
+                if (stat == null || stat.isUnknown() || !Double.isFinite(stat.getDistinctValuesCount())) {
+                    return Double.NaN;
+                }
+            }
+        }
+        if (!statistics.getColumnStatistics().keySet().containsAll(columns)) {
+            return Double.NaN;
+        }
+        // The order of the columns decides which of them the estimate damps for correlation; we sort by id, so the
+        // estimate does not depend on the iteration order of the set.
+        ColumnRefOperator[] ordered = columns.toArray(new ColumnRefOperator[0]);
+        Arrays.sort(ordered, Comparator.comparingInt(ColumnRefOperator::getId));
+        return estimateGroupCount(Arrays.asList(ordered), columns, statistics);
+    }
+
+    /**
+     * The number of groups of groupBys in the input, the output rows of an aggregate on them. groupBySet holds the
+     * same columns as groupBys; the caller passes it because it often has one already.
+     */
+    public static double estimateGroupCount(List<ColumnRefOperator> groupBys, Set<ColumnRefOperator> groupBySet,
+                                            Statistics inputStatistics) {
         // A group of exactly the group-by columns, read whole, has their distinct count.
-        MultiColumnCombinedStats own = inputStatistics.getMultiColumnCombinedStats().get(groupStatisticsMap.keySet());
+        MultiColumnCombinedStats own = inputStatistics.getMultiColumnCombinedStats().get(groupBySet);
         if (own != null && own.isComplete() && own.getNdv() > 0) {
             return Math.min(Math.max(1, own.getNdv()), inputStatistics.getOutputRowCount());
         }
@@ -1292,7 +1360,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         Set<ColumnRefOperator> columnsWithMultiColStats = new HashSet<>();
         // Try to get the largest subset with multi-column statistics
         Pair<Set<ColumnRefOperator>, MultiColumnCombinedStats> mcStats =
-                inputStatistics.getLargestSubsetMCStats(groupStatisticsMap.keySet());
+                inputStatistics.getLargestSubsetMCStats(groupBySet);
 
         if (mcStats != null) {
             Set<ColumnRefOperator> combinedMultiColumns = mcStats.first;

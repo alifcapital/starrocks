@@ -198,55 +198,7 @@ public final class TopNAggregationCost {
     }
 
     static double distinct(Statistics statistics, Set<ColumnRefOperator> columns) {
-        double rows = statistics.getOutputRowCount();
-        if (!Double.isFinite(rows) || rows <= 0 || columns.isEmpty()) {
-            return Double.NaN;
-        }
-        // Use the same conditional/projected NDV as GROUP BY, including an MCV superset.
-        // Never multiply base-table NDVs again on top of an already estimated JOIN cardinality.
-        var combined = statistics.getLargestSubsetMCStats(columns);
-        var projected = MultiColumnMcvEstimator.projectedNdv(columns, statistics);
-        if (projected.isEmpty() && statistics.getJoinStatisticsPlanner() != null) {
-            Statistics.Builder conditional = null;
-            for (ColumnRefOperator column : columns) {
-                if (combined != null && combined.first.contains(column)) {
-                    continue;
-                }
-                var key = statistics.getJoinStatisticsPlanner().keyStatistics(statistics.getJoinStatisticsScope(), column);
-                var basic = statistics.getColumnStatistics().get(column);
-                if (key == null || key.degree() == null || basic == null) {
-                    continue;
-                }
-                if (conditional == null) {
-                    conditional = Statistics.buildFrom(statistics);
-                }
-                var degree = key.degree();
-                double nulls = degree.getRowCount() > 0 ? degree.getNullCount() / (double) degree.getRowCount() : 0;
-                conditional.addColumnStatistic(column, ColumnStatistic.buildFrom(basic)
-                        .setDistinctValuesCount(degree.getDistinctCount()).setNullsFraction(nulls)
-                        .setType(ColumnStatistic.StatisticType.ESTIMATE).build());
-            }
-            if (conditional != null) {
-                statistics = conditional.build();
-            }
-        }
-        if (projected.isEmpty()) {
-            for (ColumnRefOperator column : columns) {
-                if (combined != null && combined.first.contains(column)) {
-                    continue;
-                }
-                ColumnStatistic stat = statistics.getColumnStatistics().get(column);
-                if (stat == null || stat.isUnknown() || !Double.isFinite(stat.getDistinctValuesCount())) {
-                    return Double.NaN;
-                }
-            }
-        }
-        if (!statistics.getColumnStatistics().keySet().containsAll(columns)) {
-            return Double.NaN;
-        }
-        return StatisticsCalculator.computeGroupByStatistics(
-                columns.stream().sorted(Comparator.comparingInt(ColumnRefOperator::getId)).toList(),
-                statistics, new HashMap<>());
+        return StatisticsCalculator.estimateGroupCount(statistics, columns);
     }
 
     // Model groups as distributed proportionally to source rows for a known leading value.
