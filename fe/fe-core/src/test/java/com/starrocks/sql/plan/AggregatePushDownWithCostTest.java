@@ -99,6 +99,8 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
         String sql;
         String plan;
 
+        // Pushed below the joins the aggregate groups t0 by the join keys (v1, v2): about 3.3 million times 0.5
+        // million combinations for 1 billion rows, so it would not reduce the rows and stays above the joins.
         sql = "select " +
                 "/*+SET_VAR(cbo_push_down_aggregate_mode=0,cbo_push_down_aggregate_on_broadcast_join=true)*/ sum(v3)\n" +
                 "from \n" +
@@ -107,18 +109,19 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
                 "    join t2 on t0.v2 = t2.v7\n" +
                 "group by t2.v9, t3.v11";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  4:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 4: v10\n" +
+        assertNotContains(plan, "group by: 1: v1, 2: v2");
+
+        // The join key v2 alone has 0.5 million values for 1 billion rows, so an aggregate on it reduces the rows
+        // that reach the join 2000 times and is pushed below the join.
+        sql = "select " +
+                "/*+SET_VAR(cbo_push_down_aggregate_mode=0,cbo_push_down_aggregate_on_broadcast_join=true)*/ sum(v3)\n" +
+                "from t0 join t2 on t0.v2 = t2.v7\n" +
+                "group by t2.v9";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "  |  group by: 2: v2\n" +
                 "  |  \n" +
-                "  |----3:EXCHANGE\n" +
-                "  |    \n" +
-                "  1:AGGREGATE (update finalize)\n" +
-                "  |  output: sum(3: v3)\n" +
-                "  |  group by: 1: v1, 2: v2\n" +
-                "  |  \n" +
-                "  0:OlapScanNode");
+                "  1:OlapScanNode\n" +
+                "     TABLE: t0");
     }
 
     @Test
@@ -141,48 +144,22 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
                 "    join t1 on t0.v1 = t1.v4\n" +
                 "group by t2.v9, t1.v5";
 
+        // t1 has 1000 rows, so t0 join t1 is a small broadcast join. The aggregate is not pushed right below it, and
+        // above it the key (v2, v5) has as many groups as the 0.3 million rows of the join.
         sql = String.format(sqlTemplate1, 0, "true");
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  5:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  output: sum(3: v3)\n" +
-                "  |  group by: 2: v2, 5: v5\n" +
-                "  |  \n" +
-                "  4:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 4: v4\n" +
-                "  |  \n" +
-                "  |----3:EXCHANGE\n" +
-                "  |    \n" +
-                "  1:OlapScanNode\n" +
-                "     TABLE: t0");
+        assertNotContains(plan, "group by: 2: v2, 5: v5");
+        assertNotContains(plan, "group by: 1: v1, 2: v2");
 
+        // Without the broadcast join handling the candidate is t0 grouped by (v1, v2), which does not reduce.
         sql = String.format(sqlTemplate1, 0, "false");
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  2:AGGREGATE (update finalize)\n" +
-                "  |  output: sum(3: v3)\n" +
-                "  |  group by: 1: v1, 2: v2\n" +
-                "  |  \n" +
-                "  1:OlapScanNode\n" +
-                "     TABLE: t0");
+        assertNotContains(plan, "group by: 1: v1, 2: v2");
 
         sql = String.format(sqlTemplate2, 0, "true");
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  5:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  output: sum(3: v3)\n" +
-                "  |  group by: 2: v2, 8: v5\n" +
-                "  |  \n" +
-                "  4:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 7: v4\n" +
-                "  |  \n" +
-                "  |----3:EXCHANGE\n" +
-                "  |    \n" +
-                "  1:OlapScanNode\n" +
-                "     TABLE: t0");
+        assertNotContains(plan, "group by: 2: v2, 8: v5");
+        assertNotContains(plan, "group by: 1: v1, 2: v2");
 
         sql = String.format(sqlTemplate2, 1, "false");
         plan = getFragmentPlan(sql);
@@ -204,17 +181,30 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
     }
 
     @Test
+    public void testAggAboveSmallBroadcastJoin() throws Exception {
+        // Right below the small broadcast join t0 join t1 the aggregate would group t0 by v1, and it is never pushed
+        // there. Above that join it groups by (v5, v6) of t1, about 10 groups for 0.3 million rows, so it is pushed
+        // to that place, below the join with t2.
+        String sql = "select " +
+                "/*+SET_VAR(cbo_push_down_aggregate_mode=0,cbo_push_down_aggregate_on_broadcast_join=true)*/ sum(v3)\n" +
+                "from t0 join t1 on t0.v1 = t1.v4 join t2 on t1.v6 = t2.v8\n" +
+                "group by t1.v5";
+        String plan = getFragmentPlan(sql);
+        assertNotContains(plan, "group by: 1: v1\n");
+        assertContains(plan, "  |  group by: 5: v5, 6: v6\n" +
+                "  |  \n" +
+                "  4:HASH JOIN");
+    }
+
+    @Test
     public void testAggOnUnion() throws Exception {
         String sql;
         String plan;
 
-        // Aggregate is pushed down to Broadcast Join for both children of UNION.
-        //                                        Aggregate(v2,v5)
-        //                                            Union
-        //                   Join(v2=v7)                                   Join(v2=v7)
-        //     Aggregate(v2,v5)      Aggregate(v7)            Aggregate(v2,v5)      Aggregate(v7)
-        //       Join(v1=v4)             t2(v7)                 Join(v1=v4)             t2(v7)
-        // t0(v1,v2)  t1(v4,v5)                          t0(v1,v2)  t1(v4,v5)
+        // Each child of the UNION joins t0 with t1, a small broadcast join, and then with t2. The aggregate is not
+        // pushed right below the small broadcast join, and above it the key (v2, v5) has as many groups as rows, so
+        // in auto mode nothing is pushed into the children. The rewrite of a pushed aggregate through a UNION is
+        // covered by the preagg-pushdown and agg-pushdown plan files of AggregatePushDownTest.
         sql = "select sum(v2)\n" +
                 "from (\n" +
                 "select v2, v5\n" +
@@ -231,112 +221,7 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
                 ") t\n" +
                 "group by v5";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  5:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  group by: 2: v2, 5: v5\n" +
-                "  |  \n" +
-                "  4:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 4: v4\n" +
-                "  |  \n" +
-                "  |----3:EXCHANGE\n" +
-                "  |    \n" +
-                "  1:OlapScanNode\n" +
-                "     TABLE: t0");
-        assertContains(plan, "  9:AGGREGATE (update finalize)\n" +
-                "  |  group by: 7: v7\n" +
-                "  |  \n" +
-                "  8:OlapScanNode\n" +
-                "     TABLE: t2");
-        assertContains(plan, "  18:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  group by: 11: v2, 14: v5\n" +
-                "  |  \n" +
-                "  17:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 10: v1 = 13: v4\n" +
-                "  |  \n" +
-                "  |----16:EXCHANGE\n" +
-                "  |    \n" +
-                "  14:OlapScanNode\n" +
-                "     TABLE: t0");
-        assertContains(plan, "  22:AGGREGATE (update finalize)\n" +
-                "  |  group by: 16: v7\n" +
-                "  |  \n" +
-                "  21:OlapScanNode\n" +
-                "     TABLE: t2");
-
-        // Aggregate is pushed down to Broadcast Join for one child of UNION and to Scan for the other.
-        //                                        Aggregate(v2,v5)
-        //                                            Union
-        //                   Join(v2=v7)                             \
-        //     Aggregate(v2,v5)      Aggregate(v7)                 Join(v2=v7)
-        //       Join(v1=v4)             t2(v7)           Aggregate(v2)    Aggregate(v7,v8)
-        // t0(v1,v2)  t1(v4,v5)                              t0(v2)          t2(v7,v8)
-        sql = "select sum(v2)\n" +
-                "from (\n" +
-                "select v2, v5\n" +
-                "from \n" +
-                "    t0 \n" +
-                "    join t1 on t0.v1 = t1.v4\n" +
-                "    join t2 on t0.v2 = t2.v7\n" +
-                "union\n" +
-                "select v2, v8\n" +
-                "from \n" +
-                "    t0 \n" +
-                "    join t2 on t0.v2 = t2.v7\n" +
-                ") t\n" +
-                "group by v5";
-        plan = getFragmentPlan(sql);
-        assertContains(plan, "  5:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  group by: 2: v2, 5: v5\n" +
-                "  |  \n" +
-                "  4:HASH JOIN\n" +
-                "  |  join op: INNER JOIN (BUCKET_SHUFFLE)\n" +
-                "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 4: v4\n" +
-                "  |  \n" +
-                "  |----3:EXCHANGE\n" +
-                "  |    \n" +
-                "  1:OlapScanNode\n" +
-                "     TABLE: t0");
-        assertContains(plan, "  9:AGGREGATE (update finalize)\n" +
-                "  |  group by: 7: v7\n" +
-                "  |  \n" +
-                "  8:OlapScanNode\n" +
-                "     TABLE: t2");
-        assertContains(plan, "  17:AGGREGATE (update serialize)\n" +
-                "  |  STREAMING\n" +
-                "  |  group by: 11: v2\n" +
-                "  |  \n" +
-                "  16:OlapScanNode\n" +
-                "     TABLE: t0");
-        assertContains(plan, "  15:AGGREGATE (update finalize)\n" +
-                "  |  group by: 13: v7, 14: v8\n" +
-                "  |  \n" +
-                "  14:OlapScanNode\n" +
-                "     TABLE: t2");
-
-        // Cannot push down for the second union child.
-        sql = "select sum(v2)\n" +
-                "from (\n" +
-                "select v2, v5\n" +
-                "from \n" +
-                "    t0 \n" +
-                "    join t1 on t0.v1 = t1.v4\n" +
-                "    join t2 on t0.v2 = t2.v7\n" +
-                "union\n" +
-                "select v2, v11\n" +
-                "from \n" +
-                "    t0 \n" +
-                "    join t3 on t0.v2 = t3.v10\n" +
-                ") t\n" +
-                "group by v5";
-        plan = getFragmentPlan(sql);
-        Assertions.assertEquals(4, StringUtils.countMatches(plan, ":AGGREGATE "));
+        Assertions.assertEquals(3, StringUtils.countMatches(plan, ":AGGREGATE "), plan);
     }
 
     @Test
@@ -396,14 +281,10 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
                 "  0:OlapScanNode\n" +
                 "     TABLE: t3");
 
+        // (v10, v11) has 0.1 million groups, and v12 adds 5000 values: the key has as many groups as rows.
         sql = "select sum(t3.v12) from t3 join t1 on t3.v10=t1.v4 group by t3.v11, t3.v12";
         plan = getFragmentPlan(sql);
-        assertCContains(plan, "1:AGGREGATE (update finalize)\n" +
-                "  |  output: sum(3: v12)\n" +
-                "  |  group by: 1: v10, 2: v11, 3: v12\n" +
-                "  |  \n" +
-                "  0:OlapScanNode\n" +
-                "     TABLE: t3");
+        assertNotContains(plan, "group by: 1: v10, 2: v11, 3: v12");
         plan = getCostExplain(sql);
         assertCContains(plan, "column statistics: \n" +
                 "     * v10-->[1.0, 2.0, 0.0, 4.0, 1.0E7] ESTIMATE\n" +

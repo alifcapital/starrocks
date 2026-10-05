@@ -20,6 +20,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -46,7 +47,9 @@ import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStats;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient;
+import com.starrocks.sql.optimizer.statistics.TopNAggregationCost;
 import com.starrocks.sql.optimizer.task.TaskContext;
+import com.starrocks.system.BackendResourceStat;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.logging.log4j.LogManager;
@@ -59,9 +62,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.LOWER_AGGREGATE_EFFECT_COEFFICIENT;
-import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.SMALL_BROADCAST_JOIN_MAX_COMBINED_NDV_LIMIT;
-import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.SMALL_BROADCAST_JOIN_MAX_NDV_LIMIT;
 
 /*
  * Collect all can be push down aggregate context, to get which aggregation can be
@@ -562,16 +562,27 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             return false;
         }
 
+        int[] groupByIds = groupBys.getColumnIds();
+        Set<ColumnRefOperator> columnRefOperators = new HashSet<>(groupByIds.length * 2);
+        for (int id : groupByIds) {
+            columnRefOperators.add(factory.getColumnRef(id));
+        }
+        if (pushDownMode == PUSH_DOWN_AGG_AUTO) {
+            // Right below a small broadcast join the join is cheap: its hash table is small, the probe stays where it
+            // is, and the runtime filter of the join prunes the scan. An aggregate there groups by the join key and
+            // adds a shuffle and a blocking phase, and it turns the join into a shuffle join. We measured it slower at
+            // every key size, so we leave this candidate to the aggregate placed above the join, which groups by
+            // columns of the small side and is the next candidate.
+            if (context.immediateChildOfSmallBroadcastJoin) {
+                return false;
+            }
+            return reducesRowsLocally(context, columnRefOperators, statistics);
+        }
+
         List<ColumnStatistic> lower = Lists.newArrayList();
         int mediumCount = 0;
         int highCount = 0;
 
-        Set<ColumnRefOperator> columnRefOperators = groupBys.getStream()
-                .map(factory::getColumnRef)
-                .collect(Collectors.toSet());
-
-        double maxSingleColumnDistinct = 0.0;
-        double maxMultiColumnDistinct = 0.0;
         Set<ColumnStatistic> columnStatistics = new HashSet<>();
 
         Pair<Set<ColumnRefOperator>, MultiColumnCombinedStats> mcStats = statistics.getLargestSubsetMCStats(columnRefOperators);
@@ -580,7 +591,6 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             double ndv = Math.max(1, mcStats.second.getNdv());
             ColumnStatistic multiColumnStat = ColumnStatistic.builder().setDistinctValuesCount(ndv).build();
             columnStatistics.add(multiColumnStat);
-            maxMultiColumnDistinct = ndv;
 
             Set<ColumnRefOperator> remainedColumns = new HashSet<>(columnRefOperators);
             remainedColumns.removeAll(mcStats.first);
@@ -588,13 +598,11 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             for (ColumnRefOperator col : remainedColumns) {
                 ColumnStatistic stat = ExpressionStatisticCalculator.calculate(col, statistics);
                 columnStatistics.add(stat);
-                maxSingleColumnDistinct = Math.max(maxSingleColumnDistinct, stat.getDistinctValuesCount());
             }
         } else {
             for (ColumnRefOperator col : columnRefOperators) {
                 ColumnStatistic stat = ExpressionStatisticCalculator.calculate(col, statistics);
                 columnStatistics.add(stat);
-                maxSingleColumnDistinct = Math.max(maxSingleColumnDistinct, stat.getDistinctValuesCount());
             }
         }
 
@@ -610,16 +618,6 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
                 default:
                     highCount++;
                     break;
-            }
-        }
-
-        if (pushDownMode == PUSH_DOWN_AGG_AUTO && context.immediateChildOfSmallBroadcastJoin) {
-            if (maxSingleColumnDistinct > SMALL_BROADCAST_JOIN_MAX_NDV_LIMIT) {
-                return false;
-            }
-            if (maxMultiColumnDistinct > SMALL_BROADCAST_JOIN_MAX_COMBINED_NDV_LIMIT ||
-                    maxMultiColumnDistinct * LOWER_AGGREGATE_EFFECT_COEFFICIENT >= outputRowCount) {
-                return false;
             }
         }
 
@@ -697,6 +695,42 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
         }
 
         return false;
+    }
+
+    // We want a pushed-down aggregate only where it cuts the rows that reach the join by far. It runs as a local
+    // phase in every driver, on the rows of that driver, and the BE keeps aggregating there only while the reduction
+    // is above about 2, else it passes the rows through. So we require the reduction per driver to be at least
+    // PUSH_DOWN_AGGREGATE_MIN_LOCAL_REDUCTION, well above that bound: a pushdown the runtime would undo costs a hash
+    // attempt on every driver and, with a global phase, a shuffle and a blocking aggregate of all rows.
+    //
+    // The number of groups is estimated for the whole key, the group-by columns with the join keys added on the way
+    // down, from the NDV of the aggregate estimate and the join statistics of the joins below. Classes of single
+    // columns cannot tell that a key such as (account, date) is close to unique although each column repeats.
+    private boolean reducesRowsLocally(AggregatePushDownContext context, Set<ColumnRefOperator> groupBys,
+                                       Statistics statistics) {
+        double rows = statistics.getOutputRowCount();
+        double groups = StatisticsCalculator.estimateGroupCount(statistics, groupBys);
+        if (!(rows > 0) || !Double.isFinite(groups)) {
+            return false;
+        }
+        double localGroups = TopNAggregationCost.concurrentLocalGroups(rows, groups, drivers());
+        boolean push = rows >= StatisticsEstimateCoefficient.PUSH_DOWN_AGGREGATE_MIN_LOCAL_REDUCTION * localGroups;
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Push down aggregation {} group by {}: rows {}, groups {}, local groups {}, push {}",
+                    context.aggregations.values(), groupBys, rows, groups, localGroups, push);
+        }
+        return push;
+    }
+
+    // The drivers that run the local phase, as in the cost model of aggregates.
+    private double drivers() {
+        ConnectContext connection = ConnectContext.get();
+        if (connection == null) {
+            return 1;
+        }
+        long warehouseId = connection.getCurrentWarehouseId();
+        return Math.max(1, BackendResourceStat.getInstance().getNumBes(warehouseId)) *
+                (double) Math.max(1, sessionVariable.getDegreeOfParallelism(warehouseId));
     }
 
     // high(2): row_count / cardinality < MEDIUM_AGGREGATE_EFFECT_COEFFICIENT
