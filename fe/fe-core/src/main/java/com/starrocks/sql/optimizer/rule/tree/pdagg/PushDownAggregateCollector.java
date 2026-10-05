@@ -822,7 +822,10 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             return false;
         }
 
-        if (context.aggregations.isEmpty() && context.groupBys.isEmpty()) {
+        // An aggregate with no key is a scalar aggregate: on an empty input it still emits one row of NULLs, which
+        // the join would turn into result rows the query does not have. The original aggregate has a key, but the
+        // part of it pushed to one side of a cross join, or of a join on other columns, may have none.
+        if (context.groupBys.isEmpty()) {
             return false;
         }
 
