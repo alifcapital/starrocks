@@ -1286,7 +1286,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     // Stop buffering and retain upstream DOP when retained chunks reach this budget per driver.
     @VariableMgr.VarAttr(name = ADAPTIVE_DOP_MAX_BLOCK_BYTES_PER_DRIVER_SEQ)
-    private long adaptiveDopMaxBlockBytesPerDriverSeq = 16L * 1024 * 1024;
+    private long adaptiveDopMaxBlockBytesPerDriverSeq = 1024L * 1024;
 
     @VariableMgr.VarAttr(name = ADAPTIVE_DOP_MAX_BLOCK_ROWS_PER_DRIVER_SEQ, flag = VariableMgr.INVISIBLE)
     private long adaptiveDopMaxBlockRowsPerDriverSeq = 4096L * 4;

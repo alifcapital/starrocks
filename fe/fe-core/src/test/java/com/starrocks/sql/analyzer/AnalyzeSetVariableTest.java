@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class AnalyzeSetVariableTest {
     @Test
     public void testAdaptiveDopByteBudget() {
-        Assertions.assertEquals(16L * 1024 * 1024,
+        Assertions.assertEquals(1024L * 1024,
                 new SessionVariable().getAdaptiveDopMaxBlockBytesPerDriverSeq());
         analyzeSuccess("set runtime_adaptive_dop_max_block_bytes_per_driver_seq = 16777216");
         analyzeSuccess("set runtime_adaptive_dop_max_block_bytes_per_driver_seq = 0");
