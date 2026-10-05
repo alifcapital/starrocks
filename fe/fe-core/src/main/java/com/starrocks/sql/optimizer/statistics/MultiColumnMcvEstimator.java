@@ -505,6 +505,11 @@ public class MultiColumnMcvEstimator {
     private static Map<ColumnRefOperator, List<ScalarOperator>> groupSupportedConjuncts(List<ScalarOperator> conjuncts) {
         Map<ColumnRefOperator, List<ScalarOperator>> byColumn = new LinkedHashMap<>();
         for (ScalarOperator conjunct : conjuncts) {
+            // A predicate that is not estimated, such as a bound that the scan holds only to skip files, must not
+            // count in the selectivity.
+            if (conjunct.isNotEvalEstimate()) {
+                continue;
+            }
             ColumnRefOperator column = predicateColumn(conjunct);
             if (column != null && column.getType().canStatistic()) {
                 byColumn.computeIfAbsent(column, k -> new ArrayList<>()).add(conjunct);

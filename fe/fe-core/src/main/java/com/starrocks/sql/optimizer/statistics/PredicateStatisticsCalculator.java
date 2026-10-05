@@ -33,6 +33,7 @@ import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
+import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
 import org.apache.commons.math3.util.Precision;
@@ -467,6 +468,41 @@ public class PredicateStatisticsCalculator {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
             }
+            // A comparison of a function of a column with a constant is estimated by the bounds on the column that
+            // follow from it. The check of the shape comes first, because it rejects most comparisons for free.
+            if (predicate.getChild(0) instanceof CallOperator && predicate.getChild(1).isConstantRef()) {
+                MonotonicFilterDerivation.ColumnBounds bounds =
+                        MonotonicFilterDerivation.columnBoundsForEstimate(predicate);
+                if (bounds != null) {
+                    return estimateByColumnBounds(predicate, bounds);
+                }
+            }
+            return estimateBinaryPredicate(predicate, null);
+        }
+
+        private Statistics estimateByColumnBounds(BinaryPredicateOperator predicate,
+                                                  MonotonicFilterDerivation.ColumnBounds bounds) {
+            List<ScalarOperator> columnBounds = bounds.bounds();
+            ScalarOperator bound = columnBounds.size() == 1 ? columnBounds.get(0) : Utils.compoundAnd(columnBounds);
+            Statistics byBounds = statisticsCalculate(bound, statistics, useMcv);
+            if (bounds.exact()) {
+                return byBounds;
+            }
+            // The bounds only follow from the comparison, so their estimate is an upper bound of its rows. When the
+            // function has statistics of its own, the comparison on them can give fewer rows, and we take the lower
+            // estimate.
+            ColumnStatistic functionStatistic = getExpressionStatistic(predicate.getChild(0));
+            if (functionStatistic.isUnknown() || functionStatistic.isInfiniteRange()
+                    || functionStatistic.hasNaNValue()) {
+                return byBounds;
+            }
+            Statistics byFunction = estimateBinaryPredicate(predicate, functionStatistic);
+            return byFunction.getOutputRowCount() < byBounds.getOutputRowCount() ? byFunction : byBounds;
+        }
+
+        // knownLeftStatistic: the statistics of the left child when the caller has computed them, or null
+        private Statistics estimateBinaryPredicate(BinaryPredicateOperator predicate,
+                                                   ColumnStatistic knownLeftStatistic) {
             Optional<Statistics> mcv = estimateWithMcv(predicate);
             if (mcv.isPresent()) {
                 return mcv.get();
@@ -494,7 +530,8 @@ public class PredicateStatisticsCalculator {
             }
 
             // compute left and right column statistics
-            ColumnStatistic leftColumnStatistic = getExpressionStatistic(leftChild);
+            ColumnStatistic leftColumnStatistic = knownLeftStatistic != null && leftChild == predicate.getChild(0)
+                    ? knownLeftStatistic : getExpressionStatistic(leftChild);
             ColumnStatistic rightColumnStatistic = getExpressionStatistic(rightChild);
             // do not use NaN to estimate predicate
             if (leftColumnStatistic.hasNaNValue()) {

@@ -44,6 +44,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -105,14 +106,34 @@ public class MonotonicFilterDerivationTest {
         ScalarOperator comparison = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
         List<ScalarOperator> bounds = addedBounds(comparison);
         assertFalse(bounds.isEmpty());
-        // We expect the bounds to be redundant and not estimated: the original conjunct stays, the statistics count
-        // its rows, and a materialized view rewrite compares it
+        // We expect the bounds to be redundant and not estimated: the original conjunct stays, the statistics
+        // estimate it through the same inverse, and a materialized view rewrite compares it
         for (ScalarOperator bound : bounds) {
             assertTrue(bound.isRedundant());
             assertTrue(bound.isNotEvalEstimate());
         }
         assertFalse(comparison.isRedundant());
         assertFalse(comparison.isNotEvalEstimate());
+    }
+
+    @Test
+    public void testExactBoundsAreRedundantAndNotEstimated() {
+        // to_date(d) has an exact inverse; its bound is equivalent to the comparison, which still counts once
+        ColumnRefOperator day = new ColumnRefOperator(5, DateType.DATETIME, "t", true);
+        ScalarOperator comparison = new BinaryPredicateOperator(BinaryType.GE,
+                new CallOperator("to_date", DateType.DATE, ImmutableList.of(day)),
+                ConstantOperator.createDate(LocalDateTime.of(2024, 1, 1, 0, 0)));
+        List<ScalarOperator> bounds = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(comparison))
+                .stream().filter(p -> p != comparison).toList();
+        assertFalse(bounds.isEmpty());
+        for (ScalarOperator bound : bounds) {
+            assertTrue(bound.isRedundant());
+            assertTrue(bound.isNotEvalEstimate());
+        }
+        MonotonicFilterDerivation.ColumnBounds forEstimate =
+                MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) comparison);
+        assertTrue(forEstimate.exact());
+        assertFalse(forEstimate.bounds().isEmpty());
     }
 
     @Test
@@ -271,5 +292,20 @@ public class MonotonicFilterDerivationTest {
         ctx.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
         ScalarOperator predicate = comparison("from_unixtime", BinaryType.GE, "2024-03-05 10:30:00");
         assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+        // The option decides which predicates the plan gets, not how the statistics read the one it has
+        MonotonicFilterDerivation.ColumnBounds forEstimate =
+                MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) predicate);
+        assertFalse(forEstimate.exact());
+        assertTrue(forEstimate.bounds().stream().anyMatch(p -> p.toString().equals("1: ep >= 1709634600")),
+                forEstimate.bounds().toString());
+    }
+
+    @Test
+    public void testNoBoundsForEstimateOfOtherShapes() {
+        ScalarOperator plain = new BinaryPredicateOperator(BinaryType.GE, epoch, ConstantOperator.createBigint(0));
+        assertNull(MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) plain));
+        CallOperator abs = new CallOperator("abs", IntegerType.BIGINT, ImmutableList.of(epoch));
+        ScalarOperator unknown = new BinaryPredicateOperator(BinaryType.GE, abs, ConstantOperator.createBigint(0));
+        assertNull(MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) unknown));
     }
 }
