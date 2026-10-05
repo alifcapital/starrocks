@@ -4058,3 +4058,17 @@
 {"sql": "SELECT a FROM t WHERE a IN (?, ?)"}
 {"sql": "UPDATE t SET v = 1 WHERE k IN (1, 2, 3)"}
 {"sql": "DELETE FROM t WHERE k NOT IN ('a', 'b')"}
+{"sql": "SELECT a FROM t WHERE a IN (-1)"}
+{"sql": "SELECT a FROM t WHERE a NOT IN (-1, -2.5, 3e2)"}
+{"sql": "SELECT a FROM t WHERE a IN (- 1, 2)"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 2, -9223372036854775808)"}
+{"sql": "SELECT a FROM t WHERE a IN (99999999999999999999, 1, 2)"}
+{"sql": "SELECT a FROM t WHERE a IN (-99999999999999999999, 1)"}
+{"sql": "SELECT a FROM t WHERE a IN (1.5, -2, 3) AND b IN (-1.5)"}
+{"sql": "SELECT a FROM t WHERE a IN (+1, 2.5)"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 2 + 3)"}
+{"sql": "SELECT a FROM t WHERE a IN (-1, b)"}
+{"sql": "SELECT a FROM t WHERE a IN (-b, 1)"}
+{"sql": "SELECT a FROM t WHERE a IN ('a', 1)"}
+{"sql": "SELECT a FROM t WHERE a IN (1, 'a')"}
+{"sql": "SELECT a FROM t WHERE cast(a as decimal(10, 2)) IN (1.50, 2.25, 3.00, 4.00)"}

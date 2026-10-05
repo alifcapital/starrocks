@@ -1224,28 +1224,64 @@ public final class DirectExpressionParser<E, Q, T, F, O, W, B, C>
         return value;
     }
 
-    // The grammar reads IN (1, 2, ...) as integerList and IN ('a', 'b', ...) as stringList, and AstBuilder builds
-    // a LargeInPredicate only for those two shapes, so we check that the list is exactly such tokens.
+    // The grammar reads IN (1, 2, ...) as integerList, IN (-1, 2.5, ...) as numberList and IN ('a', 'b', ...) as
+    // stringList, and AstBuilder builds a LargeInPredicate only for those shapes, so we check that the list is
+    // exactly such tokens. A list that fits both integerList and numberList is an integerList, the first alternative.
     private E largeIn(E value, List<E> values, boolean negative, NodePosition p, int open, int close) {
-        if (close - open != 2 * values.size()) {
+        ExpressionConstruction.InListKind kind = inListKind(open, close, values.size());
+        if (kind == null) {
             return null;
-        }
-        int first = type(open + 1);
-        boolean integers = first == INTEGER_VALUE;
-        if (!integers && first != SINGLE_QUOTED_TEXT && first != DOUBLE_QUOTED_TEXT) {
-            return null;
-        }
-        for (int raw = open + 1; raw < close; raw += 2) {
-            int t = type(raw);
-            boolean literal = integers ? t == INTEGER_VALUE : t == SINGLE_QUOTED_TEXT || t == DOUBLE_QUOTED_TEXT;
-            if (!literal || (raw + 1 < close && type(raw + 1) != COMMA)) {
-                return null;
-            }
         }
         Token openToken = original.get(open);
         String rawText = openToken.getInputStream()
                 .getText(Interval.of(openToken.getStartIndex(), original.get(close).getStopIndex()));
-        return construction.largeIn(value, values, negative, p, integers, rawText);
+        return construction.largeIn(value, values, negative, p, kind, rawText);
+    }
+
+    private ExpressionConstruction.InListKind inListKind(int open, int close, int count) {
+        int first = type(open + 1);
+        if (first == SINGLE_QUOTED_TEXT || first == DOUBLE_QUOTED_TEXT) {
+            if (close - open != 2 * count) {
+                return null;
+            }
+            for (int raw = open + 1; raw < close; raw += 2) {
+                int t = type(raw);
+                if (t != SINGLE_QUOTED_TEXT && t != DOUBLE_QUOTED_TEXT
+                        || raw + 1 < close && type(raw + 1) != COMMA) {
+                    return null;
+                }
+            }
+            return ExpressionConstruction.InListKind.STRINGS;
+        }
+        boolean integers = true;
+        int numbers = 0;
+        int raw = open + 1;
+        while (true) {
+            if (type(raw) == MINUS_SYMBOL) {
+                integers = false;
+                raw++;
+            }
+            int t = type(raw);
+            if (t != INTEGER_VALUE) {
+                if (t != DECIMAL_VALUE && t != DOUBLE_VALUE) {
+                    return null;
+                }
+                integers = false;
+            }
+            numbers++;
+            raw++;
+            if (raw == close) {
+                if (numbers != count) {
+                    return null;
+                }
+                return integers ? ExpressionConstruction.InListKind.INTEGERS
+                        : ExpressionConstruction.InListKind.NUMBERS;
+            }
+            if (type(raw) != COMMA) {
+                return null;
+            }
+            raw++;
+        }
     }
 
     private static int precedence(int t) {

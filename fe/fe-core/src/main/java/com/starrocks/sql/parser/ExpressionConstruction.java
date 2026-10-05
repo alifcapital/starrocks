@@ -203,9 +203,19 @@ interface ExpressionConstruction<E, Q, T, F, O, W, B, C> {
     /** Whether AstBuilder would build a LargeInPredicate for an IN list of this many constants. */
     boolean largeInWanted(int count);
 
+    /** The grammar rule that AstBuilder reads an IN list of constants with. */
+    enum InListKind {
+        /** IN (1, 2), the rule integerList. */
+        INTEGERS,
+        /** IN (-1, 2.5), the rule numberList. */
+        NUMBERS,
+        /** IN ('a', 'b'), the rule stringList. */
+        STRINGS
+    }
+
     /**
-     * The LargeInPredicate that AstBuilder builds for IN (integer, ...) or IN ('string', ...), or null when it
-     * builds an ordinary InPredicate. rawText is the list with its parentheses as written.
+     * The LargeInPredicate that AstBuilder builds for an IN list of constants of this kind. rawText is the list
+     * with its parentheses as written.
      */
-    E largeIn(E value, List<E> values, boolean negative, NodePosition p, boolean integers, String rawText);
+    E largeIn(E value, List<E> values, boolean negative, NodePosition p, InListKind kind, String rawText);
 }

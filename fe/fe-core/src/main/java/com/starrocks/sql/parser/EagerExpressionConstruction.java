@@ -1038,23 +1038,28 @@ final class EagerExpressionConstruction
                 && count >= context.getSessionVariable().getLargeInPredicateThreshold();
     }
 
-    public Expr largeIn(Expr value, List<Expr> values, boolean negative, NodePosition p, boolean integers,
+    public Expr largeIn(Expr value, List<Expr> values, boolean negative, NodePosition p, InListKind kind,
                         String rawText) {
-        List<Object> raw = new ArrayList<>(values.size());
-        if (integers) {
-            // AstBuilder parses each integer as a long and builds an ordinary IN when one does not fit.
-            for (Expr item : values) {
-                if (!(item instanceof IntLiteral literal)) {
-                    return null;
+        switch (kind) {
+            case INTEGERS: {
+                // AstBuilder keeps an integer that does not fit a long as its literal.
+                List<Object> raw = new ArrayList<>(values.size());
+                for (Expr item : values) {
+                    raw.add(item instanceof IntLiteral literal ? (Object) literal.getValue() : item);
                 }
-                raw.add(literal.getValue());
+                Expr first = raw.get(0) instanceof Long number ? new IntLiteral(number, IntegerType.BIGINT) : values.get(0);
+                return new LargeInPredicate(value, rawText, raw, values.size(), negative, List.of(first), p);
             }
-            List<Expr> first = List.of(new IntLiteral((Long) raw.get(0), IntegerType.BIGINT));
-            return new LargeInPredicate(value, rawText, raw, values.size(), negative, first, p);
+            case NUMBERS:
+                return new LargeInPredicate(value, rawText, new ArrayList<>(values), values.size(), negative,
+                        List.of(values.get(0)), p);
+            default: {
+                List<Object> raw = new ArrayList<>(values.size());
+                for (Expr item : values) {
+                    raw.add(((StringLiteral) item).getStringValue());
+                }
+                return new LargeInPredicate(value, rawText, raw, values.size(), negative, values.subList(0, 1), p);
+            }
         }
-        for (Expr item : values) {
-            raw.add(((StringLiteral) item).getStringValue());
-        }
-        return new LargeInPredicate(value, rawText, raw, values.size(), negative, values.subList(0, 1), p);
     }
 }
