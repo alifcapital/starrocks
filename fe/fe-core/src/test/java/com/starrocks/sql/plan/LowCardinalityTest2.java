@@ -20,7 +20,6 @@ import com.starrocks.planner.DecodeNode;
 import com.starrocks.planner.ExchangeNode;
 import com.starrocks.planner.OlapScanNode;
 import com.starrocks.planner.PlanNode;
-import com.starrocks.planner.UnionNode;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.optimizer.rule.tree.lowcardinality.DecodeCollector;
 import com.starrocks.sql.optimizer.rule.tree.lowcardinality.DecodeInfo;
@@ -305,26 +304,14 @@ public class LowCardinalityTest2 extends PlanTestBase {
 
         long previousProbeMin = connectContext.getSessionVariable().getGlobalRuntimeFilterProbeMinSize();
         try {
-            // Fixture estimates: build NDV=1, each UNION arm NDV=1, UNION NDV=2.
-            // The arms are not selective; the UNION's estimated 50% rejection is useful.
-            connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(102400);
-            List<PlanNode> costed = getExecPlan(sql).getFragments().stream()
-                    .flatMap(fragment -> fragment.collectNodes().stream()).toList();
-            Assertions.assertTrue(costed.stream().anyMatch(node -> node instanceof UnionNode
-                    && !node.getProbeRuntimeFilters().isEmpty()));
-            List<PlanNode> decodes = costed.stream().filter(node -> node instanceof DecodeNode).toList();
-            Assertions.assertFalse(decodes.isEmpty());
-            for (PlanNode decode : decodes) {
-                Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
-                Assertions.assertTrue(decode.getChild(0).getProbeRuntimeFilters().isEmpty());
-            }
-
-            // Test Decode traversal independently of the RF cost decision. Zero explicitly
-            // forces RF use; keep the original requirement that it reaches the exchange below Decode.
+            // The tables of this fixture are empty, so their statistics cannot decide whether the filter pays off;
+            // that decision is tested on given statistics in RuntimeFilterStatisticsTest and
+            // RuntimeFilterKeyStatisticsTest. Here we only check that a filter crosses Decode.
+            // Zero forces the filter regardless of its estimated benefit.
             connectContext.getSessionVariable().setGlobalRuntimeFilterProbeMinSize(0);
             List<PlanNode> forced = getExecPlan(sql).getFragments().stream()
                     .flatMap(fragment -> fragment.collectNodes().stream()).toList();
-            decodes = forced.stream().filter(node -> node instanceof DecodeNode).toList();
+            List<PlanNode> decodes = forced.stream().filter(node -> node instanceof DecodeNode).toList();
             Assertions.assertFalse(decodes.isEmpty());
             for (PlanNode decode : decodes) {
                 Assertions.assertTrue(decode.getChild(0) instanceof ExchangeNode);
