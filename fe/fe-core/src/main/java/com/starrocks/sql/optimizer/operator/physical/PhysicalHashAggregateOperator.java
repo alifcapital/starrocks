@@ -83,6 +83,9 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     private long localLimit = DEFAULT_LIMIT;
 
+    // See LogicalAggregationOperator.partialAggregate.
+    private boolean partialAggregate = false;
+
     private List<Pair<ConstantOperator, ConstantOperator>> groupByMinMaxStatistic = Lists.newArrayList();
 
     public PhysicalHashAggregateOperator(AggType type,
@@ -124,6 +127,7 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         this.forcePreAggregation = aggregateOperator.forcePreAggregation;
         this.withLocalShuffle = aggregateOperator.withLocalShuffle;
         this.localLimit = aggregateOperator.localLimit;
+        this.partialAggregate = aggregateOperator.partialAggregate;
     }
 
     public List<ColumnRefOperator> getGroupBys() {
@@ -144,6 +148,14 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     public boolean isOnePhaseAgg() {
         return type.isGlobal() && !isSplit;
+    }
+
+    public boolean isPartialAggregate() {
+        return partialAggregate && type.isLocal() && !isSplit && predicate == null;
+    }
+
+    public void setPartialAggregate(boolean partialAggregate) {
+        this.partialAggregate = partialAggregate;
     }
 
     /**
@@ -195,7 +207,7 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
     public boolean canUseStreamingPreAgg() {
         if (type.isGlobal() || type.isDistinctGlobal()) {
             return false;
-        } else if (type.isDistinctLocal()) {
+        } else if (type.isDistinctLocal() || isPartialAggregate()) {
             return CollectionUtils.isNotEmpty(groupBys);
         } else {
             return isSplit && CollectionUtils.isNotEmpty(groupBys) && !mergedLocalAgg;
@@ -286,7 +298,8 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), type, groupBys, aggregations.keySet(), partitionByColumns, topNLocalAgg);
+        return Objects.hash(super.hashCode(), type, groupBys, aggregations.keySet(), partitionByColumns, topNLocalAgg,
+                partialAggregate);
     }
 
     @Override
@@ -302,7 +315,7 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         PhysicalHashAggregateOperator that = (PhysicalHashAggregateOperator) o;
         return type == that.type && Objects.equals(aggregations, that.aggregations) &&
                 Objects.equals(groupBys, that.groupBys) && Objects.equals(partitionByColumns, that.partitionByColumns) &&
-                topNLocalAgg == that.topNLocalAgg;
+                topNLocalAgg == that.topNLocalAgg && partialAggregate == that.partialAggregate;
     }
 
     @Override

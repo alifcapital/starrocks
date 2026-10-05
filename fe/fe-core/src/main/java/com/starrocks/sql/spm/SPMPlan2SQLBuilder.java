@@ -258,7 +258,9 @@ public class SPMPlan2SQLBuilder {
         public SQLRelation visitPhysicalHashAggregate(OptExpression optExpression, Void context) {
             PhysicalHashAggregateOperator agg = optExpression.getOp().cast();
             SQLRelation childRelation = process(optExpression.inputAt(0));
-            if (agg.getType().isLocal() || agg.getType().isDistinctLocal()) {
+            // The first phase of a split aggregate is printed by its global phase. An only-local aggregate, such as
+            // one pushed below a join, has no global phase, so it is printed as an aggregate of its own.
+            if ((agg.getType().isLocal() && agg.isSplit()) || agg.getType().isDistinctLocal()) {
                 // update aggregate outputs function name
                 for (var entry : agg.getAggregations().entrySet()) {
                     ColumnRefOperator key = entry.getKey();

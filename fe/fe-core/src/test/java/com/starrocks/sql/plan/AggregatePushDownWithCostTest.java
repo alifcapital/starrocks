@@ -22,6 +22,7 @@ import com.starrocks.sql.optimizer.statistics.MultiColumnCombinedStatistics;
 import com.starrocks.sql.optimizer.statistics.StatisticStorage;
 import mockit.Expectations;
 import org.apache.commons.lang3.StringUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -92,6 +93,13 @@ public class AggregatePushDownWithCostTest extends PlanWithCostTestBase {
 
         connectContext.getSessionVariable().setCboPushDownAggregateMode(0);
         connectContext.getSessionVariable().setCboPushDownAggregateOnBroadcastJoin(true);
+        // These cases check where an aggregate is pushed, on plans of the exact form of a pushed aggregate.
+        connectContext.getSessionVariable().setCboPushDownAggregate("global");
+    }
+
+    @AfterEach
+    public void after() {
+        connectContext.getSessionVariable().setCboPushDownAggregate("partial");
     }
 
     @Test

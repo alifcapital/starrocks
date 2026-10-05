@@ -34,6 +34,8 @@ public class TPCDSPushAggTest extends TPCDS1TTestBase {
         connectContext.getSessionVariable().setEnableMaterializedViewRewrite(false);
         connectContext.getSessionVariable().setEnableInnerJoinToSemi(false);
         connectContext.getSessionVariable().setSemiJoinDeduplicateMode(-1);
+        // The expected numbers of aggregate nodes count the two phases of the exact form of a pushed aggregate.
+        connectContext.getSessionVariable().setCboPushDownAggregate("global");
     }
 
     @AfterAll
@@ -41,6 +43,7 @@ public class TPCDSPushAggTest extends TPCDS1TTestBase {
         FeConstants.unitTestView = true;
         connectContext.getSessionVariable().setEnableMaterializedViewRewrite(true);
         connectContext.getSessionVariable().setEnableInnerJoinToSemi(true);
+        connectContext.getSessionVariable().setCboPushDownAggregate("partial");
     }
 
     private String check(int mode, String sql, int aggNum) throws Exception {

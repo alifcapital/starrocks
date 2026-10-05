@@ -164,6 +164,7 @@ import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamScanOperator;
 import com.starrocks.sql.optimizer.rule.transformation.ListPartitionPruner;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
+import com.starrocks.system.BackendResourceStat;
 import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.type.DateType;
 import com.starrocks.type.Type;
@@ -1249,6 +1250,15 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         //Update Node Statistics
         builder.addColumnStatistics(groupStatisticsMap);
         rowCount = min(inputStatistics.getOutputRowCount(), rowCount);
+        boolean partial = node instanceof LogicalAggregationOperator logicalAggregate
+                ? logicalAggregate.isPartialAggregate()
+                : ((PhysicalHashAggregateOperator) node).isPartialAggregate();
+        if (partial) {
+            // Each driver aggregates only its own rows, so a group spread over several drivers comes out several
+            // times, and rows that do not reduce pass through.
+            rowCount = TopNAggregationCost.concurrentLocalGroups(inputStatistics.getOutputRowCount(), rowCount,
+                    aggregateDrivers());
+        }
         builder.setOutputRowCount(rowCount);
         // use inputStatistics and aggregateNode cardinality to estimate aggregate call operator column statistics.
         // because of we need cardinality to estimate count function.
@@ -1283,6 +1293,19 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             groupStatisticsMap.put(groupByColumn, statsBuilder.build());
         }
         return estimateGroupCount(groupBys, groupStatisticsMap.keySet(), inputStatistics);
+    }
+
+    /**
+     * The drivers that run a local aggregate phase: BEs times the degree of parallelism, as in the cost model.
+     */
+    public static double aggregateDrivers() {
+        ConnectContext connection = ConnectContext.get();
+        if (connection == null) {
+            return 1;
+        }
+        long warehouseId = connection.getCurrentWarehouseId();
+        return Math.max(1, BackendResourceStat.getInstance().getNumBes(warehouseId)) *
+                (double) Math.max(1, connection.getSessionVariable().getDegreeOfParallelism(warehouseId));
     }
 
     /**

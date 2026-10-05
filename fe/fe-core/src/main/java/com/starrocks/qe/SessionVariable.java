@@ -2231,9 +2231,11 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = CBO_ENABLE_INTERSECT_ADD_DISTINCT)
     private boolean cboEnableIntersectAddDistinct = true;
 
-    // auto, global, local
+    // The form of an aggregate pushed below a join: global (exact, two phases), local (blocking, per instance),
+    // auto (local for at most one group-by column, else global) or partial (a streaming local phase, see
+    // PushDownAggregateRewriter).
     @VarAttr(name = CBO_PUSH_DOWN_AGGREGATE, flag = VariableMgr.INVISIBLE)
-    private String cboPushDownAggregate = "global";
+    private String cboPushDownAggregate = "partial";
 
     @VarAttr(name = CBO_PUSH_DOWN_GROUPINGSET, flag = VariableMgr.INVISIBLE)
     private boolean cboPushDownGroupingSet = true;
