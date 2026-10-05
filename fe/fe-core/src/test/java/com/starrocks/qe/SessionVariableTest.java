@@ -33,8 +33,10 @@ public class SessionVariableTest {
         Assertions.assertEquals(1024, options.getTopn_back_pressure_num_rows());
         Assertions.assertEquals(8, options.getTopn_back_pressure_throttle_time_ms());
         Assertions.assertEquals(100, options.getTopn_back_pressure_throttle_time_upper_bound_ms());
-        // The upstream IO cap used 219, which is already occupied in our 4.1 protocol.
-        Assertions.assertEquals(219, TQueryOptions._Fields.ENABLE_AGG_INLINE_ACCUMULATOR.getThriftFieldId());
+        // The TopN back pressure options keep their upstream ids, and our own options use ids from 10000, so a BE
+        // of either side reads the IO cap at the same id.
+        Assertions.assertEquals(219, TQueryOptions._Fields.TOPN_FILTER_BACK_PRESSURE_IO_TASKS.getThriftFieldId());
+        Assertions.assertTrue(TQueryOptions._Fields.ENABLE_AGG_INLINE_ACCUMULATOR.getThriftFieldId() >= 10000);
         Assertions.assertNotEquals(TQueryOptions._Fields.ENABLE_AGG_INLINE_ACCUMULATOR.getThriftFieldId(),
                 TQueryOptions._Fields.TOPN_FILTER_BACK_PRESSURE_IO_TASKS.getThriftFieldId());
         boolean inline = options.isEnable_agg_inline_accumulator();
