@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.LargeIntLiteral;
@@ -37,6 +38,9 @@ import com.starrocks.sql.optimizer.operator.scalar.MatchExprOperator;
 import com.starrocks.sql.optimizer.operator.scalar.PredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
+import com.starrocks.sql.optimizer.rewrite.MinMax;
+import com.starrocks.sql.optimizer.rewrite.MonotonicFunctionRegistry;
+import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
@@ -59,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
@@ -566,18 +571,134 @@ public class ExpressionStatisticCalculator {
                 return deriveBasicColStats(call);
             }
 
+            ColumnStatistic result;
             if (SPMFunctions.isSPMFunctions(call)) {
                 return SPMFunctions.getSPMFunctionStatistics(call, childrenColumnStatistics).get(0);
             } else if (call.getChildren().isEmpty()) {
-                return nullaryExpressionCalculate(call);
+                result = nullaryExpressionCalculate(call);
             } else if (call.getChildren().size() == 1) {
-                return unaryExpressionCalculate(call, childrenColumnStatistics.get(0));
+                result = unaryExpressionCalculate(call, childrenColumnStatistics.get(0));
             } else if (call.getChildren().size() == 2) {
-                return binaryExpressionCalculate(call, childrenColumnStatistics.get(0),
+                result = binaryExpressionCalculate(call, childrenColumnStatistics.get(0),
                         childrenColumnStatistics.get(1));
             } else {
-                return multiaryExpressionCalculate(call, childrenColumnStatistics);
+                result = multiaryExpressionCalculate(call, childrenColumnStatistics);
             }
+            if (!result.isUnknown() && !result.isInfiniteRange()) {
+                return result;
+            }
+            return monotonicImageStatistics(call, childrenColumnStatistics, result).orElse(result);
+        }
+
+        // Many date functions have no case above, for example hours_add, months_add or last_day, so their range
+        // stays unknown and a filter on them gets a default selectivity. When the call is monotonic in its only
+        // non-constant argument (MonotonicFunctionRegistry and MonotonicImage decide this), the values of the call
+        // lie between the values at the two ends of the range of this argument. We compute these two values with
+        // the same constant folding as the FE uses, so the units and calendar rules are those of the function.
+        private Optional<ColumnStatistic> monotonicImageStatistics(CallOperator call, List<ColumnStatistic> children,
+                                                                   ColumnStatistic known) {
+            // The checks that need no allocation come first: this runs for every call without statistics of its own
+            // each time the statistics of a plan are derived. The FE folds only a call with its function.
+            Set<Integer> dataPositions = MonotonicFunctionRegistry.dataArgPositions(call.getFnName());
+            if (dataPositions == null || call.getFunction() == null) {
+                return Optional.empty();
+            }
+            int dataIndex = -1;
+            for (int i = 0; i < call.getChildren().size(); i++) {
+                if (!call.getChild(i).isConstantRef()) {
+                    if (dataIndex >= 0) {
+                        return Optional.empty();
+                    }
+                    dataIndex = i;
+                }
+            }
+            if (dataIndex < 0 || !dataPositions.contains(dataIndex)) {
+                return Optional.empty();
+            }
+            ColumnStatistic input = children.get(dataIndex);
+            if (input.isUnknown() || input.isInfiniteRange() || input.hasNaNValue()) {
+                return Optional.empty();
+            }
+            Type inputType = call.getChild(dataIndex).getType();
+            Optional<ConstantOperator> low = statisticValueToConstant(input.getMinValue(), inputType);
+            Optional<ConstantOperator> high = statisticValueToConstant(input.getMaxValue(), inputType);
+            if (low.isEmpty() || high.isEmpty() || low.get().compareTo(high.get()) > 0) {
+                return Optional.empty();
+            }
+            MinMax inputRange = MinMax.of(Range.closed(low.get(), high.get()));
+            Optional<Range<ConstantOperator>> image;
+            if (call.getChild(dataIndex) instanceof ColumnRefOperator column) {
+                image = MonotonicImage.imageRange(call, column, inputRange);
+            } else {
+                // The argument is an expression with its own statistics. A placeholder column stands for it, so
+                // that MonotonicImage folds the call with the ends of its range.
+                ColumnRefOperator placeholder =
+                        new ColumnRefOperator(Integer.MAX_VALUE, inputType, "monotonic_input", true);
+                List<ScalarOperator> arguments = new ArrayList<>(call.getChildren());
+                arguments.set(dataIndex, placeholder);
+                CallOperator probe = new CallOperator(call.getFnName(), call.getType(), arguments, call.getFunction());
+                image = MonotonicImage.imageRange(probe, placeholder, inputRange);
+            }
+            if (image.isEmpty()) {
+                return Optional.empty();
+            }
+            OptionalDouble min = ConstantOperatorUtils.doubleValueFromConstant(image.get().lowerEndpoint());
+            OptionalDouble max = ConstantOperatorUtils.doubleValueFromConstant(image.get().upperEndpoint());
+            if (min.isEmpty() || max.isEmpty()) {
+                return Optional.empty();
+            }
+            // A monotonic function never maps one value to two, so it has at most the NDV of its argument. A
+            // function that merges values, such as date_trunc or last_day, has fewer: no more than the number of
+            // dates or integers in its range.
+            double distinctValues = Math.min(rowCount, input.getDistinctValuesCount());
+            double valuesInRange = valuesInRange(call.getType(), min.getAsDouble(), max.getAsDouble());
+            distinctValues = Math.max(1, Math.min(distinctValues, valuesInRange));
+            return Optional.of(ColumnStatistic.builder()
+                    .setMinValue(min.getAsDouble())
+                    .setMaxValue(max.getAsDouble())
+                    .setNullsFraction(input.getNullsFraction())
+                    .setAverageRowSize(call.getType().getTypeSize())
+                    .setDistinctValuesCount(distinctValues)
+                    // a histogram the function-specific statistics computed for the values of the call stays valid
+                    .setHistogram(known.isUnknown() ? null : known.getHistogram())
+                    .build());
+        }
+
+        // The number of values of the type between two statistic values: dates are counted in days, integers one by
+        // one, other types have no limit.
+        private double valuesInRange(Type type, double min, double max) {
+            if (type.isDate()) {
+                return Math.floor((max - min) / (24.0 * 3600) + 0.5) + 1;
+            }
+            if (type.isIntegerType()) {
+                return Math.floor(max - min) + 1;
+            }
+            return Double.POSITIVE_INFINITY;
+        }
+
+        // A statistic value as a constant of the type: dates and datetimes are seconds since 1970, see
+        // ConstantOperatorUtils.doubleValueFromConstant.
+        private Optional<ConstantOperator> statisticValueToConstant(double value, Type type) {
+            try {
+                if (type.isDate()) {
+                    return Optional.of(ConstantOperator.createDate(Utils.getDatetimeFromLong((long) value)));
+                }
+                if (type.isDatetime()) {
+                    return Optional.of(ConstantOperator.createDatetime(Utils.getDatetimeFromLong((long) value)));
+                }
+                if (type.isIntegerType()) {
+                    if (value != Math.rint(value) || Math.abs(value) >= 0x1p63) {
+                        return Optional.empty();
+                    }
+                    return ConstantOperator.createBigint((long) value).castTo(type);
+                }
+                if (type.isNumericType()) {
+                    return ConstantOperator.createDouble(value).castTo(type);
+                }
+            } catch (Exception e) {
+                LOG.debug("cannot turn statistic value {} into {}", value, type, e);
+            }
+            return Optional.empty();
         }
 
         private ColumnStatistic nullaryExpressionCalculate(CallOperator callOperator) {
@@ -920,6 +1041,12 @@ public class ExpressionStatisticCalculator {
                     .build();
         }
 
+        // date_add, days_add, date_sub and days_sub shift a date or datetime by a number of days, while the
+        // statistics of a date or datetime are in seconds.
+        private double secondsPerDayOfShift(CallOperator callOperator) {
+            return callOperator.getChild(0).getType().isDateType() ? 24.0 * 3600 : 1.0;
+        }
+
         private ColumnStatistic binaryExpressionCalculate(CallOperator callOperator, ColumnStatistic left,
                                                           ColumnStatistic right) {
             final double minValue;
@@ -931,15 +1058,28 @@ public class ExpressionStatisticCalculator {
             long interval;
             switch (callOperator.getFnName().toLowerCase()) {
                 case FunctionSet.ADD:
-                case FunctionSet.DATE_ADD:
-                case FunctionSet.DAYS_ADD:
                     minValue = left.getMinValue() + right.getMinValue();
                     maxValue = left.getMaxValue() + right.getMaxValue();
                     break;
+                case FunctionSet.DATE_ADD:
+                case FunctionSet.DAYS_ADD: {
+                    // The statistics of a date or datetime are in seconds and the second argument counts days, so
+                    // we scale it. Otherwise days_add('1970-01-01', d) on a column of days since 1970 ends a few
+                    // hours after 1970, and a range filter on it estimates almost no rows.
+                    double secondsPerUnit = secondsPerDayOfShift(callOperator);
+                    minValue = left.getMinValue() + right.getMinValue() * secondsPerUnit;
+                    maxValue = left.getMaxValue() + right.getMaxValue() * secondsPerUnit;
+                    break;
+                }
+                case FunctionSet.DATE_SUB:
+                case FunctionSet.DAYS_SUB: {
+                    double secondsPerUnit = secondsPerDayOfShift(callOperator);
+                    minValue = left.getMinValue() - right.getMaxValue() * secondsPerUnit;
+                    maxValue = left.getMaxValue() - right.getMinValue() * secondsPerUnit;
+                    break;
+                }
                 case FunctionSet.SUBTRACT:
                 case FunctionSet.TIMEDIFF:
-                case FunctionSet.DATE_SUB:
-                case FunctionSet.DAYS_SUB:
                 case FunctionSet.SECONDS_DIFF:
                     minValue = left.getMinValue() - right.getMaxValue();
                     maxValue = left.getMaxValue() - right.getMinValue();

@@ -1140,6 +1140,11 @@ public class Utils {
         List<ScalarOperator> otherPredicates = new ArrayList<>();
 
         for (ScalarOperator op : conjunctivePredicates) {
+            // The callers estimate the rows of the predicates, and a predicate that is not estimated, such as a bound
+            // that the scan holds only to skip files, must not count there.
+            if (op.isNotEvalEstimate()) {
+                continue;
+            }
             if (ScalarOperator.isColumnEqualConstant(op)) {
                 BinaryPredicateOperator binaryOp = (BinaryPredicateOperator) op;
                 ColumnRefOperator column = (ColumnRefOperator) binaryOp.getChild(0);

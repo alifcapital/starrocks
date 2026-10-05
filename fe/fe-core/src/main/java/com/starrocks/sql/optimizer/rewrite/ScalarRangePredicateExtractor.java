@@ -24,6 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.property.RangeExtractor;
 import com.starrocks.sql.optimizer.property.RangeExtractor.ValueDescriptor;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -53,8 +54,42 @@ public class ScalarRangePredicateExtractor {
             return predicate;
         }
 
+        List<ScalarOperator> all = Utils.extractConjuncts(predicate);
         Set<ScalarOperator> conjuncts = Sets.newLinkedHashSet();
-        conjuncts.addAll(Utils.extractConjuncts(predicate));
+        List<ScalarOperator> notEstimated = null;
+        for (ScalarOperator conjunct : all) {
+            // A redundant predicate that is not estimated, such as a bound that a scan holds only to skip files, is
+            // already implied by another predicate. A range derived from it would be a new estimated predicate and
+            // count that predicate twice, so we keep it out of the derivation.
+            if (conjunct.isRedundant() && conjunct.isNotEvalEstimate()) {
+                if (notEstimated == null) {
+                    notEstimated = new ArrayList<>();
+                }
+                notEstimated.add(conjunct);
+            } else {
+                conjuncts.add(conjunct);
+            }
+        }
+        if (notEstimated == null) {
+            return rewriteConjuncts(predicate, conjuncts, onlyExtractColumnRef);
+        }
+        if (conjuncts.isEmpty()) {
+            return predicate;
+        }
+        ScalarOperator estimated = Utils.compoundAnd(conjuncts);
+        ScalarOperator rewritten = rewriteConjuncts(estimated, conjuncts, onlyExtractColumnRef);
+        if (rewritten == estimated) {
+            return predicate;
+        }
+        notEstimated.add(0, rewritten);
+        return Utils.compoundAnd(notEstimated);
+    }
+
+    private ScalarOperator rewriteConjuncts(ScalarOperator predicate, Set<ScalarOperator> conjuncts,
+                                            boolean onlyExtractColumnRef) {
+        if (predicate.getOpType() != OperatorType.COMPOUND) {
+            return predicate;
+        }
         predicate = Utils.compoundAnd(conjuncts);
 
         Map<ScalarOperator, ValueDescriptor> extractMap = extractImpl(predicate);
