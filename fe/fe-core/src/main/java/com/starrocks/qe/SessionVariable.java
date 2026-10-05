@@ -504,6 +504,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_ENABLE_LOW_CARDINALITY_OPTIMIZE_FOR_JOIN = "cbo_enable_low_cardinality_optimize_for_join";
     public static final String LOW_CARDINALITY_OPTIMIZE_V2 = "low_cardinality_optimize_v2";
     public static final String LOW_CARDINALITY_OPTIMIZE_ON_LAKE = "low_cardinality_optimize_on_lake";
+    public static final String LOW_CARDINALITY_COLLECT_DICT_ON_LAKE = "low_cardinality_collect_dict_on_lake";
     public static final String ARRAY_LOW_CARDINALITY_OPTIMIZE = "array_low_cardinality_optimize";
     public static final String CBO_USE_NTH_EXEC_PLAN = "cbo_use_nth_exec_plan";
     public static final String CBO_CTE_REUSE = "cbo_cte_reuse";
@@ -1974,6 +1975,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VariableMgr.VarAttr(name = LOW_CARDINALITY_OPTIMIZE_ON_LAKE)
     private boolean useLowCardinalityOptimizeOnLake = false;
+
+    // We want to fill the global dicts of lake columns before plans use them. With this flag a query on a lake
+    // table starts the dict collection for its eligible columns, but its plan keeps reading plain strings.
+    // low_cardinality_optimize_on_lake both collects and uses the dicts.
+    @VariableMgr.VarAttr(name = LOW_CARDINALITY_COLLECT_DICT_ON_LAKE)
+    private boolean collectLowCardinalityDictOnLake = false;
 
     @VarAttr(name = ARRAY_LOW_CARDINALITY_OPTIMIZE)
     private boolean enableArrayLowCardinalityOptimize = true;
@@ -5090,6 +5097,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setUseLowCardinalityOptimizeOnLake(boolean useLowCardinalityOptimizeOnLake) {
         this.useLowCardinalityOptimizeOnLake = useLowCardinalityOptimizeOnLake;
+    }
+
+    public boolean isCollectLowCardinalityDictOnLake() {
+        return collectLowCardinalityDictOnLake;
+    }
+
+    public void setCollectLowCardinalityDictOnLake(boolean collectLowCardinalityDictOnLake) {
+        this.collectLowCardinalityDictOnLake = collectLowCardinalityDictOnLake;
     }
 
     public boolean isEnableRewriteGroupingsetsToUnionAll() {

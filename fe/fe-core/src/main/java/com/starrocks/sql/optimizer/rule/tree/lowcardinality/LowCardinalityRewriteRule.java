@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.optimizer.rule.tree.lowcardinality;
 
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -25,7 +26,12 @@ public class LowCardinalityRewriteRule implements TreeRewriteRule {
     @Override
     public OptExpression rewrite(OptExpression root, TaskContext taskContext) {
         SessionVariable session = taskContext.getOptimizerContext().getSessionVariable();
-        boolean isQuery = taskContext.getOptimizerContext().getConnectContext().getState().isQuery();
+        ConnectContext connectContext = taskContext.getOptimizerContext().getConnectContext();
+        boolean isQuery = connectContext.getState().isQuery();
+        // The query that collects a lake dict and the queries of ANALYZE read the lake files to build dicts and
+        // statistics. We do not want them to start another dict collection or to read through a dict that may
+        // miss values, so they plan lake scans without global dicts.
+        boolean lakeDictAllowed = !connectContext.isLakeDictCollection() && !connectContext.isStatisticsConnection();
         if (!session.isEnableLowCardinalityOptimize() || !session.isUseLowCardinalityOptimizeV2()) {
             return root;
         }
@@ -33,7 +39,7 @@ public class LowCardinalityRewriteRule implements TreeRewriteRule {
         ColumnRefFactory factory = taskContext.getOptimizerContext().getColumnRefFactory();
         DecodeContext context = new DecodeContext(factory);
         {
-            DecodeCollector collector = new DecodeCollector(session, isQuery);
+            DecodeCollector collector = new DecodeCollector(session, isQuery, lakeDictAllowed);
             collector.collect(root, context);
             if (!collector.isValidMatchChildren()) {
                 return root;

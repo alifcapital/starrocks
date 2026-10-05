@@ -142,6 +142,8 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
     private final SessionVariable sessionVariable;
     private final boolean isQuery;
+    // False when the query must not collect or use global dicts of lake tables, see LowCardinalityRewriteRule.
+    private final boolean lakeDictAllowed;
 
     // These fields are the same as the fields in the DecodeContext,
     // the difference: these fields store all string information, the
@@ -179,8 +181,13 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
     private boolean canBlockingOutput = false;
 
     public DecodeCollector(SessionVariable session, boolean isQuery) {
+        this(session, isQuery, true);
+    }
+
+    public DecodeCollector(SessionVariable session, boolean isQuery, boolean lakeDictAllowed) {
         this.sessionVariable = session;
         this.isQuery = isQuery;
+        this.lakeDictAllowed = lakeDictAllowed;
     }
 
     public void collect(OptExpression root, DecodeContext context) {
@@ -1094,9 +1101,20 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
         return new Pair<>(true, dict);
     }
 
+    // Both lake modes run the same eligibility check, and checkConnectorGlobalDict starts the dict load for an
+    // eligible column. Only low_cardinality_optimize_on_lake puts the dict into the plan; with
+    // low_cardinality_collect_dict_on_lake alone the scan keeps reading strings.
+    private boolean skipLakeScan() {
+        if (!canBlockingOutput || !isQuery || !lakeDictAllowed) {
+            return true;
+        }
+        return !sessionVariable.isUseLowCardinalityOptimizeOnLake() &&
+                !sessionVariable.isCollectLowCardinalityDictOnLake();
+    }
+
     @Override
     public DecodeInfo visitPhysicalHiveScan(OptExpression optExpression, DecodeInfo context) {
-        if (!canBlockingOutput || !sessionVariable.isUseLowCardinalityOptimizeOnLake() || !isQuery) {
+        if (skipLakeScan()) {
             return DecodeInfo.empty();
         }
         PhysicalHiveScanOperator scan = optExpression.getOp().cast();
@@ -1116,7 +1134,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             }
 
             Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column, optExpression);
-            if (!res.first) {
+            if (!res.first || !sessionVariable.isUseLowCardinalityOptimizeOnLake()) {
                 continue;
             }
 
@@ -1132,7 +1150,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
 
     @Override
     public DecodeInfo visitPhysicalIcebergScan(OptExpression optExpression, DecodeInfo context) {
-        if (!canBlockingOutput || !sessionVariable.isUseLowCardinalityOptimizeOnLake() || !isQuery) {
+        if (skipLakeScan()) {
             return DecodeInfo.empty();
         }
 
@@ -1153,7 +1171,7 @@ public class DecodeCollector extends OptExpressionVisitor<DecodeInfo, DecodeInfo
             }
 
             Pair<Boolean, Optional<ColumnDict>> res = checkConnectorGlobalDict(scan, table, column, optExpression);
-            if (!res.first) {
+            if (!res.first || !sessionVariable.isUseLowCardinalityOptimizeOnLake()) {
                 continue;
             }
 
