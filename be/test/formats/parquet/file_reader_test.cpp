@@ -3160,6 +3160,61 @@ TEST_F(FileReaderTest, bloom_filter_reader_test_hit) {
     EXPECT_EQ(file_reader->row_group_size(), 1);
 }
 
+// Column s of bloom_filter_or_branches.parquet holds only the even values "v00000", "v00002", ..., "v07998".
+// Odd values such as "v00001" are inside the min/max range, so only the bloom filter can prove them absent.
+// The bloom filter is small compared to the column chunk, so the adaptive check applies it.
+// `s != x` cannot be judged by a bloom filter. An OR branch without a bloom filter verdict may match
+// any row, so it must keep the row group.
+TEST_F(FileReaderTest, bloom_filter_or_branch_without_verdict) {
+    const std::string file = "./be/test/formats/parquet/test_data/bloom_filter_or_branches.parquet";
+    Utils::SlotDesc slot_descs[] = {{"k", TYPE_INT_DESC}, {"s", TYPE_VARCHAR_DESC}, {""}};
+    auto type = get_type_info(TYPE_VARCHAR);
+
+    enum class Op { EQ, NE };
+    using Branch = std::vector<std::pair<Op, std::string>>;
+    // Builds `s` predicates as an OR of AND branches under the root AND, or as the root AND itself
+    // when `under_or` is false, and returns the number of selected row groups.
+    auto row_groups_after_filter = [&](const std::vector<Branch>& branches, bool under_or = true) {
+        auto* ctx = _create_scan_context(slot_descs, slot_descs, file);
+        auto make_and_node = [&](const Branch& branch) {
+            PredicateAndNode and_node;
+            for (const auto& [op, value] : branch) {
+                ColumnPredicate* pred = op == Op::EQ ? new_column_eq_predicate(type, 1, value)
+                                                     : new_column_ne_predicate(type, 1, value);
+                ctx->predicates.predicate_free_pool.emplace_back(pred);
+                and_node.add_child(PredicateColumnNode(pred));
+            }
+            return and_node;
+        };
+        PredicateAndNode root;
+        if (under_or) {
+            PredicateOrNode or_node;
+            for (const auto& branch : branches) {
+                or_node.add_child(make_and_node(branch));
+            }
+            root.add_child(std::move(or_node));
+        } else {
+            root = make_and_node(branches[0]);
+        }
+        ctx->predicates.predicate_tree = PredicateTree::create(std::move(root));
+
+        auto file_reader = _create_file_reader(file);
+        EXPECT_OK(file_reader->init(ctx));
+        return file_reader->row_group_size();
+    };
+
+    // s = 'v00001': the bloom filter proves the value absent, so the row group is dropped without any OR.
+    EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}}, false), 0);
+    // (s = 'v00001') OR (s != 'v00001'): the first branch is proven empty, the second has no verdict.
+    EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}, {{Op::NE, "v00001"}}}), 1);
+    // (s = 'v00001' AND s != 'zz') OR (s != 'v00001'): same, with a mixed first branch.
+    EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}, {Op::NE, "zz"}}, {{Op::NE, "v00001"}}}), 1);
+    // (s = 'v00001') OR (s = 'v00002'): "v00002" is in the bloom filter, so the second branch may match.
+    EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}, {{Op::EQ, "v00002"}}}), 1);
+    // (s = 'v00001') OR (s = 'v00003' AND s != 'zz'): both branches are proven empty.
+    EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}, {{Op::EQ, "v00003"}, {Op::NE, "zz"}}}), 0);
+}
+
 TEST_F(FileReaderTest, read_parquet_bloom_filter_by_parquet_hadoop) {
     Utils::SlotDesc slot_descs[] = {{"c0", TYPE_VARCHAR_DESC}, {"c1", TYPE_INT_DESC}, {"c2", TYPE_DATETIME_DESC}, {""}};
     const std::string bloom_filter_file =

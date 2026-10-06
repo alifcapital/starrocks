@@ -82,6 +82,22 @@ public:
             }
         }
     }
+
+    // A child without a range gave no verdict. Under an AND parent it does not narrow the result,
+    // so we skip it. Under an OR parent any row of the row group may match it, so we must merge
+    // the whole row group, otherwise the other branches would decide alone and could drop rows.
+    template <CompoundNodeType Type>
+    static void merge_child_row_ranges(std::optional<SparseRange<uint64_t>>& dest,
+                                       std::optional<SparseRange<uint64_t>>& child, uint64_t rg_first_row,
+                                       uint64_t rg_num_rows) {
+        if (child.has_value()) {
+            merge_row_ranges<Type>(dest, child.value());
+        } else if constexpr (Type == CompoundNodeType::OR) {
+            SparseRange<uint64_t> all_rows;
+            all_rows.add({rg_first_row, rg_first_row + rg_num_rows});
+            merge_row_ranges<Type>(dest, all_rows);
+        }
+    }
 };
 
 struct PredicateFilterEvaluator {
@@ -130,7 +146,7 @@ struct PredicateFilterEvaluator {
         for (const auto& child : node.compound_children()) {
             ASSIGN_OR_RETURN(auto range, child.visit(*this, Evaluator::ROWGROUP_ZONEMAP));
             combine(node_matches[child.id()]);
-            if (range.has_value()) PredicateFilterEvaluatorUtils::merge_row_ranges<Type>(row_ranges, *range);
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, range, first, rows);
         }
         node_matches[node.id()] = row_ranges.has_value() && row_ranges->span_size() == 0 ? ZoneMapMatch::NONE
                                   : visited && all_match                                 ? ZoneMapMatch::ALL
@@ -182,12 +198,11 @@ struct PredicateFilterEvaluator {
 
         for (const auto& child : node.compound_children()) {
             ASSIGN_OR_RETURN(auto cur_row_ranges_opt, child.visit(*this, Evaluator::PAGE_INDEX_ZONEMAP));
-            if (cur_row_ranges_opt.has_value()) {
-                PredicateFilterEvaluatorUtils::merge_row_ranges<Type>(row_ranges, cur_row_ranges_opt.value());
-                if ((Type == CompoundNodeType::AND && row_ranges->span_size() == 0) ||
-                    (Type == CompoundNodeType::OR && row_ranges->span_size() == rg_num_rows))
-                    return row_ranges;
-            }
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt, rg_first_row,
+                                                                        rg_num_rows);
+            if (row_ranges.has_value() && ((Type == CompoundNodeType::AND && row_ranges->span_size() == 0) ||
+                                           (Type == CompoundNodeType::OR && row_ranges->span_size() == rg_num_rows)))
+                return row_ranges;
         }
         return row_ranges;
     }
@@ -232,9 +247,8 @@ struct PredicateFilterEvaluator {
 
         for (const auto& child : node.compound_children()) {
             ASSIGN_OR_RETURN(auto cur_row_ranges_opt, child.visit(*this, Evaluator::BLOOM_FILTER));
-            if (cur_row_ranges_opt.has_value()) {
-                PredicateFilterEvaluatorUtils::merge_row_ranges<Type>(row_ranges, cur_row_ranges_opt.value());
-            }
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt, rg_first_row,
+                                                                        rg_num_rows);
         }
         return row_ranges;
     }
