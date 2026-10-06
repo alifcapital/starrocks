@@ -110,6 +110,18 @@ Status CacheInputStream::_read_block_from_local(const int64_t offset, const int6
         }
     }
 
+    // With async populate, a block we just fetched from remote is not visible in the cache until the
+    // background write finishes. We worry that a nearby read of the same stream (e.g. the column data
+    // right after the footer of a small file) misses the cache and fetches the same block again, so we
+    // serve it from the range `_buffer` still holds. The block was already submitted to the cache when
+    // it was read from remote, so we do not populate it again here.
+    if (offset >= _buffer_offset && offset + size <= _buffer_offset + _buffer_valid_size) {
+        strings::memcpy_inlined(out, _buffer.data() + (offset - _buffer_offset), size);
+        _stats.read_block_buffer_bytes += size;
+        _stats.read_block_buffer_count += 1;
+        return Status::OK();
+    }
+
     Status res = _read_from_cache(offset, size, block_offset, load_size, out);
     if (res.ok() && sb) {
         // Duplicate the block ranges to avoid saving the same data both in cache and shared buffer.
@@ -245,7 +257,12 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
                 RETURN_IF_ERROR(_sb_stream->get_bytes(&buffer, read_offset_cursor, read_size, sb));
                 src = (char*)buffer;
             } else {
+                // A failed read leaves the content of `_buffer` undefined, so we drop the remembered range
+                // first and set it again only after the read succeeds.
+                _buffer_valid_size = 0;
                 RETURN_IF_ERROR(_sb_stream->read_at_fully(read_offset_cursor, _buffer.data(), read_size));
+                _buffer_offset = read_offset_cursor;
+                _buffer_valid_size = read_size;
                 src = _buffer.data();
             }
         }

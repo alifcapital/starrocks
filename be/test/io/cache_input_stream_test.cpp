@@ -137,12 +137,18 @@ TEST_F(CacheInputStreamTest, test_aligned_read) {
     ASSERT_EQ(stats.write_block_cache_count, block_count);
 
     // first read from cache
+    // We expect all blocks to come from the cache only through a fresh stream, because the first stream
+    // still holds its last remotely read block in its own buffer and would serve that block from there.
+    io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 1000000);
+    cache_stream2.set_enable_populate_cache(true);
+    auto& stats2 = cache_stream2.stats();
     for (int i = 0; i < block_count; ++i) {
         char buffer[block_size];
-        read_stream_data(&cache_stream, i * block_size, block_size, buffer);
+        read_stream_data(&cache_stream2, i * block_size, block_size, buffer);
         ASSERT_TRUE(check_data_content(buffer, block_size, 'a' + i));
     }
-    ASSERT_EQ(stats.read_block_cache_count, block_count);
+    ASSERT_EQ(stats2.read_block_cache_count, block_count);
+    ASSERT_EQ(stats2.read_block_buffer_count, 0);
 }
 
 TEST_F(CacheInputStreamTest, test_random_read) {
@@ -170,18 +176,24 @@ TEST_F(CacheInputStreamTest, test_random_read) {
     ASSERT_EQ(stats.write_block_cache_count, block_count);
 
     // seek to a custom postion in second block, and read multiple block
+    // We expect both blocks to come from the cache only through a fresh stream, because the first stream
+    // still holds its last remotely read block in its own buffer and would serve that block from there.
+    io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 1000000);
+    cache_stream2.set_enable_populate_cache(true);
+    auto& stats2 = cache_stream2.stats();
     int64_t off_in_block = 100;
-    ASSERT_OK(cache_stream.seek(block_size + off_in_block));
-    ASSERT_EQ(cache_stream.position().value(), block_size + off_in_block);
+    ASSERT_OK(cache_stream2.seek(block_size + off_in_block));
+    ASSERT_EQ(cache_stream2.position().value(), block_size + off_in_block);
 
     char buffer[block_size * 2];
-    auto res = cache_stream.read(buffer, block_size * 2);
+    auto res = cache_stream2.read(buffer, block_size * 2);
     ASSERT_TRUE(res.ok());
 
     ASSERT_TRUE(check_data_content(buffer, block_size - off_in_block, 'a' + 1));
     ASSERT_TRUE(check_data_content(buffer + block_size - off_in_block, block_size, 'a' + 2));
 
-    ASSERT_EQ(stats.read_block_cache_count, 2);
+    ASSERT_EQ(stats2.read_block_cache_count, 2);
+    ASSERT_EQ(stats2.read_block_buffer_count, 0);
 }
 
 TEST_F(CacheInputStreamTest, test_file_overwrite) {
@@ -209,12 +221,18 @@ TEST_F(CacheInputStreamTest, test_file_overwrite) {
     ASSERT_EQ(stats.write_block_cache_count, block_count);
 
     // first read from cache
+    // We expect all blocks to come from the cache only through a fresh stream, because the first stream
+    // still holds its last remotely read block in its own buffer and would serve that block from there.
+    io::CacheInputStream cache_stream_same_file(sb_stream, file_name, data_size, 1000000);
+    cache_stream_same_file.set_enable_populate_cache(true);
+    auto& stats_same_file = cache_stream_same_file.stats();
     for (int i = 0; i < block_count; ++i) {
         char buffer[block_size];
-        read_stream_data(&cache_stream, i * block_size, block_size, buffer);
+        read_stream_data(&cache_stream_same_file, i * block_size, block_size, buffer);
         ASSERT_TRUE(check_data_content(buffer, block_size, 'a' + i));
     }
-    ASSERT_EQ(stats.read_block_cache_count, block_count);
+    ASSERT_EQ(stats_same_file.read_block_cache_count, block_count);
+    ASSERT_EQ(stats_same_file.read_block_buffer_count, 0);
 
     // With different modification time, the old cache cannot be used
     io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 2000000);
@@ -253,13 +271,21 @@ TEST_F(CacheInputStreamTest, test_read_from_io_buffer) {
 
     // read the first 1024 bytes from cache, actually it will read the whole block from cache
     // and save it to block buffer.
-    read_stream_data(&cache_stream, 0, 1024, buffer);
+    // We expect the cache read only through a fresh stream, because the first stream still holds the
+    // remotely read block in its own buffer and would serve this read from there.
+    io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 1000);
+    cache_stream2.set_enable_populate_cache(true);
+    cache_stream2.set_enable_block_buffer(true);
+    auto& stats2 = cache_stream2.stats();
+    read_stream_data(&cache_stream2, 0, 1024, buffer);
     ASSERT_TRUE(check_data_content(buffer, block_size, 'a'));
-    ASSERT_EQ(stats.read_block_cache_count, 1);
+    ASSERT_EQ(stats2.read_block_cache_count, 1);
+    ASSERT_EQ(stats2.read_block_buffer_count, 0);
 
-    read_stream_data(&cache_stream, 1024, 1024, buffer);
+    read_stream_data(&cache_stream2, 1024, 1024, buffer);
     ASSERT_TRUE(check_data_content(buffer, block_size, 'a'));
-    ASSERT_EQ(stats.read_block_buffer_count, 1);
+    ASSERT_EQ(stats2.read_block_cache_count, 1);
+    ASSERT_EQ(stats2.read_block_buffer_count, 1);
 }
 
 TEST_F(CacheInputStreamTest, test_read_zero_copy) {
@@ -359,11 +385,18 @@ TEST_F(CacheInputStreamTest, test_read_with_adaptor) {
             cache->record_read_local_cache(read_size, 1000000000);
             cache->record_read_remote_storage(read_size, 10, true);
         }
+        // We expect the adaptor to decide this read only through a fresh stream, because a stream that
+        // already holds both blocks in its own buffer would serve them without asking the cache.
+        io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 1000000);
+        cache_stream2.set_enable_populate_cache(true);
+        cache_stream2.set_enable_cache_io_adaptor(true);
+        auto& stats2 = cache_stream2.stats();
         char buffer[read_size];
-        read_stream_data(&cache_stream, 0, read_size, buffer);
+        read_stream_data(&cache_stream2, 0, read_size, buffer);
         ASSERT_TRUE(check_data_content(buffer, block_size, 'a'));
         ASSERT_TRUE(check_data_content(buffer + block_size, block_size, 'b'));
-        ASSERT_EQ(stats.read_block_cache_count, 0);
+        ASSERT_EQ(stats2.read_block_cache_count, 0);
+        ASSERT_EQ(stats2.read_block_buffer_count, 0);
     }
 
     {
@@ -373,11 +406,18 @@ TEST_F(CacheInputStreamTest, test_read_with_adaptor) {
             cache->record_read_local_cache(read_size, 10);
             cache->record_read_remote_storage(read_size, 1000000000, true);
         }
+        // We expect a fresh stream here for the same reason: the previous stream read both blocks
+        // from remote and now holds them in its own buffer.
+        io::CacheInputStream cache_stream3(sb_stream, file_name, data_size, 1000000);
+        cache_stream3.set_enable_populate_cache(true);
+        cache_stream3.set_enable_cache_io_adaptor(true);
+        auto& stats3 = cache_stream3.stats();
         char buffer[read_size];
-        read_stream_data(&cache_stream, 0, read_size, buffer);
+        read_stream_data(&cache_stream3, 0, read_size, buffer);
         ASSERT_TRUE(check_data_content(buffer, block_size, 'a'));
         ASSERT_TRUE(check_data_content(buffer + block_size, block_size, 'b'));
-        ASSERT_EQ(stats.read_block_cache_count, block_count);
+        ASSERT_EQ(stats3.read_block_cache_count, block_count);
+        ASSERT_EQ(stats3.read_block_buffer_count, 0);
     }
     fs::remove_all(cache_dir);
 }
@@ -463,6 +503,90 @@ TEST_F(CacheInputStreamTest, test_peek) {
     }
 }
 
+TEST_F(CacheInputStreamTest, test_reuse_remote_buffer_with_async_populate) {
+    // A file smaller than one block, like a small parquet file whose footer is read first.
+    const int64_t data_size = 119 * 1024;
+    char data[data_size + 1];
+    for (int64_t i = 0; i < data_size; ++i) {
+        data[i] = static_cast<char>(i % 251);
+    }
+
+    const std::string file_name = "test_reuse_remote_buffer_with_async_populate";
+    std::shared_ptr<io::SeekableInputStream> stream(new MockSeekableInputStream(data, data_size));
+    std::shared_ptr<io::SharedBufferedInputStream> sb_stream(
+            new io::SharedBufferedInputStream(stream, file_name, data_size));
+    io::CacheInputStream cache_stream(sb_stream, file_name, data_size, 1000000);
+    cache_stream.set_enable_populate_cache(true);
+    cache_stream.set_enable_async_populate_mode(true);
+    auto& stats = cache_stream.stats();
+
+    // Read the tail like a footer read, it loads the whole block from remote.
+    const int64_t tail_size = 48 * 1024;
+    char tail[tail_size];
+    read_stream_data(&cache_stream, data_size - tail_size, tail_size, tail);
+    ASSERT_EQ(0, memcmp(tail, data + data_size - tail_size, tail_size));
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+    ASSERT_EQ(data_size, sb_stream->direct_io_bytes());
+    ASSERT_EQ(0, stats.read_block_buffer_count);
+
+    // Read the head, it is inside the block just loaded, so it must not touch remote or cache again.
+    const int64_t head_size = 32 * 1024;
+    char head[head_size];
+    read_stream_data(&cache_stream, 0, head_size, head);
+    ASSERT_EQ(0, memcmp(head, data, head_size));
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+    ASSERT_EQ(data_size, sb_stream->direct_io_bytes());
+    ASSERT_EQ(1, stats.read_block_buffer_count);
+    ASSERT_EQ(head_size, stats.read_block_buffer_bytes);
+    ASSERT_EQ(0, stats.read_block_cache_count);
+}
+
+TEST_F(CacheInputStreamTest, test_reuse_remote_buffer_out_of_range_reads_remote) {
+    const int64_t block_count = 2;
+    const int64_t data_size = block_size * block_count - 1024;
+    char data[data_size + 1];
+    gen_test_data(data, data_size, block_size);
+
+    const std::string file_name = "test_reuse_remote_buffer_out_of_range_reads_remote";
+    std::shared_ptr<io::SeekableInputStream> stream(new MockSeekableInputStream(data, data_size));
+    std::shared_ptr<io::SharedBufferedInputStream> sb_stream(
+            new io::SharedBufferedInputStream(stream, file_name, data_size));
+    io::CacheInputStream cache_stream(sb_stream, file_name, data_size, 1000000);
+    // Nothing is written to the cache, so a read that cannot be served from the buffer must go remote.
+    cache_stream.set_enable_populate_cache(false);
+    auto& stats = cache_stream.stats();
+
+    char buffer[block_size];
+
+    // The tail read loads only the second block into the buffer.
+    read_stream_data(&cache_stream, block_size + 100, 1024, buffer);
+    ASSERT_TRUE(check_data_content(buffer, 1024, 'b'));
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+
+    // Inside the buffered range: no remote read.
+    read_stream_data(&cache_stream, block_size + 2048, 1024, buffer);
+    ASSERT_TRUE(check_data_content(buffer, 1024, 'b'));
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+    ASSERT_EQ(1, stats.read_block_buffer_count);
+
+    // Outside the buffered range: read remote, and the buffer now holds the first block.
+    read_stream_data(&cache_stream, 0, 1024, buffer);
+    ASSERT_TRUE(check_data_content(buffer, 1024, 'a'));
+    ASSERT_EQ(2, sb_stream->direct_io_count());
+    ASSERT_EQ(1, stats.read_block_buffer_count);
+
+    read_stream_data(&cache_stream, 2048, 1024, buffer);
+    ASSERT_TRUE(check_data_content(buffer, 1024, 'a'));
+    ASSERT_EQ(2, sb_stream->direct_io_count());
+    ASSERT_EQ(2, stats.read_block_buffer_count);
+
+    // The second block is no longer buffered, so it is read from remote again.
+    read_stream_data(&cache_stream, block_size + 100, 1024, buffer);
+    ASSERT_TRUE(check_data_content(buffer, 1024, 'b'));
+    ASSERT_EQ(3, sb_stream->direct_io_count());
+    ASSERT_EQ(2, stats.read_block_buffer_count);
+}
+
 TEST_F(CacheInputStreamTest, test_try_peer_cache) {
     const int64_t block_count = 3;
 
@@ -494,12 +618,21 @@ TEST_F(CacheInputStreamTest, test_try_peer_cache) {
     ASSERT_EQ(stats.write_block_cache_count, block_count);
 
     // first read from local cache
+    // We expect all blocks to come from the local cache only through a fresh stream, because the first
+    // stream still holds its last remotely read block in its own buffer and would serve that block from there.
+    io::CacheInputStream cache_stream2(sb_stream, file_name, data_size, 1000000);
+    cache_stream2.set_enable_populate_cache(true);
+    cache_stream2.set_peer_cache_node("1.1.1.1:1");
+    cache_stream2._peer_host = "127.0.0.1";
+    auto& stats2 = cache_stream2.stats();
     for (int i = 0; i < block_count; ++i) {
         char buffer[block_size];
-        read_stream_data(&cache_stream, i * block_size, block_size, buffer);
+        read_stream_data(&cache_stream2, i * block_size, block_size, buffer);
         ASSERT_TRUE(check_data_content(buffer, block_size, 'a' + i));
     }
-    ASSERT_EQ(stats.read_block_cache_count, block_count);
+    ASSERT_EQ(stats2.read_block_cache_count, block_count);
+    ASSERT_EQ(stats2.read_block_buffer_count, 0);
+    ASSERT_EQ(stats2.read_peer_cache_count, 0);
 }
 
 } // namespace starrocks::io
