@@ -441,6 +441,11 @@ StatusOr<ChunkPtr> ScanOperator::pull_chunk(RuntimeState* state) {
     ChunkPtr res = get_chunk_from_buffer();
     if (res != nullptr) {
         begin_pull_chunk(res);
+        // We want the time bound of the wait to cover the IO-task clamp, which starts with the first
+        // rows, so we start the wait here.
+        if (_topn_filter_back_pressure != nullptr && _op_pull_rows > 0) {
+            _topn_filter_back_pressure->start_wait();
+        }
         // for query cache mechanism, we should emit EOS chunk when we receive the last chunk.
         auto [owner_id, is_eos] = _should_emit_eos(res);
         // The buffered chunk already contains the heavy-expression results, so deferred IN filters

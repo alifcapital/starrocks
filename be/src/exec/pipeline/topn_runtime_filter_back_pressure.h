@@ -61,18 +61,30 @@ public:
     // is woken when the window ends, instead of relying on the fallback poller.
     int64_t current_throttle_deadline() const { return _phase == PH_THROTTLE ? _current_throttle_deadline : -1; }
 
-    // True once back-pressure has permanently stopped throttling -- either the RF arrived or the
-    // round/time/row budget was exhausted without it ever arriving. Read-only: unlike
-    // should_throttle() it does not advance the state machine. Used to release the scan IO-task
-    // clamp when there is nothing left to wait for, even though no RF materialized.
-    bool is_pass_through() const { return _phase == PH_PASS_THROUGH; }
+    // The scan calls this when rows first reach it. From then on the TopN above can build its filter,
+    // and the scan waits for it: it throttles and limits its IO tasks. The round and throttle-time
+    // budgets advance only after enough rows pass the scan. We fear a selective scan that never lets
+    // enough rows pass: the TopN never builds the filter, and the scan reads the whole table with
+    // limited IO. So we stop waiting when the filter has not arrived within _throttle_time_upper_bound
+    // ms after the first call.
+    void start_wait() {
+        if (_wait_start_ms < 0) {
+            _wait_start_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        }
+    }
+
+    // True once back-pressure has permanently stopped throttling -- either the RF arrived, or it did
+    // not arrive before the round/time/row budget was exhausted or the wait passed its time bound.
+    // Read-only: unlike should_throttle() it does not advance the state machine. Used to release the
+    // scan IO-task clamp when there is nothing left to wait for, even though no RF materialized.
+    bool is_pass_through() const { return _phase == PH_PASS_THROUGH || _wait_expired(); }
 
     bool should_throttle() {
         if (_phase == PH_PASS_THROUGH) {
             return false;
         } else if (_rf_arrived || !_round_limiter.has_next() || !_throttle_time_limiter.has_next() ||
                    !_num_rows_limiter.has_next() || _current_selectivity <= _selectivity_lower_bound ||
-                   _current_total_throttle_time >= _throttle_time_upper_bound) {
+                   _current_total_throttle_time >= _throttle_time_upper_bound || _wait_expired()) {
             _phase = PH_PASS_THROUGH;
             return false;
         }
@@ -110,6 +122,16 @@ public:
     }
 
 private:
+    // We expect users to set the bound to the maximum value to disable it. start + bound would
+    // overflow then, so we keep the start time and compare the elapsed time.
+    bool _wait_expired() const {
+        if (_wait_start_ms < 0) {
+            return false;
+        }
+        const int64_t now = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        return now - _wait_start_ms >= _throttle_time_upper_bound;
+    }
+
     const double _selectivity_lower_bound;
     const int64_t _throttle_time_upper_bound;
     Phase _phase{PH_UNTHROTTLE};
@@ -121,6 +143,7 @@ private:
     size_t _current_num_rows{0};
     double _current_selectivity{1.0};
     bool _rf_arrived{false};
+    int64_t _wait_start_ms{-1};
 };
 
 } // namespace starrocks::pipeline
