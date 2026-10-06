@@ -60,7 +60,7 @@ AGGREGATE ([GLOBAL] aggregate [{}] group by [[1: v1]] having [null]
 [end]
 
 [sql]
-select count(distinct v1), count(distinct v2) from t0
+select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1), count(distinct v2) from t0
 [result]
 CTEAnchor(cteid=1)
     CTEProducer(cteid=1)
@@ -78,7 +78,7 @@ CTEAnchor(cteid=1)
 [end]
 
 [sql]
-select count(distinct v1), avg(distinct v2), sum(distinct v3) from t0
+select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1), avg(distinct v2), sum(distinct v3) from t0
 [result]
 CTEAnchor(cteid=1)
     CTEProducer(cteid=1)
@@ -117,7 +117,7 @@ AGGREGATE ([GLOBAL] aggregate [{4: count=multi_distinct_count(4: count), 5: avg=
 [end]
 
 [sql]
-select count(distinct v1)/count(distinct v2), count(distinct v1)+avg(distinct v2), sum(distinct v3)-count(distinct v1) from t0
+select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1)/count(distinct v2), count(distinct v1)+avg(distinct v2), sum(distinct v3)-count(distinct v1) from t0
 [result]
 CTEAnchor(cteid=1)
     CTEProducer(cteid=1)
@@ -147,7 +147,7 @@ CTEAnchor(cteid=1)
 [end]
 
 [sql]
-select count(distinct v1), count(distinct v2) from t0 group by v3
+select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1), count(distinct v2) from t0 group by v3
 [result]
 CTEAnchor(cteid=1)
     CTEProducer(cteid=1)
@@ -173,7 +173,7 @@ AGGREGATE ([GLOBAL] aggregate [{}] group by [[3: v3]] having [null]
 [end]
 
 [sql]
-select count(distinct v1) from t0 having avg(distinct v3) > 0 order by sum(distinct v2)
+select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1) from t0 having avg(distinct v3) > 0 order by sum(distinct v2)
 [result]
 TOP-N (order by [[6: sum ASC NULLS FIRST]])
     TOP-N (order by [[6: sum ASC NULLS FIRST]])

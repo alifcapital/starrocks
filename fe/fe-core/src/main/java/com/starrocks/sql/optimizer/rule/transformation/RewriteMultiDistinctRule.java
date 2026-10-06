@@ -17,17 +17,12 @@ package com.starrocks.sql.optimizer.rule.transformation;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
-import com.starrocks.common.FeConstants;
 import com.starrocks.sql.ast.expression.ExprUtils;
-import com.starrocks.sql.common.ErrorType;
-import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
-import com.starrocks.sql.optimizer.base.LogicalProperty;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
@@ -35,21 +30,14 @@ import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
-import com.starrocks.sql.optimizer.statistics.Statistics;
-import com.starrocks.sql.optimizer.statistics.StatisticsCalculator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
-
-import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.LOW_AGGREGATE_EFFECT_COEFFICIENT;
-import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateCoefficient.MEDIUM_AGGREGATE_EFFECT_COEFFICIENT;
 
 public class RewriteMultiDistinctRule extends TransformationRule {
 
@@ -147,110 +135,43 @@ public class RewriteMultiDistinctRule extends TransformationRule {
         return Lists.newArrayList(OptExpression.create(newAgg, input.getInputs()));
     }
 
+    // Several distinct aggregations with different arguments run either as one multi_distinct aggregation, which
+    // keeps a set of argument values per group, or as CTE branches, one per argument, that remove duplicates by
+    // (group keys, argument) and are joined back by the group keys.
+    // We expect other queries to run on the cluster at the same time, so we count CPU and not the latency of one
+    // query on an idle cluster. CTE reads the input once per branch and builds a table of (group keys, argument)
+    // pairs in every branch. In our measurements CTE used 1.35 to 3 times more CPU than multi_distinct. CTE was
+    // faster only alone on an idle cluster, where it used the free cores: without GROUP BY or with few groups. With
+    // 4 queries at the same time multi_distinct was faster in all cases, those included. So we use multi_distinct
+    // unless it cannot compute the aggregations or the user asks for CTE.
     private boolean useCteToRewrite(OptExpression input, OptimizerContext context) {
         LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
         List<CallOperator> distinctAggOperatorList = agg.getAggregations().values().stream()
                 .filter(CallOperator::isDistinct).collect(Collectors.toList());
-        boolean hasMultiColumns = distinctAggOperatorList.stream().anyMatch(f -> f.getColumnRefs().size() > 1);
-        // exist multiple distinct columns should enable cte use
-        if (hasMultiColumns) {
-            if (!context.getSessionVariable().isCboCteReuse()) {
-                throw new StarRocksPlannerException(ErrorType.USER_ERROR,
-                        "%s is unsupported when cbo_cte_reuse is disabled", distinctAggOperatorList);
-            } else {
-                return true;
-            }
-        }
-
-        // respect prefer cte rewrite hint
-        if (context.getSessionVariable().isCboCteReuse() && context.getSessionVariable().isPreferCTERewrite()) {
+        // multi_distinct functions take one column
+        if (distinctAggOperatorList.stream().anyMatch(f -> f.getColumnRefs().size() > 1)) {
             return true;
         }
 
-        // respect skew int
-        if (context.getSessionVariable().isCboCteReuse() && agg.hasSkew() && !agg.getGroupingKeys().isEmpty()) {
+        if (context.getSessionVariable().isPreferCTERewrite()) {
             return true;
         }
 
-        // if one tablet, prefer to use MultiFun, which only has one global agg without exchange
-        LogicalProperty inputLogicalProperty = input.getLogicalProperty();
-        if (inputLogicalProperty.oneTabletProperty().supportOneTabletOpt && (!FeConstants.runningUnitTest)) {
-            return false;
-        }
-
-        if (context.getSessionVariable().isCboCteReuse() &&
-                isCTEMoreEfficient(input, context, distinctAggOperatorList)) {
+        // respect skew hint
+        if (agg.hasSkew() && !agg.getGroupingKeys().isEmpty()) {
             return true;
         }
 
-        // all distinct one column function can be rewritten by multi distinct function
-        boolean canRewriteByMultiFunc = true;
         for (CallOperator distinctCall : distinctAggOperatorList) {
             String fnName = distinctCall.getFnName();
-            List<ScalarOperator> children = distinctCall.getChildren();
-            Type type = children.get(0).getType();
+            Type type = distinctCall.getChildren().get(0).getType();
             if (type.isComplexType()
                     || type.isJsonType()
                     || FunctionSet.GROUP_CONCAT.equalsIgnoreCase(fnName)
                     || (FunctionSet.ARRAY_AGG.equalsIgnoreCase(fnName) && type.isDecimalOfAnyVersion())) {
-                canRewriteByMultiFunc = false;
-                break;
+                return true;
             }
         }
-
-        if (!context.getSessionVariable().isCboCteReuse() && !canRewriteByMultiFunc) {
-            throw new StarRocksPlannerException(ErrorType.USER_ERROR,
-                    "%s is unsupported when cbo_cte_reuse is disabled", distinctAggOperatorList);
-        }
-
-        return !canRewriteByMultiFunc;
-    }
-
-    private boolean isCTEMoreEfficient(OptExpression input, OptimizerContext context,
-                                       List<CallOperator> distinctAggOperatorList) {
-        LogicalAggregationOperator aggOp = input.getOp().cast();
-        if (aggOp.hasLimit()) {
-            return false;
-        }
-        Utils.calculateStatistics(input, context);
-
-        Statistics inputStatistics = input.inputAt(0).getStatistics();
-        // inputStatistics may be null if it's a cte consumer operator
-        if (inputStatistics == null) {
-            return false;
-        }
-        List<ColumnRefOperator> neededCols = Lists.newArrayList(aggOp.getGroupingKeys());
-        distinctAggOperatorList.stream().forEach(e -> neededCols.addAll(e.getColumnRefs()));
-
-        // no statistics available, use cte for no group by or group by only one col scenes to avoid bad case of multiple_func
-        if (neededCols.stream().anyMatch(e -> inputStatistics.getColumnStatistics().get(e).isUnknown())) {
-            return aggOp.getGroupingKeys().size() < 2;
-        }
-
-        double inputRowCount = inputStatistics.getOutputRowCount();
-        boolean allDistinctCountsSmall = true;
-        boolean allDeduplicatedRowsSmall = true;
-        for (CallOperator callOperator : distinctAggOperatorList) {
-            List<ColumnRefOperator> distinctColumns = callOperator.getColumnRefs();
-            if (distinctColumns.isEmpty()) {
-                continue;
-            }
-            Set<ColumnRefOperator> deduplicateKeys = Sets.newHashSet();
-            deduplicateKeys.addAll(aggOp.getGroupingKeys());
-            deduplicateKeys.addAll(distinctColumns);
-            double deduplicatedRows = StatisticsCalculator.computeGroupByStatistics(Lists.newArrayList(deduplicateKeys),
-                    inputStatistics, Maps.newHashMap());
-            double distinctCount = inputStatistics.getColumnStatistics().get(distinctColumns.get(0)).getDistinctValuesCount();
-            allDistinctCountsSmall &= distinctCount < MEDIUM_AGGREGATE_EFFECT_COEFFICIENT;
-            allDeduplicatedRowsSmall &= deduplicatedRows * LOW_AGGREGATE_EFFECT_COEFFICIENT < inputRowCount;
-        }
-
-        if (allDistinctCountsSmall) {
-            // distinct key with an extreme low cardinality use multi_distinct_func maybe more efficient
-            return false;
-        } else if (allDeduplicatedRowsSmall) {
-            return false;
-        }
-        return true;
+        return false;
     }
 }

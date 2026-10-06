@@ -1328,7 +1328,8 @@ public class AggregateTest extends PlanTestBase {
     @Test
     public void testMultiCountDistinctWithNoneGroup() throws Exception {
         FeConstants.runningUnitTest = true;
-        String sql = "select count(distinct t1b), count(distinct t1c) from test_all_type";
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b), count(distinct t1c) " +
+                "from test_all_type";
         String plan = getFragmentPlan(sql);
         assertContains(plan, "  MultiCastDataSinks\n" +
                 "  STREAM DATA SINK\n" +
@@ -1353,7 +1354,8 @@ public class AggregateTest extends PlanTestBase {
     public void testMultiCountDistinctWithNoneGroup1() throws Exception {
         FeConstants.runningUnitTest = true;
         String sql = "with tmp1 as (select 'a' as a from dual), tmp2 as (select 'b' as b from dual) " +
-                "select count(distinct t1b), count(distinct t1c), count(distinct t1.a), count(distinct t2.b) " +
+                "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b), count(distinct t1c), " +
+                "count(distinct t1.a), count(distinct t2.b) " +
                 "from test_all_type join tmp1 t1 join tmp2 t2 join tmp1 t3 join tmp2 t4";
         Pair<String, ExecPlan> pair = UtFrameUtils.getPlanAndFragment(connectContext, sql);
         logSysInfo(pair.first);
@@ -1364,7 +1366,9 @@ public class AggregateTest extends PlanTestBase {
     @Test
     public void testMultiCountDistinctWithNoneGroup2() throws Exception {
         FeConstants.runningUnitTest = true;
-        String sql = "select count(distinct t1b), count(distinct t1c), sum(t1c), max(t1b) from test_all_type";
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b), count(distinct t1c), " +
+                "sum(t1c), max(t1b) " +
+                "from test_all_type";
         String plan = getFragmentPlan(sql);
         assertContains(plan, "MultiCastDataSinks\n" +
                 "  STREAM DATA SINK\n" +
@@ -1395,7 +1399,8 @@ public class AggregateTest extends PlanTestBase {
     @Test
     public void testMultiCountDistinctWithNoneGroup3() throws Exception {
         FeConstants.runningUnitTest = true;
-        String sql = "select count(distinct t1b), count(distinct t1c) from test_all_type";
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b), count(distinct t1c) " +
+                "from test_all_type";
         String plan = getFragmentPlan(sql);
         assertContains(plan, "18:NESTLOOP JOIN\n" +
                 "  |  join op: CROSS JOIN");
@@ -1405,7 +1410,9 @@ public class AggregateTest extends PlanTestBase {
     @Test
     public void testMultiCountDistinctWithNoneGroup4() throws Exception {
         FeConstants.runningUnitTest = true;
-        String sql = "select count(distinct t1b + 1), count(distinct t1c + 2) from test_all_type";
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b + 1), " +
+                "count(distinct t1c + 2) " +
+                "from test_all_type";
         String plan = getFragmentPlan(sql);
         assertContains(plan, "1:Project\n" +
                 "  |  <slot 11> : CAST(2: t1b AS INT) + 1\n" +
@@ -1450,7 +1457,9 @@ public class AggregateTest extends PlanTestBase {
                 "  |  group by:");
 
         sql =
-                "select avg(distinct t1b + 1), count(distinct t1b), sum(distinct t1c), count(t1c), sum(t1c) from test_all_type";
+                "select /*+ SET_VAR(prefer_cte_rewrite = true) */ avg(distinct t1b + 1), count(distinct t1b), " +
+                        "sum(distinct t1c), count(t1c), sum(t1c) " +
+                        "from test_all_type";
         plan = getFragmentPlan(sql);
         assertContains(plan, "47:Project\n" +
                 "  |  <slot 12> : CAST(19: sum AS DOUBLE) / CAST(21: count AS DOUBLE)\n" +
@@ -1703,7 +1712,8 @@ public class AggregateTest extends PlanTestBase {
 
     @Test
     public void testAvgCountDistinctWithHaving() throws Exception {
-        String sql = "select avg(distinct s_suppkey), count(distinct s_acctbal) " +
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ avg(distinct s_suppkey), " +
+                "count(distinct s_acctbal) " +
                 "from supplier having avg(distinct s_suppkey) > 3 ;";
         connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
         String plan = getFragmentPlan(sql);
@@ -1756,6 +1766,40 @@ public class AggregateTest extends PlanTestBase {
             Assertions.assertEquals(3, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
         } finally {
             connectContext.getSessionVariable().setOptimizerExecuteTimeout(oldTimeout);
+        }
+    }
+
+    @Test
+    public void testMultiDistinctUsesCTEOnlyWhenRequired() throws Exception {
+        boolean oldCteReuse = connectContext.getSessionVariable().isCboCteReuse();
+        try {
+            for (boolean cteReuse : new boolean[] {true, false}) {
+                connectContext.getSessionVariable().setCboCteReuse(cteReuse);
+
+                // multi_distinct can compute these, so no CTE
+                String plan = getFragmentPlan("select t1a, count(distinct t1b), count(distinct t1d) " +
+                        "from test_all_type group by t1a");
+                assertContains(plan, "multi_distinct_count");
+                assertNotContains(plan, "MultiCastDataSinks");
+                plan = getFragmentPlan("select count(distinct t1b), count(distinct t1d) from test_all_type");
+                assertContains(plan, "multi_distinct_count");
+                assertNotContains(plan, "MultiCastDataSinks");
+
+                // the user asks for CTE
+                plan = getFragmentPlan("select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, " +
+                        "count(distinct t1b), count(distinct t1d) from test_all_type group by t1a");
+                assertContains(plan, "MultiCastDataSinks");
+
+                // multi_distinct cannot compute group_concat or a distinct over two columns
+                plan = getFragmentPlan("select t1a, count(distinct t1b), group_concat(distinct t1c) " +
+                        "from test_all_type group by t1a");
+                assertContains(plan, "MultiCastDataSinks");
+                plan = getFragmentPlan("select t1a, count(distinct t1b, t1c), count(distinct t1d) " +
+                        "from test_all_type group by t1a");
+                assertContains(plan, "MultiCastDataSinks");
+            }
+        } finally {
+            connectContext.getSessionVariable().setCboCteReuse(oldCteReuse);
         }
     }
 
@@ -2519,7 +2563,7 @@ public class AggregateTest extends PlanTestBase {
                 "from test_all_type group by t1a";
 
         plan = getFragmentPlan(sql);
-        assertNotContains(plan, "multi_distinct_count");
+        assertContains(plan, "multi_distinct_count");
         FeConstants.runningUnitTest = false;
     }
 
@@ -3203,7 +3247,9 @@ public class AggregateTest extends PlanTestBase {
     @Test
     public void testMultiCountDistinctWithHavingLimit() throws Exception {
         FeConstants.runningUnitTest = true;
-        String sql = "select count(distinct t1b) as x, count(distinct t1c) as y from test_all_type having x = 2";
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct t1b) as x, " +
+                "count(distinct t1c) as y " +
+                "from test_all_type having x = 2";
         String plan = getFragmentPlan(sql);
         assertContains(plan, "  8:AGGREGATE (merge finalize)\n" +
                 "  |  output: count(11: count)\n" +

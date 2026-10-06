@@ -873,10 +873,8 @@ public class ReplayFromDumpTest extends ReplayFromDumpTestBase {
         Pair<QueryDumpInfo, String> replayPair =
                 getPlanFragment(getDumpInfoFromFile("query_dump/distinct_constant"),
                         connectContext.getSessionVariable(), TExplainLevel.NORMAL);
-        Assertions.assertTrue(replayPair.second.contains("4:AGGREGATE (update serialize)\n" +
-                "  |  output: multi_distinct_count(1)"), replayPair.second);
-        Assertions.assertTrue(replayPair.second.contains("9:AGGREGATE (update serialize)\n" +
-                "  |  output: multi_distinct_count(NULL)"), replayPair.second);
+        Assertions.assertTrue(replayPair.second.contains("2:AGGREGATE (update serialize)\n" +
+                "  |  output: multi_distinct_count(1), multi_distinct_count(NULL)"), replayPair.second);
     }
 
     @Test
