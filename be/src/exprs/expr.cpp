@@ -36,7 +36,9 @@
 
 #include <thrift/protocol/TDebugProtocol.h>
 
+#include <memory>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -778,31 +780,87 @@ bool has_indirect_inputs(const Expr* expr) {
     return false;
 }
 
+// The copy made for a routed branch has only the routed rows, while the provider of the original
+// chunk returns columns with the rows of the original chunk. We wrap that provider so a lazy column
+// is still read on demand, and only when the branch touches it, and is cut down to the routed rows.
+// Results are cached per slot, as MissingColumnProvider requires provide() to be idempotent.
+class RoutedRowsColumnProvider final : public MissingColumnProvider {
+public:
+    RoutedRowsColumnProvider(MissingColumnProvider* parent, const std::vector<uint32_t>& rows)
+            : _parent(parent), _rows(rows) {}
+
+    bool can_provide(SlotId slot_id) const override { return _parent->can_provide(slot_id); }
+
+    StatusOr<ColumnPtr> provide(SlotId slot_id) override {
+        auto it = _cache.find(slot_id);
+        if (it != _cache.end()) {
+            return it->second;
+        }
+        ASSIGN_OR_RETURN(auto source, _parent->provide(slot_id));
+        auto column = source->clone_empty();
+        column->reserve(_rows.size());
+        column->append_selective(*source, _rows.data(), 0, static_cast<uint32_t>(_rows.size()));
+        ColumnPtr result = std::move(column);
+        _cache.emplace(slot_id, result);
+        return result;
+    }
+
+private:
+    MissingColumnProvider* _parent;
+    // Owned by the caller of evaluate_selected(), which outlives the evaluation on the copy.
+    const std::vector<uint32_t>& _rows;
+    std::unordered_map<SlotId, ColumnPtr> _cache;
+};
+
+// The Chunk keeps a raw pointer to its provider, so the provider must live as long as the chunk.
+struct SubChunk {
+    ChunkUniquePtr chunk;
+    std::unique_ptr<RoutedRowsColumnProvider> provider;
+};
+
 // Copy only the branch's inputs, preserving slot IDs and routed row order. The input chunk is immutable.
-ChunkUniquePtr make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value) {
+// Slots that the input chunk does not hold but its provider can supply are left out of the copy; the
+// copy gets its own provider that supplies them with the routed rows.
+SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value) {
+    MissingColumnProvider* parent = chunk->missing_column_provider();
     std::vector<SlotId> slots;
     if (chunk->num_columns() > 1 && !has_indirect_inputs(value)) {
         value->get_slot_ids(&slots);
         std::sort(slots.begin(), slots.end());
         slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
     }
+    SubChunk result;
     // An empty Chunk cannot carry a row count. Retain the old path for slot-free expressions,
     // and conservatively fall back if the dependency list does not describe the current input.
-    if (!slots.empty() && slots.size() < chunk->num_columns() &&
-        std::all_of(slots.begin(), slots.end(), [&](SlotId slot) { return chunk->is_slot_exist(slot); })) {
-        auto sub = std::make_unique<Chunk>();
-        for (SlotId slot : slots) {
+    // A copy that would hold no column at all also falls back, so that it keeps a row count.
+    std::vector<SlotId> present;
+    bool all_available = true;
+    for (SlotId slot : slots) {
+        if (chunk->is_slot_exist(slot)) {
+            present.push_back(slot);
+        } else if (parent == nullptr || !parent->can_provide(slot)) {
+            all_available = false;
+            break;
+        }
+    }
+    if (all_available && !present.empty() && present.size() < chunk->num_columns()) {
+        result.chunk = std::make_unique<Chunk>();
+        for (SlotId slot : present) {
             const auto& source = chunk->get_column_by_slot_id(slot);
             auto column = source->clone_empty();
             column->reserve(idx.size());
             column->append_selective(*source, idx.data(), 0, static_cast<uint32_t>(idx.size()));
-            sub->append_column(std::move(column), slot);
+            result.chunk->append_column(std::move(column), slot);
         }
-        return sub;
+    } else {
+        result.chunk = chunk->clone_empty(idx.size());
+        result.chunk->append_selective(*chunk, idx.data(), 0, static_cast<uint32_t>(idx.size()));
     }
-    ChunkUniquePtr sub = chunk->clone_empty(idx.size());
-    sub->append_selective(*chunk, idx.data(), 0, static_cast<uint32_t>(idx.size()));
-    return sub;
+    if (parent != nullptr) {
+        result.provider = std::make_unique<RoutedRowsColumnProvider>(parent, idx);
+        result.chunk->set_missing_column_provider(result.provider.get());
+    }
+    return result;
 }
 
 } // namespace
@@ -818,7 +876,7 @@ StatusOr<ColumnPtr> Expr::evaluate_selected(ExprContext* context, Chunk* chunk, 
         return result;
     }
     auto sub = make_subchunk(chunk, rows, this);
-    return evaluate_checked(context, sub.get());
+    return evaluate_checked(context, sub.chunk.get());
 }
 
 StatusOr<ColumnPtr> Expr::evaluate_with_filter(ExprContext* context, Chunk* ptr, uint8_t* filter) {
