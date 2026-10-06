@@ -1714,6 +1714,52 @@ public class AggregateTest extends PlanTestBase {
     }
 
     @Test
+    public void testPlainAvgInMultiDistinctByCTE() throws Exception {
+        long oldTimeout = connectContext.getSessionVariable().getOptimizerExecuteTimeout();
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
+        try {
+            // two count distinct branches and one branch with the plain avg, no distinct sum/count of t1c
+            String sql = "select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, count(distinct t1b), " +
+                    "count(distinct t1d), avg(t1c) from test_all_type group by t1a";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "MultiCastDataSinks", "avg(");
+            assertNotContains(plan, "sum(");
+            Assertions.assertEquals(2, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
+
+            // the plain avg must not add a distinct sum branch when count(distinct t1c) is already there
+            sql = "select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, count(distinct t1b), " +
+                    "count(distinct t1c), avg(t1c) from test_all_type group by t1a";
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "MultiCastDataSinks", "avg(");
+            assertNotContains(plan, "sum(");
+            Assertions.assertEquals(2, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
+
+            // avg(distinct t1c) is still split into a distinct sum branch and a distinct count branch
+            sql = "select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, count(distinct t1b), " +
+                    "count(distinct t1d), avg(distinct t1c) from test_all_type group by t1a";
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "MultiCastDataSinks", "sum(");
+            Assertions.assertEquals(3, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
+
+            // avg(distinct t1c) reuses the existing count(distinct t1c) branch and builds only the sum branch
+            sql = "select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, count(distinct t1b), " +
+                    "count(distinct t1c), avg(distinct t1c) from test_all_type group by t1a";
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "MultiCastDataSinks", "sum(");
+            Assertions.assertEquals(2, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
+
+            // plain and distinct avg of the same column together: distinct branches plus the other-aggregates branch
+            sql = "select /*+ SET_VAR (prefer_cte_rewrite = true) */ t1a, count(distinct t1b), " +
+                    "avg(distinct t1c), avg(t1c) from test_all_type group by t1a";
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "MultiCastDataSinks", "sum(", "avg(");
+            Assertions.assertEquals(3, StringUtils.countMatches(plan, "join op: INNER JOIN"), plan);
+        } finally {
+            connectContext.getSessionVariable().setOptimizerExecuteTimeout(oldTimeout);
+        }
+    }
+
+    @Test
     public void testSortedStreamingAggregate() throws Exception {
         connectContext.getSessionVariable().setEnableSortAggregate(true);
         String sql;
