@@ -414,6 +414,11 @@ public:
     int64_t spill_hash_join_probe_op_max_bytes() const {
         return _spill_options.has_value() ? _spill_options->spill_hash_join_probe_op_max_bytes : 1LL << 31;
     }
+    // An FE that does not send the field gets the same behaviour as the FE default, so unset means false.
+    bool spill_greedy_mem_reserve() const {
+        return _spill_options.has_value() && _spill_options->__isset.spill_greedy_mem_reserve &&
+               _spill_options->spill_greedy_mem_reserve;
+    }
 
     bool error_if_overflow() const {
         return _query_options.__isset.overflow_mode && _query_options.overflow_mode == TOverflowMode::REPORT_ERROR;
