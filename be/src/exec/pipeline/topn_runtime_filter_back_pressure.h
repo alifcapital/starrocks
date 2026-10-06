@@ -54,7 +54,18 @@ public:
     // throttling is to wait for that arrival; once the filter is present (and prunes at storage)
     // there is nothing left to wait for, so release regardless of observed per-chunk selectivity --
     // which goes stale when storage-level zonemap pruning makes the pulled chunks empty.
-    void notify_rf_arrived() { _rf_arrived = true; }
+    void notify_rf_arrived() {
+        if (!_rf_arrived && _wait_start_ns >= 0) {
+            _rf_wait_ns = duration_cast<std::chrono::nanoseconds>(steady_clock::now().time_since_epoch()).count() -
+                          _wait_start_ns;
+        }
+        _rf_arrived = true;
+    }
+
+    // Time from the first rows at the scan to the arrival of the filter, or -1 when the filter did not
+    // arrive after the wait started. The profile shows it, so we can tune the time bound of the wait.
+    int64_t rf_wait_ns() const { return _rf_wait_ns; }
+    bool wait_expired_before_rf() const { return _rf_wait_ns < 0 && _wait_expired(); }
 
     // Steady-clock deadline (ms since epoch) of the current throttle window while in PH_THROTTLE,
     // or -1 otherwise. The scan operator arms an event-scheduler timer at this deadline so the driver
@@ -70,6 +81,7 @@ public:
     void start_wait() {
         if (_wait_start_ms < 0) {
             _wait_start_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+            _wait_start_ns = duration_cast<std::chrono::nanoseconds>(steady_clock::now().time_since_epoch()).count();
         }
     }
 
@@ -144,6 +156,8 @@ private:
     double _current_selectivity{1.0};
     bool _rf_arrived{false};
     int64_t _wait_start_ms{-1};
+    int64_t _wait_start_ns{-1};
+    int64_t _rf_wait_ns{-1};
 };
 
 } // namespace starrocks::pipeline

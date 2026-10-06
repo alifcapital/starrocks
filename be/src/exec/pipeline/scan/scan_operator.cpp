@@ -180,6 +180,15 @@ void ScanOperator::close(RuntimeState* state) {
         COUNTER_SET(no_bound_counter, _morsel_queue->reorder_no_bound_morsels());
     }
 
+    if (_topn_filter_back_pressure != nullptr) {
+        if (const int64_t wait_ns = _topn_filter_back_pressure->rf_wait_ns(); wait_ns >= 0) {
+            COUNTER_SET(ADD_TIMER(_unique_metrics, "TopnRfWaitTime"), wait_ns);
+        }
+        if (_topn_filter_back_pressure->wait_expired_before_rf()) {
+            COUNTER_SET(ADD_COUNTER(_unique_metrics, "TopnRfWaitExpired", TUnit::UNIT), static_cast<int64_t>(1));
+        }
+    }
+
     _merge_chunk_source_profiles(state);
 
     if (_bp_throttle_timer != nullptr) {
