@@ -2124,6 +2124,52 @@ public class ExpressionTest extends PlanTestBase {
     }
 
     @Test
+    public void testJsonFusionOverCastToJson() throws Exception {
+        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+        long previousSqlMode = connectContext.getSessionVariable().getSqlMode();
+        try {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            String project = "select cast(cast(t1a as json) -> '$.a' -> '$.b' as varchar) from test_all_type";
+            String plan = getFragmentPlan(project);
+            assertContains(plan, "CAST(json_query_from_string(1: t1a, '$.a.b') AS VARCHAR");
+            assertNotContains(plan, "AS JSON");
+
+            String filter = "select t1b from test_all_type "
+                    + "where cast(cast(t1a as json) -> '$.a' -> '$.b' as varchar) = 'x'";
+            plan = getFragmentPlan(filter);
+            assertContains(plan, "PREDICATES: CAST(json_query_from_string(1: t1a, '$.a.b') AS VARCHAR");
+            assertNotContains(plan, "AS JSON", "get_json_string(");
+
+            String shared = "select cast(cast(t1a as json) -> '$.a' as bigint), "
+                    + "cast(cast(t1a as json) -> '$.b' as bigint) from test_all_type";
+            plan = getFragmentPlan(shared);
+            Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_query_many_from_string("));
+            assertNotContains(plan, "AS JSON");
+
+            plan = getFragmentPlan("select json_query(cast(t1a as json), t1a) from test_all_type");
+            assertContains(plan, "json_query(CAST(1: t1a AS JSON), 1: t1a)");
+            assertNotContains(plan, "json_query_from_string");
+
+            plan = getFragmentPlan("select cast(v_json as json) -> '$.a' from tjson");
+            assertNotContains(plan, "json_query_from_string");
+
+            connectContext.getSessionVariable().setSqlMode(previousSqlMode | SqlModeHelper.MODE_ALLOW_THROW_EXCEPTION);
+            plan = getFragmentPlan(project);
+            assertContains(plan, "json_query(CAST(1: t1a AS JSON), '$.a.b')");
+            assertNotContains(plan, "json_query_from_string");
+            connectContext.getSessionVariable().setSqlMode(previousSqlMode);
+
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            plan = getFragmentPlan(project);
+            assertContains(plan, "json_query(CAST(1: t1a AS JSON), '$.a.b')");
+            assertNotContains(plan, "json_query_from_string");
+        } finally {
+            connectContext.getSessionVariable().setSqlMode(previousSqlMode);
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
+        }
+    }
+
+    @Test
     public void testJsonQuery() throws Exception {
         String sql = "select parse_json('{\"a\": true}')->\"a\"->\"b\"->\"c\"->\"d\"";
         String plan = getFragmentPlan(sql);

@@ -206,4 +206,19 @@ public class HiveScanTest extends ConnectorPlanTestBase {
         }
         connectContext.getSessionVariable().setEnableRewriteSimpleAggToHdfsScan(false);
     }
+
+    @Test
+    public void testJsonFusionOverCastOnIcebergString() throws Exception {
+        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+        try {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            String sql = "select cast(cast(data as json) -> '$.body' -> '$.txn' as char) from iceberg0.partitioned_db.t1 "
+                    + "where cast(cast(data as json) -> '$.body' -> '$.mode' as char) = 'x'";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "json_query_from_string(", "data, '$.body.txn')", "data, '$.body.mode')");
+            assertNotContains(plan, "get_json_string(", "AS JSON");
+        } finally {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
+        }
+    }
 }

@@ -22,6 +22,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
@@ -51,7 +52,7 @@ public class JsonExtractFusionRule extends BottomUpScalarOperatorRewriteRule {
         }
         ScalarOperator inner = call.getChild(0);
         ScalarOperator path = call.getChild(1);
-        if (isParseJsonOverVarchar(inner) && isConstStringPath(path)) {
+        if ((isParseJsonOverVarchar(inner) || isCastVarcharToJson(inner)) && isConstStringPath(path)) {
             ScalarOperator x = inner.getChild(0);
             Type[] argTypes = new Type[] {x.getType(), path.getType()};
             Function fn = ExprUtils.getBuiltinFunction(FunctionSet.JSON_QUERY_FROM_STRING, argTypes,
@@ -73,6 +74,15 @@ public class JsonExtractFusionRule extends BottomUpScalarOperatorRewriteRule {
             return false;
         }
         return isVarcharLike(call.getChild(0).getType());
+    }
+
+    // The BE casts VARCHAR and CHAR to JSON with the same parser and NULL-on-error policy as parse_json,
+    // so we expect CAST(x AS JSON) to give the same document, and we fuse it the same way.
+    private static boolean isCastVarcharToJson(ScalarOperator op) {
+        if (!(op instanceof CastOperator) || !op.getType().isJsonType()) {
+            return false;
+        }
+        return isVarcharLike(op.getChild(0).getType());
     }
 
     private static boolean isVarcharLike(Type type) {
