@@ -150,6 +150,10 @@ protected:
     int64_t _offset;
     int64_t _buffer_size;
     std::string _buffer;
+    // The file range [_buffer_offset, _buffer_offset + _buffer_valid_size) that `_buffer` holds after the
+    // last read from remote storage. _buffer_valid_size == 0 means `_buffer` holds nothing usable.
+    int64_t _buffer_offset = 0;
+    int64_t _buffer_valid_size = 0;
     Stats _stats;
     int64_t _size;
     bool _enable_populate_cache = false;
