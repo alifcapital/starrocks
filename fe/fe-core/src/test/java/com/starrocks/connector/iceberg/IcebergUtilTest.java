@@ -20,6 +20,7 @@ import com.starrocks.planner.SlotDescriptor;
 import com.starrocks.planner.SlotId;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.thrift.TExprMinMaxValue;
+import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.StringType;
@@ -31,6 +32,7 @@ import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -38,8 +40,11 @@ import java.util.Map;
 import java.util.TimeZone;
 
 import static org.apache.iceberg.types.Types.NestedField.required;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -416,6 +421,125 @@ public class IcebergUtilTest {
         } finally {
             ConnectContext.remove();
         }
+    }
+
+    private static SlotDescriptor varcharSlot(int id, String name) {
+        SlotDescriptor slot = new SlotDescriptor(new SlotId(id), name, StringType.STRING, true);
+        slot.setColumn(new Column(name, StringType.STRING, true));
+        return slot;
+    }
+
+    private static TExprMinMaxValue topnStringBounds(byte[] lower, byte[] upper) {
+        Schema schema = new Schema(required(5, "s", Types.StringType.get()));
+        Map<Integer, ByteBuffer> lowerBounds = new HashMap<>();
+        Map<Integer, ByteBuffer> upperBounds = new HashMap<>();
+        if (lower != null) {
+            lowerBounds.put(5, ByteBuffer.wrap(lower));
+        }
+        if (upper != null) {
+            upperBounds.put(5, ByteBuffer.wrap(upper));
+        }
+        return IcebergUtil.toThriftTopnStringBounds(schema, lowerBounds, upperBounds, Map.of(5, 0L), Map.of(5, 4L),
+                varcharSlot(5, "s"));
+    }
+
+    @Test
+    public void testTopnStringBoundsKeepRawBytes() {
+        byte[] lower = "2026-10-05 10:00".getBytes(StandardCharsets.UTF_8);
+        byte[] upper = "2026-10-05 11:24".getBytes(StandardCharsets.UTF_8);
+        TExprMinMaxValue v = topnStringBounds(lower, upper);
+        assertEquals(TExprNodeType.STRING_LITERAL, v.getType());
+        assertFalse(v.isHas_null());
+        assertFalse(v.isAll_null());
+        assertArrayEquals(lower, v.getMin_string_value());
+        assertArrayEquals(upper, v.getMax_string_value());
+        assertFalse(v.isSetMin_int_value());
+        assertFalse(v.isSetMax_int_value());
+
+        // A bound cut inside a multi-byte character is invalid UTF-8. Decoding it would turn the tail
+        // into U+FFFD (EF BF BD), so the bytes must reach BE unchanged.
+        byte[] cutLower = {'a', (byte) 0xC3};
+        byte[] cutUpper = {'b', (byte) 0xE2, (byte) 0x82};
+        v = topnStringBounds(cutLower, cutUpper);
+        assertArrayEquals(cutLower, v.getMin_string_value());
+        assertArrayEquals(cutUpper, v.getMax_string_value());
+
+        // Only the remaining bytes of the buffer are the bound, and reading them keeps its position.
+        Schema schema = new Schema(required(5, "s", Types.StringType.get()));
+        ByteBuffer shared = ByteBuffer.wrap("xxabc".getBytes(StandardCharsets.UTF_8), 2, 3);
+        v = IcebergUtil.toThriftTopnStringBounds(schema, Map.of(5, shared), Map.of(5, shared), Map.of(5, 0L),
+                Map.of(5, 4L), varcharSlot(5, "s"));
+        assertArrayEquals("abc".getBytes(StandardCharsets.UTF_8), v.getMin_string_value());
+        assertEquals(2, shared.position());
+    }
+
+    @Test
+    public void testTopnStringBoundsDroppedOutsideBmp() {
+        byte[] plain = "2026".getBytes(StandardCharsets.UTF_8);
+        // U+1F600 is F0 9F 98 80 in UTF-8.
+        byte[] emoji = "2026😀".getBytes(StandardCharsets.UTF_8);
+        assertNull(topnStringBounds(emoji, plain));
+        assertNull(topnStringBounds(plain, emoji));
+        assertNull(topnStringBounds(plain, new byte[] {'a', (byte) 0xF4}));
+        // 0xEF is the highest lead byte of a 3-byte (BMP) character and is kept.
+        assertNotNull(topnStringBounds(plain, new byte[] {'a', (byte) 0xEF, (byte) 0xBF, (byte) 0xBF}));
+    }
+
+    @Test
+    public void testTopnStringBoundsDroppedWhenOneIsMissing() {
+        byte[] lower = "2026-10-05".getBytes(StandardCharsets.UTF_8);
+        assertNull(topnStringBounds(lower, null));
+        assertNull(topnStringBounds(null, lower));
+        Schema schema = new Schema(required(5, "s", Types.StringType.get()));
+        assertNull(IcebergUtil.toThriftTopnStringBounds(schema, null, null, Map.of(5, 0L), Map.of(5, 4L),
+                varcharSlot(5, "s")));
+        // Without null counts we cannot tell whether the file has nulls.
+        assertNull(IcebergUtil.toThriftTopnStringBounds(schema, Map.of(5, ByteBuffer.wrap(lower)),
+                Map.of(5, ByteBuffer.wrap(lower)), Map.of(), Map.of(5, 4L), varcharSlot(5, "s")));
+    }
+
+    @Test
+    public void testTopnStringBoundsAllNullAndNulls() {
+        Schema schema = new Schema(required(5, "s", Types.StringType.get()));
+        TExprMinMaxValue v = IcebergUtil.toThriftTopnStringBounds(schema, null, null, Map.of(5, 4L), Map.of(5, 4L),
+                varcharSlot(5, "s"));
+        assertEquals(TExprNodeType.STRING_LITERAL, v.getType());
+        assertTrue(v.isHas_null());
+        assertTrue(v.isAll_null());
+        assertFalse(v.isSetMin_string_value());
+        assertFalse(v.isSetMax_string_value());
+
+        ByteBuffer bound = ByteBuffer.wrap("a".getBytes(StandardCharsets.UTF_8));
+        v = IcebergUtil.toThriftTopnStringBounds(schema, Map.of(5, bound), Map.of(5, bound), Map.of(5, 1L),
+                Map.of(5, 4L), varcharSlot(5, "s"));
+        assertTrue(v.isHas_null());
+        assertFalse(v.isAll_null());
+    }
+
+    @Test
+    public void testTopnStringBoundsOnlyForStringColumns() {
+        ByteBuffer intBound = ByteBuffer.wrap(new byte[] {1, 0, 0, 0});
+        // Iceberg int column read into a VARCHAR slot: not a string bound.
+        Schema intSchema = new Schema(required(5, "s", Types.IntegerType.get()));
+        assertNull(IcebergUtil.toThriftTopnStringBounds(intSchema, Map.of(5, intBound), Map.of(5, intBound),
+                Map.of(5, 0L), Map.of(5, 4L), varcharSlot(5, "s")));
+        // Iceberg string column read into a non-string slot.
+        Schema stringSchema = new Schema(required(5, "s", Types.StringType.get()));
+        SlotDescriptor intSlot = new SlotDescriptor(new SlotId(5), "s", IntegerType.INT, true);
+        intSlot.setColumn(new Column("s", IntegerType.INT, true));
+        assertNull(IcebergUtil.toThriftTopnStringBounds(stringSchema, Map.of(5, intBound), Map.of(5, intBound),
+                Map.of(5, 0L), Map.of(5, 4L), intSlot));
+    }
+
+    @Test
+    public void testExactMinMaxNeverCarriesStringBounds() {
+        // The aggregate min/max optimization reads toThriftMinMaxValueBySlots as exact values. A string
+        // column must stay out of it, whatever its bounds are.
+        Schema schema = new Schema(required(5, "s", Types.StringType.get()));
+        ByteBuffer bound = ByteBuffer.wrap("abc".getBytes(StandardCharsets.UTF_8));
+        Map<Integer, TExprMinMaxValue> exact = IcebergUtil.toThriftMinMaxValueBySlots(schema, Map.of(5, bound),
+                Map.of(5, bound), Map.of(5, 0L), Map.of(5, 4L), List.of(varcharSlot(5, "s")));
+        assertTrue(exact.isEmpty());
     }
 
     private FileScanTask createMockFileScanTask(FileFormat fileFormat) {

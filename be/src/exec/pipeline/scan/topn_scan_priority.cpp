@@ -24,6 +24,7 @@ TopnScanPriority topn_scan_priority(const THdfsScanRange& range, int32_t slot_id
     bool all_null = false;
     bool has_bound = false;
     int64_t key = 0;
+    const std::string* string_bound = nullptr;
 
     if (range.__isset.min_max_values) {
         const auto& min_max_values = range.min_max_values;
@@ -34,7 +35,14 @@ TopnScanPriority topn_scan_priority(const THdfsScanRange& range, int32_t slot_id
             all_null = v.all_null;
             if (!all_null) {
                 // Integer, date and timestamp encodings preserve order: max for DESC, min for ASC.
-                if (desc && v.__isset.max_int_value) {
+                // String bounds keep the VARCHAR sort order. A string bound is used only when both
+                // sides are present: a file without one of them may hold any value.
+                if (v.type == TExprNodeType::STRING_LITERAL) {
+                    if (v.__isset.min_string_value && v.__isset.max_string_value) {
+                        string_bound = desc ? &v.max_string_value : &v.min_string_value;
+                        has_bound = true;
+                    }
+                } else if (desc && v.__isset.max_int_value) {
                     key = v.max_int_value;
                     has_bound = true;
                 } else if (!desc && v.__isset.min_int_value) {
@@ -50,6 +58,10 @@ TopnScanPriority topn_scan_priority(const THdfsScanRange& range, int32_t slot_id
     } else if (has_bound) {
         priority.rank = 1;
         priority.value = key;
+        if (string_bound != nullptr) {
+            priority.is_string = true;
+            priority.string_value = *string_bound;
+        }
     } else {
         priority.rank = 2; // no usable bound -> serve last
     }

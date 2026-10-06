@@ -506,6 +506,8 @@ struct HdfsScannerContext {
     // Decode the raw Iceberg endpoints in |value| (date=days, timestamp=micros, int=raw) into the
     // slot's internal Datum form. Returns false for types without a comparable bound (float/time/
     // other), writing nothing. Decodes identically to create_min_max_value_column (the agg build).
+    // A VARCHAR/CHAR slot takes STRING_LITERAL bounds as Slice Datums that point into |value|, so
+    // |value| must outlive them.
     static bool decode_min_max_endpoint(const TypeDescriptor& type, const TExprMinMaxValue& value, Datum* min_out,
                                         Datum* max_out);
 

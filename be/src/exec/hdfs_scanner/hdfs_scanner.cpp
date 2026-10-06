@@ -696,6 +696,13 @@ void HdfsScannerContext::update_return_count_columns() {
     materialized_columns.swap(updated_columns);
 }
 
+// String bounds (type STRING_LITERAL) may be truncated by Iceberg, so they are not values of the
+// column. We use them only to order and skip files for a TopN. The min/max optimization outputs the
+// values it finds here as MIN/MAX, so it must take only exact values.
+static bool is_exact_min_max_value(const TExprMinMaxValue& value) {
+    return value.type != TExprNodeType::STRING_LITERAL;
+}
+
 void HdfsScannerContext::update_min_max_columns() {
     if (!options.use_min_max_opt) {
         return;
@@ -703,7 +710,8 @@ void HdfsScannerContext::update_min_max_columns() {
     std::vector<ColumnInfo> updated_columns;
     const std::map<int32_t, TExprMinMaxValue>& min_max_values = scan_range->min_max_values;
     for (auto& column : materialized_columns) {
-        if (min_max_values.find(column.slot_id()) != min_max_values.end()) {
+        auto it = min_max_values.find(column.slot_id());
+        if (it != min_max_values.end() && is_exact_min_max_value(it->second)) {
             // This column has file-level min/max statistics.  Move it to
             // not_existed_slots so that append_or_update_min_max_column_to_chunk()
             // fills the column with the statistics values instead of reading the
@@ -755,7 +763,7 @@ Status HdfsScannerContext::append_or_update_not_existed_columns_to_chunk(ChunkPt
     for (auto* slot_desc : not_existed_slots) {
         if (options.use_min_max_opt) {
             auto it = scan_range->min_max_values.find(slot_desc->id());
-            if (it != scan_range->min_max_values.end()) {
+            if (it != scan_range->min_max_values.end() && is_exact_min_max_value(it->second)) {
                 MutableColumnPtr col = create_min_max_value_column(slot_desc, it->second, row_count);
                 ck->append_or_update_column(std::move(col), slot_desc->id());
                 continue;
@@ -885,6 +893,23 @@ bool HdfsScannerContext::decode_min_max_endpoint(const TypeDescriptor& type, con
                                                  Datum* min_out, Datum* max_out) {
     // An absent endpoint is not a zero bound. Incomplete or inconsistent metadata
     // must leave the file to the normal reader.
+    if (value.type == TExprNodeType::STRING_LITERAL) {
+        // The bounds may be truncated, but only wider: the lower bound is <= every value and the upper
+        // bound is >= every value. That is enough for a zone-map test, which compares strings as
+        // unsigned bytes like the sort. The Datums point into |value|.
+        if ((type.type != TYPE_VARCHAR && type.type != TYPE_CHAR) || !value.__isset.min_string_value ||
+            !value.__isset.max_string_value) {
+            return false;
+        }
+        Slice min_slice(value.min_string_value);
+        Slice max_slice(value.max_string_value);
+        if (min_slice.compare(max_slice) > 0) {
+            return false;
+        }
+        *min_out = Datum(min_slice);
+        *max_out = Datum(max_slice);
+        return true;
+    }
     const auto expected_type = type.type == TYPE_BOOLEAN ? TExprNodeType::BOOL_LITERAL : TExprNodeType::INT_LITERAL;
     if (value.type != expected_type || !value.__isset.min_int_value || !value.__isset.max_int_value ||
         value.min_int_value > value.max_int_value) {
@@ -925,7 +950,8 @@ bool HdfsScannerContext::decode_min_max_endpoint(const TypeDescriptor& type, con
         return true;
     }
     default:
-        // float/double (NaN, not eligible), time, decimal/string (absent from min_max_values).
+        // float/double (NaN, not eligible), time, decimal (absent from min_max_values), and a string
+        // slot whose value is not STRING_LITERAL.
         return false;
     }
 }

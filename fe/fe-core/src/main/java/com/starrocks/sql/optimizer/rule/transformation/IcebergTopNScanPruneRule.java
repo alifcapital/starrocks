@@ -25,6 +25,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalTopNOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
+import com.starrocks.type.Type;
 
 import java.util.Collections;
 import java.util.List;
@@ -79,8 +80,10 @@ public class IcebergTopNScanPruneRule extends TransformationRule {
         }
 
         // The leading key must be a real file column: in the scan's column map, not a partition
-        // column, and an int/date/datetime type whose bound fits TExprMinMaxValue (int64). Float,
-        // decimal, string and largeint are excluded.
+        // column, and of a type whose file bounds keep the sort order. An int/date/datetime bound fits
+        // TExprMinMaxValue as int64. A VARCHAR/CHAR bound is sent as raw bytes: the sort compares
+        // strings as unsigned bytes, and Iceberg string bounds keep that order. Float, decimal,
+        // binary and largeint are excluded.
         Column column = scan.getColRefToColumnMetaMap().get(key);
         if (column == null) {
             return false;
@@ -88,7 +91,8 @@ public class IcebergTopNScanPruneRule extends TransformationRule {
         if (scan.getPartitionColumns().contains(column.getName())) {
             return false;
         }
-        return key.getType().isIntegerType() || key.getType().isDateType();
+        Type type = key.getType();
+        return type.isIntegerType() || type.isDateType() || type.isVarchar() || type.isChar();
     }
 
     @Override

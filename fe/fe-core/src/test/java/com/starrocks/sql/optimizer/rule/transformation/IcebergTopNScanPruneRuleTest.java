@@ -27,9 +27,12 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalTopNOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.type.DateType;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.StringType;
 import com.starrocks.type.Type;
+import com.starrocks.type.TypeFactory;
+import com.starrocks.type.VarbinaryType;
 import mockit.Expectations;
 import mockit.Mocked;
 import org.junit.jupiter.api.Assertions;
@@ -148,10 +151,33 @@ public class IcebergTopNScanPruneRuleTest {
     }
 
     @Test
-    public void notFiresForStringKey(@Mocked IcebergTable table, @Mocked OptimizerContext context) {
+    public void firesForVarcharDesc(@Mocked IcebergTable table, @Mocked OptimizerContext context) {
         mockSession(context, true, true);
-        OptExpression expr = topnOverScan(table, col(StringType.STRING), true, false, 10, false);
-        Assertions.assertFalse(rule.check(expr, context));
+        ColumnRefOperator key = col(StringType.STRING);
+        OptExpression expr = topnOverScan(table, key, false, false, 10, false);
+
+        Assertions.assertTrue(rule.check(expr, context));
+        rule.transform(expr, context);
+
+        LogicalScanOperator scan = scanOf(expr);
+        Assertions.assertEquals(key, scan.getScanOptimizeOption().getTopnReorderKey());
+        Assertions.assertTrue(scan.getScanOptimizeOption().isTopnReorderDesc());
+        Assertions.assertFalse(scan.getScanOptimizeOption().isTopnReorderNullsFirst());
+    }
+
+    @Test
+    public void firesForCharKey(@Mocked IcebergTable table, @Mocked OptimizerContext context) {
+        mockSession(context, true, true);
+        OptExpression expr = topnOverScan(table, col(TypeFactory.createCharType(10)), true, false, 10, false);
+        Assertions.assertTrue(rule.check(expr, context));
+    }
+
+    @Test
+    public void notFiresForDoubleOrBinaryKey(@Mocked IcebergTable table, @Mocked OptimizerContext context) {
+        mockSession(context, true, true);
+        Assertions.assertFalse(rule.check(topnOverScan(table, col(FloatType.DOUBLE), true, false, 10, false), context));
+        Assertions.assertFalse(
+                rule.check(topnOverScan(table, col(VarbinaryType.VARBINARY), true, false, 10, false), context));
     }
 
     @Test

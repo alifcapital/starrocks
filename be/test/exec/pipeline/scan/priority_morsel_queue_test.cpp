@@ -17,6 +17,8 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -44,6 +46,27 @@ MorselPtr bound_morsel(int64_t min_v, int64_t max_v, bool has_null = false, bool
     hdfs.__isset.min_max_values = true;
     scan_range.__set_hdfs_scan_range(hdfs);
     return std::make_unique<ScanMorsel>(1, scan_range);
+}
+
+// A morsel whose scan range carries raw string bounds on kSlotId (a VARCHAR key). An empty
+// optional leaves that side unset.
+MorselPtr string_morsel(std::optional<std::string> min_v, std::optional<std::string> max_v, bool has_null = false) {
+    TScanRange scan_range;
+    THdfsScanRange hdfs;
+    TExprMinMaxValue v;
+    v.__set_type(TExprNodeType::STRING_LITERAL);
+    v.__set_has_null(has_null);
+    v.__set_all_null(false);
+    if (min_v.has_value()) v.__set_min_string_value(*min_v);
+    if (max_v.has_value()) v.__set_max_string_value(*max_v);
+    hdfs.min_max_values.emplace(kSlotId, v);
+    hdfs.__isset.min_max_values = true;
+    scan_range.__set_hdfs_scan_range(hdfs);
+    return std::make_unique<ScanMorsel>(1, scan_range);
+}
+
+const TExprMinMaxValue& bounds_of(const MorselPtr& m) {
+    return down_cast<ScanMorsel*>(m.get())->get_scan_range()->hdfs_scan_range.min_max_values.at(kSlotId);
 }
 
 // A morsel with no shipped bound (empty scan range).
@@ -253,6 +276,102 @@ TEST(PriorityMorselQueueTest, forces_shared_queue) {
     EXPECT_EQ(1u, queue.num_original_morsels());
     EXPECT_EQ(MorselQueue::Type::DYNAMIC, queue.type());
     EXPECT_EQ(8u, queue.max_degree_of_parallelism());
+}
+
+// DESC on a VARCHAR key: served by descending upper bound, compared as bytes. A truncated upper
+// bound '2026-10-05 11:24' is above '2026-10-05 11:23:59'.
+TEST(PriorityMorselQueueTest, string_desc_orders_by_max) {
+    PriorityMorselQueue q(morsels_of([] {
+                              std::vector<MorselPtr> v;
+                              v.emplace_back(string_morsel("2026-10-05 00:00", "2026-10-05 10:59"));
+                              v.emplace_back(string_morsel("2026-10-05 00:00", "2026-10-05 11:24"));
+                              v.emplace_back(string_morsel("2026-10-05 00:00", "2026-10-05 11:23:59"));
+                              return v;
+                          }()),
+                          /*has_more=*/false, kSlotId, /*desc=*/true, /*nulls_first=*/false);
+    auto out = drain(q);
+    ASSERT_EQ(3u, out.size());
+    EXPECT_EQ("2026-10-05 11:24", bounds_of(out[0]).max_string_value);
+    EXPECT_EQ("2026-10-05 11:23:59", bounds_of(out[1]).max_string_value);
+    EXPECT_EQ("2026-10-05 10:59", bounds_of(out[2]).max_string_value);
+    EXPECT_EQ(3, q.reorder_eligible_morsels());
+}
+
+// ASC on a VARCHAR key: served by ascending lower bound. A shorter prefix comes first, and bytes
+// >= 0x80 compare unsigned ('z' = 0x7A before 0xC3).
+TEST(PriorityMorselQueueTest, string_asc_orders_by_min_bytewise) {
+    PriorityMorselQueue q(morsels_of([] {
+                              std::vector<MorselPtr> v;
+                              v.emplace_back(string_morsel("\xC3\xA9", "\xC3\xA9"));
+                              v.emplace_back(string_morsel("2026-10-05 11:23:00", "z"));
+                              v.emplace_back(string_morsel("z", "z"));
+                              v.emplace_back(string_morsel("2026-10-05 11:23", "z"));
+                              return v;
+                          }()),
+                          /*has_more=*/false, kSlotId, /*desc=*/false, /*nulls_first=*/false);
+    auto out = drain(q);
+    ASSERT_EQ(4u, out.size());
+    EXPECT_EQ("2026-10-05 11:23", bounds_of(out[0]).min_string_value);
+    EXPECT_EQ("2026-10-05 11:23:00", bounds_of(out[1]).min_string_value);
+    EXPECT_EQ("z", bounds_of(out[2]).min_string_value);
+    EXPECT_EQ("\xC3\xA9", bounds_of(out[3]).min_string_value);
+}
+
+// A string-bounded file that misses one side may hold any value: it is served after the bounded
+// files, in both directions.
+TEST(PriorityMorselQueueTest, string_missing_side_served_last) {
+    for (bool desc : {false, true}) {
+        PriorityMorselQueue q(morsels_of([] {
+                                  std::vector<MorselPtr> v;
+                                  v.emplace_back(string_morsel(std::nullopt, "b"));
+                                  v.emplace_back(string_morsel("a", std::nullopt));
+                                  v.emplace_back(string_morsel("a", "b"));
+                                  return v;
+                              }()),
+                              /*has_more=*/false, kSlotId, desc, /*nulls_first=*/false);
+        EXPECT_EQ(1, q.reorder_eligible_morsels());
+        EXPECT_EQ(2, q.reorder_no_bound_morsels());
+        auto out = drain(q);
+        ASSERT_EQ(3u, out.size());
+        EXPECT_TRUE(bounds_of(out[0]).__isset.min_string_value && bounds_of(out[0]).__isset.max_string_value);
+    }
+}
+
+// NULLS FIRST: a string-bounded file with nulls leads.
+TEST(PriorityMorselQueueTest, string_nulls_first_served_first) {
+    PriorityMorselQueue q(morsels_of([] {
+                              std::vector<MorselPtr> v;
+                              v.emplace_back(string_morsel("a", "b"));
+                              v.emplace_back(string_morsel("x", "y", /*has_null=*/true));
+                              return v;
+                          }()),
+                          /*has_more=*/false, kSlotId, /*desc=*/false, /*nulls_first=*/true);
+    auto out = drain(q);
+    ASSERT_EQ(2u, out.size());
+    EXPECT_EQ("x", bounds_of(out[0]).min_string_value);
+    EXPECT_EQ("a", bounds_of(out[1]).min_string_value);
+}
+
+// The int key path ignores string fields and the string path ignores int fields.
+TEST(PriorityMorselQueueTest, string_and_int_priorities) {
+    THdfsScanRange range;
+    TExprMinMaxValue v;
+    v.__set_type(TExprNodeType::STRING_LITERAL);
+    v.__set_has_null(false);
+    v.__set_all_null(false);
+    v.__set_min_string_value("a");
+    v.__set_max_string_value("b");
+    range.min_max_values.emplace(kSlotId, v);
+    range.__isset.min_max_values = true;
+    TopnScanPriority p = topn_scan_priority(range, kSlotId, /*desc=*/true, /*nulls_first=*/false);
+    EXPECT_EQ(1, p.rank);
+    EXPECT_TRUE(p.is_string);
+    EXPECT_EQ("b", p.string_value);
+
+    range.min_max_values[kSlotId].__set_type(TExprNodeType::INT_LITERAL);
+    p = topn_scan_priority(range, kSlotId, /*desc=*/true, /*nulls_first=*/false);
+    EXPECT_EQ(2, p.rank);
+    EXPECT_FALSE(p.is_string);
 }
 
 } // namespace starrocks::pipeline

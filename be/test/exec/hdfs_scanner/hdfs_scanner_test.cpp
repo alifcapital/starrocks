@@ -775,6 +775,184 @@ TEST_F(HdfsScannerTest, TopnSkipDisabledByGuards) {
     }
 }
 
+// VARCHAR TopN key: FE sends the raw Iceberg string bounds with type STRING_LITERAL. They may be
+// truncated (lower = prefix, upper = prefix with the last character incremented), so they are only
+// bounds, never values.
+static TExprMinMaxValue topn_string_min_max(const std::string& mn, const std::string& mx, bool has_null = false) {
+    TExprMinMaxValue v;
+    v.__set_type(TExprNodeType::STRING_LITERAL);
+    v.__set_has_null(has_null);
+    v.__set_all_null(false);
+    v.__set_min_string_value(mn);
+    v.__set_max_string_value(mx);
+    return v;
+}
+
+TEST_F(HdfsScannerTest, TestDecodeMinMaxEndpointString) {
+    const auto varchar = TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR);
+    Datum mn;
+    Datum mx;
+    TExprMinMaxValue v = topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:24");
+    ASSERT_TRUE(HdfsScannerContext::decode_min_max_endpoint(varchar, v, &mn, &mx));
+    EXPECT_EQ(Slice("2026-10-05 10:00"), mn.get_slice());
+    EXPECT_EQ(Slice("2026-10-05 11:24"), mx.get_slice());
+    ASSERT_TRUE(HdfsScannerContext::decode_min_max_endpoint(TypeDescriptor::from_logical_type(LogicalType::TYPE_CHAR),
+                                                            v, &mn, &mx));
+
+    // String bounds on a non-string slot, and int bounds on a string slot, are not decoded.
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT),
+                                                             v, &mn, &mx));
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(varchar, topn_int_min_max(1, 2, false, false), &mn, &mx));
+
+    // A missing side, or min > max, leaves the file to the normal reader.
+    TExprMinMaxValue no_upper = v;
+    no_upper.__isset.max_string_value = false;
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(varchar, no_upper, &mn, &mx));
+    TExprMinMaxValue no_lower = v;
+    no_lower.__isset.min_string_value = false;
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(varchar, no_lower, &mn, &mx));
+    EXPECT_FALSE(HdfsScannerContext::decode_min_max_endpoint(varchar, topn_string_min_max("b", "a"), &mn, &mx));
+
+    // Bytes >= 0x80 compare unsigned, like the VARCHAR sort: 'z' (0x7A) < 0xC3.
+    EXPECT_TRUE(HdfsScannerContext::decode_min_max_endpoint(varchar, topn_string_min_max("z", "\xC3\xA9"), &mn, &mx));
+}
+
+// Runs should_skip_scan_range_by_topn_min_max on one VARCHAR slot (id 0) with |pred| at the root.
+static bool topn_string_skip(TupleDescriptor* tuple_desc, const TExprMinMaxValue& value, const ColumnPredicate* pred) {
+    THdfsScanRange range;
+    range.min_max_values[0] = value;
+    range.__isset.min_max_values = true;
+    PredicateAndNode root;
+    root.add_child(PredicateColumnNode(pred));
+    HdfsScannerContext ctx;
+    ctx.tuple_desc = tuple_desc;
+    ctx.scan_range = &range;
+    ctx.options.topn_reorder_slot_id = 0;
+    ctx.predicates.predicate_tree = PredicateTree::create(std::move(root));
+    ctx.predicates.runtime_filter_scan_range_pruner = std::make_unique<RuntimeScanRangePruner>();
+    auto res = ctx.should_skip_scan_range_by_topn_min_max();
+    EXPECT_TRUE(res.ok());
+    return res.ok() && res.value();
+}
+
+// DESC: the TopN filter keeps cs >= bound. The file upper bound is >= every value in the file.
+TEST_F(HdfsScannerTest, TopnStringSkipDesc) {
+    SlotDesc descs[] = {{"cs", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)}, {""}};
+    auto* tuple_desc = _create_tuple_desc(descs);
+    auto type = get_type_info(LogicalType::TYPE_VARCHAR);
+    std::unique_ptr<ColumnPredicate> ge(new_column_ge_predicate(type, 0, Slice("2026-10-05 11:23:59")));
+
+    // A truncated upper bound '2026-10-05 11:24' is greater than '2026-10-05 11:23:59': the file
+    // may hold '2026-10-05 11:23:59' or later, so keep it.
+    EXPECT_FALSE(topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:24"), ge.get()));
+    // An upper bound equal to the filter bound keeps the file (ties must survive).
+    EXPECT_FALSE(
+            topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:23:59"), ge.get()));
+    // Every value is <= '2026-10-05 10:59' < '2026-10-05 11:23:59': skip.
+    EXPECT_TRUE(topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 10:00", "2026-10-05 10:59"), ge.get()));
+    // A shorter upper bound that is a prefix of the filter bound sorts before it: skip.
+    EXPECT_TRUE(topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:23"), ge.get()));
+    // A file without an upper bound is never skipped.
+    TExprMinMaxValue no_upper = topn_string_min_max("2026-10-05 10:00", "2026-10-05 10:59");
+    no_upper.__isset.max_string_value = false;
+    EXPECT_FALSE(topn_string_skip(tuple_desc, no_upper, ge.get()));
+}
+
+// ASC: the TopN filter keeps cs <= bound. The file lower bound is a prefix of its smallest value.
+TEST_F(HdfsScannerTest, TopnStringSkipAsc) {
+    SlotDesc descs[] = {{"cs", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)}, {""}};
+    auto* tuple_desc = _create_tuple_desc(descs);
+    auto type = get_type_info(LogicalType::TYPE_VARCHAR);
+    std::unique_ptr<ColumnPredicate> le(new_column_le_predicate(type, 0, Slice("2026-10-05 11:23:00")));
+
+    // The lower bound '2026-10-05 11:23' is a prefix of '2026-10-05 11:23:00', so the file may hold
+    // that value: keep it.
+    EXPECT_FALSE(topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 11:23", "2026-10-05 12:00"), le.get()));
+    // Every value is >= '2026-10-05 11:24' > '2026-10-05 11:23:00': skip.
+    EXPECT_TRUE(topn_string_skip(tuple_desc, topn_string_min_max("2026-10-05 11:24", "2026-10-05 12:00"), le.get()));
+    // A file without a lower bound is never skipped.
+    TExprMinMaxValue no_lower = topn_string_min_max("2026-10-05 11:24", "2026-10-05 12:00");
+    no_lower.__isset.min_string_value = false;
+    EXPECT_FALSE(topn_string_skip(tuple_desc, no_lower, le.get()));
+}
+
+// The TopN runtime filter arrives late and sits in the pruner; the string bound is tested against it.
+TEST_F(HdfsScannerTest, TopnStringSkipByLateRuntimeFilter) {
+    SlotDesc descs[] = {{"cs", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)}, {""}};
+    auto* tuple = _create_tuple_desc(descs);
+    TRuntimeFilterDescription desc;
+    desc.__set_filter_id(1);
+    desc.__set_has_remote_targets(false);
+    desc.__set_build_plan_node_id(1);
+    desc.__set_build_join_mode(TRuntimeFilterBuildJoinMode::BROADCAST);
+    desc.__set_filter_type(TRuntimeFilterBuildType::TOPN_FILTER);
+    desc.__isset.plan_node_id_to_target_expr = true;
+    desc.plan_node_id_to_target_expr.emplace(1, ExprsTestHelper::create_column_ref_t_expr<TYPE_VARCHAR>(0, true));
+    RuntimeFilterProbeDescriptor rf_desc;
+    ASSERT_OK(rf_desc.init(&_pool, desc, 1, _runtime_state));
+    THdfsScanRange range;
+    range.min_max_values[0] = topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:24");
+    range.__isset.min_max_values = true;
+    HdfsScannerContext ctx;
+    ctx.tuple_desc = tuple;
+    ctx.slot_descs = tuple->slots();
+    ctx.scan_range = &range;
+    ctx.options.topn_reorder_slot_id = 0;
+    ctx.options.topn_reorder_desc = true;
+    ctx.predicates.predicate_parser = std::make_unique<ConnectorPredicateParser>(&ctx.slot_descs);
+    UnarrivedRuntimeFilterList pending;
+    pending.add_unarrived_rf(&rf_desc, tuple->slots()[0], 1);
+    ctx.predicates.runtime_filter_scan_range_pruner =
+            std::make_unique<RuntimeScanRangePruner>(ctx.predicates.predicate_parser.get(), pending);
+
+    // DESC TopN filter: cs >= '2026-10-05 11:23:59', built the way the sorter builds it.
+    auto* rf = MinMaxRuntimeFilter<TYPE_VARCHAR>::create_with_range<true>(&_pool, Slice("2026-10-05 11:23:59"),
+                                                                          /*is_close_interval=*/true);
+    rf_desc.set_runtime_filter(rf);
+    auto keep = ctx.should_skip_scan_range_by_topn_min_max();
+    ASSERT_TRUE(keep.ok());
+    EXPECT_FALSE(keep.value());
+
+    range.min_max_values[0] = topn_string_min_max("2026-10-05 10:00", "2026-10-05 10:59");
+    auto skip = ctx.should_skip_scan_range_by_topn_min_max();
+    ASSERT_TRUE(skip.ok());
+    EXPECT_TRUE(skip.value());
+}
+
+// String bounds must never be read as exact values: the min/max optimization keeps reading the
+// column, and a not-existed slot is filled with its default, not with a bound.
+TEST_F(HdfsScannerTest, StringBoundsNeverUsedByMinMaxOptimization) {
+    SlotDesc descs[] = {{"cs", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)}, {""}};
+    auto* tuple_desc = _create_tuple_desc(descs);
+    SlotDescriptor* slot = tuple_desc->slots()[0];
+
+    THdfsScanRange range;
+    range.min_max_values[slot->id()] = topn_string_min_max("2026-10-05 10:00", "2026-10-05 11:24");
+    range.__isset.min_max_values = true;
+
+    {
+        HdfsScannerContext ctx;
+        ctx.scan_range = &range;
+        ctx.options.use_min_max_opt = true;
+        ctx.materialized_columns.push_back(HdfsScannerContext::ColumnInfo{0, slot});
+        ctx.update_min_max_columns();
+        ASSERT_EQ(1u, ctx.materialized_columns.size());
+        EXPECT_TRUE(ctx.not_existed_slots.empty());
+        EXPECT_FALSE(ctx.can_use_min_max_optimization());
+    }
+    {
+        HdfsScannerContext ctx;
+        ctx.scan_range = &range;
+        ctx.options.use_min_max_opt = true;
+        ctx.not_existed_slots.push_back(slot);
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
+        ASSERT_OK(ctx.append_or_update_not_existed_columns_to_chunk(&chunk, 2));
+        ASSERT_EQ(2, chunk->num_rows());
+        EXPECT_EQ("[NULL]", chunk->debug_row(0));
+        EXPECT_EQ("[NULL]", chunk->debug_row(1));
+    }
+}
+
 // ========================= ORC SCANNER ============================
 
 static TTypeDesc create_primitive_type_desc(TPrimitiveType::type type) {

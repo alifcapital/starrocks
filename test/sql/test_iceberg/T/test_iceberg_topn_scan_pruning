@@ -66,13 +66,49 @@ set enable_iceberg_topn_scan_pruning = true;
 select id from ice_topn where id < 50 or id > 350 order by id asc limit 3;
 
 -- ============================================================
--- Case 4: non-eligible key (string) -> rule does not fire -> dynamic morsel queue.
+-- Case 4: string key -> rule fires -> priority morsel queue; identical result off vs on.
 -- ============================================================
-set enable_iceberg_topn_scan_pruning = true;
--- Leading key is the string column (id added only as a deterministic tie-break); the rule keys off
--- ordering[0] = s, which is not eligible, so it must not fire -> dynamic morsel queue.
+-- Leading key is the string column (id added only as a deterministic tie-break).
+set enable_iceberg_topn_scan_pruning = false;
 select id from ice_topn order by s desc, id desc limit 3;
+
+set enable_iceberg_topn_scan_pruning = true;
+select id from ice_topn order by s desc, id desc limit 3;
+select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%MorselQueueType: priority_morsel_queue%';
+
+-- Every file got a usable string bound ('a'..'d').
+select id from ice_topn order by s desc, id desc limit 3;
+select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%TopnReorderNoBoundMorsels: 0%';
+
+-- ============================================================
+-- Case 5: non-eligible key (double) -> rule does not fire -> dynamic morsel queue.
+-- ============================================================
+create table ice_topn_dbl (d double);
+insert into ice_topn_dbl values (1.5),(2.5);
+set enable_iceberg_topn_scan_pruning = true;
+select d from ice_topn_dbl order by d desc limit 1;
 select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%MorselQueueType: dynamic_morsel_queue%';
+drop table ice_topn_dbl force;
+
+-- ============================================================
+-- Case 6: VARCHAR timestamps longer than the 16-character bound truncation, a value with a 4-byte
+-- UTF-8 character (its file gets no string bound) and a NULL. Identical result off vs on, both
+-- directions.
+-- ============================================================
+create table ice_topn_str (id bigint, cs string);
+insert into ice_topn_str values (1,'2026-10-05 10:59:58'),(2,'2026-10-05 10:59:59');
+insert into ice_topn_str values (3,'2026-10-05 11:23:59'),(4,'2026-10-05 11:24:00');
+insert into ice_topn_str values (5,'2026-10-05 11:24:01'),(6,'2026-10-05 11:24:02');
+insert into ice_topn_str values (7,'2026-10-05 11:23:58😀'),(8,NULL);
+set enable_iceberg_topn_scan_pruning = false;
+select id from ice_topn_str order by cs desc, id desc limit 3;
+set enable_iceberg_topn_scan_pruning = true;
+select id from ice_topn_str order by cs desc, id desc limit 3;
+set enable_iceberg_topn_scan_pruning = false;
+select id from ice_topn_str order by cs asc, id asc limit 3;
+set enable_iceberg_topn_scan_pruning = true;
+select id from ice_topn_str order by cs asc, id asc limit 3;
+drop table ice_topn_str force;
 
 
 -- Ties, mixed NULL files, both null orders and OFFSET with pruning off/on.
