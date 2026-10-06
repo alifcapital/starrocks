@@ -27,6 +27,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Test;
 
@@ -92,5 +93,59 @@ class MultiDistinctCTEJoinKeysTest {
             assertTrue(project.getColumnRefMap().keySet().containsAll(calls.keySet()));
             assertEquals(keys, ((LogicalAggregationOperator) input.getOp()).getGroupingKeys());
         }
+    }
+
+    // A plain avg is computed together with the other non-distinct aggregates. We expect no distinct sum/count
+    // branches for it, so two count distinct calls and one plain avg give exactly three aggregates and two joins.
+    @Test
+    void plainAvgDoesNotAddDistinctBranches() {
+        ColumnRefFactory factory = new ColumnRefFactory();
+        ColumnRefOperator key = factory.create("key", IntegerType.INT, true);
+        ColumnRefOperator arg0 = factory.create("arg0", IntegerType.INT, true);
+        ColumnRefOperator arg1 = factory.create("arg1", IntegerType.INT, true);
+        ColumnRefOperator avgArg = factory.create("avgArg", IntegerType.INT, true);
+        Map<ColumnRefOperator, CallOperator> calls = new LinkedHashMap<>();
+        calls.put(factory.create("count0", IntegerType.BIGINT, true),
+                new CallOperator("count", IntegerType.BIGINT, List.of(arg0), null, true));
+        calls.put(factory.create("count1", IntegerType.BIGINT, true),
+                new CallOperator("count", IntegerType.BIGINT, List.of(arg1), null, true));
+        ColumnRefOperator avgRef = factory.create("avg", FloatType.DOUBLE, true);
+        calls.put(avgRef, new CallOperator("avg", FloatType.DOUBLE, List.of(avgArg), null, false));
+        OptExpression input = OptExpression.create(
+                new LogicalAggregationOperator(AggType.GLOBAL, List.of(key), calls),
+                OptExpression.create(new LogicalValuesOperator(List.of(key, arg0, arg1, avgArg))));
+
+        OptExpression result = new MultiDistinctByCTERewriter()
+                .transformImpl(input, OptimizerFactory.mockContext(factory)).get(0);
+
+        LogicalProjectOperator project = (LogicalProjectOperator) result.inputAt(1).getOp();
+        assertEquals(avgRef, project.getColumnRefMap().get(avgRef));
+        List<LogicalAggregationOperator> branches = new ArrayList<>();
+        int joins = 0;
+        List<OptExpression> pending = new ArrayList<>(List.of(result.inputAt(1).inputAt(0)));
+        while (!pending.isEmpty()) {
+            OptExpression expr = pending.remove(pending.size() - 1);
+            if (expr.getOp() instanceof LogicalJoinOperator) {
+                joins++;
+                pending.addAll(expr.getInputs());
+            } else {
+                branches.add((LogicalAggregationOperator) expr.getOp());
+            }
+        }
+        assertEquals(2, joins);
+        assertEquals(3, branches.size());
+        int distinctCounts = 0;
+        int plainAvgs = 0;
+        for (LogicalAggregationOperator branch : branches) {
+            for (CallOperator call : branch.getAggregations().values()) {
+                if (call.isDistinct() && "count".equalsIgnoreCase(call.getFnName())) {
+                    distinctCounts++;
+                } else if (!call.isDistinct() && "avg".equalsIgnoreCase(call.getFnName())) {
+                    plainAvgs++;
+                }
+            }
+        }
+        assertEquals(2, distinctCounts);
+        assertEquals(1, plainAvgs);
     }
 }

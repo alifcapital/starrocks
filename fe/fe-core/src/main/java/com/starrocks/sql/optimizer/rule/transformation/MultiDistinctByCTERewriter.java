@@ -251,8 +251,10 @@ public class MultiDistinctByCTERewriter {
 
         // Deal with avg(distinct xx) function, because avg needs to compute count and sum, there can use the aggregate
         // node with sum/count function directly if these aggregate node has generated before.
+        // We want only AVG(DISTINCT) here. A plain AVG is computed in the other-aggregates branch.
         Map<ColumnRefOperator, CallOperator> distinctAvgAggregate = aggregate.getAggregations().entrySet().stream().
-                filter(kv -> kv.getValue().getFnName().equalsIgnoreCase(FunctionSet.AVG)).collect(Collectors.toMap(
+                filter(kv -> kv.getValue().isDistinct() &&
+                        kv.getValue().getFnName().equalsIgnoreCase(FunctionSet.AVG)).collect(Collectors.toMap(
                         Map.Entry::getKey, Map.Entry::getValue));
         if (!distinctAvgAggregate.isEmpty()) {
             for (Map.Entry<ColumnRefOperator, CallOperator> aggregation : distinctAvgAggregate.entrySet()) {
