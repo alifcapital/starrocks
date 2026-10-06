@@ -727,4 +727,16 @@ public class DistinctAggregationOverWindowTest extends PlanTestBase {
                 "  |  order by: 2: v2 ASC\n" +
                 "  |  window: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW");
     }
+
+    @Test
+    public void testCountDistinctOverWindowOnSharedCte() throws Exception {
+        // The rule copies the window input into a new CTE. The copy holds consumers of the shared CTE c, whose
+        // producer stays outside the copy, so they must keep the id of c; with a fresh id no statistics exist for
+        // them and planning fails.
+        String sql = "with c as (select v1, v2, v3 from t0 where v1 > 0)\n" +
+                "select v1, v2, count(distinct v3) over (partition by v1) from\n" +
+                "(select * from c union all select * from c where v2 > 1) x";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "HASH JOIN");
+    }
 }
