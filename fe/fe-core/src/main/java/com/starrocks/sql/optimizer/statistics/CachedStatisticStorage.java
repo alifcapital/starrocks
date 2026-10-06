@@ -1255,7 +1255,7 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
                 }));
     }
 
-    private CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>>
+    CompletableFuture<Map<ExternalStatisticsCacheKey, Optional<ExternalColumnStatistics>>>
             loadExternalPartitionBatch(List<ExternalStatisticsCacheKey> batch) {
         // Caffeine claims missing keys individually. Serialize only key reservation, not I/O or union.
         Lock lock = externalStatisticsLoadLocks.get(batch.get(0).tableUUID);
@@ -1265,6 +1265,10 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
         } finally {
             lock.unlock();
         }
+    }
+
+    boolean externalMcvBackoffActive() {
+        return externalMcvLoader.backoff.active();
     }
 
     private static final class ExternalStatisticsRefresh {

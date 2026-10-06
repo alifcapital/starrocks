@@ -489,6 +489,15 @@ public class AnalyzeMgr implements Writable {
                 || meta.getTableUUID().isEmpty() || meta.getTableUUID().equals(uuid));
     }
 
+    /** UUIDs of the tables that have external MCV statistics; metas stored without a UUID are left out. */
+    public List<String> getExternalMcvTableUuids() {
+        return externalMcvStatsMetaMap.values().stream()
+                .map(ExternalMcvStatsMeta::getTableUUID)
+                .filter(uuid -> uuid != null && !uuid.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
     public void refreshExternalMcvStatisticsCache(String tableUUID, boolean isSync) {
         GlobalStateMgr.getCurrentState().getStatisticStorage().refreshExternalMcvStatistics(tableUUID, isSync);
     }
