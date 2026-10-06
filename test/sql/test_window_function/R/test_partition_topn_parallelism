@@ -1,0 +1,68 @@
+-- name: test_partition_topn_parallelism
+DROP TABLE IF EXISTS partition_topn_t;
+-- result:
+-- !result
+CREATE TABLE partition_topn_t (
+    id BIGINT NOT NULL,
+    terminal_id INT NOT NULL
+)
+DUPLICATE KEY(id)
+DISTRIBUTED BY HASH(id) BUCKETS 8
+PROPERTIES (
+    "replication_num" = "1"
+);
+-- result:
+-- !result
+INSERT INTO partition_topn_t SELECT x, x % 7 FROM TABLE(generate_series(1, 100000)) g(x);
+-- result:
+-- !result
+ANALYZE FULL TABLE partition_topn_t;
+-- result:
+[REGEX]OK
+-- !result
+shell: sleep 5
+-- result:
+0
+
+-- !result
+function: assert_table_cardinality('explain select * from partition_topn_t', '100000')
+-- result:
+None
+-- !result
+set pipeline_dop = 4;
+-- result:
+-- !result
+set enable_profile = true;
+-- result:
+-- !result
+set enable_async_profile = false;
+-- result:
+-- !result
+[UC]SELECT terminal_id, id, rnk FROM (
+    SELECT terminal_id, id, RANK() OVER (PARTITION BY terminal_id ORDER BY rn) AS rnk FROM (
+        SELECT terminal_id, id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM partition_topn_t
+    ) a
+) b WHERE rnk = 1 ORDER BY terminal_id;
+-- result:
+0	7	1
+1	1	1
+2	2	1
+3	3	1
+4	4	1
+5	5	1
+6	6	1
+-- !result
+CREATE TABLE partition_topn_profile PROPERTIES("replication_num" = "1") AS
+SELECT seg FROM TABLE(unnest(split(get_query_profile(last_query_id()), 'Pipeline (id='))) t(seg);
+-- result:
+-- !result
+SELECT assert_true(count(*) > 0) FROM partition_topn_profile
+WHERE seg LIKE '%LOCAL_PARTITION_TOPN_SINK%' AND seg REGEXP '- DegreeOfParallelism: 4[^0-9]';
+-- result:
+1
+-- !result
+SELECT assert_true(count(*) = 0) FROM partition_topn_profile
+WHERE seg LIKE '%LOCAL_PARTITION_TOPN_SINK%' AND seg REGEXP '- DegreeOfParallelism: 1[^0-9]';
+-- result:
+1
+-- !result

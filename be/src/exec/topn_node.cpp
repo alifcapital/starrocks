@@ -277,10 +277,14 @@ std::vector<std::shared_ptr<pipeline::OperatorFactory>> TopNNode::_decompose_to_
 
     if (is_partition_topn) {
         partition_limit = _tnode.sort_node.partition_limit;
-        if (_tnode.sort_node.__isset.pre_agg_insert_local_shuffle && _tnode.sort_node.pre_agg_insert_local_shuffle) {
-            ops_sink_with_sort = context->maybe_interpolate_local_shuffle_exchange(
-                    runtime_state(), id(), ops_sink_with_sort, _local_partition_exprs);
-        }
+    }
+
+    // Only the window pre-agg needs this shuffle by the partition keys. The other partition TopNs take the
+    // branches below like any TopN, so a serial input does not keep them serial.
+    if (is_partition_topn && _tnode.sort_node.__isset.pre_agg_insert_local_shuffle &&
+        _tnode.sort_node.pre_agg_insert_local_shuffle) {
+        ops_sink_with_sort = context->maybe_interpolate_local_shuffle_exchange(
+                runtime_state(), id(), ops_sink_with_sort, _local_partition_exprs);
     } else if (need_merge) {
         if (enable_parallel_merge) {
             ops_sink_with_sort = context->maybe_interpolate_local_passthrough_exchange(

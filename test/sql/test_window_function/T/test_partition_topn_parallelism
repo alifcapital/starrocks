@@ -1,0 +1,39 @@
+-- name: test_partition_topn_parallelism
+-- A partition TopN above a serial window (ROW_NUMBER without PARTITION BY) must not stay serial.
+DROP TABLE IF EXISTS partition_topn_t;
+
+CREATE TABLE partition_topn_t (
+    id BIGINT NOT NULL,
+    terminal_id INT NOT NULL
+)
+DUPLICATE KEY(id)
+DISTRIBUTED BY HASH(id) BUCKETS 8
+PROPERTIES (
+    "replication_num" = "1"
+);
+
+INSERT INTO partition_topn_t SELECT x, x % 7 FROM TABLE(generate_series(1, 100000)) g(x);
+
+-- The planner picks the parallel merge only when it sees enough input rows.
+ANALYZE FULL TABLE partition_topn_t;
+shell: sleep 5
+function: assert_table_cardinality('explain select * from partition_topn_t', '100000')
+
+set pipeline_dop = 4;
+set enable_profile = true;
+set enable_async_profile = false;
+
+-- The first row of each terminal_id by id, so the result is the smallest id per terminal_id.
+[UC]SELECT terminal_id, id, rnk FROM (
+    SELECT terminal_id, id, RANK() OVER (PARTITION BY terminal_id ORDER BY rn) AS rnk FROM (
+        SELECT terminal_id, id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM partition_topn_t
+    ) a
+) b WHERE rnk = 1 ORDER BY terminal_id;
+
+-- Split the profile at every pipeline and look at the pipeline that holds the partition TopN sink.
+CREATE TABLE partition_topn_profile PROPERTIES("replication_num" = "1") AS
+SELECT seg FROM TABLE(unnest(split(get_query_profile(last_query_id()), 'Pipeline (id='))) t(seg);
+SELECT assert_true(count(*) > 0) FROM partition_topn_profile
+WHERE seg LIKE '%LOCAL_PARTITION_TOPN_SINK%' AND seg REGEXP '- DegreeOfParallelism: 4[^0-9]';
+SELECT assert_true(count(*) = 0) FROM partition_topn_profile
+WHERE seg LIKE '%LOCAL_PARTITION_TOPN_SINK%' AND seg REGEXP '- DegreeOfParallelism: 1[^0-9]';
