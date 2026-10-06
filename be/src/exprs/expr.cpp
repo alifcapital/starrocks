@@ -59,6 +59,7 @@
 #include "exprs/column_ref.h"
 #include "exprs/compound_predicate.h"
 #include "exprs/condition_expr.h"
+#include "exprs/conditional_two_phase_stats.h"
 #include "exprs/dict_query_expr.h"
 #include "exprs/dictionary_get_expr.h"
 #include "exprs/dictmapping_expr.h"
@@ -786,8 +787,9 @@ bool has_indirect_inputs(const Expr* expr) {
 // Results are cached per slot, as MissingColumnProvider requires provide() to be idempotent.
 class RoutedRowsColumnProvider final : public MissingColumnProvider {
 public:
-    RoutedRowsColumnProvider(MissingColumnProvider* parent, const std::vector<uint32_t>& rows)
-            : _parent(parent), _rows(rows) {}
+    RoutedRowsColumnProvider(MissingColumnProvider* parent, const std::vector<uint32_t>& rows,
+                             ConditionalTwoPhaseStats* stats)
+            : _parent(parent), _rows(rows), _stats(stats) {}
 
     bool can_provide(SlotId slot_id) const override { return _parent->can_provide(slot_id); }
 
@@ -802,6 +804,10 @@ public:
         column->append_selective(*source, _rows.data(), 0, static_cast<uint32_t>(_rows.size()));
         ColumnPtr result = std::move(column);
         _cache.emplace(slot_id, result);
+        if (_stats != nullptr) {
+            ConditionalTwoPhaseStats::add(_stats->lazy_provide_calls, 1);
+            ConditionalTwoPhaseStats::add(_stats->lazy_provide_rows, static_cast<int64_t>(_rows.size()));
+        }
         return result;
     }
 
@@ -809,6 +815,8 @@ private:
     MissingColumnProvider* _parent;
     // Owned by the caller of evaluate_selected(), which outlives the evaluation on the copy.
     const std::vector<uint32_t>& _rows;
+    // nullptr when the evaluation is not counted.
+    ConditionalTwoPhaseStats* _stats;
     std::unordered_map<SlotId, ColumnPtr> _cache;
 };
 
@@ -821,7 +829,8 @@ struct SubChunk {
 // Copy only the branch's inputs, preserving slot IDs and routed row order. The input chunk is immutable.
 // Slots that the input chunk does not hold but its provider can supply are left out of the copy; the
 // copy gets its own provider that supplies them with the routed rows.
-SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value) {
+SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value,
+                       ConditionalTwoPhaseStats* stats) {
     MissingColumnProvider* parent = chunk->missing_column_provider();
     std::vector<SlotId> slots;
     if (chunk->num_columns() > 1 && !has_indirect_inputs(value)) {
@@ -843,7 +852,8 @@ SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Exp
             break;
         }
     }
-    if (all_available && !present.empty() && present.size() < chunk->num_columns()) {
+    const bool copy_branch_inputs = all_available && !present.empty() && present.size() < chunk->num_columns();
+    if (copy_branch_inputs) {
         result.chunk = std::make_unique<Chunk>();
         for (SlotId slot : present) {
             const auto& source = chunk->get_column_by_slot_id(slot);
@@ -856,8 +866,19 @@ SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Exp
         result.chunk = chunk->clone_empty(idx.size());
         result.chunk->append_selective(*chunk, idx.data(), 0, static_cast<uint32_t>(idx.size()));
     }
+    if (stats != nullptr) {
+        ConditionalTwoPhaseStats::add(stats->subchunk_copies, 1);
+        ConditionalTwoPhaseStats::add(stats->subchunk_copied_columns,
+                                      static_cast<int64_t>(result.chunk->num_columns()));
+        if (!copy_branch_inputs) {
+            ConditionalTwoPhaseStats::add(stats->subchunk_whole_chunk_copies, 1);
+        }
+        // bytes_usage() walks the copied rows for some column types; we accept it, as the copy itself
+        // already walked them.
+        ConditionalTwoPhaseStats::add(stats->subchunk_copied_bytes, static_cast<int64_t>(result.chunk->bytes_usage()));
+    }
     if (parent != nullptr) {
-        result.provider = std::make_unique<RoutedRowsColumnProvider>(parent, idx);
+        result.provider = std::make_unique<RoutedRowsColumnProvider>(parent, idx, stats);
         result.chunk->set_missing_column_provider(result.provider.get());
     }
     return result;
@@ -875,7 +896,7 @@ StatusOr<ColumnPtr> Expr::evaluate_selected(ExprContext* context, Chunk* chunk, 
         result->append_selective(*source, rows.data(), 0, rows.size());
         return result;
     }
-    auto sub = make_subchunk(chunk, rows, this);
+    auto sub = make_subchunk(chunk, rows, this, conditional_two_phase_stats(context));
     return evaluate_checked(context, sub.chunk.get());
 }
 

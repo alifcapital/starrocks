@@ -321,6 +321,11 @@ void GlobalDriverExecutor::report_exec_state(QueryContext* query_ctx, FragmentCo
     auto* profile = fragment_ctx->runtime_state()->runtime_profile();
     ObjectPool obj_pool;
     if (attach_profile) {
+        // Expressions count conditional two-phase work in atomics of the RuntimeState, so we copy the current
+        // values into the instance profile right before it is reported.
+        if (query_ctx->enable_profile()) {
+            fragment_ctx->runtime_state()->conditional_two_phase_stats()->update_profile(profile);
+        }
         profile = _build_merged_instance_profile(query_ctx, fragment_ctx, &obj_pool);
 
         // Add counters for query level memory and cpu usage, these two metrics will be specially handled at the frontend

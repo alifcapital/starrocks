@@ -531,6 +531,30 @@ public class ExplainAnalyzer {
         }
     }
 
+    // The BE adds these counters to a fragment instance only when conditional two-phase evaluation ran in it,
+    // so we print the group only for such fragments and keep the other fragments unchanged.
+    private void appendConditionalTwoPhase(RuntimeProfile fragmentProfile) {
+        if (fragmentProfile.getCounter("TwoPhaseCalls") == null) {
+            return;
+        }
+        appendDetailLine("ConditionalTwoPhase:");
+        pushIndent(GraphElement.LEAF_METRIC_INDENT);
+        appendDetailLine("Calls: ", fragmentProfile.getCounter("TwoPhaseCalls"),
+                ", AllTrueShortcut: ", fragmentProfile.getCounter("TwoPhaseAllTrueShortcut"),
+                ", Time: ", fragmentProfile.getCounter("TwoPhaseTime"),
+                ", AssembleTime: ", fragmentProfile.getCounter("TwoPhaseAssembleTime"));
+        appendDetailLine("InputRows: ", fragmentProfile.getCounter("TwoPhaseInputRows"),
+                ", SelectedRows: ", fragmentProfile.getCounter("TwoPhaseSelectedRows"),
+                ", FullRows: ", fragmentProfile.getCounter("TwoPhaseFullRows"));
+        appendDetailLine("SubchunkCopies: ", fragmentProfile.getCounter("TwoPhaseSubchunkCopies"),
+                ", CopiedColumns: ", fragmentProfile.getCounter("TwoPhaseSubchunkCopiedColumns"),
+                ", WholeChunkCopies: ", fragmentProfile.getCounter("TwoPhaseSubchunkWholeChunkCopies"),
+                ", CopiedBytes: ", fragmentProfile.getCounter("TwoPhaseSubchunkCopiedBytes"));
+        appendDetailLine("LazyProvideCalls: ", fragmentProfile.getCounter("TwoPhaseLazyProvideCalls"),
+                ", LazyProvideRows: ", fragmentProfile.getCounter("TwoPhaseLazyProvideRows"));
+        popIndent();
+    }
+
     private void appendFragment(ProfilingExecPlan.ProfilingFragment fragment, RuntimeProfile fragmentProfile) {
         appendDetailLine(fragmentProfile.getName());
         pushIndent(GraphElement.NON_LEAF_METRIC_INDENT);
@@ -543,6 +567,7 @@ public class ExplainAnalyzer {
         if (missingInstanceIds != null) {
             appendDetailLine("MissingInstanceIds: ", missingInstanceIds);
         }
+        appendConditionalTwoPhase(fragmentProfile);
         popIndent(); // metric indent
 
         ProfilingExecPlan.ProfilingElement sink = fragment.getSink();

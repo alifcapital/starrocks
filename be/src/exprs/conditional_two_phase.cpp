@@ -22,12 +22,81 @@
 #include "column/column_viewer.h"
 #include "column/const_column.h"
 #include "common/status.h"
+#include "exprs/conditional_two_phase_stats.h"
 #include "exprs/expr.h"
+#include "exprs/expr_context.h"
+#include "runtime/runtime_state.h"
 #include "types/logical_type.h"
+#include "util/runtime_profile.h"
+#include "util/time.h"
 
 namespace starrocks {
 
 namespace {
+
+// Depth of two-phase calls on this thread. A conditional inside a branch makes a nested call whose time is
+// already inside the outer call, so only the outermost call adds to the total time.
+thread_local int tls_two_phase_depth = 0;
+
+// Counts one two-phase call. The call counts in plain fields and adds them to the shared atomics once, when it
+// returns, so the shared counters see a few updates per chunk and none per row or per branch.
+class CallStats {
+public:
+    CallStats(ExprContext* context, size_t num_rows)
+            : _stats(conditional_two_phase_stats(context)), _input_rows(static_cast<int64_t>(num_rows)) {
+        if (_stats != nullptr && tls_two_phase_depth++ == 0) {
+            _start_ns = MonotonicNanos();
+        }
+    }
+
+    ~CallStats() {
+        if (_stats == nullptr) {
+            return;
+        }
+        if (--tls_two_phase_depth == 0) {
+            ConditionalTwoPhaseStats::add(_stats->time_ns, MonotonicNanos() - _start_ns);
+        }
+        ConditionalTwoPhaseStats::add(_shortcut ? _stats->all_true_shortcuts : _stats->calls, 1);
+        add_if_nonzero(_stats->input_rows, _input_rows);
+        add_if_nonzero(_stats->selected_rows, _selected_rows);
+        add_if_nonzero(_stats->full_rows, _full_rows);
+        add_if_nonzero(_stats->assemble_time_ns, _assemble_ns);
+    }
+
+    CallStats(const CallStats&) = delete;
+    CallStats& operator=(const CallStats&) = delete;
+
+    void add_selected_rows(size_t rows) { _selected_rows += static_cast<int64_t>(rows); }
+    void add_full_rows(size_t rows) { _full_rows += static_cast<int64_t>(rows); }
+    void mark_all_true_shortcut() { _shortcut = true; }
+
+    template <typename Fn>
+    StatusOr<ColumnPtr> time_assemble(Fn&& assemble_fn) {
+        if (_stats == nullptr) {
+            return assemble_fn();
+        }
+        const int64_t start_ns = MonotonicNanos();
+        StatusOr<ColumnPtr> result = assemble_fn();
+        _assemble_ns += MonotonicNanos() - start_ns;
+        return result;
+    }
+
+private:
+    // We skip zero values, because an atomic add of zero still takes the cache line from other drivers.
+    static void add_if_nonzero(std::atomic<int64_t>& counter, int64_t value) {
+        if (value != 0) {
+            ConditionalTwoPhaseStats::add(counter, value);
+        }
+    }
+
+    ConditionalTwoPhaseStats* const _stats;
+    const int64_t _input_rows;
+    int64_t _selected_rows = 0;
+    int64_t _full_rows = 0;
+    int64_t _assemble_ns = 0;
+    int64_t _start_ns = 0;
+    bool _shortcut = false;
+};
 
 // Phase 3 (shared): read, for each row, its routed source column at pos[r] and append in row order.
 // Sequential write (append-only, required for variable-length types); random read at pos[r] is fine.
@@ -80,6 +149,7 @@ StatusOr<ColumnPtr> two_phase_eval_predicate_routed(ExprContext* context, Chunk*
                                                     bool else_two_phase, bool enable_first_all_true_shortcut) {
     const size_t num_rows = chunk->num_rows();
     const uint32_t kElseIdx = static_cast<uint32_t>(num_branches);
+    CallStats call_stats(context, num_rows);
 
     std::vector<uint32_t> branch_of(num_rows, kElseIdx); // default: ELSE / no-match
     std::vector<uint32_t> pos(num_rows);                 // identity; overridden for DENSE-routed rows
@@ -106,6 +176,8 @@ StatusOr<ColumnPtr> two_phase_eval_predicate_routed(ExprContext* context, Chunk*
             }
         }
         if (trues != 0 && enable_first_all_true_shortcut && !saw_surviving && trues == num_rows) {
+            call_stats.mark_all_true_shortcut();
+            call_stats.add_full_rows(num_rows);
             return then_exprs[i]->evaluate_checked(context, chunk);
         }
         if (newly > 0) {
@@ -131,9 +203,11 @@ StatusOr<ColumnPtr> two_phase_eval_predicate_routed(ExprContext* context, Chunk*
             return Status::OK();
         }
         if (!two_phase || rows.size() == num_rows) {
+            call_stats.add_full_rows(num_rows);
             ASSIGN_OR_RETURN(sources[idx], value_expr->evaluate_checked(context, chunk)); // FULL; pos stays r
             return Status::OK();
         }
+        call_stats.add_selected_rows(rows.size());
         ASSIGN_OR_RETURN(sources[idx], value_expr->evaluate_selected(context, chunk, rows));
         for (size_t j = 0; j < rows.size(); ++j) {
             pos[rows[j]] = static_cast<uint32_t>(j);
@@ -146,7 +220,7 @@ StatusOr<ColumnPtr> two_phase_eval_predicate_routed(ExprContext* context, Chunk*
     }
     RETURN_IF_ERROR(eval_branch(static_cast<int>(kElseIdx), else_expr, else_two_phase));
 
-    return assemble(result_type, num_rows, branch_of, pos, sources);
+    return call_stats.time_assemble([&] { return assemble(result_type, num_rows, branch_of, pos, sources); });
 }
 
 StatusOr<ColumnPtr> two_phase_eval_null_routed(ExprContext* context, Chunk* chunk, const TypeDescriptor& result_type,
@@ -155,6 +229,7 @@ StatusOr<ColumnPtr> two_phase_eval_null_routed(ExprContext* context, Chunk* chun
     const size_t num_rows = chunk->num_rows();
     const int num_args = static_cast<int>(arg_exprs.size());
     const uint32_t kElseIdx = static_cast<uint32_t>(num_args);
+    CallStats call_stats(context, num_rows);
 
     std::vector<uint32_t> branch_of(num_rows, kElseIdx); // default: all-args-null => SQL NULL
     std::vector<uint32_t> pos(num_rows);
@@ -170,6 +245,7 @@ StatusOr<ColumnPtr> two_phase_eval_null_routed(ExprContext* context, Chunk* chun
         // arg0 always full (its null-ness gates routing); cheap arg full; full when nothing resolved yet.
         const bool full = (arg_two_phase[i] == 0) || i == 0 || remaining == num_rows;
         if (full) {
+            call_stats.add_full_rows(num_rows);
             ASSIGN_OR_RETURN(sources[i], arg_exprs[i]->evaluate_checked(context, chunk));
             const Column& col = *sources[i];
             for (size_t r = 0; r < num_rows; ++r) {
@@ -188,6 +264,7 @@ StatusOr<ColumnPtr> two_phase_eval_null_routed(ExprContext* context, Chunk* chun
                     idx.push_back(static_cast<uint32_t>(r));
                 }
             }
+            call_stats.add_selected_rows(idx.size());
             ASSIGN_OR_RETURN(sources[i], arg_exprs[i]->evaluate_selected(context, chunk, idx));
             const Column& dense = *sources[i];
             for (size_t j = 0; j < idx.size(); ++j) {
@@ -204,7 +281,41 @@ StatusOr<ColumnPtr> two_phase_eval_null_routed(ExprContext* context, Chunk* chun
     if (remaining > 0) {
         sources[kElseIdx] = ColumnHelper::create_const_null_column(num_rows);
     }
-    return assemble(result_type, num_rows, branch_of, pos, sources);
+    return call_stats.time_assemble([&] { return assemble(result_type, num_rows, branch_of, pos, sources); });
+}
+
+ConditionalTwoPhaseStats* conditional_two_phase_stats(ExprContext* context) {
+    if (context == nullptr || context->runtime_state() == nullptr) {
+        return nullptr;
+    }
+    return context->runtime_state()->conditional_two_phase_stats();
+}
+
+void ConditionalTwoPhaseStats::update_profile(RuntimeProfile* profile) const {
+    const int64_t num_calls = calls.load(std::memory_order_relaxed);
+    const int64_t num_shortcuts = all_true_shortcuts.load(std::memory_order_relaxed);
+    if (profile == nullptr || (num_calls == 0 && num_shortcuts == 0)) {
+        return;
+    }
+    static const std::string kSection = "ConditionalTwoPhase";
+    ADD_COUNTER(profile, kSection, TUnit::NONE);
+    auto set = [&](const std::string& name, TUnit::type unit, int64_t value) {
+        COUNTER_SET(ADD_CHILD_COUNTER(profile, name, unit, kSection), value);
+    };
+    auto load = [](const std::atomic<int64_t>& counter) { return counter.load(std::memory_order_relaxed); };
+    set("TwoPhaseCalls", TUnit::UNIT, num_calls);
+    set("TwoPhaseAllTrueShortcut", TUnit::UNIT, num_shortcuts);
+    set("TwoPhaseInputRows", TUnit::UNIT, load(input_rows));
+    set("TwoPhaseSelectedRows", TUnit::UNIT, load(selected_rows));
+    set("TwoPhaseFullRows", TUnit::UNIT, load(full_rows));
+    set("TwoPhaseSubchunkCopies", TUnit::UNIT, load(subchunk_copies));
+    set("TwoPhaseSubchunkCopiedColumns", TUnit::UNIT, load(subchunk_copied_columns));
+    set("TwoPhaseSubchunkWholeChunkCopies", TUnit::UNIT, load(subchunk_whole_chunk_copies));
+    set("TwoPhaseSubchunkCopiedBytes", TUnit::BYTES, load(subchunk_copied_bytes));
+    set("TwoPhaseLazyProvideCalls", TUnit::UNIT, load(lazy_provide_calls));
+    set("TwoPhaseLazyProvideRows", TUnit::UNIT, load(lazy_provide_rows));
+    set("TwoPhaseTime", TUnit::TIME_NS, load(time_ns));
+    set("TwoPhaseAssembleTime", TUnit::TIME_NS, load(assemble_time_ns));
 }
 
 } // namespace starrocks
