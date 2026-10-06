@@ -73,7 +73,7 @@ OutPut Exchange Id: 04
 3:OlapScanNode
 table: part, rollup: part
 preAggregation: on
-Predicates: [21: P_BRAND, CHAR, false] IN ('Brand#45', 'Brand#11', 'Brand#21'), [23: P_SIZE, INT, false] <= 15, [24: P_CONTAINER, CHAR, false] IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG'), [23: P_SIZE, INT, false] >= 1
+Predicates: [23: P_SIZE, INT, false] <= 15, [23: P_SIZE, INT, false] >= 1, [21: P_BRAND, CHAR, false] IN ('Brand#45', 'Brand#11', 'Brand#21'), [24: P_CONTAINER, CHAR, false] IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=32.0
 cardinality: 6051300

@@ -48,7 +48,7 @@ HASH_PARTITIONED: 18: P_PARTKEY
 3:OlapScanNode
 TABLE: part
 PREAGGREGATION: ON
-PREDICATES: 21: P_BRAND IN ('Brand#45', 'Brand#11', 'Brand#21'), 23: P_SIZE <= 15, 24: P_CONTAINER IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG'), 23: P_SIZE >= 1
+PREDICATES: 23: P_SIZE <= 15, 23: P_SIZE >= 1, 21: P_BRAND IN ('Brand#45', 'Brand#11', 'Brand#21'), 24: P_CONTAINER IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
 partitions=1/1
 rollup: part
 tabletRatio=10/10
