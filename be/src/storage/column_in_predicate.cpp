@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <type_traits>
 
 #include "column/column.h"
@@ -37,7 +38,26 @@ class ColumnInPredicate final : public ColumnPredicate {
 
 public:
     ColumnInPredicate(const TypeInfoPtr& type_info, ColumnId id, ItemSet values)
-            : ColumnPredicate(type_info, id), _values(std::move(values)) {}
+            : ColumnPredicate(type_info, id), _values(std::move(values)) {
+        // A zone map check should not cost O(N) for a large IN list, so we keep the values sorted
+        // by the same comparator that zone_map_filter uses.
+        _sorted_values.reserve(_values.size());
+        for (const ValueType& v : _values) {
+            if constexpr (std::is_floating_point_v<ValueType>) {
+                // NaN is equal to every value under the comparator, which is not a strict weak order
+                // and makes sorting undefined, so zone_map_filter scans all values in this case.
+                if (v != v) {
+                    _has_nan = true;
+                    _sorted_values.clear();
+                    return;
+                }
+            }
+            _sorted_values.push_back(v);
+        }
+        const TypeInfo* ti = this->type_info();
+        std::sort(_sorted_values.begin(), _sorted_values.end(),
+                  [ti](const ValueType& a, const ValueType& b) { return ti->cmp(Datum(a), Datum(b)) < 0; });
+    }
 
     ~ColumnInPredicate() override = default;
 
@@ -97,12 +117,22 @@ public:
         const auto& min = detail.min_or_null_value();
         const auto& max = detail.max_value();
         const auto type_info = this->type_info();
-        for (const ValueType& v : _values) {
-            if (type_info->cmp(Datum(v), min) >= 0 && type_info->cmp(Datum(v), max) <= 0) {
-                return true;
+        if constexpr (std::is_floating_point_v<ValueType>) {
+            if (_has_nan) {
+                for (const ValueType& v : _values) {
+                    if (type_info->cmp(Datum(v), min) >= 0 && type_info->cmp(Datum(v), max) <= 0) {
+                        return true;
+                    }
+                }
+                return false;
             }
         }
-        return false;
+        // The first value not below min is the best candidate: if it is above max, all later values are too.
+        // A null min is below every value, so the search returns the smallest value.
+        auto it = std::lower_bound(
+                _sorted_values.begin(), _sorted_values.end(), min,
+                [type_info](const ValueType& v, const Datum& m) { return type_info->cmp(Datum(v), m) < 0; });
+        return it != _sorted_values.end() && type_info->cmp(Datum(*it), max) <= 0;
     }
 
     bool support_bitmap_filter() const override { return true; }
@@ -197,6 +227,8 @@ public:
 
 private:
     ItemSet _values;
+    std::vector<ValueType> _sorted_values;
+    bool _has_nan = false;
 };
 
 // Template specialization for binary column
@@ -208,6 +240,7 @@ public:
         for (const std::string& s : _zero_padded_strs) {
             _slices.emplace(Slice(s));
         }
+        _build_sorted_slices();
     }
 
     ~BinaryColumnInPredicate() override = default;
@@ -285,12 +318,12 @@ public:
         const auto& min = detail.min_or_null_value();
         const auto& max = detail.max_value();
         const auto type_info = this->type_info();
-        for (const Slice& v : _slices) {
-            if (type_info->cmp(Datum(v), min) >= 0 && type_info->cmp(Datum(v), max) <= 0) {
-                return true;
-            }
-        }
-        return false;
+        // The first value not below min is the best candidate: if it is above max, all later values are too.
+        // A null min is below every value, so the search returns the smallest value.
+        auto it = std::lower_bound(
+                _sorted_slices.begin(), _sorted_slices.end(), min,
+                [type_info](const Slice& v, const Datum& m) { return type_info->cmp(Datum(v), m) < 0; });
+        return it != _sorted_slices.end() && type_info->cmp(Datum(*it), max) <= 0;
     }
 
     bool support_bitmap_filter() const override { return true; }
@@ -370,6 +403,7 @@ public:
             str.append(len > old_sz ? len - old_sz : 0, '\0');
             _slices.emplace(str.data(), old_sz);
         }
+        _build_sorted_slices();
         return true;
     }
 
@@ -388,8 +422,18 @@ public:
     }
 
 private:
+    // The slices point into _zero_padded_strs, so they must be rebuilt whenever the strings change.
+    void _build_sorted_slices() {
+        const TypeInfo* ti = this->type_info();
+        _sorted_slices.assign(_slices.begin(), _slices.end());
+        std::sort(_sorted_slices.begin(), _sorted_slices.end(),
+                  [ti](const Slice& a, const Slice& b) { return ti->cmp(Datum(a), Datum(b)) < 0; });
+    }
+
     std::vector<std::string> _zero_padded_strs;
     ItemHashSet<Slice> _slices;
+    // The same slices as _slices, sorted for the zone map check.
+    std::vector<Slice> _sorted_slices;
 };
 
 class DictionaryCodeInPredicate final : public ColumnPredicate {

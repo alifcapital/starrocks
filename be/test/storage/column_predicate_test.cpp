@@ -14,6 +14,10 @@
 
 #include "storage/column_predicate.h"
 
+#include <algorithm>
+#include <optional>
+#include <random>
+#include <string>
 #include <vector>
 
 #include "exprs/runtime_filter.h"
@@ -2300,6 +2304,219 @@ TEST(ColumnPredicateTest, zone_map_filter_varchar) {
     EXPECT_TRUE(not_in_xx_yy->ZMF(Datum("tt"), Datum("x")));
     EXPECT_TRUE(not_in_xx_yy->ZMF(Datum("ab"), Datum("cd")));
     EXPECT_TRUE(not_in_xx_yy->ZMF(Datum("xy"), Datum("zz")));
+}
+
+namespace {
+
+// nullopt stands for a null bound: a null min is below every value, a null max matches nothing.
+template <typename T>
+bool brute_force_in_zone_map(const std::vector<T>& values, const std::optional<T>& min, const std::optional<T>& max) {
+    if (!max.has_value()) {
+        return false;
+    }
+    for (const T& v : values) {
+        if ((!min.has_value() || v >= *min) && v <= *max) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_many_int_values) {
+    // The values are 100, 110, ..., 20090 and are inserted in shuffled order.
+    std::vector<int32_t> values;
+    for (int32_t i = 0; i < 2000; i++) {
+        values.push_back(100 + 10 * i);
+    }
+    std::vector<std::string> strs;
+    {
+        std::vector<int32_t> shuffled = values;
+        std::shuffle(shuffled.begin(), shuffled.end(), std::mt19937(7));
+        for (int32_t v : shuffled) {
+            strs.push_back(std::to_string(v));
+        }
+    }
+    std::unique_ptr<ColumnPredicate> p(new_column_in_predicate(get_type_info(TYPE_INT), 0, strs));
+
+    auto check = [&](std::optional<int32_t> min, std::optional<int32_t> max) {
+        Datum min_datum = min.has_value() ? Datum(*min) : Datum();
+        Datum max_datum = max.has_value() ? Datum(*max) : Datum();
+        EXPECT_EQ(brute_force_in_zone_map(values, min, max), p->ZMF(min_datum, max_datum))
+                << "min=" << (min.has_value() ? std::to_string(*min) : "null")
+                << " max=" << (max.has_value() ? std::to_string(*max) : "null");
+    };
+
+    // below all values
+    EXPECT_FALSE(p->ZMF(Datum(0), Datum(99)));
+    check(0, 99);
+    // above all values
+    EXPECT_FALSE(p->ZMF(Datum(20091), Datum(30000)));
+    check(20091, 30000);
+    // between two adjacent values
+    EXPECT_FALSE(p->ZMF(Datum(101), Datum(109)));
+    check(101, 109);
+    check(10001, 10009);
+    // the only value in the zone map is at the min boundary
+    EXPECT_TRUE(p->ZMF(Datum(100), Datum(105)));
+    check(100, 105);
+    check(5010, 5015);
+    // the only value in the zone map is at the max boundary
+    EXPECT_TRUE(p->ZMF(Datum(95), Datum(100)));
+    check(95, 100);
+    check(5005, 5010);
+    // min equals max
+    EXPECT_TRUE(p->ZMF(Datum(500), Datum(500)));
+    EXPECT_FALSE(p->ZMF(Datum(505), Datum(505)));
+    check(500, 500);
+    check(505, 505);
+    check(20090, 20090);
+    check(20091, 20091);
+    // the whole range of values
+    EXPECT_TRUE(p->ZMF(Datum(0), Datum(30000)));
+    check(0, 30000);
+    // null min
+    EXPECT_FALSE(p->ZMF(Datum(), Datum(50)));
+    EXPECT_TRUE(p->ZMF(Datum(), Datum(100)));
+    EXPECT_TRUE(p->ZMF(Datum(), Datum(30000)));
+    EXPECT_FALSE(p->ZMF(Datum(), Datum()));
+    check(std::nullopt, 50);
+    check(std::nullopt, 100);
+    check(std::nullopt, 30000);
+    check(std::nullopt, std::nullopt);
+
+    for (int32_t min = 50; min <= 400; min++) {
+        for (int32_t max = min; max <= min + 25; max++) {
+            check(min, max);
+        }
+    }
+    check(20000, 20100);
+    check(20085, 20095);
+}
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_few_int_values) {
+    std::unique_ptr<ColumnPredicate> p(new_column_in_predicate(get_type_info(TYPE_INT), 0, {"30", "10", "20"}));
+    EXPECT_FALSE(p->ZMF(Datum(0), Datum(9)));
+    EXPECT_TRUE(p->ZMF(Datum(0), Datum(10)));
+    EXPECT_FALSE(p->ZMF(Datum(11), Datum(19)));
+    EXPECT_TRUE(p->ZMF(Datum(30), Datum(40)));
+    EXPECT_FALSE(p->ZMF(Datum(31), Datum(40)));
+    EXPECT_TRUE(p->ZMF(Datum(), Datum(10)));
+    EXPECT_FALSE(p->ZMF(Datum(), Datum(9)));
+}
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_many_double_values) {
+    std::unique_ptr<ColumnPredicate> p(
+            new_column_in_predicate(get_type_info(TYPE_DOUBLE), 0, {"3.5", "-1.5", "2.5", "0.5", "10.5"}));
+    EXPECT_FALSE(p->ZMF(Datum(-3.0), Datum(-2.0)));
+    EXPECT_TRUE(p->ZMF(Datum(-3.0), Datum(-1.5)));
+    EXPECT_FALSE(p->ZMF(Datum(0.6), Datum(2.4)));
+    EXPECT_TRUE(p->ZMF(Datum(10.5), Datum(11.0)));
+    EXPECT_FALSE(p->ZMF(Datum(10.6), Datum(11.0)));
+    EXPECT_TRUE(p->ZMF(Datum(), Datum(-1.5)));
+    EXPECT_FALSE(p->ZMF(Datum(), Datum(-1.6)));
+
+    // NaN is equal to every value under the type comparator, so a zone map with non-null bounds always matches.
+    std::unique_ptr<ColumnPredicate> with_nan(
+            new_column_in_predicate(get_type_info(TYPE_DOUBLE), 0, {"3.5", "NaN", "2.5", "0.5", "10.5"}));
+    EXPECT_TRUE(with_nan->ZMF(Datum(100.0), Datum(200.0)));
+    EXPECT_FALSE(with_nan->ZMF(Datum(), Datum()));
+}
+
+namespace {
+
+void test_zone_map_filter_in_many_strings(LogicalType type) {
+    // The values are "k00000", "k00002", ..., "k03998" and are inserted in shuffled order.
+    auto key = [](int i) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "k%05d", i);
+        return std::string(buf);
+    };
+    std::vector<std::string> values;
+    for (int i = 0; i < 2000; i++) {
+        values.push_back(key(2 * i));
+    }
+    std::vector<std::string> strs = values;
+    std::shuffle(strs.begin(), strs.end(), std::mt19937(11));
+    std::unique_ptr<ColumnPredicate> p(new_column_in_predicate(get_type_info(type), 0, strs));
+
+    auto check = [&](std::optional<std::string> min, std::optional<std::string> max) {
+        Datum min_datum = min.has_value() ? Datum(Slice(*min)) : Datum();
+        Datum max_datum = max.has_value() ? Datum(Slice(*max)) : Datum();
+        EXPECT_EQ(brute_force_in_zone_map(values, min, max), p->ZMF(min_datum, max_datum))
+                << "min=" << min.value_or("null") << " max=" << max.value_or("null");
+    };
+
+    // below all values
+    check("a", "j");
+    EXPECT_FALSE(p->ZMF(Datum("a"), Datum("j")));
+    // above all values
+    check("k03999", "z");
+    EXPECT_FALSE(p->ZMF(Datum("k03999"), Datum("z")));
+    // between two adjacent values
+    check("k00001", "k00001");
+    check("k01001", "k01001");
+    EXPECT_FALSE(p->ZMF(Datum("k00001"), Datum("k00001")));
+    // the only value in the zone map is at the min boundary
+    check("k00002", "k00003");
+    EXPECT_TRUE(p->ZMF(Datum("k00002"), Datum("k00003")));
+    // the only value in the zone map is at the max boundary
+    check("k00001", "k00002");
+    EXPECT_TRUE(p->ZMF(Datum("k00001"), Datum("k00002")));
+    // min equals max
+    check("k01000", "k01000");
+    check("k01001", "k01001");
+    check("k03998", "k03998");
+    EXPECT_TRUE(p->ZMF(Datum("k01000"), Datum("k01000")));
+    // a prefix is below the values that extend it
+    check("k", "k");
+    check("k0", "k00000");
+    check("k00000", "k000000");
+    // null min
+    check(std::nullopt, "a");
+    check(std::nullopt, "k00000");
+    check(std::nullopt, "z");
+    check(std::nullopt, std::nullopt);
+    EXPECT_FALSE(p->ZMF(Datum(), Datum("a")));
+    EXPECT_TRUE(p->ZMF(Datum(), Datum("k00000")));
+    EXPECT_FALSE(p->ZMF(Datum(), Datum()));
+
+    for (int i = 0; i < 40; i++) {
+        for (int j = i; j < i + 6; j++) {
+            check(key(i), key(j));
+        }
+    }
+}
+
+} // namespace
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_many_varchar_values) {
+    test_zone_map_filter_in_many_strings(TYPE_VARCHAR);
+}
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_many_char_values) {
+    test_zone_map_filter_in_many_strings(TYPE_CHAR);
+}
+
+// NOLINTNEXTLINE
+TEST(ColumnPredicateTest, zone_map_filter_in_char_values_after_padding) {
+    std::vector<std::string> strs;
+    for (int i = 0; i < 100; i++) {
+        strs.push_back(std::string(1, 'a' + i % 26) + std::to_string(i));
+    }
+    std::unique_ptr<ColumnPredicate> p(new_column_in_predicate(get_type_info(TYPE_CHAR), 0, strs));
+    ASSERT_TRUE(p->padding_zeros(8));
+    EXPECT_TRUE(p->ZMF(Datum("a0"), Datum("a0")));
+    EXPECT_FALSE(p->ZMF(Datum("a1"), Datum("a1")));
+    EXPECT_TRUE(p->ZMF(Datum("b1"), Datum("b1")));
+    EXPECT_FALSE(p->ZMF(Datum("a0\1"), Datum("a0\1")));
+    EXPECT_FALSE(p->ZMF(Datum(), Datum("a")));
 }
 
 // NOLINTNEXTLINE
