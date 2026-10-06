@@ -17,11 +17,11 @@
 #include <gtest/gtest.h>
 
 #include <functional>
+#include <map>
 #include <optional>
 #include <random>
 #include <string>
 
-#include "testutil/assert.h"
 #include "column/chunk.h"
 #include "column/column_helper.h"
 #include "column/fixed_length_column.h"
@@ -33,8 +33,9 @@
 #include "exprs/expr.h"
 #include "exprs/literal.h"
 #include "exprs/selected_column.h"
-#include "types/logical_type.h"
 #include "runtime/types.h"
+#include "testutil/assert.h"
+#include "types/logical_type.h"
 
 namespace starrocks {
 
@@ -606,6 +607,192 @@ TEST_F(ConditionalTwoPhaseTest, constant_branches_and_null_runs) {
             return (contiguous ? r < 60 : r % 3 == 0) ? std::optional<std::string>(text) : std::nullopt;
         });
     }
+}
+
+// Serves the columns of slots that are absent from the chunk, with the rows of the original chunk, and
+// counts how often each slot is asked for.
+class FakeMissingColumnProvider final : public MissingColumnProvider {
+public:
+    bool can_provide(SlotId slot_id) const override { return columns.count(slot_id) != 0; }
+    StatusOr<ColumnPtr> provide(SlotId slot_id) override {
+        ++calls[slot_id];
+        return columns.at(slot_id);
+    }
+    std::map<SlotId, ColumnPtr> columns;
+    std::map<SlotId, int> calls;
+};
+
+// Sums the INT columns of its children, so every child is read through the chunk it is evaluated on.
+class SumExpr final : public Expr {
+public:
+    explicit SumExpr(bool indirect_inputs = false)
+            : Expr(TypeDescriptor(TYPE_INT), false), _indirect(indirect_inputs) {}
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new SumExpr(*this)); }
+    bool is_constant() const override { return false; }
+    bool is_expensive_node() const override { return true; }
+    bool is_dictmapping_expr() const override { return _indirect; }
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        seen_columns = chunk->num_columns();
+        auto result = Int32Column::create();
+        for (Expr* child : _children) {
+            ASSIGN_OR_RETURN(auto column, child->evaluate_checked(context, chunk));
+            if (result->size() == 0) {
+                result->resize(column->size());
+            }
+            for (size_t i = 0; i < column->size(); ++i) {
+                result->get_data()[i] += column->get(i).get_int32();
+            }
+        }
+        seen_rows = result->size();
+        return result;
+    }
+    size_t seen_columns = 0;
+    size_t seen_rows = 0;
+
+private:
+    bool _indirect;
+};
+
+// IF(children[0], children[1]) evaluated on the chunk it is given, with its own two-phase routing.
+class NestedIfExpr final : public Expr {
+public:
+    NestedIfExpr() : Expr(TypeDescriptor(TYPE_INT), false) {}
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new NestedIfExpr(*this)); }
+    bool is_constant() const override { return false; }
+    bool is_expensive_node() const override { return true; }
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return _children[0]->evaluate_checked(context, chunk); };
+        return two_phase_eval_predicate_routed(context, chunk, TypeDescriptor(TYPE_INT), 1, guard_fn, {_children[1]},
+                                               {1}, nullptr, false, true);
+    }
+};
+
+class ConditionalTwoPhaseLazyColumnTest : public ConditionalTwoPhaseTest {
+protected:
+    // Slot 0 is the guard, slot 2 is the ELSE value and slot 4 is read by the branch; slot 1 is read by the
+    // branch too, but only the provider has it. Slot 5 is only in the provider, and nobody reads it.
+    void SetUp() override {
+        chunk.append_column(make_bool([](int r) { return r % 3 == 0; }), 0);
+        chunk.append_column(make_int([](int r) { return -r - 1; }), 2);
+        chunk.append_column(make_bool([](int r) { return r % 2 == 0; }), 3);
+        chunk.append_column(make_int([](int r) { return r * 100; }), 4);
+        provider.columns[1] = make_int([](int r) { return r * 3; });
+        provider.columns[5] = make_int([](int r) { return 7; });
+        chunk.set_missing_column_provider(&provider);
+    }
+    void TearDown() override { chunk.set_missing_column_provider(nullptr); }
+
+    ColumnRef* ref(SlotId id) { return pool.add(new ColumnRef(int_type(), id)); }
+
+    StatusOr<ColumnPtr> run(Expr* value, bool two_phase) {
+        auto guard = chunk.get_column_by_slot_id(0);
+        auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return guard; };
+        return two_phase_eval_predicate_routed(nullptr, &chunk, int_type(), 1, guard_fn, {value},
+                                               {static_cast<uint8_t>(two_phase)}, slot(pool, 2, false), false, true);
+    }
+
+    ObjectPool pool;
+    Chunk chunk;
+    FakeMissingColumnProvider provider;
+};
+
+// The branch reads a lazy slot and a slot that is in the chunk: only the second is copied, the first comes
+// from the provider with the routed rows.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, branch_reads_lazy_and_present_slots) {
+    SumExpr value;
+    value.add_child(ref(1));
+    value.add_child(ref(4));
+    auto expected = [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 3 + r * 100 : (-r - 1); };
+
+    ASSIGN_OR_ABORT(auto eager, run(&value, /*two_phase=*/false));
+    expect(eager, expected);
+    ASSERT_EQ(1, provider.calls[1]);
+
+    provider.calls.clear();
+    ASSIGN_OR_ABORT(auto selected, run(&value, /*two_phase=*/true));
+    expect(selected, expected);
+    EXPECT_EQ(33, value.seen_rows);
+    EXPECT_EQ(1, value.seen_columns);
+    EXPECT_EQ(1, provider.calls[1]);
+    EXPECT_EQ(0, provider.calls.count(5));
+    EXPECT_EQ(4, chunk.num_columns());
+    EXPECT_EQ(kRows, chunk.num_rows());
+}
+
+// The branch reads only a lazy slot, so the copy keeps the whole chunk to carry the row count.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, branch_reads_only_lazy_slot) {
+    SumExpr value;
+    value.add_child(ref(1));
+    ASSIGN_OR_ABORT(auto selected, run(&value, /*two_phase=*/true));
+    expect(selected, [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 3 : (-r - 1); });
+    EXPECT_EQ(33, value.seen_rows);
+    EXPECT_EQ(4, value.seen_columns);
+    EXPECT_EQ(1, provider.calls[1]);
+}
+
+// Dictionary and lambda inputs are not listed by the expression, so the whole chunk is copied.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, whole_chunk_copy_reads_lazy_slot) {
+    SumExpr value(/*indirect_inputs=*/true);
+    value.add_child(ref(1));
+    value.add_child(ref(4));
+    ASSIGN_OR_ABORT(auto selected, run(&value, /*two_phase=*/true));
+    expect(selected, [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 3 + r * 100 : (-r - 1); });
+    EXPECT_EQ(33, value.seen_rows);
+    EXPECT_EQ(4, value.seen_columns);
+    EXPECT_EQ(1, provider.calls[1]);
+    EXPECT_EQ(0, provider.calls.count(5));
+}
+
+// A conditional inside the branch routes again on the copy; its copy wraps the provider of the first copy.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, nested_conditional_reads_lazy_slot) {
+    SumExpr inner;
+    inner.add_child(ref(1));
+    inner.add_child(ref(4));
+    NestedIfExpr value;
+    value.add_child(ref(3));
+    value.add_child(&inner);
+    auto expected = [](int r) -> std::optional<int> {
+        if (r % 3 != 0) return -r - 1;
+        if (r % 2 != 0) return std::nullopt;
+        return r * 3 + r * 100;
+    };
+    ASSIGN_OR_ABORT(auto eager, run(&value, /*two_phase=*/false));
+    expect(eager, expected);
+
+    provider.calls.clear();
+    ASSIGN_OR_ABORT(auto selected, run(&value, /*two_phase=*/true));
+    expect(selected, expected);
+    EXPECT_EQ(17, inner.seen_rows); // multiples of 6 below 97
+    EXPECT_EQ(1, provider.calls[1]);
+    EXPECT_EQ(0, provider.calls.count(5));
+}
+
+// No row routes to the branch, so the lazy slot is not read.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, unrouted_branch_does_not_read_lazy_slot) {
+    chunk.append_column(make_bool([](int) { return false; }), 6);
+    SumExpr value;
+    value.add_child(ref(1));
+    value.add_child(ref(4));
+    auto guard = chunk.get_column_by_slot_id(6);
+    auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return guard; };
+    ASSIGN_OR_ABORT(auto result, two_phase_eval_predicate_routed(nullptr, &chunk, int_type(), 1, guard_fn, {&value},
+                                                                 {1}, slot(pool, 2, false), false, true));
+    expect(result, [](int r) -> std::optional<int> { return -r - 1; });
+    EXPECT_TRUE(provider.calls.empty());
+    EXPECT_EQ(0, value.seen_rows);
+}
+
+// A chunk without a provider is copied as before.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, chunk_without_provider) {
+    chunk.set_missing_column_provider(nullptr);
+    chunk.append_column(provider.columns[1], 1);
+    SumExpr value;
+    value.add_child(ref(1));
+    value.add_child(ref(4));
+    ASSIGN_OR_ABORT(auto selected, run(&value, /*two_phase=*/true));
+    expect(selected, [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 3 + r * 100 : (-r - 1); });
+    EXPECT_EQ(2, value.seen_columns);
+    EXPECT_TRUE(provider.calls.empty());
 }
 
 } // namespace starrocks
