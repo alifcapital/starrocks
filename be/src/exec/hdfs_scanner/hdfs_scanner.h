@@ -197,6 +197,19 @@ struct HdfsScannerProfile {
     RuntimeProfile::Counter* datacache_write_timer = nullptr;
     RuntimeProfile::Counter* datacache_write_fail_counter = nullptr;
     RuntimeProfile::Counter* datacache_write_fail_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_write_already_exist_counter = nullptr;
+    RuntimeProfile::Counter* datacache_write_already_exist_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_write_busy_counter = nullptr;
+    RuntimeProfile::Counter* datacache_write_busy_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_write_mem_limit_counter = nullptr;
+    RuntimeProfile::Counter* datacache_write_mem_limit_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_write_capacity_limit_counter = nullptr;
+    RuntimeProfile::Counter* datacache_write_capacity_limit_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_write_retry_counter = nullptr;
+    RuntimeProfile::Counter* datacache_write_retry_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_async_write_done_counter = nullptr;
+    RuntimeProfile::Counter* datacache_async_write_fail_counter = nullptr;
+    RuntimeProfile::Counter* datacache_async_write_exist_counter = nullptr;
     RuntimeProfile::Counter* datacache_read_block_buffer_counter = nullptr;
     RuntimeProfile::Counter* datacache_read_block_buffer_bytes = nullptr;
 

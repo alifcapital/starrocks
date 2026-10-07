@@ -632,6 +632,19 @@ void HdfsScanner::update_counter() {
         COUNTER_UPDATE(profile->datacache_write_fail_bytes, stats.write_cache_fail_bytes);
         COUNTER_UPDATE(profile->datacache_skip_write_counter, stats.skip_write_cache_count);
         COUNTER_UPDATE(profile->datacache_skip_write_bytes, stats.skip_write_cache_bytes);
+        COUNTER_UPDATE(profile->datacache_write_already_exist_counter, stats.write_cache_already_exist_count);
+        COUNTER_UPDATE(profile->datacache_write_already_exist_bytes, stats.write_cache_already_exist_bytes);
+        COUNTER_UPDATE(profile->datacache_write_busy_counter, stats.write_cache_busy_count);
+        COUNTER_UPDATE(profile->datacache_write_busy_bytes, stats.write_cache_busy_bytes);
+        COUNTER_UPDATE(profile->datacache_write_mem_limit_counter, stats.write_cache_mem_limit_count);
+        COUNTER_UPDATE(profile->datacache_write_mem_limit_bytes, stats.write_cache_mem_limit_bytes);
+        COUNTER_UPDATE(profile->datacache_write_capacity_limit_counter, stats.write_cache_capacity_limit_count);
+        COUNTER_UPDATE(profile->datacache_write_capacity_limit_bytes, stats.write_cache_capacity_limit_bytes);
+        COUNTER_UPDATE(profile->datacache_write_retry_counter, stats.write_cache_retry_count);
+        COUNTER_UPDATE(profile->datacache_write_retry_bytes, stats.write_cache_retry_bytes);
+        COUNTER_UPDATE(profile->datacache_async_write_done_counter, stats.async_write_done_count);
+        COUNTER_UPDATE(profile->datacache_async_write_fail_counter, stats.async_write_fail_count);
+        COUNTER_UPDATE(profile->datacache_async_write_exist_counter, stats.async_write_exist_count);
         COUNTER_UPDATE(profile->datacache_read_block_buffer_counter, stats.read_block_buffer_count);
         COUNTER_UPDATE(profile->datacache_read_block_buffer_bytes, stats.read_block_buffer_bytes);
 

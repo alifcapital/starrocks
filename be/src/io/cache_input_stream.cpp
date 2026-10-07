@@ -72,6 +72,13 @@ CacheInputStream::CacheInputStream(const std::shared_ptr<SharedBufferedInputStre
 
 CacheInputStream::~CacheInputStream() = default;
 
+const CacheInputStream::Stats& CacheInputStream::stats() {
+    _stats.async_write_done_count = _async_write_stats->done_count.load(std::memory_order_relaxed);
+    _stats.async_write_fail_count = _async_write_stats->fail_count.load(std::memory_order_relaxed);
+    _stats.async_write_exist_count = _async_write_stats->exist_count.load(std::memory_order_relaxed);
+    return _stats;
+}
+
 Status CacheInputStream::_read_block_from_local(const int64_t offset, const int64_t size, char* out) {
     if (UNLIKELY(size == 0)) {
         return Status::OK();
@@ -496,15 +503,36 @@ void CacheInputStream::_populate_to_cache(const char* p, int64_t offset, int64_t
 
 void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options) {
     DCHECK(offset % _block_size == 0);
-    if (_already_populated_blocks.contains(offset / _block_size)) {
+    const int64_t block_id = offset / _block_size;
+    if (_already_populated_blocks.contains(block_id)) {
         // Already populate in CacheInputStream's lifecycle, ignore this time
         return;
+    }
+
+    if (_rejected_populate_blocks.contains(block_id)) {
+        _stats.write_cache_retry_count += 1;
+        _stats.write_cache_retry_bytes += iobuf.size();
+    }
+
+    if (options->async) {
+        // An OK status of an async write means only that the cache accepted the job. We want to see the
+        // real result, so we count what the cache passes to the callback. The callback may run after
+        // the scan has reported its profile; that result is lost.
+        options->callback = [async_stats = _async_write_stats, cb = std::move(options->callback)](
+                                    int code, const std::string& msg) {
+            async_stats->record(code);
+            if (cb) {
+                cb(code, msg);
+            }
+        };
     }
 
     SCOPED_RAW_TIMER(&_stats.write_block_cache_ns);
     Status r = _cache->write(_cache_key, offset, iobuf, options);
     if (r.ok() || r.is_already_exist()) {
-        _already_populated_blocks.emplace(offset / _block_size);
+        _already_populated_blocks.emplace(block_id);
+    } else {
+        _rejected_populate_blocks.emplace(block_id);
     }
 
     if (r.ok()) {
@@ -516,9 +544,22 @@ void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskC
         _stats.write_cache_fail_count += 1;
         _stats.write_cache_fail_bytes += iobuf.size();
         LOG(WARNING) << "write block cache failed, errmsg: " << r.message();
-    } else if (r.is_already_exist() || r.is_resource_busy()) {
+    } else if (r.is_already_exist()) {
+        _stats.write_cache_already_exist_count += 1;
+        _stats.write_cache_already_exist_bytes += iobuf.size();
         _stats.skip_write_cache_count += 1;
         _stats.skip_write_cache_bytes += iobuf.size();
+    } else if (r.is_resource_busy()) {
+        _stats.write_cache_busy_count += 1;
+        _stats.write_cache_busy_bytes += iobuf.size();
+        _stats.skip_write_cache_count += 1;
+        _stats.skip_write_cache_bytes += iobuf.size();
+    } else if (r.is_mem_limit_exceeded()) {
+        _stats.write_cache_mem_limit_count += 1;
+        _stats.write_cache_mem_limit_bytes += iobuf.size();
+    } else if (r.is_capacity_limit_exceeded()) {
+        _stats.write_cache_capacity_limit_count += 1;
+        _stats.write_cache_capacity_limit_bytes += iobuf.size();
     }
 }
 

@@ -675,6 +675,32 @@ void HiveDataSource::_init_counter(RuntimeState* state) {
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheSkipWriteCounter", TUnit::UNIT, prefix);
         _scanner_ctx.profile.datacache_skip_write_bytes =
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheSkipWriteBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_already_exist_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteAlreadyExistCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_already_exist_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteAlreadyExistBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_busy_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteBusyCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_busy_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteBusyBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_mem_limit_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteMemLimitCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_mem_limit_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteMemLimitBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_capacity_limit_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteCapacityLimitCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_capacity_limit_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteCapacityLimitBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_retry_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteRetryCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_retry_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteRetryBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_async_write_done_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheAsyncWriteDoneCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_async_write_fail_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheAsyncWriteFailCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_async_write_exist_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheAsyncWriteExistCount", TUnit::UNIT, prefix);
         _scanner_ctx.profile.datacache_read_block_buffer_counter =
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheReadBlockBufferCounter", TUnit::UNIT, prefix);
         _scanner_ctx.profile.datacache_read_block_buffer_bytes =

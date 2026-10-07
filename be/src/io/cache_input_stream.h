@@ -14,8 +14,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <cerrno>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #include "cache/disk_cache/block_cache.h"
 #include "cache/disk_cache/io_buffer.h"
@@ -43,10 +46,27 @@ public:
         int64_t skip_read_cache_bytes = 0;
         int64_t skip_read_peer_cache_count = 0;
         int64_t skip_read_peer_cache_bytes = 0;
+        // AlreadyExist plus ResourceBusy. Dashboards read this sum, so we keep it next to the split below.
         int64_t skip_write_cache_count = 0;
         int64_t skip_write_cache_bytes = 0;
+        int64_t write_cache_already_exist_count = 0;
+        int64_t write_cache_already_exist_bytes = 0;
+        int64_t write_cache_busy_count = 0;
+        int64_t write_cache_busy_bytes = 0;
+        int64_t write_cache_mem_limit_count = 0;
+        int64_t write_cache_mem_limit_bytes = 0;
+        int64_t write_cache_capacity_limit_count = 0;
+        int64_t write_cache_capacity_limit_bytes = 0;
+        // Writes of a block that the cache already rejected once in this stream. Such a write is also
+        // counted again under its own result, so these show how much of the counters above is repeats.
+        int64_t write_cache_retry_count = 0;
+        int64_t write_cache_retry_bytes = 0;
         int64_t write_cache_fail_count = 0;
         int64_t write_cache_fail_bytes = 0;
+        // Results of async writes, as the cache reports them to the write callback.
+        int64_t async_write_done_count = 0;
+        int64_t async_write_fail_count = 0;
+        int64_t async_write_exist_count = 0;
         int64_t read_block_buffer_bytes = 0;
         int64_t read_block_buffer_count = 0;
 
@@ -73,8 +93,21 @@ public:
             skip_read_peer_cache_bytes += o.skip_read_peer_cache_bytes;
             skip_write_cache_count += o.skip_write_cache_count;
             skip_write_cache_bytes += o.skip_write_cache_bytes;
+            write_cache_already_exist_count += o.write_cache_already_exist_count;
+            write_cache_already_exist_bytes += o.write_cache_already_exist_bytes;
+            write_cache_busy_count += o.write_cache_busy_count;
+            write_cache_busy_bytes += o.write_cache_busy_bytes;
+            write_cache_mem_limit_count += o.write_cache_mem_limit_count;
+            write_cache_mem_limit_bytes += o.write_cache_mem_limit_bytes;
+            write_cache_capacity_limit_count += o.write_cache_capacity_limit_count;
+            write_cache_capacity_limit_bytes += o.write_cache_capacity_limit_bytes;
+            write_cache_retry_count += o.write_cache_retry_count;
+            write_cache_retry_bytes += o.write_cache_retry_bytes;
             write_cache_fail_count += o.write_cache_fail_count;
             write_cache_fail_bytes += o.write_cache_fail_bytes;
+            async_write_done_count += o.async_write_done_count;
+            async_write_fail_count += o.async_write_fail_count;
+            async_write_exist_count += o.async_write_exist_count;
             read_block_buffer_bytes += o.read_block_buffer_bytes;
             read_block_buffer_count += o.read_block_buffer_count;
             return *this;
@@ -96,7 +129,9 @@ public:
 
     StatusOr<int64_t> get_size() override;
 
-    const Stats& stats() { return _stats; }
+    // The async write counters are copied in at each call, so a caller that keeps the reference
+    // sees them as of its last call.
+    const Stats& stats();
 
     void set_enable_populate_cache(bool v) { _enable_populate_cache = v; }
 
@@ -129,6 +164,25 @@ protected:
         IOBuffer buffer;
     };
     using SharedBufferPtr = SharedBufferedInputStream::SharedBufferPtr;
+
+    // The cache runs an async write in its own threads and reports the result only to the write
+    // callback, possibly after this stream is destroyed. So the callback holds these counters by
+    // shared_ptr, and stats() copies them into Stats.
+    struct AsyncWriteStats {
+        std::atomic<int64_t> done_count{0};
+        std::atomic<int64_t> fail_count{0};
+        std::atomic<int64_t> exist_count{0};
+
+        void record(int code) {
+            if (code == 0) {
+                done_count.fetch_add(1, std::memory_order_relaxed);
+            } else if (code == EEXIST) {
+                exist_count.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                fail_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
 
     // Read block from local, if not found, will return Status::NotFound();
     virtual Status _read_block_from_local(const int64_t offset, const int64_t size, char* out);
@@ -175,6 +229,9 @@ private:
     inline int64_t _calculate_remote_latency_per_block(int64_t io_bytes, int64_t read_time_ns);
     // Record already populated blocks, avoid duplicate populate
     std::unordered_set<int64_t> _already_populated_blocks{};
+    // Blocks the cache rejected in this stream. Used only to count repeated writes of the same block.
+    std::unordered_set<int64_t> _rejected_populate_blocks{};
+    std::shared_ptr<AsyncWriteStats> _async_write_stats = std::make_shared<AsyncWriteStats>();
 };
 
 } // namespace starrocks::io
