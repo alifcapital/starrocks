@@ -14,6 +14,7 @@
 
 package com.starrocks.connector.iceberg;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.Column;
@@ -28,6 +29,7 @@ import com.starrocks.planner.SlotId;
 import com.starrocks.planner.TupleDescriptor;
 import com.starrocks.planner.TupleId;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.thrift.TExprMinMaxValue;
 import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.thrift.THdfsPartition;
 import com.starrocks.thrift.THdfsScanRange;
@@ -35,12 +37,17 @@ import com.starrocks.type.DateType;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.Metrics;
 import org.apache.iceberg.PartitionKey;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.types.Conversions;
+import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -97,6 +104,64 @@ public class IcebergConnectorScanRangeSourceTest extends TableTestBase {
             Assertions.assertTrue(range.getMin_max_values().containsKey(1));
             Assertions.assertEquals(aggregate, range.getMin_max_values().containsKey(2));
             Assertions.assertEquals(aggregate ? 2 : 1, range.getMin_max_values().size());
+        }
+    }
+
+    @Test
+    public void testTopnStringBoundsOnlyWithoutAggregateMinMax() throws Exception {
+        byte[] lower = "2026-10-05 10:00".getBytes(StandardCharsets.UTF_8);
+        byte[] upper = "2026-10-05 11:24".getBytes(StandardCharsets.UTF_8);
+        Metrics metrics = new Metrics(2L,
+                ImmutableMap.of(1, 50L, 2, 50L),
+                ImmutableMap.of(1, 2L, 2, 2L),
+                ImmutableMap.of(1, 0L, 2, 0L),
+                ImmutableMap.of(1, 0L, 2, 0L),
+                ImmutableMap.of(1, Conversions.toByteBuffer(Types.IntegerType.get(), 1), 2, ByteBuffer.wrap(lower)),
+                ImmutableMap.of(1, Conversions.toByteBuffer(Types.IntegerType.get(), 2), 2, ByteBuffer.wrap(upper)));
+        DataFile file = DataFiles.builder(PartitionSpec.unpartitioned())
+                .withPath("/path/to/data-h-topn.parquet")
+                .withFileSizeInBytes(20)
+                .withRecordCount(2)
+                .withMetrics(metrics)
+                .build();
+        mockedNativeTableH.newFastAppend().appendFile(file).commit();
+        List<Column> schema = List.of(new Column("k1", INT), new Column("k2", VARCHAR));
+        IcebergTable icebergTable = new IcebergTable(1, "iceberg_table", "iceberg_catalog",
+                "resource", "db", "table", "", schema, mockedNativeTableH, Maps.newHashMap());
+        TupleDescriptor tuple = new TupleDescriptor(new TupleId(8));
+        SlotDescriptor k1Slot = new SlotDescriptor(new SlotId(1), tuple);
+        k1Slot.setType(INT);
+        k1Slot.setColumn(new Column("k1", INT));
+        tuple.addSlot(k1Slot);
+        SlotDescriptor k2Slot = new SlotDescriptor(new SlotId(2), tuple);
+        k2Slot.setType(VARCHAR);
+        k2Slot.setColumn(new Column("k2", VARCHAR));
+        tuple.addSlot(k2Slot);
+        FileScanTask task = Lists.newArrayList(mockedNativeTableH.newScan().includeColumnStats().planFiles()).get(0);
+
+        // TopN on the VARCHAR slot: only that slot is shipped, with its raw string bounds.
+        IcebergConnectorScanRangeSource topnSource = new IcebergConnectorScanRangeSource(icebergTable,
+                RemoteFileInfoDefaultSource.EMPTY, IcebergMORParams.EMPTY, tuple, Optional.empty(),
+                PartitionIdGenerator.of(), false, false);
+        topnSource.setTopnReorderSlotId(2);
+        THdfsScanRange range = topnSource.buildScanRange(task, task.file(), topnSource.addPartition(task));
+        Assertions.assertEquals(1, range.getMin_max_values().size());
+        TExprMinMaxValue bounds = range.getMin_max_values().get(2);
+        Assertions.assertEquals(TExprNodeType.STRING_LITERAL, bounds.getType());
+        Assertions.assertArrayEquals(lower, bounds.getMin_string_value());
+        Assertions.assertArrayEquals(upper, bounds.getMax_string_value());
+
+        // With the aggregate min/max optimization on, the map holds exact values only: the int slot
+        // and no string bounds.
+        IcebergConnectorScanRangeSource aggSource = new IcebergConnectorScanRangeSource(icebergTable,
+                RemoteFileInfoDefaultSource.EMPTY, IcebergMORParams.EMPTY, tuple, Optional.empty(),
+                PartitionIdGenerator.of(), false, true);
+        aggSource.setTopnReorderSlotId(2);
+        range = aggSource.buildScanRange(task, task.file(), aggSource.addPartition(task));
+        Assertions.assertTrue(range.getMin_max_values().containsKey(1));
+        Assertions.assertFalse(range.getMin_max_values().containsKey(2));
+        for (TExprMinMaxValue value : range.getMin_max_values().values()) {
+            Assertions.assertNotEquals(TExprNodeType.STRING_LITERAL, value.getType());
         }
     }
 

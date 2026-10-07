@@ -302,6 +302,86 @@ public final class IcebergUtil {
         return result;
     }
 
+    /**
+     * Builds the per-file bound of a VARCHAR TopN reorder key, or returns null when the file has no
+     * usable bound. BE then never skips the file and orders it after the files with a bound.
+     *
+     * <p>We want BE to order and skip files in the order the sort uses: unsigned bytes, a shorter prefix
+     * first. Iceberg string bounds keep that order for characters inside the BMP, and a truncated bound
+     * only gets wider (the lower bound is a prefix, the upper bound is a prefix with its last character
+     * incremented), so skipping by it stays safe. What we fear, and what we do:
+     * <ul>
+     *   <li>A writer that truncates by bytes can leave invalid UTF-8, and decoding it into a Java String
+     *   would change the bytes. So we copy the bytes as they are.</li>
+     *   <li>Outside the BMP, UTF-16 order can differ from byte order. So we drop the bounds of a file
+     *   when either bound has a byte &gt;= 0xF0, the first byte of a 4-byte UTF-8 character.</li>
+     *   <li>A missing bound does not limit its side. So we drop the bounds of a file that misses one.</li>
+     * </ul>
+     * The result has type STRING_LITERAL, and BE never uses such a value as an exact min/max.
+     */
+    public static TExprMinMaxValue toThriftTopnStringBounds(Schema schema,
+                                                            Map<Integer, ByteBuffer> lowerBounds,
+                                                            Map<Integer, ByteBuffer> upperBounds,
+                                                            Map<Integer, Long> nullValueCounts,
+                                                            Map<Integer, Long> valueCounts,
+                                                            SlotDescriptor slot) {
+        if (!slot.getType().isVarchar() && !slot.getType().isChar()) {
+            return null;
+        }
+        Types.NestedField field = schema.findField(slot.getColumn().getName());
+        if (field == null || field.type().typeId() != Type.TypeID.STRING) {
+            return null;
+        }
+        int fieldId = field.fieldId();
+        if (nullValueCounts == null || valueCounts == null) {
+            return null;
+        }
+        Long nullValueCount = nullValueCounts.get(fieldId);
+        Long valueCount = valueCounts.get(fieldId);
+        if (nullValueCount == null || valueCount == null) {
+            return null;
+        }
+        TExprMinMaxValue texpr = new TExprMinMaxValue();
+        texpr.setType(TExprNodeType.STRING_LITERAL);
+        texpr.setHas_null(nullValueCount > 0);
+        texpr.setAll_null(valueCount.longValue() == nullValueCount.longValue());
+        if (texpr.isAll_null()) {
+            return texpr;
+        }
+        byte[] lower = rawBoundBytes(lowerBounds, fieldId);
+        byte[] upper = rawBoundBytes(upperBounds, fieldId);
+        if (lower == null || upper == null || hasNonBmpLeadByte(lower) || hasNonBmpLeadByte(upper)) {
+            return null;
+        }
+        texpr.setMin_string_value(lower);
+        texpr.setMax_string_value(upper);
+        return texpr;
+    }
+
+    private static byte[] rawBoundBytes(Map<Integer, ByteBuffer> bounds, int fieldId) {
+        if (bounds == null) {
+            return null;
+        }
+        ByteBuffer buffer = bounds.get(fieldId);
+        if (buffer == null) {
+            return null;
+        }
+        // duplicate() so that reading the bytes does not move the position of the shared buffer.
+        ByteBuffer copy = buffer.duplicate();
+        byte[] bytes = new byte[copy.remaining()];
+        copy.get(bytes);
+        return bytes;
+    }
+
+    private static boolean hasNonBmpLeadByte(byte[] bytes) {
+        for (byte b : bytes) {
+            if ((b & 0xFF) >= 0xF0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static String tableDataLocation(Table table) {
         Preconditions.checkArgument(table != null, "table is null");
         String tableLocation = table.location();

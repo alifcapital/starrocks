@@ -28,9 +28,10 @@ namespace starrocks::pipeline {
 // of each file's min/max on the sort column, best file first, so the TopN runtime filter gets its
 // bound early and the other files are skipped.
 //
-// The key is the raw int64 bound from THdfsScanRange.min_max_values (min for ASC, max for DESC).
+// The key is the raw bound from THdfsScanRange.min_max_values (min for ASC, max for DESC).
 // It is not decoded: the raw Iceberg encodings (int, date as days, timestamp as micros) are
-// monotonic, so raw int64 order is the same as decoded order. The key is computed when a morsel is
+// monotonic, so raw int64 order is the same as decoded order. A VARCHAR key uses the raw string
+// bound, compared as unsigned bytes like the sort. The key is computed when a morsel is
 // added, from its scan range, so morsels created later in the fragment executor are ordered too.
 //
 // Split pieces of one file share a scan range, so they get the same key and stay next to each
@@ -67,7 +68,7 @@ public:
 
 private:
     // rank 0: nulls lead (NULLS FIRST and the file has nulls) -> serve first;
-    // rank 1: has a numeric bound -> serve ordered by key;
+    // rank 1: has a bound -> serve ordered by key;
     // rank 2: no usable bound -> serve last.
     struct Entry {
         TopnScanPriority priority;

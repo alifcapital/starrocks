@@ -130,6 +130,15 @@ select id from ice_topn where id < 50 or id > 350 order by id asc limit 3;
 2
 3
 -- !result
+set enable_iceberg_topn_scan_pruning = false;
+-- result:
+-- !result
+select id from ice_topn order by s desc, id desc limit 3;
+-- result:
+403
+303
+203
+-- !result
 set enable_iceberg_topn_scan_pruning = true;
 -- result:
 -- !result
@@ -139,9 +148,93 @@ select id from ice_topn order by s desc, id desc limit 3;
 303
 203
 -- !result
+select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%MorselQueueType: priority_morsel_queue%';
+-- result:
+1
+-- !result
+select id from ice_topn order by s desc, id desc limit 3;
+-- result:
+403
+303
+203
+-- !result
+select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%TopnReorderNoBoundMorsels: 0%';
+-- result:
+1
+-- !result
+create table ice_topn_dbl (d double);
+-- result:
+-- !result
+insert into ice_topn_dbl values (1.5),(2.5);
+-- result:
+-- !result
+set enable_iceberg_topn_scan_pruning = true;
+-- result:
+-- !result
+select d from ice_topn_dbl order by d desc limit 1;
+-- result:
+2.5
+-- !result
 select count(*) > 0 from (select line from table(unnest(split(get_query_profile(last_query_id()),"\n"))) t(line)) v where v.line like '%MorselQueueType: dynamic_morsel_queue%';
 -- result:
 1
+-- !result
+drop table ice_topn_dbl force;
+-- result:
+-- !result
+create table ice_topn_str (id bigint, cs string);
+-- result:
+-- !result
+insert into ice_topn_str values (1,'2026-10-05 10:59:58'),(2,'2026-10-05 10:59:59');
+-- result:
+-- !result
+insert into ice_topn_str values (3,'2026-10-05 11:23:59'),(4,'2026-10-05 11:24:00');
+-- result:
+-- !result
+insert into ice_topn_str values (5,'2026-10-05 11:24:01'),(6,'2026-10-05 11:24:02');
+-- result:
+-- !result
+insert into ice_topn_str values (7,'2026-10-05 11:23:58😀'),(8,NULL);
+-- result:
+-- !result
+set enable_iceberg_topn_scan_pruning = false;
+-- result:
+-- !result
+select id from ice_topn_str order by cs desc, id desc limit 3;
+-- result:
+6
+5
+4
+-- !result
+set enable_iceberg_topn_scan_pruning = true;
+-- result:
+-- !result
+select id from ice_topn_str order by cs desc, id desc limit 3;
+-- result:
+6
+5
+4
+-- !result
+set enable_iceberg_topn_scan_pruning = false;
+-- result:
+-- !result
+select id from ice_topn_str order by cs asc, id asc limit 3;
+-- result:
+8
+1
+2
+-- !result
+set enable_iceberg_topn_scan_pruning = true;
+-- result:
+-- !result
+select id from ice_topn_str order by cs asc, id asc limit 3;
+-- result:
+8
+1
+2
+-- !result
+drop table ice_topn_str force;
+-- result:
 -- !result
 
 create table ice_topn_edges (a bigint, b bigint);

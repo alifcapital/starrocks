@@ -283,4 +283,12 @@ struct TExprMinMaxValue {
   5: optional i64 max_int_value
   6: optional double min_float_value
   7: optional double max_float_value
+
+  // Fields from 10000 belong to our fork. Upstream does not use this range, so new upstream fields do not collide with them.
+  // Raw Iceberg string bounds of a VARCHAR TopN reorder key, sent with type STRING_LITERAL. Iceberg may
+  // truncate them: the lower bound can be a prefix and the upper bound a prefix with its last character
+  // incremented. So they are not values of the column, and we use them only to order and skip files,
+  // never as an exact min/max.
+  10000: optional binary min_string_value
+  10001: optional binary max_string_value
 }
