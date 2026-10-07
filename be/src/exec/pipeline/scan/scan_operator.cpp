@@ -180,6 +180,15 @@ void ScanOperator::close(RuntimeState* state) {
         COUNTER_SET(no_bound_counter, _morsel_queue->reorder_no_bound_morsels());
     }
 
+    if (_topn_filter_back_pressure != nullptr) {
+        if (const int64_t wait_ns = _topn_filter_back_pressure->rf_wait_ns(); wait_ns >= 0) {
+            COUNTER_SET(ADD_TIMER(_unique_metrics, "TopnRfWaitTime"), wait_ns);
+        }
+        if (_topn_filter_back_pressure->wait_expired_before_rf()) {
+            COUNTER_SET(ADD_COUNTER(_unique_metrics, "TopnRfWaitExpired", TUnit::UNIT), static_cast<int64_t>(1));
+        }
+    }
+
     _merge_chunk_source_profiles(state);
 
     if (_bp_throttle_timer != nullptr) {
@@ -441,6 +450,11 @@ StatusOr<ChunkPtr> ScanOperator::pull_chunk(RuntimeState* state) {
     ChunkPtr res = get_chunk_from_buffer();
     if (res != nullptr) {
         begin_pull_chunk(res);
+        // We want the time bound of the wait to cover the IO-task clamp, which starts with the first
+        // rows, so we start the wait here.
+        if (_topn_filter_back_pressure != nullptr && _op_pull_rows > 0) {
+            _topn_filter_back_pressure->start_wait();
+        }
         // for query cache mechanism, we should emit EOS chunk when we receive the last chunk.
         auto [owner_id, is_eos] = _should_emit_eos(res);
         // The buffered chunk already contains the heavy-expression results, so deferred IN filters

@@ -14,6 +14,9 @@
 
 #include "exec/pipeline/scan/olap_scan_operator.h"
 
+#include <chrono>
+#include <thread>
+
 #include "exec/olap_scan_node.h"
 #include "exec/pipeline/fragment_context.h"
 #include "exec/pipeline/query_context.h"
@@ -125,6 +128,13 @@ TEST_F(OlapScanOperatorTest, topn_io_cap_controls_readiness) {
     op->_topn_filter_back_pressure->notify_rf_arrived();
     EXPECT_TRUE(op->ScanOperator::has_output());
     op->_topn_filter_back_pressure = std::make_unique<TopnRfBackPressure>(0.1, 100, 0, 8, 1024);
+    EXPECT_TRUE(op->ScanOperator::has_output());
+
+    // Too few rows to start a throttle round: the time bound of the wait releases the cap.
+    op->_topn_filter_back_pressure = std::make_unique<TopnRfBackPressure>(0.1, 100, 8, 8, 1024);
+    op->_topn_filter_back_pressure->start_wait();
+    EXPECT_FALSE(op->ScanOperator::has_output());
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
     EXPECT_TRUE(op->ScanOperator::has_output());
     op->_topn_filter_back_pressure.reset();
     EXPECT_TRUE(op->ScanOperator::has_output());
