@@ -30,12 +30,16 @@
 #include "common/object_pool.h"
 #include "exprs/cast_expr.h"
 #include "exprs/column_ref.h"
+#include "exprs/conditional_two_phase_stats.h"
 #include "exprs/expr.h"
+#include "exprs/expr_context.h"
 #include "exprs/literal.h"
 #include "exprs/selected_column.h"
+#include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "testutil/assert.h"
 #include "types/logical_type.h"
+#include "util/runtime_profile.h"
 
 namespace starrocks {
 
@@ -371,6 +375,97 @@ TEST_F(ConditionalTwoPhaseTest, predicate_routed_first_all_true_shortcut) {
                                                                       then_exprs, {1}, /*else=*/nullptr, false,
                                                                       /*shortcut=*/true));
     expect(result, [](int r) -> std::optional<int> { return r * 5; });
+}
+
+// IF(guard, then[expensive], else) on 97 rows, then the same IF with an all-true guard: the counters of the
+// RuntimeState show one routed call and one shortcut, and the profile gets them under ConditionalTwoPhase.
+TEST_F(ConditionalTwoPhaseTest, counters_for_two_phase_branch) {
+    ObjectPool pool;
+    RuntimeState state;
+    Chunk chunk;
+    chunk.append_column(make_bool([](int r) { return r % 3 == 0; }), 0);
+    chunk.append_column(make_int([](int r) { return r; }), 1);
+    chunk.append_column(make_int([](int r) { return -r - 1; }), 2);
+    chunk.append_column(make_bool([](int) { return true; }), 3);
+    Expr* then_expr = slot(pool, 1, /*expensive=*/true);
+    Expr* else_expr = slot(pool, 2, /*expensive=*/false);
+    ExprContext context(then_expr);
+    ASSERT_OK(context.prepare(&state));
+    const ConditionalTwoPhaseStats& stats = *state.conditional_two_phase_stats();
+
+    RuntimeProfile empty_profile("empty");
+    stats.update_profile(&empty_profile);
+    EXPECT_EQ(nullptr, empty_profile.get_counter("ConditionalTwoPhase"));
+    EXPECT_EQ(nullptr, empty_profile.get_counter("TwoPhaseCalls"));
+
+    SlotId guard_slot = 0;
+    auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return chunk.get_column_by_slot_id(guard_slot); };
+    ASSIGN_OR_ABORT(ColumnPtr routed, two_phase_eval_predicate_routed(&context, &chunk, int_type(), 1, guard_fn,
+                                                                      {then_expr}, {1}, else_expr, false, true));
+    expect(routed, [](int r) -> std::optional<int> { return r % 3 == 0 ? r : (-r - 1); });
+    EXPECT_EQ(1, stats.calls.load());
+    EXPECT_EQ(0, stats.all_true_shortcuts.load());
+    EXPECT_EQ(kRows, stats.input_rows.load());
+    EXPECT_EQ(33, stats.selected_rows.load()); // THEN gets the multiples of 3
+    EXPECT_EQ(kRows, stats.full_rows.load());  // ELSE is cheap and runs on the whole chunk
+    EXPECT_EQ(1, stats.subchunk_copies.load());
+    EXPECT_EQ(1, stats.subchunk_copied_columns.load()); // only slot 1, the THEN input
+    EXPECT_EQ(0, stats.subchunk_whole_chunk_copies.load());
+    EXPECT_EQ(static_cast<int64_t>(33 * sizeof(int32_t)), stats.subchunk_copied_bytes.load());
+    EXPECT_EQ(0, stats.lazy_provide_calls.load());
+    EXPECT_GT(stats.time_ns.load(), 0);
+    EXPECT_GE(stats.time_ns.load(), stats.assemble_time_ns.load());
+
+    guard_slot = 3;
+    ASSIGN_OR_ABORT(ColumnPtr direct, two_phase_eval_predicate_routed(&context, &chunk, int_type(), 1, guard_fn,
+                                                                      {then_expr}, {1}, else_expr, false, true));
+    expect(direct, [](int r) -> std::optional<int> { return r; });
+    EXPECT_EQ(1, stats.calls.load());
+    EXPECT_EQ(1, stats.all_true_shortcuts.load());
+    EXPECT_EQ(2 * kRows, stats.input_rows.load());
+    EXPECT_EQ(33, stats.selected_rows.load());
+    EXPECT_EQ(2 * kRows, stats.full_rows.load());
+    EXPECT_EQ(1, stats.subchunk_copies.load());
+
+    RuntimeProfile profile("instance");
+    stats.update_profile(&profile);
+    ASSERT_NE(nullptr, profile.get_counter("ConditionalTwoPhase"));
+    ASSERT_NE(nullptr, profile.get_counter("TwoPhaseCalls"));
+    EXPECT_EQ(1, profile.get_counter("TwoPhaseCalls")->value());
+    EXPECT_EQ(1, profile.get_counter("TwoPhaseAllTrueShortcut")->value());
+    EXPECT_EQ(2 * kRows, profile.get_counter("TwoPhaseInputRows")->value());
+    EXPECT_EQ(33, profile.get_counter("TwoPhaseSelectedRows")->value());
+    EXPECT_EQ(1, profile.get_counter("TwoPhaseSubchunkCopies")->value());
+    EXPECT_EQ(TUnit::TIME_NS, profile.get_counter("TwoPhaseTime")->type());
+
+    // Without a RuntimeState nothing is counted.
+    ASSIGN_OR_ABORT(ColumnPtr uncounted, two_phase_eval_predicate_routed(nullptr, &chunk, int_type(), 1, guard_fn,
+                                                                         {then_expr}, {1}, else_expr, false, true));
+    expect(uncounted, [](int r) -> std::optional<int> { return r; });
+    EXPECT_EQ(1, stats.all_true_shortcuts.load());
+    EXPECT_EQ(2 * kRows, stats.input_rows.load());
+}
+
+// COALESCE(arg0, arg1[expensive]): arg0 is evaluated full, arg1 only on the rows where arg0 is NULL.
+TEST_F(ConditionalTwoPhaseTest, counters_for_null_routed) {
+    ObjectPool pool;
+    RuntimeState state;
+    Chunk chunk;
+    chunk.append_column(make_nullable_int([](int r) { return r % 5 != 0; }, [](int r) { return r; }), 0);
+    chunk.append_column(make_int([](int r) { return r * 7; }), 1);
+    chunk.append_column(make_int([](int r) { return r; }), 2);
+    std::vector<Expr*> arg_exprs = {slot(pool, 0, false), slot(pool, 1, true)};
+    ExprContext context(arg_exprs[1]);
+    ASSERT_OK(context.prepare(&state));
+    ASSIGN_OR_ABORT(ColumnPtr result, two_phase_eval_null_routed(&context, &chunk, int_type(), arg_exprs, {0, 1}));
+    expect(result, [](int r) -> std::optional<int> { return r % 5 == 0 ? r : (r * 7); });
+    const ConditionalTwoPhaseStats& stats = *state.conditional_two_phase_stats();
+    EXPECT_EQ(1, stats.calls.load());
+    EXPECT_EQ(kRows, stats.input_rows.load());
+    EXPECT_EQ(kRows, stats.full_rows.load());
+    EXPECT_EQ(77, stats.selected_rows.load()); // rows that are not multiples of 5
+    EXPECT_EQ(1, stats.subchunk_copies.load());
+    EXPECT_EQ(1, stats.subchunk_copied_columns.load());
 }
 
 // Randomized differential: random guard patterns / values / expensive flags, compared to a closed-form
@@ -717,6 +812,28 @@ TEST_F(ConditionalTwoPhaseLazyColumnTest, branch_reads_lazy_and_present_slots) {
     EXPECT_EQ(0, provider.calls.count(5));
     EXPECT_EQ(4, chunk.num_columns());
     EXPECT_EQ(kRows, chunk.num_rows());
+}
+
+// A lazy slot read for the routed rows is counted once per copy, a cache hit is not counted again.
+TEST_F(ConditionalTwoPhaseLazyColumnTest, counters_for_lazy_slot) {
+    RuntimeState state;
+    SumExpr value;
+    value.add_child(ref(1));
+    value.add_child(ref(1));
+    value.add_child(ref(4));
+    ExprContext context(&value);
+    ASSERT_OK(context.prepare(&state));
+    auto guard = chunk.get_column_by_slot_id(0);
+    auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return guard; };
+    ASSIGN_OR_ABORT(auto result, two_phase_eval_predicate_routed(&context, &chunk, int_type(), 1, guard_fn, {&value},
+                                                                 {1}, slot(pool, 2, false), false, true));
+    expect(result, [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 6 + r * 100 : (-r - 1); });
+    const ConditionalTwoPhaseStats& stats = *state.conditional_two_phase_stats();
+    EXPECT_EQ(1, stats.subchunk_copies.load());
+    EXPECT_EQ(1, stats.subchunk_copied_columns.load()); // slot 4; slot 1 comes from the provider
+    EXPECT_EQ(0, stats.subchunk_whole_chunk_copies.load());
+    EXPECT_EQ(1, stats.lazy_provide_calls.load());
+    EXPECT_EQ(33, stats.lazy_provide_rows.load());
 }
 
 // The branch reads only a lazy slot, so the copy keeps the whole chunk to carry the row count.

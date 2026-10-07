@@ -106,6 +106,9 @@ public:
 
     Expr* root() { return _root; }
 
+    // nullptr when the context was not prepared with a RuntimeState.
+    RuntimeState* runtime_state() const { return _runtime_state; }
+
     bool closed() { return _closed; }
 
     bool opened() { return _opened; }

@@ -50,6 +50,7 @@
 #include "common/global_types.h"
 #include "common/object_pool.h"
 #include "exec/pipeline/pipeline_fwd.h"
+#include "exprs/conditional_two_phase_stats.h"
 #include "gen_cpp/FrontendService.h"
 #include "gen_cpp/InternalService_types.h" // for TQueryOptions
 #include "gen_cpp/Types_types.h"           // for TUniqueId
@@ -316,6 +317,8 @@ public:
     void update_load_datacache_metrics(TReportExecStatusParams* load_params) const;
 
     std::atomic_int64_t* mutable_total_spill_bytes();
+
+    ConditionalTwoPhaseStats* conditional_two_phase_stats() { return &_conditional_two_phase_stats; }
 
     void set_per_fragment_instance_idx(int idx) { _per_fragment_instance_idx = idx; }
 
@@ -710,6 +713,8 @@ private:
 
     std::atomic<int64_t> _num_print_error_rows{0};
     std::atomic<int64_t> _num_log_rejected_rows{0}; // rejected rows
+
+    ConditionalTwoPhaseStats _conditional_two_phase_stats;
 
     std::vector<std::string> _export_output_files;
 
