@@ -222,7 +222,8 @@ TEST_F(SelectedCollectionFunctionsTest, MapFiltersAndJsonNullKeyScope) {
     std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
     for (bool selected_null_key : {false, true}) {
         auto keys = strings({"a", "b", nullptr, "d", selected_null_key ? nullptr : "e"});
-        auto vals = strings({"v0", "v1", "bad-unselected", "v3", "v4"});
+        // MapColumn requires nullable keys and values.
+        auto vals = ColumnHelper::cast_to_nullable_column(strings({"v0", "v1", "bad-unselected", "v3", "v4"}));
         auto offsets = UInt32Column::create();
         for (uint32_t i = 0; i <= 5; ++i) offsets->append(i);
         auto maps = MapColumn::create(std::move(*keys).mutate(), std::move(*vals).mutate(), std::move(offsets));
