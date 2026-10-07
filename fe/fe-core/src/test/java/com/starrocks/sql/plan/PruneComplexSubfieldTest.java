@@ -103,6 +103,16 @@ public class PruneComplexSubfieldTest extends PlanTestNoneDBBase {
                 "\"in_memory\" = \"false\",\n" +
                 "\"storage_format\" = \"DEFAULT\"\n" +
                 ");");
+        starRocksAssert.withTable("CREATE TABLE `jsv0` (\n" +
+                "  `v1` bigint NULL, \n" +
+                "  `j1` JSON NULL, \n" +
+                "  `s1` STRING NULL \n" +
+                ") ENGINE=OLAP\n" +
+                "DUPLICATE KEY(`v1`)\n" +
+                "DISTRIBUTED BY HASH(`v1`) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\"\n" +
+                ");");
         starRocksAssert.withTable("CREATE TABLE IF NOT EXISTS t1(\n" +
                 "    tenant_id BIGINT NOT NULL,\n" +
                 "    id BIGINT NOT NULL,\n" +
@@ -1299,6 +1309,28 @@ public class PruneComplexSubfieldTest extends PlanTestNoneDBBase {
                     "  |  7 <-> json_query[(parse_json[([5: c1, VARCHAR, true]); args: VARCHAR; result: JSON; " +
                     "args nullable: true; result nullable: true], '$.a.b');");
             assertContains(noFirePlan, "4:HASH JOIN");
+        } finally {
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(oldFusion);
+        }
+    }
+
+    @Test
+    public void testJsonFusionOverCastKeepsStringExtraction() throws Exception {
+        boolean oldFusion = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+        try {
+            // We read j1 -> '$.c' so that PruneSubfieldRule rewrites the scan and the predicate on s1 goes through
+            // NormalizeCastJsonExpr.
+            String sql = "select j1 -> '$.c' from jsv0 where cast(cast(s1 as json) -> '$.a' -> '$.b' as varchar) = 'x'";
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "json_query_from_string(3: s1, '$.a.b')");
+            assertNotContains(plan, "get_json_string(", "AS JSON");
+            assertContains(getVerboseExplain(sql), "ColumnAccessPath: [/j1/c(json)]");
+
+            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            plan = getFragmentPlan(sql);
+            assertContains(plan, "get_json_string(CAST(3: s1 AS JSON), '$.a.b')");
+            assertNotContains(plan, "json_query_from_string");
         } finally {
             connectContext.getSessionVariable().setEnableJsonExtractFusion(oldFusion);
         }
