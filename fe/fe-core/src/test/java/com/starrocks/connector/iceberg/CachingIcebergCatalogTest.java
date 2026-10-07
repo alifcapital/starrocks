@@ -145,6 +145,9 @@ public class CachingIcebergCatalogTest {
             Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
             IcebergTableName key = new IcebergTableName("db", "tbl");
             tables.put(key, oldTable);
+            // Only a table that clients query is warmed.
+            Map<IcebergTableName, Long> access = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+            access.put(key, System.currentTimeMillis());
             Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
                     .thenReturn(unchanged, changedMetadata);
             Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
@@ -183,6 +186,9 @@ public class CachingIcebergCatalogTest {
                         sameMetadata ? "old.json" : "new.json");
                 Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
                 tables.put(new IcebergTableName("db", "tbl"), oldTable);
+                // Only a table that clients query is warmed.
+                Map<IcebergTableName, Long> access = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+                access.put(new IcebergTableName("db", "tbl"), System.currentTimeMillis());
                 Cache<IcebergTableName, Map<String, Partition>> partitions =
                         Deencapsulation.getField(catalog, "partitionCache");
                 IcebergTableName staleKey = new IcebergTableName("db", "tbl", 99L);

@@ -66,7 +66,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -516,6 +515,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
     }
 
+    // A table is active while clients query it (see isActive()); a refresh is not client activity. The loader
+    // and the background pass refresh the cached tables, and only an active table has queries to serve, so
+    // only an active table is warmed. A new snapshot of it is warmed in two halves before its queries come:
+    // the data file entries with their column statistics go into dataFileCache, so planning reads no
+    // manifests, and the Parquet footers go into the BE cache, so the scan reads no footers. With the
+    // snapshot unchanged, a refresh only refills the manifest entries the cache dropped and extends the ones
+    // it holds; warming the footers of every active table on every pass would cost a scan of each table.
     private void refreshTableUnderLock(String dbName, String tableName, ConnectContext ctx,
                                        ExecutorService executorService, boolean checkMetadata) {
         IcebergTableName icebergTableName = new IcebergTableName(dbName, tableName);
@@ -523,15 +529,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         if (cachedTable == null) {
             discoverySchemas.invalidate(icebergTableName);
             invalidatePartitionCache(dbName, tableName);
-            // Cold-start path: table wasn't cached yet (first refresh after FE restart).
-            // Trigger footer warmup here too so the first user query doesn't pay S3 for the
-            // footer. Skips internally if the session var is off.
-            IcebergMetadataRefreshFooterPrefetcher.warmup(
-                    catalogName, dbName, tableName, ctx, footerPrefetchOrchestratorExecutor);
         } else {
             BaseTable currentTable = (BaseTable) cachedTable;
+            boolean active = isActive(icebergTableName, System.currentTimeMillis());
             if (!checkMetadata) {
-                warmCurrentSnapshot(currentTable, dbName, tableName, executorService);
+                if (active) {
+                    warmCurrentSnapshot(currentTable, dbName, tableName, executorService);
+                }
                 return;
             }
             BaseTable updateTable = (BaseTable) delegate.getTable(ctx, dbName, tableName);
@@ -563,9 +567,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             if (!currentLocation.equals(updateLocation)) {
                 LOG.info("Refresh iceberg caching catalog table {}.{} from {} to {}",
                         dbName, tableName, currentLocation, updateLocation);
-                refreshTable(currentTable, updateTable, dbName, tableName, ctx, executorService);
-                IcebergMetadataRefreshFooterPrefetcher.warmup(
-                        catalogName, dbName, tableName, ctx, footerPrefetchOrchestratorExecutor);
+                refreshTable(updateTable, dbName, tableName, executorService, active);
+                if (active) {
+                    warmFooters(dbName, tableName, ctx);
+                }
                 LOG.info("Finished to refresh iceberg table {}.{}", dbName, tableName);
             } else {
                 // Glue uses catalog-configured credentials (including refreshing AWS providers), not
@@ -573,7 +578,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 // Other catalogs retain the reload path, needed for REST vended credential renewal.
                 BaseTable retainedTable = getIcebergCatalogType() == IcebergCatalogType.GLUE_CATALOG
                         ? currentTable : updateTable;
-                warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
+                if (active) {
+                    warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
+                }
                 tables.put(icebergTableName, retainedTable);
                 updateDiscoverySchemaIfPresent(icebergTableName, retainedTable);
                 invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
@@ -582,13 +589,22 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
     }
 
-    private void refreshTable(BaseTable currentTable, BaseTable updatedTable,
-                              String dbName, String tableName, ConnectContext ctx, ExecutorService executorService) {
+    // The footer warmup is a CACHE SELECT that takes the table from the cache like a query does, so it
+    // runs after the table to warm is the cached one.
+    private void warmFooters(String dbName, String tableName, ConnectContext ctx) {
+        IcebergMetadataRefreshFooterPrefetcher.warmup(
+                catalogName, dbName, tableName, ctx, footerPrefetchOrchestratorExecutor);
+    }
+
+    private void refreshTable(BaseTable updatedTable, String dbName, String tableName,
+                              ExecutorService executorService, boolean warm) {
         IcebergTableName keyWithoutSnap = new IcebergTableName(dbName, tableName);
         Snapshot updated = updatedTable.currentSnapshot();
 
         // Readers keep the previous, warm snapshot until all metadata for the candidate is ready.
-        warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
+        if (warm) {
+            warmCurrentSnapshot(updatedTable, dbName, tableName, executorService);
+        }
         tables.put(keyWithoutSnap, updatedTable);
         updateDiscoverySchemaIfPresent(keyWithoutSnap, updatedTable);
         invalidateOldPartitionSnapshots(dbName, tableName, updated);
@@ -609,21 +625,20 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         // A stable table can lose partition/manifest entries to TTL or memory pressure too.
         IcebergTableName snapshotKey = new IcebergTableName(dbName, tableName, snapshot.snapshotId());
         // The candidate is intentionally not in the public table cache yet.
-        partitionCache.get(snapshotKey, key -> loadPartitions(table, key));
+        Map<String, Partition> partitions = partitionCache.get(snapshotKey, key -> loadPartitions(table, key));
+        // These caches expire entries a fixed time after the write, while the table stays in use. Writing a
+        // held entry again extends it, so a table in use does not lose its entries to the TTL.
+        if (partitions != null) {
+            partitionCache.put(snapshotKey, partitions);
+        }
         // Each cache has its own budget: disabling data caching must not disable delete warmup.
         // Manifest files are immutable; refill missing/incomplete entries even on stable snapshots.
         List<ManifestFile> manifestFiles = dataFileCache != null &&
                 icebergProperties.getIcebergDataFileCacheMemoryUsageRatio() > 0
-                ? snapshot.dataManifests(table.io()).stream()
-                        .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
-                                f, dataFileCache.getIfPresent(f.path())))
-                        .collect(Collectors.toList()) : Collections.emptyList();
+                ? missingOrExtend(snapshot.dataManifests(table.io()), dataFileCache) : Collections.emptyList();
         List<ManifestFile> deleteManifests = deleteFileCache != null &&
                 icebergProperties.getIcebergDeleteFileCacheMemoryUsageRatio() > 0
-                ? snapshot.deleteManifests(table.io()).stream()
-                        .filter(f -> !StarRocksIcebergTableScan.isCompleteCachedFiles(
-                                f, deleteFileCache.getIfPresent(f.path())))
-                        .collect(Collectors.toList()) : Collections.emptyList();
+                ? missingOrExtend(snapshot.deleteManifests(table.io()), deleteFileCache) : Collections.emptyList();
         if (manifestFiles.isEmpty() && deleteManifests.isEmpty()) {
             return;
         }
@@ -640,17 +655,38 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 manifestFiles.size(), deleteManifests.size(), dbName, tableName);
     }
 
+    // Returns the manifests without a complete entry in the cache, and writes every complete entry again to
+    // extend it.
+    private static <F> List<ManifestFile> missingOrExtend(List<ManifestFile> manifests,
+                                                           Cache<String, Set<F>> cache) {
+        List<ManifestFile> missing = new ArrayList<>();
+        for (ManifestFile manifest : manifests) {
+            Set<F> cached = cache.getIfPresent(manifest.path());
+            if (StarRocksIcebergTableScan.isCompleteCachedFiles(manifest, cached)) {
+                cache.put(manifest.path(), cached);
+            } else {
+                missing.add(manifest);
+            }
+        }
+        return missing;
+    }
+
+    // A table is active while a client query has scanned it within the table cache TTL.
+    private boolean isActive(IcebergTableName key, long now) {
+        Long latestAccessTime = tableLatestAccessTime.get(key);
+        return latestAccessTime != null &&
+                (now - latestAccessTime) / 1000 <= icebergProperties.getIcebergTableCacheTtlSec();
+    }
+
     // dispatched every background_refresh_metadata_interval_millis
     public void refreshCatalog() {
         List<IcebergTableName> identifiers = Lists.newArrayList(tables.asMap().keySet());
-        long tableTtlSec = icebergProperties.getIcebergTableCacheTtlSec();
         long metaTtlSec = icebergProperties.getIcebergMetaCacheTtlSec();
         long now = System.currentTimeMillis();
         for (IcebergTableName identifier : identifiers) {
             try {
-                Long latestAccessTime = tableLatestAccessTime.get(identifier);
                 // drop entries that haven't been used within the table cache TTL window
-                if (latestAccessTime == null || (now - latestAccessTime) / 1000 > tableTtlSec) {
+                if (!isActive(identifier, now)) {
                     // Discovery has its own access lifetime; retiring a data scan must not evict it.
                     synchronized (tableRefreshLock(identifier.dbName, identifier.tableName)) {
                         invalidateCacheUnderLock(identifier, false);
@@ -692,11 +728,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     public List<IcebergCachedTableInfo> getCachedTablesInfo() {
         List<IcebergCachedTableInfo> result = Lists.newArrayList();
         long now = System.currentTimeMillis();
-        long tableTtlSec = icebergProperties.getIcebergTableCacheTtlSec();
         for (Map.Entry<IcebergTableName, Table> entry : tables.asMap().entrySet()) {
             IcebergTableName identifier = entry.getKey();
-            Long latestAccessTime = tableLatestAccessTime.get(identifier);
-            if (latestAccessTime == null || (now - latestAccessTime) / 1000 > tableTtlSec) {
+            if (!isActive(identifier, now)) {
                 continue;
             }
             Snapshot snapshot = entry.getValue().currentSnapshot();
@@ -704,7 +738,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                     identifier.dbName,
                     identifier.tableName,
                     snapshot == null ? null : snapshot.snapshotId(),
-                    latestAccessTime,
+                    tableLatestAccessTime.get(identifier),
                     tableLatestRefreshTime.get(identifier),
                     tableLatestSnapshotTime.get(identifier)
             ));

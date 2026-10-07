@@ -180,6 +180,10 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
         Cache<CachingIcebergCatalog.IcebergTableName, Table> tables =
                 Deencapsulation.getField(catalog, "tables");
         tables.put(new CachingIcebergCatalog.IcebergTableName("db", "table"), oldTable);
+        // Only a table that clients query is warmed.
+        Map<CachingIcebergCatalog.IcebergTableName, Long> access =
+                Deencapsulation.getField(catalog, "tableLatestAccessTime");
+        access.put(new CachingIcebergCatalog.IcebergTableName("db", "table"), System.currentTimeMillis());
         LoadingCache<CachingIcebergCatalog.IcebergTableName, Map<String, Partition>> partitions =
                 Deencapsulation.getField(catalog, "partitionCache");
         partitions.put(new CachingIcebergCatalog.IcebergTableName("db", "table", 2), Collections.emptyMap());
