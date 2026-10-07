@@ -1896,6 +1896,44 @@ public class IcebergMetadataTest extends TableTestBase {
                 "Expected encryption error, got: " + ex.getMessage());
     }
 
+    // With column statistics on and no ANALYZE, the optimizer lists the files with their statistics. The scan of
+    // the same query reads file bounds (TopN reorder, MIN/MAX from metadata) from that list, so the statistics
+    // stay in it, and a scan that needs no statistics reuses the list instead of listing the files again.
+    @Test
+    public void testColumnStatisticsListingServesTheScan() throws Exception {
+        IcebergMetadata metadata = newStatsMetadata();
+        mockedNativeTableB.newFastAppend().appendFile(FILE_B_3).commit();
+        mockedNativeTableB.refresh();
+        IcebergTable icebergTable = new IcebergTable(1, "srTableName", CATALOG_NAME, "resource_name", "db_name",
+                "table_name", "", Lists.newArrayList(), mockedNativeTableB, Maps.newHashMap());
+        Map<ColumnRefOperator, Column> colRefToColumnMetaMap = new HashMap<>();
+        colRefToColumnMetaMap.put(new ColumnRefOperator(1, IntegerType.INT, "k1", true),
+                new Column("k1", IntegerType.INT));
+        OptimizerContext context = OptimizerFactory.mockContext(new ColumnRefFactory());
+        context.getSessionVariable().setEnableIcebergColumnStatistics(true);
+        TvrVersionRange versionRange = TvrTableSnapshot.of(Optional.of(
+                mockedNativeTableB.currentSnapshot().snapshotId()));
+        metadata.getTableStatistics(context, icebergTable, colRefToColumnMetaMap, null, null, -1, versionRange);
+
+        for (boolean enableColumnStats : List.of(true, false)) {
+            GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder()
+                    .setTableVersionRange(versionRange)
+                    .setEnableColumnStats(enableColumnStats)
+                    .build();
+            List<RemoteFileInfo> files = metadata.getRemoteFiles(icebergTable, params);
+            Assertions.assertEquals(1, files.size());
+            DataFile file = ((IcebergRemoteFileInfo) files.get(0)).getFileScanTask().file();
+            Assertions.assertNotNull(file.lowerBounds(), "enableColumnStats=" + enableColumnStats);
+            Assertions.assertNotNull(file.upperBounds(), "enableColumnStats=" + enableColumnStats);
+            Assertions.assertNotNull(file.nullValueCounts(), "enableColumnStats=" + enableColumnStats);
+            Assertions.assertNotNull(file.valueCounts(), "enableColumnStats=" + enableColumnStats);
+        }
+        // Both requests took the one listing of the optimizer.
+        java.lang.reflect.Field splitTasksField = IcebergMetadata.class.getDeclaredField("splitTasks");
+        splitTasksField.setAccessible(true);
+        Assertions.assertEquals(1, ((Map<?, ?>) splitTasksField.get(metadata)).size());
+    }
+
     @Test
     public void testGetTableStatistics() {
         IcebergHiveCatalog icebergHiveCatalog = new IcebergHiveCatalog(CATALOG_NAME, new Configuration(), DEFAULT_CONFIG);

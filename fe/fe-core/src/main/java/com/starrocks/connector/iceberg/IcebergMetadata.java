@@ -1161,6 +1161,7 @@ public class IcebergMetadata implements ConnectorMetadata {
             return boundedTasks.stream().map(IcebergRemoteFileInfo::new).collect(Collectors.toList());
         }
 
+        key = splitTasksKey(dbName, tableName, params);
         triggerIcebergPlanFilesIfNeeded(key, table);
 
         List<FileScanTask> icebergScanTasks = splitTasks.get(key);
@@ -1664,7 +1665,7 @@ public class IcebergMetadata implements ConnectorMetadata {
 
         String dbName = table.getCatalogDBName();
         String tableName = table.getCatalogTableName();
-        PredicateSearchKey predicateSearchKey = PredicateSearchKey.of(dbName, tableName, params);
+        PredicateSearchKey predicateSearchKey = splitTasksKey(dbName, tableName, params);
         RemoteFileInfoSource baseSource;
         // Bounded-cost statistics scan (design 2.4): never read a cached split list (it may be a full,
         // non-budgeted list) - always build a fresh, budget-limited source below.
@@ -2620,14 +2621,31 @@ public class IcebergMetadata implements ConnectorMetadata {
         return !manifest.hasAddedFiles() && !manifest.hasExistingFiles() && !manifest.hasDeletedFiles();
     }
 
+    // A list of files planned with column statistics also serves a request without them, so a request without
+    // statistics takes its own entry if there is one, and otherwise the entry with statistics if there is one.
+    // A request with statistics never takes a list without them: the scan would lose the file bounds.
+    private PredicateSearchKey splitTasksKey(String dbName, String tableName, GetRemoteFilesParams params) {
+        PredicateSearchKey key = PredicateSearchKey.of(dbName, tableName, params);
+        if (params.isEnableColumnStats() || splitTasks.containsKey(key)) {
+            return key;
+        }
+        PredicateSearchKey withStats = PredicateSearchKey.of(dbName, tableName, GetRemoteFilesParams.newBuilder()
+                .setPredicate(params.getPredicate())
+                .setTableVersionRange(params.getTableVersionRange())
+                .setEnableColumnStats(true)
+                .build());
+        return splitTasks.containsKey(withStats) ? withStats : key;
+    }
+
     private IcebergSplitScanTask buildIcebergSplitScanTask(
             FileScanTask fileScanTask, Expression icebergPredicate, PredicateSearchKey filter) {
         long offset = fileScanTask.start();
         long length = fileScanTask.length();
-        DataFile dataFileWithoutStats = fileScanTask.file().copyWithoutStats();
-        DeleteFile[] deleteFiles = fileScanTask.deletes().stream()
-                .map(DeleteFile::copyWithoutStats)
-                .toArray(DeleteFile[]::new);
+        // The scan of this query reads file bounds (TopN reorder, MIN/MAX from metadata) from this list, so the
+        // column statistics stay. The files usually come from the catalog cache, which holds the same objects
+        // with the same statistics, so keeping them costs memory only on a cache miss.
+        DataFile dataFile = fileScanTask.file();
+        DeleteFile[] deleteFiles = fileScanTask.deletes().toArray(new DeleteFile[0]);
 
         PartitionSpec taskSpec = fileScanTask.spec();
         Schema taskSchema = fileScanTask.spec().schema();
@@ -2648,7 +2666,7 @@ public class IcebergMetadata implements ConnectorMetadata {
         ResidualEvaluator residualEvaluator = ResidualEvaluator.of(taskSpec, icebergPredicate, true);
 
         BaseFileScanTask baseFileScanTask = new BaseFileScanTask(
-                dataFileWithoutStats,
+                dataFile,
                 deleteFiles,
                 schemaString,
                 partitionString,
