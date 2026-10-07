@@ -399,6 +399,14 @@ pipeline::OpFactories TopNNode::decompose_to_pipeline(pipeline::PipelineBuilderC
 
     OpFactories operators_source_with_sort;
 
+    // A ROW_NUMBER TopN with a small limit keeps at most limit + offset rows in a heap, so it never needs to
+    // spill. The spillable sink always uses ChunksSorterTopn, which builds the TopN runtime filter only after
+    // it sorts a full batch of chunks. We fear a selective scan below that never fills a batch: the filter
+    // never arrives and the scan reads the whole table. So we use the non-spillable sink with the heap
+    // sorter, which publishes the filter as soon as it holds limit rows.
+    bool use_heap_sorter = !is_rank_topn_type && _limit >= 0 &&
+                           _limit + _offset <= static_cast<int64_t>(ChunksSorter::USE_HEAP_SORTER_LIMIT_SZ);
+
     if (is_partition_topn) {
         operators_source_with_sort =
                 _decompose_to_pipeline<LocalPartitionTopnContextFactory, LocalPartitionTopnSinkOperatorFactory,
@@ -406,7 +414,7 @@ pipeline::OpFactories TopNNode::decompose_to_pipeline(pipeline::PipelineBuilderC
                                                                                 is_partition_skewed, need_merge,
                                                                                 enable_parallel_merge, is_per_pipeline);
     } else {
-        if (runtime_state()->enable_spill() && runtime_state()->enable_sort_spill()) {
+        if (runtime_state()->enable_spill() && runtime_state()->enable_sort_spill() && !use_heap_sorter) {
             if (enable_parallel_merge) {
                 operators_source_with_sort =
                         _decompose_to_pipeline<SortContextFactory, SpillablePartitionSortSinkOperatorFactory,
