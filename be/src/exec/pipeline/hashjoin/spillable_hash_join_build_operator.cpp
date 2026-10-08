@@ -183,7 +183,11 @@ Status SpillableHashJoinBuildOperator::set_finishing(RuntimeState* state) {
     SpillProcessTasksBuilder task_builder(state);
     task_builder.then(flush_function).finally(set_call_back_function);
 
-    RETURN_IF_ERROR(_join_builder->spill_channel()->execute(task_builder));
+    // push_chunk spills on the driver thread, so a flush can be in flight here while the channel never
+    // queued a task. We fear that the final flush then picks partitions while that flush still writes them,
+    // so we always queue it: the pump runs it only after the in-flight flush completed.
+    RETURN_IF_ERROR(
+            _join_builder->spill_channel()->execute(task_builder, SpillProcessChannel::ExecuteMode::ALWAYS_QUEUE));
 
     return Status::OK();
 }

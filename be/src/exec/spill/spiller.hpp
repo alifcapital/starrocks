@@ -455,14 +455,18 @@ Status PartitionedSpillerWriter::flush_if_full(RuntimeState* state, MemGuard&& g
 
 template <class TaskExecutor, class MemGuard>
 Status PartitionedSpillerWriter::flush(RuntimeState* state, bool is_final_flush, MemGuard&& guard) {
-    std::vector<SpilledPartition*> splitting_partitions, spilling_partitions;
-    RETURN_IF_ERROR(_choose_partitions_to_flush(is_final_flush, splitting_partitions, spilling_partitions));
-    if (spilling_partitions.empty() && splitting_partitions.empty()) {
+    // An in-flight flush task splits and writes partitions, and choosing partitions to flush reads and marks
+    // the same partitions. We expect the caller to queue the final flush behind the in-flight one: the spill
+    // process pump runs a task only while the writer is not full. If it does not, we fear a race with the
+    // flush task, so we keep every partition as it is. Their rows stay in the mem-tables, which the readers
+    // read back.
+    if (is_final_flush && _running_flush_tasks > 0) {
         return Status::OK();
     }
 
-    if (is_final_flush && _running_flush_tasks > 0) {
-        _need_final_flush = true;
+    std::vector<SpilledPartition*> splitting_partitions, spilling_partitions;
+    RETURN_IF_ERROR(_choose_partitions_to_flush(is_final_flush, splitting_partitions, spilling_partitions));
+    if (spilling_partitions.empty() && splitting_partitions.empty()) {
         return Status::OK();
     }
 

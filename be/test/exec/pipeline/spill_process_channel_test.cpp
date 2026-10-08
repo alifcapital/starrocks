@@ -18,7 +18,9 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "exec/pipeline/context_with_dependency.h"
 #include "exec/pipeline/schedule/observer.h"
@@ -132,6 +134,68 @@ TEST_F(SpillProcessChannelTest, execute_working_enqueues_then_wakes_source) {
         ++drained;
     }
     ASSERT_EQ(drained, 3);
+}
+
+// execute() runs its tasks inline on a channel that never queued a task. ALWAYS_QUEUE queues them in that
+// case too, so that the pump runs them in order after the writer's in-flight flush completed, and wakes the
+// source list once.
+TEST_F(SpillProcessChannelTest, execute_always_queue_enqueues_on_idle_channel) {
+    SpillProcessChannel channel;
+    channel.set_spiller(_spiller);
+    ASSERT_FALSE(channel.is_working());
+
+    std::vector<std::string> order;
+    SpillProcessTasksBuilder builder(&_state);
+    builder.then([&](RuntimeState*) {
+        order.push_back("then");
+        return Status::OK();
+    });
+    builder.finally([&](RuntimeState*) {
+        order.push_back("finally");
+        return Status::OK();
+    });
+
+    int32_t source_before = _source_obs.source_count.load();
+    ASSERT_OK(channel.execute(builder, SpillProcessChannel::ExecuteMode::ALWAYS_QUEUE));
+
+    ASSERT_TRUE(order.empty());
+    ASSERT_TRUE(channel.is_working());
+    ASSERT_TRUE(channel.has_task());
+    ASSERT_TRUE(channel.is_finishing());
+    ASSERT_EQ(_source_obs.source_count.load(), source_before + 1);
+
+    while (channel.acquire_spill_task()) {
+        auto st = channel.current_task()();
+        ASSERT_TRUE(st.status().is_end_of_file());
+        channel.on_current_task_finished();
+    }
+    ASSERT_EQ(order, (std::vector<std::string>{"then", "finally"}));
+    ASSERT_TRUE(channel.is_finished());
+}
+
+// A closed channel has no pump any more. ALWAYS_QUEUE keeps the closed-channel behavior of execute(): only the
+// final task runs, inline, so that it releases what it holds.
+TEST_F(SpillProcessChannelTest, execute_always_queue_on_closed_channel_runs_final_task_inline) {
+    SpillProcessChannel channel;
+    channel.set_spiller(_spiller);
+    channel.close(&_state);
+
+    bool then_ran = false;
+    bool finally_ran = false;
+    SpillProcessTasksBuilder builder(&_state);
+    builder.then([&](RuntimeState*) {
+        then_ran = true;
+        return Status::OK();
+    });
+    builder.finally([&](RuntimeState*) {
+        finally_ran = true;
+        return Status::OK();
+    });
+
+    ASSERT_OK(channel.execute(builder, SpillProcessChannel::ExecuteMode::ALWAYS_QUEUE));
+    ASSERT_FALSE(then_ran);
+    ASSERT_TRUE(finally_ran);
+    ASSERT_FALSE(channel.has_task());
 }
 
 // A drained task drops the count and wakes the sink list (the writer blocks

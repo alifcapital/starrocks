@@ -164,7 +164,7 @@ void SpillProcessChannel::prepare_source(RuntimeState* state, pipeline::Pipeline
     }
 }
 
-Status SpillProcessChannel::execute(SpillProcessTasksBuilder& task_builder) {
+Status SpillProcessChannel::execute(SpillProcessTasksBuilder& task_builder, ExecuteMode mode) {
     Status res;
     std::shared_ptr<spill::Spiller> notify_spiller;
     {
@@ -176,7 +176,7 @@ Status SpillProcessChannel::execute(SpillProcessTasksBuilder& task_builder) {
             if (!st.status().is_ok_or_eof()) {
                 res = st.status();
             }
-        } else if (is_working()) {
+        } else if (mode == ExecuteMode::ALWAYS_QUEUE || is_working()) {
             // We already hold _mutex; call the *_locked mutators directly. Calling
             // the public add_*/add_last_task here would re-enter the non-reentrant
             // _mutex and deadlock. The single source notify fires once below, after
