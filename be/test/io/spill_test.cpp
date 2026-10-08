@@ -20,6 +20,7 @@
 #include <future>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -39,6 +40,8 @@
 #include "common/status.h"
 #include "common/statusor.h"
 #include "exec/pipeline/schedule/observer.h"
+#include "exec/pipeline/spill_process_channel.h"
+#include "exec/pipeline/spill_process_operator.h"
 #include "exec/sorting/merge.h"
 #include "exec/sorting/sorting.h"
 #include "exec/spill/executor.h"
@@ -1135,6 +1138,240 @@ TEST_F(SpillTest, restore_completion_keeps_spiller_until_notify_ends) {
     ASSERT_EQ(dropping_obs.source_count.load(), 1);
     ASSERT_GT(fx.source_obs.source_count.load(), source_before);
     ASSERT_TRUE(spiller_ref.expired());
+}
+
+// A partitioned spiller with 4 partitions (ids 4..7, picked by hash 0..3) in the state a hash join build reaches
+// after a push_chunk: the flush of partition 4 is in flight (its task is held in DeferredExecutor), and
+// partition 5 still holds its rows in a mem-table. The build spills on the driver thread, so no task was ever
+// queued in the spill channel.
+struct InflightFlushFixture {
+    static constexpr size_t kMemTableBytes = 512 * 1024;
+    static constexpr int32_t kFlushingPartition = 4;
+    static constexpr int32_t kMemoryPartition = 5;
+
+    struct PartitionState {
+        bool in_mem;
+        size_t mem_size;
+        size_t bytes;
+        bool is_spliting;
+        bool mem_table_done;
+        size_t mem_table_usage;
+        bool operator==(const PartitionState&) const = default;
+    };
+
+    InflightFlushFixture(SpillTest* test, ObjectPool* pool, RuntimeState* state) : _state(state) {
+        // The test has no split task, so it keeps the partitions below the level where they are split.
+        _saved_max_partition_level = config::spill_max_partition_level;
+        config::spill_max_partition_level = 2;
+
+        TExprBuilder tuple_slots_builder;
+        tuple_slots_builder << TYPE_INT;
+        tuple_slots = tuple_slots_builder.get_res();
+        CHECK(Expr::create_expr_trees(pool, tuple_slots, &tuple, state).ok());
+
+        SpilledOptions spill_options(4);
+        spill_options.mem_table_pool_size = 1;
+        spill_options.spill_mem_table_bytes_size = kMemTableBytes;
+        spill_options.spill_type = spill::SpillFormaterType::SPILL_BY_COLUMN;
+        spill_options.block_manager = test->dummy_block_mgr.get();
+        spiller = spill::make_spilled_factory()->create(spill_options);
+        spiller->set_metrics(test->metrics);
+        CHECK(spiller->prepare(state).ok());
+        writer = spiller->_writer->as<spill::PartitionedSpillerWriter*>();
+
+        state->set_enable_event_scheduler(true);
+        spiller->observable().subscribe_sink(state, &sink_obs);
+        spiller->observable().subscribe_source(state, &source_obs);
+    }
+
+    ~InflightFlushFixture() { config::spill_max_partition_level = _saved_max_partition_level; }
+
+    spill::SpilledPartition* partition(int32_t id) { return writer->_id_to_partitions.at(id); }
+
+    // Appends one chunk whose rows all hash to `hash`.
+    template <class Executor>
+    Status spill_chunk(uint32_t hash) {
+        auto chunk = chunk_builder.gen(tuple, nullables);
+        auto hash_column = spill::SpillHashColumn::create(chunk->num_rows());
+        auto& hashes = hash_column->get_data();
+        std::fill(hashes.begin(), hashes.end(), hash);
+        chunk->append_column(std::move(hash_column), -1);
+        return spiller->spill<Executor>(_state, chunk, EmptyMemGuard{});
+    }
+
+    void start_inflight_flush() {
+        ASSERT_OK(spill_chunk<DeferredExecutor>(kMemoryPartition - kFlushingPartition));
+        // Partition 4 grows until the total passes the mem-table size. The flush then takes partition 4, which
+        // is the largest, and leaves partition 5.
+        for (int i = 0; i < 64 && !spiller->is_full(); ++i) {
+            ASSERT_OK(spill_chunk<DeferredExecutor>(0));
+        }
+        ASSERT_TRUE(spiller->is_full());
+        ASSERT_EQ(DeferredExecutor::tasks.size(), 1);
+        ASSERT_EQ(writer->running_flush_tasks(), 1);
+        ASSERT_FALSE(partition(kFlushingPartition)->in_mem);
+        ASSERT_TRUE(partition(kMemoryPartition)->in_mem);
+        ASSERT_FALSE(partition(kMemoryPartition)->spill_writer->mem_table()->is_empty());
+
+        // The final flush keeps a partition in memory while the bytes it has spilled so far stay under the
+        // mem-table size. We make partition 5 look like one that spilled more, so that the final flush has a
+        // partition to choose.
+        partition(kMemoryPartition)->bytes = kMemTableBytes + 1;
+    }
+
+    std::map<int32_t, PartitionState> snapshot() {
+        std::map<int32_t, PartitionState> res;
+        for (const auto& [id, p] : writer->_id_to_partitions) {
+            const auto& mem_table = p->spill_writer->mem_table();
+            res[id] = {p->in_mem, p->mem_size, p->bytes, p->is_spliting, mem_table->is_done(), mem_table->mem_usage()};
+        }
+        return res;
+    }
+
+    // A partition that is not in memory must not keep rows in its mem-table: the probe counts only the
+    // spilled bytes of such a partition when it decides how many partitions to load at once.
+    void expect_flushed_partitions_are_empty() {
+        for (const auto& [id, p] : writer->_id_to_partitions) {
+            if (!p->in_mem) {
+                EXPECT_TRUE(p->spill_writer->mem_table()->is_empty()) << p->debug_string();
+            }
+        }
+    }
+
+    // Reads every partition back the way the probe loads the build side.
+    size_t read_back_rows() {
+        std::vector<const SpillPartitionInfo*> partitions;
+        spiller->get_all_partitions(&partitions);
+        auto readers = spiller->get_partition_spill_readers(partitions);
+        size_t rows = 0;
+        for (auto& reader : readers) {
+            bool eof = false;
+            for (int i = 0; i < 10000 && !eof; ++i) {
+                CHECK(reader->trigger_restore<SyncExecutor>(_state, EmptyMemGuard{}).ok());
+                auto chunk_st = reader->restore<SyncExecutor>(_state, EmptyMemGuard{});
+                if (chunk_st.status().is_end_of_file()) {
+                    eof = true;
+                } else {
+                    CHECK(chunk_st.ok()) << chunk_st.status().to_string();
+                    rows += chunk_st.value()->num_rows();
+                }
+            }
+            CHECK(eof);
+        }
+        return rows;
+    }
+
+    RuntimeState* _state;
+    int32_t _saved_max_partition_level = 0;
+    std::vector<TExpr> tuple_slots;
+    std::vector<ExprContext*> tuple;
+    std::vector<bool> nullables = {false};
+    RandomChunkBuilder chunk_builder;
+    std::shared_ptr<spill::Spiller> spiller;
+    spill::PartitionedSpillerWriter* writer = nullptr;
+    CountingObserver sink_obs;
+    CountingObserver source_obs;
+};
+
+// The final flush chooses partitions and marks them, while a flush task that is still in flight splits and
+// writes partitions. We expect the final flush to start only after that task completed. If it starts earlier,
+// we fear a race with the task, so the writer keeps every partition as it was and returns OK: nothing is
+// chosen, marked or submitted, and the rows stay in the mem-tables.
+TEST_F(SpillTest, partitioned_final_flush_leaves_partitions_while_a_flush_is_in_flight) {
+    ObjectPool pool;
+    InflightFlushFixture fx(this, &pool, &dummy_rt_st);
+    ASSERT_NO_FATAL_FAILURE(fx.start_inflight_flush());
+    auto before = fx.snapshot();
+
+    ASSERT_OK(fx.spiller->flush<DeferredExecutor>(&dummy_rt_st, EmptyMemGuard{}));
+    ASSERT_EQ(fx.snapshot(), before);
+    ASSERT_EQ(DeferredExecutor::tasks.size(), 1);
+    ASSERT_EQ(fx.writer->running_flush_tasks(), 1);
+
+    // Once the in-flight flush completed, the same call writes the partition it chooses.
+    DeferredExecutor::run_all();
+    ASSERT_FALSE(fx.spiller->is_full());
+    ASSERT_OK(fx.spiller->flush<DeferredExecutor>(&dummy_rt_st, EmptyMemGuard{}));
+    ASSERT_EQ(DeferredExecutor::tasks.size(), 1);
+    ASSERT_FALSE(fx.partition(InflightFlushFixture::kMemoryPartition)->in_mem);
+    DeferredExecutor::run_all();
+
+    ASSERT_OK(fx.spiller->task_status());
+    ASSERT_FALSE(fx.spiller->is_full());
+    fx.expect_flushed_partitions_are_empty();
+    ASSERT_EQ(fx.read_back_rows(), fx.spiller->spilled_append_rows());
+}
+
+// The hash join build finishes with a flush in flight and an idle spill channel. Its set_finishing queues the
+// final flush and the flush-all callback with ExecuteMode::ALWAYS_QUEUE. We expect the pump to hold them while
+// the writer is full, to run the final flush only after the in-flight flush completed, and to flush the
+// partition the final flush chooses, so that every row is read back and no partition outside memory keeps rows
+// in a mem-table.
+TEST_F(SpillTest, queued_final_flush_runs_after_the_inflight_flush) {
+    ObjectPool pool;
+    InflightFlushFixture fx(this, &pool, &dummy_rt_st);
+    ASSERT_NO_FATAL_FAILURE(fx.start_inflight_flush());
+
+    auto channels = std::make_shared<SpillProcessChannelFactory>(1);
+    auto channel = channels->get_or_create(0);
+    channel->set_spiller(fx.spiller);
+    pipeline::SpillProcessOperatorFactory pump_factory(0, "spill_process", 1, channels);
+    auto pump = pump_factory.create(1, 0);
+    ASSERT_FALSE(channel->is_working());
+
+    int final_flush_calls = 0;
+    uint64_t running_flushes_at_final_flush = std::numeric_limits<uint64_t>::max();
+    bool flush_all_called = false;
+    auto flush_function = [&](RuntimeState* state) {
+        ++final_flush_calls;
+        running_flushes_at_final_flush = fx.writer->running_flush_tasks();
+        return fx.spiller->flush<DeferredExecutor>(state, EmptyMemGuard{});
+    };
+    auto set_call_back_function = [&](RuntimeState* state) {
+        return fx.spiller->set_flush_all_call_back<DeferredExecutor>(
+                [&]() {
+                    flush_all_called = true;
+                    return Status::OK();
+                },
+                state, EmptyMemGuard{});
+    };
+    SpillProcessTasksBuilder task_builder(&dummy_rt_st);
+    task_builder.then(flush_function).finally(set_call_back_function);
+    ASSERT_OK(channel->execute(task_builder, SpillProcessChannel::ExecuteMode::ALWAYS_QUEUE));
+
+    // Nothing ran on this thread, and the pump waits for the in-flight flush.
+    ASSERT_EQ(final_flush_calls, 0);
+    ASSERT_TRUE(channel->is_working());
+    ASSERT_TRUE(channel->has_task());
+    ASSERT_FALSE(pump->has_output());
+    ASSERT_EQ(DeferredExecutor::tasks.size(), 1);
+
+    // The completion of the in-flight flush wakes the pump.
+    int32_t source_before = fx.source_obs.source_count.load();
+    DeferredExecutor::run_all();
+    ASSERT_GT(fx.source_obs.source_count.load(), source_before);
+    ASSERT_EQ(final_flush_calls, 0);
+    ASSERT_TRUE(pump->has_output());
+
+    // The pump starts the final flush on an idle writer, and the flush-all callback waits for it.
+    ASSERT_OK(pump->pull_chunk(&dummy_rt_st).status());
+    ASSERT_EQ(final_flush_calls, 1);
+    ASSERT_EQ(running_flushes_at_final_flush, 0);
+    ASSERT_EQ(DeferredExecutor::tasks.size(), 1);
+    ASSERT_FALSE(fx.partition(InflightFlushFixture::kMemoryPartition)->in_mem);
+    ASSERT_FALSE(pump->has_output());
+    ASSERT_FALSE(flush_all_called);
+
+    DeferredExecutor::run_all();
+    ASSERT_TRUE(pump->has_output());
+    ASSERT_OK(pump->pull_chunk(&dummy_rt_st).status());
+    ASSERT_TRUE(flush_all_called);
+    ASSERT_TRUE(channel->is_finished());
+    ASSERT_TRUE(pump->is_finished());
+
+    ASSERT_OK(fx.spiller->task_status());
+    fx.expect_flushed_partitions_are_empty();
+    ASSERT_EQ(fx.read_back_rows(), fx.spiller->spilled_append_rows());
 }
 
 // reset_state must refuse while IO is in flight: swapping

@@ -161,7 +161,16 @@ public:
     // the pump's prepare(). Never infer ownership later from whether the context pointer is non-null.
     void set_guarded_context(pipeline::ContextWithDependency* context);
 
-    Status execute(SpillProcessTasksBuilder& task_builder);
+    enum class ExecuteMode {
+        // Run the tasks on the calling thread if no task was ever queued, otherwise queue them.
+        INLINE_IF_IDLE,
+        // Queue the tasks even if no task was ever queued. A producer that spills on its own thread can have a
+        // flush in flight while the channel is idle. We fear that running the final flush inline then races
+        // with that flush, so we queue it: the pump runs a task only when the writer is not full.
+        ALWAYS_QUEUE,
+    };
+
+    Status execute(SpillProcessTasksBuilder& task_builder, ExecuteMode mode = ExecuteMode::INLINE_IF_IDLE);
 
     void close(RuntimeState* state);
 
