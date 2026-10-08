@@ -376,8 +376,6 @@ private:
     int32_t _min_level = 0;
     int32_t _max_level = 0;
 
-    bool _need_final_flush = false;
-
     std::unique_ptr<MemTracker> _mem_tracker;
 
     // level to partition
