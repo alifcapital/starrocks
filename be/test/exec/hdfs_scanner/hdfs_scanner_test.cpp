@@ -2084,6 +2084,206 @@ TEST_F(HdfsScannerTest, TestOrcLazyLoad) {
     scanner->close();
 }
 
+// Builds "100 / (slot - divisor_shift) > 0". With error_for_division_by_zero the evaluation fails
+// as soon as one row has slot == divisor_shift.
+static ExprContext* create_division_conjunct(ObjectPool* pool, SlotDescriptor* slot_desc, int64_t divisor_shift) {
+    TExprNode gt_node;
+    gt_node.__set_node_type(TExprNodeType::BINARY_PRED);
+    gt_node.__set_child_type(TPrimitiveType::INT);
+    gt_node.__set_type(create_primitive_type_desc(TPrimitiveType::BOOLEAN));
+    gt_node.__set_opcode(TExprOpcode::GT);
+    gt_node.__set_num_children(2);
+
+    TExprNode div_node;
+    div_node.__set_node_type(TExprNodeType::ARITHMETIC_EXPR);
+    div_node.__set_type(create_primitive_type_desc(TPrimitiveType::INT));
+    div_node.__set_opcode(TExprOpcode::DIVIDE);
+    div_node.__set_num_children(2);
+
+    TExprNode sub_node;
+    sub_node.__set_node_type(TExprNodeType::ARITHMETIC_EXPR);
+    sub_node.__set_type(create_primitive_type_desc(TPrimitiveType::INT));
+    sub_node.__set_opcode(TExprOpcode::SUBTRACT);
+    sub_node.__set_num_children(2);
+
+    TExprNode slot_node;
+    slot_node.__set_node_type(TExprNodeType::SLOT_REF);
+    slot_node.__set_num_children(0);
+    slot_node.__set_type(create_primitive_type_desc(TPrimitiveType::INT));
+    TSlotRef slot_ref;
+    slot_ref.__set_slot_id(slot_desc->id());
+    slot_ref.__set_tuple_id(slot_desc->parent());
+    slot_node.__set_slot_ref(slot_ref);
+
+    std::vector<TExprNode> nodes;
+    nodes.emplace_back(gt_node);
+    nodes.emplace_back(div_node);
+    nodes.emplace_back(create_int_literal_node(TPrimitiveType::INT, 100));
+    nodes.emplace_back(sub_node);
+    nodes.emplace_back(slot_node);
+    nodes.emplace_back(create_int_literal_node(TPrimitiveType::INT, divisor_shift));
+    nodes.emplace_back(create_int_literal_node(TPrimitiveType::INT, 0));
+    return create_expr_context(pool, nodes);
+}
+
+// Position deletes in an ORC file. orc_test_struct_basic.orc holds c0 = 1, 2, 3, 4 at file rows 0, 1, 2, 3, and
+// c1 = struct<Cc1> = 'Smith', 'Cruise', 'hello', 'World'. The pushed conjunct on c0 is
+// "100 / (c0 - divisor_shift) > 0" and error_for_division_by_zero is on, so evaluating it on the row with
+// c0 == divisor_shift fails the query. c1 has no conjunct, so with c1 in the tuple it is a lazy column.
+class HdfsOrcScannerDeleteTest : public HdfsScannerTest {
+protected:
+    void _open(bool with_lazy_column, int64_t divisor_shift, const std::vector<uint64_t>& deleted_rows,
+               int chunk_size = 0) {
+        static const std::string input_orc_file = "./be/test/exec/test_data/orc_scanner/orc_test_struct_basic.orc";
+
+        SlotDesc c0{"c0", TypeDescriptor::from_logical_type(LogicalType::TYPE_INT)};
+        SlotDesc c1{"c1", TypeDescriptor::from_logical_type(LogicalType::TYPE_STRUCT)};
+        c1.type.children.push_back(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR));
+        c1.type.field_names.emplace_back("Cc1");
+        SlotDesc slot_descs_with_lazy_column[] = {c0, c1, {""}};
+        SlotDesc slot_descs[] = {c0, {""}};
+
+        _runtime_state->_query_options.__set_error_for_division_by_zero(true);
+        if (chunk_size > 0) {
+            _runtime_state->set_chunk_size(chunk_size);
+        }
+
+        _scanner = std::make_shared<HdfsOrcScanner>();
+        auto* range = _create_scan_range(input_orc_file, 0, 0);
+        _tuple_desc = _create_tuple_desc(with_lazy_column ? slot_descs_with_lazy_column : slot_descs);
+        auto* ctx = _create_ctx(input_orc_file, range, _tuple_desc);
+        ctx->conjuncts.by_slot[0].push_back(create_division_conjunct(&_pool, _tuple_desc->slots()[0], divisor_shift));
+        for (auto& it : ctx->conjuncts.by_slot) {
+            ASSERT_OK(Expr::prepare(it.second, _runtime_state));
+            ASSERT_OK(Expr::open(it.second, _runtime_state));
+        }
+
+        ASSERT_OK(_scanner->init(_runtime_state, ctx));
+        // we test the row level filtering, so the search argument must not skip anything.
+        _scanner->disable_use_orc_sargs();
+        ASSERT_OK(_scanner->open(_runtime_state));
+
+        if (!deleted_rows.empty()) {
+            roaring64_bitmap_t* bitmap = roaring64_bitmap_create();
+            for (uint64_t row : deleted_rows) {
+                roaring64_bitmap_add(bitmap, row);
+            }
+            _scanner->_skip_rows_ctx->deletion_bitmap = std::make_shared<DeletionBitmap>(bitmap);
+        }
+    }
+
+    // Reads the scanner to the end. Returns the first error, or OK with all the rows as debug strings.
+    Status _read_all(std::vector<std::string>* rows) {
+        ChunkPtr chunk = ChunkHelper::new_chunk(*_tuple_desc, 0);
+        for (;;) {
+            chunk->reset();
+            Status status = _scanner->get_next(_runtime_state, &chunk);
+            if (!status.ok() && !status.is_end_of_file()) {
+                return status;
+            }
+            for (size_t i = 0; i < chunk->num_rows(); i++) {
+                rows->push_back(chunk->debug_row(i));
+            }
+            if (status.is_end_of_file()) {
+                return Status::OK();
+            }
+        }
+    }
+
+    static std::vector<std::string> _expected_rows(const std::vector<int>& c0_values, bool with_lazy_column) {
+        static const char* c1_values[] = {"Smith", "Cruise", "hello", "World"};
+        std::vector<std::string> rows;
+        for (int c0 : c0_values) {
+            if (with_lazy_column) {
+                rows.push_back("[" + std::to_string(c0) + ", {Cc1:'" + c1_values[c0 - 1] + "'}]");
+            } else {
+                rows.push_back("[" + std::to_string(c0) + "]");
+            }
+        }
+        return rows;
+    }
+
+    std::shared_ptr<HdfsOrcScanner> _scanner;
+    TupleDescriptor* _tuple_desc = nullptr;
+};
+
+// The deleted row c0 = 2 would fail the conjunct with division by zero. The query must succeed, and the conjunct
+// drops c0 = 1 (100 / -1 < 0), so c0 = 3 and c0 = 4 are returned.
+TEST_F(HdfsOrcScannerDeleteTest, TestDeletedRowDoesNotFailConjunct) {
+    for (bool with_lazy_column : {false, true}) {
+        SCOPED_TRACE(with_lazy_column);
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 2, {1}));
+        std::vector<std::string> rows;
+        ASSERT_OK(_read_all(&rows));
+        EXPECT_EQ(_expected_rows({3, 4}, with_lazy_column), rows);
+        // raw_rows_read counts the rows read from the file, before deletes and conjuncts.
+        EXPECT_EQ(4, _scanner->raw_rows_read());
+        _scanner->close();
+    }
+}
+
+// The same file with nothing deleted: the row c0 = 2 reaches the conjunct, so the query fails. This shows that the
+// test above succeeds because of the delete.
+TEST_F(HdfsOrcScannerDeleteTest, TestNotDeletedRowFailsConjunct) {
+    for (bool with_lazy_column : {false, true}) {
+        SCOPED_TRACE(with_lazy_column);
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 2, {}));
+        std::vector<std::string> rows;
+        Status status = _read_all(&rows);
+        ASSERT_FALSE(status.ok());
+        EXPECT_NE(std::string::npos, status.message().find("Division by zero")) << status.message();
+        _scanner->close();
+    }
+}
+
+// Nothing is deleted and no row fails the conjunct: all rows are returned.
+TEST_F(HdfsOrcScannerDeleteTest, TestNoDeletedRows) {
+    for (bool with_lazy_column : {false, true}) {
+        SCOPED_TRACE(with_lazy_column);
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 0, {}));
+        std::vector<std::string> rows;
+        ASSERT_OK(_read_all(&rows));
+        EXPECT_EQ(_expected_rows({1, 2, 3, 4}, with_lazy_column), rows);
+        EXPECT_EQ(4, _scanner->raw_rows_read());
+        _scanner->close();
+    }
+}
+
+// Every row is deleted, including the one that fails the conjunct: no rows and no error.
+TEST_F(HdfsOrcScannerDeleteTest, TestAllRowsDeleted) {
+    for (bool with_lazy_column : {false, true}) {
+        SCOPED_TRACE(with_lazy_column);
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 2, {0, 1, 2, 3}));
+        std::vector<std::string> rows;
+        ASSERT_OK(_read_all(&rows));
+        EXPECT_TRUE(rows.empty());
+        EXPECT_EQ(4, _scanner->raw_rows_read());
+        _scanner->close();
+    }
+}
+
+// A deleted row that passes the conjunct is dropped, and the other rows keep their values: the delete positions
+// map to the file rows of each batch (batch size 2 gives the batches {c0 = 1, 2} and {c0 = 3, 4}).
+TEST_F(HdfsOrcScannerDeleteTest, TestDeletedRowsAcrossBatches) {
+    for (bool with_lazy_column : {false, true}) {
+        SCOPED_TRACE(with_lazy_column);
+        // every row passes the conjunct, row 2 (c0 = 3) is deleted.
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 0, {2}, 2));
+        std::vector<std::string> rows;
+        ASSERT_OK(_read_all(&rows));
+        EXPECT_EQ(_expected_rows({1, 2, 4}, with_lazy_column), rows);
+        _scanner->close();
+
+        // row 1 (c0 = 2) is deleted and would fail the conjunct, the conjunct drops c0 = 1, so the first batch is
+        // empty and the second one is returned as it is.
+        ASSERT_NO_FATAL_FAILURE(_open(with_lazy_column, 2, {1}, 2));
+        rows.clear();
+        ASSERT_OK(_read_all(&rows));
+        EXPECT_EQ(_expected_rows({3, 4}, with_lazy_column), rows);
+        _scanner->close();
+    }
+}
+
 /**
  * ORC format: struct<col1:int,col2:map<string,string>>
  * Data:

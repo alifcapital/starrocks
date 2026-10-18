@@ -646,8 +646,12 @@ StatusOr<size_t> HdfsOrcScanner::_do_get_next(ChunkPtr* chunk) {
             }
         }
 
+        // one entry per row left in the batch after dict filtering, 0 means the row is deleted.
+        Filter& delete_filter = down_cast<BooleanColumn*>(row_delete_filter.get())->get_data();
+
         size_t rows_read = 0;
         size_t origin_rows_read = 0;
+        bool has_deleted_rows = false;
         if (_orc_reader->get_cvb_size() != 0) {
             rows_read = _orc_reader->get_cvb_size();
             origin_rows_read = rows_read;
@@ -668,8 +672,23 @@ StatusOr<size_t> HdfsOrcScanner::_do_get_next(ChunkPtr* chunk) {
 
             // do stats before we filter rows which does not match.
             _app_stats.raw_rows_read += rows_read;
+
+            // We fear that a conjunct raises an error (division by zero, assert_true, overflow) or runs a UDF
+            // for a deleted row, which does not exist for the query. So we drop the deleted rows from the
+            // chunk before any conjunct is evaluated, and the conjuncts see only the rows that are not deleted.
+            DCHECK_EQ(delete_filter.size(), rows_read);
+            const size_t not_deleted_rows = SIMD::count_nonzero(delete_filter);
+            has_deleted_rows = not_deleted_rows != rows_read;
+            rows_read = not_deleted_rows;
+            if (rows_read == 0) {
+                ck->set_num_rows(0);
+            } else if (has_deleted_rows) {
+                ck->filter(delete_filter);
+            }
+
+            // _chunk_filter is sized for the rows left after the deleted rows are dropped.
             _chunk_filter.assign(rows_read, 1);
-            {
+            if (rows_read != 0) {
                 SCOPED_RAW_TIMER(&_app_stats.expr_filter_ns);
                 for (auto& it : _eval_conjunct_ctxs_by_materialized_slot) {
                     // do evaluation.
@@ -683,15 +702,6 @@ StatusOr<size_t> HdfsOrcScanner::_do_get_next(ChunkPtr* chunk) {
                         ck->set_num_rows(0);
                         break;
                     }
-                }
-            }
-
-            if (rows_read != 0) {
-                ColumnHelper::merge_two_filters(std::move(row_delete_filter), &_chunk_filter, nullptr);
-                rows_read = SIMD::count_nonzero(_chunk_filter);
-                if (rows_read == 0) {
-                    // If rows_read = 0, we need to set chunk size = 0 and bypass filter chunk directly
-                    ck->set_num_rows(0);
                 }
             }
 
@@ -726,8 +736,13 @@ StatusOr<size_t> HdfsOrcScanner::_do_get_next(ChunkPtr* chunk) {
         }
         {
             SCOPED_RAW_TIMER(&_app_stats.column_convert_ns);
+            // The lazy columns are read for the whole batch. We drop rows from them in the same order as from
+            // the chunk, and each filter is sized for the rows left by the previous one.
             if (has_used_dict_filter) {
                 _orc_reader->lazy_filter_on_cvb(&_dict_filter);
+            }
+            if (has_deleted_rows) {
+                _orc_reader->lazy_filter_on_cvb(&delete_filter);
             }
             _orc_reader->lazy_filter_on_cvb(&_chunk_filter);
             StatusOr<ChunkPtr> ret = _orc_reader->get_lazy_chunk();
