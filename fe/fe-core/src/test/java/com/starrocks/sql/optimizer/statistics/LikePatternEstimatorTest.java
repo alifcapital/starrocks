@@ -223,4 +223,57 @@ public class LikePatternEstimatorTest {
         LikePredicateOperator column = new LikePredicateOperator(STATUS, CODE);
         Assertions.assertTrue(LikePatternEstimator.pattern(column).isEmpty());
     }
+
+    @Test
+    public void testWorkOfOneDerivationIsBoundedWhateverTheHead() {
+        // Each text takes about a million steps of backtracking: with a budget per text a head of 1000 texts would
+        // take a billion. The texts of one derivation spend one budget in their order, so the second one runs out.
+        LikePredicateOperator like = new LikePredicateOperator(STATUS,
+                ConstantOperator.createVarchar("%" + "a_".repeat(400) + "b"));
+        Map<String, Long> head = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < 1000; i++) {
+            head.put("x" + i + "a".repeat(2000), 1L);
+        }
+        Statistics statistics = Statistics.builder().setOutputRowCount(2000)
+                .addColumnStatistic(STATUS, ColumnStatistic.builder().setDistinctValuesCount(2000).setNullsFraction(0)
+                        .setAverageRowSize(2000).setHistogram(new Histogram(List.of(new Bucket(
+                                Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, 1000L, 0L)), head)).build())
+                .build();
+        List<List<Optional<Boolean>>> runs = new java.util.ArrayList<>();
+        Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(5), () -> {
+            for (int run = 0; run < 2; run++) {
+                Assertions.assertTrue(LikePatternEstimator.selectivity(like, statistics).isEmpty());
+                McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+                List<Optional<Boolean>> results = new java.util.ArrayList<>();
+                for (String value : head.keySet()) {
+                    results.add(evaluator.matchesComponent(like, STATUS, value));
+                }
+                runs.add(results);
+            }
+        });
+        Assertions.assertEquals(runs.get(0), runs.get(1));
+        Assertions.assertTrue(runs.get(0).stream().filter(Optional::isEmpty).count() >= 999);
+    }
+
+    @Test
+    public void testTextsOfOneDerivationShareTheBudget() {
+        // One long value takes about 12 000 steps, more than a hundredth of the budget; the short values take a few.
+        // Together they fit one budget, so the head is matched and the long value counts.
+        Map<String, Long> head = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < 99; i++) {
+            head.put("v" + i, 10L);
+        }
+        head.put("z".repeat(12_000) + "a1b", 10L);
+        Histogram histogram = new Histogram(
+                List.of(new Bucket(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, 200L, 0L)), head);
+        Statistics statistics = Statistics.builder().setOutputRowCount(1200)
+                .addColumnStatistic(STATUS, ColumnStatistic.builder().setDistinctValuesCount(150).setNullsFraction(0)
+                        .setAverageRowSize(100).setHistogram(histogram).build())
+                .build();
+        LikePredicateOperator like = new LikePredicateOperator(STATUS, ConstantOperator.createVarchar("%a_b%"));
+        double total = histogram.getTotalRows();
+        double expected = (10 + (total - 1000) * StatisticsEstimateCoefficient.PREDICATE_UNKNOWN_FILTER_COEFFICIENT)
+                / total;
+        Assertions.assertEquals(expected, LikePatternEstimator.selectivity(like, statistics).orElseThrow(), 1e-12);
+    }
 }

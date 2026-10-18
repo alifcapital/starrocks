@@ -25,6 +25,7 @@ import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
 import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.common.MetaUtils;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -205,6 +206,14 @@ public final class ExtendedStatisticsSchedule {
                     var db = state.getMetadataMgr().getDb(context, name.getCatalog(), name.getDb());
                     // Resolve current schema, not types captured before a schema change.
                     var types = job.getColumns().stream().map(column -> {
+                        if (ExpressionTemplate.isExpressionElement(column)) {
+                            // An expression is analyzed against the current schema; an error fails the job.
+                            String text = ExpressionTemplate.canonicalTextOf(column);
+                            if (text == null) {
+                                throw new IllegalStateException("Unsupported format of MCV expression " + column);
+                            }
+                            return ExpressionTemplate.parse(text, table, context).getType();
+                        }
                         var value = table.getColumn(column);
                         if (value == null || !value.getType().canStatistic() || value.getType().isComplexType()
                                 || value.getType().isJsonType() || value.getType().isOnlyMetricType()) {

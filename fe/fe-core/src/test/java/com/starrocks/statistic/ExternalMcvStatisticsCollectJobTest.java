@@ -156,6 +156,15 @@ public class ExternalMcvStatisticsCollectJobTest {
     }
 
     @Test
+    public void testProjectionOfExpressionElement() {
+        Assertions.assertEquals("stats_tuple_key(cast((substr(`c`, 1, 3)) as varchar), cast(`gate` as varchar)) AS k,"
+                        + " cast((substr(`c`, 1, 3)) as varchar) AS v0, cast(`gate` as varchar) AS v1",
+                ExternalMcvStatisticsCollectJob.buildProjection(null, List.of("expr:1:substr(`c`, 1, 3)", "gate")));
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ExternalMcvStatisticsCollectJob.buildProjection(null, List.of("expr:9:lower(`c`)")));
+    }
+
+    @Test
     public void testParseFrequentItemsKeepsOrder() {
         Assertions.assertEquals(List.of("approved#0#0", "declined#1#0", "\\N#0#0"),
                 ExternalMcvStatisticsCollectJob.parseFrequentItems(
@@ -236,5 +245,22 @@ public class ExternalMcvStatisticsCollectJobTest {
         Assertions.assertEquals(columnIds, ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("gate", "status")));
         Assertions.assertNotEquals(columnIds, ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("sta", "tus#gate")));
         Assertions.assertEquals("[]", ExternalMcvStatisticsCollectJob.buildMcvJson(List.of()));
+    }
+
+    @Test
+    public void testExpressionGroupsRunInTheDefaultSqlMode() {
+        ExternalMcvStatisticsCollectJob expressions = new ExternalMcvStatisticsCollectJob("hive0", null, null,
+                List.of("expr:1:lower(`status`)"), List.of(VarcharType.VARCHAR), StatsConstants.AnalyzeType.FULL,
+                StatsConstants.ScheduleType.ONCE, Map.of(), List.of(StatisticsType.MCV),
+                List.of(List.of("expr:1:lower(`status`)")));
+        com.starrocks.qe.ConnectContext context = new com.starrocks.qe.ConnectContext();
+        context.getSessionVariable().setSqlMode(com.starrocks.qe.SqlModeHelper.MODE_DOUBLE_LITERAL);
+        expressions.setDefaultSessionVariable(context);
+        Assertions.assertEquals(com.starrocks.qe.SqlModeHelper.MODE_DEFAULT, context.getSessionVariable().getSqlMode());
+        // Without an expression the mode of the context stays.
+        com.starrocks.qe.ConnectContext columns = new com.starrocks.qe.ConnectContext();
+        columns.getSessionVariable().setSqlMode(com.starrocks.qe.SqlModeHelper.MODE_DOUBLE_LITERAL);
+        newJob(Map.of()).setDefaultSessionVariable(columns);
+        Assertions.assertEquals(com.starrocks.qe.SqlModeHelper.MODE_DOUBLE_LITERAL, columns.getSessionVariable().getSqlMode());
     }
 }

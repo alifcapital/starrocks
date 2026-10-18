@@ -292,8 +292,13 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         ScalarOperator scanPredicate = predicate;
         predicate = removePartitionPredicate(predicate, node, optimizerContext);
         Statistics statistics = narrowDroppedPartitionColumns(scanPredicate, predicate, context.getStatistics());
+        // Only the scan itself reads the statistics on expressions of its columns: an operator that passes the
+        // statistics of its child on can carry them above the scan.
+        ScanExpressionStatistics expressions = node instanceof LogicalScanOperator || node instanceof PhysicalScanOperator
+                ? statistics.getScanExpressionStatistics() : null;
         if (estimatePredicate && null != predicate && !predicate.isNotEvalEstimate()) {
-            statistics = estimateStatistics(ImmutableList.of(predicate), statistics);
+            statistics = expressions == null ? estimateStatistics(ImmutableList.of(predicate), statistics)
+                    : estimateScanStatistics(predicate, statistics, expressions);
         }
 
         Statistics.Builder statisticsBuilder = null;
@@ -323,6 +328,9 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             // so dependent expressions see preceding outputs without a wrapper per output.
             // Row count and accuracy have already been finalized above.
             Statistics projectionStatistics = statisticsBuilder.build();
+            // A projection fused with the scan reads the statistics on expressions of the scan columns.
+            ScanExpressionStatistics scanExpressions = node instanceof LogicalScanOperator
+                    || node instanceof PhysicalScanOperator ? statistics.getScanExpressionStatistics() : null;
             Map<ColumnRefOperator, SubfieldOperator> subfieldColumns = Maps.newHashMap();
             Preconditions.checkState(projection.getCommonSubOperatorMap().isEmpty());
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projection.getColumnRefMap().entrySet()) {
@@ -330,8 +338,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                         node instanceof PhysicalScanOperator)) {
                     subfieldColumns.put(entry.getKey(), (SubfieldOperator) entry.getValue());
                 } else {
-                    statisticsBuilder.addColumnStatistic(entry.getKey(),
-                            ExpressionStatisticCalculator.calculate(entry.getValue(), projectionStatistics));
+                    ColumnStatistic fromExpressions = scanExpressions == null ? null
+                            : ExpressionProjectionStatistics.calculate(entry.getValue(), scanExpressions,
+                                    projectionStatistics.getOutputRowCount());
+                    statisticsBuilder.addColumnStatistic(entry.getKey(), fromExpressions != null ? fromExpressions
+                            : ExpressionStatisticCalculator.calculate(entry.getValue(), projectionStatistics));
                 }
             }
             // for subfield operator, we get the statistics from statistics storage
@@ -343,6 +354,12 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             // projection can evaluate the original expression at that operator.
             statisticsBuilder.addMultiColumnStatistics(
                     McvStatisticsPropagation.project(projection.getColumnRefMap(), statistics));
+        }
+        if (statisticsBuilder != null) {
+            // Statistics on expressions of the scan columns reach a separate projection above the scan; a fused
+            // projection is that projection, so its output does not carry them.
+            statisticsBuilder.setScanExpressionStatistics(
+                    projection == null ? statistics.getScanExpressionStatistics() : null);
         }
         context.setStatistics(statisticsBuilder == null ? statistics : statisticsBuilder.build());
         return null;
@@ -1202,6 +1219,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         Statistics.Builder allBuilder = Statistics.builder();
         allBuilder.setOutputRowCount(inputStatistics.getOutputRowCount());
         allBuilder.addColumnStatistics(inputStatistics.getColumnStatistics());
+        // A projection right above a scan reads the statistics on expressions of the scan columns; checking the
+        // child operator keeps them from an operator that passes the statistics of a scan on.
+        ScanExpressionStatistics scanExpressions =
+                inputStatistics.getScanExpressionStatistics() != null && childIsScan(context)
+                        ? inputStatistics.getScanExpressionStatistics() : null;
 
         for (ColumnRefOperator requiredColumnRefOperator : columnRefMap.keySet()) {
             ScalarOperator mapOperator = columnRefMap.get(requiredColumnRefOperator);
@@ -1213,8 +1235,12 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                     continue;
                 }
             }
-            ColumnStatistic outputStatistic =
-                    ExpressionStatisticCalculator.calculate(mapOperator, allBuilder.build());
+            ColumnStatistic outputStatistic = scanExpressions == null ? null
+                    : ExpressionProjectionStatistics.calculate(mapOperator, scanExpressions,
+                            inputStatistics.getOutputRowCount());
+            if (outputStatistic == null) {
+                outputStatistic = ExpressionStatisticCalculator.calculate(mapOperator, allBuilder.build());
+            }
             builder.addColumnStatistic(requiredColumnRefOperator, outputStatistic);
             allBuilder.addColumnStatistic(requiredColumnRefOperator, outputStatistic);
         }
@@ -1222,6 +1248,15 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         builder.addMultiColumnStatistics(McvStatisticsPropagation.project(columnRefMap, inputStatistics));
         context.setStatistics(builder.build());
         return visitOperator(context.getOp(), context);
+    }
+
+    private static boolean childIsScan(ExpressionContext context) {
+        try {
+            Operator child = context.getChildOperator(0);
+            return child instanceof LogicalScanOperator || child instanceof PhysicalScanOperator;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     @Override
@@ -2699,6 +2734,16 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 .build();
     }
 
+    private static Statistics estimateScanStatistics(ScalarOperator predicate, Statistics statistics,
+                                                     ScanExpressionStatistics expressions) {
+        Statistics result = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, true, expressions);
+        // avoid sample statistics filter all data, save one rows least
+        if (statistics.getOutputRowCount() > 0 && result.getOutputRowCount() == 0) {
+            return result.withOutputRowCount(1);
+        }
+        return result;
+    }
+
     public Statistics estimateStatistics(List<ScalarOperator> predicateList, Statistics statistics) {
         if (predicateList.isEmpty()) {
             return statistics;
@@ -2842,7 +2887,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         try {
             Statistics narrowed =
                     PredicateStatisticsCalculator.statisticsCalculate(Utils.compoundAnd(dropped), statistics, false);
-            Statistics.Builder builder = Statistics.buildFrom(statistics);
+            Statistics.Builder builder = Statistics.buildFrom(statistics)
+                    .setScanExpressionStatistics(statistics.getScanExpressionStatistics());
             for (ScalarOperator conjunct : dropped) {
                 for (ColumnRefOperator ref : Utils.extractColumnRef(conjunct)) {
                     ColumnStatistic columnStatistic = narrowed.getColumnStatistics().get(ref);

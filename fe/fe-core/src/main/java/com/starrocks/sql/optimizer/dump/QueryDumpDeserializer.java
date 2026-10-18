@@ -192,7 +192,11 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
                 for (JsonElement groupElement : externalMcvStatistics.get(tableKey).getAsJsonArray()) {
                     JsonObject groupJson = groupElement.getAsJsonObject();
                     List<String> columns = new ArrayList<>();
-                    groupJson.get("columns").getAsJsonArray().forEach(e -> columns.add(e.getAsString()));
+                    List<ExternalMcvStatistics.Expression> expressions = new ArrayList<>();
+                    if (!ExternalMcvStatsCacheLoader.parseColumnNames(groupJson.get("columns").toString(), columns,
+                            expressions)) {
+                        continue;
+                    }
                     long ndv = groupJson.get("ndv").getAsLong();
                     long rowCount = groupJson.get("row_count").getAsLong();
                     List<MultiColumnCombinedStats.McvEntry> mcv =
@@ -200,7 +204,8 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
                     dumpInfo.addExternalMcvStatistics(tableKey,
                             new ExternalMcvStatistics.Group(columns, rowCount, ndv, mcv,
                                     ExternalMcvStatsCacheLoader.parseBuckets(groupJson.get("buckets").toString()),
-                                    ExternalMcvStatsCacheLoader.parseNullCounts(groupJson.get("null_counts").toString())));
+                                    ExternalMcvStatsCacheLoader.parseNullCounts(groupJson.get("null_counts").toString()),
+                                    expressions));
                 }
             }
         }

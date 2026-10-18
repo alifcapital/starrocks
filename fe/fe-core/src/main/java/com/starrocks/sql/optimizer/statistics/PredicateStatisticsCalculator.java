@@ -37,9 +37,12 @@ import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
 import org.apache.commons.math3.util.Precision;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,8 +55,162 @@ import static com.starrocks.sql.optimizer.statistics.HistogramStatisticsUtils.es
 import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateUtils.computeCompoundStatsWithMultiColumnOptimize;
 
 public class PredicateStatisticsCalculator {
+    private static final Logger LOG = LogManager.getLogger(PredicateStatisticsCalculator.class);
+
     public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics) {
         return statisticsCalculate(predicate, statistics, true);
+    }
+
+    /**
+     * The estimate of the predicate of a scan with statistics on expressions of its columns. The conditions that
+     * can be written over the virtual columns are estimated over them on a copy of the predicate; the predicate and
+     * the plan do not change. The row count comes from that estimate. The statistics of the real columns come from
+     * the estimate of the predicate as written, bounded by that row count: x knows how many rows a prefix holds,
+     * not how many distinct values of c they have. Any failure on this path leaves the estimate as before.
+     *
+     * @param expressions the statistics on expressions of the scan; the caller passes them only for a scan
+     */
+    public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics, boolean useMcv,
+                                                 ScanExpressionStatistics expressions) {
+        Statistics plain = statisticsCalculate(predicate, statistics, useMcv);
+        if (expressions == null || predicate == null) {
+            return plain;
+        }
+        try {
+            ExpressionStatisticsMatcher.Result match = ExpressionStatisticsMatcher.match(predicate, expressions,
+                    statistics);
+            if (match == null) {
+                Set<ColumnRefOperator> describing = Sets.newHashSet();
+                for (ScanExpressionStatistics.Entry entry : expressions.getEntries()) {
+                    if (ExpressionStatisticsMatcher.describesFilteredRows(predicate, entry, statistics)) {
+                        describing.add(entry.getColumn());
+                    }
+                }
+                return Statistics.buildFrom(plain).setScanExpressionStatistics(
+                        expressions.afterFilter(Map.of(), describing, null, false)).build();
+            }
+            Statistics.Builder virtual = Statistics.buildFrom(
+                    expressions.withVirtualColumns(statistics, match.getUsedColumns()));
+            // The share of x leaves out the NULL rows of a source column with a written condition that is never true
+            // on NULL, so a kept condition on that column must not take them out again.
+            for (ColumnRefOperator column : match.getNonNullColumns()) {
+                ColumnStatistic statistic = statistics.getColumnStatistics().get(column);
+                if (statistic != null && !statistic.isUnknown()) {
+                    virtual.addColumnStatistic(column, ColumnStatistic.buildFrom(statistic).setNullsFraction(0).build());
+                }
+            }
+            Statistics withVirtual = virtual.build();
+            Statistics estimated = expressions.getCache().within(
+                    () -> statisticsCalculate(match.getPredicate(), withVirtual, useMcv));
+            double rowCount = estimated.getOutputRowCount();
+            // The plain estimate gives only the form of the column statistics here, not the row count; a default
+            // selectivity mark on it describes a guess that the row count does not use, unless the estimate over
+            // x makes the same guess on the column, as for a condition on another column it cannot write.
+            Statistics.Builder columns = Statistics.buildFrom(plain);
+            double distinctBound = Math.max(1, rowCount);
+            Set<ColumnRefOperator> nonNullColumns = match.getNonNullColumns();
+            // The columns of the conditions the copy keeps as they are: both estimates evaluate them.
+            Set<ColumnRefOperator> keptColumns = Sets.newHashSet();
+            List<ScalarOperator> keptConjuncts = new ArrayList<>();
+            for (ScalarOperator conjunct : Utils.extractConjuncts(match.getPredicate())) {
+                List<ColumnRefOperator> read = Utils.extractColumnRef(conjunct);
+                if (read.stream().noneMatch(ExpressionStatisticsEstimator::isVirtualColumn)) {
+                    keptColumns.addAll(read);
+                    keptConjuncts.add(conjunct);
+                }
+            }
+            // The plain NDV of a kept column can still hold the guess of a condition on f, so a guessed column takes
+            // its NDV from the kept conditions alone, estimated once when a column needs it.
+            Statistics[] keptOnly = new Statistics[1];
+            plain.getColumnStatistics().forEach((column, statistic) -> {
+                ColumnStatistic overX = estimated.getColumnStatistics().get(column);
+                boolean kept = keptColumns.contains(column);
+                boolean plainGuess = statistic.isDistinctValuesFromDefaultSelectivity();
+                boolean xGuess = overX != null && overX.isDistinctValuesFromDefaultSelectivity();
+                // The mark stays when the estimate over x makes the same guess on the column.
+                boolean guessed = plainGuess && !xGuess;
+                boolean nonNull = nonNullColumns.contains(column);
+                double ndv = statistic.getDistinctValuesCount();
+                boolean mark = plainGuess && xGuess;
+                if (kept) {
+                    if (plainGuess) {
+                        if (keptOnly[0] == null) {
+                            keptOnly[0] = statisticsCalculate(Utils.compoundAnd(keptConjuncts), statistics, useMcv);
+                        }
+                        ColumnStatistic alone = keptOnly[0].getColumnStatistics().get(column);
+                        if (alone != null && !alone.isUnknown()) {
+                            ndv = alone.getDistinctValuesCount();
+                            mark = alone.isDistinctValuesFromDefaultSelectivity() && (overX == null || xGuess);
+                        }
+                    }
+                    // The estimate over x evaluates the kept conditions as well and can keep fewer values.
+                    if (overX != null && !overX.isUnknown()) {
+                        ndv = Math.min(ndv, overX.getDistinctValuesCount());
+                    }
+                } else if (guessed || !statistic.isUnknown()
+                        && statistic.getDistinctValuesCount() >= Math.max(1, plain.getOutputRowCount()) * (1 - 1e-9)) {
+                    // The NDV of the plain estimate follows its guessed row count, so the column takes its NDV from
+                    // the estimate over x; the scan gives it when the estimate over x does not have the column. An NDV
+                    // at the plain row count is the cap by that row count, which a formula on f can make tiny without
+                    // a mark, so it is taken the same way; an NDV below the plain row count is a narrowing the plain
+                    // estimate counted, and it stays.
+                    ColumnStatistic source = overX != null ? overX : statistics.getColumnStatistics().get(column);
+                    if (source != null && !source.isUnknown()) {
+                        ndv = source.getDistinctValuesCount();
+                    }
+                }
+                // With a column of unknown statistics the adjustment below leaves every column as is, so the NDV
+                // of a known column is bounded by the row count here.
+                ndv = Math.min(ndv, distinctBound);
+                mark |= !statistic.isUnknown() && keepsGuessOverX(ndv, overX, distinctBound);
+                boolean changed = !statistic.isUnknown() && ndv != statistic.getDistinctValuesCount();
+                if (!changed && !nonNull && mark == plainGuess) {
+                    return;
+                }
+                ColumnStatistic.Builder adjusted = ColumnStatistic.buildFrom(statistic)
+                        .setDistinctValuesFromDefaultSelectivity(mark);
+                if (!statistic.isUnknown()) {
+                    adjusted.setDistinctValuesCount(ndv);
+                }
+                if (nonNull) {
+                    // A written condition on the column is never true on NULL, and the row count from x leaves
+                    // the NULL rows out.
+                    adjusted.setNullsFraction(0);
+                }
+                columns.addColumnStatistic(column, adjusted.build());
+            });
+            Statistics result = StatisticsEstimateUtils.adjustStatisticsByRowCount(
+                    columns.setOutputRowCount(rowCount).build(), rowCount);
+            Map<ColumnRefOperator, ColumnStatistic> filtered = new HashMap<>();
+            for (ColumnRefOperator column : match.getUsedColumns()) {
+                ColumnStatistic statistic = estimated.getColumnStatistics().get(column);
+                if (statistic != null) {
+                    filtered.put(column, statistic);
+                }
+            }
+            List<ScalarOperator> virtualConjuncts = Utils.extractConjuncts(match.getPredicate()).stream()
+                    .filter(conjunct -> Utils.extractColumnRef(conjunct).stream()
+                            .anyMatch(ExpressionStatisticsEstimator::isVirtualColumn))
+                    .collect(Collectors.toList());
+            return Statistics.buildFrom(result).setOutputRowCount(result.getOutputRowCount())
+                    .setScanExpressionStatistics(expressions.afterFilter(filtered, match.getFilteredColumns(),
+                            virtualConjuncts.isEmpty() ? null : Utils.compoundAnd(virtualConjuncts), match.hasOr()))
+                    .build();
+        } catch (RuntimeException e) {
+            LOG.warn("Failed to estimate the predicate of table {} with statistics on expressions, predicate {}",
+                    expressions.getTableName(), predicate, e);
+            return plain;
+        }
+    }
+
+    /**
+     * Whether the NDV of a column after the merge is the guess the estimate over x made on it: the NDV over x under
+     * its mark, or the bound by the row count from x, which the guess set. An NDV between them is a value the plain
+     * estimate counted, so it does not take the mark.
+     */
+    static boolean keepsGuessOverX(double ndv, ColumnStatistic overX, double distinctBound) {
+        return overX != null && overX.isDistinctValuesFromDefaultSelectivity()
+                && (ndv == overX.getDistinctValuesCount() || ndv == distinctBound);
     }
 
     /**
@@ -238,6 +395,11 @@ public class PredicateStatisticsCalculator {
             if (mcv.isPresent()) {
                 return mcv.get();
             }
+            Optional<Statistics> substring = ExpressionStatisticsEstimator.estimate(predicate, statistics);
+            if (substring.isPresent()) {
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(substring.get(),
+                        substring.get().getOutputRowCount());
+            }
             if (SPMFunctions.isSPMFunctions(predicate)) {
                 if (SPMFunctions.canRevert2ScalarOperator(predicate)) {
                     predicate = (InPredicateOperator) SPMFunctions.revertSPMFunctions(predicate).get(0);
@@ -403,7 +565,7 @@ public class PredicateStatisticsCalculator {
             }
             Optional<Statistics> mcv = estimateWithMcv(predicate);
             if (mcv.isPresent()) {
-                return mcv.get();
+                return ExpressionStatisticsEstimator.withNullCheckedVirtualColumn(predicate, statistics, mcv.get());
             }
             double selectivity = 1;
             List<ColumnRefOperator> children = Utils.extractColumnRef(predicate);
@@ -433,7 +595,9 @@ public class PredicateStatisticsCalculator {
             builder.addColumnStatistic(children.get(0), ColumnStatistic.buildFrom(isNullColumnStatistic)
                     .setNullsFraction(predicate.isNotNull() ? 0.0 : 1.0)
                     .build());
-            return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount, defaultSelectivity);
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(
+                    ExpressionStatisticsEstimator.withNullCheckedVirtualColumn(predicate, statistics, builder.build()),
+                    rowCount, defaultSelectivity);
         }
 
         @Override
@@ -446,6 +610,10 @@ public class PredicateStatisticsCalculator {
                 Optional<String> prefix = LikePatternEstimator.pattern(predicate)
                         .flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
                 if (statistic.getHistogram() != null && statistic.getHistogram().hasStringValues() && prefix.isPresent()) {
+                    if (ExpressionStatisticsEstimator.isVirtualColumn(column)) {
+                        return ExpressionStatisticsEstimator.prefix(predicate, column, statistic, prefix.get(),
+                                statistics);
+                    }
                     return StringHistogramEstimator.prefix(column, statistic, prefix.get(), statistics);
                 }
             }
@@ -510,6 +678,11 @@ public class PredicateStatisticsCalculator {
             Optional<Statistics> mcv = estimateWithMcv(predicate);
             if (mcv.isPresent()) {
                 return mcv.get();
+            }
+            Optional<Statistics> substring = ExpressionStatisticsEstimator.estimate(predicate, statistics);
+            if (substring.isPresent()) {
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(substring.get(),
+                        substring.get().getOutputRowCount());
             }
             ScalarOperator leftChild = predicate.getChild(0);
             ScalarOperator rightChild = predicate.getChild(1);
@@ -621,8 +794,13 @@ public class PredicateStatisticsCalculator {
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(cumulativeStatistics, rowCount);
             } else {
                 Statistics inputStatistics = predicate.getChild(0).accept(this, null);
-                double rowCount = Math.max(0, statistics.getOutputRowCount() - inputStatistics.getOutputRowCount());
-                return StatisticsEstimateUtils.adjustStatisticsByRowCount(statistics.withOutputRowCount(rowCount), rowCount);
+                // The negation of a condition on a virtual column holds on its non-NULL rows only.
+                double rowCount = Math.max(0, statistics.getOutputRowCount()
+                        * ExpressionStatisticsEstimator.negationShare(predicate.getChild(0), statistics)
+                        - inputStatistics.getOutputRowCount());
+                Statistics negated = ExpressionStatisticsEstimator.withNegatedVirtualColumn(predicate.getChild(0),
+                        statistics, statistics.withOutputRowCount(rowCount));
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(negated, rowCount);
             }
         }
 
@@ -791,8 +969,13 @@ public class PredicateStatisticsCalculator {
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(baseStatistics, rowCount);
             } else {
                 Statistics inputStatistics = predicate.getChild(0).accept(this, null);
-                double rowCount = Math.max(0, statistics.getOutputRowCount() - inputStatistics.getOutputRowCount());
-                return StatisticsEstimateUtils.adjustStatisticsByRowCount(statistics.withOutputRowCount(rowCount), rowCount);
+                // The negation of a condition on a virtual column holds on its non-NULL rows only.
+                double rowCount = Math.max(0, statistics.getOutputRowCount()
+                        * ExpressionStatisticsEstimator.negationShare(predicate.getChild(0), statistics)
+                        - inputStatistics.getOutputRowCount());
+                Statistics negated = ExpressionStatisticsEstimator.withNegatedVirtualColumn(predicate.getChild(0),
+                        statistics, statistics.withOutputRowCount(rowCount));
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(negated, rowCount);
             }
         }
 

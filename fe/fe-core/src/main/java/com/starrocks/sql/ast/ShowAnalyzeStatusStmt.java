@@ -87,7 +87,7 @@ public class ShowAnalyzeStatusStmt extends ShowStmt {
                     ? StatisticUtils.getCollectibleColumns((Table) table).size()
                     : -1L;
             if (columns.size() != totalCollectColumnsSize) {
-                String str = String.join(",", columns);
+                String str = com.starrocks.sql.optimizer.statistics.ExpressionTemplate.displayElements(columns);
                 row.set(3, str);
             }
         }

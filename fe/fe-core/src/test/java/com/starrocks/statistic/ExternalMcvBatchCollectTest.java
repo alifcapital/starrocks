@@ -51,10 +51,14 @@ public class ExternalMcvBatchCollectTest {
         private final List<List<List<String>>> responses;
 
         CapturingJob(List<List<List<String>>> responses) {
+            this(responses, GROUPS);
+        }
+
+        CapturingJob(List<List<List<String>>> responses, List<List<String>> groups) {
             super("hive0", new Database(1, "tpch"), ExternalMcvBatchCollectTest.table,
-                    List.of("c_name", "c_phone", "c_custkey"), List.of(),
+                    groups.stream().flatMap(List::stream).distinct().toList(), List.of(),
                     StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.ONCE, Map.of(),
-                    List.of(StatisticsType.MCV), GROUPS);
+                    List.of(StatisticsType.MCV), groups);
             this.responses = responses;
         }
 
@@ -106,6 +110,64 @@ public class ExternalMcvBatchCollectTest {
             String plan = UtFrameUtils.getFragmentPlan(context, sql);
             Assertions.assertEquals(1, plan.split("HdfsScanNode", -1).length - 1, plan);
             Assertions.assertFalse(plan.contains("MULTICAST"), plan);
+        }
+    }
+
+    @Test
+    public void testExpressionElementsAreProjectedAndPlanned() throws Exception {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        String lower = "expr:1:lower(`c_name`)";
+        List<List<String>> groups = List.of(List.of(prefix), List.of("c_name", lower));
+        List<String> sketches = List.of("100", "[[\"123\",\"50\"]]", "20", "[\"100\",\"200\"]",
+                "100", "[[\"alice#alice\",\"30\"]]", "40");
+        List<String> counts = List.of(histogram("123", 50), "100", histogram("123", 50), "100",
+                "{\"mcv\":[],\"buckets\":[[\"100\",\"200\",\"40\",\"5\",\"9\"]]}",
+                histogram("alice#alice", 30), "100", histogram("alice", 30), "100", histogram("alice", 30), "100");
+        CapturingJob job = new CapturingJob(List.of(List.of(sketches), List.of(counts)), groups);
+        job.resolveExpressions(context);
+        var results = job.collectBatch(context, null, groups, SOURCE);
+        // The string expression of a singleton is ordered: its value is projected for the bounds and buckets.
+        Assertions.assertTrue(job.queries.get(0).contains("(substr(`c_phone`, 1, 3)) AS g0_x"), job.queries.get(0));
+        Assertions.assertTrue(job.queries.get(0).contains("ds_kll_quantiles(g0_x, "), job.queries.get(0));
+        Assertions.assertTrue(job.queries.get(0).contains("cast((lower(`c_name`)) as varchar) AS g1_v1"),
+                job.queries.get(0));
+        Assertions.assertEquals(1, results.get(0).buckets.size());
+        Assertions.assertEquals(50, results.get(0).mcv.get(0).count);
+        Assertions.assertEquals(List.of("alice", "alice"), results.get(1).mcv.get(0).values);
+        for (String sql : job.queries) {
+            String plan = UtFrameUtils.getFragmentPlan(context, sql);
+            Assertions.assertEquals(1, plan.split("HdfsScanNode", -1).length - 1, plan);
+        }
+    }
+
+    @Test
+    public void testExpressionElementsInStorage() throws Exception {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        var template = com.starrocks.sql.optimizer.statistics.ExpressionTemplate.parse("substr(`c_phone`, 1, 3)",
+                table, context);
+        String json = ExternalMcvStatisticsCollectJob.buildColumnNamesJson(List.of("c_name", prefix),
+                Map.of(prefix, template));
+        var array = com.google.gson.JsonParser.parseString(json).getAsJsonArray();
+        Assertions.assertEquals("c_name", array.get(0).getAsString());
+        var element = array.get(1).getAsJsonObject();
+        Assertions.assertEquals("substr(`c_phone`, 1, 3)", element.get("expr").getAsString());
+        Assertions.assertEquals(1, element.get("format").getAsInt());
+        Assertions.assertEquals(template.getType().toSql(), element.get("type").getAsString());
+        var columns = element.getAsJsonArray("columns");
+        Assertions.assertEquals(1, columns.size());
+        Assertions.assertEquals("c_phone", columns.get(0).getAsJsonObject().get("name").getAsString());
+        Assertions.assertFalse(columns.get(0).getAsJsonObject().has("fieldId"));
+
+        // The key of an expression element never equals the key of a column named by its text.
+        Assertions.assertNotEquals(ExternalMcvStatisticsCollectJob.buildColumnIds(List.of(prefix)),
+                ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("substr(`c_phone`, 1, 3)")));
+        Assertions.assertEquals(ExternalMcvStatisticsCollectJob.buildColumnIds(List.of("c_name", prefix)),
+                ExternalMcvStatisticsCollectJob.buildColumnIds(List.of(prefix, "c_name")));
+
+        // An expression of another format or one the current schema cannot analyze fails the collection.
+        for (String unusable : List.of("expr:2:substr(`c_phone`, 1, 3)", "expr:1:lower(`missing_column`)")) {
+            CapturingJob job = new CapturingJob(List.of(), List.of(List.of(unusable)));
+            Assertions.assertThrows(DdlException.class, () -> job.resolveExpressions(context), unusable);
         }
     }
 

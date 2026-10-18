@@ -267,9 +267,8 @@ public class QueryDumpSerializer implements JsonSerializer<QueryDumpInfo> {
             JsonArray groups = new JsonArray();
             for (ExternalMcvStatistics.Group group : entry.getValue()) {
                 JsonObject groupJson = new JsonObject();
-                JsonArray columns = new JsonArray();
-                group.getColumnNames().forEach(columns::add);
-                groupJson.add("columns", columns);
+                // An expression element is written as column_names holds it, so replay can analyze it again.
+                groupJson.add("columns", ExternalMcvStatsCacheLoader.formatColumnNames(group));
                 groupJson.addProperty("ndv", group.getNdv());
                 groupJson.addProperty("row_count", group.getRowCount());
                 groupJson.addProperty("mcv", ExternalMcvStatsCacheLoader.formatMcv(group.getMcv()));

@@ -129,6 +129,14 @@ public class StatisticsCalcUtils {
             return statistics;
         }
         Statistics attached = attachExternalMcvStats(statistics, cached, colRefToColumnMetaMap);
+        if (cached.getGroups().stream().anyMatch(ExternalMcvStatistics.Group::hasExpressions)) {
+            int[] localIds = {0};
+            java.util.function.IntSupplier ids = optimizerContext != null
+                    ? optimizerContext::nextExpressionStatisticsColumnId : () -> --localIds[0];
+            attached = ScanExpressionStatistics.attach(attached, cached, colRefToColumnMetaMap, table, ids,
+                    optimizerContext != null ? optimizerContext.getExpressionStatisticsCache()
+                            : new ExpressionStatisticsCache());
+        }
         if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
             for (ExternalMcvStatistics.Group group : cached.getGroups()) {
                 optimizerContext.getDumpInfo().addExternalMcvStatistics(table, group);
@@ -168,6 +176,11 @@ public class StatisticsCalcUtils {
                     .setStatsSource(Statistics.StatsSource.ANALYZE);
         }
         for (ExternalMcvStatistics.Group group : cached.getGroups()) {
+            if (group.hasExpressions()) {
+                // A group with an expression element is attached by ScanExpressionStatistics: matched by name here,
+                // MCV(left(c, 8), d) would attach as the group {d} with a placeholder.
+                continue;
+            }
             List<ColumnRefOperator> refs = new ArrayList<>(group.getColumnNames().size());
             Set<ColumnRefOperator> read = new HashSet<>();
             boolean duplicate = false;
@@ -193,10 +206,87 @@ public class StatisticsCalcUtils {
                         .ifPresent(single -> builder.addColumnStatistic(column, single));
             }
         }
+        // With expression groups, ScanExpressionStatistics takes the marginals from all groups at once.
+        if (cached.getGroups().stream().noneMatch(ExternalMcvStatistics.Group::hasExpressions)) {
+            List<ExternalMcvStatistics.Group> multiElementGroups = new ArrayList<>();
+            List<List<ColumnRefOperator>> multiElementRefs = new ArrayList<>();
+            plainMultiElementGroups(cached, colRefToColumnMetaMap, multiElementGroups, multiElementRefs);
+            addElementStatistics(builder, multiElementGroups, multiElementRefs, Set.of());
+        }
         if (attached.isEmpty() && !useCollectedRowCount) {
             return statistics;
         }
         return builder.addMultiColumnStatistics(attached).build();
+    }
+
+    /** The groups of two or more plain columns that the scan reads, with their elements over the scan. */
+    static void plainMultiElementGroups(ExternalMcvStatistics cached, Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                        List<ExternalMcvStatistics.Group> groups, List<List<ColumnRefOperator>> refs) {
+        Map<String, ColumnRefOperator> columnNameToRefMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        colRefToColumnMetaMap.keySet().forEach(ref -> columnNameToRefMap.putIfAbsent(ref.getName(), ref));
+        for (ExternalMcvStatistics.Group group : cached.getGroups()) {
+            if (group.hasExpressions() || group.getColumnNames().size() < 2 || group.getRowCount() <= 0) {
+                continue;
+            }
+            List<ColumnRefOperator> groupRefs = new ArrayList<>(group.getColumnNames().size());
+            Set<ColumnRefOperator> read = new HashSet<>();
+            boolean duplicate = false;
+            for (String columnName : group.getColumnNames()) {
+                ColumnRefOperator ref = columnNameToRefMap.get(columnName);
+                groupRefs.add(ref);
+                duplicate |= ref != null && !read.add(ref);
+            }
+            if (!duplicate && !read.isEmpty()) {
+                groups.add(group);
+                refs.add(groupRefs);
+            }
+        }
+    }
+
+    /**
+     * A column of a multi-element group gets its marginal from the group: the head from the component counts, the
+     * tail as one bucket of unknown bounds and the exact NULL fraction. Without it the frequencies of the column in
+     * the head would serve the estimate of conditions only, not ranges, joins or TopN. A column that already has a
+     * distribution, from a singleton group or from the histogram of its own statistics, keeps it. We fear a column
+     * whose type changed since the collection, for example to a struct, so a column of another type is left as it
+     * is, and a failure leaves the column with its own statistics.
+     */
+    static void addElementStatistics(Statistics.Builder builder, List<ExternalMcvStatistics.Group> groups,
+                                     List<List<ColumnRefOperator>> refs, Set<ColumnRefOperator> virtual) {
+        Set<ColumnRefOperator> elements = new HashSet<>();
+        refs.forEach(groupRefs -> {
+            if (groupRefs.size() > 1) {
+                groupRefs.stream().filter(ref -> ref != null && !virtual.contains(ref)).forEach(elements::add);
+            }
+        });
+        for (ColumnRefOperator column : elements) {
+            ColumnStatistic current = builder.getColumnStatistics(column);
+            if (current == null || current.getHistogram() != null || !ExpressionTemplate.isMcvType(column.getType())) {
+                continue;
+            }
+            try {
+                ColumnStatistic element = ScanExpressionStatistics.elementStatistic(column, groups, refs, current);
+                if (element != null) {
+                    builder.addColumnStatistic(column, element);
+                }
+            } catch (RuntimeException e) {
+                LOG.warn("Ignore the MCV marginal of column {}", column.getName(), e);
+            }
+        }
+    }
+
+    /** The statistics with the marginals of the columns of plain multi-element groups. */
+    static Statistics withPlainElementStatistics(Statistics statistics, ExternalMcvStatistics cached,
+                                                 Map<ColumnRefOperator, Column> colRefToColumnMetaMap) {
+        List<ExternalMcvStatistics.Group> groups = new ArrayList<>();
+        List<List<ColumnRefOperator>> refs = new ArrayList<>();
+        plainMultiElementGroups(cached, colRefToColumnMetaMap, groups, refs);
+        if (groups.isEmpty()) {
+            return statistics;
+        }
+        Statistics.Builder builder = Statistics.buildFrom(statistics);
+        addElementStatistics(builder, groups, refs, Set.of());
+        return builder.build();
     }
 
     static MultiColumnCombinedStats preferMultiColumnStats(MultiColumnCombinedStats current,

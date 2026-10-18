@@ -166,6 +166,61 @@ public class StringHistogramEstimatorTest {
                 .getOutputRowCount(), 1e-9);
     }
 
+    // The order of the UTF-8 forms, an unpaired surrogate taken as '?', by a walk over code points.
+    private static int codePointOrder(String left, String right) {
+        int leftIndex = 0;
+        int rightIndex = 0;
+        while (leftIndex < left.length() && rightIndex < right.length()) {
+            int leftPoint = left.codePointAt(leftIndex);
+            int rightPoint = right.codePointAt(rightIndex);
+            leftIndex += Character.charCount(leftPoint);
+            rightIndex += Character.charCount(rightPoint);
+            int leftValue = leftPoint >= Character.MIN_SURROGATE && leftPoint <= Character.MAX_SURROGATE ? '?' : leftPoint;
+            int rightValue = rightPoint >= Character.MIN_SURROGATE && rightPoint <= Character.MAX_SURROGATE ? '?' : rightPoint;
+            if (leftValue != rightValue) {
+                return Integer.compare(leftValue, rightValue);
+            }
+        }
+        return Integer.compare(left.length() - leftIndex, right.length() - rightIndex);
+    }
+
+    @Test
+    public void testCompareAgreesWithCodePointOrder() {
+        String[] parts = {"a", "b", "é", "?", "😀", "😁", String.valueOf((char) 0xD83D), String.valueOf((char) 0xDE00),
+                String.valueOf((char) 0xE000), ""};
+        java.util.Random random = new java.util.Random(7);
+        for (int iteration = 0; iteration < 200_000; iteration++) {
+            StringBuilder left = new StringBuilder();
+            StringBuilder right = new StringBuilder();
+            for (int i = random.nextInt(4); i > 0; i--) {
+                String part = parts[random.nextInt(parts.length)];
+                left.append(part);
+                right.append(part);
+            }
+            for (int i = random.nextInt(4); i > 0; i--) {
+                left.append(parts[random.nextInt(parts.length)]);
+            }
+            for (int i = random.nextInt(4); i > 0; i--) {
+                right.append(parts[random.nextInt(parts.length)]);
+            }
+            Assertions.assertEquals(codePointOrder(left.toString(), right.toString()),
+                    StringBucket.compare(left.toString(), right.toString()), left + " / " + right);
+        }
+    }
+
+    @Test
+    public void testPrefixTakesNoRowsFromBucketOfOneValueAfterIt() {
+        // Every row of the bucket ["b", "b"] is "b", which does not start with "a". A filter below "b" counts the 90
+        // rows of the bucket other than its upper repeats, so the prefix takes no bucket that starts at or after "b".
+        Histogram h = new Histogram(List.of(new StringBucket("b", "b", 100, 10, 1)), Map.of());
+        Statistics input = statistics(h);
+        Histogram filtered = StringHistogramEstimator.prefixHistogram(input.getColumnStatistic(COLUMN), "a");
+        Assertions.assertEquals(0, StringHistogramEstimator.rows(filtered));
+        // Planner row counts have a floor of one.
+        Assertions.assertEquals(1, StringHistogramEstimator.prefix(COLUMN, input.getColumnStatistic(COLUMN), "a", input)
+                .getOutputRowCount(), 1e-9);
+    }
+
     @Test
     public void testStringTypeSurvivesHeadOnlyFilteringAndDump() {
         Statistics equal = estimate(statistics(histogram()), BinaryType.EQ, "2023");

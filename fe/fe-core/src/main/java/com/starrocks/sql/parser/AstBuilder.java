@@ -3296,6 +3296,19 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         return columns;
     }
 
+    // An MCV item is a column, as in the other column lists, or an expression of columns.
+    private List<Expr> getMcvItems(List<com.starrocks.sql.parser.StarRocksParser.McvItemContext> items) {
+        List<Expr> result = Lists.newArrayList();
+        for (com.starrocks.sql.parser.StarRocksParser.McvItemContext item : items) {
+            if (item.qualifiedName() != null) {
+                result.addAll(getAnalyzeColumns(List.of(getQualifiedName(item.qualifiedName()))));
+            } else {
+                result.add((Expr) visit(item.expression()));
+            }
+        }
+        return result;
+    }
+
     private Pair<Boolean, List<Expr>> visitAnalyzeColumnClause(
             com.starrocks.sql.parser.StarRocksParser.AnalyzeColumnClauseContext context) {
         boolean usePredicateColumns = false;
@@ -3313,9 +3326,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) {
             com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext mcvColumnSetContext =
                     (com.starrocks.sql.parser.StarRocksParser.McvColumnSetContext) context;
-            List<QualifiedName> names = mcvColumnSetContext.qualifiedName().stream()
-                    .map(this::getQualifiedName).collect(toList());
-            columns = getAnalyzeColumns(names);
+            columns = getMcvItems(mcvColumnSetContext.mcvItem());
         } else if (context instanceof com.starrocks.sql.parser.StarRocksParser.PredicateColumnsContext
                 || context instanceof com.starrocks.sql.parser.StarRocksParser.McvPredicateColumnsContext) {
             usePredicateColumns = true;
@@ -3389,7 +3400,7 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
         TableRef tableRef = new TableRef(normalizeName(qualifiedName), null, tablePos);
         DropStatsStmt statement = new DropStatsStmt(tableRef, context.MULTIPLE() != null,
                 context.MCV() != null, createPos(context));
-        statement.setColumnNames(context.identifier().stream().map(this::getIdentifierName).collect(Collectors.toList()));
+        statement.setMcvItems(getMcvItems(context.mcvItem()));
         return statement;
     }
 
@@ -3421,7 +3432,8 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             List<QualifiedName> qualifiedNames = context.qualifiedName().stream().map(this::getQualifiedName).
                     collect(toList());
             TableRef tableRef = new TableRef(normalizeName(qualifiedNames.get(0)), null, createPos(context));
-            List<Expr> columns = getAnalyzeColumns(qualifiedNames.subList(1, qualifiedNames.size()));
+            List<Expr> columns = context.MCV() != null ? getMcvItems(context.mcvItem())
+                    : getAnalyzeColumns(qualifiedNames.subList(1, qualifiedNames.size()));
             return new CreateAnalyzeJobStmt(tableRef, columns, context.IF() != null, isSample, properties,
                     analyzeType, context.MCV() != null ? new AnalyzeMcvDesc() : null, pos);
         } else if (context.histogramStatement() != null) {

@@ -359,6 +359,61 @@ public class QueryDumpDeserializerTest {
     }
 
     @Test
+    public void testDeserializeQueryDumpWithExpressionStatistics() {
+        ExternalMcvStatistics.Expression expression = new ExternalMcvStatistics.Expression("substr(`c`, 1, 3)",
+                "varchar(65533)", List.of(new ExternalMcvStatistics.StoredSource("c", "varchar(65533)", 7)), null);
+        ExternalMcvStatistics.Group stored = new ExternalMcvStatistics.Group(
+                List.of("d", "expr:1:substr(`c`, 1, 3)"), 1000, 12,
+                List.of(new MultiColumnCombinedStats.McvEntry(List.of("5", "103"), 500, List.of(600L, 620L))),
+                List.of(), List.of(0L, 50L), Arrays.asList(null, expression));
+        JsonArray columns = ExternalMcvStatsCacheLoader.formatColumnNames(stored);
+        assertThat(columns.get(0).getAsString()).isEqualTo("d");
+        assertThat(columns.get(1).getAsJsonObject().get("expr").getAsString()).isEqualTo("substr(`c`, 1, 3)");
+
+        JsonObject dump = new JsonObject();
+        dump.addProperty("statement", "select * from t1");
+        JsonObject tableMeta = new JsonObject();
+        tableMeta.addProperty("test.t1", "CREATE TABLE t1 (c VARCHAR(10), d INT)");
+        dump.add("table_meta", tableMeta);
+        JsonObject rowCount = new JsonObject();
+        JsonObject partitionRowCount = new JsonObject();
+        partitionRowCount.addProperty("t1", 1000L);
+        rowCount.add("test.t1", partitionRowCount);
+        dump.add("table_row_count", rowCount);
+        dump.add("column_statistics", new JsonObject());
+        JsonArray groups = new JsonArray();
+        for (int format : List.of(1, 2)) {
+            JsonArray formatColumns = columns.deepCopy();
+            formatColumns.get(1).getAsJsonObject().addProperty("format", format);
+            JsonObject group = new JsonObject();
+            group.add("columns", formatColumns);
+            group.addProperty("ndv", 12L);
+            group.addProperty("row_count", 1000L);
+            group.addProperty("mcv", ExternalMcvStatsCacheLoader.formatMcv(stored.getMcv()));
+            group.add("buckets", new JsonArray());
+            group.add("null_counts", JsonParser.parseString("[0,50]"));
+            groups.add(group);
+        }
+        JsonObject multiColumn = new JsonObject();
+        multiColumn.add("test.t1", groups);
+        dump.add("external_mcv_statistics", multiColumn);
+        dump.addProperty("be_number", 3);
+
+        Gson gson = new GsonBuilder().registerTypeAdapter(QueryDumpInfo.class, new QueryDumpDeserializer()).create();
+        QueryDumpInfo dumpInfo = gson.fromJson(dump, QueryDumpInfo.class);
+        List<ExternalMcvStatistics.Group> parsed = dumpInfo.getExternalMcvStatisticsMap().get("test.t1");
+        // The group of an unknown format is left out.
+        assertThat(parsed).hasSize(1);
+        assertThat(parsed.get(0).getColumnNames()).containsExactly("d", "expr:1:substr(`c`, 1, 3)");
+        assertThat(parsed.get(0).getExpressions().get(0)).isNull();
+        ExternalMcvStatistics.Expression restored = parsed.get(0).getExpressions().get(1);
+        assertThat(restored.getText()).isEqualTo("substr(`c`, 1, 3)");
+        assertThat(restored.getSources()).containsExactly(new ExternalMcvStatistics.StoredSource("c", "varchar(65533)", 7));
+        assertThat(restored.getTemplate()).isNull();
+        assertThat(ExternalMcvStatsCacheLoader.formatColumnNames(parsed.get(0))).isEqualTo(columns);
+    }
+
+    @Test
     public void testDeserializeQueryDumpWithHistogram() {
         // Build a dump whose column_histogram section carries the serialized histogram, then verify the
         // deserializer merges it back onto the column statistic parsed from column_statistics.

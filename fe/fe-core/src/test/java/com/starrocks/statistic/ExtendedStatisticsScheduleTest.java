@@ -253,6 +253,36 @@ class ExtendedStatisticsScheduleTest {
     }
 
     @Test
+    void scheduledMcvExpressionOfUnknownFormatFailsWithReason() {
+        var mgr = installState(mock(JoinStatisticsManager.class));
+        var table = mock(com.starrocks.catalog.Table.class);
+        when(table.getUUID()).thenReturn("t-uuid");
+        new MockUp<com.starrocks.sql.common.MetaUtils>() {
+            @Mock
+            public com.starrocks.catalog.Table getSessionAwareTable(ConnectContext context,
+                    com.starrocks.catalog.Database db, com.starrocks.catalog.TableName name) {
+                return table;
+            }
+        };
+        var value = job(StatsConstants.AnalyzeType.MCV, 7, List.of("expr:2:lower(`status`)"));
+        mgr.replayAddAnalyzeJob(value);
+        var executor = mock(StatisticExecutor.class);
+        boolean staggered = Config.enable_statistic_auto_collect_staggered_schedule;
+        boolean enabled = Config.enable_statistic_collect;
+        try {
+            Config.enable_statistic_auto_collect_staggered_schedule = false;
+            Config.enable_statistic_collect = true;
+            ExtendedStatisticsSchedule.run(value, mock(ConnectContext.class), executor, false);
+            assertEquals(StatsConstants.ScheduleStatus.FAILED, value.getStatus());
+            assertTrue(value.getReason().contains("Unsupported format of MCV expression"), value.getReason());
+            verifyNoInteractions(executor);
+        } finally {
+            Config.enable_statistic_auto_collect_staggered_schedule = staggered;
+            Config.enable_statistic_collect = enabled;
+        }
+    }
+
+    @Test
     void joinJobCreationChecksEverySourceAndKillCancelsOnlyTheCapturedGeneration() {
         var manager = mock(JoinStatisticsManager.class);
         var mgr = installState(manager);

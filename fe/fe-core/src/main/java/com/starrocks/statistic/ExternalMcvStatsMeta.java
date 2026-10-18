@@ -17,6 +17,7 @@ package com.starrocks.statistic;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Writable;
 import com.starrocks.sql.ast.StatisticsType;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -80,7 +81,7 @@ public class ExternalMcvStatsMeta implements Writable {
         }
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (String column : columnNames) {
-            if (column == null || column.isBlank() || !seen.add(column.toLowerCase(java.util.Locale.ROOT))) {
+            if (column == null || column.isBlank() || !seen.add(ExpressionTemplate.keyText(column))) {
                 throw new IllegalArgumentException("Invalid external MCV statistics columns");
             }
         }

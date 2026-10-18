@@ -20,6 +20,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.starrocks.catalog.Table;
@@ -52,6 +53,10 @@ public class ExternalMcvStatsCacheLoader
 
     private final StatisticExecutor statisticExecutor = new StatisticExecutor();
     final StatisticsLoadBackoff backoff = new StatisticsLoadBackoff();
+    private static final long SKIP_WARNING_INTERVAL_MS = 60_000;
+    private final java.util.concurrent.atomic.AtomicLong lastSkipWarning = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong LAST_IGNORE_WARNING =
+            new java.util.concurrent.atomic.AtomicLong();
 
     @Override
     public @NonNull CompletableFuture<Optional<ExternalMcvStatistics>> asyncLoad(
@@ -74,23 +79,8 @@ public class ExternalMcvStatsCacheLoader
                 if (groups.isEmpty()) {
                     return Optional.empty();
                 }
-                if (groups.stream().anyMatch(group -> group.getColumnNames().size() == 1)) {
-                    Table table = getTableByUUID(connectContext, tableUUID);
-                    for (ExternalMcvStatistics.Group group : groups) {
-                        if (group.getColumnNames().size() != 1) {
-                            continue;
-                        }
-                        try {
-                            group.prepare(StatisticUtils.getQueryStatisticsColumnType(table, group.getColumnNames().get(0)));
-                        } catch (SemanticException e) {
-                            // Statistics can outlive a dropped column. It cannot match a scan column,
-                            // but must not prevent other groups of the table from being loaded.
-                            LOG.debug("Cannot prepare MCV statistics for removed column {} of {}",
-                                    group.getColumnNames(), tableUUID, e);
-                        }
-                    }
-                }
-                return Optional.of(new ExternalMcvStatistics(groups));
+                ExternalMcvStatistics bound = resolveAndBind(groups, connectContext, tableUUID);
+                return bound.isEmpty() && !bound.isIncomplete() ? Optional.empty() : Optional.of(bound);
             } catch (Exception e) {
                 backoff.failed();
                 // Caffeine reports the failed load; query callers respect the retry pause.
@@ -108,13 +98,175 @@ public class ExternalMcvStatsCacheLoader
         return asyncLoad(tableUUID, executor);
     }
 
+    /**
+     * Binds the groups that need the table to it. We fear that the table cannot be found by its UUID, as when it was
+     * dropped or created again outside StarRocks; that is a state of one table, not a failure of the statistics, so
+     * its groups that need the table are left out of this load, the other groups load, and the result is marked
+     * incomplete. The retry pause of all loads is not started.
+     */
+    ExternalMcvStatistics resolveAndBind(List<ExternalMcvStatistics.Group> groups, ConnectContext connectContext,
+                                         String tableUUID) {
+        if (groups.stream().noneMatch(ExternalMcvStatsCacheLoader::needsTable)) {
+            return new ExternalMcvStatistics(groups);
+        }
+        Table table;
+        try {
+            table = getTableByUUID(connectContext, tableUUID);
+        } catch (RuntimeException e) {
+            warnOnceAMinute(lastSkipWarning, "Skip MCV statistics of table {} that need the table in this load: {}",
+                    tableUUID, e.getMessage());
+            List<ExternalMcvStatistics.Group> kept = new ArrayList<>();
+            for (ExternalMcvStatistics.Group group : groups) {
+                if (!needsTable(group)) {
+                    kept.add(group);
+                }
+            }
+            return new ExternalMcvStatistics(kept, true);
+        }
+        return bindGroups(groups, table, connectContext, tableUUID);
+    }
+
+    // A group of one element is prepared by the type of its column, and an expression is analyzed on the table.
+    private static boolean needsTable(ExternalMcvStatistics.Group group) {
+        return group.getColumnNames().size() == 1 || group.hasExpressions();
+    }
+
+    // A failure that repeats on every load until the table or its schema reads again is logged once a minute.
+    private static void warnOnceAMinute(java.util.concurrent.atomic.AtomicLong lastWarning, String message,
+                                        Object... arguments) {
+        long now = System.currentTimeMillis();
+        long last = lastWarning.get();
+        if (now - last >= SKIP_WARNING_INTERVAL_MS && lastWarning.compareAndSet(last, now)) {
+            LOG.warn(message, arguments);
+        } else {
+            LOG.debug(message, arguments);
+        }
+    }
+
+    /**
+     * Binds the groups of a table to its current schema and prepares the singleton groups. A group whose Iceberg
+     * field ids cannot be read now is left out of this load only: the other groups load, the result is marked
+     * incomplete so the cache loads it again soon, and the loads of other tables go on.
+     */
+    ExternalMcvStatistics bindGroups(List<ExternalMcvStatistics.Group> groups, Table table,
+                                     ConnectContext connectContext, String tableUUID) {
+        List<ExternalMcvStatistics.Group> bound = new ArrayList<>(groups.size());
+        boolean incomplete = false;
+        for (ExternalMcvStatistics.Group parsed : groups) {
+            ExternalMcvStatistics.Group group;
+            try {
+                group = parsed.hasExpressions() ? bindExpressions(parsed, table, connectContext, tableUUID) : parsed;
+            } catch (ExpressionTemplate.FieldIdUnavailableException e) {
+                warnOnceAMinute(lastSkipWarning, "Skip MCV statistics of group {} of table {} in this load: {}",
+                        parsed.getColumnNames(), tableUUID, e.getMessage());
+                incomplete = true;
+                continue;
+            }
+            if (group == null) {
+                continue;
+            }
+            bound.add(group);
+            if (group.getColumnNames().size() != 1) {
+                continue;
+            }
+            ExternalMcvStatistics.Expression expression = group.getExpressions().get(0);
+            if (expression != null) {
+                // The type of an expression comes from the analyzed expression, not from a column.
+                group.prepare(expression.getTemplate().getType());
+                continue;
+            }
+            try {
+                group.prepare(StatisticUtils.getQueryStatisticsColumnType(table, group.getColumnNames().get(0)));
+            } catch (SemanticException e) {
+                // Statistics can outlive a dropped column. It cannot match a scan column,
+                // but must not prevent other groups of the table from being loaded.
+                LOG.debug("Cannot prepare MCV statistics for removed column {} of {}",
+                        group.getColumnNames(), tableUUID, e);
+            }
+        }
+        return new ExternalMcvStatistics(bound, incomplete);
+    }
+
+    /**
+     * Analyzes the expressions of a group against the current schema of the table, once per load. We fear that the
+     * schema changed since the collection: a source column was dropped, renamed and added again, or changed its
+     * type. Such a group no longer describes the expression of the query, so it is left out with a warning; the
+     * other groups of the table and the query are not affected.
+     */
+    static ExternalMcvStatistics.Group bindExpressions(ExternalMcvStatistics.Group group, Table table,
+                                                       ConnectContext context, String tableUUID) {
+        return bindExpressions(group, table, context, tableUUID, true);
+    }
+
+    /**
+     * @param checkFieldIds whether the Iceberg field ids are compared; a group of a replayed query dump comes with a
+     *                      table that cannot give them
+     */
+    static ExternalMcvStatistics.Group bindExpressions(ExternalMcvStatistics.Group group, Table table,
+                                                       ConnectContext context, String tableUUID,
+                                                       boolean checkFieldIds) {
+        List<ExternalMcvStatistics.Expression> bound = new ArrayList<>(group.getExpressions().size());
+        for (ExternalMcvStatistics.Expression expression : group.getExpressions()) {
+            if (expression == null) {
+                bound.add(null);
+                continue;
+            }
+            String reason = null;
+            try {
+                if (table == null) {
+                    reason = "the table is not found";
+                } else {
+                    for (ExternalMcvStatistics.StoredSource source : expression.getSources()) {
+                        if (!sameSource(source, table, checkFieldIds)) {
+                            reason = "column " + source.name() + " is missing or changed";
+                            break;
+                        }
+                    }
+                }
+                if (reason == null) {
+                    ExpressionTemplate template = ExpressionTemplate.parse(expression.getText(), table, context);
+                    if (!template.getText().equals(expression.getText())) {
+                        reason = "it analyzes as " + template.getText();
+                    } else if (!template.getType().toSql().equals(expression.getType())) {
+                        reason = "its type is " + template.getType().toSql() + ", not " + expression.getType();
+                    } else {
+                        bound.add(expression.withTemplate(template));
+                        continue;
+                    }
+                }
+            } catch (ExpressionTemplate.FieldIdUnavailableException e) {
+                // A schema that cannot be read now may be read on the next load.
+                throw e;
+            } catch (RuntimeException e) {
+                reason = e.getMessage();
+            }
+            // A changed schema leaves the group out on every load until the statistics are collected again.
+            warnOnceAMinute(LAST_IGNORE_WARNING, "Ignore MCV statistics of expression {} on table {}: {}",
+                    expression.getText(), tableUUID, reason);
+            return null;
+        }
+        return group.withExpressions(bound);
+    }
+
+    /** Whether a column of the table still has the type and the Iceberg field id recorded at collection. */
+    static boolean sameSource(ExternalMcvStatistics.StoredSource source, Table table, boolean checkFieldIds) {
+        com.starrocks.catalog.Column column = table.getColumn(source.name());
+        return column != null && column.getType().toSql().equals(source.type())
+                && (!checkFieldIds
+                || ExpressionTemplate.fieldIdMatchesOrThrow(table, column.getName(), source.fieldId()));
+    }
+
     // A row is [column_names, row_count, ndv, mcv, buckets, null_counts].
     static ExternalMcvStatistics.Group parseGroup(List<String> row) {
         if (row.size() != 6 || row.stream().anyMatch(java.util.Objects::isNull)) {
             return null;
         }
         try {
-            List<String> columnNames = parseStringArray(JsonParser.parseString(row.get(0)).getAsJsonArray());
+            List<String> columnNames = new ArrayList<>();
+            List<ExternalMcvStatistics.Expression> expressions = new ArrayList<>();
+            if (!parseColumnNames(row.get(0), columnNames, expressions)) {
+                return null;
+            }
             if (columnNames.isEmpty()) {
                 return null;
             }
@@ -128,11 +280,76 @@ public class ExternalMcvStatsCacheLoader
                     || nullCounts.stream().anyMatch(n -> n < 0 || n > rowCount)) {
                 throw new IllegalArgumentException("Invalid MCV NULL counts");
             }
-            return new ExternalMcvStatistics.Group(columnNames, rowCount, ndv, mcv, buckets, nullCounts);
+            return new ExternalMcvStatistics.Group(columnNames, rowCount, ndv, mcv, buckets, nullCounts, expressions);
         } catch (RuntimeException e) {
             LOG.warn("Ignore malformed external MCV statistics record", e);
             return null;
         }
+    }
+
+    /**
+     * column_names: a column is its name; an expression is an object with its canonical text, format version, type
+     * and source columns. False when the group has an expression of a format this FE does not know, which is left
+     * out with a warning.
+     */
+    public static boolean parseColumnNames(String text, List<String> columnNames,
+                                           List<ExternalMcvStatistics.Expression> expressions) {
+        for (JsonElement element : JsonParser.parseString(text).getAsJsonArray()) {
+            if (!element.isJsonObject()) {
+                columnNames.add(element.getAsString());
+                expressions.add(null);
+                continue;
+            }
+            JsonObject object = element.getAsJsonObject();
+            String expression = object.get(ExpressionTemplate.JSON_EXPR).getAsString();
+            int format = object.get(ExpressionTemplate.JSON_FORMAT).getAsInt();
+            if (format != ExpressionTemplate.FORMAT_VERSION) {
+                LOG.warn("Ignore MCV statistics of expression {} of unknown format {}", expression, format);
+                return false;
+            }
+            List<ExternalMcvStatistics.StoredSource> sources = new ArrayList<>();
+            for (JsonElement column : object.getAsJsonArray(ExpressionTemplate.JSON_COLUMNS)) {
+                JsonObject source = column.getAsJsonObject();
+                JsonElement fieldId = source.get(ExpressionTemplate.JSON_FIELD_ID);
+                sources.add(new ExternalMcvStatistics.StoredSource(
+                        source.get(ExpressionTemplate.JSON_NAME).getAsString(),
+                        source.get(ExpressionTemplate.JSON_TYPE).getAsString(),
+                        fieldId == null || fieldId.isJsonNull() ? null : fieldId.getAsInt()));
+            }
+            columnNames.add(ExpressionTemplate.elementText(expression));
+            expressions.add(new ExternalMcvStatistics.Expression(expression,
+                    object.get(ExpressionTemplate.JSON_TYPE).getAsString(), sources, null));
+        }
+        return true;
+    }
+
+    /** The inverse of parseColumnNames: the elements of a group as column_names holds them. */
+    public static JsonArray formatColumnNames(ExternalMcvStatistics.Group group) {
+        JsonArray array = new JsonArray();
+        for (int i = 0; i < group.getColumnNames().size(); i++) {
+            ExternalMcvStatistics.Expression expression = group.getExpressions().get(i);
+            if (expression == null) {
+                array.add(group.getColumnNames().get(i));
+                continue;
+            }
+            JsonObject object = new JsonObject();
+            object.addProperty(ExpressionTemplate.JSON_EXPR, expression.getText());
+            object.addProperty(ExpressionTemplate.JSON_FORMAT, ExpressionTemplate.FORMAT_VERSION);
+            object.addProperty(ExpressionTemplate.JSON_TYPE, expression.getType());
+            JsonArray sources = new JsonArray();
+            for (ExternalMcvStatistics.StoredSource source : expression.getSources()) {
+                JsonObject column = new JsonObject();
+                column.addProperty(ExpressionTemplate.JSON_NAME, source.name());
+                column.addProperty(ExpressionTemplate.JSON_TYPE, source.type());
+                if (source.fieldId() != null) {
+                    column.addProperty(ExpressionTemplate.JSON_FIELD_ID, source.fieldId());
+                }
+                sources.add(column);
+            }
+            object.add(ExpressionTemplate.JSON_COLUMNS, sources);
+            array.add(object);
+        }
+        return array;
     }
 
     public static List<List<String>> parseBuckets(String text) {

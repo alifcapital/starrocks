@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.statistics;
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
@@ -1460,7 +1461,24 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             throw new IllegalArgumentException("MCV statistics cache byte limit must be positive");
         }
         Caffeine<String, Optional<ExternalMcvStatistics>> builder = Caffeine.newBuilder()
-                .expireAfterWrite(Config.statistic_update_interval_sec * 2, TimeUnit.SECONDS)
+                .expireAfter(new Expiry<String, Optional<ExternalMcvStatistics>>() {
+                    @Override
+                    public long expireAfterCreate(String key, Optional<ExternalMcvStatistics> value, long now) {
+                        return externalMcvLifetimeNanos(value);
+                    }
+
+                    @Override
+                    public long expireAfterUpdate(String key, Optional<ExternalMcvStatistics> value, long now,
+                                                  long currentDuration) {
+                        return externalMcvLifetimeNanos(value);
+                    }
+
+                    @Override
+                    public long expireAfterRead(String key, Optional<ExternalMcvStatistics> value, long now,
+                                                long currentDuration) {
+                        return currentDuration;
+                    }
+                })
                 .maximumWeight(maximumBytes)
                 .recordStats()
                 .weigher((String key, Optional<ExternalMcvStatistics> value) -> externalMcvCacheWeight(key, value))
@@ -1469,6 +1487,16 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             builder.refreshAfterWrite(Config.statistic_update_interval_sec, TimeUnit.SECONDS);
         }
         return builder.buildAsync(loader);
+    }
+
+    // Statistics with a group left out for a passing reason are loaded again within a minute; others live as long
+    // as other statistics.
+    static long externalMcvLifetimeNanos(Optional<ExternalMcvStatistics> value) {
+        long seconds = Config.statistic_update_interval_sec * 2;
+        if (value.isPresent() && value.get().isIncomplete()) {
+            seconds = Math.min(seconds, 60);
+        }
+        return TimeUnit.SECONDS.toNanos(seconds);
     }
 
     static int externalMcvCacheWeight(String key, Optional<ExternalMcvStatistics> value) {

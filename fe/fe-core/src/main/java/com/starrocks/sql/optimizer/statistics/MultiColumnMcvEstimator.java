@@ -605,15 +605,21 @@ public class MultiColumnMcvEstimator {
      * or the result cannot be compared with the constant.
      */
     static Optional<Boolean> matchesComponent(ScalarOperator conjunct, ColumnRefOperator column, String value) {
+        return matchesComponent(conjunct, column, value, new LikePatternEstimator.Work());
+    }
+
+    /** The same, with a LIKE spending the work budget of the derivation. */
+    static Optional<Boolean> matchesComponent(ScalarOperator conjunct, ColumnRefOperator column, String value,
+                                              LikePatternEstimator.Work work) {
         ScalarOperator expr = conjunct.getChild(0);
         if (expr.isColumnRef()) {
-            return matches(conjunct, column.getType(), value);
+            return matches(conjunct, column.getType(), value, work);
         }
         Optional<ConstantOperator> result = evaluate(expr, column, value);
         if (result.isEmpty()) {
             return Optional.empty();
         }
-        return matches(conjunct, expr.getType(), result.get().isNull() ? null : constantText(result.get()));
+        return matches(conjunct, expr.getType(), result.get().isNull() ? null : constantText(result.get()), work);
     }
 
     // The expression with the column replaced by the component value, folded to a constant.
@@ -646,6 +652,10 @@ public class MultiColumnMcvEstimator {
             }
             if (expr instanceof CallOperator) {
                 CallOperator call = (CallOperator) expr;
+                Optional<ConstantOperator> substring = foldSubstring(call, children);
+                if (substring.isPresent()) {
+                    return substring;
+                }
                 Optional<ConstantOperator> chosen = chooseAmongConstants(call.getFnName(), children);
                 if (chosen.isPresent()) {
                     return chosen.get().isNull() || chosen.get().getType().equals(expr.getType())
@@ -665,6 +675,37 @@ public class MultiColumnMcvEstimator {
         }
     }
 
+    /**
+     * substr(s, pos, len) of the built-in function over a VARCHAR and two INT constants, folded by the FE function
+     * the constant folding reaches for it. We expect the head of a statistic on substr to be evaluated on every
+     * estimate, so this call skips the scalar rewrite the folding runs around it; any other call takes the rewrite.
+     */
+    private static Optional<ConstantOperator> foldSubstring(CallOperator call, List<ScalarOperator> children) {
+        String name = call.getFnName();
+        if (children.size() != 3 || !(FunctionSet.SUBSTR.equalsIgnoreCase(name)
+                || FunctionSet.SUBSTRING.equalsIgnoreCase(name))) {
+            return Optional.empty();
+        }
+        com.starrocks.catalog.Function function = call.getFunction();
+        if (function == null || function.isUdf() || function.getArgs().length != 3
+                || !function.getArgs()[0].isVarchar() || !function.getArgs()[1].isInt() || !function.getArgs()[2].isInt()) {
+            return Optional.empty();
+        }
+        ConnectContext context = ConnectContext.get();
+        if (context != null && context.getSessionVariable().isDisableFunctionFoldConstants()) {
+            return Optional.empty();
+        }
+        for (int i = 0; i < 3; i++) {
+            ConstantOperator constant = (ConstantOperator) children.get(i);
+            if (constant.isNull() || (i == 0 ? !constant.getType().isVarchar() : !constant.getType().isInt())) {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions.substring(
+                (ConstantOperator) children.get(0), (ConstantOperator) children.get(1),
+                (ConstantOperator) children.get(2)));
+    }
+
     private static boolean isNonNullConstant(ScalarOperator operator) {
         return operator.isConstantRef() && !((ConstantOperator) operator).isNull();
     }
@@ -674,6 +715,11 @@ public class MultiColumnMcvEstimator {
      * the constant.
      */
     static Optional<Boolean> matches(ScalarOperator conjunct, Type type, String value) {
+        return matches(conjunct, type, value, new LikePatternEstimator.Work());
+    }
+
+    private static Optional<Boolean> matches(ScalarOperator conjunct, Type type, String value,
+                                             LikePatternEstimator.Work work) {
         if (conjunct instanceof IsNullPredicateOperator) {
             boolean isNull = value == null;
             return Optional.of(((IsNullPredicateOperator) conjunct).isNotNull() != isNull);
@@ -682,7 +728,8 @@ public class MultiColumnMcvEstimator {
             return Optional.of(false);
         }
         if (conjunct instanceof LikePredicateOperator) {
-            return LikePatternEstimator.pattern((LikePredicateOperator) conjunct).flatMap(pattern -> pattern.tryMatch(value));
+            return LikePatternEstimator.pattern((LikePredicateOperator) conjunct)
+                    .flatMap(pattern -> pattern.tryMatch(value, work));
         }
         if (conjunct instanceof BinaryPredicateOperator) {
             BinaryPredicateOperator predicate = (BinaryPredicateOperator) conjunct;

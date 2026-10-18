@@ -1145,7 +1145,10 @@ public class Utils {
             if (op.isNotEvalEstimate()) {
                 continue;
             }
-            if (ScalarOperator.isColumnEqualConstant(op)) {
+            // A virtual column of statistics on an expression (a negative id) takes its share from its own
+            // distribution and multiplies with the others as independent; it is not one of the equalities whose
+            // shares the correlated estimate weakens.
+            if (ScalarOperator.isColumnEqualConstant(op) && ((ColumnRefOperator) op.getChild(0)).getId() >= 0) {
                 BinaryPredicateOperator binaryOp = (BinaryPredicateOperator) op;
                 ColumnRefOperator column = (ColumnRefOperator) binaryOp.getChild(0);
                 ConstantOperator constant = (ConstantOperator) binaryOp.getChild(1);

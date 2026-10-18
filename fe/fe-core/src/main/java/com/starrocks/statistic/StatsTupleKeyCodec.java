@@ -15,6 +15,7 @@
 package com.starrocks.statistic;
 
 import com.starrocks.catalog.Table;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,8 +44,15 @@ public final class StatsTupleKeyCodec {
                 .collect(Collectors.joining(", ")) + ")";
     }
 
-    /** The text of one column value as the key holds it. */
+    /** The text of one column value as the key holds it; an expression element casts its canonical text. */
     public static String buildComponentExpr(Table table, String columnName) {
+        if (ExpressionTemplate.isExpressionElement(columnName)) {
+            String text = ExpressionTemplate.canonicalTextOf(columnName);
+            if (text == null) {
+                throw new IllegalArgumentException("Unsupported format of MCV expression " + columnName);
+            }
+            return "cast((" + text + ") as varchar)";
+        }
         return "cast(" + StatisticUtils.quoting(table, columnName) + " as varchar)";
     }
 

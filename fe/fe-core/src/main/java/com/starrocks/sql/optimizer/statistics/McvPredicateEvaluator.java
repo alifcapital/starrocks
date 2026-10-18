@@ -23,27 +23,56 @@ import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.type.Type;
 
 import java.math.BigDecimal;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** Predicate preparation scoped to one derivation, never retained in the statistics cache. */
+/**
+ * Predicate preparation scoped to one derivation, never retained in the statistics cache. A condition on a virtual
+ * column of the statistics on an expression is written by the planner for the estimate only and does not change,
+ * and the derivations of one query match the head of x with it again, so its preparation and its result on each
+ * value are kept in the cache of the query.
+ */
 final class McvPredicateEvaluator {
+    private static final int MAX_RESULTS = 4096;
+
     // ScalarOperator.hashCode/equals can themselves walk a long IN list. Identity is sufficient here.
-    private final Map<ScalarOperator, Prepared> predicates = new IdentityHashMap<>();
+    private final Map<ScalarOperator, Local> predicates = new IdentityHashMap<>();
+    private final ExpressionStatisticsCache cache = ExpressionStatisticsCache.current();
+
+    // A prepared condition with the work budget its LIKE spends in this derivation, over the values in their order.
+    private record Local(Prepared prepared, LikePatternEstimator.Work work) {
+    }
 
     ColumnRefOperator column(ScalarOperator predicate) {
-        return prepared(predicate).column;
+        return local(predicate).prepared().column;
     }
 
     Optional<Boolean> matchesComponent(ScalarOperator predicate, ColumnRefOperator column, String value) {
-        Prepared prepared = prepared(predicate);
+        Local local = local(predicate);
+        Prepared prepared = local.prepared();
+        if (prepared.results != null && column.equals(prepared.column) && value != null) {
+            Optional<Boolean> known = prepared.results.get(value);
+            if (known == null) {
+                known = match(prepared, predicate, column, value, local.work());
+                if (prepared.results.size() < MAX_RESULTS && prepared.results.putIfAbsent(value, known) == null) {
+                    cache.grow(1);
+                }
+            }
+            return known;
+        }
+        return match(prepared, predicate, column, value, local.work());
+    }
+
+    private static Optional<Boolean> match(Prepared prepared, ScalarOperator predicate, ColumnRefOperator column,
+                                           String value, LikePatternEstimator.Work work) {
         if (prepared.membership == null && prepared.like == null) {
-            return MultiColumnMcvEstimator.matchesComponent(predicate, column, value);
+            return MultiColumnMcvEstimator.matchesComponent(predicate, column, value, work);
         }
         ScalarOperator expression = predicate.getChild(0);
         if (!expression.isColumnRef()) {
@@ -53,25 +82,50 @@ final class McvPredicateEvaluator {
             }
             value = result.get().isNull() ? null : MultiColumnMcvEstimator.constantText(result.get());
         }
-        return prepared.like != null ? value == null ? Optional.of(false) : prepared.like.tryMatch(value)
+        return prepared.like != null ? value == null ? Optional.of(false) : prepared.like.tryMatch(value, work)
                 : prepared.membership.matches(value);
     }
 
-    private Prepared prepared(ScalarOperator predicate) {
-        return predicates.computeIfAbsent(predicate, Prepared::new);
+    private Local local(ScalarOperator predicate) {
+        Local local = predicates.get(predicate);
+        if (local != null) {
+            return local;
+        }
+        ColumnRefOperator column = MultiColumnMcvEstimator.predicateColumn(predicate);
+        Prepared prepared;
+        if (cache != null && column != null && ExpressionStatisticsEstimator.isVirtualColumn(column)) {
+            long size = ExpressionStatisticsCache.units(predicate);
+            if (predicate instanceof LikePredicateOperator && predicate.getChild(1) instanceof ConstantOperator pattern
+                    && !pattern.isNull() && pattern.getType().isStringType()) {
+                // A LIKE keeps its compiled pattern, which is about as long as the pattern text.
+                size += pattern.getVarchar().length();
+            }
+            long units = size;
+            prepared = cache.part(List.of("prepared", new ExpressionStatisticsCache.Identity(predicate)),
+                    () -> new Prepared(predicate, column, true), created -> units);
+        } else {
+            prepared = new Prepared(predicate, column, false);
+        }
+        local = new Local(prepared, new LikePatternEstimator.Work());
+        predicates.put(predicate, local);
+        return local;
     }
 
     private static final class Prepared {
         private final ColumnRefOperator column;
         private final Membership membership;
         private final LikePatternEstimator.LikePattern like;
+        // The result on each value, kept for a condition on a virtual column in the cache of a query only. The
+        // result of a LIKE depends on the budget the derivation has left, so it is not kept.
+        private final Map<String, Optional<Boolean>> results;
 
-        private Prepared(ScalarOperator predicate) {
-            column = MultiColumnMcvEstimator.predicateColumn(predicate);
+        private Prepared(ScalarOperator predicate, ColumnRefOperator column, boolean kept) {
+            this.column = column;
             membership = column != null && predicate instanceof InPredicateOperator
                     ? new Membership((InPredicateOperator) predicate) : null;
             like = column != null && predicate instanceof LikePredicateOperator pattern
                     ? LikePatternEstimator.pattern(pattern).orElse(null) : null;
+            results = kept && !(predicate instanceof LikePredicateOperator) ? new ConcurrentHashMap<>() : null;
         }
     }
 
@@ -131,8 +185,15 @@ final class McvPredicateEvaluator {
                 // Double.equals has the same equality semantics as Double.compare, including NaN and signed zero.
                 return StatisticUtils.convertStatisticsToDouble(valueType, value).orElse(null);
             }
-            // Match byte equality even for strings containing malformed UTF-16 surrogate sequences.
-            return ByteBuffer.wrap(value.getBytes(StandardCharsets.UTF_8));
+            // Match byte equality of the UTF-8 forms even for strings containing malformed UTF-16 surrogate
+            // sequences: the UTF-8 form is valid and decodes back to one string per byte sequence, and a string
+            // without surrogates decodes back to itself, so it is its own key.
+            for (int i = 0; i < value.length(); i++) {
+                if (Character.isSurrogate(value.charAt(i))) {
+                    return new String(value.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+                }
+            }
+            return value;
         } catch (RuntimeException e) {
             return null;
         }

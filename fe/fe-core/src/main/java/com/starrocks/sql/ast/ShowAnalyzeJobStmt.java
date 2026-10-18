@@ -102,7 +102,7 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
                             ? ((Table) table).getBaseSchema().size()
                             : -1L;
                     if (columns.size() != fullSchemaSize) {
-                        String str = String.join(",", columns);
+                        String str = com.starrocks.sql.optimizer.statistics.ExpressionTemplate.displayElements(columns);
                         if (str.length() > 100) {
                             row.set(4, str.substring(0, 100) + "...");
                         } else {

@@ -32,6 +32,58 @@ import java.util.Optional;
 public class ExternalMcvStatistics {
     public static final ExternalMcvStatistics EMPTY = new ExternalMcvStatistics();
 
+    /** A column an expression element reads, with the type and the Iceberg field id recorded at collection. */
+    public record StoredSource(String name, String type, Integer fieldId) {
+    }
+
+    /**
+     * An expression element of a group: its canonical text, its result type and the columns it reads as recorded
+     * at collection, and the expression analyzed against the schema when the group was loaded.
+     */
+    public static final class Expression {
+        private final String text;
+        private final String type;
+        private final List<StoredSource> sources;
+        private final ExpressionTemplate template;
+
+        public Expression(String text, String type, List<StoredSource> sources, ExpressionTemplate template) {
+            this.text = text;
+            this.type = type;
+            this.sources = List.copyOf(sources);
+            this.template = template;
+        }
+
+        public String getText() {
+            return text;
+        }
+
+        public String getType() {
+            return type;
+        }
+
+        public List<StoredSource> getSources() {
+            return sources;
+        }
+
+        /** Null until the group is bound to the schema of its table. */
+        public ExpressionTemplate getTemplate() {
+            return template;
+        }
+
+        public Expression withTemplate(ExpressionTemplate template) {
+            return new Expression(text, type, sources, template);
+        }
+
+        private long retainedBytes() {
+            long bytes = 96 + stringBytes(text) + stringBytes(type) + 32L * sources.size();
+            for (StoredSource source : sources) {
+                bytes += 48 + stringBytes(source.name()) + stringBytes(source.type());
+            }
+            // The analyzed template holds a small operator tree over the source columns.
+            return bytes + 512;
+        }
+    }
+
     public static class Group {
         // Order of the tuple components in the most common values.
         private final List<String> columnNames;
@@ -43,6 +95,10 @@ public class ExternalMcvStatistics {
         private final List<Long> nullCounts;
         private final McvDistribution singleColumnMcv;
         private final long headRows;
+        // One entry per element: the expression of an expression element, null for a column.
+        private final List<Expression> expressions;
+        // The marginal distribution of each element of a multi-element group, built on first use.
+        private volatile Group[] elementGroups;
         // The distribution is immutable. This memoized immutable view is keyed by source type so
         // schema changes and dump replay cannot reuse string ordering for numeric/date columns.
         private volatile PreparedColumn preparedColumn;
@@ -86,6 +142,16 @@ public class ExternalMcvStatistics {
 
         public Group(List<String> columnNames, long rowCount, long ndv, List<MultiColumnCombinedStats.McvEntry> mcv,
                      List<List<String>> buckets, List<Long> nullCounts) {
+            this(columnNames, rowCount, ndv, mcv, buckets, nullCounts, Collections.nCopies(columnNames.size(), null));
+        }
+
+        /** The column names of expression elements are their element texts, see ExpressionTemplate#elementText. */
+        public Group(List<String> columnNames, long rowCount, long ndv, List<MultiColumnCombinedStats.McvEntry> mcv,
+                     List<List<String>> buckets, List<Long> nullCounts, List<Expression> expressions) {
+            if (expressions.size() != columnNames.size()) {
+                throw new IllegalArgumentException("Invalid MCV expressions");
+            }
+            this.expressions = Collections.unmodifiableList(new ArrayList<>(expressions));
             if (columnNames.isEmpty() || rowCount < 0 || ndv < 0 || nullCounts.size() != columnNames.size()
                     || nullCounts.stream().anyMatch(count -> count < 0 || count > rowCount)
                     || (columnNames.size() != 1 && !buckets.isEmpty())) {
@@ -136,11 +202,28 @@ public class ExternalMcvStatistics {
             return nullCounts;
         }
 
+        /** One entry per element: the expression of an expression element, null for a column. */
+        public List<Expression> getExpressions() {
+            return expressions;
+        }
+
+        public boolean hasExpressions() {
+            return expressions.stream().anyMatch(java.util.Objects::nonNull);
+        }
+
+        /** The same distribution with the given expressions, as when the group is bound to the table schema. */
+        public Group withExpressions(List<Expression> boundExpressions) {
+            return new Group(columnNames, rowCount, ndv, mcv, getBuckets(), nullCounts, boundExpressions);
+        }
+
         private long retainedBytes() {
             long bytes = 192 + 32L + 8L * columnNames.size() + 32L + 32L * nullCounts.size()
                     + 32L + 8L * mcv.size() + 32L + 8L * buckets.size() + mcv.retainedIndexBytes();
             for (String name : columnNames) {
                 bytes += stringBytes(name);
+            }
+            for (Expression expression : expressions) {
+                bytes += expression == null ? 8 : 8 + expression.retainedBytes();
             }
             for (MultiColumnCombinedStats.McvEntry entry : mcv) {
                 bytes += 48 + 64L + 8L * entry.getValues().size()
@@ -151,6 +234,10 @@ public class ExternalMcvStatistics {
             }
             for (StoredBucket bucket : buckets) {
                 bytes += 64 + stringBytes(bucket.lower) + stringBytes(bucket.upper);
+            }
+            if (columnNames.size() > 1) {
+                // Element views are built lazily, and Caffeine does not reweigh a value; reserve them up front.
+                bytes += columnNames.size() * (256L + 160L * mcv.size());
             }
             if (columnNames.size() == 1) {
                 // Map nodes/boxed counts refer to the strings already counted above. Reserve
@@ -179,6 +266,40 @@ public class ExternalMcvStatistics {
                 builder.setMinValue(prepared.min).setMaxValue(prepared.max);
             }
             return Optional.of(builder.build());
+        }
+
+        /**
+         * The marginal distribution of one element of a multi-element group as a singleton group: the distinct values
+         * of the element in the head with their counts over the whole table, from the collected component counts,
+         * and the NULL count of the element. Head entries without component counts are left out. The rows outside
+         * the head of the element are the tail, with unknown bounds. The NDV of the result is a placeholder that the
+         * caller replaces.
+         */
+        public Group elementGroup(int position) {
+            Group[] prepared = elementGroups;
+            if (prepared != null && prepared[position] != null) {
+                return prepared[position];
+            }
+            synchronized (this) {
+                if (elementGroups == null) {
+                    elementGroups = new Group[columnNames.size()];
+                }
+                if (elementGroups[position] == null) {
+                    Map<String, Long> counts = mcv.getComponentCounts().get(position);
+                    List<MultiColumnCombinedStats.McvEntry> entries = new ArrayList<>();
+                    for (Map.Entry<String, Long> value : counts.entrySet()) {
+                        if (value.getKey() != null && value.getValue() > 0) {
+                            entries.add(new MultiColumnCombinedStats.McvEntry(List.of(value.getKey()), value.getValue(),
+                                    List.of(value.getValue())));
+                        }
+                    }
+                    entries.sort((left, right) -> Long.compare(right.getCount(), left.getCount()));
+                    long nulls = Math.min(rowCount, nullCounts.get(position));
+                    elementGroups[position] = new Group(List.of(columnNames.get(position)), rowCount,
+                            entries.size() + 1, entries, List.of(), List.of(nulls));
+                }
+                return elementGroups[position];
+            }
         }
 
         /** Prepare at load time; constructors used by dump replay can prepare on first use. */
@@ -249,14 +370,25 @@ public class ExternalMcvStatistics {
     }
 
     private final List<Group> groups;
+    private final boolean incomplete;
     private final long retainedBytes;
 
     private ExternalMcvStatistics() {
         this.groups = Collections.emptyList();
+        this.incomplete = false;
         this.retainedBytes = 64;
     }
 
     public ExternalMcvStatistics(List<Group> groups) {
+        this(groups, false);
+    }
+
+    /**
+     * @param incomplete whether a group was left out of this load for a reason that can pass, such as a schema
+     *                   that could not be read; the cache loads such statistics again soon
+     */
+    public ExternalMcvStatistics(List<Group> groups, boolean incomplete) {
+        this.incomplete = incomplete;
         this.groups = List.copyOf(groups);
         this.retainedBytes = 64 + 8L * groups.size() + groups.stream().mapToLong(Group::retainedBytes).sum();
     }
@@ -273,6 +405,10 @@ public class ExternalMcvStatistics {
 
     public List<Group> getGroups() {
         return groups;
+    }
+
+    public boolean isIncomplete() {
+        return incomplete;
     }
 
     public boolean isEmpty() {

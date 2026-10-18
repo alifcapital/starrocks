@@ -1551,13 +1551,18 @@ analyzeColumnClause
     | ALL COLUMNS                                               #allColumns
     | PREDICATE COLUMNS                                         #predicateColumns
     | MULTIPLE COLUMNS '(' qualifiedName  (',' qualifiedName)* ')' #multiColumnSet
-    | MCV '(' qualifiedName  (',' qualifiedName)* ')'              #mcvColumnSet
+    | MCV '(' mcvItem  (',' mcvItem)* ')'                          #mcvColumnSet
     | MCV PREDICATE COLUMNS                                      #mcvPredicateColumns
+    ;
+
+mcvItem
+    : qualifiedName
+    | expression
     ;
 
 dropStatsStatement
     : DROP (MULTIPLE COLUMNS STATS qualifiedName
-           | MCV STATS qualifiedName ('(' identifier (',' identifier)* ')')?
+           | MCV STATS qualifiedName ('(' mcvItem (',' mcvItem)* ')')?
            | STATS qualifiedName)
     ;
 
@@ -1580,7 +1585,7 @@ createAnalyzeStatement
     : CREATE ANALYZE (FULL | SAMPLE)? ALL properties?
     | CREATE ANALYZE (FULL | SAMPLE)? DATABASE db=identifier properties?
     | CREATE ANALYZE (FULL | SAMPLE)? (IF NOT EXISTS)? TABLE qualifiedName ('(' qualifiedName (',' qualifiedName)* ')')? properties?
-    | CREATE ANALYZE FULL TABLE qualifiedName MCV '(' qualifiedName (',' qualifiedName)* ')' properties?
+    | CREATE ANALYZE FULL TABLE qualifiedName MCV '(' mcvItem (',' mcvItem)* ')' properties?
     | CREATE ANALYZE JOIN STATISTICS joinName=identifier properties?
     | CREATE histogramStatement
     ;

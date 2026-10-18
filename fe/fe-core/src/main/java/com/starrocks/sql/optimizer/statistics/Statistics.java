@@ -51,6 +51,9 @@ public class Statistics {
     private final JoinStatisticsPlanner joinStatisticsPlanner;
 
     private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
+    // Statistics on expressions of the columns of a scan. Only the scan itself and a projection right above it
+    // read them, so buildFrom does not copy them and every other operator drops them.
+    private final ScanExpressionStatistics scanExpressionStatistics;
 
     private static double clampOutputRowCount(double outputRowCount) {
         // Due to the influence of the default filter coefficient,
@@ -73,6 +76,7 @@ public class Statistics {
         this.joinStatisticsScope = builder.joinStatisticsScope;
         this.joinStatisticsPlanner = builder.joinStatisticsPlanner;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(builder.multiColumnCombinedStats);
+        this.scanExpressionStatistics = builder.scanExpressionStatistics;
     }
 
     private Statistics(double outputRowCount,
@@ -81,7 +85,8 @@ public class Statistics {
                        Collection<ColumnRefOperator> shadowColumns,
                        StatsSource statsSource, boolean partitionRestricted, JoinStatisticsScope joinStatisticsScope,
                        JoinStatisticsPlanner joinStatisticsPlanner,
-                       Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats) {
+                       Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats,
+                       ScanExpressionStatistics scanExpressionStatistics) {
         this.outputRowCount = outputRowCount;
         this.columnStatistics = Collections.unmodifiableMap(columnStatistics);
         this.tableRowCountMayInaccurate = tableRowCountMayInaccurate;
@@ -91,6 +96,7 @@ public class Statistics {
         this.joinStatisticsScope = joinStatisticsScope;
         this.joinStatisticsPlanner = joinStatisticsPlanner;
         this.multiColumnCombinedStats = Collections.unmodifiableMap(multiColumnCombinedStats);
+        this.scanExpressionStatistics = scanExpressionStatistics;
     }
 
     public JoinStatisticsPlanner getJoinStatisticsPlanner() {
@@ -116,7 +122,7 @@ public class Statistics {
         }
         return new Statistics(clamped, columnStatistics, tableRowCountMayInaccurate, shadowColumns,
                 statsSource, partitionRestricted, joinStatisticsScope, joinStatisticsPlanner,
-                multiColumnCombinedStats);
+                multiColumnCombinedStats, scanExpressionStatistics);
     }
 
     /**
@@ -129,7 +135,7 @@ public class Statistics {
             return this;
         }
         return new Statistics(outputRowCount, columnStatistics, tableRowCountMayInaccurate, shadowColumns,
-                statsSource, partitionRestricted, scope, planner, multiColumnCombinedStats);
+                statsSource, partitionRestricted, scope, planner, multiColumnCombinedStats, scanExpressionStatistics);
     }
 
     public double getOutputSize(ColumnRefSet outputColumns) {
@@ -194,6 +200,11 @@ public class Statistics {
 
     public Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> getMultiColumnCombinedStats() {
         return multiColumnCombinedStats;
+    }
+
+    /** Null unless these are the statistics of a scan with statistics on expressions of its columns. */
+    public ScanExpressionStatistics getScanExpressionStatistics() {
+        return scanExpressionStatistics;
     }
 
     public boolean isTableRowCountMayInaccurate() {
@@ -299,7 +310,7 @@ public class Statistics {
         private JoinStatisticsScope joinStatisticsScope;
         private JoinStatisticsPlanner joinStatisticsPlanner;
         private final Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> multiColumnCombinedStats;
-
+        private ScanExpressionStatistics scanExpressionStatistics;
 
         public Builder() {
             this(NaN, new HashMap<>(), false);
@@ -365,6 +376,21 @@ public class Statistics {
 
         public Builder addMultiColumnStatistics(Set<ColumnRefOperator> columns, MultiColumnCombinedStats mcStats) {
             this.multiColumnCombinedStats.put(columns, mcStats);
+            return this;
+        }
+
+        public Builder removeColumnStatistic(ColumnRefOperator column) {
+            this.columnStatistics.remove(column);
+            return this;
+        }
+
+        public Builder removeMultiColumnStatistics(Set<ColumnRefOperator> columns) {
+            this.multiColumnCombinedStats.remove(columns);
+            return this;
+        }
+
+        public Builder setScanExpressionStatistics(ScanExpressionStatistics scanExpressionStatistics) {
+            this.scanExpressionStatistics = scanExpressionStatistics;
             return this;
         }
 

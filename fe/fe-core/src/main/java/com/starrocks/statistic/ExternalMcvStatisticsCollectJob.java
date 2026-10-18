@@ -21,6 +21,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.starrocks.catalog.Database;
@@ -34,6 +35,7 @@ import com.starrocks.common.util.SqlUtils;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryState;
+import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.ColumnDef;
@@ -48,6 +50,7 @@ import com.starrocks.sql.ast.ValuesRelation;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.StringLiteral;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
@@ -94,6 +97,8 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     private static final Gson JSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private final String catalogName;
+    // The expression elements of the groups, analyzed against the current schema when the collection starts.
+    private final Map<String, ExpressionTemplate> expressions = new LinkedHashMap<>();
     private final List<String> sqlBuffer = Lists.newArrayList();
     private final List<List<Expr>> rowsBuffer = Lists.newArrayList();
 
@@ -125,6 +130,7 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
             bucketNum();
         }
         setDefaultSessionVariable(context);
+        resolveExpressions(context);
         // Capture once for every group and both passes. Later writes make the statistics stale,
         // but must not mix one snapshot's NDV/bounds with another snapshot's counts.
         String source = captureSource();
@@ -147,6 +153,20 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
             finished += batch.size();
             analyzeStatus.setProgress(finished * 100 / total);
             GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
+        }
+    }
+
+    /**
+     * The collection runs in a context with the global session variables. The canonical text of an expression is
+     * written for the default SQL mode: under another mode, such as DOUBLE_LITERAL, a decimal constant of the text
+     * reads as another type and the values differ from the ones the planner computes. So a job with an expression
+     * runs its SQL in the default mode.
+     */
+    @Override
+    protected void setDefaultSessionVariable(ConnectContext context) {
+        super.setDefaultSessionVariable(context);
+        if (columnGroups.stream().flatMap(List::stream).anyMatch(ExpressionTemplate::isExpressionElement)) {
+            context.getSessionVariable().setSqlMode(SqlModeHelper.MODE_DEFAULT);
         }
     }
 
@@ -189,8 +209,49 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
         return new GroupStatistics(0, 0, List.of(), List.of(), java.util.Collections.nCopies(group.size(), 0L));
     }
 
+    /**
+     * Analyzes the expression elements against the current schema. The stored text is the canonical text, so it
+     * must give itself back; a text of another format version or a schema change that alters the expression fails
+     * the collection with the reason.
+     */
+    void resolveExpressions(ConnectContext context) throws DdlException {
+        for (List<String> group : columnGroups) {
+            for (String element : group) {
+                if (!ExpressionTemplate.isExpressionElement(element) || expressions.containsKey(element)) {
+                    continue;
+                }
+                String text = ExpressionTemplate.canonicalTextOf(element);
+                if (text == null) {
+                    throw new DdlException("Unsupported format of MCV expression " + element);
+                }
+                ExpressionTemplate template;
+                try {
+                    template = ExpressionTemplate.parse(text, table, context);
+                } catch (RuntimeException e) {
+                    throw new DdlException("Cannot analyze MCV expression " + text + ": " + e.getMessage());
+                }
+                if (!template.getText().equals(text)) {
+                    throw new DdlException("MCV expression " + text + " analyzes as " + template.getText()
+                            + " on the current schema");
+                }
+                expressions.put(element, template);
+            }
+        }
+    }
+
+    private Type elementType(String element) {
+        ExpressionTemplate template = expressions.get(element);
+        return template != null ? template.getType() : table.getColumn(element).getType();
+    }
+
+    // The value of an element as the BE computes it: the column, or the canonical text of the expression.
+    private String valueExpr(String element) {
+        return ExpressionTemplate.isExpressionElement(element)
+                ? "(" + ExpressionTemplate.canonicalTextOf(element) + ")" : StatisticUtils.quoting(table, element);
+    }
+
     private boolean ordered(List<String> group) {
-        return group.size() == 1 && supportsBuckets(table.getColumn(group.get(0)).getType());
+        return group.size() == 1 && supportsBuckets(elementType(group.get(0)));
     }
 
     // All aggregates consume one input stream. No CTE consumers/multicast buffers and no row multiplication.
@@ -201,7 +262,7 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
             String prefix = "g" + i + "_";
             projections.add(buildProjection(table, group, prefix));
             if (ordered(group)) {
-                projections.add(StatisticUtils.quoting(table, group.get(0)) + " AS " + prefix + "x");
+                projections.add(valueExpr(group.get(0)) + " AS " + prefix + "x");
             }
         }
         return " FROM (SELECT " + String.join(", ", projections) + " FROM " + source + ") t";
@@ -278,8 +339,7 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     }
 
     String buildFromClause(List<String> columnGroup, String source) {
-        String rawColumn = columnGroup.size() == 1
-                ? ", " + StatisticUtils.quoting(table, columnGroup.get(0)) + " AS x" : "";
+        String rawColumn = columnGroup.size() == 1 ? ", " + valueExpr(columnGroup.get(0)) + " AS x" : "";
         return " FROM (SELECT " + buildProjection(table, columnGroup) + rawColumn + " FROM " + source + ") t";
     }
 
@@ -522,9 +582,38 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     }
 
     static String buildColumnNamesJson(List<String> columnGroup) {
+        return buildColumnNamesJson(columnGroup, Map.of());
+    }
+
+    /**
+     * column_names: the elements in tuple order. A column is its name. An expression is an object with its
+     * canonical text, the format version of the text, its result type and the columns it reads with their types
+     * and Iceberg field ids, so the planner can tell when the schema no longer matches the statistics.
+     */
+    static String buildColumnNamesJson(List<String> columnGroup, Map<String, ExpressionTemplate> expressions) {
         JsonArray array = new JsonArray();
-        for (String column : columnGroup) {
-            array.add(column);
+        for (String element : columnGroup) {
+            ExpressionTemplate template = expressions.get(element);
+            if (template == null) {
+                array.add(element);
+                continue;
+            }
+            JsonObject object = new JsonObject();
+            object.addProperty(ExpressionTemplate.JSON_EXPR, template.getText());
+            object.addProperty(ExpressionTemplate.JSON_FORMAT, ExpressionTemplate.FORMAT_VERSION);
+            object.addProperty(ExpressionTemplate.JSON_TYPE, template.getType().toSql());
+            JsonArray sources = new JsonArray();
+            for (ExpressionTemplate.Source source : template.getSources()) {
+                JsonObject column = new JsonObject();
+                column.addProperty(ExpressionTemplate.JSON_NAME, source.getName());
+                column.addProperty(ExpressionTemplate.JSON_TYPE, source.getType().toSql());
+                if (source.getFieldId() != null) {
+                    column.addProperty(ExpressionTemplate.JSON_FIELD_ID, source.getFieldId());
+                }
+                sources.add(column);
+            }
+            object.add(ExpressionTemplate.JSON_COLUMNS, sources);
+            array.add(object);
         }
         return JSON.toJson(array);
     }
@@ -532,7 +621,7 @@ public class ExternalMcvStatisticsCollectJob extends StatisticsCollectJob {
     private void bufferRow(List<String> columnGroup, GroupStatistics statistics) {
         String tableUUID = StatisticUtils.hashTableUuidForPkStorage(table.getUUID());
         String columnIds = buildColumnIds(columnGroup);
-        String columnNamesJson = buildColumnNamesJson(columnGroup);
+        String columnNamesJson = buildColumnNamesJson(columnGroup, expressions);
         String mcvJson = buildMcvJson(statistics.mcv);
         String bucketsJson = JSON.toJson(statistics.buckets);
         String nullCountsJson = JSON.toJson(statistics.nullCounts);

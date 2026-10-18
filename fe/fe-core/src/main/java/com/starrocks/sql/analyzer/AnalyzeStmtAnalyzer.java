@@ -31,6 +31,7 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.connector.ConnectorMetadataRequestContext;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
@@ -42,14 +43,20 @@ import com.starrocks.sql.ast.AstVisitorExtendInterface;
 import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
 import com.starrocks.sql.ast.DropHistogramStmt;
 import com.starrocks.sql.ast.DropStatsStmt;
+import com.starrocks.sql.ast.McvItem;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.ast.expression.Expr;
+import com.starrocks.sql.ast.expression.SlotRef;
+import com.starrocks.sql.ast.expression.SubfieldExpr;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.sql.optimizer.OptimizerFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
+import com.starrocks.sql.optimizer.statistics.ExpressionStatisticsSqlPrinter;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.parser.NodePosition;
+import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.columns.ColumnUsage;
@@ -195,20 +202,40 @@ public class AnalyzeStmtAnalyzer {
                 }
             }
 
+            List<McvItem> mcvItems = Lists.newArrayList();
             if (CollectionUtils.isNotEmpty(columns)) {
                 Set<String> mentionedColumns = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
+                // Expression texts are case-sensitive: '%Y' and '%y' are different expressions.
+                Set<String> mentionedExpressions = Sets.newHashSet();
                 // The actual column name, avoiding case sensitivity issues
                 List<String> realColumnNames = Lists.newArrayList();
                 for (Expr column : columns) {
+                    if (!isColumnItem(column)) {
+                        if (!(analyzeTypeDesc instanceof AnalyzeMcvDesc)) {
+                            throw new SemanticException("Expressions are supported in ANALYZE ... MCV (...) only");
+                        }
+                        McvItem item = analyzeMcvExpression(column, analyzeTable, session);
+                        if (!mentionedExpressions.add(item.getElementText())) {
+                            throw new SemanticException("MCV expression '%s' specified twice",
+                                    ExpressionTemplate.displayText(item.getElementText()));
+                        }
+                        realColumnNames.add(item.getElementText());
+                        mcvItems.add(item);
+                        continue;
+                    }
                     ExpressionAnalyzer.analyzeExpression(column, new AnalyzeState(), new Scope(RelationId.anonymous(),
                             new RelationFields(analyzeTable.getBaseSchema().stream().map(col -> new Field(col.getName(),
                                             col.getType(), tableName, null))
                                     .collect(Collectors.toList()))), session);
                     String colName = StatisticUtils.getColumnName(analyzeTable, column);
+                    if (analyzeTypeDesc instanceof AnalyzeMcvDesc) {
+                        ExpressionTemplate.checkColumnName(colName);
+                    }
                     if (!mentionedColumns.add(colName)) {
                         throw new SemanticException("Column '%s' specified twice", colName);
                     }
                     realColumnNames.add(colName);
+                    mcvItems.add(new McvItem(column, colName, column.getType(), List.of(colName), false));
                 }
                 statement.setColumnNames(realColumnNames);
             }
@@ -280,7 +307,8 @@ public class AnalyzeStmtAnalyzer {
                             .map(ExternalColumnGroupUsage::columns)
                             // Skip the entire stale/unsupported group, never manufacture a smaller set.
                             .filter(group -> group.size() <= Config.statistics_max_multi_column_combined_num)
-                            .filter(group -> group.stream().allMatch(name -> isMcvColumn(analyzeTable.getColumn(name))))
+                            .filter(group -> group.stream().allMatch(name -> isMcvColumn(analyzeTable.getColumn(name))
+                                    && !ExpressionTemplate.looksLikeExpressionElement(name)))
                             .map(group -> group.stream().map(name -> analyzeTable.getColumn(name).getName())
                                     .distinct().sorted().toList())
                             .distinct().toList();
@@ -292,6 +320,7 @@ public class AnalyzeStmtAnalyzer {
                     statement.setColumnNames(groups.stream().flatMap(List::stream).distinct().sorted().toList());
                 } else {
                     mcv.setColumnGroups(List.of(statement.getColumnNames()));
+                    mcv.setItems(mcvItems);
                 }
             }
 
@@ -501,6 +530,77 @@ public class AnalyzeStmtAnalyzer {
             }
         }
 
+        // A column of the table, written as a name; any other expression is an MCV expression item.
+        private static boolean isColumnItem(Expr item) {
+            return item instanceof SlotRef || item instanceof SubfieldExpr;
+        }
+
+        /**
+         * Analyzes an MCV expression in the session of the caller and names it by its canonical text, so every
+         * spelling of the expression names the same statistics.
+         */
+        private static McvItem analyzeMcvExpression(Expr item, Table table, ConnectContext session) {
+            ExpressionTemplate template = ExpressionTemplate.analyzeStable(item, table, session);
+            return new McvItem(item, ExpressionTemplate.elementText(template.getText()), template.getType(),
+                    template.getSources().stream().map(ExpressionTemplate.Source::getName).toList(), true);
+        }
+
+        /**
+         * The element of an MCV expression for DROP: the element of the canonical text when statistics exist on it,
+         * else the stored element whose text reads as the text as written, as SHOW prints it. We fear that a stored
+         * text no longer analyzes, after its column or function was dropped, or analyzes to another text, after the
+         * canonical form changed; the text as written still finds it. When neither has statistics, DROP fails
+         * instead of dropping nothing.
+         */
+        private static String dropElement(Expr item, Table table, TableRef tableRef, ConnectContext session) {
+            String written = unanalyzedText(item);
+            String canonical = null;
+            RuntimeException failure = null;
+            try {
+                canonical = analyzeMcvExpression(item, table, session).getElementText();
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+            // The elements of the groups with statistics and of the groups a job collects, which DROP removes too.
+            List<String> stored = GlobalStateMgr.getCurrentState().getAnalyzeMgr().getExternalMcvGroups(
+                            tableRef.getCatalogName(), tableRef.getDbName(), tableRef.getTableName(), table.getUUID())
+                    .stream().flatMap(List::stream).distinct().toList();
+            if (canonical != null && stored.contains(canonical)) {
+                return canonical;
+            }
+            if (written != null) {
+                for (String element : stored) {
+                    String text = ExpressionTemplate.canonicalTextOf(element);
+                    if (text != null && written.equals(unanalyzedText(text))) {
+                        return element;
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+            throw new SemanticException("No MCV statistics on %s of table %s",
+                    ExpressionTemplate.displayText(canonical), tableRef.getTableName());
+        }
+
+        // The text of an expression as written, null when it cannot be printed.
+        private static String unanalyzedText(Expr item) {
+            try {
+                return ExpressionStatisticsSqlPrinter.printUnanalyzed(item);
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
+        private static String unanalyzedText(String text) {
+            try {
+                return ExpressionStatisticsSqlPrinter.printUnanalyzed(
+                        SqlParser.parseSqlToExpr(text, SqlModeHelper.MODE_DEFAULT));
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
         private static boolean isMcvColumn(Column column) {
             if (column == null) {
                 return false;
@@ -541,6 +641,10 @@ public class AnalyzeStmtAnalyzer {
                 }
             }
             for (String name : statement.getColumnNames()) {
+                if (ExpressionTemplate.isExpressionElement(name)) {
+                    // The type of an expression was checked when it was analyzed.
+                    continue;
+                }
                 if (table.getColumn(name) == null) {
                     throw new SemanticException("MCV statistics require top-level scalar columns: %s", name);
                 }
@@ -698,13 +802,31 @@ public class AnalyzeStmtAnalyzer {
                 throw new SemanticException("Multi-column combined statistics exist on native tables only, "
                         + "use DROP MCV STATS");
             }
-            if (!statement.getColumnNames().isEmpty()) {
+            if (!statement.getMcvItems().isEmpty() || !statement.getColumnNames().isEmpty()) {
+                if (!statement.isMcv()) {
+                    throw new SemanticException("Only DROP MCV STATS takes a column group");
+                }
                 TableName tableName = new TableName(tableRef.getCatalogName(), tableRef.getDbName(),
                         tableRef.getTableName(), tableRef.getPos());
                 Table table = MetaUtils.getSessionAwareTable(session, null, tableName);
                 Set<String> mentionedColumns = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
+                Set<String> mentionedExpressions = Sets.newHashSet();
                 List<String> columnNames = Lists.newArrayList();
-                for (String name : statement.getColumnNames()) {
+                List<Expr> items = statement.getMcvItems().isEmpty()
+                        ? statement.getColumnNames().stream().<Expr>map(name -> new SlotRef(null, name)).toList()
+                        : statement.getMcvItems();
+                for (Expr item : items) {
+                    if (!(item instanceof SlotRef)) {
+                        // An expression names the statistics by its canonical text, as ANALYZE did.
+                        String element = dropElement(item, table, tableRef, session);
+                        if (!mentionedExpressions.add(element)) {
+                            throw new SemanticException("MCV expression '%s' specified twice",
+                                    ExpressionTemplate.displayText(element));
+                        }
+                        columnNames.add(element);
+                        continue;
+                    }
+                    String name = ((SlotRef) item).getColumnName();
                     Column column = table.getColumn(name);
                     if (column == null) {
                         throw new SemanticException("Unknown column '%s'", name);
@@ -713,6 +835,16 @@ public class AnalyzeStmtAnalyzer {
                         throw new SemanticException("Column '%s' specified twice", name);
                     }
                     columnNames.add(column.getName());
+                }
+                // An expression found in the statistics may belong to another group only, as left(c, 8) of
+                // MCV(left(c, 8), d): DROP of this group then drops nothing, so it fails.
+                if (columnNames.stream().anyMatch(ExpressionTemplate::isExpressionElement)
+                        && !GlobalStateMgr.getCurrentState().getAnalyzeMgr().hasExternalMcvGroup(
+                        tableRef.getCatalogName(), tableRef.getDbName(), tableRef.getTableName(), table.getUUID(),
+                        columnNames)) {
+                    throw new SemanticException("No MCV statistics on (%s) of table %s", String.join(", ",
+                            columnNames.stream().map(ExpressionTemplate::displayText).toList()),
+                            tableRef.getTableName());
                 }
                 statement.setColumnNames(columnNames);
             }

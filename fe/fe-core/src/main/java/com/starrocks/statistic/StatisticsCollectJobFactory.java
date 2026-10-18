@@ -30,9 +30,11 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.sql.common.ErrorType;
 import com.starrocks.sql.common.StarRocksPlannerException;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.statistic.columns.ColumnUsage;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.type.Type;
+import com.starrocks.type.VarcharType;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.iceberg.util.PropertyUtil;
@@ -295,7 +297,9 @@ public class StatisticsCollectJobFactory {
             Map<String, String> properties, List<StatisticsType> statisticsTypes,
             List<List<String>> columnGroups) {
         if (columnTypes == null || columnTypes.isEmpty()) {
-            columnTypes = columnNames.stream().map(col -> table.getColumn(col).getType()).collect(Collectors.toList());
+            // The collection analyzes the expression elements itself; their types here are not read.
+            columnTypes = columnNames.stream().map(col -> ExpressionTemplate.isExpressionElement(col)
+                    ? (Type) VarcharType.VARCHAR : table.getColumn(col).getType()).collect(Collectors.toList());
         }
         return new ExternalMcvStatisticsCollectJob(catalogName, db, table, columnNames, columnTypes,
                 analyzeType, scheduleType, properties, statisticsTypes, columnGroups);

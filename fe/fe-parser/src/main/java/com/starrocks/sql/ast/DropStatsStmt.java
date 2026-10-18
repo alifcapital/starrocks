@@ -15,6 +15,7 @@
 
 package com.starrocks.sql.ast;
 
+import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.parser.NodePosition;
 
 import java.util.List;
@@ -24,6 +25,8 @@ public class DropStatsStmt extends StatementBase {
     private boolean isExternal = false;
     private boolean isMultiColumn = false;
     private boolean isMcv = false;
+    // The MCV items as written: columns and expressions. Analysis turns them into the element texts below.
+    private List<Expr> mcvItems = List.of();
     private List<String> columnNames = List.of();
 
     public DropStatsStmt(TableRef tableRef) {
@@ -75,6 +78,14 @@ public class DropStatsStmt extends StatementBase {
 
     public boolean isMcv() {
         return isMcv;
+    }
+
+    public List<Expr> getMcvItems() {
+        return mcvItems;
+    }
+
+    public void setMcvItems(List<Expr> mcvItems) {
+        this.mcvItems = List.copyOf(mcvItems);
     }
 
     public List<String> getColumnNames() {

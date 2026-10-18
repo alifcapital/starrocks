@@ -53,6 +53,19 @@ public final class StringBucket extends Bucket {
         // UTF-8 preserves Unicode scalar-value order. Comparing code points avoids allocating
         // two encoded byte arrays per comparison, unlike String.compareTo's UTF-16 code-unit order.
         // Match the JDK UTF-8 encoder's '?' replacement for unpaired surrogates as well.
+        // Equal chars are equal code points, so the walk is in step at the first char where the strings differ
+        // unless a surrogate is just before it; without a surrogate there the two chars decide, as the walk would.
+        int length = Math.min(left.length(), right.length());
+        int common = 0;
+        while (common < length && left.charAt(common) == right.charAt(common)) {
+            common++;
+        }
+        if ((common == 0 || !Character.isSurrogate(left.charAt(common - 1)))
+                && (common == left.length() || !Character.isSurrogate(left.charAt(common)))
+                && (common == right.length() || !Character.isSurrogate(right.charAt(common)))) {
+            return common < length ? Integer.compare(left.charAt(common), right.charAt(common))
+                    : Integer.compare(left.length() - common, right.length() - common);
+        }
         int leftIndex = 0;
         int rightIndex = 0;
         while (leftIndex < left.length() && rightIndex < right.length()) {

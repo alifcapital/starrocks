@@ -44,6 +44,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.StatisticsType;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.transaction.InsertTxnCommitAttachment;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TxnCommitAttachment;
@@ -228,13 +229,63 @@ public class AnalyzeMgr implements Writable {
     }
 
     public void removeMcvAnalyzeJobs(String catalog, String db, String table, List<String> columns) {
+        removeMcvAnalyzeJobs(catalog, db, table, null, columns);
+    }
+
+    // The jobs of the table by its UUID or by its names, of the group when columns are given.
+    private void removeMcvAnalyzeJobs(String catalog, String db, String table, String tableUUID, List<String> columns) {
+        StatsMetaKey tableKey = new StatsMetaKey(catalog, db, table);
         for (ExternalAnalyzeJob job : getAllExternalAnalyzeJobList()) {
-            if (job.getAnalyzeType() == StatsConstants.AnalyzeType.MCV && job.getCatalogName().equals(catalog)
-                    && job.getDbName().equals(db) && job.getTableName().equals(table)
-                    && (columns == null || new java.util.HashSet<>(columns).equals(new java.util.HashSet<>(job.getColumns())))) {
+            if (job.getAnalyzeType() == StatsConstants.AnalyzeType.MCV
+                    && sameTable(tableKey, tableUUID, new StatsMetaKey(job.getCatalogName(), job.getDbName(),
+                    job.getTableName()), job.getTargetUuid())
+                    && (columns == null || sameGroup(columns, job.getColumns()))) {
                 removeAnalyzeJob(job.getId());
             }
         }
+    }
+
+    /**
+     * Whether statistics recorded for a table are of the given one. A statement can write the names of a table of an
+     * external catalog in another case than the catalog gives them, so the same UUID is the same table as well as
+     * the same names.
+     */
+    private static boolean sameTable(StatsMetaKey key, String uuid, StatsMetaKey otherKey, String otherUuid) {
+        return key.equals(otherKey) || uuid != null && !uuid.isEmpty() && uuid.equals(otherUuid);
+    }
+
+    // Whether two lists name the same MCV group, compared as the key of its statistics compares them.
+    private static boolean sameGroup(Collection<String> columns, Collection<String> other) {
+        return new ExternalMcvStatsKey("", "", "", columns).getColumnNames()
+                .equals(new ExternalMcvStatsKey("", "", "", other).getColumnNames());
+    }
+
+    /**
+     * The MCV groups of a table: those with statistics and those with a job that collects them, by the UUID of the
+     * table or by its names.
+     */
+    public List<List<String>> getExternalMcvGroups(String catalog, String db, String table, String tableUUID) {
+        StatsMetaKey tableKey = new StatsMetaKey(catalog, db, table);
+        List<List<String>> groups = new ArrayList<>();
+        for (ExternalMcvStatsMeta meta : externalMcvStatsMetaMap.values()) {
+            if (sameTable(tableKey, tableUUID, new StatsMetaKey(meta.getCatalogName(), meta.getDbName(),
+                    meta.getTableName()), meta.getTableUUID())) {
+                groups.add(meta.getColumnNames());
+            }
+        }
+        for (ExternalAnalyzeJob job : getAllExternalAnalyzeJobList()) {
+            if (job.getAnalyzeType() == StatsConstants.AnalyzeType.MCV && sameTable(tableKey, tableUUID,
+                    new StatsMetaKey(job.getCatalogName(), job.getDbName(), job.getTableName()), job.getTargetUuid())) {
+                groups.add(job.getColumns());
+            }
+        }
+        return groups;
+    }
+
+    /** Whether a table has MCV statistics or a job that collects them on the group. */
+    public boolean hasExternalMcvGroup(String catalog, String db, String table, String tableUUID,
+                                       List<String> columns) {
+        return getExternalMcvGroups(catalog, db, table, tableUUID).stream().anyMatch(group -> sameGroup(group, columns));
     }
 
     public List<AnalyzeJob> getAllAnalyzeJobList() {
@@ -440,12 +491,22 @@ public class AnalyzeMgr implements Writable {
     }
 
     public void addExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
+        // An invalid meta fails the statement before it reaches the edit log, which every FE replays.
+        meta.validate();
         GlobalStateMgr.getCurrentState().getEditLog().logAddExternalMcvStatsMeta(meta,
                 wal -> replayAddExternalMcvStatsMeta(meta));
     }
 
     public synchronized void replayAddExternalMcvStatsMeta(ExternalMcvStatsMeta meta) {
-        meta.validate();
+        try {
+            meta.validate();
+        } catch (IllegalArgumentException e) {
+            // A meta already in the edit log must not stop the replay, and so the FE; it is skipped as the image
+            // load skips it.
+            LOG.error("Skipping invalid external MCV statistics metadata in the edit log: {}.{}.{} {}",
+                    meta.getCatalogName(), meta.getDbName(), meta.getTableName(), meta.getColumnNames(), e);
+            return;
+        }
         ExternalMcvStatsKey key = ExternalMcvStatsKey.of(meta);
         externalMcvStatsMetaMap.put(key, meta);
         externalMcvTables.computeIfAbsent(key.getTableKey(), ignored -> new java.util.concurrent.ConcurrentHashMap<>())
@@ -535,31 +596,39 @@ public class AnalyzeMgr implements Writable {
 
     public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
                                                         Table table) {
-        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), null);
+        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), table.getUUID(), null);
         var lock = ExtendedStatisticsSchedule.mcvLock(table.getUUID());
         lock.lock();
         try {
             new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID());
-            removeExternalMcvStatsMeta(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+            removeExternalMcvStatsMetas(tableName, table.getUUID(), null);
         } finally {
             lock.unlock();
         }
     }
 
+    // The metas of the table by its UUID or by its names, of the group when columns are given.
+    private void removeExternalMcvStatsMetas(TableName tableName, String tableUUID, List<String> columns) {
+        StatsMetaKey tableKey = new StatsMetaKey(tableName.getCatalog(), tableName.getDb(), tableName.getTbl());
+        for (ExternalMcvStatsMeta meta : Lists.newArrayList(externalMcvStatsMetaMap.values())) {
+            if (sameTable(tableKey, tableUUID, new StatsMetaKey(meta.getCatalogName(), meta.getDbName(),
+                    meta.getTableName()), meta.getTableUUID())
+                    && (columns == null || sameGroup(columns, meta.getColumnNames()))) {
+                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(meta,
+                        wal -> replayRemoveExternalMcvStatsMeta(meta));
+            }
+        }
+    }
+
     public void dropExternalMcvStatsMetaAndData(ConnectContext statsConnectCtx, TableName tableName,
                                               Table table, List<String> columnNames) {
-        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), columnNames);
+        removeMcvAnalyzeJobs(tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), table.getUUID(),
+                columnNames);
         var lock = ExtendedStatisticsSchedule.mcvLock(table.getUUID());
         lock.lock();
         try {
             new StatisticExecutor().dropExternalMcvStatistics(statsConnectCtx, table.getUUID(), columnNames);
-            ExternalMcvStatsKey key = new ExternalMcvStatsKey(tableName.getCatalog(), tableName.getDb(),
-                    tableName.getTbl(), columnNames);
-            ExternalMcvStatsMeta meta = externalMcvStatsMetaMap.get(key);
-            if (meta != null) {
-                GlobalStateMgr.getCurrentState().getEditLog().logRemoveExternalMcvStatsMeta(meta,
-                        wal -> replayRemoveExternalMcvStatsMeta(meta));
-            }
+            removeExternalMcvStatsMetas(tableName, table.getUUID(), columnNames);
         } finally {
             lock.unlock();
         }
@@ -1548,7 +1617,7 @@ public class AnalyzeMgr implements Writable {
 
     public static class ExternalMcvStatsKey {
         private final StatsMetaKey tableKey;
-        // Case-insensitive like column names; the order of the group does not matter.
+        // Column names are case-insensitive, expression texts are not; the order of the group does not matter.
         private final Set<String> columnNames;
 
         public ExternalMcvStatsKey(String catalogName, String dbName, String tableName,
@@ -1556,7 +1625,7 @@ public class AnalyzeMgr implements Writable {
             this.tableKey = new StatsMetaKey(catalogName, dbName, tableName);
             this.columnNames = new HashSet<>();
             for (String columnName : columnNames) {
-                this.columnNames.add(columnName.toLowerCase());
+                this.columnNames.add(ExpressionTemplate.keyText(columnName));
             }
         }
 

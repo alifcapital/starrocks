@@ -30,6 +30,7 @@ import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.tvr.common.TvrOptContext;
+import com.starrocks.sql.optimizer.statistics.ExpressionStatisticsCache;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsAggregate;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsRequest;
 import com.starrocks.sql.optimizer.statistics.ExternalStatisticsScanKey;
@@ -145,6 +146,9 @@ public class OptimizerContext {
 
     // Base scan fallbacks only: never cache filtered/projected operator statistics here.
     private final Map<ExternalStatisticsScanKey, Statistics> externalStatisticsFallbacks = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger expressionStatisticsColumnIds =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final ExpressionStatisticsCache expressionStatisticsCache = new ExpressionStatisticsCache();
 
     public Statistics getExternalStatisticsFallback(ExternalStatisticsScanKey key) {
         // Hashing the key walks the whole predicate. A query whose scans use ANALYZE statistics never stores a
@@ -190,6 +194,19 @@ public class OptimizerContext {
 
     public void setColumnRefFactory(ColumnRefFactory columnRefFactory) {
         this.columnRefFactory = columnRefFactory;
+    }
+
+    /**
+     * An id for a column of statistics on an expression. Such a column never enters the plan, so it takes negative
+     * ids that no column of the column ref factory has.
+     */
+    public int nextExpressionStatisticsColumnId() {
+        return expressionStatisticsColumnIds.decrementAndGet();
+    }
+
+    /** The work of the statistics on expressions that the query repeats, see ExpressionStatisticsCache. */
+    public ExpressionStatisticsCache getExpressionStatisticsCache() {
+        return expressionStatisticsCache;
     }
 
     public ColumnRefFactory getColumnRefFactory() {

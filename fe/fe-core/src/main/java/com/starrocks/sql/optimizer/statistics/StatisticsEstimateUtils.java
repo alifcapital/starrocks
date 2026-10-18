@@ -340,6 +340,17 @@ public class StatisticsEstimateUtils {
             remaining.add(getPredicateSelectivity(equality, statistics));
         }
         remaining.sort(Double::compare);
+        // When the MCV estimate covered virtual columns of the statistics on expressions only, it estimated the
+        // conditions on f, and a condition on a real column is independent of them, as when a condition on f is
+        // estimated alone; the decay would count the real columns as correlated with the expression.
+        boolean overExpressionsOnly = !mcvEstimate.getConsumedColumns().isEmpty()
+                && mcvEstimate.getConsumedColumns().stream().allMatch(ExpressionStatisticsEstimator::isVirtualColumn);
+        if (overExpressionsOnly) {
+            for (double share : remaining) {
+                selectivity *= share;
+            }
+            return Math.min(1.0, Math.max(0.0, selectivity));
+        }
         boolean decay = ConnectContext.get() == null ||
                 ConnectContext.get().getSessionVariable().isUseCorrelatedPredicateEstimate();
         for (int i = 0; i < Math.min(3, remaining.size()); i++) {

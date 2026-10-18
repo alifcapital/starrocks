@@ -40,6 +40,7 @@ import com.starrocks.sql.ast.AnalyzeHistogramDesc;
 import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
+import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
 import com.starrocks.sql.ast.DropHistogramStmt;
 import com.starrocks.sql.ast.DropStatsStmt;
 import com.starrocks.sql.ast.KillAnalyzeStmt;
@@ -56,6 +57,7 @@ import com.starrocks.sql.ast.ShowMultiColumnStatsMetaStmt;
 import com.starrocks.sql.ast.ShowUserPropertyStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.common.MetaUtils;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.statistic.AnalyzeMgr;
 import com.starrocks.statistic.AnalyzeStatus;
@@ -1210,6 +1212,189 @@ public class AnalyzeStmtTest {
         analyzeFail("drop mcv stats t0", "MCV statistics exist on external tables only");
         analyzeFail("drop multiple columns stats hive0.tpch.customer",
                 "Multi-column combined statistics exist on native tables only");
+    }
+
+    @Test
+    public void testAnalyzeMcvExpressions() {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        AnalyzeStmt stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (left(c_phone, 3))");
+        Assertions.assertEquals(List.of(prefix), stmt.getColumnNames());
+        AnalyzeMcvDesc desc = (AnalyzeMcvDesc) stmt.getAnalyzeTypeDesc();
+        Assertions.assertEquals(List.of(List.of(prefix)), desc.getColumnGroups());
+        Assertions.assertEquals(1, desc.getItems().size());
+        Assertions.assertTrue(desc.getItems().get(0).isExpression());
+        Assertions.assertEquals(List.of("c_phone"), desc.getItems().get(0).getSourceColumns());
+        Assertions.assertTrue(desc.getItems().get(0).getType().isStringType());
+
+        // Every spelling of the expression names the same statistics.
+        for (String spelling : List.of("substr(c_phone, 1, 3)", "substring(C_PHONE, 1, 3)", "strleft(c_phone, 3)")) {
+            stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (" + spelling + ")");
+            Assertions.assertEquals(List.of(prefix), stmt.getColumnNames(), spelling);
+        }
+
+        stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (c_name, lower(c_name), "
+                + "c_custkey % 10) properties ('mcv_size'='10')");
+        Assertions.assertEquals(3, stmt.getColumnNames().size());
+        Assertions.assertEquals("c_name", stmt.getColumnNames().get(0));
+        Assertions.assertEquals("expr:1:lower(`c_name`)", stmt.getColumnNames().get(1));
+        Assertions.assertFalse(((AnalyzeMcvDesc) stmt.getAnalyzeTypeDesc()).getItems().get(0).isExpression());
+
+        // Literals that differ only in case are different expressions.
+        stmt = (AnalyzeStmt) analyzeSuccess("analyze table hive0.tpch.customer mcv (concat(c_name, 'Y'), "
+                + "concat(c_name, 'y'))");
+        Assertions.assertEquals(2, stmt.getColumnNames().size());
+        analyzeSuccess("analyze table hive0.tpch.customer mcv (left(c_phone, 3)) properties ('mcv_bucket_num'='8')");
+
+        analyzeFail("analyze table hive0.tpch.customer mcv (substr(c_phone, 1, 3), left(c_phone, 3))",
+                "specified twice");
+        analyzeFail("analyze table hive0.tpch.customer mcv (count(c_name))");
+        analyzeFail("analyze table hive0.tpch.customer mcv (c_custkey + rand())", "deterministic");
+        analyzeFail("analyze table hive0.tpch.customer mcv (1 + 2)", "at least one column");
+        analyzeFail("analyze table hive0.tpch.customer mcv (sum(c_custkey) over ())", "window");
+        analyzeFail("analyze table hive0.tpch.customer mcv (c_custkey in (select 1))", "subquery");
+        analyzeFail("analyze table hive0.tpch.customer mcv (array_map(x -> x + 1, [c_custkey]))", "lambda");
+        analyzeFail("analyze table hive0.tpch.customer mcv (now())", "deterministic");
+        analyzeFail("analyze table hive0.tpch.customer mcv ([c_custkey])", "expression type");
+        analyzeFail("analyze table hive0.tpch.customer mcv (lower(missing_column))");
+        analyzeFail("analyze table db.tbl mcv (lower(kk1))", "MCV statistics are collected on external tables only");
+
+        CreateAnalyzeJobStmt job = (CreateAnalyzeJobStmt) analyzeSuccess(
+                "create analyze full table hive0.tpch.customer mcv (c_name, left(c_phone, 3))");
+        Assertions.assertEquals(List.of("c_name", prefix), job.getColumnNames());
+    }
+
+    @Test
+    public void testDropMcvExpressionStats() {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        AnalyzeMgr analyzeMgr = getConnectContext().getGlobalStateMgr().getAnalyzeMgr();
+        ExternalMcvStatsMeta groupMeta = mcvMeta(List.of("c_name", prefix));
+        ExternalMcvStatsMeta prefixMeta = mcvMeta(List.of(prefix));
+        analyzeMgr.replayAddExternalMcvStatsMeta(groupMeta);
+        try {
+            DropStatsStmt stmt = (DropStatsStmt) analyzeSuccess(
+                    "drop mcv stats hive0.tpch.customer (C_NAME, substr(c_phone, 1, 3))");
+            Assertions.assertEquals(List.of("c_name", prefix), stmt.getColumnNames());
+            // The expression has statistics only in the group with c_name: DROP of it alone would drop nothing.
+            analyzeFail("drop mcv stats hive0.tpch.customer (left(c_phone, 3))",
+                    "No MCV statistics on (substr(`c_phone`, 1, 3))");
+            analyzeMgr.replayAddExternalMcvStatsMeta(prefixMeta);
+            stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer (left(c_phone, 3))");
+            Assertions.assertEquals(List.of(prefix), stmt.getColumnNames());
+            analyzeFail("drop mcv stats hive0.tpch.customer (left(c_phone, 3), substring(c_phone, 1, 3))",
+                    "specified twice");
+        } finally {
+            analyzeMgr.replayRemoveExternalMcvStatsMeta(groupMeta);
+            analyzeMgr.replayRemoveExternalMcvStatsMeta(prefixMeta);
+        }
+        analyzeFail("drop mcv stats hive0.tpch.customer (lower(missing_column))", "missing_column");
+        // An expression without statistics is not dropped silently.
+        analyzeFail("drop mcv stats hive0.tpch.customer (lower(c_name))", "No MCV statistics on lower(`c_name`)");
+
+        // After the column or the function is dropped the expression no longer analyzes, and a text of an earlier
+        // canonical form analyzes to another text; DROP finds both by the text SHOW prints.
+        for (String element : List.of("expr:1:lower(`gone_column`)", "expr:1:`db1`.myfn(`c_phone`)",
+                "expr:1:(`c_custkey`) + 1")) {
+            ExternalMcvStatsMeta meta = mcvMeta(List.of(element));
+            analyzeMgr.replayAddExternalMcvStatsMeta(meta);
+            try {
+                String sql = "drop mcv stats hive0.tpch.customer (" + ExpressionTemplate.displayText(element) + ")";
+                Assertions.assertEquals(List.of(element), ((DropStatsStmt) analyzeSuccess(sql)).getColumnNames());
+            } finally {
+                analyzeMgr.replayRemoveExternalMcvStatsMeta(meta);
+            }
+        }
+        analyzeFail("drop mcv stats hive0.tpch.customer (lower(`gone_column`))", "gone_column");
+    }
+
+    @Test
+    public void testDropMcvExpressionStatsFindsTheTableByUuidAndTheJobs() {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        AnalyzeMgr analyzeMgr = getConnectContext().getGlobalStateMgr().getAnalyzeMgr();
+        Table table = getConnectContext().getGlobalStateMgr().getMetadataMgr().getTable(getConnectContext(), "hive0",
+                "tpch", "customer");
+        // Statistics recorded under names in another case are of the same table by its UUID.
+        ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta("hive0", "TPCH", "Customer", List.of(prefix),
+                StatsConstants.AnalyzeType.FULL, List.of(MCV), LocalDateTime.of(2020, 1, 1, 1, 1), Map.of());
+        meta.setTableUUID(table.getUUID());
+        analyzeMgr.replayAddExternalMcvStatsMeta(meta);
+        try {
+            DropStatsStmt stmt = (DropStatsStmt) analyzeSuccess("drop mcv stats hive0.tpch.customer (left(c_phone, 3))");
+            Assertions.assertEquals(List.of(prefix), stmt.getColumnNames());
+        } finally {
+            analyzeMgr.replayRemoveExternalMcvStatsMeta(meta);
+        }
+        // A group that only a job collects yet is dropped with its job, as a group of columns is.
+        ExternalAnalyzeJob job = new ExternalAnalyzeJob("hive0", "tpch", "customer", List.of("c_name", prefix),
+                List.of(), StatsConstants.AnalyzeType.MCV, StatsConstants.ScheduleType.SCHEDULE, Map.of(),
+                StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+        job.setId(424242);
+        analyzeMgr.replayAddAnalyzeJob(job);
+        try {
+            DropStatsStmt stmt = (DropStatsStmt) analyzeSuccess(
+                    "drop mcv stats hive0.tpch.customer (c_name, left(c_phone, 3))");
+            Assertions.assertEquals(List.of("c_name", prefix), stmt.getColumnNames());
+            analyzeFail("drop mcv stats hive0.tpch.customer (left(c_phone, 3))", "No MCV statistics");
+        } finally {
+            analyzeMgr.replayRemoveAnalyzeJob(job);
+        }
+    }
+
+    @Test
+    public void testShowAnalyzePrintsExpressionTexts() throws Exception {
+        String prefix = "expr:1:substr(`c_phone`, 1, 3)";
+        ExternalAnalyzeJob job = new ExternalAnalyzeJob("hive0", "tpch", "customer", List.of("c_name", prefix),
+                List.of(), StatsConstants.AnalyzeType.MCV, StatsConstants.ScheduleType.SCHEDULE, Map.of(),
+                StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+        Assertions.assertEquals("[c_name, substr(`c_phone`, 1, 3)]",
+                ShowAnalyzeJobStmt.showAnalyzeJobs(getConnectContext(), job).get(4));
+        AnalyzeStatus status = new ExternalAnalyzeStatus(-1, "hive0", "tpch", "customer", "uuid",
+                List.of("c_name", prefix), StatsConstants.AnalyzeType.MCV, StatsConstants.ScheduleType.ONCE, Map.of(),
+                LocalDateTime.of(2020, 1, 1, 1, 1));
+        status.setStatus(StatsConstants.ScheduleStatus.FINISH);
+        Assertions.assertEquals("[c_name, substr(`c_phone`, 1, 3)]",
+                ShowAnalyzeStatusStmt.showAnalyzeStatus(getConnectContext(), status).get(3));
+        // A group of columns prints as before.
+        ExternalAnalyzeJob columns = new ExternalAnalyzeJob("hive0", "tpch", "customer", List.of("c_name", "c_phone"),
+                List.of(), StatsConstants.AnalyzeType.MCV, StatsConstants.ScheduleType.SCHEDULE, Map.of(),
+                StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+        Assertions.assertEquals("c_name,c_phone", ShowAnalyzeJobStmt.showAnalyzeJobs(getConnectContext(), columns).get(4));
+    }
+
+    private static ExternalMcvStatsMeta mcvMeta(List<String> elements) {
+        return new ExternalMcvStatsMeta("hive0", "tpch", "customer", elements, StatsConstants.AnalyzeType.FULL,
+                List.of(MCV), LocalDateTime.of(2020, 1, 1, 1, 1), Map.of());
+    }
+
+    @Test
+    public void testInvalidMcvMetaInTheEditLogIsSkipped() {
+        // A column named as an expression element and the expression itself clash: the replay skips the meta and
+        // the FE goes on.
+        AnalyzeMgr analyzeMgr = getConnectContext().getGlobalStateMgr().getAnalyzeMgr();
+        int before = analyzeMgr.getExternalMcvStatsMetaMap().size();
+        analyzeMgr.replayAddExternalMcvStatsMeta(mcvMeta(List.of("expr:1:lower(`c_name`)", "expr:1:lower(`c_name`)")));
+        Assertions.assertEquals(before, analyzeMgr.getExternalMcvStatsMetaMap().size());
+    }
+
+    @Test
+    public void testMcvExpressionKeysAreCaseSensitive() {
+        AnalyzeMgr.ExternalMcvStatsKey upper = new AnalyzeMgr.ExternalMcvStatsKey("hive0", "tpch", "customer",
+                List.of("C_NAME", "expr:1:concat(`c_name`, 'Y')"));
+        AnalyzeMgr.ExternalMcvStatsKey lower = new AnalyzeMgr.ExternalMcvStatsKey("hive0", "tpch", "customer",
+                List.of("c_name", "expr:1:concat(`c_name`, 'y')"));
+        AnalyzeMgr.ExternalMcvStatsKey same = new AnalyzeMgr.ExternalMcvStatsKey("hive0", "tpch", "customer",
+                List.of("expr:1:concat(`c_name`, 'Y')", "c_name"));
+        Assertions.assertNotEquals(upper, lower);
+        Assertions.assertEquals(upper, same);
+    }
+
+    @Test
+    public void testShowMcvExpressionStatsMeta() {
+        ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta("hive0", "tpch", "customer",
+                List.of("c_name", "expr:1:substr(`c_phone`, 1, 3)"), StatsConstants.AnalyzeType.FULL, List.of(MCV),
+                LocalDateTime.of(2020, 1, 1, 1, 1), Map.of());
+        List<String> row = ShowExecutor.showExternalMcvStatsMeta(getConnectContext(), meta);
+        Assertions.assertNotNull(row);
+        Assertions.assertEquals("[c_name, substr(`c_phone`, 1, 3)]", row.get(2));
     }
 
     @Test

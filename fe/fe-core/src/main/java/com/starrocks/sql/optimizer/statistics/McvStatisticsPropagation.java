@@ -444,6 +444,16 @@ final class McvStatisticsPropagation {
         return product;
     }
 
+    /**
+     * Whether NOT of a condition on one column holds on a value of the column: the condition is FALSE there.
+     * Empty when the condition cannot be evaluated on the value.
+     */
+    static Optional<Boolean> negationHolds(ScalarOperator condition, ColumnRefOperator column, String value,
+                                           McvPredicateEvaluator evaluator) {
+        return evaluate(condition, List.of(column), java.util.Collections.singletonList(value), evaluator)
+                .map(truth -> truth == Truth.FALSE);
+    }
+
     private static Optional<Truth> evaluate(ScalarOperator predicate, List<ColumnRefOperator> columns,
                                            List<String> values, McvPredicateEvaluator evaluator) {
         // Boolean equality with TRUE is normalized to the column itself by the optimizer.
@@ -491,7 +501,9 @@ final class McvStatisticsPropagation {
             return Optional.empty();
         }
         String value = values.get(position);
-        if (!(predicate instanceof IsNullPredicateOperator)) {
+        // A value of a string column is its own operand, which is not NULL.
+        boolean plainString = value != null && predicate.getChild(0).isColumnRef() && column.getType().isStringType();
+        if (!(predicate instanceof IsNullPredicateOperator) && !plainString) {
             Optional<ConstantOperator> operand = MultiColumnMcvEstimator.evaluate(predicate.getChild(0), column, value);
             if (operand.isEmpty()) {
                 return Optional.empty();

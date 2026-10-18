@@ -74,8 +74,6 @@ public final class StringHistogramEstimator {
                 head.put(text, count);
             }
         });
-        boolean less = op == BinaryType.LT || op == BinaryType.LE;
-        boolean inclusive = op == BinaryType.LE || op == BinaryType.GE;
         boolean inHead = histogram.getMCV().containsKey(value);
         List<Bucket> buckets = new ArrayList<>();
         long previous = 0;
@@ -84,30 +82,89 @@ public final class StringHistogramEstimator {
             StringBucket b = (StringBucket) raw;
             long mass = b.getCount() - previous;
             previous = b.getCount();
-            long below = Math.round(b.lessRows(value, less ? inclusive : !inclusive, mass, inHead));
-            long count = Math.max(0, Math.min(mass, less ? below : mass - below));
-            if (count == 0) {
-                continue;
+            StringBucket clipped = clip(b, mass, cumulative, value, op, inHead);
+            if (clipped != null) {
+                cumulative = clipped.getCount();
+                buckets.add(clipped);
             }
-            cumulative += count;
-            String low = b.getLowerString();
-            String high = b.getUpperString();
-            boolean lowInclusive = b.isLowerInclusive();
-            boolean highInclusive = b.isUpperInclusive();
-            long repeats = b.getUpperRepeats();
-            if (less && StringBucket.compare(value, high) <= 0) {
-                high = value;
-                highInclusive = inclusive && !inHead && b.pointRows(value, mass) > 0;
-                repeats = highInclusive ? Math.min(count, Math.round(b.pointRows(value, mass))) : 0;
-            } else if (!less && StringBucket.compare(value, low) >= 0) {
-                low = value;
-                lowInclusive = inclusive && !inHead && b.pointRows(value, mass) > 0;
-            }
-            long ndv = Math.min(count, Math.max(1, (long) Math.ceil(b.getDistinctCount().orElse(1L)
-                    * count / (double) Math.max(1, mass))));
-            buckets.add(new StringBucket(low, high, cumulative, repeats, ndv, lowInclusive, highInclusive));
         }
         return Histogram.forStrings(buckets, head);
+    }
+
+    /**
+     * The part of one bucket of the given rows on the side of the value that the comparison keeps, with its count
+     * after the given cumulative rows; null when no row is left. It is the step of filter for one bucket, so a caller
+     * that cuts single buckets gets the same parts without building histograms.
+     */
+    static StringBucket clip(StringBucket b, long mass, long cumulative, String value, BinaryType op, boolean inHead) {
+        boolean less = op == BinaryType.LT || op == BinaryType.LE;
+        boolean inclusive = op == BinaryType.LE || op == BinaryType.GE;
+        long below = Math.round(b.lessRows(value, less ? inclusive : !inclusive, mass, inHead));
+        long count = Math.max(0, Math.min(mass, less ? below : mass - below));
+        if (count == 0) {
+            return null;
+        }
+        String low = b.getLowerString();
+        String high = b.getUpperString();
+        boolean lowInclusive = b.isLowerInclusive();
+        boolean highInclusive = b.isUpperInclusive();
+        long repeats = b.getUpperRepeats();
+        if (less && StringBucket.compare(value, high) <= 0) {
+            high = value;
+            highInclusive = inclusive && !inHead && b.pointRows(value, mass) > 0;
+            repeats = highInclusive ? Math.min(count, Math.round(b.pointRows(value, mass))) : 0;
+        } else if (!less && StringBucket.compare(value, low) >= 0) {
+            low = value;
+            lowInclusive = inclusive && !inHead && b.pointRows(value, mass) > 0;
+        }
+        long ndv = Math.min(count, Math.max(1, (long) Math.ceil(b.getDistinctCount().orElse(1L)
+                * count / (double) Math.max(1, mass))));
+        return new StringBucket(low, high, cumulative + count, repeats, ndv, lowInclusive, highInclusive);
+    }
+
+    /**
+     * The buckets that can hold strings from the lower string up to the upper one, the upper excluded, with the
+     * head: the filters of a prefix leave no row of any other bucket, so they need not walk them. Buckets are sorted
+     * and do not overlap.
+     */
+    private static Histogram slice(Histogram histogram, String lower, String upper) {
+        List<Bucket> buckets = histogram.getBuckets();
+        int from = 0;
+        int to = buckets.size();
+        while (from < to) {
+            int mid = (from + to) >>> 1;
+            if (StringBucket.compare(((StringBucket) buckets.get(mid)).getUpperString(), lower) < 0) {
+                from = mid + 1;
+            } else {
+                to = mid;
+            }
+        }
+        int end = buckets.size();
+        if (upper != null) {
+            int low = from;
+            int high = buckets.size();
+            while (low < high) {
+                int mid = (low + high) >>> 1;
+                if (StringBucket.compare(((StringBucket) buckets.get(mid)).getLowerString(), upper) < 0) {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            end = low;
+        }
+        if (from == 0 && end == buckets.size()) {
+            return histogram;
+        }
+        List<Bucket> part = new ArrayList<>(Math.max(0, end - from));
+        long base = from == 0 ? 0 : buckets.get(from - 1).getCount();
+        for (int i = from; i < end; i++) {
+            StringBucket bucket = (StringBucket) buckets.get(i);
+            part.add(new StringBucket(bucket.getLowerString(), bucket.getUpperString(), bucket.getCount() - base,
+                    bucket.getUpperRepeats(), bucket.getDistinctCount().orElse(1L), bucket.isLowerInclusive(),
+                    bucket.isUpperInclusive()));
+        }
+        return Histogram.forStrings(part, histogram.getMCV());
     }
 
     private static boolean matches(int cmp, BinaryType op) {
@@ -145,7 +202,12 @@ public final class StringHistogramEstimator {
 
     public static Statistics prefix(ColumnRefOperator column, ColumnStatistic statistic,
                                     String prefix, Statistics input) {
-        Histogram filtered = filter(statistic.getHistogram(), prefix, BinaryType.GE);
+        return prefixResult(column, statistic, input, prefixHistogram(statistic, prefix));
+    }
+
+    /** The histogram of the values with the prefix, which depends on the histogram of the column only. */
+    static Histogram prefixHistogram(ColumnStatistic statistic, String prefix) {
+        String upper = null;
         int[] points = prefix.codePoints().toArray();
         for (int i = points.length - 1; i >= 0; i--) {
             if (points[i] < Character.MAX_CODE_POINT) {
@@ -153,11 +215,20 @@ public final class StringHistogramEstimator {
                 if (successor == Character.MIN_SURROGATE) {
                     successor = Character.MAX_SURROGATE + 1;
                 }
-                String upper = new String(points, 0, i) + new String(Character.toChars(successor));
-                filtered = filter(filtered, upper, BinaryType.LT);
+                upper = new String(points, 0, i) + new String(Character.toChars(successor));
                 break;
             }
         }
+        Histogram filtered = filter(slice(statistic.getHistogram(), prefix, upper), prefix, BinaryType.GE);
+        if (upper != null) {
+            filtered = filter(filtered, upper, BinaryType.LT);
+        }
+        return filtered;
+    }
+
+    /** The estimate of a prefix from the histogram of its values. */
+    static Statistics prefixResult(ColumnRefOperator column, ColumnStatistic statistic, Statistics input,
+                                   Histogram filtered) {
         double distinct = filtered.getMCV().size() + filtered.getBuckets().stream()
                 .mapToLong(b -> b.getDistinctCount().orElse(0L)).sum();
         return result(Optional.of(column), statistic, input, rows(filtered), distinct, filtered);

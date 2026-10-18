@@ -20,10 +20,21 @@ import java.util.List;
 
 /**
  * ANALYZE TABLE ... MCV (columns): the most common value tuples of a column set of an external table
- * with their exact row counts, and the number of distinct tuples.
+ * with their exact row counts, and the number of distinct tuples. An element of the set is a column or an
+ * expression of columns.
  */
 public class AnalyzeMcvDesc extends AnalyzeTypeDesc {
     private List<List<String>> columnGroups = List.of();
+    // The analyzed elements of an explicit group; empty for groups taken from the predicate columns.
+    private List<McvItem> items = List.of();
+
+    public List<McvItem> getItems() {
+        return items;
+    }
+
+    public void setItems(List<McvItem> items) {
+        this.items = List.copyOf(items);
+    }
 
     public List<List<String>> getColumnGroups() {
         return columnGroups;

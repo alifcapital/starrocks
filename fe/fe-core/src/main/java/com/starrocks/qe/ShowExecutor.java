@@ -261,6 +261,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
+import com.starrocks.sql.optimizer.statistics.ExpressionTemplate;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
 import com.starrocks.sql.spm.SPMStmtExecutor;
 import com.starrocks.statistic.AnalyzeJob;
@@ -3678,7 +3679,8 @@ public class ShowExecutor {
         List<String> row = Lists.newArrayList("", "", "", "", "", "", "");
         row.set(0, meta.getCatalogName() + "." + meta.getDbName());
         row.set(1, meta.getTableName());
-        row.set(2, meta.getColumnNames().toString());
+        // An expression shows as its canonical text, not as the text the user wrote.
+        row.set(2, meta.getColumnNames().stream().map(ExpressionTemplate::displayText).toList().toString());
         row.set(3, meta.getAnalyzeType().name());
         row.set(4, meta.getStatisticsTypes() == null ? "" :
                 meta.getStatisticsTypes().stream().map(Enum::name).collect(Collectors.joining(", ")));

@@ -34,10 +34,17 @@ import java.util.OptionalDouble;
  * matcher is bounded in time whatever the pattern, since it runs during planning on user input.
  */
 public class LikePatternEstimator {
+    /** The work budget of the LIKE matches of one derivation; the texts spend it in the order they are matched. */
+    public static final class Work {
+        private long remaining = 1_000_000;
+    }
+
     /**
      * A LIKE pattern: '%' matches any text, '_' any one character, '\\' escapes the next character.
      * Characters are code points, as the BE matches them. Matching runs in time proportional to the
-     * sum of text and pattern lengths for literal segments. General underscore patterns use a shared work budget.
+     * sum of text and pattern lengths for literal segments. General underscore patterns spend a work budget, one
+     * for all the texts a derivation matches in its order, so the work of the derivation stays bounded whatever the
+     * size of the head.
      */
     public static class LikePattern {
         private static final int ANY_TEXT = -1;
@@ -45,7 +52,8 @@ public class LikePatternEstimator {
         // Code points of the literal characters, or one of the two markers above.
         private final int[] tokens;
         private final List<Segment> segments;
-        private long remainingWork = 1_000_000;
+        // The literal text of a pattern of literal characters and one trailing %, null for any other pattern.
+        private final String literalPrefix;
 
         private record Segment(int[] text, int[] failure) {
             static Segment of(int[] text) {
@@ -77,6 +85,11 @@ public class LikePatternEstimator {
 
         private LikePattern(int[] tokens) {
             this.tokens = tokens;
+            boolean prefixOnly = tokens.length > 0 && tokens[tokens.length - 1] == ANY_TEXT;
+            for (int i = 0; prefixOnly && i < tokens.length - 1; i++) {
+                prefixOnly = tokens[i] >= 0;
+            }
+            literalPrefix = prefixOnly ? new String(tokens, 0, tokens.length - 1) : null;
             segments = Arrays.stream(tokens).anyMatch(t -> t == ANY_CHAR) ? null : new ArrayList<>();
             if (segments != null) {
                 for (int start = 0, end = 0; end <= tokens.length; end++) {
@@ -113,6 +126,16 @@ public class LikePatternEstimator {
         }
 
         public Optional<Boolean> tryMatch(String text) {
+            return tryMatch(text, new Work());
+        }
+
+        /** The match of one text, spending the budget of the derivation; empty once the budget is spent. */
+        public Optional<Boolean> tryMatch(String text, Work work) {
+            if (literalPrefix != null) {
+                // A pattern of a fixed prefix and one trailing %: the code points of the text start with those of
+                // the prefix exactly when its chars do.
+                return Optional.of(text.startsWith(literalPrefix));
+            }
             int[] chars = text.codePoints().toArray();
             if (segments != null) {
                 return Optional.of(matchSegments(chars));
@@ -122,7 +145,7 @@ public class LikePatternEstimator {
             int starToken = -1;
             int starText = 0;
             while (t < chars.length) {
-                if (--remainingWork < 0) {
+                if (--work.remaining < 0) {
                     return Optional.empty();
                 }
                 if (p < tokens.length && (tokens[p] == chars[t] || tokens[p] == ANY_CHAR)) {
@@ -240,6 +263,7 @@ public class LikePatternEstimator {
         }
         Histogram histogram = columnStatistic.getHistogram();
         Map<String, Long> mcv = histogram.getMCV();
+        Work work = new Work();
         if (mcv.isEmpty()) {
             return OptionalDouble.empty();
         }
@@ -260,7 +284,7 @@ public class LikePatternEstimator {
                 }
                 text = MultiColumnMcvEstimator.constantText(value.get());
             }
-            Optional<Boolean> match = pattern.get().tryMatch(text);
+            Optional<Boolean> match = pattern.get().tryMatch(text, work);
             if (match.isEmpty()) {
                 return OptionalDouble.empty();
             }
