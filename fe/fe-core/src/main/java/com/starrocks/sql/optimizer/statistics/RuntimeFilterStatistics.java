@@ -63,17 +63,19 @@ public final class RuntimeFilterStatistics {
     private final boolean completeHead;
     private final double headMass;
     private final JoinKey joinKey;
+    // See ColumnStatistic#isDistinctValuesFromDefaultSelectivity: the NDV of the key does not measure its keys.
+    private final boolean ndvFromDefaultSelectivity;
 
     private record JoinKey(JoinStatisticsPlanner planner, JoinStatisticsScope scope, ColumnRefOperator column, double rows) {
     }
 
     private RuntimeFilterStatistics(Type type, double ndv, double sourceNdv, double nullFraction,
-                                    Map<String, Double> head) {
-        this(type, ndv, sourceNdv, nullFraction, head, null);
+                                    Map<String, Double> head, boolean ndvFromDefaultSelectivity) {
+        this(type, ndv, sourceNdv, nullFraction, head, null, ndvFromDefaultSelectivity);
     }
 
     private RuntimeFilterStatistics(Type type, double ndv, double sourceNdv, double nullFraction,
-                                    Map<String, Double> head, JoinKey joinKey) {
+                                    Map<String, Double> head, JoinKey joinKey, boolean ndvFromDefaultSelectivity) {
         this.type = type;
         this.ndv = ndv;
         this.sourceNdv = ndv < 0 ? -1 : Math.max(ndv, sourceNdv);
@@ -82,6 +84,7 @@ public final class RuntimeFilterStatistics {
         this.headMass = mass(this.head);
         this.completeHead = mass(head) >= 1 - this.nullFraction - 1e-9;
         this.joinKey = joinKey;
+        this.ndvFromDefaultSelectivity = ndvFromDefaultSelectivity;
     }
 
     public RuntimeFilterStatistics withJoinStatistics(JoinStatisticsPlanner planner, JoinStatisticsScope scope,
@@ -95,7 +98,7 @@ public final class RuntimeFilterStatistics {
                 : key.degree().getNullCount() / (double) Math.max(1, key.degree().getRowCount());
         double probeRows = key == null ? rows : key.rows();
         return new RuntimeFilterStatistics(type, keyNdv, sourceNdv, keyNulls, head,
-                new JoinKey(planner, scope, column, probeRows));
+                new JoinKey(planner, scope, column, probeRows), ndvFromDefaultSelectivity);
     }
 
     public double getNdv() {
@@ -116,13 +119,13 @@ public final class RuntimeFilterStatistics {
 
     public RuntimeFilterStatistics boundByRows(double rows) {
         if (rows == 0) {
-            return new RuntimeFilterStatistics(type, 0, sourceNdv, 0, Map.of());
+            return new RuntimeFilterStatistics(type, 0, sourceNdv, 0, Map.of(), ndvFromDefaultSelectivity);
         }
         if (rows < 0 || ndv <= rows) {
             return this;
         }
         return new RuntimeFilterStatistics(type, rows, sourceNdv, nullFraction,
-                rows < head.size() ? Map.of() : head, joinKey);
+                rows < head.size() ? Map.of() : head, joinKey, ndvFromDefaultSelectivity);
     }
 
     public static RuntimeFilterStatistics from(ColumnRefOperator column, ColumnStatistic basic,
@@ -191,7 +194,8 @@ public final class RuntimeFilterStatistics {
             head.forEach((key, value) -> scaled.put(key, value * scale));
             head = scaled;
         }
-        return new RuntimeFilterStatistics(column.getType(), ndv, Double.isFinite(sourceNdv) ? sourceNdv : -1, nulls, head)
+        return new RuntimeFilterStatistics(column.getType(), ndv, Double.isFinite(sourceNdv) ? sourceNdv : -1, nulls, head,
+                basic.isDistinctValuesFromDefaultSelectivity())
                 .boundByRows(rows);
     }
 
@@ -244,7 +248,10 @@ public final class RuntimeFilterStatistics {
                 return OptionalDouble.of(probe.joinKey.rows == 0 ? 0 : clamp(rows.getAsDouble() / probe.joinKey.rows));
             }
         }
-        if (mode == NdvEstimate.OFF || probe == null || ndv < 0 || probe.ndv < 0 || !comparable(type, probe.type)) {
+        // A build NDV cut to a default selectivity says nothing about how many probe rows the keys pass, so we
+        // leave the decision to the rules that do not read the NDV.
+        if (mode == NdvEstimate.OFF || ndvFromDefaultSelectivity || probe == null || ndv < 0 || probe.ndv < 0
+                || !comparable(type, probe.type)) {
             return OptionalDouble.empty();
         }
         double matchedMass = 0;
@@ -292,7 +299,7 @@ public final class RuntimeFilterStatistics {
 
     /** Membership known from retained statistics, not from an assumed overlap of unseen domains. */
     OptionalDouble knownMembership(Type probeType, String value, boolean nullSafe) {
-        if (!comparable(type, probeType)) {
+        if (ndvFromDefaultSelectivity || !comparable(type, probeType)) {
             return OptionalDouble.empty();
         }
         boolean complete = completeHead;

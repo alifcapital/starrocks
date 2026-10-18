@@ -56,6 +56,10 @@ public class ColumnStatistic {
     // few probe rows, even when the probe side has fewer distinct keys than the build side. So we keep the NDV of
     // the column before filters, joins and aggregations reduced it. NaN means this statistic is the original one.
     private double sourceDistinctValuesCount = NaN;
+    // A predicate that we could not estimate took a default selectivity coefficient, and the NDV was cut to the
+    // row count that this coefficient gave. Such an NDV is not a measure of the keys, so we do not let the
+    // runtime filter estimate read a key domain from it.
+    private boolean distinctValuesFromDefaultSelectivity;
 
     public ColumnStatistic(
             double minValue,
@@ -140,6 +144,10 @@ public class ColumnStatistic {
                 : Math.max(sourceDistinctValuesCount, distinctValuesCount);
     }
 
+    public boolean isDistinctValuesFromDefaultSelectivity() {
+        return distinctValuesFromDefaultSelectivity;
+    }
+
     public Histogram getHistogram() {
         return histogram;
     }
@@ -205,7 +213,8 @@ public class ColumnStatistic {
         return new Builder(other.minString, other.maxString, other.minValue, other.maxValue,
                 other.nullsFraction, other.averageRowSize, other.distinctValuesCount, other.histogram,
                 other.collectionSize, other.type)
-                .setSourceDistinctValuesCount(other.getSourceDistinctValuesCount());
+                .setSourceDistinctValuesCount(other.getSourceDistinctValuesCount())
+                .setDistinctValuesFromDefaultSelectivity(other.distinctValuesFromDefaultSelectivity);
     }
 
     /** The same statistic for a value whose domain is not the domain of the column it was derived from. */
@@ -314,6 +323,7 @@ public class ColumnStatistic {
         private String maxString = null;
         private double collectionSize = DEFAULT_COLLECTION_SIZE;
         private double sourceDistinctValuesCount = NaN;
+        private boolean distinctValuesFromDefaultSelectivity;
 
         private Builder() {
         }
@@ -401,10 +411,16 @@ public class ColumnStatistic {
             return this;
         }
 
+        public Builder setDistinctValuesFromDefaultSelectivity(boolean distinctValuesFromDefaultSelectivity) {
+            this.distinctValuesFromDefaultSelectivity = distinctValuesFromDefaultSelectivity;
+            return this;
+        }
+
         public ColumnStatistic build() {
             ColumnStatistic columnStatistic = new ColumnStatistic(minValue, maxValue, nullsFraction, averageRowSize,
                     distinctValuesCount, collectionSize, histogram, type, minString, maxString);
             columnStatistic.sourceDistinctValuesCount = sourceDistinctValuesCount;
+            columnStatistic.distinctValuesFromDefaultSelectivity = distinctValuesFromDefaultSelectivity;
             return columnStatistic;
         }
     }

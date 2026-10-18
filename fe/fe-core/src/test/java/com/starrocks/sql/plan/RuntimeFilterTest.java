@@ -208,6 +208,89 @@ public class RuntimeFilterTest extends PlanTestBase {
         }
     }
 
+    // The build side keeps half of the dimension by the default coefficient of an IN on an expression, and its key
+    // NDV is cut to that row count. The NDV estimate would reject the filter (34M of 68.5M keys pass about half of
+    // the probe rows), so the probe gate decides by the build and probe row counts: 34M of 827M rows, the filter
+    // is kept. A predicate estimated from statistics that keeps more of the keys leaves the decision to the NDV
+    // estimate, which rejects the filter.
+    @Test
+    public void testProbeGateIgnoresBuildNdvCutToADefaultSelectivity() throws Exception {
+        SessionVariable sv = connectContext.getSessionVariable();
+        long savedProbeMin = sv.getGlobalRuntimeFilterProbeMinSize();
+        boolean savedGrf = sv.getEnableGlobalRuntimeFilter();
+        try {
+            sv.setGlobalRuntimeFilterProbeMinSize(1);
+            sv.setEnableGlobalRuntimeFilter(true);
+            setTableStatistics((OlapTable) getTable("rf_fact"), 827_000_000);
+            setTableStatistics((OlapTable) getTable("rf_dim"), 68_700_000);
+            new MockUp<MockTpchStatisticStorage>() {
+                @Mock
+                public List<ColumnStatistic> getColumnStatistics(Table table, List<String> columns) {
+                    return columns.stream().map(c -> {
+                        if (c.equals("d_cust")) {
+                            return colStat(68_500_000);
+                        } else if (c.equals("f_cust")) {
+                            return colStat(40_800_000);
+                        } else if (c.equals("d_name")) {
+                            return colStat(68_200_000);
+                        }
+                        return colStat(1000);
+                    }).collect(Collectors.toList());
+                }
+            };
+
+            String guessed = getVerboseExplain("select * from rf_fact join [shuffle] rf_dim on f_cust = d_cust "
+                    + "where d_name % 1000 in (103, 105)");
+            assertContains(guessed, "probe runtime filters");
+
+            String measured = getVerboseExplain("select * from rf_fact join [shuffle] rf_dim on f_cust = d_cust "
+                    + "where d_name < 40000000");
+            assertNotContains(measured, "probe runtime filters");
+        } finally {
+            sv.setGlobalRuntimeFilterProbeMinSize(savedProbeMin);
+            sv.setEnableGlobalRuntimeFilter(savedGrf);
+        }
+    }
+
+    // The same build side when another column of the dimension has no statistics: the estimate keeps the NDVs, the
+    // key still gets the mark, and the probe gate decides by the row counts.
+    @Test
+    public void testProbeGateIgnoresBuildNdvAboveADefaultRowCountWithAColumnWithoutStatistics() throws Exception {
+        SessionVariable sv = connectContext.getSessionVariable();
+        long savedProbeMin = sv.getGlobalRuntimeFilterProbeMinSize();
+        boolean savedGrf = sv.getEnableGlobalRuntimeFilter();
+        try {
+            sv.setGlobalRuntimeFilterProbeMinSize(1);
+            sv.setEnableGlobalRuntimeFilter(true);
+            setTableStatistics((OlapTable) getTable("rf_fact"), 827_000_000);
+            setTableStatistics((OlapTable) getTable("rf_dim"), 68_700_000);
+            new MockUp<MockTpchStatisticStorage>() {
+                @Mock
+                public List<ColumnStatistic> getColumnStatistics(Table table, List<String> columns) {
+                    return columns.stream().map(c -> {
+                        if (c.equals("d_cust")) {
+                            return colStat(68_500_000);
+                        } else if (c.equals("f_cust")) {
+                            return colStat(40_800_000);
+                        } else if (c.equals("d_name")) {
+                            return colStat(68_200_000);
+                        } else if (c.equals("d_region")) {
+                            return ColumnStatistic.unknown();
+                        }
+                        return colStat(1000);
+                    }).collect(Collectors.toList());
+                }
+            };
+
+            String plan = getVerboseExplain("select * from rf_fact join [shuffle] rf_dim on f_cust = d_cust "
+                    + "where d_name % 1000 in (103, 105)");
+            assertContains(plan, "probe runtime filters");
+        } finally {
+            sv.setGlobalRuntimeFilterProbeMinSize(savedProbeMin);
+            sv.setEnableGlobalRuntimeFilter(savedGrf);
+        }
+    }
+
     @Test
     public void testProbeGateUsesFrequencyMassInsteadOfDistinctRatio() throws Exception {
         SessionVariable sv = connectContext.getSessionVariable();

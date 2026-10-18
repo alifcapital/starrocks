@@ -207,7 +207,7 @@ public class PredicateStatisticsCalculator {
                     statistics.getOutputRowCount() * StatisticsEstimateCoefficient.PREDICATE_UNKNOWN_FILTER_COEFFICIENT;
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(
                     statistics.withOutputRowCount(outputRowCount),
-                    outputRowCount);
+                    outputRowCount, true);
         }
 
         @Override
@@ -349,11 +349,13 @@ public class PredicateStatisticsCalculator {
                     Math.max(columnMinVal, otherChildrenMinValue) <= Math.min(columnMaxVal, otherChildrenMaxValue);
 
             // 2 .compute the in predicate selectivity
+            boolean defaultSelectivity = false;
             if (inColumnStatistic.isUnknown() || inColumnStatistic.hasNaNValue() ||
                     hasUnknownOrNaN ||
                     !(firstChild.isColumnRef())) {
                 // use default selectivity if column statistic is unknown or has NaN values.
                 // can not get accurate column statistics if it is not ColumnRef operator
+                defaultSelectivity = true;
                 selectivity = predicate.isNotIn() ?
                         1 - StatisticsEstimateCoefficient.IN_PREDICATE_DEFAULT_FILTER_COEFFICIENT :
                         StatisticsEstimateCoefficient.IN_PREDICATE_DEFAULT_FILTER_COEFFICIENT;
@@ -365,6 +367,7 @@ public class PredicateStatisticsCalculator {
             }
             // avoid not in predicate too small
             if (predicate.isNotIn() && Precision.equals(selectivity, 0.0, 0.000001d)) {
+                defaultSelectivity = true;
                 selectivity = 1 - StatisticsEstimateCoefficient.IN_PREDICATE_DEFAULT_FILTER_COEFFICIENT;
             }
 
@@ -390,7 +393,7 @@ public class PredicateStatisticsCalculator {
                             Statistics.buildFrom(statistics).setOutputRowCount(rowCount).
                                     addColumnStatistic(operator, newInColumnStatistic).build()).
                     orElseGet(() -> statistics.withOutputRowCount(rowCount));
-            return StatisticsEstimateUtils.adjustStatisticsByRowCount(inStatistics, rowCount);
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(inStatistics, rowCount, defaultSelectivity);
         }
 
         @Override
@@ -412,7 +415,9 @@ public class PredicateStatisticsCalculator {
                 return statistics.withOutputRowCount(rowCount);
             }
             ColumnStatistic isNullColumnStatistic = statistics.getColumnStatistic(children.get(0));
+            boolean defaultSelectivity = false;
             if (isNullColumnStatistic.isUnknown()) {
+                defaultSelectivity = true;
                 selectivity = predicate.isNotNull() ?
                         1 - StatisticsEstimateCoefficient.IS_NULL_PREDICATE_DEFAULT_FILTER_COEFFICIENT :
                         StatisticsEstimateCoefficient.IS_NULL_PREDICATE_DEFAULT_FILTER_COEFFICIENT;
@@ -428,7 +433,7 @@ public class PredicateStatisticsCalculator {
             builder.addColumnStatistic(children.get(0), ColumnStatistic.buildFrom(isNullColumnStatistic)
                     .setNullsFraction(predicate.isNotNull() ? 0.0 : 1.0)
                     .build());
-            return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount);
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount, defaultSelectivity);
         }
 
         @Override

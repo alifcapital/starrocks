@@ -183,7 +183,8 @@ public class HistogramStatisticsUtils {
             double rowCount,
             Histogram originalHistogram) {
 
-        if (Precision.equals(selectivity, 0.0, 0.000001d)) {
+        boolean defaultSelectivity = Precision.equals(selectivity, 0.0, 0.000001d);
+        if (defaultSelectivity) {
             selectivity = 1 - StatisticsEstimateCoefficient.IN_PREDICATE_DEFAULT_FILTER_COEFFICIENT;
             rowCount = statistics.getOutputRowCount() * (1 - nullsFraction) * selectivity;
         }
@@ -198,7 +199,7 @@ public class HistogramStatisticsUtils {
                 .addColumnStatistic(columnRefOperator, estimatedColumnStatistic)
                 .build();
 
-        return StatisticsEstimateUtils.adjustStatisticsByRowCount(result, rowCount);
+        return StatisticsEstimateUtils.adjustStatisticsByRowCount(result, rowCount, defaultSelectivity);
     }
 
     private static Histogram createNotInHistogram(Histogram originalHistogram, MatchedConstantsInfo matchedInfo) {

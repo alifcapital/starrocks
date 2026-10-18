@@ -274,4 +274,23 @@ public class RuntimeFilterStatisticsTest {
         }
     }
 
+    @Test
+    public void testBuildNdvCutToADefaultSelectivityGivesNoEstimate() {
+        // A dimension of 68.5M keys under a predicate estimated at the default 0.5: its key NDV is the row count
+        // that the coefficient gave, not a count of its keys.
+        ColumnStatistic source = ColumnStatistic.builder().setDistinctValuesCount(68_500_000).setNullsFraction(0).build();
+        ColumnStatistic cut = ColumnStatistic.buildFrom(source).setDistinctValuesCount(34_350_000).build();
+        RuntimeFilterStatistics measured = RuntimeFilterStatistics.from(KEY, cut, List.of(), 34_350_000);
+        RuntimeFilterStatistics guessed = RuntimeFilterStatistics.from(KEY,
+                ColumnStatistic.buildFrom(cut).setDistinctValuesFromDefaultSelectivity(true).build(), List.of(),
+                34_350_000);
+        RuntimeFilterStatistics probe = reduced(40_800_000, 40_800_000, Map.of(), 827_000_000);
+        for (RuntimeFilterStatistics.NdvEstimate mode : List.of(RuntimeFilterStatistics.NdvEstimate.CORRELATED,
+                RuntimeFilterStatistics.NdvEstimate.INDEPENDENT)) {
+            Assertions.assertTrue(measured.probePassFraction(probe, false, mode).isPresent());
+            Assertions.assertTrue(guessed.probePassFraction(probe, false, mode).isEmpty());
+            Assertions.assertTrue(guessed.boundByRows(1000).probePassFraction(probe, false, mode).isEmpty());
+        }
+        Assertions.assertTrue(guessed.knownMembership(IntegerType.BIGINT, "1", false).isEmpty());
+    }
 }

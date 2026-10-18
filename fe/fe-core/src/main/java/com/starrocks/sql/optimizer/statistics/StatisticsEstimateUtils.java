@@ -113,12 +113,24 @@ public class StatisticsEstimateUtils {
     }
 
     public static Statistics adjustStatisticsByRowCount(Statistics statistics, double rowCount) {
+        return adjustStatisticsByRowCount(statistics, rowCount, false);
+    }
+
+    /**
+     * @param defaultSelectivity the row count comes from a default selectivity coefficient; the columns whose NDV
+     *                           is above it are marked, see {@link ColumnStatistic#isDistinctValuesFromDefaultSelectivity}
+     */
+    public static Statistics adjustStatisticsByRowCount(Statistics statistics, double rowCount,
+                                                        boolean defaultSelectivity) {
         if (statistics.isTableRowCountMayInaccurate()) {
             return statistics;
         }
         for (ColumnStatistic cs : statistics.getColumnStatistics().values()) {
             if (cs.isUnknown()) {
-                return statistics;
+                // We keep the NDVs when a column has no statistics, but the runtime filter estimate still caps the
+                // NDV of a key by the row count of its operator. So a column whose NDV is above a row count from a
+                // default selectivity gets the mark here as well.
+                return defaultSelectivity ? markColumnsAboveRowCount(statistics, rowCount) : statistics;
             }
         }
 
@@ -139,11 +151,32 @@ public class StatisticsEstimateUtils {
         builder.setOutputRowCount(updated.getOutputRowCount());
         updated.getColumnStatistics().forEach((column, columnStatistic) -> {
             if (columnStatistic.getDistinctValuesCount() > distinctValues) {
-                builder.addColumnStatistic(column,
-                        ColumnStatistic.buildFrom(columnStatistic).setDistinctValuesCount(distinctValues).build());
+                ColumnStatistic.Builder adjusted =
+                        ColumnStatistic.buildFrom(columnStatistic).setDistinctValuesCount(distinctValues);
+                if (defaultSelectivity) {
+                    adjusted.setDistinctValuesFromDefaultSelectivity(true);
+                }
+                builder.addColumnStatistic(column, adjusted.build());
             }
         });
         return builder.build();
+    }
+
+    private static Statistics markColumnsAboveRowCount(Statistics statistics, double rowCount) {
+        double distinctValues = Math.max(1, rowCount);
+        Statistics.Builder builder = null;
+        for (Map.Entry<ColumnRefOperator, ColumnStatistic> entry : statistics.getColumnStatistics().entrySet()) {
+            ColumnStatistic columnStatistic = entry.getValue();
+            if (!columnStatistic.isUnknown() && columnStatistic.getDistinctValuesCount() > distinctValues
+                    && !columnStatistic.isDistinctValuesFromDefaultSelectivity()) {
+                if (builder == null) {
+                    builder = Statistics.buildFrom(statistics);
+                }
+                builder.addColumnStatistic(entry.getKey(), ColumnStatistic.buildFrom(columnStatistic)
+                        .setDistinctValuesFromDefaultSelectivity(true).build());
+            }
+        }
+        return builder == null ? statistics : builder.build();
     }
 
     // The plain selectivity of a predicate, without the MCV lists: what the MCV estimation is built from.

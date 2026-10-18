@@ -14,6 +14,8 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -22,8 +24,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class StatisticsEstimateUtilsTest {
     @BeforeAll
@@ -374,5 +378,50 @@ public class StatisticsEstimateUtilsTest {
 
         assertEquals(expectedNonMcvRows, actualHistogram.getBuckets().get(0).getCount());
         assertEquals(expectedTotalRows, actualHistogram.getTotalRows());
+    }
+
+    @Test
+    void itShouldMarkOnlyTheColumnsThatADefaultSelectivityCuts() {
+        ColumnRefOperator wide = new ColumnRefOperator(1, IntegerType.BIGINT, "wide", true);
+        ColumnRefOperator narrow = new ColumnRefOperator(2, IntegerType.BIGINT, "narrow", true);
+        Statistics input = Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(wide, new ColumnStatistic(0, 1000, 0, 8, 1000))
+                .addColumnStatistic(narrow, new ColumnStatistic(0, 5, 0, 8, 5))
+                .build();
+
+        Statistics guessed = StatisticsEstimateUtils.adjustStatisticsByRowCount(input, 500, true);
+        assertEquals(500, guessed.getColumnStatistic(wide).getDistinctValuesCount());
+        assertTrue(guessed.getColumnStatistic(wide).isDistinctValuesFromDefaultSelectivity());
+        assertFalse(guessed.getColumnStatistic(narrow).isDistinctValuesFromDefaultSelectivity());
+
+        Statistics measured = StatisticsEstimateUtils.adjustStatisticsByRowCount(input, 500);
+        assertFalse(measured.getColumnStatistic(wide).isDistinctValuesFromDefaultSelectivity());
+
+        // The mark stays with the column when a later estimate cuts it again.
+        Statistics later = StatisticsEstimateUtils.adjustStatisticsByRowCount(guessed, 100);
+        assertTrue(later.getColumnStatistic(wide).isDistinctValuesFromDefaultSelectivity());
+        assertEquals(5, later.getColumnStatistic(narrow).getDistinctValuesCount());
+        assertFalse(later.getColumnStatistic(narrow).isDistinctValuesFromDefaultSelectivity());
+    }
+
+    @Test
+    void itShouldMarkAColumnAboveADefaultRowCountWhenAnotherColumnHasNoStatistics() {
+        ColumnRefOperator wide = new ColumnRefOperator(1, IntegerType.BIGINT, "wide", true);
+        ColumnRefOperator narrow = new ColumnRefOperator(2, IntegerType.BIGINT, "narrow", true);
+        ColumnRefOperator unknown = new ColumnRefOperator(3, IntegerType.BIGINT, "unknown", true);
+        Statistics input = Statistics.builder().setOutputRowCount(500)
+                .addColumnStatistic(wide, new ColumnStatistic(0, 1000, 0, 8, 1000))
+                .addColumnStatistic(narrow, new ColumnStatistic(0, 5, 0, 8, 5))
+                .addColumnStatistic(unknown, ColumnStatistic.unknown())
+                .build();
+
+        Statistics guessed = StatisticsEstimateUtils.adjustStatisticsByRowCount(input, 500, true);
+        assertEquals(1000, guessed.getColumnStatistic(wide).getDistinctValuesCount());
+        assertTrue(guessed.getColumnStatistic(wide).isDistinctValuesFromDefaultSelectivity());
+        assertFalse(guessed.getColumnStatistic(narrow).isDistinctValuesFromDefaultSelectivity());
+        assertTrue(guessed.getColumnStatistic(unknown).isUnknown());
+
+        Statistics measured = StatisticsEstimateUtils.adjustStatisticsByRowCount(input, 500);
+        assertFalse(measured.getColumnStatistic(wide).isDistinctValuesFromDefaultSelectivity());
     }
 }
