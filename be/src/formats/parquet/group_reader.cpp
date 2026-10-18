@@ -899,8 +899,19 @@ StatusOr<bool> GroupReader::_filter_and_backfill_lazy(const Range<uint64_t>& r, 
         }
         _column_materializer->set_force_backfill_slots(std::move(force_backfill_slots));
         DeferOp clear_force_backfill_slots([this] { _column_materializer->set_force_backfill_slots({}); });
-        RETURN_IF_ERROR(_column_materializer->read_lazy_columns(r, post_filter_range, post_filter, state.chunk_filter,
-                                                                state.has_filter, state.active_chunk));
+        // A join filter that is built later estimates from this what a row that it drops would still cost.
+        int64_t lazy_read_ns = 0;
+        const size_t lazy_read_rows = state.active_chunk->num_rows();
+        {
+            SCOPED_RAW_TIMER(&lazy_read_ns);
+            RETURN_IF_ERROR(_column_materializer->read_lazy_columns(
+                    r, post_filter_range, post_filter, state.chunk_filter, state.has_filter, state.active_chunk));
+        }
+        for (auto* desc : _rf_descs) {
+            if (auto* sink = desc->scan_sink()) {
+                sink->add_lazy_read(lazy_read_ns, static_cast<int64_t>(lazy_read_rows));
+            }
+        }
     }
 
     return true;
@@ -1200,6 +1211,7 @@ void GroupReader::_process_columns_and_conjunct_ctxs() {
 void GroupReader::_setup_runtime_filter_predicates() {
     _rf_predicates = RuntimeFilterPredicates();
     _rf_probe_columns.clear();
+    _rf_descs.clear();
 
     auto* src = _param.scanner_ctx == nullptr ? nullptr : _param.scanner_ctx->runtime_filter_preds;
     if (src == nullptr || src->empty()) {
@@ -1245,6 +1257,7 @@ void GroupReader::_setup_runtime_filter_predicates() {
         if (!is_active && lazy_slots.count(slot_id) == 0) continue;
         if (_column_readers.find(slot_id) == _column_readers.end()) continue;
         preds.add_predicate(pred);
+        _rf_descs.push_back(pred->get_rf_desc());
         // Several filters may probe the same column. _rf_probe_columns drives building
         // the probe chunk, which keys columns by id and rejects duplicates, so it must
         // hold each column once even though every predicate is kept.
@@ -1253,6 +1266,7 @@ void GroupReader::_setup_runtime_filter_predicates() {
         }
     }
     if (_rf_probe_columns.empty()) {
+        _rf_descs.clear();
         return;
     }
     _rf_predicates = std::move(preds);

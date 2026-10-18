@@ -24,6 +24,7 @@
 #include "exec/hash_join_components.h"
 #include "exec/join/join_hash_table.h"
 #include "exec/pipeline/context_with_dependency.h"
+#include "exec/pipeline/hashjoin/deferred_local_runtime_filter.h"
 #include "exec/pipeline/runtime_filter_types.h"
 #include "exec/pipeline/spill_process_channel.h"
 #include "exec/spill/spiller.h"
@@ -243,6 +244,18 @@ public:
     pipeline::OpTRuntimeBloomFilterBuildParams& get_runtime_bloom_filter_build_params() {
         return _runtime_bloom_filter_build_params;
     }
+    // The local Bloom filters that were not built because their build side is large. They are decided and built
+    // later, by the drivers that scan for this JOIN. Set once, before the probe side starts.
+    const std::vector<std::shared_ptr<pipeline::DeferredLocalRuntimeFilter>>& deferred_runtime_filters() const {
+        return _deferred_rfs;
+    }
+    // Refuses the deferred filters that are not built and releases their key columns. We call it before the hash
+    // table is reset or closed.
+    void cancel_deferred_runtime_filters() {
+        for (const auto& deferred : _deferred_rfs) {
+            deferred->cancel();
+        }
+    }
 
     size_t get_ht_row_count() { return _hash_join_builder->hash_table_row_count(); }
 
@@ -267,6 +280,7 @@ public:
     const HashJoinProbeMetrics& probe_metrics() { return *_probe_metrics; }
     void track_completed_probe_rows();
     int64_t completed_probe_rows() const;
+    int64_t probe_output_rows() const;
     Status drain_probe_input(RuntimeState* state);
     bool is_skew_join() const { return _is_skew_join; }
 
@@ -441,6 +455,12 @@ private:
     Status _create_runtime_in_filters(RuntimeState* state);
 
     Status _create_runtime_bloom_filters(RuntimeState* state, int64_t limit);
+    // Keeps the filter back if the deferral can build it later, and otherwise tells the profile why not.
+    void _try_defer_runtime_bloom_filter(RuntimeState* state, const RuntimeFilterBuildDescriptor* rf_desc,
+                                         size_t filter_ndv, size_t ht_row_count, Columns* columns);
+    void _defer_runtime_bloom_filter(RuntimeState* state, const RuntimeFilterBuildDescriptor* rf_desc,
+                                     size_t filter_ndv, size_t ht_row_count, Columns columns,
+                                     const char* skip_bloom_reason);
 
 private:
     const THashJoinNode& _hash_join_node;
@@ -472,6 +492,9 @@ private:
     pipeline::RuntimeInFilters _runtime_in_filters;
     pipeline::RuntimeMembershipFilters _build_runtime_filters;
     pipeline::OpTRuntimeBloomFilterBuildParams _runtime_bloom_filter_build_params;
+    std::vector<std::shared_ptr<pipeline::DeferredLocalRuntimeFilter>> _deferred_rfs;
+    // The profile of the build operator, where the reasons that a filter was not deferred go.
+    RuntimeProfile* _build_profile = nullptr;
     bool _build_runtime_filters_from_planner;
 
     bool _is_push_down = false;

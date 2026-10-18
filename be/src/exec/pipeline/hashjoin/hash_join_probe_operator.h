@@ -32,6 +32,9 @@ public:
     Status prepare(RuntimeState* state) override;
     static void configure_local_runtime_filter_feedback(const Operators& operators);
     static Status drain_local_runtime_filter_input(RuntimeState* state, Operator* op);
+    // The feedback measures the lookups of the plain probe. The spillable probe runs the plain probe as long as its
+    // JOIN has not spilled, so it takes part too.
+    static bool measures_local_runtime_filter(const Operator* op);
 
     void close(RuntimeState* state) override;
 
@@ -58,11 +61,16 @@ protected:
     /// Reference the read-only hash table from builder in the first pull_chunk.
     Status _reference_builder_hash_table_once();
 
+    // The lookups of this driver leave the prober that the feedback counts. We expect no window to end after that,
+    // so the feedback stops, and a filter that has not been built is refused. The reason goes to the profile.
+    void _stop_local_rf_feedback(const char* reason);
+
 private:
-    void _observe_local_rf_lookup();
+    Status _observe_local_rf_lookup();
     void _publish_local_rf_feedback();
     std::shared_ptr<LocalRuntimeFilterFeedback> _probe_rf_feedback;
     int64_t _feedback_completed_rows = 0;
+    int64_t _feedback_output_rows = 0;
     int64_t _feedback_lookup_ns = 0;
     int64_t _feedback_key_ns = 0;
     int64_t _feedback_partition_ns = 0;

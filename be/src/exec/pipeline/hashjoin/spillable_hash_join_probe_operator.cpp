@@ -295,7 +295,7 @@ bool SpillableHashJoinProbeOperator::pending_finish() const {
 }
 
 Status SpillableHashJoinProbeOperator::set_finishing(RuntimeState* state) {
-    if (!spilled()) {
+    if (!_probes_through_spill()) {
         return HashJoinProbeOperator::set_finishing(state);
     }
     if (state->is_cancelled()) {
@@ -312,7 +312,7 @@ Status SpillableHashJoinProbeOperator::set_finished(RuntimeState* state) {
 
 Status SpillableHashJoinProbeOperator::push_chunk(RuntimeState* state, const ChunkPtr& chunk) {
     RETURN_IF_ERROR(_status());
-    if (!spilled()) {
+    if (!_probes_through_spill()) {
         return HashJoinProbeOperator::push_chunk(state, chunk);
     }
 
@@ -656,7 +656,7 @@ Status SpillableHashJoinProbeOperator::_restore_probe_partition(RuntimeState* st
 
 StatusOr<ChunkPtr> SpillableHashJoinProbeOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_status());
-    if (!spilled()) {
+    if (!_probes_through_spill()) {
         return HashJoinProbeOperator::pull_chunk(state);
     }
 
@@ -768,6 +768,15 @@ StatusOr<ChunkPtr> SpillableHashJoinProbeOperator::pull_chunk(RuntimeState* stat
 bool SpillableHashJoinProbeOperator::spilled() const {
     auto build_spiller = _join_builder->spiller();
     return build_spiller != nullptr && build_spiller->spilled();
+}
+
+bool SpillableHashJoinProbeOperator::_probes_through_spill() {
+    if (!spilled()) {
+        return false;
+    }
+    // A JOIN that spills probes through its partition probers, which the feedback does not count.
+    _stop_local_rf_feedback("join spilled");
+    return true;
 }
 
 void SpillableHashJoinProbeOperator::_acquire_next_partitions() {

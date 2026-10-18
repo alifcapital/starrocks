@@ -52,6 +52,9 @@ public:
         _morsel_queue_factory = morsel_queue_factory;
     }
     size_t num_total_original_morsels() const { return _morsel_queue_factory->num_original_morsels(); }
+    MorselProgress morsel_progress() const {
+        return _morsel_queue_factory == nullptr ? MorselProgress{} : _morsel_queue_factory->progress();
+    }
 
     // When the pipeline of this source operator wants to insert a local shuffle for some complex operators,
     // such as hash join and aggregate, use this method to decide whether really need to insert a local shuffle.

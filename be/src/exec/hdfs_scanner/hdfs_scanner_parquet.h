@@ -31,6 +31,7 @@ public:
     Status do_get_next(RuntimeState* runtime_state, ChunkPtr* chunk) override;
     Status do_init(RuntimeState* runtime_state, const HdfsScannerContext& scanner_ctx) override;
     void do_update_counter(HdfsScannerProfile* profile) override;
+    int64_t expected_raw_rows() const override;
 
 private:
     std::shared_ptr<parquet::FileReader> _reader = nullptr;

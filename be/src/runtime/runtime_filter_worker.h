@@ -41,6 +41,7 @@ class RuntimeState;
 class RuntimeFilter;
 class RuntimeFilterProbeDescriptor;
 class RuntimeFilterBuildDescriptor;
+class RuntimeFilterScanSink;
 
 using RuntimeFilterRpcClosure = RefCountClosure<PTransmitRuntimeFilterResult>;
 using RuntimeFilterRpcClosures = std::vector<RuntimeFilterRpcClosure*>;
@@ -62,6 +63,9 @@ public:
     // or allocated in this query(shuffle join generate global runtime filter)
     void receive_runtime_filter(int32_t filter_id, const RuntimeFilter* rf);
     void receive_shared_runtime_filter(int32_t filter_id, const std::shared_ptr<const RuntimeFilter>& rf);
+    // The scan sinks of the probe descriptors that wait for filter_id. A sink is created when the descriptor has
+    // none, so the readers of a filter that is built later can report their cost before the filter exists.
+    std::vector<std::shared_ptr<RuntimeFilterScanSink>> enable_scan_sinks(int32_t filter_id);
     std::string listeners(int32_t filter_id);
 
 private:

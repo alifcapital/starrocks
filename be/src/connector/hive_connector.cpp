@@ -1085,6 +1085,10 @@ int64_t HiveDataSource::raw_rows_read() const {
     if (_scanner == nullptr) return 0;
     return _scanner->raw_rows_read();
 }
+int64_t HiveDataSource::expected_raw_rows() const {
+    if (_scanner == nullptr) return -1;
+    return _scanner->expected_raw_rows();
+}
 int64_t HiveDataSource::num_rows_read() const {
     if (_scanner == nullptr) return 0;
     return _scanner->num_rows_read();

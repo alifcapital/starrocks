@@ -814,6 +814,12 @@ ConnectorChunkSource::ConnectorChunkSource(ScanOperator* op, RuntimeProfile* run
     _is_split_source_morsel =
             (split_context == nullptr) && (op->morsel_queue() != nullptr) && op->morsel_queue()->has_more_from_split();
 
+    int64_t range_bytes = 0;
+    if (scan_range->__isset.hdfs_scan_range && scan_range->hdfs_scan_range.__isset.length) {
+        range_bytes = scan_range->hdfs_scan_range.length;
+    }
+    _ledger_range = std::make_unique<ScanRangeLedger::Range>(op->range_ledger(), range_bytes);
+
     _data_source = scan_node->data_source_provider()->create_data_source(*scan_range);
     _data_source->set_driver_sequence(op->get_driver_sequence());
     _data_source->set_split_context(split_context);
@@ -917,6 +923,7 @@ void ConnectorChunkSource::close(RuntimeState* state) {
         _data_source->update_profile(profile);
     }
     _closed = true;
+    _ledger_range->close();
     _data_source->close(state);
 }
 
@@ -1039,6 +1046,7 @@ Status ConnectorChunkSource::_read_chunk(RuntimeState* state, ChunkPtr* chunk) {
 
             DCHECK(_status.ok() || _status.is_end_of_file());
             _scan_rows_num = _data_source->raw_rows_read();
+            _ledger_range->update(_scan_rows_num, _data_source->expected_raw_rows());
             _scan_bytes = _data_source->num_bytes_read();
             _cpu_time_spent_ns = _data_source->cpu_time_spent();
             _io_time_spent_ns = _data_source->io_time_spent();

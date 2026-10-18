@@ -210,6 +210,8 @@ private:
     int64_t _request_mem_tracker_bytes = 0;
     int64_t _mem_alloc_failed_count = 0;
     bool _enable_adaptive_io_tasks = true;
+    // The rows that this range has read and will read, for the drivers that estimate the rows left to scan.
+    std::unique_ptr<ScanRangeLedger::Range> _ledger_range;
 };
 
 } // namespace pipeline

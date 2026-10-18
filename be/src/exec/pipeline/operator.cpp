@@ -271,13 +271,27 @@ void Operator::eval_runtime_bloom_filters(Chunk* chunk) {
     }
 
     auto* feedback = _local_rf_feedback.get();
+    // The build side tells whether it kept a filter back when it has finished, which is before the first chunk of
+    // this driver.
+    if (feedback) feedback->resolve_deferred_once();
     const auto before = chunk->num_rows();
     int64_t filter_ns = 0;
+    int64_t scan_ns = 0;
+    if (feedback && feedback->enabled() && _pull_timer != nullptr) {
+        // We expect the timer to miss the pull that is running, which does not matter for the cost per row over a
+        // window of many chunks.
+        const int64_t pulled_ns = COUNTER_VALUE(_pull_timer);
+        scan_ns = std::max<int64_t>(0, pulled_ns - _local_rf_last_pull_ns);
+        _local_rf_last_pull_ns = pulled_ns;
+    }
     if (auto* bloom_filters = runtime_bloom_filters()) {
         _init_rf_counters(true);
         if (feedback && feedback->enabled()) {
             for (const auto& [id, desc] : bloom_filters->descriptors()) {
                 const auto* rf = desc->runtime_filter(_runtime_filter_probe_sequence);
+                // A filter that the build side kept back is absent until a window builds it, and for good when it is
+                // cancelled. The feedback goes on without it.
+                if (rf == nullptr && feedback->awaiting_deferred(id)) continue;
                 if (rf == nullptr || rf->always_true() || desc->has_push_down_to_storage()) {
                     _unique_metrics->add_info_string(
                             "LocalRfFallbackReason",
@@ -300,8 +314,8 @@ void Operator::eval_runtime_bloom_filters(Chunk* chunk) {
 
     ExecNode::eval_filter_null_values(chunk, filter_null_value_columns());
     if (feedback && feedback->enabled()) {
-        feedback->observe_filter(before, chunk->num_rows(), filter_ns);
-        if (!feedback->enabled()) {
+        feedback->observe_filter(before, chunk->num_rows(), filter_ns, scan_ns);
+        if (!feedback->enabled() && !feedback->deferral_refused()) {
             _unique_metrics->add_info_string("LocalRfFallbackReason", "invalid filter accounting");
         }
     }

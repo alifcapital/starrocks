@@ -75,10 +75,11 @@ StatusOr<ChunkPtr> SingleHashJoinProberImpl::probe_chunk(RuntimeState* state) {
     TRY_CATCH_ALLOC_SCOPE_START()
     DCHECK(_current_probe_has_remain && _probe_chunk);
     RETURN_IF_ERROR(_hash_table->probe(state, _key_columns, &_probe_chunk, &chunk, &_current_probe_has_remain));
+    if (_progress != nullptr) _progress->output_rows += chunk->num_rows();
     RETURN_IF_ERROR(_hash_joiner.filter_probe_output_chunk(chunk, *_hash_table));
     RETURN_IF_ERROR(_hash_joiner.lazy_output_chunk<false>(state, &_probe_chunk, &chunk, *_hash_table));
     if (!_current_probe_has_remain) {
-        if (_completed_rows != nullptr) *_completed_rows += _input_rows;
+        if (_progress != nullptr) _progress->completed_rows += _input_rows;
         _probe_chunk = nullptr;
     }
     TRY_CATCH_ALLOC_SCOPE_END()
@@ -168,8 +169,8 @@ public:
     StatusOr<ChunkPtr> probe_chunk(RuntimeState* state) override;
     StatusOr<ChunkPtr> probe_remain(RuntimeState* state, bool* has_remain) override;
     void reset(RuntimeState* runtime_state) override;
-    void track_completed_rows(int64_t* counter) override {
-        for (auto& prober : _probers) prober->track_completed_rows(counter);
+    void track_progress(HashJoinProbeProgress* progress) override {
+        for (auto& prober : _probers) prober->track_progress(progress);
     }
     Status drain_input(RuntimeState* state) override;
     void set_probers(std::vector<std::unique_ptr<SingleHashJoinProberImpl>>&& probers) {

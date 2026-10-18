@@ -319,6 +319,11 @@ StatusOr<std::function<StatusOr<ChunkPtr>()>> SpillableHashJoinBuildOperator::_c
         RETURN_IF_ERROR(build_chunk->upgrade_if_overflow());
     }
 
+    // The reset below frees the hash table and its key columns. We expect no deferred local filter to be armed
+    // here, because the build side arms them only when it finishes without spilling, and a build side that has
+    // finished does not spill. We refuse them anyway, so a filter never builds from keys of a hash table that is gone.
+    _join_builder->cancel_deferred_runtime_filters();
+
     // The build chunks are now snapshotted as shared_ptr, so neither the async spill iterator below
     // nor any later push_chunk needs the JoinHashTables anymore. Reset the builder HERE --
     // synchronously, on the driver thread (this runs inside set_finishing / push_chunk) -- instead of

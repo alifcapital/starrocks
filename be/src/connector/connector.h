@@ -54,6 +54,9 @@ public:
     virtual int64_t num_rows_read() const = 0;
     // how many bytes read from external
     virtual int64_t num_bytes_read() const = 0;
+    // How many rows raw_rows_read() will count when this source is read to its end, or negative when the source does
+    // not know it, for example before it has read the footer of its file.
+    virtual int64_t expected_raw_rows() const { return -1; }
     // CPU time of this data source
     virtual int64_t cpu_time_spent() const = 0;
     // IO time of this data source

@@ -63,6 +63,14 @@ public:
     void set_max_degree_of_parallelism(size_t dop) { _degree_of_parallelism = dop; }
     size_t max_degree_of_parallelism() const override { return _degree_of_parallelism; }
 
+    MorselProgress progress() const override {
+        MorselProgress result;
+        result.enqueued = _enqueued.load(std::memory_order_relaxed);
+        result.remaining = _size.load(std::memory_order_relaxed);
+        result.version = _ranges_version.load(std::memory_order_relaxed);
+        return result;
+    }
+
     int64_t reorder_eligible_morsels() const override { return _eligible_morsels.load(std::memory_order_relaxed); }
     int64_t reorder_no_bound_morsels() const override { return _no_bound_morsels.load(std::memory_order_relaxed); }
 
@@ -92,6 +100,8 @@ private:
     std::mutex _mutex;
     std::multiset<Entry, Cmp> _set;
     std::atomic<int64_t> _size = 0;
+    // Every morsel that was appended, the ones of the constructor included; unget does not count.
+    std::atomic<int64_t> _enqueued = 0;
     // Reorder diagnostics; bumped on append (under _mutex), read lock-free by the scan operator.
     std::atomic<int64_t> _eligible_morsels = 0;
     std::atomic<int64_t> _no_bound_morsels = 0;

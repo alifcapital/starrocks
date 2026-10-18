@@ -17,6 +17,7 @@
 #include "exec/exec_node.h"
 #include "exec/pipeline/pipeline_fwd.h"
 #include "exec/pipeline/scan/balanced_chunk_buffer.h"
+#include "exec/pipeline/scan/scan_range_ledger.h"
 #include "exec/pipeline/scan/warm_slot_reservation.h"
 #include "exec/pipeline/source_operator.h"
 #include "exec/pipeline/topn_runtime_filter_back_pressure.h"
@@ -90,6 +91,11 @@ public:
     void set_query_ctx(const QueryContextPtr& query_ctx);
 
     virtual int available_pickup_morsel_count() { return _io_tasks_per_scan_operator; }
+    // How far the scan operators of this scan got through their scan ranges. The ranges that are left are the ones
+    // that the queues have now, which is a lower bound while more ranges are to come.
+    MorselProgress morsel_progress() const { return _source_factory()->morsel_progress(); }
+    // What the ranges that this scan took still have to give. The ledger is shared by the scan operators of all drivers.
+    std::shared_ptr<ScanRangeLedger> range_ledger() const;
     bool output_chunk_by_bucket() const { return _output_chunk_by_bucket; }
     void begin_pull_chunk(const ChunkPtr& res) {
         _op_pull_chunks += 1;
@@ -350,10 +356,12 @@ public:
 
     std::shared_ptr<workgroup::ScanTaskGroup> scan_task_group() const { return _scan_task_group; }
     ScanNode* scan_node() { return _scan_node; }
+    const std::shared_ptr<ScanRangeLedger>& range_ledger() const { return _range_ledger; }
 
 protected:
     ScanNode* const _scan_node;
     std::shared_ptr<workgroup::ScanTaskGroup> _scan_task_group;
+    std::shared_ptr<ScanRangeLedger> _range_ledger = std::make_shared<ScanRangeLedger>();
 };
 
 inline auto scan_defer_notify(ScanOperator* scan_op) {

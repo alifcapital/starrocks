@@ -309,6 +309,14 @@ struct CompoundScanCase {
     std::vector<int32_t> join_values;
     SlotId join_filter_slot = kActiveSlot;
     bool join_filter_ready = true;
+    // With join_filter_ready false: the filter arrives after this many get_next() calls, as a filter that the
+    // build side builds late does. -1 means that it never arrives.
+    int install_filter_after_reads = -1;
+    // The descriptor of the join filter has a sink, where the reader reports the cost of its lazy columns.
+    bool enable_filter_scan_sink = false;
+    // The join filter has no Bloom filter, as a filter that the build side could not afford the Bloom filter for, so it
+    // keeps every value inside the range of join_values.
+    bool join_filter_min_max_only = false;
     // The scan reads every lazy column of the output chunk as INT, which fails on a NULL. The group
     // reader fills a lazy column with NULL when no conjunct reads it and no output needs it, so a case
     // with such a column sets this to false and the scan collects no lazy values.
@@ -329,6 +337,9 @@ struct CompoundScanResult {
     HdfsScannerStats stats;
     // The rows that each compound conjunct saw and kept, in the order of the conjuncts.
     std::vector<HdfsScannerContext::CompoundConjunctStats> conjunct_stats;
+    // What the reader reported to the sink of the join filter, when the case has one.
+    int64_t sink_lazy_rows = 0;
+    int64_t sink_lazy_ns = 0;
 };
 
 class GroupReaderTest : public ::testing::Test {
@@ -2177,6 +2188,140 @@ TEST_F(GroupReaderTest, EvaluateAllPredicatesWithScannerCtxs) {
     Expr::close(scanner_ctxs, &runtime_state);
 }
 
+// A lazy column reader that returns `span_size` default rows of BIGINT.
+class MockLazyColumnReader : public ColumnReader {
+public:
+    MockLazyColumnReader() : ColumnReader(nullptr) {}
+    ~MockLazyColumnReader() override = default;
+
+    Status prepare() override { return Status::OK(); }
+
+    Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst_col) override {
+        auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+        column->append_default(range.span_size());
+        dst_col = std::move(column);
+        return Status::OK();
+    }
+
+    void set_need_parse_levels(bool need_parse_levels) override {}
+    void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
+    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
+                                 ColumnIOTypeFlags types, bool active) override {}
+    void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
+};
+
+namespace {
+
+constexpr SlotId kActiveSlotId = 262;
+constexpr SlotId kLazySlotId = 263;
+
+// Sets two columns in `param`: an active one (kActiveSlotId) and a lazy one (kLazySlotId).
+void set_active_and_lazy_columns(ObjectPool* pool, GroupReaderParam* param, bool lazy_is_output_column) {
+    param->read_cols.clear();
+    auto* active_slot = pool->add(
+            new SlotDescriptor(kActiveSlotId, "a", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    TSlotDescriptor t_lazy_slot = TSlotDescriptorBuilder()
+                                          .type(LogicalType::TYPE_BIGINT)
+                                          .column_name("b")
+                                          .id(kLazySlotId)
+                                          .is_output_column(lazy_is_output_column)
+                                          .build();
+    auto* lazy_slot = pool->add(new SlotDescriptor(t_lazy_slot));
+    GroupReaderParam::Column active_column{};
+    active_column.slot_desc = active_slot;
+    GroupReaderParam::Column lazy_column{};
+    lazy_column.slot_desc = lazy_slot;
+    param->read_cols.emplace_back(active_column);
+    param->read_cols.emplace_back(lazy_column);
+}
+
+// The active chunk of a 2 row range.
+ChunkPtr make_active_chunk_of_two_rows() {
+    auto chunk = std::make_shared<Chunk>();
+    auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+    column->append_datum(Datum(int64_t(1)));
+    column->append_datum(Datum(int64_t(2)));
+    chunk->append_column(column, kActiveSlotId);
+    return chunk;
+}
+
+} // namespace
+
+// Covers: ColumnMaterializer::lazy_column_needed stays true once a chunk of the row group read a lazy column,
+//         also when a later chunk reads none.
+TEST_F(GroupReaderTest, LazyColumnNeededAccumulatesOverChunks) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+
+    const Range<uint64_t> range(0, 2);
+    Range<uint64_t> no_range;
+    Filter no_filter;
+
+    // Chunk 1 reads no lazy column: the predicate-only lazy column is filled with defaults.
+    materializer.reset_read_chunk();
+    auto chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_FALSE(materializer.lazy_column_needed());
+
+    // Chunk 2: a compound predicate reads the lazy column.
+    materializer.reset_read_chunk();
+    chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.materialize_slot(kLazySlotId, range, nullptr));
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+
+    // Chunk 3 reads no lazy column.
+    materializer.reset_read_chunk();
+    chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+}
+
+// Covers: ColumnMaterializer::materialize_slot marks the row group as needing lazy columns when it reads one,
+//         also if the chunk is filtered out before read_lazy_columns() runs.
+TEST_F(GroupReaderTest, LazyColumnNeededIsSetByLazyReadOfFilteredChunk) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+
+    materializer.reset_read_chunk();
+    ASSERT_OK(materializer.materialize_slot(kLazySlotId, Range<uint64_t>(0, 2), nullptr));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+}
+
+// Covers: ColumnMaterializer::read_lazy_columns marks the row group as needing lazy columns when it backfills an
+//         output lazy column.
+TEST_F(GroupReaderTest, LazyColumnNeededIsSetByBackfill) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/true);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+    EXPECT_FALSE(materializer.lazy_column_needed());
+
+    const Range<uint64_t> range(0, 2);
+    Range<uint64_t> no_range;
+    Filter no_filter;
+    materializer.reset_read_chunk();
+    auto chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+}
+
 class MockSourceColumnReader : public ColumnReader {
 public:
     explicit MockSourceColumnReader(ColumnPtr source_column)
@@ -2993,16 +3138,29 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
         param->scanner_ctx->conjuncts.scanner_ctxs.push_back(compound_ctx);
     }
 
+    RuntimeFilterProbeDescriptor* filter_desc = nullptr;
+    const RuntimeFilter* late_filter = nullptr;
+    std::shared_ptr<RuntimeFilterScanSink> filter_sink;
     if (!scan_case.join_values.empty()) {
         const SlotId probe_slot = scan_case.join_filter_slot;
         ASSIGN_OR_RETURN(auto* probe_desc, create_int_runtime_filter_desc(&_pool, runtime_state, probe_slot));
-        if (scan_case.join_filter_ready) {
-            auto* rf = _pool.add(new ComposedRuntimeBloomFilter<TYPE_INT>());
+        filter_desc = probe_desc;
+        auto* rf = _pool.add(new ComposedRuntimeBloomFilter<TYPE_INT>());
+        if (scan_case.join_filter_min_max_only) {
+            rf->get_membership_filter()->clear_bf();
+        } else {
             rf->get_membership_filter()->init(10);
-            for (int32_t value : scan_case.join_values) {
-                rf->insert(value);
-            }
+        }
+        for (int32_t value : scan_case.join_values) {
+            rf->insert(value);
+        }
+        if (scan_case.join_filter_ready) {
             probe_desc->set_runtime_filter(rf);
+        } else {
+            late_filter = rf;
+        }
+        if (scan_case.enable_filter_scan_sink) {
+            filter_sink = probe_desc->enable_scan_sink();
         }
         auto& preds = param->scanner_ctx->predicates.runtime_filter_preds;
         preds = RuntimeFilterPredicates(0 /*driver_sequence*/);
@@ -3040,12 +3198,16 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
     result.conjunct_has_dict_mapping = group_reader->_compound_conjuncts[0].has_dict_mapping;
     result.conjunct_slots = group_reader->_compound_conjuncts[0].slots;
     result.lazy_values.resize(scan_case.lazy_columns.size());
+    int reads = 0;
     while (true) {
         auto chunk = _create_chunk(param);
         size_t row_count = scan_case.rows_per_read;
         Status st = group_reader->get_next(&chunk, &row_count);
         if (!st.ok() && !st.is_end_of_file()) {
             return st;
+        }
+        if (late_filter != nullptr && ++reads == scan_case.install_filter_after_reads) {
+            filter_desc->set_runtime_filter(late_filter);
         }
         for (size_t i = 0; i < row_count; ++i) {
             result.a_values.push_back(chunk->get_column_by_slot_id(slot_a->id())->get(i).get_int32());
@@ -3067,6 +3229,10 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
     }
     result.stats = *param->stats;
     result.conjunct_stats = param->scanner_ctx->compound_conjunct_stats;
+    if (filter_sink != nullptr) {
+        result.sink_lazy_rows = filter_sink->lazy_read_rows();
+        result.sink_lazy_ns = filter_sink->lazy_read_ns();
+    }
     return result;
 }
 
@@ -3365,6 +3531,84 @@ TEST_F(GroupReaderTest, CompoundPredicateRunsFirstWhenJoinRuntimeFilterNotArrive
     EXPECT_EQ(0, result.stats.rf_cond_input_rows);
     EXPECT_EQ(1u, result.lazy_read_counts[0]);
     EXPECT_EQ(std::vector<int64_t>({10}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: a join runtime filter that the build side builds after the scan has started is found by the group
+//         reader through the descriptor. The pass that reads before the filter exists runs as it did without a
+//         filter, and the passes after it probe the filter before the compound predicate.
+TEST_F(GroupReaderTest, JoinRuntimeFilterBuiltAfterTheScanStartedIsAppliedFromTheNextRead) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(0, &odd);
+    scan_case.rows_per_read = 4;
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = 701;
+    scan_case.join_filter_ready = false;
+    scan_case.install_filter_after_reads = 1;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    // The rows 0..3 are read before the filter exists. The filter drops the rows 4..7 and keeps 9 and 10 of the
+    // rows 8..11, and the compound predicate keeps the odd one.
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 9}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 9}), result.lazy_values[0]);
+    EXPECT_EQ(8, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(2, result.stats.rf_cond_output_rows);
+    // The compound predicate saw the whole first pass, and only the rows that the filter kept in the last pass.
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 9, 10}), odd->evaluated_values);
+}
+
+// Covers: a join runtime filter that has its min/max range only, as a filter that the build side could not afford the
+//         Bloom filter for, drops the values outside the range from the next read and keeps the ones inside it.
+TEST_F(GroupReaderTest, MinMaxOnlyJoinRuntimeFilterBuiltAfterTheScanStartedDropsTheValuesOutsideItsRange) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(0, &odd);
+    scan_case.rows_per_read = 4;
+    scan_case.join_values = {9, 11};
+    scan_case.join_filter_min_max_only = true;
+    scan_case.join_filter_slot = 701;
+    scan_case.join_filter_ready = false;
+    scan_case.install_filter_after_reads = 1;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    // The rows 0..3 are read before the filter exists. The range 9..11 drops the rows 4..7 and 8 and keeps 9, 10 and 11,
+    // and the compound predicate keeps the odd ones. A Bloom filter of 9 and 11 would not keep 10.
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 9, 11}), result.a_values);
+    EXPECT_EQ(8, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(3, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 9, 10, 11}), odd->evaluated_values);
+}
+
+// Covers: a join runtime filter that never arrives is never probed, and every pass runs as it does without a
+//         filter.
+TEST_F(GroupReaderTest, JoinRuntimeFilterThatNeverArrivesIsNeverProbed) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(0, &odd);
+    scan_case.rows_per_read = 4;
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = 701;
+    scan_case.join_filter_ready = false;
+    scan_case.install_filter_after_reads = -1;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(0, result.stats.rf_cond_input_rows);
+}
+
+// Covers: a lazy column that the group reader backfills for the rows left is reported to the sink of the join
+//         filter, which a filter built later uses to estimate what a dropped row costs.
+TEST_F(GroupReaderTest, ReaderReportsLazyColumnCostToTheSinkOfTheJoinFilter) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    // An output column that no conjunct reads, so the group reader reads it only for the rows that are left.
+    scan_case.lazy_columns.push_back({702, row_as_value, true});
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = CompoundScanCase::kActiveSlot;
+    scan_case.enable_filter_scan_sink = true;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({9}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({9}), result.lazy_values[1]);
+    EXPECT_EQ(1, result.sink_lazy_rows);
+    EXPECT_GE(result.sink_lazy_ns, 0);
 }
 
 // Covers: when the join runtime filter drops every row, it ends the pass before the compound
@@ -4043,140 +4287,6 @@ TEST_F(GroupReaderTest, CompoundLambdaPredicateIsDeferredWhenItReadsTheOnlyLazyC
     ASSERT_EQ(1u, result.conjunct_stats.size());
     EXPECT_EQ(8, result.conjunct_stats[0].input_rows);
     EXPECT_EQ(4, result.conjunct_stats[0].output_rows);
-}
-
-// A lazy column reader that returns `span_size` default rows of BIGINT.
-class MockLazyColumnReader : public ColumnReader {
-public:
-    MockLazyColumnReader() : ColumnReader(nullptr) {}
-    ~MockLazyColumnReader() override = default;
-
-    Status prepare() override { return Status::OK(); }
-
-    Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst_col) override {
-        auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
-        column->append_default(range.span_size());
-        dst_col = std::move(column);
-        return Status::OK();
-    }
-
-    void set_need_parse_levels(bool need_parse_levels) override {}
-    void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
-    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
-                                 ColumnIOTypeFlags types, bool active) override {}
-    void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
-};
-
-namespace {
-
-constexpr SlotId kActiveSlotId = 262;
-constexpr SlotId kLazySlotId = 263;
-
-// Sets two columns in `param`: an active one (kActiveSlotId) and a lazy one (kLazySlotId).
-void set_active_and_lazy_columns(ObjectPool* pool, GroupReaderParam* param, bool lazy_is_output_column) {
-    param->read_cols.clear();
-    auto* active_slot = pool->add(
-            new SlotDescriptor(kActiveSlotId, "a", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
-    TSlotDescriptor t_lazy_slot = TSlotDescriptorBuilder()
-                                          .type(LogicalType::TYPE_BIGINT)
-                                          .column_name("b")
-                                          .id(kLazySlotId)
-                                          .is_output_column(lazy_is_output_column)
-                                          .build();
-    auto* lazy_slot = pool->add(new SlotDescriptor(t_lazy_slot));
-    GroupReaderParam::Column active_column{};
-    active_column.slot_desc = active_slot;
-    GroupReaderParam::Column lazy_column{};
-    lazy_column.slot_desc = lazy_slot;
-    param->read_cols.emplace_back(active_column);
-    param->read_cols.emplace_back(lazy_column);
-}
-
-// The active chunk of a 2 row range.
-ChunkPtr make_active_chunk_of_two_rows() {
-    auto chunk = std::make_shared<Chunk>();
-    auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
-    column->append_datum(Datum(int64_t(1)));
-    column->append_datum(Datum(int64_t(2)));
-    chunk->append_column(column, kActiveSlotId);
-    return chunk;
-}
-
-} // namespace
-
-// Covers: ColumnMaterializer::lazy_column_needed stays true once a chunk of the row group read a lazy column,
-//         also when a later chunk reads none.
-TEST_F(GroupReaderTest, LazyColumnNeededAccumulatesOverChunks) {
-    auto* param = _create_group_reader_param();
-    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
-    ColumnMaterializer::ColumnReaderMap column_readers;
-    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
-    ColumnMaterializer materializer(*param, &column_readers);
-    materializer.add_active_column(0);
-    materializer.add_lazy_column(1);
-    ASSERT_OK(materializer.init_read_chunk());
-
-    const Range<uint64_t> range(0, 2);
-    Range<uint64_t> no_range;
-    Filter no_filter;
-
-    // Chunk 1 reads no lazy column: the predicate-only lazy column is filled with defaults.
-    materializer.reset_read_chunk();
-    auto chunk = make_active_chunk_of_two_rows();
-    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
-    EXPECT_FALSE(materializer.lazy_column_needed());
-
-    // Chunk 2: a compound predicate reads the lazy column.
-    materializer.reset_read_chunk();
-    chunk = make_active_chunk_of_two_rows();
-    ASSERT_OK(materializer.materialize_slot(kLazySlotId, range, nullptr));
-    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
-    EXPECT_TRUE(materializer.lazy_column_needed());
-
-    // Chunk 3 reads no lazy column.
-    materializer.reset_read_chunk();
-    chunk = make_active_chunk_of_two_rows();
-    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
-    EXPECT_TRUE(materializer.lazy_column_needed());
-}
-
-// Covers: ColumnMaterializer::materialize_slot marks the row group as needing lazy columns when it reads one,
-//         also if the chunk is filtered out before read_lazy_columns() runs.
-TEST_F(GroupReaderTest, LazyColumnNeededIsSetByLazyReadOfFilteredChunk) {
-    auto* param = _create_group_reader_param();
-    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
-    ColumnMaterializer::ColumnReaderMap column_readers;
-    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
-    ColumnMaterializer materializer(*param, &column_readers);
-    materializer.add_active_column(0);
-    materializer.add_lazy_column(1);
-    ASSERT_OK(materializer.init_read_chunk());
-
-    materializer.reset_read_chunk();
-    ASSERT_OK(materializer.materialize_slot(kLazySlotId, Range<uint64_t>(0, 2), nullptr));
-    EXPECT_TRUE(materializer.lazy_column_needed());
-}
-
-// Covers: ColumnMaterializer::read_lazy_columns marks the row group as needing lazy columns when it backfills an
-//         output lazy column.
-TEST_F(GroupReaderTest, LazyColumnNeededIsSetByBackfill) {
-    auto* param = _create_group_reader_param();
-    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/true);
-    ColumnMaterializer::ColumnReaderMap column_readers;
-    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
-    ColumnMaterializer materializer(*param, &column_readers);
-    materializer.add_active_column(0);
-    materializer.add_lazy_column(1);
-    ASSERT_OK(materializer.init_read_chunk());
-    EXPECT_FALSE(materializer.lazy_column_needed());
-
-    const Range<uint64_t> range(0, 2);
-    Range<uint64_t> no_range;
-    Filter no_filter;
-    materializer.reset_read_chunk();
-    auto chunk = make_active_chunk_of_two_rows();
-    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
-    EXPECT_TRUE(materializer.lazy_column_needed());
 }
 
 } // namespace starrocks::parquet

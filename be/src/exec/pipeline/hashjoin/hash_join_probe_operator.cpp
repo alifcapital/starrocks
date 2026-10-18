@@ -14,15 +14,41 @@
 
 #include "exec/pipeline/hashjoin/hash_join_probe_operator.h"
 
+#include <algorithm>
+
+#include "common/config.h"
 #include "exec/hash_joiner.h"
 #include "exec/pipeline/chunk_accumulate_operator.h"
 #include "exec/pipeline/hashjoin/hash_joiner_factory.h"
 #include "exec/pipeline/hashjoin/local_runtime_filter_feedback.h"
+#include "exec/pipeline/hashjoin/spillable_hash_join_probe_operator.h"
 #include "exec/pipeline/project_operator.h"
 #include "exec/pipeline/scan/scan_operator.h"
 #include "runtime/current_thread.h"
 
 namespace starrocks::pipeline {
+
+// The filters of the scan that the build side kept back. A driver measures the JOIN without a filter only when the
+// build side kept back every filter of the scan: the measurement switches all the filters of the scan off.
+static std::vector<std::shared_ptr<DeferredRfDecider>> resolve_deferred_filters(
+        const HashJoiner& builder, const RuntimeFilterProbeCollector& filters) {
+    const auto& deferred = builder.deferred_runtime_filters();
+    std::vector<std::shared_ptr<DeferredRfDecider>> deciders;
+    for (const auto& entry : filters.descriptors()) {
+        const int32_t filter_id = entry.first;
+        auto it = std::find_if(deferred.begin(), deferred.end(),
+                               [filter_id](const auto& d) { return d->filter_id() == filter_id; });
+        if (it == deferred.end()) {
+            return {};
+        }
+        deciders.emplace_back(*it);
+    }
+    return deciders;
+}
+
+bool HashJoinProbeOperator::measures_local_runtime_filter(const Operator* op) {
+    return typeid(*op) == typeid(HashJoinProbeOperator) || typeid(*op) == typeid(SpillableHashJoinProbeOperator);
+}
 
 void HashJoinProbeOperator::configure_local_runtime_filter_feedback(const Operators& operators) {
     if (operators.empty() || dynamic_cast<ScanOperator*>(operators.front().get()) == nullptr) return;
@@ -31,7 +57,7 @@ void HashJoinProbeOperator::configure_local_runtime_filter_feedback(const Operat
     if (filters == nullptr || filters->empty()) return;
     for (size_t i = 1; i < operators.size(); ++i) {
         auto* op = operators[i].get();
-        if (typeid(*op) == typeid(HashJoinProbeOperator)) {
+        if (measures_local_runtime_filter(op)) {
             auto* join = down_cast<HashJoinProbeOperator*>(op);
             const auto type = join->_join_prober->join_type();
             if (type != TJoinOp::INNER_JOIN && type != TJoinOp::LEFT_SEMI_JOIN) return;
@@ -60,6 +86,23 @@ void HashJoinProbeOperator::configure_local_runtime_filter_feedback(const Operat
             join->_feedback_decisions = ADD_COUNTER(profile, "LocalRfDecisions", TUnit::UNIT);
             join->_feedback_switches = ADD_COUNTER(profile, "LocalRfSwitches", TUnit::UNIT);
             profile->add_info_string("LocalRfFeedbackSource", std::to_string(source->get_plan_node_id()));
+            if (config::enable_deferred_local_runtime_filter) {
+                feedback->set_deferred_resolver(
+                        [builder = join->_join_builder, filters]() {
+                            return resolve_deferred_filters(*builder, *filters);
+                        },
+                        [scan = down_cast<ScanOperator*>(source)](DeferredRfWindow* window) {
+                            const MorselProgress progress = scan->morsel_progress();
+                            window->morsels_taken = progress.taken();
+                            window->morsels_remaining = progress.remaining;
+                            window->ranges_version = progress.version;
+                            if (const auto ledger = scan->range_ledger()) {
+                                window->remaining_raw =
+                                        estimate_remaining_raw_rows(ledger->snapshot(), progress.remaining);
+                            }
+                        },
+                        [scan = down_cast<ScanOperator*>(source)]() { return scan->morsel_progress().version; });
+            }
             // Publish shared state only after all profile counters are ready.
             join->_feedback_intermediate_timers = std::move(intermediate_timers);
             source->set_local_runtime_filter_feedback(feedback);
@@ -82,20 +125,24 @@ void HashJoinProbeOperator::configure_local_runtime_filter_feedback(const Operat
 Status HashJoinProbeOperator::drain_local_runtime_filter_input(RuntimeState* state, Operator* op) {
     if (typeid(*op) == typeid(ChunkAccumulateOperator)) {
         down_cast<ChunkAccumulateOperator*>(op)->drain_input();
-    } else if (typeid(*op) == typeid(HashJoinProbeOperator)) {
+    } else if (measures_local_runtime_filter(op)) {
         auto* join = down_cast<HashJoinProbeOperator*>(op);
         if (join->_probe_rf_feedback && join->_join_prober->has_referenced_hash_table()) {
             RETURN_IF_ERROR(join->_join_prober->drain_probe_input(state));
-            join->_observe_local_rf_lookup();
+            RETURN_IF_ERROR(join->_observe_local_rf_lookup());
         }
     }
     return Status::OK();
 }
 
-void HashJoinProbeOperator::_observe_local_rf_lookup() {
-    if (!_probe_rf_feedback || !_probe_rf_feedback->enabled()) return;
+Status HashJoinProbeOperator::_observe_local_rf_lookup() {
+    if (!_probe_rf_feedback) return Status::OK();
+    // A deferred filter that failed to build ends the feedback of every driver, so we check before the enabled flag.
+    if (_probe_rf_feedback->deferral_failed()) return _probe_rf_feedback->deferral_status();
+    if (!_probe_rf_feedback->enabled()) return Status::OK();
     const auto& metrics = _join_prober->probe_metrics();
     const auto completed = _join_prober->completed_probe_rows();
+    const auto output = _join_prober->probe_output_rows();
     const auto lookup = COUNTER_VALUE(metrics.search_ht_timer);
     const auto keys = COUNTER_VALUE(metrics.probe_conjunct_evaluate_timer);
     const auto partition = COUNTER_VALUE(metrics.partition_probe_overhead);
@@ -106,8 +153,8 @@ void HashJoinProbeOperator::_observe_local_rf_lookup() {
     const auto ns =
             lookup - _feedback_lookup_ns + std::max(keys - _feedback_key_ns, partition - _feedback_partition_ns);
     _probe_rf_feedback->observe_lookup(completed - _feedback_completed_rows, ns,
-                                       intermediate - _feedback_intermediate_ns);
-    if (!_probe_rf_feedback->enabled()) {
+                                       intermediate - _feedback_intermediate_ns, output - _feedback_output_rows);
+    if (!_probe_rf_feedback->enabled() && !_probe_rf_feedback->deferral_refused()) {
         _unique_metrics->add_info_string(
                 "LocalRfFallbackReason",
                 strings::Substitute("lookup accounting: completed=$0 previous=$1 outstanding=$2 ns=$3 intermediate=$4",
@@ -115,11 +162,20 @@ void HashJoinProbeOperator::_observe_local_rf_lookup() {
                                     intermediate - _feedback_intermediate_ns));
     }
     _feedback_completed_rows = completed;
+    _feedback_output_rows = output;
     _feedback_lookup_ns = lookup;
     _feedback_key_ns = keys;
     _feedback_partition_ns = partition;
     _feedback_intermediate_ns = intermediate;
     if (decisions != _probe_rf_feedback->totals().decisions) _publish_local_rf_feedback();
+    // The window that this lookup closed may have built a deferred filter, and a build that failed fails the query.
+    return _probe_rf_feedback->deferral_failed() ? _probe_rf_feedback->deferral_status() : Status::OK();
+}
+
+void HashJoinProbeOperator::_stop_local_rf_feedback(const char* reason) {
+    if (!_probe_rf_feedback || _probe_rf_feedback->stopped()) return;
+    _probe_rf_feedback->stop();
+    _unique_metrics->add_info_string("LocalRfFallbackReason", reason);
 }
 
 void HashJoinProbeOperator::_publish_local_rf_feedback() {
@@ -145,7 +201,12 @@ HashJoinProbeOperator::HashJoinProbeOperator(OperatorFactory* factory, int32_t i
 
 void HashJoinProbeOperator::close(RuntimeState* state) {
     _publish_local_rf_feedback();
-    if (_probe_rf_feedback) _probe_rf_feedback->disable();
+    if (_probe_rf_feedback) {
+        for (const auto& decider : _probe_rf_feedback->deciders()) {
+            decider->report(_unique_metrics.get());
+        }
+        _probe_rf_feedback->disable();
+    }
     if (_join_prober != _join_builder) {
         _join_prober->unref(state);
     }
@@ -200,14 +261,13 @@ Status HashJoinProbeOperator::push_chunk(RuntimeState* state, const ChunkPtr& ch
     if (_probe_rf_feedback && _probe_rf_feedback->needs_drain()) {
         RETURN_IF_ERROR(_join_prober->drain_probe_input(state));
     }
-    _observe_local_rf_lookup();
-    return Status::OK();
+    return _observe_local_rf_lookup();
 }
 
 StatusOr<ChunkPtr> HashJoinProbeOperator::pull_chunk(RuntimeState* state) {
     RETURN_IF_ERROR(_reference_builder_hash_table_once());
     auto result = _join_prober->pull_chunk(state);
-    if (result.ok()) _observe_local_rf_lookup();
+    if (result.ok()) RETURN_IF_ERROR(_observe_local_rf_lookup());
     return result;
 }
 
@@ -215,7 +275,7 @@ Status HashJoinProbeOperator::set_finishing(RuntimeState* state) {
     // TODO: notify one will be ok
     auto notify = _join_builder->defer_notify_build();
     RETURN_IF_ERROR(_join_prober->probe_input_finished(state));
-    _observe_local_rf_lookup();
+    RETURN_IF_ERROR(_observe_local_rf_lookup());
     _join_prober->enter_post_probe_phase();
     return Status::OK();
 }

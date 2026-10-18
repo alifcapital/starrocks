@@ -86,6 +86,11 @@ public:
     Status collect_scan_io_ranges(std::vector<io::SharedBufferedInputStream::IORange>* io_ranges);
 
     size_t row_group_size() const { return _row_group_size; }
+    // The rows that the row groups of this reader will read, after the row groups and the pages that the conditions
+    // drop are left out: the rows that raw_rows_read counts when the reader is read to its end. A runtime filter that
+    // arrives later can drop more. A reader that reads no column of the file counts no raw rows, so it says that it
+    // does not know them, with a negative number.
+    int64_t expected_raw_rows() const { return _no_materialized_column_scan ? -1 : _expected_raw_rows; }
 
     const std::vector<std::shared_ptr<GroupReader>>& group_readers() const { return _row_group_readers; }
 
@@ -125,6 +130,7 @@ private:
     size_t _row_group_size = 0;
 
     size_t _total_row_count = 0;
+    int64_t _expected_raw_rows = 0;
     size_t _scan_row_count = 0;
     bool _no_materialized_column_scan = false;
 

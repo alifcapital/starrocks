@@ -1222,6 +1222,109 @@ TEST_F(FileReaderTest, TestInit) {
     ASSERT_TRUE(status.ok());
 }
 
+// Covers: the reader tells how many rows it will read before it reads any, and a reader that is read to its end counts
+//         exactly these rows as raw rows, whether the conditions of the scan drop the rows of its row groups or not.
+// These tests count in their own stats, because the stats of the other tests of this file are shared and some of them
+// compare the counters with exact numbers.
+TEST_F(FileReaderTest, ExpectedRawRowsAreTheRawRowsOfAReaderThatIsReadToItsEnd) {
+    // The rows that the reader says it will read, which are checked against the raw rows that it counts when it is read
+    // to its end. expected_rows is negative when the test only compares the two.
+    auto check = [&](const std::string& path, HdfsScannerContext* ctx, int64_t expected_rows) {
+        HdfsScannerStats stats;
+        ctx->stats = &stats;
+        auto reader = _create_file_reader(path);
+        ASSERT_OK(reader->init(ctx));
+        const int64_t expected = reader->expected_raw_rows();
+        if (expected_rows >= 0) EXPECT_EQ(expected_rows, expected);
+        while (true) {
+            auto chunk = _create_chunk();
+            auto status = reader->get_next(&chunk);
+            if (status.is_end_of_file()) break;
+            ASSERT_OK(status);
+        }
+        EXPECT_EQ(expected, stats.raw_rows_read);
+    };
+    // A condition that drops the rows of the row groups after they are read leaves the rows raw rows all the same.
+    auto probe = _create_file_reader(_file2_path);
+    HdfsScannerStats probe_stats;
+    auto* probe_ctx = _create_file2_base_context();
+    probe_ctx->stats = &probe_stats;
+    ASSERT_OK(probe->init(probe_ctx));
+    const int64_t file2_rows = probe->get_file_metadata()->t_metadata().num_rows;
+    ASSERT_GT(file2_rows, 0);
+    check(_file2_path, _create_file2_base_context(), file2_rows);
+    check(_file2_path, _create_context_for_skip_group(), -1);
+}
+
+// Covers: a reader that reads no column of the file, for example because the scan needs only the columns that the
+//         partition gives, counts no raw rows, so it does not know the rows that it will count.
+TEST_F(FileReaderTest, ReaderThatReadsNoColumnDoesNotKnowItsRawRows) {
+    HdfsScannerStats stats;
+    auto reader = _create_file_reader(_file1_path);
+    auto* ctx = _create_context_for_partition();
+    ctx->stats = &stats;
+    ASSERT_OK(reader->init(ctx));
+    ASSERT_TRUE(reader->_no_materialized_column_scan);
+    EXPECT_EQ(-1, reader->expected_raw_rows());
+    auto chunk = _create_chunk_for_partition();
+    ASSERT_OK(reader->get_next(&chunk));
+    EXPECT_EQ(4, chunk->num_rows());
+    EXPECT_EQ(0, stats.raw_rows_read);
+}
+
+TEST_F(FileReaderTest, ExpectedRawRowsLeaveOutTheRowGroupsThatAreFilteredAtOpen) {
+    const SlotId slot_id = 1;
+    HdfsScannerStats stats;
+    auto init = [&](FileReader* reader, StatusOr<HdfsScannerContext*> ctx) {
+        ASSERT_TRUE(ctx.ok());
+        ctx.value()->stats = &stats;
+        ASSERT_OK(reader->init(ctx.value()));
+    };
+    auto rows_of_all_groups = [&](FileReader* reader) {
+        int64_t rows = 0;
+        for (const auto& group : reader->get_file_metadata()->t_metadata().row_groups) rows += group.num_rows;
+        return rows;
+    };
+    // The first row group is filtered, the second is read.
+    auto one = _create_file_reader(_filter_row_group_path_1);
+    init(one.get(), _create_context_for_filter_row_group_1(slot_id, 5, 6, false));
+    ASSERT_EQ(1, one->row_group_size());
+    EXPECT_EQ(one->group_readers()[0]->get_row_group_metadata()->num_rows, one->expected_raw_rows());
+    EXPECT_LT(one->expected_raw_rows(), rows_of_all_groups(one.get()));
+
+    auto both = _create_file_reader(_filter_row_group_path_1);
+    init(both.get(), _create_context_for_filter_row_group_1(slot_id, 2, 5, false));
+    ASSERT_EQ(2, both->row_group_size());
+    EXPECT_EQ(rows_of_all_groups(both.get()), both->expected_raw_rows());
+
+    auto none = _create_file_reader(_filter_row_group_path_1);
+    init(none.get(), _create_context_for_filter_row_group_1(slot_id, 7, 10, false));
+    ASSERT_EQ(0, none->row_group_size());
+    EXPECT_EQ(0, none->expected_raw_rows());
+}
+
+TEST_F(FileReaderTest, ExpectedRawRowsLeaveOutThePagesThatThePageIndexDrops) {
+    HdfsScannerStats stats;
+    auto reader = _create_file_reader(_filter_page_index_with_rf_has_null);
+    auto ctx = _create_context_for_filter_page_index(1, 92880, 92990, true);
+    ASSERT_TRUE(ctx.ok());
+    ctx.value()->stats = &stats;
+    ASSERT_OK(reader->init(ctx.value()));
+    ASSERT_EQ(1, reader->row_group_size());
+    EXPECT_EQ(20100, reader->expected_raw_rows());
+    EXPECT_LT(reader->expected_raw_rows(), reader->group_readers()[0]->get_row_group_metadata()->num_rows);
+}
+
+TEST_F(FileReaderTest, ExpectedRawRowsOfAFilteredFileAreZero) {
+    HdfsScannerStats stats;
+    auto reader = _create_file_reader(_file2_path);
+    auto* ctx = _create_context_for_filter_file();
+    ctx->stats = &stats;
+    ASSERT_OK(reader->init(ctx));
+    ASSERT_TRUE(reader->_is_file_filtered);
+    EXPECT_EQ(0, reader->expected_raw_rows());
+}
+
 TEST_F(FileReaderTest, CacheSelectKeepsRangesWithoutPreparingDataReaders) {
     auto check = [&](const std::string& path, auto make_context) {
         auto read = _create_file_reader(path);

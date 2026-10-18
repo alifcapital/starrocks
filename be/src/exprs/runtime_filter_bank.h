@@ -29,6 +29,7 @@
 #include "exprs/expr_context.h"
 #include "exprs/runtime_filter.h"
 #include "exprs/runtime_filter_layout.h"
+#include "exprs/runtime_filter_scan_sink.h"
 #include "gen_cpp/InternalService_types.h"
 #include "gen_cpp/PlanNodes_types.h"
 #include "gen_cpp/RuntimeFilter_types.h"
@@ -239,6 +240,14 @@ public:
     }
     void set_runtime_filter(const RuntimeFilter* rf);
     void set_shared_runtime_filter(const std::shared_ptr<const RuntimeFilter>& rf);
+
+    // A local filter that is built after the scan has started has a sink where the readers of this descriptor
+    // report their per-row cost. The sink is created by the build side before any reader runs, so readers only load
+    // the pointer; it is null for a filter that is not deferred. The descriptor owns the sink, so a reader that is
+    // still running when the build side is destroyed does not touch freed memory.
+    RuntimeFilterScanSink* scan_sink() const { return _scan_sink_ptr.load(std::memory_order_acquire); }
+    std::shared_ptr<RuntimeFilterScanSink> enable_scan_sink();
+
     void add_observer(RuntimeState* state, pipeline::PipelineObserver* observer) {
         _observable.add_observer(state, observer);
     }
@@ -274,6 +283,9 @@ private:
 
     std::atomic<const RuntimeFilter*> _runtime_filter = nullptr;
     std::shared_ptr<const RuntimeFilter> _shared_runtime_filter = nullptr;
+    std::mutex _scan_sink_mutex;
+    std::shared_ptr<RuntimeFilterScanSink> _scan_sink;
+    std::atomic<RuntimeFilterScanSink*> _scan_sink_ptr = nullptr;
     RuntimeState* _runtime_state = nullptr;
     pipeline::Observable _observable;
     bool _has_push_down_to_storage = false;

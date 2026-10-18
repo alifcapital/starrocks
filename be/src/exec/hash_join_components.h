@@ -27,6 +27,14 @@ class HashJoiner;
 struct HashJoinProbeMetrics;
 class HashJoinBuilder;
 
+// How far a prober got through its probe input.
+struct HashJoinProbeProgress {
+    // Probe rows whose lookups are all finished.
+    int64_t completed_rows = 0;
+    // Rows that the lookups returned, before any other condition of the JOIN is applied to them.
+    int64_t output_rows = 0;
+};
+
 class HashJoinProberImpl {
 public:
     virtual ~HashJoinProberImpl() = default;
@@ -36,13 +44,13 @@ public:
     virtual StatusOr<ChunkPtr> probe_chunk(RuntimeState* state) = 0;
     virtual StatusOr<ChunkPtr> probe_remain(RuntimeState* state, bool* has_remain) = 0;
     virtual void reset(RuntimeState* runtime_state) = 0;
-    virtual void track_completed_rows(int64_t* counter) { _completed_rows = counter; }
+    virtual void track_progress(HashJoinProbeProgress* progress) { _progress = progress; }
     virtual Status drain_input(RuntimeState* state) { return Status::OK(); }
 
 protected:
     HashJoinProberImpl(HashJoiner& hash_joiner) : _hash_joiner(hash_joiner) {}
     HashJoiner& _hash_joiner;
-    int64_t* _completed_rows = nullptr;
+    HashJoinProbeProgress* _progress = nullptr;
 };
 
 class HashJoinProber {
@@ -78,14 +86,15 @@ public:
     bool has_attached() const { return _impl != nullptr; }
 
     bool need_input() const { return has_attached() && probe_chunk_empty(); }
-    void track_completed_rows() { _impl->track_completed_rows(&_completed_rows); }
-    int64_t completed_rows() const { return _completed_rows; }
+    void track_completed_rows() { _impl->track_progress(&_progress); }
+    int64_t completed_rows() const { return _progress.completed_rows; }
+    int64_t output_rows() const { return _progress.output_rows; }
     Status drain_input(RuntimeState* state) { return _impl->drain_input(state); }
 
 private:
     HashJoiner& _hash_joiner;
     std::unique_ptr<HashJoinProberImpl> _impl;
-    int64_t _completed_rows = 0;
+    HashJoinProbeProgress _progress;
 };
 
 // build hash table

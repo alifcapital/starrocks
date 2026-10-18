@@ -364,6 +364,10 @@ Status FileReader::_init_group_readers(InitMode mode) {
         _total_row_count += num_rows;
     }
     _row_group_size = _row_group_readers.size();
+    _expected_raw_rows = 0;
+    for (const auto& group_reader : _row_group_readers) {
+        _expected_raw_rows += static_cast<int64_t>(group_reader->get_range().span_size());
+    }
 
     if (!_row_group_readers.empty()) {
         if (mode == InitMode::CACHE_SELECT) {

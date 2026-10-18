@@ -112,6 +112,7 @@ public:
     int32_t extended_column_index(SlotId id) const;
 
     int64_t raw_rows_read() const override;
+    int64_t expected_raw_rows() const override;
     int64_t num_rows_read() const override;
     int64_t num_bytes_read() const override;
     int64_t cpu_time_spent() const override;

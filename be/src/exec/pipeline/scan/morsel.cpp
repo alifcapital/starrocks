@@ -98,12 +98,32 @@ bool SharedMorselQueueFactory::reach_limit() const {
     return _queue->reach_limit();
 }
 
+MorselProgress SharedMorselQueueFactory::progress() const {
+    return _queue->progress();
+}
+
+// The sum of the queues of the drivers. The version is the sum too, so a change in any queue is a change of it.
+static MorselProgress sum_progress(const std::vector<MorselQueuePtr>& queues) {
+    MorselProgress total;
+    for (const auto& queue : queues) {
+        const MorselProgress progress = queue->progress();
+        total.enqueued += progress.enqueued;
+        total.remaining += progress.remaining;
+        total.version += progress.version;
+    }
+    return total;
+}
+
 size_t IndividualMorselQueueFactory::num_original_morsels() const {
     size_t total = 0;
     for (const auto& queue : _queue_per_driver_seq) {
         total += queue->num_original_morsels();
     }
     return total;
+}
+
+MorselProgress IndividualMorselQueueFactory::progress() const {
+    return sum_progress(_queue_per_driver_seq);
 }
 
 Status MorselQueueFactory::append_morsels(int driver_seq, Morsels&& morsels) {
@@ -254,6 +274,10 @@ size_t BucketSequenceMorselQueueFactory::num_original_morsels() const {
         total += queue->num_original_morsels();
     }
     return total;
+}
+
+MorselProgress BucketSequenceMorselQueueFactory::progress() const {
+    return sum_progress(_queue_per_driver_seq);
 }
 
 /// MorselQueue.
@@ -1074,6 +1098,8 @@ void DynamicMorselQueue::unget(MorselPtr&& morsel) {
 Status DynamicMorselQueue::append_morsels(std::vector<MorselPtr>&& morsels) {
     std::lock_guard<std::mutex> _l(_mutex);
     _size += morsels.size();
+    _enqueued += morsels.size();
+    _ranges_version.fetch_add(1, std::memory_order_relaxed);
     // add split morsels to front of this queue.
     // so this new morsels share same owner_id with recently processed morsel.
     _queue.insert(_queue.begin(), std::make_move_iterator(morsels.begin()), std::make_move_iterator(morsels.end()));

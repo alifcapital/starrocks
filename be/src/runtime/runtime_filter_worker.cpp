@@ -320,6 +320,16 @@ void RuntimeFilterPort::receive_shared_runtime_filter(int32_t filter_id,
     }
 }
 
+std::vector<std::shared_ptr<RuntimeFilterScanSink>> RuntimeFilterPort::enable_scan_sinks(int32_t filter_id) {
+    std::vector<std::shared_ptr<RuntimeFilterScanSink>> sinks;
+    auto it = _listeners.find(filter_id);
+    if (it == _listeners.end()) return sinks;
+    for (auto* rf_desc : it->second) {
+        sinks.emplace_back(rf_desc->enable_scan_sink());
+    }
+    return sinks;
+}
+
 Status RuntimeFilterMergerStatus::_merge_skew_broadcast_runtime_filter(RuntimeFilter* out) {
     if (skew_broadcast_rf_material == nullptr || skew_broadcast_rf_material->key_column == nullptr) {
         return Status::InternalError("skew broadcast rf material is nullptr");

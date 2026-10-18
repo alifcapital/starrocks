@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -239,6 +240,20 @@ private:
     ShortKeyRangesOptionPtr _short_key_ranges_option;
 };
 
+// How far the scan ranges of a queue got. A queue that still gets scan ranges answers with the ranges it has now, so
+// the number of ranges that are left is a lower bound, and it grows when the ranges arrive.
+struct MorselProgress {
+    // Every morsel that was put in the queue so far, the first ones included.
+    int64_t enqueued = 0;
+    // Morsels that nobody took.
+    int64_t remaining = 0;
+    // Grows whenever morsels are put in the queue, which is the only event that raises the remaining morsels.
+    int64_t version = 0;
+
+    // Morsels that a scan took, including the ones it is reading.
+    int64_t taken() const { return enqueued - remaining; }
+};
+
 /// MorselQueueFactory.
 class MorselQueueFactory {
 public:
@@ -247,6 +262,7 @@ public:
     virtual MorselQueue* create(int driver_sequence) = 0;
     virtual size_t size() const = 0;
     virtual size_t num_original_morsels() const = 0;
+    virtual MorselProgress progress() const { return {}; }
 
     virtual bool is_shared() const = 0;
     virtual bool could_local_shuffle() const = 0;
@@ -267,6 +283,7 @@ public:
     MorselQueue* create(int driver_sequence) override { return _queue.get(); }
     size_t size() const override { return _size; }
     size_t num_original_morsels() const override;
+    MorselProgress progress() const override;
 
     bool is_shared() const override { return true; }
     bool could_local_shuffle() const override { return true; }
@@ -294,6 +311,7 @@ public:
     size_t size() const override { return _queue_per_driver_seq.size(); }
 
     size_t num_original_morsels() const override;
+    MorselProgress progress() const override;
 
     bool is_shared() const override { return false; }
     bool could_local_shuffle() const override { return _could_local_shuffle; }
@@ -329,6 +347,7 @@ public:
     size_t size() const override { return _queue_per_driver_seq.size(); }
 
     size_t num_original_morsels() const override;
+    MorselProgress progress() const override;
 
     bool is_shared() const override { return false; }
 
@@ -374,6 +393,12 @@ public:
     virtual bool could_attch_ticket_checker() const { return false; }
 
     virtual size_t num_original_morsels() const { return _num_morsels; }
+    // A queue that does not count its morsels reports none, which is a lower bound.
+    virtual MorselProgress progress() const {
+        MorselProgress result;
+        result.version = _ranges_version.load(std::memory_order_relaxed);
+        return result;
+    }
     virtual size_t max_degree_of_parallelism() const { return _num_morsels; }
     virtual bool empty() const = 0;
     virtual StatusOr<MorselPtr> try_get() = 0;
@@ -407,6 +432,8 @@ public:
 protected:
     std::atomic<bool> _has_more_scan_ranges = false;
     std::atomic<bool> _has_more_from_split = false;
+    // Grows when morsels are appended, which is when a scan has to estimate again what is left.
+    std::atomic<int64_t> _ranges_version = 0;
     std::atomic<bool> _reach_limit = false;
     Morsels _morsels;
     size_t _num_morsels = 0;
@@ -422,6 +449,14 @@ public:
     explicit FixedMorselQueue(Morsels&& morsels) : MorselQueue(std::move(morsels)), _pop_index(0) {}
     ~FixedMorselQueue() override = default;
     bool empty() const override { return _unget_morsel == nullptr && _pop_index >= _num_morsels; }
+    MorselProgress progress() const override {
+        const size_t popped = _pop_index.load(std::memory_order_relaxed);
+        MorselProgress result;
+        result.enqueued = static_cast<int64_t>(_num_morsels);
+        result.remaining = popped >= _num_morsels ? 0 : static_cast<int64_t>(_num_morsels - popped);
+        result.version = _ranges_version.load(std::memory_order_relaxed);
+        return result;
+    }
     StatusOr<MorselPtr> try_get() override;
 
     std::string name() const override { return "fixed_morsel_queue"; }
@@ -459,6 +494,7 @@ public:
     bool could_attch_ticket_checker() const override { return true; }
 
     size_t num_original_morsels() const override { return _morsel_queue->num_original_morsels(); }
+    MorselProgress progress() const override { return _morsel_queue->progress(); }
     size_t max_degree_of_parallelism() const override { return _morsel_queue->max_degree_of_parallelism(); }
     bool empty() const override;
     StatusOr<MorselPtr> try_get() override;
@@ -493,6 +529,17 @@ public:
     bool could_attch_ticket_checker() const override { return true; }
     size_t max_degree_of_parallelism() const override { return _degree_of_parallelism; }
     Type type() const override { return SPLIT; }
+
+    // The unit is a tablet, not a piece of it. We expect a tablet to give about as many rows as the tablets that were
+    // read, so we count the tablet that is being split as taken, and the tablets behind it as remaining.
+    MorselProgress progress() const override {
+        MorselProgress result;
+        const auto tablets = static_cast<int64_t>(_tablets.size());
+        const auto current = static_cast<int64_t>(_tablet_idx.load(std::memory_order_relaxed));
+        result.enqueued = tablets;
+        result.remaining = std::max<int64_t>(0, tablets - current - 1);
+        return result;
+    }
 
 protected:
     void _inc_split(bool is_last_split) {
@@ -642,6 +689,13 @@ public:
 
     ~DynamicMorselQueue() override = default;
     bool empty() const override { return _size.load(std::memory_order_relaxed) == 0; }
+    MorselProgress progress() const override {
+        MorselProgress result;
+        result.enqueued = _enqueued.load(std::memory_order_relaxed);
+        result.remaining = _size.load(std::memory_order_relaxed);
+        result.version = _ranges_version.load(std::memory_order_relaxed);
+        return result;
+    }
     StatusOr<MorselPtr> try_get() override;
     void unget(MorselPtr&& morsel) override;
     std::string name() const override { return "dynamic_morsel_queue"; }
@@ -657,6 +711,8 @@ public:
 
 private:
     std::atomic<int64_t> _size = 0;
+    // Every morsel that was appended, the ones of the constructor included; unget does not count.
+    std::atomic<int64_t> _enqueued = 0;
     std::deque<MorselPtr> _queue;
     std::mutex _mutex;
     query_cache::TicketCheckerPtr _ticket_checker;

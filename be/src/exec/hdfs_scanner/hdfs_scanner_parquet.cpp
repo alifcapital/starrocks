@@ -362,6 +362,10 @@ Status HdfsParquetScanner::do_get_next(RuntimeState* runtime_state, ChunkPtr* ch
     return _reader->get_next(chunk);
 }
 
+int64_t HdfsParquetScanner::expected_raw_rows() const {
+    return _reader == nullptr ? -1 : _reader->expected_raw_rows();
+}
+
 void HdfsParquetScanner::do_close(RuntimeState* runtime_state) noexcept {
     _reader.reset();
 }

@@ -45,6 +45,8 @@ Status PriorityMorselQueue::append_morsels(Morsels&& morsels) {
         _set.insert(std::move(entry));
     }
     _size += added;
+    _enqueued += added;
+    _ranges_version.fetch_add(1, std::memory_order_relaxed);
     return Status::OK();
 }
 

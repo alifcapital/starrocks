@@ -28,9 +28,9 @@
 #include "exec/spill/partition.h"
 #include "exec/spill/spill_components.h"
 #include "exec/spill/spiller_factory.h"
+#include "gutil/macros.h"
 #include "runtime/runtime_state.h"
 #include "util/runtime_profile.h"
-#include "gutil/macros.h"
 
 namespace starrocks::pipeline {
 
@@ -125,6 +125,10 @@ public:
 
 private:
     bool spilled() const;
+
+    // Tells whether the JOIN probes through the spill, which every entry point asks after it checked the errors of
+    // the spillers. The first time that the JOIN has spilled, the local runtime filter feedback of the driver stops.
+    bool _probes_through_spill();
 
     // acquire next build-side partitions
     void _acquire_next_partitions();

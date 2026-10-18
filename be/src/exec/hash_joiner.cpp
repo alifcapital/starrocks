@@ -25,6 +25,7 @@
 #include "common/statusor.h"
 #include "exec/hash_join_components.h"
 #include "exec/join/join_hash_table.h"
+#include "exec/pipeline/query_context.h"
 #include "exec/spill/spiller.hpp"
 #include "exprs/column_ref.h"
 #include "exprs/expr.h"
@@ -32,6 +33,7 @@
 #include "gen_cpp/Metrics_types.h"
 #include "pipeline/hashjoin/hash_joiner_fwd.h"
 #include "runtime/current_thread.h"
+#include "runtime/runtime_filter_worker.h"
 #include "simd/simd.h"
 #include "storage/chunk_helper.h"
 #include "util/runtime_profile.h"
@@ -121,6 +123,7 @@ Status HashJoiner::prepare_builder(RuntimeState* state, RuntimeProfile* runtime_
         runtime_profile->add_info_string("Predicates", _hash_join_node.sql_predicates);
     }
 
+    _build_profile = runtime_profile;
     runtime_profile->add_info_string("DistributionMode", to_string(_hash_join_node.distribution_mode));
     runtime_profile->add_info_string("JoinType", to_string(_join_type));
 
@@ -272,6 +275,10 @@ int64_t HashJoiner::completed_probe_rows() const {
     return _hash_join_prober->completed_rows();
 }
 
+int64_t HashJoiner::probe_output_rows() const {
+    return _hash_join_prober->output_rows();
+}
+
 Status HashJoiner::drain_probe_input(RuntimeState* state) {
     return _hash_join_prober->drain_input(state);
 }
@@ -339,6 +346,8 @@ StatusOr<ChunkPtr> HashJoiner::_pull_probe_output_chunk(RuntimeState* state) {
 }
 
 void HashJoiner::close(RuntimeState* state) {
+    // Nobody probes after the hash table is closed, so a filter that is still waiting will not be asked for.
+    cancel_deferred_runtime_filters();
     _spiller.reset();
     _hash_join_builder->close();
 }
@@ -613,6 +622,88 @@ Status HashJoiner::_create_runtime_in_filters(RuntimeState* state) {
     return Status::OK();
 }
 
+void HashJoiner::_try_defer_runtime_bloom_filter(RuntimeState* state, const RuntimeFilterBuildDescriptor* rf_desc,
+                                                 size_t filter_ndv, size_t ht_row_count, Columns* columns) {
+    pipeline::DeferredRfEligibilityInput input;
+    input.join_type = _join_type;
+    input.has_other_join_conjuncts = !_other_join_conjunct_ctxs.empty();
+    input.skew_join = _is_skew_join;
+    input.broadcast_join = _hash_join_node.distribution_mode == TJoinDistributionMode::BROADCAST;
+    input.broadcast_filter = rf_desc->join_mode() == TRuntimeFilterBuildJoinMode::BROADCAST;
+    input.partitioned_filter =
+            rf_desc->layout().pipeline_level_multi_partitioned() || rf_desc->num_colocate_partition() > 0;
+    // A build that returns an error fails the query, as the build of a filter that is not deferred does. A key type
+    // without a Bloom filter would fail every build, and the filter is not built today, so we do not defer it.
+    std::unique_ptr<RuntimeFilter> supported(RuntimeFilterHelper::create_runtime_bloom_filter(
+            nullptr, rf_desc->build_expr_type(), rf_desc->join_mode()));
+    input.key_type_has_bloom_filter = supported != nullptr;
+    // A global runtime filter builds no Bloom filter for more keys than this, and keeps its min/max range. A deferred
+    // filter does the same.
+    input.ndv = filter_ndv;
+    const auto& options = state->query_options();
+    if (options.__isset.global_runtime_filter_build_max_size && options.global_runtime_filter_build_max_size > 0) {
+        input.max_ndv = options.global_runtime_filter_build_max_size;
+    }
+
+    const auto eligibility = pipeline::decide_deferred_rf_eligibility(input);
+    if (eligibility.defer) {
+        _defer_runtime_bloom_filter(state, rf_desc, filter_ndv, ht_row_count, std::move(*columns),
+                                    eligibility.bloom ? nullptr : "NDV > cap");
+        return;
+    }
+    // The filter is not built, as without the deferral, and the profile tells why.
+    if (_build_profile != nullptr) {
+        auto* section = _build_profile->create_child(pipeline::deferred_rf_section_name(rf_desc->filter_id()));
+        section->add_info_string("State", std::string("not deferred: ") + eligibility.reason);
+        auto counter = [&](const char* name, size_t value) {
+            auto* c = ADD_COUNTER_SKIP_MERGE(section, name, TUnit::UNIT, TCounterMergeType::SKIP_ALL);
+            COUNTER_SET(c, static_cast<int64_t>(std::min<size_t>(value, INT64_MAX)));
+        };
+        counter("Ndv", filter_ndv);
+    }
+}
+
+void HashJoiner::_defer_runtime_bloom_filter(RuntimeState* state, const RuntimeFilterBuildDescriptor* rf_desc,
+                                             size_t filter_ndv, size_t ht_row_count, Columns columns,
+                                             const char* skip_bloom_reason) {
+    pipeline::DeferredLocalRuntimeFilter::Params params;
+    params.skip_bloom_reason = skip_bloom_reason;
+    params.filter_id = rf_desc->filter_id();
+    params.build_type = rf_desc->build_expr_type();
+    params.join_mode = rf_desc->join_mode();
+    params.eq_null = _is_null_safes[rf_desc->build_expr_order()];
+    // A LEFT SEMI JOIN with conditions on the pairs gets all the pairs from its lookups, as an INNER JOIN does.
+    params.semi_join = _join_type == TJoinOp::LEFT_SEMI_JOIN && _other_join_conjunct_ctxs.empty();
+    params.ndv = filter_ndv;
+    params.build_rows = ht_row_count;
+    double avg_key_bytes = 0;
+    size_t key_rows = 0;
+    size_t key_bytes = 0;
+    for (const auto& column : columns) {
+        key_rows += column->size();
+        key_bytes += column->byte_size();
+    }
+    if (key_rows > 0) {
+        avg_key_bytes = static_cast<double>(key_bytes) / key_rows;
+    }
+    params.key_ns = pipeline::estimate_deferred_rf_key_ns(params.build_type, avg_key_bytes);
+    params.benefit_margin = config::deferred_local_runtime_filter_benefit_margin;
+    params.columns = std::move(columns);
+    params.pool = _pool;
+    if (state->query_ctx() != nullptr) {
+        params.mem_tracker = state->query_ctx()->mem_tracker();
+    }
+    auto* port = state->runtime_filter_port();
+    params.scan_sinks = port->enable_scan_sinks(params.filter_id);
+    // The probe descriptors of the scans read the filter on every chunk, and receive_runtime_filter() sets it in
+    // all of them, the same call that publishes a filter that is built at once.
+    params.publish = [port, filter_id = params.filter_id](const RuntimeFilter* rf) {
+        port->receive_runtime_filter(filter_id, rf);
+    };
+    params.cancelled = [state]() { return state->is_cancelled(); };
+    _deferred_rfs.emplace_back(std::make_shared<pipeline::DeferredLocalRuntimeFilter>(std::move(params)));
+}
+
 Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t limit) {
     size_t ht_row_count = get_ht_row_count();
     std::vector<JoinHashTable*> hash_tables;
@@ -645,6 +736,13 @@ Status HashJoiner::_create_runtime_bloom_filters(RuntimeState* state, int64_t li
         }
         const size_t filter_ndv = rf_desc->estimate_local_ndv(ht_row_count, hash_table_ndv.value_or(ht_row_count));
         if (!rf_desc->has_remote_targets() && filter_ndv > limit) {
+            // The limit fits a scan where the filter only saves hash lookups. We expect a scan that reads expensive
+            // columns to gain far more than a large filter costs, and only the running scan can tell, so we keep
+            // the key columns and let the scan decide.
+            if (!is_empty && config::enable_deferred_local_runtime_filter &&
+                config::enable_local_runtime_filter_feedback) {
+                _try_defer_runtime_bloom_filter(state, rf_desc, filter_ndv, ht_row_count, &columns);
+            }
             _runtime_bloom_filter_build_params.emplace_back();
             continue;
         }

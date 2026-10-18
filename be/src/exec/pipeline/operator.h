@@ -344,6 +344,7 @@ protected:
     RuntimeMembershipFilterEvalContext _bloom_filter_eval_context;
     std::shared_ptr<LocalRuntimeFilterFeedback> _local_rf_feedback;
     bool _local_rf_was_on = true;
+    int64_t _local_rf_last_pull_ns = 0;
 
     spill::OperatorMemoryResourceManager _mem_resource_manager;
 

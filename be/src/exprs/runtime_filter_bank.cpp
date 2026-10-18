@@ -1169,6 +1169,15 @@ void RuntimeFilterProbeDescriptor::set_shared_runtime_filter(const std::shared_p
     }
 }
 
+std::shared_ptr<RuntimeFilterScanSink> RuntimeFilterProbeDescriptor::enable_scan_sink() {
+    std::lock_guard guard(_scan_sink_mutex);
+    if (_scan_sink == nullptr) {
+        _scan_sink = std::make_shared<RuntimeFilterScanSink>();
+        _scan_sink_ptr.store(_scan_sink.get(), std::memory_order_release);
+    }
+    return _scan_sink;
+}
+
 void RuntimeFilterHelper::create_min_max_value_predicate(ObjectPool* pool, SlotId slot_id, LogicalType slot_type,
                                                          const RuntimeFilter* filter, Expr** min_max_predicate) {
     *min_max_predicate = nullptr;

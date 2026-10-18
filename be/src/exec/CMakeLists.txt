@@ -290,6 +290,7 @@ set(EXEC_FILES
     pipeline/set/union_passthrough_operator.cpp
     pipeline/set/union_const_source_operator.cpp
     pipeline/set/raw_values_source_operator.cpp
+    pipeline/hashjoin/deferred_local_runtime_filter.cpp
     pipeline/hashjoin/hash_join_build_operator.cpp
     pipeline/hashjoin/hash_join_probe_operator.cpp
     pipeline/hashjoin/hash_joiner_factory.cpp

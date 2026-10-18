@@ -286,6 +286,9 @@ private:
         bool is_active;
     };
     std::vector<RuntimeFilterProbeColumn> _rf_probe_columns;
+    // The descriptors of _rf_predicates. A filter that the build side has not built yet may have a sink there, where
+    // this reader reports what the lazy columns of a row cost.
+    std::vector<RuntimeFilterProbeDescriptor*> _rf_descs;
 
     // ── Compound conjuncts ─────────────────────────────────────────────────
     // The conjuncts in scanner_ctx->conjuncts.scanner_ctxs are prepared before the group reader is

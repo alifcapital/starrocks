@@ -23,6 +23,7 @@
 #include "common/statusor.h"
 #include "exec/olap_scan_node.h"
 #include "exec/pipeline/fragment_context.h"
+#include "exec/pipeline/hashjoin/local_runtime_filter_feedback.h"
 #include "exec/pipeline/limit_operator.h"
 #include "exec/pipeline/pipeline_builder.h"
 #include "exec/pipeline/scan/connector_scan_operator.h"
@@ -464,6 +465,10 @@ StatusOr<ChunkPtr> ScanOperator::pull_chunk(RuntimeState* state) {
         }
         evaluate_topn_runtime_filters(res.get());
         eval_runtime_bloom_filters(res.get());
+        // The chunk may have closed a window that built a deferred filter, and a build that failed fails the query.
+        if (_local_rf_feedback != nullptr && _local_rf_feedback->deferral_failed()) {
+            return _local_rf_feedback->deferral_status();
+        }
         res->owner_info().set_owner_id(owner_id, is_eos);
     }
 
@@ -856,6 +861,11 @@ void ScanOperator::set_query_ctx(const QueryContextPtr& query_ctx) {
 }
 
 // ========== ScanOperatorFactory ==========
+
+std::shared_ptr<ScanRangeLedger> ScanOperator::range_ledger() const {
+    const auto* factory = dynamic_cast<const ScanOperatorFactory*>(_factory);
+    return factory == nullptr ? nullptr : factory->range_ledger();
+}
 
 ScanOperatorFactory::ScanOperatorFactory(int32_t id, ScanNode* scan_node)
         : SourceOperatorFactory(id, scan_node->name(), scan_node->id()),
