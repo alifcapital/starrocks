@@ -263,6 +263,14 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
                 ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
             }
         }
+        if (ret.ok() && ret.value()->buffer.capacity() == 0 &&
+            _sb_stream->plan_load(ret.value(), read_offset_cursor, block_end_offset - read_offset_cursor)) {
+            // The reader gets some bytes of this shared buffer elsewhere (see SharedBufferedInputStream::plan_load()),
+            // so we do not load them. We look for the buffer of the chunk again: the chunk is a part of the range
+            // that is still to be read, so it stays inside one run. The data cache is asked about the new buffer
+            // below, because the bytes of the new buffers were not chosen by the data cache.
+            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        }
         if (ret.ok() && ret.value()->buffer.capacity() == 0 && !ret.value()->split && _can_ask_cache()) {
             // Loading this shared buffer downloads all of its blocks, and we fear that the cache holds some of
             // them. So we split the buffer into the runs of blocks without cache before we load it. The chunk is
