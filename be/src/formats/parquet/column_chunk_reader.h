@@ -80,6 +80,15 @@ public:
     LevelDecoder& def_level_decoder() { return _def_level_decoder; }
     LevelDecoder& rep_level_decoder() { return _rep_level_decoder; }
 
+    // The share of the rows of the current read range that the filter keeps. The decoder of the current page gets
+    // it now, and the decoder of every page that is parsed later, until the next call.
+    void set_filter_share(double share) {
+        _filter_share = share;
+        if (_cur_decoder != nullptr) {
+            _cur_decoder->set_filter_share(share);
+        }
+    }
+
     Status decode_values(size_t n, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                          const FilterData* filter = nullptr) {
         SCOPED_RAW_TIMER(&_opts.stats->value_decode_ns);
@@ -154,6 +163,7 @@ private:
 
     bool _dict_page_parsed = false;
     Decoder* _cur_decoder = nullptr;
+    double _filter_share = 1.0;
     std::unordered_map<int, std::unique_ptr<Decoder>> _decoders;
 };
 

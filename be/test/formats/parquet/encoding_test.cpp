@@ -16,9 +16,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
 #include <set>
+#include <string>
+#include <vector>
 
 #include "column/binary_column.h"
 #include "column/column_helper.h"
@@ -26,6 +31,7 @@
 #include "column/nullable_column.h"
 #include "common/config.h"
 #include "formats/parquet/encoding_dict.h"
+#include "formats/parquet/encoding_plain.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
 #include "util/byte_stream_split.h"
@@ -2292,6 +2298,515 @@ TEST_F(ParquetEncodingTest, DeltaHeaderDeclaresMoreValuesThanThePageHolds) {
     auto decoder = create_test_decoder(tparquet::Type::INT32, tparquet::Encoding::DELTA_BINARY_PACKED);
     std::string page = make_page(count_1000, 40);
     ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+}
+
+namespace {
+
+// A PLAIN BYTE_ARRAY page of `num_rows` values of `width` bytes. With `announce` the decoder is told how many
+// values the page holds before the page is set, as the reader does, so it knows the width of a value. The decoder
+// decides by the share that it is told, as it does in production.
+void make_plain_page_of_width(size_t num_rows, size_t width, bool announce, std::vector<std::string>* values,
+                              std::unique_ptr<Encoder>* encoder, std::unique_ptr<Decoder>* decoder) {
+    values->clear();
+    for (size_t i = 0; i < num_rows; ++i) {
+        values->push_back(std::string(width, static_cast<char>('a' + i % 26)));
+    }
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::vector<Slice> slices;
+    for (const auto& value : *values) {
+        slices.emplace_back(value);
+    }
+    ASSERT_TRUE(encoding->create_encoder(encoder).ok());
+    ASSERT_TRUE((*encoder)->append(reinterpret_cast<uint8_t*>(slices.data()), slices.size()).ok());
+    ASSERT_TRUE(encoding->create_decoder(decoder).ok());
+    (*decoder)->_filter_mode = FilterMode::AUTO;
+    if (announce) {
+        (*decoder)->set_num_values(num_rows);
+    }
+    ASSERT_TRUE((*decoder)->set_data((*encoder)->build()).ok());
+}
+
+// Decodes the rows of `values` with next_batch() and a filter that keeps the first `num_kept` rows, after the
+// decoder is told that the filter keeps `share` of the rows of the range, and checks the column. A decoder that
+// uses the filter makes each dropped row NULL, and a decoder that does not has every value. `used` tells which one
+// happened. The share is a parameter because the decoder does not count the filter: the reader does.
+void decode_plain_batch_and_tell(Decoder* decoder, const std::vector<std::string>& values, size_t num_kept,
+                                 double share, bool* used) {
+    std::vector<uint8_t> filter(values.size(), 0);
+    std::fill_n(filter.begin(), num_kept, 1);
+    decoder->set_filter_share(share);
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    Status st = decoder->next_batch(values.size(), ColumnContentType::VALUE, dst.get(), filter.data());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    ASSERT_EQ(values.size(), dst->size());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+    *used = dst->has_null();
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i < num_kept || !*used) {
+            ASSERT_FALSE(dst->is_null(i)) << "row " << i;
+            ASSERT_EQ(values[i], binary_column->get_slice(i).to_string()) << "row " << i;
+        } else {
+            ASSERT_TRUE(dst->is_null(i)) << "row " << i;
+            ASSERT_EQ(0U, binary_column->get_slice(i).size) << "row " << i;
+        }
+    }
+}
+
+} // namespace
+
+TEST_F(ParquetEncodingTest, DecoderStartsWithTheFilterModeOfTheBuild) {
+    PlainDecoder<Slice> plain;
+    DictDecoder<int32_t> dict;
+    EXPECT_EQ(FilterMode::ALWAYS, plain._filter_mode);
+    EXPECT_EQ(FilterMode::ALWAYS, dict._filter_mode);
+    // A decoder that is not told the share takes it as a filter that keeps every row.
+    EXPECT_DOUBLE_EQ(1.0, plain._filter_share);
+    EXPECT_DOUBLE_EQ(1.0, dict._filter_share);
+    plain.set_filter_share(0.25);
+    EXPECT_DOUBLE_EQ(0.25, plain._filter_share);
+}
+
+TEST_F(ParquetEncodingTest, PlainByteArrayFilterShareTable) {
+    using PlainSliceDecoder = PlainDecoder<Slice>;
+    constexpr double kEps = 1e-9;
+    // The measured points.
+    EXPECT_NEAR(0.12, PlainSliceDecoder::max_filter_share(8), kEps);
+    EXPECT_NEAR(0.20, PlainSliceDecoder::max_filter_share(32), kEps);
+    EXPECT_NEAR(0.55, PlainSliceDecoder::max_filter_share(128), kEps);
+    EXPECT_NEAR(0.90, PlainSliceDecoder::max_filter_share(512), kEps);
+    // The nearest point below 8 and above 512 bytes, and for an unknown width.
+    for (size_t width : {0, 1, 2, 7}) {
+        EXPECT_NEAR(0.12, PlainSliceDecoder::max_filter_share(width), kEps) << width;
+    }
+    for (size_t width : {513, 1024, 4096, 1 << 20}) {
+        EXPECT_NEAR(0.90, PlainSliceDecoder::max_filter_share(width), kEps) << width;
+    }
+    // The middle of two points in the logarithm of the width is the middle of their shares.
+    EXPECT_NEAR(0.16, PlainSliceDecoder::max_filter_share(16), kEps);
+    EXPECT_NEAR(0.375, PlainSliceDecoder::max_filter_share(64), kEps);
+    EXPECT_NEAR(0.725, PlainSliceDecoder::max_filter_share(256), kEps);
+    // Other widths are on the line between their points: 100 bytes is 82% of the way from 32 to 128 bytes in the
+    // logarithm.
+    EXPECT_NEAR(0.20 + 0.35 * (std::log2(100.0) - 5.0) / 2.0, PlainSliceDecoder::max_filter_share(100), kEps);
+    // The share never falls when the width grows, and stays between the points.
+    double previous = 0;
+    for (size_t width = 0; width <= 2048; ++width) {
+        const double share = PlainSliceDecoder::max_filter_share(width);
+        EXPECT_GE(share, previous) << width;
+        EXPECT_GE(share, 0.12 - kEps) << width;
+        EXPECT_LE(share, 0.90 + kEps) << width;
+        previous = share;
+    }
+
+    // The page of 100 values of 8 bytes holds 12 bytes for each, the length prefix included.
+    EXPECT_EQ(8U, PlainSliceDecoder::avg_value_width(1200, 100));
+    EXPECT_EQ(0U, PlainSliceDecoder::avg_value_width(1200, 0));
+    // A page that is shorter than the prefixes of its values, which only a corrupt page or NULL values give.
+    EXPECT_EQ(0U, PlainSliceDecoder::avg_value_width(100, 100));
+    EXPECT_EQ(0U, PlainSliceDecoder::avg_value_width(0, 100));
+}
+
+// The decoder uses the filter when the share that it is told is below the share of the width of the values of the
+// page, and the shares of the cases are a little below and a little above the share of the width. The page has 200
+// rows, and the filter keeps the first 100 of them whatever the share is, so a row is dropped when the filter is
+// used.
+TEST_F(ParquetEncodingTest, PlainByteArrayUsesFilterByWidthAndShare) {
+    struct Case {
+        size_t width;
+        double share;
+        bool expect_used;
+    };
+    const std::vector<Case> cases = {
+            // the nearest point below 8 bytes, 12%
+            {5, 0.11, true},
+            {5, 0.13, false},
+            {8, 0.11, true},
+            {8, 0.13, false},
+            // between the points, on the line in the logarithm of the width
+            {15, 0.15, true},
+            {15, 0.165, false},
+            {16, 0.15, true},
+            {16, 0.17, false},
+            {32, 0.19, true},
+            {32, 0.21, false},
+            {64, 0.36, true},
+            {64, 0.39, false},
+            {100, 0.46, true},
+            {100, 0.52, false},
+            {128, 0.53, true},
+            {128, 0.57, false},
+            {200, 0.64, true},
+            {200, 0.69, false},
+            {256, 0.70, true},
+            {256, 0.75, false},
+            // from 512 bytes, 90%
+            {512, 0.88, true},
+            {512, 0.92, false},
+            {1024, 0.88, true},
+            {1024, 0.92, false},
+            {4096, 0.88, true},
+            {4096, 0.92, false},
+            {512, 1.0, false},
+            {512, 0.0, true},
+    };
+    for (const Case& c : cases) {
+        SCOPED_TRACE("width " + std::to_string(c.width) + ", share " + std::to_string(c.share));
+        std::vector<std::string> values;
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(200, c.width, true, &values, &encoder, &decoder));
+        bool used = false;
+        ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), values, 100, c.share, &used));
+        ASSERT_EQ(c.expect_used, used);
+    }
+}
+
+// A page that the reader did not describe has no known width, so the decoder takes the share of the narrowest
+// values. The description is for one page: the next page starts without it.
+TEST_F(ParquetEncodingTest, PlainByteArrayFilterShareNeedsTheNumberOfValuesOfThePage) {
+    std::vector<std::string> values;
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    bool used = false;
+
+    // 512 byte values, half of the rows kept: used when the width is known, not used when it is not.
+    ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(100, 512, true, &values, &encoder, &decoder));
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), values, 50, 0.5, &used));
+    ASSERT_TRUE(used);
+
+    // The same decoder gets the same page again, now without the number of values.
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), values, 50, 0.5, &used));
+    ASSERT_FALSE(used);
+    // Few kept rows are still worth it for any width.
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), values, 5, 0.05, &used));
+    ASSERT_TRUE(used);
+
+    ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(100, 512, false, &values, &encoder, &decoder));
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), values, 50, 0.5, &used));
+    ASSERT_FALSE(used);
+}
+
+// The decoder does not count the filter. It decides by the share that it is told, whatever the filter keeps in the
+// batch it decodes, and a decoder that is not told takes the filter as one that keeps every row.
+TEST_F(ParquetEncodingTest, PlainByteArrayDecidesByTheShareItIsTold) {
+    std::vector<std::string> values;
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    // 32 byte values use the filter below 20%.
+    ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(200, 32, true, &values, &encoder, &decoder));
+    bool used = false;
+    const std::vector<std::string> first(values.begin(), values.begin() + 100);
+    const std::vector<std::string> second(values.begin() + 100, values.end());
+
+    // The filter of the batch keeps 50%, the range keeps 5%: used. Then the filter keeps 5% and the range 5%: used.
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), first, 50, 0.05, &used));
+    ASSERT_TRUE(used);
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), second, 5, 0.05, &used));
+    ASSERT_TRUE(used);
+
+    // The filter of the batch keeps 5%, the range keeps 60%: not used.
+    decoder->set_num_values(values.size());
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), first, 5, 0.6, &used));
+    ASSERT_FALSE(used);
+    ASSERT_NO_FATAL_FAILURE(decode_plain_batch_and_tell(decoder.get(), second, 50, 0.6, &used));
+    ASSERT_FALSE(used);
+
+    // A decoder that is not told the share does not use the filter.
+    ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(100, 32, true, &values, &encoder, &decoder));
+    std::vector<uint8_t> filter(values.size(), 0);
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    ASSERT_TRUE(decoder->next_batch(values.size(), ColumnContentType::VALUE, dst.get(), filter.data()).ok());
+    ASSERT_FALSE(dst->has_null());
+}
+
+namespace {
+
+// A batch with NULL rows. The page holds a value for every second row, and the filter keeps every NULL row and
+// every fourth value. The decoder decides by the share that it is told, and the NULL rows do not change that.
+void check_plain_share_with_nulls(double share, bool expect_used) {
+    SCOPED_TRACE("share " + std::to_string(share));
+    constexpr size_t kNumRows = 400;
+    // 200 values of 8 bytes, which use the filter below 12%. The reader announces the 400 rows of the page, NULL
+    // rows included.
+    std::vector<std::string> values;
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(kNumRows / 2, 8, false, &values, &encoder, &decoder));
+    decoder->set_num_values(kNumRows);
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+    decoder->set_filter_share(share);
+
+    std::vector<uint8_t> nulls(kNumRows);
+    std::vector<uint8_t> filter(kNumRows);
+    size_t num_values_seen = 0;
+    for (size_t i = 0; i < kNumRows; ++i) {
+        nulls[i] = i % 2;
+        filter[i] = nulls[i] ? 1 : (num_values_seen++ % 4 == 0);
+    }
+    NullInfos null_infos = make_plain_null_infos(nulls);
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    Status st =
+            decoder->next_batch_with_nulls(kNumRows, null_infos, ColumnContentType::VALUE, dst.get(), filter.data());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    ASSERT_EQ(kNumRows, dst->size());
+
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+    bool used = false;
+    size_t next_value = 0;
+    for (size_t i = 0; i < kNumRows; ++i) {
+        if (nulls[i]) {
+            ASSERT_TRUE(dst->is_null(i)) << "row " << i;
+            continue;
+        }
+        const std::string& value = values[next_value++];
+        if (filter[i] || !dst->is_null(i)) {
+            ASSERT_FALSE(dst->is_null(i)) << "row " << i;
+            ASSERT_EQ(value, binary_column->get_slice(i).to_string()) << "row " << i;
+        } else {
+            used = true;
+        }
+    }
+    ASSERT_EQ(expect_used, used);
+}
+
+} // namespace
+
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsDecidesByTheShareItIsTold) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_share_with_nulls(0.09, true));
+    ASSERT_NO_FATAL_FAILURE(check_plain_share_with_nulls(0.0, true));
+    ASSERT_NO_FATAL_FAILURE(check_plain_share_with_nulls(0.11, true));
+    ASSERT_NO_FATAL_FAILURE(check_plain_share_with_nulls(0.13, false));
+    ASSERT_NO_FATAL_FAILURE(check_plain_share_with_nulls(1.0, false));
+}
+
+namespace {
+
+// The rows of a page of a numeric dictionary decoder that has NULL rows or not. `used` tells from the column
+// whether the filter was used: a row with a value that the filter drops is NULL then. The column is checked in
+// both cases against what the decoder promises.
+template <typename T>
+void decode_numeric_dict_batch_and_tell(Decoder* decoder, const std::vector<T>& page_values, size_t* page_pos,
+                                        const std::vector<uint8_t>& nulls, const std::vector<uint8_t>& filter,
+                                        bool with_null_infos, Column* dst, bool* used) {
+    const size_t prev_rows = dst->size();
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    Status st = with_null_infos ? decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE,
+                                                                 dst, filter.data())
+                                : decoder->next_batch(nulls.size(), ColumnContentType::VALUE, dst, filter.data());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    const size_t num_values = nulls.size() - null_infos.num_nulls;
+    const std::vector<T> values(page_values.begin() + *page_pos, page_values.begin() + *page_pos + num_values);
+    *page_pos += num_values;
+
+    auto* nullable = down_cast<NullableColumn*>(dst);
+    *used = false;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        if (!nulls[i] && !filter[i] && nullable->is_null(prev_rows + i)) {
+            *used = true;
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(verify_dict_batch<T>(dst, prev_rows, nulls, *used ? &filter : nullptr, values));
+}
+
+// The NULL rows of a batch of 200 rows: none, every fourth row, or a run of 60 NULL rows first.
+std::vector<uint8_t> make_dict_test_nulls(int null_pattern) {
+    std::vector<uint8_t> nulls(200, 0);
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        if (null_pattern == 1) {
+            nulls[i] = i % 4 == 3;
+        } else if (null_pattern == 2) {
+            nulls[i] = i < 60;
+        }
+    }
+    return nulls;
+}
+
+// A filter that keeps every NULL row and every third value, so the filter drops rows whatever the share is.
+std::vector<uint8_t> make_dict_test_filter(const std::vector<uint8_t>& nulls) {
+    std::vector<uint8_t> filter(nulls.size());
+    size_t num_values_seen = 0;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        filter[i] = nulls[i] ? 1 : (num_values_seen++ % 3 == 0);
+    }
+    return filter;
+}
+
+// A dictionary decoder of numbers uses the filter when the share that it is told is below 15%. The gate on the
+// size of the dictionary is open, and the batch is decoded in one go or run by run, and both decide by the share
+// of the range.
+template <tparquet::Type::type PT>
+void check_numeric_dict_filter_share() {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    struct Case {
+        // The NULL rows of the batch, see make_dict_test_nulls(). Pattern 2 has a run of NULL rows first, so the
+        // base class decodes the run of values on its own.
+        int null_pattern;
+        double share;
+        bool expect_used;
+    };
+    const std::vector<Case> cases = {{0, 0.14, true}, {0, 0.16, false}, {0, 0.0, true},  {0, 1.0, false},
+                                     {1, 0.14, true}, {1, 0.16, false}, {2, 0.14, true}, {2, 0.16, false}};
+    for (const Case& c : cases) {
+        SCOPED_TRACE("null pattern " + std::to_string(c.null_pattern) + ", share " + std::to_string(c.share));
+        const std::vector<uint8_t> nulls = make_dict_test_nulls(c.null_pattern);
+        const size_t num_values = count_non_null_rows(nulls);
+        const std::vector<T> values = make_dict_page_values<T>(num_values);
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<PT>(values, &encoder, &decoder));
+        decoder->_filter_mode = FilterMode::AUTO;
+        decoder->set_filter_share(c.share);
+        down_cast<CacheAwareDictDecoder*>(decoder.get())->_dict_size_threshold = 0;
+
+        const std::vector<uint8_t> filter = make_dict_test_filter(nulls);
+        auto dst = NullableColumn::create(make_sentinel_data_column<T>(nulls.size()), NullColumn::create());
+        size_t page_pos = 0;
+        bool used = false;
+        ASSERT_NO_FATAL_FAILURE(decode_numeric_dict_batch_and_tell<T>(decoder.get(), values, &page_pos, nulls, filter,
+                                                                      c.null_pattern != 0, dst.get(), &used));
+        ASSERT_EQ(c.expect_used, used);
+        ASSERT_EQ(values.size(), page_pos);
+    }
+}
+
+} // namespace
+
+TEST_F(ParquetEncodingTest, NumericDictDecidesByTheShareItIsTold) {
+    ASSERT_NO_FATAL_FAILURE(check_numeric_dict_filter_share<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_numeric_dict_filter_share<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_numeric_dict_filter_share<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_numeric_dict_filter_share<tparquet::Type::DOUBLE>());
+}
+
+// The decoder does not look at the share while the dictionary fits in the cache: the gate is closed and the
+// filter is ignored, even when the share is 0.
+TEST_F(ParquetEncodingTest, NumericDictIgnoresFilterWhileGateIsClosed) {
+    const std::vector<uint8_t> nulls(100, 0);
+    const std::vector<int32_t> values = make_dict_page_values<int32_t>(100);
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<tparquet::Type::INT32>(values, &encoder, &decoder));
+    decoder->_filter_mode = FilterMode::AUTO;
+    decoder->set_filter_share(0.0);
+    ASSERT_GT(down_cast<CacheAwareDictDecoder*>(decoder.get())->_dict_size_threshold, 0U);
+
+    const std::vector<uint8_t> filter(100, 0);
+    auto dst = NullableColumn::create(make_sentinel_data_column<int32_t>(100), NullColumn::create());
+    // next_batch_with_nulls() has no bypass for tests, and a page without NULL rows reaches it only from a test.
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    ASSERT_TRUE(
+            decoder->next_batch_with_nulls(100, null_infos, ColumnContentType::VALUE, dst.get(), filter.data()).ok());
+    ASSERT_FALSE(dst->has_null());
+    const int32_t* data = reinterpret_cast<const int32_t*>(dst->data_column_raw_ptr()->raw_data());
+    for (size_t i = 0; i < values.size(); ++i) {
+        ASSERT_EQ(values[i], data[i]) << "row " << i;
+    }
+}
+
+namespace {
+
+// A dictionary of 10 strings of `width` bytes and a page of `num_rows` rows over it.
+void make_string_dict_page(size_t num_rows, size_t width, std::vector<std::string>* values,
+                           std::unique_ptr<Encoder>* encoder, std::unique_ptr<Decoder>* decoder) {
+    std::vector<std::string> dict_values;
+    for (size_t i = 0; i < 10; ++i) {
+        dict_values.push_back(std::string(width, static_cast<char>('a' + i)));
+    }
+    values->clear();
+    std::vector<Slice> slices;
+    for (size_t i = 0; i < num_rows; ++i) {
+        values->push_back(dict_values[i % dict_values.size()]);
+    }
+    for (const auto& value : *values) {
+        slices.emplace_back(value);
+    }
+
+    const EncodingInfo* plain_encoding = nullptr;
+    const EncodingInfo* dict_encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::PLAIN, &plain_encoding);
+    (void)EncodingInfo::get(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::RLE_DICTIONARY, &dict_encoding);
+    ASSERT_TRUE(plain_encoding != nullptr);
+    ASSERT_TRUE(dict_encoding != nullptr);
+    ASSERT_TRUE(dict_encoding->create_encoder(encoder).ok());
+    ASSERT_TRUE((*encoder)->append(reinterpret_cast<uint8_t*>(slices.data()), slices.size()).ok());
+
+    std::unique_ptr<Encoder> dict_encoder;
+    ASSERT_TRUE(plain_encoding->create_encoder(&dict_encoder).ok());
+    size_t num_dicts = 0;
+    ASSERT_TRUE((*encoder)->encode_dict(dict_encoder.get(), &num_dicts).ok());
+    std::unique_ptr<Decoder> dict_decoder;
+    ASSERT_TRUE(plain_encoding->create_decoder(&dict_decoder).ok());
+    ASSERT_TRUE(dict_decoder->set_data(dict_encoder->build()).ok());
+
+    ASSERT_TRUE(dict_encoding->create_decoder(decoder).ok());
+    ASSERT_TRUE((*decoder)->set_dict(config::vector_chunk_size, num_dicts, dict_decoder.get()).ok());
+    ASSERT_TRUE((*decoder)->set_data((*encoder)->build()).ok());
+    (*decoder)->_filter_mode = FilterMode::AUTO;
+    down_cast<CacheAwareDictDecoder*>(decoder->get())->_dict_size_threshold = 0;
+}
+
+} // namespace
+
+// The dictionary decoder of strings uses the filter when the share that it is told is below 20%, and below 30%
+// when the average value of the dictionary is wider than 64 bytes.
+TEST_F(ParquetEncodingTest, StringDictDecidesByWidthAndTheShareItIsTold) {
+    struct Case {
+        size_t width;
+        // Every fourth row is NULL, or none.
+        bool with_nulls;
+        double share;
+        bool expect_used;
+    };
+    const std::vector<Case> cases = {{8, false, 0.19, true},   {8, false, 0.21, false},  {64, false, 0.19, true},
+                                     {64, false, 0.21, false}, {64, false, 0.29, false}, {65, false, 0.29, true},
+                                     {65, false, 0.31, false}, {200, false, 0.29, true}, {200, false, 0.31, false},
+                                     {8, true, 0.19, true},    {8, true, 0.21, false},   {65, true, 0.29, true},
+                                     {65, true, 0.31, false}};
+    for (const Case& c : cases) {
+        SCOPED_TRACE("width " + std::to_string(c.width) + ", with NULL " + std::to_string(c.with_nulls) + ", share " +
+                     std::to_string(c.share));
+        const std::vector<uint8_t> nulls = make_dict_test_nulls(c.with_nulls ? 1 : 0);
+        const size_t num_values = count_non_null_rows(nulls);
+        std::vector<std::string> values;
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_string_dict_page(num_values, c.width, &values, &encoder, &decoder));
+        decoder->set_filter_share(c.share);
+
+        const std::vector<uint8_t> filter = make_dict_test_filter(nulls);
+        auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        NullInfos null_infos = make_dict_null_infos(nulls);
+        Status st = c.with_nulls
+                            ? decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE,
+                                                             dst.get(), filter.data())
+                            : decoder->next_batch(nulls.size(), ColumnContentType::VALUE, dst.get(), filter.data());
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(nulls.size(), dst->size());
+
+        auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+        bool used = false;
+        size_t next_value = 0;
+        for (size_t i = 0; i < nulls.size(); ++i) {
+            if (nulls[i]) {
+                ASSERT_TRUE(dst->is_null(i)) << "row " << i;
+                continue;
+            }
+            const std::string& value = values[next_value++];
+            if (filter[i] || !dst->is_null(i)) {
+                ASSERT_FALSE(dst->is_null(i)) << "row " << i;
+                ASSERT_EQ(value, binary_column->get_slice(i).to_string()) << "row " << i;
+            } else {
+                used = true;
+                ASSERT_EQ(0U, binary_column->get_slice(i).size) << "row " << i;
+            }
+        }
+        ASSERT_EQ(c.expect_used, used);
+    }
 }
 
 } // namespace starrocks::parquet

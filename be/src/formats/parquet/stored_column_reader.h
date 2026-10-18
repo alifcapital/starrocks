@@ -165,12 +165,26 @@ private:
                                           starrocks::Column* dst, bool append_default,
                                           const FilterData* filter = nullptr) = 0;
 
+    // We offer the filter of the rows that are decoded now to the decoder and let it decide whether to use it. The
+    // decoder knows the encoding, the width of the values and the size of its dictionary. Required and Optional
+    // readers have one value per row, so the filter of the rows is the filter of the values.
     virtual const FilterData* _convert_filter_row_to_value(const Filter* filter, size_t row_readed) {
         if (!filter || !config::parquet_push_down_filter_to_decoder_enable) {
             return nullptr;
         }
-        // based on benchmark we added some threshold here, selectivity < 0.2
-        return SIMD::count_nonzero(*filter) * 1.0 / filter->size() < 0.2 ? filter->data() + row_readed : nullptr;
+        return filter->data() + row_readed;
+    }
+
+    // The decoder decides by the share of the rows that the filter of the read range keeps. We count the rows once
+    // for the range, before the first decode, and the column chunk reader tells the share to the decoder of the
+    // page that is decoded, and to the next decoder when the range goes on in a page of another encoding. So the
+    // pages, the batches and the runs of one range decide alike, and no decoder counts the filter.
+    virtual void _set_filter_share(const Filter* filter) {
+        if (!filter || filter->empty() || !config::parquet_push_down_filter_to_decoder_enable) {
+            return;
+        }
+        _reader->set_filter_share(static_cast<double>(SIMD::count_nonzero(*filter)) /
+                                  static_cast<double>(filter->size()));
     }
 };
 

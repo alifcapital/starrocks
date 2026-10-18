@@ -556,6 +556,54 @@ TEST_P(StoredColumnReaderTest, RandomReads) {
     }
 }
 
+// The reader offers the decoder the filter of the rows that it decodes, whatever the share of the rows that the
+// filter keeps, and leaves the decision to the decoder. A Repeated reader has more values than rows and offers
+// none. The switch turns the offer off.
+TEST_P(StoredColumnReaderTest, OffersTheFilterOfTheDecodedRowsToTheDecoder) {
+    ASSERT_NO_FATAL_FAILURE(_init());
+    auto* reader = static_cast<StoredColumnReaderImpl*>(_reader.get());
+    // The filter keeps all rows but one.
+    Filter filter(16, 1);
+    filter[3] = 0;
+
+    const FilterData* offered = reader->_convert_filter_row_to_value(&filter, 5);
+    if (GetParam() == ReaderCase::REPEATED) {
+        EXPECT_EQ(nullptr, offered);
+    } else {
+        EXPECT_EQ(filter.data() + 5, offered);
+    }
+    EXPECT_EQ(nullptr, reader->_convert_filter_row_to_value(nullptr, 5));
+
+    const bool enabled = config::parquet_push_down_filter_to_decoder_enable;
+    config::parquet_push_down_filter_to_decoder_enable = false;
+    EXPECT_EQ(nullptr, reader->_convert_filter_row_to_value(&filter, 5));
+    config::parquet_push_down_filter_to_decoder_enable = enabled;
+}
+
+// The reader counts the rows that the filter keeps once for a read range, and the decoder of the column chunk gets
+// the share: the decoder that is created for the first page of the range, and the one that is already there for
+// the next range. A range that crosses a page boundary gets the share of the whole range. A Repeated reader offers
+// no filter, so it tells no share.
+TEST_P(StoredColumnReaderTest, TellsTheDecoderTheShareOfTheReadRange) {
+    ASSERT_NO_FATAL_FAILURE(_init(true));
+    auto* reader = static_cast<StoredColumnReaderImpl*>(_reader.get());
+    const bool offers_filter = GetParam() != ReaderCase::REPEATED;
+    auto decoder_share = [&reader]() { return reader->_reader->_cur_decoder->_filter_share; };
+
+    // The first read creates the decoder after the share is counted: the rows 0..127 are in two pages of 64 rows,
+    // and every other row is kept, so the share is 0.5 for both pages.
+    ASSERT_NO_FATAL_FAILURE(_run(std::vector<ReadOp>{ReadOp{0, 128, FilterKind::ALTERNATE}}));
+    EXPECT_DOUBLE_EQ(offers_filter ? 0.5 : 1.0, decoder_share());
+
+    // The decoder exists, and gets the share of the next range even when no row of it is kept.
+    ASSERT_NO_FATAL_FAILURE(_run(std::vector<ReadOp>{ReadOp{128, 160, FilterKind::ZERO}}));
+    EXPECT_DOUBLE_EQ(offers_filter ? 0.0 : 1.0, decoder_share());
+
+    // The first 8 rows of the range are dropped and the other 24 are kept.
+    ASSERT_NO_FATAL_FAILURE(_run(std::vector<ReadOp>{ReadOp{160, 192, FilterKind::ZERO_PREFIX, 8}}));
+    EXPECT_DOUBLE_EQ(offers_filter ? 0.75 : 1.0, decoder_share());
+}
+
 INSTANTIATE_TEST_SUITE_P(AllReaders, StoredColumnReaderTest,
                          testing::Values(ReaderCase::REQUIRED, ReaderCase::OPTIONAL, ReaderCase::OPTIONAL_WITH_LEVELS,
                                          ReaderCase::REPEATED),

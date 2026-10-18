@@ -136,15 +136,12 @@ public:
             break;
         }
         case VALUE: {
-#ifdef BE_TEST
-            return _next_batch_value(count, dst, filter);
-#else
-            if (_get_dict_size() > _dict_size_threshold && config::parquet_cache_aware_dict_decoder_enable) {
-                return _next_batch_value(count, dst, filter);
-            } else {
-                return _next_batch_value(count, dst, nullptr);
+#ifndef BE_TEST
+            if (!_filter_gate_open()) {
+                filter = nullptr;
             }
 #endif // BE_TEST
+            return _next_batch_value(count, dst, _select_filter(filter));
         }
         default:
             return Status::NotSupported("read type not supported");
@@ -152,14 +149,15 @@ public:
         return Status::OK();
     }
 
+    // The decision is made here, once for the batch. A path that reads the batch run by run passes the filter of
+    // each run to next_batch(), which makes the same decision again, because it depends on the share of the read
+    // range and not on the run.
     Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                                  const FilterData* filter) override {
-        if (_get_dict_size() > _dict_size_threshold && config::parquet_cache_aware_dict_decoder_enable) {
-            return _do_next_batch_with_nulls(count, null_infos, content_type, dst, filter);
-        } else {
-            return _do_next_batch_with_nulls(count, null_infos, content_type, dst, nullptr);
+        if (!_filter_gate_open()) {
+            filter = nullptr;
         }
-        return Status::OK();
+        return _do_next_batch_with_nulls(count, null_infos, content_type, dst, _select_filter(filter));
     }
 
     // `src_data` holds the `num_non_nulls` values of the batch and must have one more readable element after them.
@@ -234,6 +232,23 @@ protected:
     virtual size_t _get_dict_size() const = 0;
     // The number of values of the dictionary, where _get_dict_size is its size in bytes.
     virtual size_t _get_num_dict_values() const = 0;
+    // The largest share of the rows of a read range that the filter may keep for the filtered decode to be faster,
+    // see _use_filter(). It depends on the type of the values and, for strings, on their width.
+    virtual double _max_filter_share() const = 0;
+
+    // We measured that with a dictionary inside the L2 cache the filtered decode is slower than the plain one
+    // for numbers (2 to 11 times) and for most strings, because the lookups hit the cache and the filtered decode
+    // adds a branch per row. So only a dictionary larger than the cache may gain from the filter. The switch
+    // turns the filter off for all dictionary decoders.
+    bool _filter_gate_open() const {
+        return _get_dict_size() > _dict_size_threshold && config::parquet_cache_aware_dict_decoder_enable;
+    }
+
+    // Returns `filter` when the decoder should use it, and nullptr when it should not.
+    const FilterData* _select_filter(const FilterData* filter) const {
+        return _use_filter(filter, _max_filter_share()) ? filter : nullptr;
+    }
+
     virtual Status _next_batch_value(size_t count, Column* dst, const FilterData* filter) = 0;
     virtual Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                              Column* dst, const FilterData* filter) = 0;
@@ -388,6 +403,13 @@ private:
     size_t _get_dict_size() const override { return _dict.size() * SIZE_OF_TYPE; }
     size_t _get_num_dict_values() const override { return _dict.size(); }
 
+    // With a dictionary larger than the L2 cache, we measured the share where the filtered decode and the plain
+    // decode take the same time at 17% without NULL and at about 10% with 10% NULL, for 4 and 8 byte values. We use
+    // 15%. The filtered decode gains below it in both cases, except in a range with NULL rows between 10% and 15%,
+    // where it loses a little, and it loses above it in both cases. A limit of 17% would lose more in the range
+    // with NULL rows, and a limit of 10% would leave the gain between 10% and 17% unused when there is no NULL.
+    double _max_filter_share() const override { return 0.15; }
+
     Status _next_batch_value(size_t count, Column* dst, const FilterData* filter) override {
         FixedLengthColumn<T>* data_column /* = nullptr */;
         if (dst->is_nullable()) {
@@ -525,6 +547,7 @@ public:
 
         // reserve enough memory to use append_strings_overflow
         const size_t total_length = _dict_data.size();
+        _avg_value_length = num_values > 0 ? total_length / num_values : 0;
         raw::stl_vector_resize_uninitialized(&_dict_data, total_length + Column::APPEND_OVERFLOW_MAX_SIZE);
 
         // _dict_data does not move any more, so the values can point into it
@@ -631,6 +654,12 @@ public:
 private:
     size_t _get_dict_size() const override { return _dict_data.size(); }
     size_t _get_num_dict_values() const override { return _dict.size(); }
+
+    // With a dictionary larger than the L2 cache, we measured the share where the filtered decode and the plain
+    // decode take the same time at 16% to 20% for values of 8 and 32 bytes and at about 30% for 128 bytes. The
+    // filtered decode skips the lookup and the copy of a dropped value, so we expect it to gain more on wide
+    // values. We use 20%, and 30% when the average value of the dictionary is wider than 64 bytes.
+    double _max_filter_share() const override { return _avg_value_length > 64 ? 0.3 : 0.2; }
 
     Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                      Column* dst, const FilterData* filter) override {
@@ -803,6 +832,8 @@ private:
     FixedSliceArray _dict;
     FixedSliceArray _slices;
     size_t _max_value_length = 0;
+    // The average length of a value of the dictionary.
+    size_t _avg_value_length = 0;
     std::vector<uint32_t> _temp_lengths;
     std::vector<char*> _temp_datas;
 };

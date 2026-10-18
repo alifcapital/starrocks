@@ -223,6 +223,8 @@ Status ColumnChunkReader::_parse_data_page(tparquet::PageType::type page_type) {
     }
 
     RETURN_IF_ERROR(_cur_decoder->set_type_length(_type_length));
+    _cur_decoder->set_num_values(_num_values);
+    _cur_decoder->set_filter_share(_filter_share);
     RETURN_IF_ERROR(_cur_decoder->set_data(data));
 
     _page_parse_state = PAGE_DATA_PARSED;

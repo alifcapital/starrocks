@@ -92,6 +92,8 @@ private:
         return nullptr;
     }
 
+    void _set_filter_share(const Filter* filter) override {}
+
 private:
     const ParquetField* _field = nullptr;
 
@@ -350,6 +352,7 @@ Status StoredColumnReaderImpl::_read(const Range<uint64_t>& range, const starroc
                                      starrocks::parquet::ColumnContentType content_type, starrocks::Column* dst) {
     uint64_t row_count = range.span_size();
     size_t row_readed = 0;
+    _set_filter_share(filter);
     while (row_readed < row_count) {
         if (_num_values_left_in_cur_page > 0) {
             size_t to_read = static_cast<size_t>(row_count) - row_readed;

@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -51,12 +53,40 @@ public:
     virtual std::string to_string() const { return "Encoder"; }
 };
 
+// The reader offers every decoder the filter of the rows that the query keeps, and each decoder decides whether
+// to use it. A decoder that uses the filter does not decode the value of a row that the filter drops: such a row
+// gets NULL when the destination is nullable, and a zero or an empty value when it is not. A decoder that does not
+// use the filter decodes every row, so a dropped row holds its real value. The caller removes the dropped rows
+// afterwards, so it has to accept both.
+enum class FilterMode : uint8_t {
+    // The decoder uses the filter when it expects the filtered decode to be faster, by the share of the rows of
+    // the read range that the filter keeps (see Decoder::set_filter_share()).
+    AUTO,
+    // The decoder uses every filter it is offered, if it can use a filter at all. Tests and benchmarks set it to
+    // see the filtered decode at any share.
+    ALWAYS,
+};
+
 class Decoder {
 public:
     Decoder() = default;
     virtual ~Decoder() = default;
 
     virtual std::string to_string() const { return "Decoder"; }
+
+    // Tells the decoder how many values the next page holds, NULL values included. The reader calls it before
+    // set_data(). A decoder that chooses how to decode by the width of a value takes the width from the size of
+    // the page and this number, so it does not have to scan the page. The other decoders ignore it, and 0 or no
+    // call means that the number is not known.
+    virtual void set_num_values(size_t num_values) {}
+
+    // Tells the decoder the share of the rows that the filter of the current read range keeps, from 0 to 1. The
+    // reader counts the rows once for the range, and tells every decoder that the range uses before the decoder
+    // decodes, so a decoder does not count the filter and all the batches and runs of the range get the same
+    // answer. A decoder that can use a filter compares the share with the largest share at which a filtered decode
+    // still pays off, see _use_filter(). A decoder that is not told the share takes it as 1, a filter that keeps
+    // every row.
+    void set_filter_share(double share) { _filter_share = share; }
 
     virtual Status set_dict(int chunk_size, size_t num_values, Decoder* decoder) {
         return Status::NotSupported("set_dict is not supported");
@@ -92,6 +122,27 @@ public:
 
 protected:
     void _next_null_column(size_t count, const NullInfos& null_infos, NullableColumn* dst);
+
+    // Tells whether to use `filter`. The decoder passes the largest share of the rows that the filter may keep for
+    // the filtered decode to pay off, `max_share`. We expect the filtered decode to be slower than the plain one
+    // when the filter keeps most of the rows, because it works row by row and gains only on the rows that it
+    // drops. So we use the filter when the share that the reader told is below `max_share`. The share is the same
+    // for the whole read range, so every call of the range decides alike, whatever its size. A decoder in
+    // FilterMode::ALWAYS uses any filter.
+    bool _use_filter(const FilterData* filter, double max_share) const {
+        return filter != nullptr && (_filter_mode == FilterMode::ALWAYS || _filter_share < max_share);
+    }
+
+    // The share of the rows of the read range that the filter keeps.
+    double _filter_share = 1.0;
+
+#ifdef BE_TEST
+    // The unit tests give a decoder filters of any share and expect it to use them, so a test build starts with
+    // ALWAYS. The tests of the decision itself set AUTO and the share.
+    FilterMode _filter_mode = FilterMode::ALWAYS;
+#else
+    FilterMode _filter_mode = FilterMode::AUTO;
+#endif
 };
 
 class EncodingInfo {
