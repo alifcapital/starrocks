@@ -37,6 +37,31 @@ import org.junit.jupiter.api.Test;
 
 public class JoinTest extends PlanTestBase {
 
+    // The side of the outer LEFT JOIN that supplies NULLs drops its rows whose key is NULL, so the key is not NULL
+    // inside it. The key comes from the side of the inner LEFT JOIN that supplies NULLs, directly or through a GROUP BY
+    // on it, so the inner join keeps no row that it extends with NULLs and becomes an INNER JOIN.
+    @Test
+    public void testOuterJoinKeyIsNotNullOnNullSide() throws Exception {
+        String direct = "select * from t0 left join (select t1.v4, t2.v7 from t1 left join t2 on t1.v5 = t2.v8) s "
+                + "on t0.v1 = s.v7";
+        String plan = getFragmentPlan(direct);
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, "OUTER JOIN"), plan);
+        assertContains(plan, "INNER JOIN");
+
+        String grouped = "select * from t0 left join (select t2.v8, sum(t1.v4) as s4 from t1 left join t2 "
+                + "on t1.v5 = t2.v8 group by t2.v8) s on t0.v1 = s.v8";
+        plan = getFragmentPlan(grouped);
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, "OUTER JOIN"), plan);
+        assertContains(plan, "INNER JOIN");
+
+        // The preserved side of an outer join keeps the rows without a match, so nothing is derived for it.
+        String preserved = "select * from (select t1.v4, t2.v7 from t1 left join t2 on t1.v5 = t2.v8) s "
+                + "left join t0 on s.v7 = t0.v1";
+        plan = getFragmentPlan(preserved);
+        Assertions.assertEquals(2, StringUtils.countMatches(plan, "OUTER JOIN"), plan);
+        assertNotContains(plan, "INNER JOIN");
+    }
+
     @Test
     public void testIsNullPredicatePushdownClear() throws Exception {
         {
@@ -1843,11 +1868,11 @@ public class JoinTest extends PlanTestBase {
                 "SELECT 1 FROM join1 RIGHT ANTI JOIN join2 on join1.id = join2.id and join2.dt = 1 FULL OUTER JOIN "
                         + "pushdown_test on join2.dt = pushdown_test.k3 WHERE join2.value != join2.value";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "8:HASH JOIN\n" +
+        assertContains(plan, "4:HASH JOIN\n" +
                 "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
                 "  |  equal join conjunct: 4: dt = 9: k3");
-        assertContains(plan, "4:HASH JOIN\n" +
+        assertContains(plan, "8:HASH JOIN\n" +
                 "  |  join op: LEFT ANTI JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
                 "  |  equal join conjunct: 5: id = 2: id\n" +
@@ -1860,11 +1885,11 @@ public class JoinTest extends PlanTestBase {
                 "SELECT 1 FROM join1 RIGHT ANTI JOIN join2 on join1.id = join2.id FULL OUTER JOIN "
                         + "pushdown_test on join2.dt = pushdown_test.k3 WHERE join2.value != join2.value";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "8:HASH JOIN\n" +
+        assertContains(plan, "4:HASH JOIN\n" +
                 "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
                 "  |  equal join conjunct: 4: dt = 9: k3");
-        assertContains(plan, "4:HASH JOIN\n" +
+        assertContains(plan, "8:HASH JOIN\n" +
                 "  |  join op: LEFT ANTI JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
                 "  |  equal join conjunct: 5: id = 2: id");

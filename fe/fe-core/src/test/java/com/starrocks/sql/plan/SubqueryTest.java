@@ -456,7 +456,7 @@ public class SubqueryTest extends PlanTestBase {
                     "'correlate scalar subquery result must 1 row')\n" +
                     "  |  \n" +
                     "  4:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 1: v1 = 4: v4");
             assertContains(plan, "  2:AGGREGATE (update finalize)\n" +
@@ -487,7 +487,7 @@ public class SubqueryTest extends PlanTestBase {
                     "'correlate scalar subquery result must 1 row')\n" +
                     "  |  \n" +
                     "  4:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 1: v1 = 4: v4");
             assertContains(plan, "2:AGGREGATE (update finalize)\n" +
@@ -497,7 +497,7 @@ public class SubqueryTest extends PlanTestBase {
                     "  1:OlapScanNode\n" +
                     "     TABLE: t1\n" +
                     "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: 4: v4 = 10, 5: v5 < 2\n" +
+                    "     PREDICATES: 4: v4 IS NOT NULL, 4: v4 = 10, 5: v5 < 2\n" +
                     "     partitions=0/1\n" +
                     "     rollup: t1\n" +
                     "     tabletRatio=0/0\n" +
@@ -559,22 +559,22 @@ public class SubqueryTest extends PlanTestBase {
                     "      WHERE t0.v1 = t1.v4\n" +
                     ");";
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "9:Project\n" +
+            assertContains(plan, "8:Project\n" +
                     "  |  <slot 1> : 1: v1\n" +
                     "  |  <slot 4> : 4: sum\n" +
                     "  |  \n" +
-                    "  8:SELECT\n" +
+                    "  7:SELECT\n" +
                     "  |  predicates: 4: sum > 8: v5\n" +
                     "  |  \n" +
-                    "  7:Project\n" +
+                    "  6:Project\n" +
                     "  |  <slot 1> : 1: v1\n" +
                     "  |  <slot 4> : 4: sum\n" +
                     "  |  <slot 8> : 10: anyValue\n" +
                     "  |  <slot 11> : assert_true((9: countRows IS NULL) OR (9: countRows <= 1), " +
                     "'correlate scalar subquery result must 1 row')\n" +
                     "  |  \n" +
-                    "  6:HASH JOIN\n" +
-                    "  |  join op: RIGHT OUTER JOIN (PARTITIONED)\n" +
+                    "  5:HASH JOIN\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 5: v4 = 1: v1");
             assertContains(plan, "1:AGGREGATE (update finalize)\n" +
@@ -743,7 +743,7 @@ public class SubqueryTest extends PlanTestBase {
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 16: max = 6: v6");
             assertContains(plan, "  9:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 1: v1 = 13: v8");
             assertContains(plan, "  4:HASH JOIN\n" +
@@ -764,7 +764,7 @@ public class SubqueryTest extends PlanTestBase {
                     "  |  join op: CROSS JOIN\n" +
                     "  |  colocate: false, reason: ");
             assertContains(plan, "  5:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 2: v2 = 8: v5");
         }
@@ -778,7 +778,7 @@ public class SubqueryTest extends PlanTestBase {
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 4: v4 = 1: v1");
             assertContains(plan, "  5:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 2: v2 = 8: v5");
         }
@@ -790,13 +790,13 @@ public class SubqueryTest extends PlanTestBase {
                     "  |  join op: CROSS JOIN\n" +
                     "  |  colocate: false, reason: ");
             assertContains(plan, "HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 2: v2 = 8: v5");
             assertContains(plan, "OlapScanNode\n" +
                     "     TABLE: t1\n" +
                     "     PREAGGREGATION: ON\n" +
-                    "     PREDICATES: 8: v5 = 10, 9: v6 != 3\n");
+                    "     PREDICATES: 8: v5 IS NOT NULL, 8: v5 = 10, 9: v6 != 3\n");
         }
         {
             String sql = "select * from t0 " +
@@ -816,17 +816,17 @@ public class SubqueryTest extends PlanTestBase {
                     "and t0.v3 = (select v4 from t1 where t0.v2 = t1.v5) " +
                     "and t1.v6 = (select v8 from t2 where t2.v9 = t0.v3)";
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "  15:HASH JOIN\n" +
+            assertContains(plan, "  16:HASH JOIN\n" +
                     "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 1: v1 = 4: v4\n" +
                     "  |  equal join conjunct: 14: v8 = 6: v6");
-            assertContains(plan, "  9:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+            assertContains(plan, "  10:HASH JOIN\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 3: v3 = 13: v9");
             assertContains(plan, "  4:HASH JOIN\n" +
-                    "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
+                    "  |  join op: INNER JOIN (BROADCAST)\n" +
                     "  |  colocate: false, reason: \n" +
                     "  |  equal join conjunct: 2: v2 = 8: v5");
         }

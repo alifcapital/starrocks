@@ -127,6 +127,7 @@ import com.starrocks.sql.optimizer.rule.tree.PruneSubfieldsForComplexType;
 import com.starrocks.sql.optimizer.rule.tree.PushDownAggregateRule;
 import com.starrocks.sql.optimizer.rule.tree.PushDownDistinctAggregateRule;
 import com.starrocks.sql.optimizer.rule.tree.PushDownNonGroupedAggregateBelowUnion;
+import com.starrocks.sql.optimizer.rule.tree.ReduceOuterJoinRule;
 import com.starrocks.sql.optimizer.rule.tree.RemoveUselessScanOutputPropertyRule;
 import com.starrocks.sql.optimizer.rule.tree.SemiJoinDeduplicateRule;
 import com.starrocks.sql.optimizer.rule.tree.SimplifyCaseWhenPredicateRule;
@@ -588,6 +589,17 @@ public class QueryOptimizer extends Optimizer {
         // because of the Filter node needs to be merged first to avoid the Limit node
         // cannot merge
         scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_PREDICATE_RULES);
+        // The predicates are in the operators now, so the rule sees them next to the joins that they reduce. The
+        // inner joins that it makes get their pushdown and runtime filters from the rules that run later. We keep the
+        // outer joins of a query that a materialized view with joins may answer: the view rewrite matches the join
+        // types of the query with the ones of the view, and an outer join of the view does not match an inner join.
+        boolean hasJoinMvCandidates = context.getQueryMaterializationContext() != null
+                && context.getQueryMaterializationContext().getValidCandidateMVs().stream()
+                .anyMatch(MaterializationContext::hasMultiTables);
+        if (!hasJoinMvCandidates) {
+            deriveLogicalProperty(tree);
+            tree = new ReduceOuterJoinRule().rewrite(tree, rootTaskContext);
+        }
 
         // We run the rule after predicate pushdown: we want the join of a LargeInPredicate on the operator that the
         // InPredicate would filter, as low in the plan as the IN would go
