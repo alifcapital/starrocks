@@ -98,6 +98,7 @@ struct HdfsScannerStats {
     int64_t group_dict_decode_ns = 0;
     // io coalesce
     int64_t active_lazy_coalesce_together = 0;
+    int64_t active_lazy_coalesce_together_bytes = 0;
     int64_t active_lazy_coalesce_seperately = 0;
     int64_t parquet_lazy_col_skip_rows = 0;
     int64_t parquet_lazy_slot_triggered = 0;
@@ -457,7 +458,12 @@ struct HdfsScannerContext {
     std::vector<ExprContext*> conjunct_ctxs_of_non_existed_slots;
 
     // TODO: probably should be removed in later version.
+    // Used by ORC only.
     std::atomic<int32_t>* lazy_column_coalesce_counter = nullptr;
+    // Used by Parquet only: row groups of one scan that finished reading, and how many of them needed their
+    // lazy columns. Both point to counters owned by the scan node and shared by all its scanners.
+    std::atomic<int64_t>* lazy_coalesce_row_groups_finished = nullptr;
+    std::atomic<int64_t>* lazy_coalesce_row_groups_needed = nullptr;
     ColumnIdToGlobalDictMap* global_dictmaps = &EMPTY_GLOBAL_DICTMAPS;
 
     // The rows that each compound conjunct (by its index in conjuncts.scanner_ctxs) saw and kept in this

@@ -19,6 +19,7 @@
 #include <testutil/assert.h>
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -55,6 +56,7 @@
 #include "storage/column_expr_predicate.h"
 #include "storage/runtime_filter_predicate.h"
 #include "testutil/exprs_test_helper.h"
+#include "testutil/scoped_updater.h"
 
 namespace starrocks::parquet {
 
@@ -341,6 +343,12 @@ private:
     tparquet::SchemaElement* _create_schema_element(const std::string& col_name, tparquet::Type::type type);
     Status _create_filemeta(FileMetaData** file_meta, GroupReaderParam* param);
     GroupReaderParam* _create_group_reader_param();
+    // Prepares a row group whose active column (slot 0) has one range of 1 MiB at offset 0 and, if
+    // `has_lazy_column`, whose lazy column (slot 1) has `lazy_ranges`. The row group reads from a new shared
+    // buffered stream kept in _sb_stream, so the previous row group of the test must be destroyed first.
+    StatusOr<std::unique_ptr<GroupReader>> _prepare_group_with_lazy_ranges(
+            GroupReaderParam* param, bool has_lazy_column,
+            std::vector<io::SharedBufferedInputStream::IORange> lazy_ranges);
     static ChunkPtr _create_chunk(GroupReaderParam* param);
 
     static void _check_int32_column(Column* column, size_t start, size_t count);
@@ -354,6 +362,7 @@ private:
     // The number of rows of the row groups that _create_filemeta() describes.
     size_t _row_group_num_rows = 12;
     ObjectPool _pool;
+    std::shared_ptr<io::SharedBufferedInputStream> _sb_stream;
 };
 
 ChunkPtr GroupReaderTest::_create_chunk(GroupReaderParam* param) {
@@ -562,6 +571,34 @@ GroupReaderParam* GroupReaderTest::_create_group_reader_param() {
     param->stats = &g_hdfs_stats;
     param->scanner_ctx = scanner_ctx;
     return param;
+}
+
+StatusOr<std::unique_ptr<GroupReader>> GroupReaderTest::_prepare_group_with_lazy_ranges(
+        GroupReaderParam* param, bool has_lazy_column,
+        std::vector<io::SharedBufferedInputStream::IORange> lazy_ranges) {
+    FileMetaData* file_meta;
+    RETURN_IF_ERROR(_create_filemeta(&file_meta, param));
+    param->chunk_size = config::vector_chunk_size;
+    param->file = _create_file();
+    param->file_metadata = file_meta;
+    _sb_stream = std::make_shared<io::SharedBufferedInputStream>(std::make_shared<MockInputStream>(), "mock",
+                                                                 1024L * 1024 * 1024);
+    param->sb_stream = _sb_stream.get();
+
+    auto group_reader = std::make_unique<GroupReader>(*param, 0, std::make_shared<SkipRowsContext>(), 0);
+    RETURN_IF_ERROR(group_reader->init());
+    group_reader->_column_readers.clear();
+    group_reader->_column_materializer->clear_classification();
+    group_reader->_column_materializer->add_active_column(0);
+    group_reader->_column_readers.emplace(
+            0, std::make_unique<MockIORangeColumnReader>(
+                       std::vector<io::SharedBufferedInputStream::IORange>{{0, 1024 * 1024}}));
+    if (has_lazy_column) {
+        group_reader->_column_materializer->add_lazy_column(1);
+        group_reader->_column_readers.emplace(1, std::make_unique<MockIORangeColumnReader>(std::move(lazy_ranges)));
+    }
+    RETURN_IF_ERROR(group_reader->prepare());
+    return std::move(group_reader);
 }
 
 TEST_F(GroupReaderTest, TestInit) {
@@ -1521,34 +1558,274 @@ TEST_F(GroupReaderTest, ReadRangePlannerDeduplicateSortsBySizeWhenOffsetsEqual) 
     EXPECT_EQ(50, ranges[1].size);
 }
 
-// Covers: ReadRangePlanner::should_coalesce_active_lazy returns true
-//         when counter is nullptr (default).
+// ── Lazy column io coalescing ────────────────────────────────────────────────
 
-TEST_F(GroupReaderTest, ReadRangePlannerShouldCoalesceReturnsTrueWhenCounterIsNull) {
+namespace {
+
+constexpr int64_t kMiB = 1024 * 1024;
+
+// The two counters that all row groups of one scan share.
+struct LazyCoalesceCounters {
+    std::atomic<int64_t> finished{0};
+    std::atomic<int64_t> needed{0};
+
+    void set(int64_t finished_value, int64_t needed_value) {
+        finished.store(finished_value);
+        needed.store(needed_value);
+    }
+
+    void attach(GroupReaderParam* param) {
+        param->lazy_coalesce_row_groups_finished = &finished;
+        param->lazy_coalesce_row_groups_needed = &needed;
+    }
+};
+
+// The profile counters of coalescing decisions, read before and after a row group is prepared.
+struct CoalesceDecisionStats {
+    int64_t together = 0;
+    int64_t together_bytes = 0;
+    int64_t seperately = 0;
+
+    static CoalesceDecisionStats current() {
+        return {g_hdfs_stats.active_lazy_coalesce_together, g_hdfs_stats.active_lazy_coalesce_together_bytes,
+                g_hdfs_stats.active_lazy_coalesce_seperately};
+    }
+};
+
+} // namespace
+
+// Covers: ReadRangePlanner::should_coalesce_active_lazy coalesces when the scan has no counters.
+TEST_F(GroupReaderTest, ReadRangePlannerShouldCoalesceWithoutCountersIsTrue) {
     auto* param = _create_group_reader_param();
-    param->lazy_column_coalesce_counter = nullptr;
 
     std::unordered_map<int32_t, std::unique_ptr<ColumnReader>> readers;
     ReadRangePlanner planner(*param, &readers);
 
-    EXPECT_TRUE(planner.should_coalesce_active_lazy());
+    EXPECT_TRUE(planner.should_coalesce_active_lazy(64 * kMiB));
 }
 
-// Covers: ReadRangePlanner::should_coalesce_active_lazy reads
-//         the adaptive counter.
-
-TEST_F(GroupReaderTest, ReadRangePlannerShouldCoalesceReadsCounter) {
+// Covers: ReadRangePlanner::should_coalesce_active_lazy coalesces only if the share of row groups that need
+//         lazy columns is bigger than lazy_bytes / (lazy_bytes + io_coalesce_read_max_distance_size).
+TEST_F(GroupReaderTest, ReadRangePlannerShouldCoalesceByShareOfRowGroups) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
     auto* param = _create_group_reader_param();
-    std::atomic<int32_t> counter = -1;
-    param->lazy_column_coalesce_counter = &counter;
+    LazyCoalesceCounters counters;
+    counters.attach(param);
 
     std::unordered_map<int32_t, std::unique_ptr<ColumnReader>> readers;
     ReadRangePlanner planner(*param, &readers);
 
-    EXPECT_FALSE(planner.should_coalesce_active_lazy());
+    // 4 of 10 row groups need lazy columns.
+    counters.set(10, 4);
+    // 128 KiB is wasted in 6 row groups, one request is saved in 4: coalesce.
+    EXPECT_TRUE(planner.should_coalesce_active_lazy(128 * 1024));
+    // 4 MiB is wasted in 6 row groups, one request is saved in 4: do not coalesce.
+    EXPECT_FALSE(planner.should_coalesce_active_lazy(4 * kMiB));
 
-    counter.store(0, std::memory_order_relaxed);
-    EXPECT_TRUE(planner.should_coalesce_active_lazy());
+    // For 4 MiB the share must be bigger than 80%: 8 of 10 is not enough, 9 of 10 is.
+    counters.set(10, 8);
+    EXPECT_FALSE(planner.should_coalesce_active_lazy(4 * kMiB));
+    counters.set(10, 9);
+    EXPECT_TRUE(planner.should_coalesce_active_lazy(4 * kMiB));
+
+    // Without lazy ranges there is nothing to decide.
+    counters.set(10, 0);
+    EXPECT_TRUE(planner.should_coalesce_active_lazy(0));
+}
+
+// Covers: GroupReader::prepare coalesces small lazy ranges and keeps big lazy ranges apart for the same share
+//         of row groups that need lazy columns.
+TEST_F(GroupReaderTest, PrepareCoalescesSmallLazyRangesAndNotBigOnes) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+
+    // 4 of 10 row groups need lazy columns.
+    counters.set(10, 4);
+    {
+        // 128 KiB of lazy bytes: the lazy range is read in the buffer of the active range.
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 128 * 1024}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(1, after.together - before.together);
+        EXPECT_EQ(128 * 1024, after.together_bytes - before.together_bytes);
+        EXPECT_EQ(0, after.seperately - before.seperately);
+        EXPECT_EQ(1, _sb_stream->_map.size());
+    }
+
+    counters.set(10, 4);
+    {
+        // 4 MiB of lazy bytes: the lazy range gets a buffer of its own.
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 4 * kMiB}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(0, after.together - before.together);
+        EXPECT_EQ(0, after.together_bytes - before.together_bytes);
+        EXPECT_EQ(1, after.seperately - before.seperately);
+        EXPECT_EQ(2, _sb_stream->_map.size());
+    }
+}
+
+// Covers: GroupReader::prepare reads lazy ranges separately until kMinRowGroupsForLazyCoalesce row groups of
+//         the scan have finished, even if all of them needed lazy columns.
+TEST_F(GroupReaderTest, PrepareSeparatesLazyRangesBeforeMinimumRowGroups) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+
+    const int64_t min_row_groups = ReadRangePlanner::kMinRowGroupsForLazyCoalesce;
+    counters.set(min_row_groups - 1, min_row_groups - 1);
+    {
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 128 * 1024}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(0, after.together - before.together);
+        EXPECT_EQ(1, after.seperately - before.seperately);
+        EXPECT_EQ(2, _sb_stream->_map.size());
+    }
+
+    counters.set(min_row_groups, min_row_groups);
+    {
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 128 * 1024}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(1, after.together - before.together);
+        EXPECT_EQ(0, after.seperately - before.seperately);
+        EXPECT_EQ(1, _sb_stream->_map.size());
+    }
+}
+
+// Covers: io_coalesce_adaptive_lazy_active = false keeps meaning that lazy ranges are always coalesced.
+TEST_F(GroupReaderTest, PrepareAlwaysCoalescesWhenAdaptiveLazyActiveIsOff) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+
+    // No row group needed lazy columns so far and the lazy range is big.
+    counters.set(100, 0);
+    {
+        SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 4 * kMiB}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(0, after.together - before.together);
+        EXPECT_EQ(1, after.seperately - before.seperately);
+    }
+
+    counters.set(100, 0);
+    {
+        SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, false);
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, 4 * kMiB}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(1, after.together - before.together);
+        EXPECT_EQ(4 * kMiB, after.together_bytes - before.together_bytes);
+        EXPECT_EQ(0, after.seperately - before.seperately);
+        EXPECT_EQ(1, _sb_stream->_map.size());
+    }
+}
+
+// Covers: GroupReader::prepare reads io_coalesce_read_max_distance_size for each row group, so a new value
+//         changes the decision for the next row group.
+TEST_F(GroupReaderTest, PrepareFollowsChangeOfRequestPrice) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+
+    // 4 of 10 row groups need lazy columns and 1 MiB is read in vain by the others: the share must be bigger
+    // than 50% while a request is worth 1 MiB.
+    counters.set(10, 4);
+    {
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, kMiB}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(0, after.together - before.together);
+        EXPECT_EQ(1, after.seperately - before.seperately);
+    }
+
+    // With a request worth 4 MiB the share must be bigger than 20%.
+    config::io_coalesce_read_max_distance_size = 4 * kMiB;
+    counters.set(10, 4);
+    {
+        auto before = CoalesceDecisionStats::current();
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, {{kMiB, kMiB}}));
+        auto after = CoalesceDecisionStats::current();
+        EXPECT_EQ(1, after.together - before.together);
+        EXPECT_EQ(kMiB, after.together_bytes - before.together_bytes);
+        EXPECT_EQ(0, after.seperately - before.seperately);
+    }
+}
+
+// Covers: ReadRangePlanner::coalescable_lazy_bytes skips lazy ranges bigger than io_coalesce_read_max_buffer_size,
+//         because the shared buffered stream gives them a buffer of their own whatever we decide.
+TEST_F(GroupReaderTest, PrepareCountsOnlyLazyRangesThatCanBeCoalesced) {
+    SCOPED_UPDATE(int32_t, config::io_coalesce_read_max_distance_size, kMiB);
+    SCOPED_UPDATE(bool, config::io_coalesce_adaptive_lazy_active, true);
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+
+    counters.set(10, 4);
+    auto before = CoalesceDecisionStats::current();
+    // A 64 KiB range next to the active range and a 20 MiB range, which is bigger than the 8 MiB buffer.
+    ASSIGN_OR_ABORT(auto group_reader,
+                    _prepare_group_with_lazy_ranges(param, true, {{kMiB, 64 * 1024}, {2 * kMiB, 20 * kMiB}}));
+    auto after = CoalesceDecisionStats::current();
+    EXPECT_EQ(64 * 1024, group_reader->_column_materializer->read_range_planner()->coalescable_lazy_bytes());
+    // With 20 MiB counted the share would have to be above 95%, and the row group would be read separately.
+    EXPECT_EQ(1, after.together - before.together);
+    EXPECT_EQ(64 * 1024, after.together_bytes - before.together_bytes);
+    EXPECT_EQ(0, after.seperately - before.seperately);
+}
+
+// Covers: GroupReader::prepare does not count a decision for a row group without lazy ranges.
+TEST_F(GroupReaderTest, PrepareCountsNoDecisionWithoutLazyRanges) {
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+    counters.set(10, 4);
+
+    auto before = CoalesceDecisionStats::current();
+    ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, false, {}));
+    auto after = CoalesceDecisionStats::current();
+    EXPECT_EQ(0, after.together - before.together);
+    EXPECT_EQ(0, after.together_bytes - before.together_bytes);
+    EXPECT_EQ(0, after.seperately - before.seperately);
+}
+
+// Covers: ~GroupReader counts a finished row group with lazy columns, and counts it as needing them only if a
+//         lazy column was read; a row group without lazy columns is not counted.
+TEST_F(GroupReaderTest, DestroyedRowGroupUpdatesLazyCoalesceCounters) {
+    auto* param = _create_group_reader_param();
+    LazyCoalesceCounters counters;
+    counters.attach(param);
+    const std::vector<io::SharedBufferedInputStream::IORange> lazy_ranges{{kMiB, 64 * 1024}};
+
+    {
+        // The lazy column is never read.
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, lazy_ranges));
+    }
+    EXPECT_EQ(1, counters.finished.load());
+    EXPECT_EQ(0, counters.needed.load());
+
+    {
+        ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, true, lazy_ranges));
+        ASSERT_OK(group_reader->_column_materializer->materialize_slot(1, Range<uint64_t>(0, 12), nullptr));
+    }
+    EXPECT_EQ(2, counters.finished.load());
+    EXPECT_EQ(1, counters.needed.load());
+
+    { ASSIGN_OR_ABORT(auto group_reader, _prepare_group_with_lazy_ranges(param, false, {})); }
+    EXPECT_EQ(2, counters.finished.load());
+    EXPECT_EQ(1, counters.needed.load());
 }
 
 // ── Temp Column Lifecycle Tests ──────────────────────────────────────────────
@@ -3318,6 +3595,140 @@ TEST_F(GroupReaderTest, CompoundLambdaPredicateIsDeferredWhenItReadsTheOnlyLazyC
     ASSERT_EQ(1u, result.conjunct_stats.size());
     EXPECT_EQ(8, result.conjunct_stats[0].input_rows);
     EXPECT_EQ(4, result.conjunct_stats[0].output_rows);
+}
+
+// A lazy column reader that returns `span_size` default rows of BIGINT.
+class MockLazyColumnReader : public ColumnReader {
+public:
+    MockLazyColumnReader() : ColumnReader(nullptr) {}
+    ~MockLazyColumnReader() override = default;
+
+    Status prepare() override { return Status::OK(); }
+
+    Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst_col) override {
+        auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+        column->append_default(range.span_size());
+        dst_col = std::move(column);
+        return Status::OK();
+    }
+
+    void set_need_parse_levels(bool need_parse_levels) override {}
+    void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
+    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
+                                 ColumnIOTypeFlags types, bool active) override {}
+    void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
+};
+
+namespace {
+
+constexpr SlotId kActiveSlotId = 262;
+constexpr SlotId kLazySlotId = 263;
+
+// Sets two columns in `param`: an active one (kActiveSlotId) and a lazy one (kLazySlotId).
+void set_active_and_lazy_columns(ObjectPool* pool, GroupReaderParam* param, bool lazy_is_output_column) {
+    param->read_cols.clear();
+    auto* active_slot = pool->add(
+            new SlotDescriptor(kActiveSlotId, "a", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    TSlotDescriptor t_lazy_slot = TSlotDescriptorBuilder()
+                                          .type(LogicalType::TYPE_BIGINT)
+                                          .column_name("b")
+                                          .id(kLazySlotId)
+                                          .is_output_column(lazy_is_output_column)
+                                          .build();
+    auto* lazy_slot = pool->add(new SlotDescriptor(t_lazy_slot));
+    GroupReaderParam::Column active_column{};
+    active_column.slot_desc = active_slot;
+    GroupReaderParam::Column lazy_column{};
+    lazy_column.slot_desc = lazy_slot;
+    param->read_cols.emplace_back(active_column);
+    param->read_cols.emplace_back(lazy_column);
+}
+
+// The active chunk of a 2 row range.
+ChunkPtr make_active_chunk_of_two_rows() {
+    auto chunk = std::make_shared<Chunk>();
+    auto column = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+    column->append_datum(Datum(int64_t(1)));
+    column->append_datum(Datum(int64_t(2)));
+    chunk->append_column(column, kActiveSlotId);
+    return chunk;
+}
+
+} // namespace
+
+// Covers: ColumnMaterializer::lazy_column_needed stays true once a chunk of the row group read a lazy column,
+//         also when a later chunk reads none.
+TEST_F(GroupReaderTest, LazyColumnNeededAccumulatesOverChunks) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+
+    const Range<uint64_t> range(0, 2);
+    Range<uint64_t> no_range;
+    Filter no_filter;
+
+    // Chunk 1 reads no lazy column: the predicate-only lazy column is filled with defaults.
+    materializer.reset_read_chunk();
+    auto chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_FALSE(materializer.lazy_column_needed());
+
+    // Chunk 2: a compound predicate reads the lazy column.
+    materializer.reset_read_chunk();
+    chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.materialize_slot(kLazySlotId, range, nullptr));
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+
+    // Chunk 3 reads no lazy column.
+    materializer.reset_read_chunk();
+    chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+}
+
+// Covers: ColumnMaterializer::materialize_slot marks the row group as needing lazy columns when it reads one,
+//         also if the chunk is filtered out before read_lazy_columns() runs.
+TEST_F(GroupReaderTest, LazyColumnNeededIsSetByLazyReadOfFilteredChunk) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/false);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+
+    materializer.reset_read_chunk();
+    ASSERT_OK(materializer.materialize_slot(kLazySlotId, Range<uint64_t>(0, 2), nullptr));
+    EXPECT_TRUE(materializer.lazy_column_needed());
+}
+
+// Covers: ColumnMaterializer::read_lazy_columns marks the row group as needing lazy columns when it backfills an
+//         output lazy column.
+TEST_F(GroupReaderTest, LazyColumnNeededIsSetByBackfill) {
+    auto* param = _create_group_reader_param();
+    set_active_and_lazy_columns(&_pool, param, /*lazy_is_output_column=*/true);
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(kLazySlotId, std::make_unique<MockLazyColumnReader>());
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_lazy_column(1);
+    ASSERT_OK(materializer.init_read_chunk());
+    EXPECT_FALSE(materializer.lazy_column_needed());
+
+    const Range<uint64_t> range(0, 2);
+    Range<uint64_t> no_range;
+    Filter no_filter;
+    materializer.reset_read_chunk();
+    auto chunk = make_active_chunk_of_two_rows();
+    ASSERT_OK(materializer.read_lazy_columns(range, no_range, no_filter, no_filter, false, chunk));
+    EXPECT_TRUE(materializer.lazy_column_needed());
 }
 
 } // namespace starrocks::parquet

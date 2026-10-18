@@ -103,8 +103,11 @@ struct GroupReaderParam {
     uint64_t file_size = 0;
     const DataCacheOptions* datacache_options;
 
-    // used to identify io coalesce
-    std::atomic<int32_t>* lazy_column_coalesce_counter = nullptr;
+    // Used to decide io coalescing of lazy columns. Both are shared by all row groups of one scan: the number
+    // of row groups that finished reading, and how many of them needed their lazy columns. A null pointer
+    // means we always coalesce.
+    std::atomic<int64_t>* lazy_coalesce_row_groups_finished = nullptr;
+    std::atomic<int64_t>* lazy_coalesce_row_groups_needed = nullptr;
 
     // Kept directly in GroupReaderParam for test-compatibility; also used by
     // _get_extended_bigint_value() to read extended_columns from the scan range.

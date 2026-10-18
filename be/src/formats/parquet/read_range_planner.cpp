@@ -15,7 +15,9 @@
 #include "formats/parquet/read_range_planner.h"
 
 #include <algorithm>
+#include <atomic>
 
+#include "common/config.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/group_reader.h"
 
@@ -61,11 +63,33 @@ void ReadRangePlanner::deduplicate(std::vector<IORange>* ranges) {
     ranges->erase(ranges->begin() + static_cast<std::ptrdiff_t>(write_idx + 1), ranges->end());
 }
 
-bool ReadRangePlanner::should_coalesce_active_lazy() const {
-    if (_param.lazy_column_coalesce_counter == nullptr) {
+int64_t ReadRangePlanner::coalescable_lazy_bytes() const {
+    const int64_t max_buffer_size = config::io_coalesce_read_max_buffer_size;
+    int64_t bytes = 0;
+    for (const auto& range : _lazy_ranges) {
+        if (range.size <= max_buffer_size) {
+            bytes += range.size;
+        }
+    }
+    return bytes;
+}
+
+bool ReadRangePlanner::should_coalesce_active_lazy(int64_t lazy_bytes) const {
+    if (!config::io_coalesce_adaptive_lazy_active || lazy_bytes <= 0) {
         return true;
     }
-    return _param.lazy_column_coalesce_counter->load(std::memory_order_relaxed) >= 0;
+    if (_param.lazy_coalesce_row_groups_finished == nullptr || _param.lazy_coalesce_row_groups_needed == nullptr) {
+        return true;
+    }
+    const int64_t finished = _param.lazy_coalesce_row_groups_finished->load(std::memory_order_relaxed);
+    if (finished < kMinRowGroupsForLazyCoalesce) {
+        return false;
+    }
+    // The two counters are read one after the other, so the second may be ahead of the first.
+    const int64_t needed = std::min(_param.lazy_coalesce_row_groups_needed->load(std::memory_order_relaxed), finished);
+    // needed / finished > lazy_bytes / (lazy_bytes + price), without a division.
+    const double price = config::io_coalesce_read_max_distance_size;
+    return static_cast<double>(needed) * price > static_cast<double>(finished - needed) * lazy_bytes;
 }
 
 void ReadRangePlanner::pre_plan_lazy_ranges(const std::vector<int>& lazy_column_indices, int64_t* end_offset,

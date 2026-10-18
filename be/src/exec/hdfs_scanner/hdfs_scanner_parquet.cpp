@@ -102,6 +102,7 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
 
     // io coalesce
     RuntimeProfile::Counter* active_lazy_coalesce_together = nullptr;
+    RuntimeProfile::Counter* active_lazy_coalesce_together_bytes = nullptr;
     RuntimeProfile::Counter* active_lazy_coalesce_seperately = nullptr;
 
     // page statistics
@@ -173,6 +174,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
 
     active_lazy_coalesce_together = ADD_CHILD_COUNTER(root, "GroupActiveLazyColumnIOCoalesceTogether", TUnit::UNIT,
                                                       kParquetProfileSectionPrefix);
+    active_lazy_coalesce_together_bytes = ADD_CHILD_COUNTER(root, "GroupActiveLazyColumnIOCoalesceTogetherBytes",
+                                                            TUnit::BYTES, kParquetProfileSectionPrefix);
     active_lazy_coalesce_seperately = ADD_CHILD_COUNTER(root, "GroupActiveLazyColumnIOCoalesceSeperately", TUnit::UNIT,
                                                         kParquetProfileSectionPrefix);
 
@@ -233,6 +236,7 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     COUNTER_UPDATE(group_dict_filter_timer, _app_stats.group_dict_filter_ns);
     COUNTER_UPDATE(group_dict_decode_timer, _app_stats.group_dict_decode_ns);
     COUNTER_UPDATE(active_lazy_coalesce_together, _app_stats.active_lazy_coalesce_together);
+    COUNTER_UPDATE(active_lazy_coalesce_together_bytes, _app_stats.active_lazy_coalesce_together_bytes);
     COUNTER_UPDATE(active_lazy_coalesce_seperately, _app_stats.active_lazy_coalesce_seperately);
     COUNTER_UPDATE(dict_code_predicate_eval_count, _app_stats.parquet_dict_code_predicate_eval_count);
     int64_t page_stats = _app_stats.has_page_statistics ? 1 : 0;

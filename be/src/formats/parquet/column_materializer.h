@@ -158,8 +158,8 @@ public:
     // identity dispatch in each reader handles the LOGICAL fallback.
     Status finalize_active_slot(SlotId slot_id, ChunkPtr& active_chunk);
 
+    // Whether any chunk of this row group read a lazy column from storage.
     bool lazy_column_needed() const { return _lazy_column_needed; }
-    void set_lazy_column_needed(bool v) { _lazy_column_needed = v; }
 
     void collect_io_ranges(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end,
                            ColumnIOTypeFlags types);
@@ -283,6 +283,9 @@ private:
     // cleared by reset_read_chunk(). All entries hold logical (finalized) columns.
     std::unordered_map<SlotId, SlotCacheEntry> _slot_cache;
 
+    // Per-row-group flag. We want to know if the row group needed its lazy columns at all, not if the last
+    // chunk did, so it is set by the first lazy read (materialize_slot() or backfill in read_lazy_columns())
+    // and never cleared. The materializer lives as long as its row group, and reset_read_chunk() keeps it.
     bool _lazy_column_needed = false;
 
     // Per-row-group set of unique lazy slots triggered via materialize_slot().

@@ -298,7 +298,7 @@ Status FileReader::_init_group_readers(InitMode mode) {
     // scanner_ctx replaces 11 individual field copies; GroupReader accesses
     // context-derived data (timezone, options, partitions, slots, dicts, etc.)
     // through the pointer.  File-infrastructure fields (sb_stream, file, etc.)
-    // and hot fields (stats, lazy_column_coalesce_counter) remain direct copies.
+    // and hot fields (stats, lazy coalesce counters) remain direct copies.
     _group_reader_param.scanner_ctx = _scanner_ctx;
     _group_reader_param.conjunct_ctxs_by_slot = fd_scanner_ctx.conjunct_ctxs_by_slot;
     _group_reader_param.stats = fd_scanner_ctx.stats;
@@ -306,7 +306,8 @@ Status FileReader::_init_group_readers(InitMode mode) {
     _group_reader_param.chunk_size = _chunk_size;
     _group_reader_param.file = _file;
     _group_reader_param.file_metadata = _file_metadata.get();
-    _group_reader_param.lazy_column_coalesce_counter = fd_scanner_ctx.lazy_column_coalesce_counter;
+    _group_reader_param.lazy_coalesce_row_groups_finished = fd_scanner_ctx.lazy_coalesce_row_groups_finished;
+    _group_reader_param.lazy_coalesce_row_groups_needed = fd_scanner_ctx.lazy_coalesce_row_groups_needed;
     _group_reader_param.modification_time = _datacache_options.modification_time;
     _group_reader_param.file_size = _file_size;
     _group_reader_param.datacache_options = &_datacache_options;

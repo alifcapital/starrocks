@@ -78,6 +78,9 @@ protected:
     const THdfsScanNode _hdfs_scan_node;
     int64_t _max_file_length = 0;
     mutable std::atomic<int32_t> _lazy_column_coalesce_counter = 0;
+    // Parquet row groups of this scan that finished reading, and how many of them needed their lazy columns.
+    mutable std::atomic<int64_t> _lazy_coalesce_row_groups_finished = 0;
+    mutable std::atomic<int64_t> _lazy_coalesce_row_groups_needed = 0;
     std::shared_ptr<parquet::PageIndexReadAdvisor> _page_index_read_advisor =
             std::make_shared<parquet::PageIndexReadAdvisor>();
     // Shared footer-prefetch open context (one FileSystem per scan), built once and reused

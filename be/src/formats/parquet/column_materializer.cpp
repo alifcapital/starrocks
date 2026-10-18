@@ -330,6 +330,9 @@ Status ColumnMaterializer::read_lazy_columns(const Range<uint64_t>& full_range,
         }
 
         if (!backfill_indices.empty()) {
+            // We read lazy columns from storage in this row group. Lazy columns triggered during predicate
+            // evaluation set the flag in materialize_slot().
+            _lazy_column_needed = true;
             std::vector<SlotId> backfill_slot_ids;
             backfill_slot_ids.reserve(backfill_indices.size());
             for (int col_idx : backfill_indices) {
@@ -358,11 +361,7 @@ Status ColumnMaterializer::read_lazy_columns(const Range<uint64_t>& full_range,
             }
             active_chunk->merge(std::move(*lazy_chunk));
         }
-        _lazy_column_needed = !backfill_indices.empty();
-    } else {
-        _lazy_column_needed = false;
     }
-    _lazy_column_needed = _lazy_column_needed || !_slot_cache.empty();
 
     return Status::OK();
 }
@@ -473,6 +472,8 @@ Status ColumnMaterializer::materialize_slot(SlotId slot_id, const Range<uint64_t
         SCOPED_RAW_TIMER(&_param.stats->parquet_lazy_read_ns);
         _param.stats->parquet_lazy_read_count++;
         _triggered_lazy_slots.insert(slot_id);
+        // The chunk may be filtered out before read_lazy_columns(), but this read is already done.
+        _lazy_column_needed = true;
         RETURN_IF_ERROR(
                 (*_column_readers)[slot_id]->read_range(range, filter, _read_chunk->get_column_by_slot_id(slot_id)));
     }

@@ -77,10 +77,14 @@ GroupReader::~GroupReader() {
     }
     // If GroupReader is filtered by statistics, it's _has_prepared = false
     if (_has_prepared) {
-        if (_column_materializer->lazy_column_needed()) {
-            _param.lazy_column_coalesce_counter->fetch_add(1, std::memory_order_relaxed);
-        } else {
-            _param.lazy_column_coalesce_counter->fetch_sub(1, std::memory_order_relaxed);
+        // We want the share of row groups that need their lazy columns. A row group without lazy columns
+        // says nothing about it, so we do not count it.
+        if (_param.lazy_coalesce_row_groups_finished != nullptr && _param.lazy_coalesce_row_groups_needed != nullptr &&
+            !_column_materializer->lazy_column_indices().empty()) {
+            if (_column_materializer->lazy_column_needed()) {
+                _param.lazy_coalesce_row_groups_needed->fetch_add(1, std::memory_order_relaxed);
+            }
+            _param.lazy_coalesce_row_groups_finished->fetch_add(1, std::memory_order_relaxed);
         }
         // Lazy-materialization diagnostic: count row groups where every lazy slot
         // was triggered during predicate evaluation.  A consistently high count
@@ -131,11 +135,16 @@ Status GroupReader::prepare() {
         int64_t end_offset = 0;
         collect_io_ranges(&ranges, &end_offset, ColumnIOType::PAGES);
         auto* planner = _column_materializer->read_range_planner();
-        bool coalesce_lazy = planner->should_coalesce_active_lazy();
-        if (coalesce_lazy || !config::io_coalesce_adaptive_lazy_active) {
-            _param.stats->active_lazy_coalesce_together += 1;
-        } else {
-            _param.stats->active_lazy_coalesce_seperately += 1;
+        const int64_t lazy_bytes = planner->coalescable_lazy_bytes();
+        const bool coalesce_lazy = planner->should_coalesce_active_lazy(lazy_bytes);
+        // Without lazy ranges nothing was decided, so we count nothing.
+        if (lazy_bytes > 0) {
+            if (coalesce_lazy) {
+                _param.stats->active_lazy_coalesce_together += 1;
+                _param.stats->active_lazy_coalesce_together_bytes += lazy_bytes;
+            } else {
+                _param.stats->active_lazy_coalesce_seperately += 1;
+            }
         }
         _set_end_offset(end_offset);
         RETURN_IF_ERROR(_param.sb_stream->set_io_ranges(ranges, coalesce_lazy));

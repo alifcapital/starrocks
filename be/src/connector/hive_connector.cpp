@@ -821,6 +821,8 @@ Status HiveDataSource::_init_scanner(RuntimeState* state) {
         _scanner_ctx.avro_schema_json = hdfs_desc->get_avro_schema_json();
     }
     _scanner_ctx.lazy_column_coalesce_counter = &_provider->_lazy_column_coalesce_counter;
+    _scanner_ctx.lazy_coalesce_row_groups_finished = &_provider->_lazy_coalesce_row_groups_finished;
+    _scanner_ctx.lazy_coalesce_row_groups_needed = &_provider->_lazy_coalesce_row_groups_needed;
     if (state->query_options().__isset.connector_max_split_size) {
         _scanner_ctx.options.connector_max_split_size = state->query_options().connector_max_split_size;
     }
