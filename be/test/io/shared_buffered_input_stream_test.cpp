@@ -85,6 +85,21 @@ private:
 
 using Reads = std::vector<std::pair<int64_t, int64_t>>;
 
+// A stream that records the arguments of each touch_cache() call, as the stream of a lake file with a data cache warms
+// the cache.
+class TouchCacheRecordingStream : public RecordingInputStream {
+public:
+    using RecordingInputStream::RecordingInputStream;
+
+    Status touch_cache(int64_t offset, size_t length) override {
+        touched.emplace_back(offset, length);
+        return touch_status;
+    }
+
+    Reads touched;
+    Status touch_status = Status::OK();
+};
+
 // A file of 1 MB behind a recording stream, read through shared buffers aligned to 256 KB. The bytes are not
 // periodic in the alignment, so a read from a wrong place never matches.
 struct SplitCase {
@@ -128,6 +143,32 @@ struct SplitCase {
     std::shared_ptr<RecordingInputStream> remote;
     std::shared_ptr<io::SharedBufferedInputStream> stream;
 };
+
+// The cache warm-up of a lake column file calls touch_cache() on the file, and with io_coalesce_lake_read_enable the file
+// is this stream. We expect each call to reach the stream below with the same offset and length, so that the warm-up
+// fills the data cache. The default touch_cache() of a stream does nothing and returns OK, so a call that is not passed
+// on is not seen by the stream below.
+TEST_F(SharedBufferedInputStreamTest, test_touch_cache_is_passed_to_the_stream_below) {
+    auto remote = std::make_shared<TouchCacheRecordingStream>(std::string(1024, 'x'));
+    SharedBufferedInputStream stream(remote, "touch_cache", 1024);
+
+    ASSERT_OK(stream.touch_cache(10, 20));
+    ASSERT_OK(stream.touch_cache(512, 100));
+    ASSERT_OK(stream.touch_cache(0, 0));
+    ASSERT_EQ((Reads{{10, 20}, {512, 100}, {0, 0}}), remote->touched);
+    // the call warms the cache of the stream below and reads nothing through this stream
+    ASSERT_TRUE(remote->reads.empty());
+    ASSERT_EQ(0, stream.shared_io_count());
+    ASSERT_EQ(0, stream.direct_io_count());
+    ASSIGN_OR_ABORT(auto position, stream.position());
+    ASSERT_EQ(0, position);
+
+    // an error of the stream below reaches the caller
+    remote->touch_status = Status::IOError("touch cache fails");
+    Status st = stream.touch_cache(7, 9);
+    ASSERT_TRUE(st.is_io_error()) << st.to_string();
+    ASSERT_EQ((Reads{{10, 20}, {512, 100}, {0, 0}, {7, 9}}), remote->touched);
+}
 
 // A read that fails must not leave the buffer looking loaded, because the next read would serve the bytes that no one
 // wrote. The buffer stays unloaded, the next read loads it again, and the counters count only the load that worked.

@@ -99,7 +99,8 @@ StatusOr<int64_t> S3InputStream::read(void* out, int64_t count) {
                 read_start_offset = _buffer_start_offset + _buffer_data_length;
             }
             int64_t read_end_offset = std::min<int64_t>(read_start_offset + _read_ahead_size, _size);
-            auto range = fmt::format("bytes={}-{}", read_start_offset, read_end_offset);
+            // The last byte of an HTTP range is inclusive, and read_end_offset is the byte after the buffer.
+            auto range = fmt::format("bytes={}-{}", read_start_offset, read_end_offset - 1);
             Aws::S3::Model::GetObjectRequest request;
             request.SetBucket(_bucket);
             request.SetKey(_object);

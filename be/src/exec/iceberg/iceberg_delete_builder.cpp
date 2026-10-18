@@ -273,7 +273,7 @@ void IcebergDeleteBuilder::update_delete_file_io_counter(
         RuntimeProfile::Counter* shared_buffered_shared_io_count =
                 ADD_CHILD_COUNTER(parent_profile, "MOR_SharedIOCount", TUnit::UNIT, prefix);
         RuntimeProfile::Counter* shared_buffered_shared_io_timer =
-                ADD_CHILD_TIMER(parent_profile, "SharedIOTime", prefix);
+                ADD_CHILD_TIMER(parent_profile, "MOR_SharedIOTime", prefix);
         RuntimeProfile::Counter* shared_buffered_direct_io_bytes =
                 ADD_CHILD_COUNTER(parent_profile, "MOR_DirectIOBytes", TUnit::BYTES, prefix);
         RuntimeProfile::Counter* shared_buffered_direct_io_count =

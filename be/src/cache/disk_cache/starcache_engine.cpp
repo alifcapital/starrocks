@@ -74,6 +74,7 @@ Status StarCacheEngine::write(const std::string& key, const IOBuffer& buffer, Di
     starcache::WriteOptions opts;
     opts.priority = options->priority;
     opts.ttl_seconds = options->ttl_seconds;
+    opts.frequency = options->frequency;
     opts.overwrite = options->overwrite;
     opts.async = options->async;
     opts.keep_alive = options->allow_zero_copy;

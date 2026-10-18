@@ -342,6 +342,7 @@ set(EXEC_FILES
         ./io/fd_output_stream_test.cpp
         ./io/s3_output_stream_test.cpp
         ./io/s3_input_stream_test.cpp
+        ./io/s3_input_stream_fake_client_test.cpp
         ./io/fd_input_stream_test.cpp
         ./io/seekable_input_stream_test.cpp
         ./io/shared_buffered_input_stream_test.cpp

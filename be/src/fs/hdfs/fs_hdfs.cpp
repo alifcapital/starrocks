@@ -76,6 +76,7 @@ public:
     int64_t getTotalOpenFileTimeNs() const { return _total_open_file_time_ns; }
     const std::string& getPath() const { return _path; }
     void setOffset(int64_t offset) { _offset = offset; }
+    int64_t getOffset() const { return _offset; }
 
     Status seek(int64_t offset) {
         hdfsFS fs = getFS();
@@ -182,14 +183,14 @@ public:
 
     StatusOr<int64_t> read(void* data, int64_t size) override;
     StatusOr<int64_t> get_size() override;
-    StatusOr<int64_t> position() override { return _offset; }
+    // The handle keeps the offset: read() moves it and seek() sets it, so the stream asks the handle for it.
+    StatusOr<int64_t> position() override { return _handle->getOffset(); }
     StatusOr<std::unique_ptr<io::NumericStatistics>> get_numeric_statistics() override;
     Status seek(int64_t offset) override;
     void set_size(int64_t size) override;
 
 private:
     std::unique_ptr<GetHdfsFileReadOnlyHandle> _handle;
-    int64_t _offset{0};
     int64_t _file_size{0};
 };
 

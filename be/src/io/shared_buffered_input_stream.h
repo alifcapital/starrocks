@@ -187,6 +187,12 @@ public:
         return _stream->get_numeric_statistics();
     }
 
+    // We expect touch_cache() to refresh or fill the data cache of the stream below, as the cache warm-up of a lake
+    // column file (CACHE SELECT) does, and this stream is that file when io_coalesce_lake_read_enable is on. The default
+    // of a stream returns OK and does nothing, so the warm-up would read nothing. So we pass the call on, unchanged.
+    // The call reads nothing into the shared buffers.
+    Status touch_cache(int64_t offset, size_t length) override { return _stream->touch_cache(offset, length); }
+
     IoStatsSnapshot get_io_stats_snapshot() const override;
 
     Status set_io_ranges(const std::vector<IORange>& ranges, bool coalesce_lazy_column = true);

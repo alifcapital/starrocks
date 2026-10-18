@@ -19,6 +19,7 @@
 #include <filesystem>
 
 #include "fs/fs_util.h"
+#include "testutil/assert.h"
 #include "testutil/sync_point.h"
 #include "util/defer_op.h"
 
@@ -135,6 +136,41 @@ TEST_F(HdfsFileSystemTest, create_file_with_open_truncate) {
 
     (*wfile_1).reset();
     (*wfile_2).reset();
+}
+
+// The default skip() of a stream seeks to position() plus the count, so position() must follow the reads and the
+// seeks of the stream.
+TEST_F(HdfsFileSystemTest, input_stream_position_follows_reads_and_seeks) {
+    auto fs = new_fs_hdfs(FSOptions());
+    const std::string filepath = "file://" + _root_path + "/input_stream_position";
+    {
+        auto wfile = fs->new_writable_file(filepath);
+        ASSERT_TRUE(wfile.ok());
+        ASSERT_TRUE((*wfile)->append(Slice("0123456789")).ok());
+        ASSERT_TRUE((*wfile)->close().ok());
+    }
+
+    auto rfile = fs->new_random_access_file(filepath);
+    ASSERT_TRUE(rfile.ok()) << rfile.status();
+    auto& file = *rfile;
+
+    char buf[4] = {};
+    ASSERT_OK(file->read_fully(buf, 3));
+    EXPECT_EQ("012", std::string(buf, 3));
+    ASSIGN_OR_ABORT(auto position, file->position());
+    EXPECT_EQ(3, position);
+
+    ASSERT_OK(file->seek(6));
+    ASSIGN_OR_ABORT(position, file->position());
+    EXPECT_EQ(6, position);
+
+    ASSERT_OK(file->skip(1));
+    ASSIGN_OR_ABORT(position, file->position());
+    EXPECT_EQ(7, position);
+    ASSERT_OK(file->read_fully(buf, 2));
+    EXPECT_EQ("78", std::string(buf, 2));
+    ASSIGN_OR_ABORT(position, file->position());
+    EXPECT_EQ(9, position);
 }
 
 TEST_F(HdfsFileSystemTest, directory_operations) {
