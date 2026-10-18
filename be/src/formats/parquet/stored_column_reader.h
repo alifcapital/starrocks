@@ -115,6 +115,13 @@ protected:
     virtual Status _next_page();
     virtual bool _cur_page_selected(size_t row_readed, const Filter* filter, size_t to_read);
 
+    // The rows of the current page between the decoders and the first row of the next decode.
+    size_t _rows_to_skip_in_cur_page() const {
+        size_t num_rows_consumed = _reader->num_values() - _num_values_left_in_cur_page;
+        DCHECK_GE(num_rows_consumed, _decoder_pos_in_cur_page);
+        return num_rows_consumed - _decoder_pos_in_cur_page;
+    }
+
     // for RequiredColumn, there is no need to get levels.
     // for RepeatedColumn, there is no possible to get default levels.
     // for OptionalColumn, we will override it.
@@ -122,7 +129,10 @@ protected:
 
     std::unique_ptr<ColumnChunkReader> _reader;
     size_t _num_values_left_in_cur_page = 0;
-    size_t _num_values_skip_in_cur_page = 0;
+    // The Required and Optional readers do not move the value decoder and the def level decoder over rows that are
+    // skipped or filtered out, because the page may end before a later row is read. We keep the number of rows of the
+    // current page that the decoders have passed, so the next decode first skips the rows in between.
+    size_t _decoder_pos_in_cur_page = 0;
     const ColumnReaderOptions& _opts;
     bool _cur_page_loaded = false;
     uint64_t _read_cursor = _opts.first_row_index;
@@ -147,7 +157,10 @@ private:
     // for repeated column, we collect levels information after _convert_row_to_value which had decoded the levels.
     virtual void _collect_not_null_values(size_t num_levels, bool lazy_flag) {}
 
-    virtual Status _lazy_skip_values(uint64_t begin) = 0;
+    // Called before a decode. Required and Optional readers load the page data if needed and move the decoders over
+    // the rows that were skipped or filtered out since the last decode. Repeated readers skip the values counted by
+    // _collect_not_null_values().
+    virtual Status _lazy_skip_values() = 0;
     virtual Status _read_values_on_levels(size_t num_values, starrocks::parquet::ColumnContentType content_type,
                                           starrocks::Column* dst, bool append_default,
                                           const FilterData* filter = nullptr) = 0;

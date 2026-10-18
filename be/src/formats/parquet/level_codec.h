@@ -94,15 +94,22 @@ public:
         return _levels_decoded - _levels_parsed;
     }
 
+    // Appends default levels for rows that are filtered out and not decoded. The levels that are decoded but not
+    // parsed yet are the levels of the rows the caller still has to skip or read, in page order, so we keep them
+    // behind the default levels.
     void append_default_levels(size_t level_nums) {
-        size_t new_capacity = _levels_parsed + level_nums;
+        size_t num_remaining = _levels_decoded - _levels_parsed;
+        size_t new_capacity = _levels_decoded + level_nums;
         if (new_capacity > _levels_capacity) {
             _levels.resize(new_capacity);
             _levels_capacity = new_capacity;
         }
+        if (num_remaining > 0) {
+            memmove(&_levels[_levels_parsed + level_nums], &_levels[_levels_parsed], num_remaining * sizeof(level_t));
+        }
         memset(&_levels[_levels_parsed], 0x0, level_nums * sizeof(level_t));
         _levels_parsed += level_nums;
-        _levels_decoded = _levels_parsed;
+        _levels_decoded += level_nums;
     }
 
 private:

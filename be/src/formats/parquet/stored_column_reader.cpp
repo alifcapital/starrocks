@@ -79,7 +79,7 @@ private:
     StatusOr<size_t> _convert_row_to_value(size_t* row) override;
     void _collect_not_null_values(size_t num_levels, bool lazy_flag) override;
 
-    Status _lazy_skip_values(uint64_t begin) override;
+    Status _lazy_skip_values() override;
     Status _read_values_on_levels(size_t num_values, starrocks::parquet::ColumnContentType content_type,
                                   starrocks::Column* dst, bool append_default, const FilterData* filter) override;
 
@@ -138,7 +138,7 @@ private:
     Status _decode_levels(size_t* num_rows, size_t* num_levels_parsed, level_t** def_levels);
 
     void _consume_levels(size_t num_values) { _reader->def_level_decoder().consume_levels(num_values); }
-    Status _lazy_skip_values(uint64_t begin) override;
+    Status _lazy_skip_values() override;
     Status _read_values_on_levels(size_t num_values, starrocks::parquet::ColumnContentType content_type,
                                   starrocks::Column* dst, bool append_default, const FilterData* filter) override;
 
@@ -180,7 +180,7 @@ public:
     }
 
 private:
-    Status _lazy_skip_values(uint64_t begin) override;
+    Status _lazy_skip_values() override;
     Status _read_values_on_levels(size_t num_values, starrocks::parquet::ColumnContentType content_type,
                                   starrocks::Column* dst, bool append_default, const FilterData* filter) override;
     const ParquetField* _field = nullptr;
@@ -344,10 +344,13 @@ Status StoredColumnReaderImpl::_read(const Range<uint64_t>& range, const starroc
             ASSIGN_OR_RETURN(size_t num_values, _convert_row_to_value(&to_read));
             DCHECK_LE(num_values, _num_values_left_in_cur_page);
             if (_cur_page_selected(row_readed, filter, to_read)) {
-                RETURN_IF_ERROR(_lazy_skip_values(range.begin()));
+                RETURN_IF_ERROR(_lazy_skip_values());
                 auto* value_filter = _convert_filter_row_to_value(filter, row_readed);
                 RETURN_IF_ERROR(_read_values_on_levels(num_values, content_type, dst, false, value_filter));
             } else {
+                // No row of this portion is selected, so we append defaults and do not decode values. Required and
+                // Optional readers skip these rows in the next _lazy_skip_values() through _decoder_pos_in_cur_page,
+                // Repeated readers count the values to skip in _read_values_on_levels().
                 RETURN_IF_ERROR(_read_values_on_levels(num_values, content_type, dst, true));
             }
             row_readed += to_read;
@@ -386,25 +389,23 @@ StatusOr<size_t> RepeatedStoredColumnReader::_convert_row_to_value(size_t* row) 
     return num_parsed_levels;
 }
 
-Status RequiredStoredColumnReader::_lazy_skip_values(uint64_t begin) {
-    if (_cur_page_loaded) {
-        return _reader->skip_values(static_cast<size_t>(begin - _read_cursor));
-    } else {
+Status RequiredStoredColumnReader::_lazy_skip_values() {
+    if (!_cur_page_loaded) {
         RETURN_IF_ERROR(_reader->load_page());
         _cur_page_loaded = true;
-        return _reader->skip_values(_reader->num_values() - _num_values_left_in_cur_page);
     }
+    size_t row_to_skip = _rows_to_skip_in_cur_page();
+    RETURN_IF_ERROR(_reader->skip_values(row_to_skip));
+    _decoder_pos_in_cur_page += row_to_skip;
+    return Status::OK();
 }
 
-Status OptionalStoredColumnReader::_lazy_skip_values(uint64_t begin) {
-    size_t row_to_skip = 0;
-    if (_cur_page_loaded) {
-        row_to_skip = static_cast<size_t>(begin - _read_cursor);
-    } else {
+Status OptionalStoredColumnReader::_lazy_skip_values() {
+    if (!_cur_page_loaded) {
         RETURN_IF_ERROR(_reader->load_page());
         _cur_page_loaded = true;
-        row_to_skip = _reader->num_values() - _num_values_left_in_cur_page;
     }
+    size_t row_to_skip = _rows_to_skip_in_cur_page();
     size_t values_to_skip = 0;
     size_t row_skipped = 0;
     while (row_skipped < row_to_skip) {
@@ -419,10 +420,12 @@ Status OptionalStoredColumnReader::_lazy_skip_values(uint64_t begin) {
         // reset_levels() to avoiding using too much memory and prepare levels for new reading.
         reset_levels();
     }
-    return _reader->skip_values(values_to_skip);
+    RETURN_IF_ERROR(_reader->skip_values(values_to_skip));
+    _decoder_pos_in_cur_page += row_to_skip;
+    return Status::OK();
 }
 
-Status RepeatedStoredColumnReader::_lazy_skip_values(uint64_t begin) {
+Status RepeatedStoredColumnReader::_lazy_skip_values() {
     size_t to_skip = _not_null_to_skip;
     _not_null_to_skip = 0;
     return _reader->skip_values(to_skip);
@@ -436,7 +439,9 @@ Status RequiredStoredColumnReader::_read_values_on_levels(size_t num_values,
         dst->append_default(num_values);
         return Status::OK();
     }
-    return _reader->decode_values(num_values, content_type, dst, filter);
+    RETURN_IF_ERROR(_reader->decode_values(num_values, content_type, dst, filter));
+    _decoder_pos_in_cur_page += num_values;
+    return Status::OK();
 }
 
 static void assign_nulls(int16_t* __restrict levels, uint16_t def_level, size_t n, uint8_t* __restrict is_nulls,
@@ -482,7 +487,9 @@ Status OptionalStoredColumnReader::_read_values_on_levels(size_t num_values,
         assign_nulls(def_levels, max_def_level, num_values, is_nulls, &num_ranges, &num_nulls);
         _null_infos.num_ranges = num_ranges;
         _null_infos.num_nulls = num_nulls;
-        return _reader->decode_values(num_values, _null_infos, content_type, dst, filter);
+        RETURN_IF_ERROR(_reader->decode_values(num_values, _null_infos, content_type, dst, filter));
+        _decoder_pos_in_cur_page += num_values;
+        return Status::OK();
     }
 }
 
@@ -534,6 +541,7 @@ Status StoredColumnReaderImpl::_next_page() {
     } else {
         _cur_page_loaded = false;
         _num_values_left_in_cur_page = _reader->num_values();
+        _decoder_pos_in_cur_page = 0;
     }
     return Status::OK();
 }
@@ -566,6 +574,7 @@ Status StoredColumnReaderImpl::load_specific_page(size_t cur_page_idx, uint64_t 
     RETURN_IF_ERROR(_reader->load_header());
     _cur_page_loaded = false;
     _num_values_left_in_cur_page = _reader->num_values();
+    _decoder_pos_in_cur_page = 0;
     _read_cursor = first_row;
     return Status::OK();
 }
