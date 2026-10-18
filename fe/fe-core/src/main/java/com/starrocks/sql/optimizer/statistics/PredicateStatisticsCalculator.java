@@ -221,15 +221,28 @@ public class PredicateStatisticsCalculator {
         if (predicate == null) {
             return statistics;
         }
+        return finishEstimate(predicate, statistics, visit(predicate, statistics, useMcv), useMcv);
+    }
 
-        // The time-complexity of PredicateStatisticsCalculatingVisitor OR row-count is O(2^n), n is OR number
-        Statistics output;
-        if (countDisConsecutiveOr(predicate, 0, false) > StatisticsEstimateCoefficient.DEFAULT_OR_OPERATOR_LIMIT) {
-            output = predicate.accept(new LargeOrCalculatingVisitor(statistics, useMcv), null);
-        } else {
-            output = predicate.accept(new BaseCalculatingVisitor(statistics, useMcv), null);
+    /**
+     * The row count of statisticsCalculate(predicate, statistics, false). The MCV estimators ask for the plain row
+     * count of a condition many times, once per value of a head tuple, so we skip the propagation of the MCV lists
+     * that the estimate ends with: it builds the distributions and the column statistics of the output and keeps
+     * its row count.
+     */
+    static double plainRowCount(ScalarOperator predicate, Statistics statistics) {
+        if (predicate == null) {
+            return statistics.getOutputRowCount();
         }
-        return finishEstimate(predicate, statistics, output, useMcv);
+        return visit(predicate, statistics, false).getOutputRowCount();
+    }
+
+    private static Statistics visit(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
+        // The time-complexity of PredicateStatisticsCalculatingVisitor OR row-count is O(2^n), n is OR number
+        if (countDisConsecutiveOr(predicate, 0, false) > StatisticsEstimateCoefficient.DEFAULT_OR_OPERATOR_LIMIT) {
+            return predicate.accept(new LargeOrCalculatingVisitor(statistics, useMcv), null);
+        }
+        return predicate.accept(new BaseCalculatingVisitor(statistics, useMcv), null);
     }
 
     private static Statistics finishEstimate(ScalarOperator predicate, Statistics statistics, Statistics output,

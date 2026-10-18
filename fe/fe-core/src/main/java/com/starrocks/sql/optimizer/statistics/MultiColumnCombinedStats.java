@@ -94,10 +94,16 @@ public class MultiColumnCombinedStats {
 
     public MultiColumnCombinedStats(long ndv, double rowCount, List<ColumnRefOperator> columns, List<McvEntry> mcv,
                                     List<Long> nullCounts) {
+        this(ndv, rowCount, columns, mcv, nullCounts, null);
+    }
+
+    /** @param valuesOf the head whose values the MCV list holds at the same positions, see PreparedMcvTuples */
+    MultiColumnCombinedStats(long ndv, double rowCount, List<ColumnRefOperator> columns, List<McvEntry> mcv,
+                             List<Long> nullCounts, PreparedMcvTuples valuesOf) {
         this.ndv = ndv;
         this.rowCount = rowCount;
         this.columns = Collections.unmodifiableList(new ArrayList<>(columns));
-        this.mcv = PreparedMcvTuples.copyOf(mcv, columns.size(), rowCount, nullCounts);
+        this.mcv = PreparedMcvTuples.copyOf(mcv, columns.size(), rowCount, nullCounts, valuesOf);
         this.nullCounts = List.copyOf(nullCounts);
         this.readColumns = (int) columns.stream().filter(Objects::nonNull).count();
     }

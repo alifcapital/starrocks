@@ -139,7 +139,8 @@ final class McvStatisticsPropagation {
         double matching = 0;
         McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
         for (MultiColumnCombinedStats.McvEntry entry : best.getMcv()) {
-            Optional<Truth> truth = evaluate(predicate, best.getColumns(), entry.getValues(), evaluator);
+            Optional<Truth> truth = evaluate(predicate, best.getColumns(), entry.getValues(), best.getMcvDistribution(),
+                    evaluator);
             if (truth.isEmpty()) {
                 return OptionalDouble.empty();
             }
@@ -207,7 +208,8 @@ final class McvStatisticsPropagation {
             double head = 0;
             boolean supported = true;
             for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {
-                Optional<Truth> match = evaluate(groupPredicate, group.getColumns(), entry.getValues(), evaluator);
+                Optional<Truth> match = evaluate(groupPredicate, group.getColumns(), entry.getValues(),
+                        group.getMcvDistribution(), evaluator);
                 if (match.isEmpty()) {
                     supported = false;
                     break;
@@ -232,8 +234,8 @@ final class McvStatisticsPropagation {
             if (group.getColumns().size() == 1 && !group.getNullCounts().isEmpty()
                     && group.getNullCounts().get(0) > 0
                     && !group.getMcvDistribution().hasNull(0)
-                    && evaluate(groupPredicate, group.getColumns(), java.util.Collections.singletonList(null), evaluator)
-                            .filter(truth -> truth == Truth.TRUE).isEmpty()) {
+                    && evaluate(groupPredicate, group.getColumns(), java.util.Collections.singletonList(null), null,
+                            evaluator).filter(truth -> truth == Truth.TRUE).isEmpty()) {
                 // Global NDV includes NULL even when it was outside the retained head.
                 tailNdv = Math.max(0, tailNdv - 1);
             }
@@ -294,7 +296,7 @@ final class McvStatisticsPropagation {
                 }
             }
             MultiColumnCombinedStats conditional = new MultiColumnCombinedStats(Math.max(surviving.size(), distinct),
-                    rows, group.getColumns(), headEntries, nullCounts);
+                    rows, group.getColumns(), headEntries, nullCounts, group.getMcvDistribution());
             groups.put(item.getKey(), conditional);
             if (group.getColumns().size() > 1) {
                 for (ColumnRefOperator column : item.getKey()) {
@@ -450,12 +452,18 @@ final class McvStatisticsPropagation {
      */
     static Optional<Boolean> negationHolds(ScalarOperator condition, ColumnRefOperator column, String value,
                                            McvPredicateEvaluator evaluator) {
-        return evaluate(condition, List.of(column), java.util.Collections.singletonList(value), evaluator)
+        return evaluate(condition, List.of(column), java.util.Collections.singletonList(value), null, evaluator)
                 .map(truth -> truth == Truth.FALSE);
     }
 
+    /**
+     * The truth of the predicate on one tuple.
+     *
+     * @param head the head the values are a tuple of, null when they are not
+     */
     private static Optional<Truth> evaluate(ScalarOperator predicate, List<ColumnRefOperator> columns,
-                                           List<String> values, McvPredicateEvaluator evaluator) {
+                                           List<String> values, PreparedMcvTuples head,
+                                           McvPredicateEvaluator evaluator) {
         // Boolean equality with TRUE is normalized to the column itself by the optimizer.
         // Keep the same conditional distribution for WHERE flag and WHERE flag = TRUE.
         if (predicate instanceof ColumnRefOperator column && column.getType().isBoolean()) {
@@ -463,8 +471,10 @@ final class McvStatisticsPropagation {
             if (position < 0) {
                 return Optional.empty();
             }
-            return MultiColumnMcvEstimator.evaluate(column, column, values.get(position))
-                    .map(value -> value.isNull() ? Truth.UNKNOWN : value.getBoolean() ? Truth.TRUE : Truth.FALSE);
+            byte operand = McvPredicateEvaluator.operand(column, column, values.get(position), head, position);
+            return operand == McvPredicateEvaluator.OPERAND_EMPTY ? Optional.empty()
+                    : Optional.of(operand == McvPredicateEvaluator.OPERAND_NULL ? Truth.UNKNOWN
+                    : operand == McvPredicateEvaluator.OPERAND_TRUE ? Truth.TRUE : Truth.FALSE);
         }
         if (predicate instanceof ConstantOperator) {
             ConstantOperator constant = (ConstantOperator) predicate;
@@ -476,7 +486,7 @@ final class McvStatisticsPropagation {
         }
         if (predicate instanceof CompoundPredicateOperator) {
             CompoundPredicateOperator compound = (CompoundPredicateOperator) predicate;
-            Optional<Truth> left = evaluate(predicate.getChild(0), columns, values, evaluator);
+            Optional<Truth> left = evaluate(predicate.getChild(0), columns, values, head, evaluator);
             if (left.isEmpty()) {
                 return Optional.empty();
             }
@@ -484,7 +494,7 @@ final class McvStatisticsPropagation {
                 return Optional.of(left.get() == Truth.UNKNOWN ? Truth.UNKNOWN
                         : left.get() == Truth.TRUE ? Truth.FALSE : Truth.TRUE);
             }
-            Optional<Truth> right = evaluate(predicate.getChild(1), columns, values, evaluator);
+            Optional<Truth> right = evaluate(predicate.getChild(1), columns, values, head, evaluator);
             if (right.isEmpty()) {
                 return Optional.empty();
             }
@@ -504,15 +514,15 @@ final class McvStatisticsPropagation {
         // A value of a string column is its own operand, which is not NULL.
         boolean plainString = value != null && predicate.getChild(0).isColumnRef() && column.getType().isStringType();
         if (!(predicate instanceof IsNullPredicateOperator) && !plainString) {
-            Optional<ConstantOperator> operand = MultiColumnMcvEstimator.evaluate(predicate.getChild(0), column, value);
-            if (operand.isEmpty()) {
+            byte operand = McvPredicateEvaluator.operand(predicate.getChild(0), column, value, head, position);
+            if (operand == McvPredicateEvaluator.OPERAND_EMPTY) {
                 return Optional.empty();
             }
-            if (operand.get().isNull()) {
+            if (operand == McvPredicateEvaluator.OPERAND_NULL) {
                 return Optional.of(Truth.UNKNOWN);
             }
         }
-        return evaluator.matchesComponent(predicate, column, value)
+        return evaluator.matchesComponent(predicate, column, value, head, position)
                 .map(match -> match ? Truth.TRUE : Truth.FALSE);
     }
 }

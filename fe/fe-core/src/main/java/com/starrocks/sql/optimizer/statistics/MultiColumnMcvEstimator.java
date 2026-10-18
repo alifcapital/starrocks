@@ -261,7 +261,7 @@ public class MultiColumnMcvEstimator {
         double minHeadShare = stats.getMcvDistribution().getMinShare();
         for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
             double share = entry.getCount() / rowCount;
-            Optional<Boolean> matches = matchesAll(entry, columns, conjuncts, evaluator);
+            Optional<Boolean> matches = matchesAll(entry, stats.getMcvDistribution(), columns, conjuncts, evaluator);
             if (matches.isEmpty()) {
                 return OptionalDouble.empty();
             }
@@ -319,15 +319,17 @@ public class MultiColumnMcvEstimator {
      * Whether the tuple satisfies every conjunct. Empty when a conjunct falls outside the tuple or a
      * component cannot be compared with the constant.
      */
-    private static Optional<Boolean> matchesAll(MultiColumnCombinedStats.McvEntry entry, List<ColumnRefOperator> columns,
-                                                List<ScalarOperator> conjuncts, McvPredicateEvaluator evaluator) {
+    private static Optional<Boolean> matchesAll(MultiColumnCombinedStats.McvEntry entry, PreparedMcvTuples head,
+                                                List<ColumnRefOperator> columns, List<ScalarOperator> conjuncts,
+                                                McvPredicateEvaluator evaluator) {
         for (ScalarOperator conjunct : conjuncts) {
             ColumnRefOperator column = evaluator.column(conjunct);
             int index = columns.indexOf(column);
             if (index < 0 || index >= entry.getValues().size()) {
                 return Optional.empty();
             }
-            Optional<Boolean> match = evaluator.matchesComponent(conjunct, column, entry.getValues().get(index));
+            Optional<Boolean> match = evaluator.matchesComponent(conjunct, column, entry.getValues().get(index), head,
+                    index);
             if (match.isEmpty()) {
                 return Optional.empty();
             }

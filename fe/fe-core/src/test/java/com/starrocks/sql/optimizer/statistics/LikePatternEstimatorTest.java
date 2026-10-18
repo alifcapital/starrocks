@@ -246,7 +246,7 @@ public class LikePatternEstimatorTest {
                 McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
                 List<Optional<Boolean>> results = new java.util.ArrayList<>();
                 for (String value : head.keySet()) {
-                    results.add(evaluator.matchesComponent(like, STATUS, value));
+                    results.add(evaluator.matchesComponent(like, STATUS, value, null, -1));
                 }
                 runs.add(results);
             }

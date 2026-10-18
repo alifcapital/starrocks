@@ -182,13 +182,13 @@ public class StatisticsEstimateUtils {
 
     // The plain selectivity of a predicate, without the MCV lists: what the MCV estimation is built from.
     public static double getPredicateSelectivity(ScalarOperator predicate, Statistics statistics) {
-        Statistics estimatedStatistics = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, false);
+        double rowCount = PredicateStatisticsCalculator.plainRowCount(predicate, statistics);
 
         // avoid sample statistics filter all data, save one rows least
-        if (statistics.getOutputRowCount() > 0 && estimatedStatistics.getOutputRowCount() == 0) {
+        if (statistics.getOutputRowCount() > 0 && rowCount == 0) {
             return 1 / statistics.getOutputRowCount();
         } else {
-            return estimatedStatistics.getOutputRowCount() / statistics.getOutputRowCount();
+            return rowCount / statistics.getOutputRowCount();
         }
     }
 
