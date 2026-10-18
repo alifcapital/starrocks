@@ -15,6 +15,7 @@
 package com.starrocks.statistic.sample;
 
 import com.google.common.base.Preconditions;
+import com.starrocks.statistic.StatisticsCollectJob;
 import com.starrocks.type.Type;
 
 public class PrimitiveTypeColumnStats extends ColumnStats {
@@ -53,7 +54,7 @@ public class PrimitiveTypeColumnStats extends ColumnStats {
     public String getMax() {
         String fn = "MAX";
         if (columnType.getPrimitiveType().isCharFamily()) {
-            fn = fn + "(LEFT(column_key, 200))";
+            fn = fn + "(LEFT(column_key, " + StatisticsCollectJob.STRING_BOUND_LENGTH + "))";
         } else {
             fn = fn + "(column_key)";
         }
@@ -65,7 +66,7 @@ public class PrimitiveTypeColumnStats extends ColumnStats {
     public String getMin() {
         String fn = "MIN";
         if (columnType.getPrimitiveType().isCharFamily()) {
-            fn = fn + "(LEFT(column_key, 200))";
+            fn = fn + "(LEFT(column_key, " + StatisticsCollectJob.STRING_BOUND_LENGTH + "))";
         } else {
             fn = fn + "(column_key)";
         }

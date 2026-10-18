@@ -49,6 +49,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -626,6 +627,48 @@ public class PredicateStatisticsCalculator {
         return input.withOutputRowCount(rowCount);
     }
 
+    // A placeholder column that holds the statistics of the expression of an interval while it is estimated
+    private static final int INTERVAL_COLUMN_ID = Integer.MAX_VALUE - 1;
+
+    // A range comparison of an expression with a constant
+    private record IntervalSide(ScalarOperator expression, BinaryType type, ConstantOperator constant) {
+    }
+
+    // The comparisons of one expression in a conjunction, and the tightest bound on each side
+    private static final class Interval {
+        private final List<ScalarOperator> conjuncts = new ArrayList<>(2);
+        private ConstantOperator lower;
+        private BinaryType lowerType;
+        private ConstantOperator upper;
+        private BinaryType upperType;
+        private boolean comparable = true;
+
+        private void add(IntervalSide side, ScalarOperator conjunct) {
+            conjuncts.add(conjunct);
+            boolean isLower = side.type() == BinaryType.GE || side.type() == BinaryType.GT;
+            ConstantOperator current = isLower ? lower : upper;
+            if (current != null && !current.getType().equals(side.constant().getType())) {
+                comparable = false;
+                return;
+            }
+            int cmp = current == null ? 0 : side.constant().compareTo(current);
+            boolean strict = side.type() == BinaryType.GT || side.type() == BinaryType.LT;
+            if (current == null || (isLower ? cmp > 0 : cmp < 0) || (cmp == 0 && strict)) {
+                if (isLower) {
+                    lower = side.constant();
+                    lowerType = side.type();
+                } else {
+                    upper = side.constant();
+                    upperType = side.type();
+                }
+            }
+        }
+
+        private boolean isClosed() {
+            return comparable && lower != null && upper != null;
+        }
+    }
+
     private static class BaseCalculatingVisitor extends ScalarOperatorVisitor<Statistics, Void> {
         protected final Statistics statistics;
         protected final boolean useMcv;
@@ -782,6 +825,15 @@ public class PredicateStatisticsCalculator {
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(inStatistics, rowCount);
             }
 
+            if (!predicate.isSubquery() && !predicate.isNotIn() && firstChild instanceof CastOperator && allConstants
+                    && !inColumnStatistic.isUnknown() && !inColumnStatistic.isInfiniteRange()
+                    && keepsOrder((CastOperator) firstChild)) {
+                Optional<Statistics> cast = estimateInOverCast(inColumnStatistic, otherChildrenList);
+                if (cast.isPresent()) {
+                    return cast.get();
+                }
+            }
+
             double columnMaxVal = inColumnStatistic.getMaxValue();
             double columnMinVal = inColumnStatistic.getMinValue();
             double columnDistinctValues = inColumnStatistic.getDistinctValuesCount();
@@ -877,6 +929,208 @@ public class PredicateStatisticsCalculator {
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(inStatistics, rowCount, defaultSelectivity);
         }
 
+        // A cast that keeps the order of its source, whose statistics have the range and the NDV of the cast. For a
+        // cast that reorders the values the IN keeps its default estimate, and so does a cast whose statistics have
+        // no range: its NDV can then be that of the source, as seconds or strings for a cast to DATE.
+        private static boolean keepsOrder(CastOperator cast) {
+            CastStatisticsRules.Order order = CastStatisticsRules.order(cast.getChild(0).getType(), cast.getType());
+            return order == CastStatisticsRules.Order.STRICT || order == CastStatisticsRules.Order.NON_DECREASING
+                    || order == CastStatisticsRules.Order.SEGMENTED || order == CastStatisticsRules.Order.LAYOUT;
+        }
+
+        /**
+         * CAST(x AS T) IN (constants) over the statistics of the cast: a literal outside the range of the cast
+         * matches no row, and each literal inside it matches its share of the distinct values of the cast. A cast
+         * that turns values into NULL, such as a string read as a number, leaves fewer rows that can match.
+         */
+        private Optional<Statistics> estimateInOverCast(ColumnStatistic cast, List<ScalarOperator> literals) {
+            double distinct = cast.getDistinctValuesCount();
+            if (!(distinct >= 1) || cast.hasNaNValue()) {
+                return Optional.empty();
+            }
+            long inside = 0;
+            for (ScalarOperator literal : literals) {
+                ConstantOperator constant = (ConstantOperator) literal;
+                if (constant.isNull()) {
+                    continue;
+                }
+                OptionalDouble value = ConstantOperatorUtils.doubleValueFromConstant(constant);
+                if (value.isEmpty() || (value.getAsDouble() >= cast.getMinValue()
+                        && value.getAsDouble() <= cast.getMaxValue())) {
+                    inside++;
+                }
+            }
+            double selectivity = Math.min(1, inside / distinct) * (1 - cast.getNullsFraction());
+            double rowCount = statistics.getOutputRowCount() * selectivity;
+            return Optional.of(StatisticsEstimateUtils.adjustStatisticsByRowCount(
+                    statistics.withOutputRowCount(rowCount), rowCount));
+        }
+
+        /**
+         * CAST(x AS T) IS [NOT] NULL over the NULL rows of the cast, which holds the values the cast turns into
+         * NULL besides the NULL rows of x. A cast of NULL is NULL, so where the cast is not NULL, x is not either.
+         */
+        private Optional<Statistics> estimateNullOfCast(IsNullPredicateOperator predicate, ScalarOperator operand) {
+            ColumnStatistic cast = getExpressionStatistic(operand);
+            if (cast.isUnknown()) {
+                return Optional.empty();
+            }
+            double selectivity = predicate.isNotNull() ? 1 - cast.getNullsFraction() : cast.getNullsFraction();
+            // avoid estimate selectivity too small because of the error of null fraction
+            selectivity = Math.max(selectivity, StatisticsEstimateCoefficient.IS_NULL_PREDICATE_DEFAULT_FILTER_COEFFICIENT);
+            double rowCount = statistics.getOutputRowCount() * selectivity;
+            Statistics.Builder builder = Statistics.buildFrom(statistics).setOutputRowCount(rowCount);
+            if (predicate.isNotNull() && operand.getChild(0) instanceof ColumnRefOperator column
+                    && statistics.getColumnStatistics().containsKey(column)) {
+                builder.addColumnStatistic(column,
+                        ColumnStatistic.buildFrom(statistics.getColumnStatistic(column)).setNullsFraction(0).build());
+            }
+            return Optional.of(StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount));
+        }
+
+        /**
+         * Comparisons of one expression that is not a column with constants on both sides, as
+         * CAST(c AS DATE) >= '2026-08-01' AND CAST(c AS DATE) <= '2026-08-31', estimated as one interval over the
+         * statistics of the expression. Each comparison alone keeps the statistics of the expression, so a second
+         * one would take its share of the whole range again and multiply two halves. A comparison of a monotonic
+         * function takes the exact bound on its argument, see MonotonicFilterDerivation.columnBoundsForEstimate, so
+         * hours_add(CAST(c AS DATETIME), 5) between two times is an interval of CAST(c AS DATETIME). The other
+         * conjuncts are estimated after the intervals. Empty when the conjunction has no interval.
+         */
+        protected Optional<Statistics> estimateIntervals(CompoundPredicateOperator predicate) {
+            // We expect a conjunction of comparisons of columns almost always: count the candidates first, without
+            // allocating.
+            if (countIntervalCandidates(predicate) < 2) {
+                return Optional.empty();
+            }
+            try {
+                return intervals(predicate);
+            } catch (RuntimeException e) {
+                LOG.debug("Failed to estimate the intervals of a conjunction", e);
+                return Optional.empty();
+            }
+        }
+
+        private Optional<Statistics> intervals(CompoundPredicateOperator predicate) {
+            List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
+            Map<ScalarOperator, Interval> intervals = null;
+            List<ScalarOperator> rest = new ArrayList<>(conjuncts.size());
+            for (ScalarOperator conjunct : conjuncts) {
+                IntervalSide side = intervalSide(conjunct);
+                if (side == null) {
+                    rest.add(conjunct);
+                    continue;
+                }
+                if (intervals == null) {
+                    intervals = new LinkedHashMap<>();
+                }
+                intervals.computeIfAbsent(side.expression(), key -> new Interval()).add(side, conjunct);
+            }
+            if (intervals == null) {
+                return Optional.empty();
+            }
+            Statistics current = statistics;
+            boolean estimated = false;
+            for (Map.Entry<ScalarOperator, Interval> entry : intervals.entrySet()) {
+                Statistics next = entry.getValue().isClosed()
+                        ? estimateInterval(entry.getKey(), entry.getValue(), current) : null;
+                if (next == null) {
+                    rest.addAll(entry.getValue().conjuncts);
+                } else {
+                    // The MCV statistics follow the conjuncts of the interval, as they follow each conjunct of an AND
+                    current = finishEstimate(Utils.compoundAnd(entry.getValue().conjuncts), current, next, useMcv);
+                    estimated = true;
+                }
+            }
+            if (!estimated) {
+                return Optional.empty();
+            }
+            return Optional.of(rest.isEmpty() ? current : statisticsCalculate(Utils.compoundAnd(rest), current, useMcv));
+        }
+
+        private static int countIntervalCandidates(ScalarOperator predicate) {
+            if (predicate instanceof CompoundPredicateOperator compound && compound.isAnd()) {
+                return countIntervalCandidates(compound.getChild(0)) + countIntervalCandidates(compound.getChild(1));
+            }
+            return predicate instanceof BinaryPredicateOperator binary && binary.getBinaryType().isRange()
+                    && !binary.getChild(0).isColumnRef() && binary.getChild(1).isConstantRef() ? 1 : 0;
+        }
+
+        // The expression a range comparison bounds and the bound; null when the comparison is not part of an
+        // interval: a comparison of a column narrows the statistics of the column itself.
+        private IntervalSide intervalSide(ScalarOperator conjunct) {
+            if (!(conjunct instanceof BinaryPredicateOperator binary) || !checkNeedEvalEstimate(conjunct)
+                    || !binary.getBinaryType().isRange() || !(binary.getChild(1) instanceof ConstantOperator constant)
+                    || constant.isNull()) {
+                return null;
+            }
+            ScalarOperator left = getChildForCastOperator(binary.getChild(0));
+            if (left.isColumnRef() || left.isConstantRef()
+                    || ExpressionStatisticsEstimator.estimate(conjunct, statistics).isPresent()) {
+                return null;
+            }
+            if (left instanceof CallOperator && !(left instanceof CastOperator)) {
+                MonotonicFilterDerivation.ColumnBounds bounds = MonotonicFilterDerivation.columnBoundsForEstimate(binary);
+                if (bounds != null) {
+                    if (bounds.wider() || bounds.bounds().size() != 1
+                            || !(bounds.bounds().get(0) instanceof BinaryPredicateOperator bound)
+                            || !bound.getBinaryType().isRange() || !(bound.getChild(1) instanceof ConstantOperator limit)
+                            || limit.isNull()) {
+                        return null;
+                    }
+                    ScalarOperator expression = getChildForCastOperator(bound.getChild(0));
+                    return expression.isColumnRef() ? null : new IntervalSide(expression, bound.getBinaryType(), limit);
+                }
+            }
+            return new IntervalSide(left, binary.getBinaryType(), constant);
+        }
+
+        /**
+         * The rows of an interval over the statistics of its expression. A histogram is filtered by each end in
+         * turn, as it holds the rows on both sides of each end. A range is cut once, so that an interval of one value
+         * takes the share of one distinct value of the whole range. Null when the statistics do not tell.
+         */
+        private Statistics estimateInterval(ScalarOperator expression, Interval interval, Statistics input) {
+            try {
+                ColumnStatistic statistic = ExpressionStatisticCalculator.calculate(expression, input);
+                if (statistic.isUnknown() || statistic.hasNaNValue()) {
+                    return null;
+                }
+                Histogram histogram = statistic.getHistogram();
+                double rows;
+                if ((histogram != null && (histogram.hasStringValues() || !histogram.hasUnknownRange()))
+                        || expression.getType().isStringType()) {
+                    ColumnRefOperator column = new ColumnRefOperator(INTERVAL_COLUMN_ID, expression.getType(),
+                            "interval", true);
+                    Statistics withColumn = Statistics.buildFrom(input).addColumnStatistic(column, statistic).build();
+                    Statistics low = BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(
+                            Optional.of(column), statistic,
+                            new BinaryPredicateOperator(interval.lowerType, column, interval.lower),
+                            Optional.of(interval.lower), withColumn);
+                    ColumnStatistic narrowed = low.getColumnStatistics().get(column);
+                    if (narrowed == null) {
+                        return null;
+                    }
+                    rows = BinaryPredicateStatisticCalculator.estimateColumnToConstantComparison(Optional.of(column),
+                            narrowed, new BinaryPredicateOperator(interval.upperType, column, interval.upper),
+                            Optional.of(interval.upper), low).getOutputRowCount();
+                } else {
+                    OptionalDouble low = ConstantOperatorUtils.doubleValueFromConstant(interval.lower);
+                    OptionalDouble high = ConstantOperatorUtils.doubleValueFromConstant(interval.upper);
+                    if (low.isEmpty() || high.isEmpty() || statistic.isInfiniteRange()) {
+                        return null;
+                    }
+                    rows = BinaryPredicateStatisticCalculator.estimatePredicateRange(Optional.empty(), statistic,
+                            new StatisticRangeValues(low.getAsDouble(), high.getAsDouble(), Double.NaN), input)
+                            .getOutputRowCount();
+                }
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(input.withOutputRowCount(rows), rows);
+            } catch (RuntimeException e) {
+                LOG.debug("Failed to estimate an interval of {}", expression, e);
+                return null;
+            }
+        }
+
         @Override
         public Statistics visitIsNullPredicate(IsNullPredicateOperator predicate, Void context) {
             if (!checkNeedEvalEstimate(predicate)) {
@@ -885,6 +1139,13 @@ public class PredicateStatisticsCalculator {
             Optional<Statistics> mcv = estimateWithMcv(predicate);
             if (mcv.isPresent()) {
                 return ExpressionStatisticsEstimator.withNullCheckedVirtualColumn(predicate, statistics, mcv.get());
+            }
+            ScalarOperator operand = getChildForCastOperator(predicate.getChild(0));
+            if (operand instanceof CastOperator) {
+                Optional<Statistics> cast = estimateNullOfCast(predicate, operand);
+                if (cast.isPresent()) {
+                    return cast.get();
+                }
             }
             double selectivity = 1;
             List<ColumnRefOperator> children = Utils.extractColumnRef(predicate);
@@ -1086,6 +1347,11 @@ public class PredicateStatisticsCalculator {
                 if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
                     return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate, useMcv);
                 }
+                Optional<Statistics> intervals = estimateIntervals(predicate);
+                if (intervals.isPresent()) {
+                    return StatisticsEstimateUtils.adjustStatisticsByRowCount(intervals.get(),
+                            intervals.get().getOutputRowCount());
+                }
 
                 Statistics leftStatistics = finishEstimate(predicate.getChild(0), statistics,
                         predicate.getChild(0).accept(this, null), useMcv);
@@ -1216,24 +1482,19 @@ public class PredicateStatisticsCalculator {
             return equivalentCompoundPredicate.accept(this, null);
         }
 
+        // A cast of a constant becomes the value the BE computes. A cast of an expression is unwrapped only when it
+        // keeps every value; any other cast has statistics of its own, see ExpressionStatisticCalculator.
         private ScalarOperator getChildForCastOperator(ScalarOperator operator) {
-            if (operator instanceof CastOperator && !castsNumberToDate((CastOperator) operator)) {
+            if (operator instanceof CastOperator) {
                 if (operator.getChild(0) instanceof ConstantOperator constant) {
                     return StatisticsCastEvaluator.cast(constant, operator.getType())
                             .<ScalarOperator>map(value -> value).orElse(operator);
                 }
-                if (CastStatisticsUtils.preservesValues(operator.getChild(0).getType(), operator.getType())) {
+                if (CastStatisticsRules.preservesValues(operator.getChild(0).getType(), operator.getType())) {
                     return getChildForCastOperator(operator.getChild(0));
                 }
             }
             return operator;
-        }
-
-        // We keep a cast of a number to a date and do not take the statistics of the number: the statistics of a date
-        // are seconds since the epoch, while a number such as 20240101 as an INT means something else.
-        // ExpressionStatisticCalculator estimates the cast itself.
-        private static boolean castsNumberToDate(CastOperator cast) {
-            return cast.getChild(0).getType().isNumericType() && cast.getType().isDateType();
         }
 
         private ColumnStatistic getExpressionStatistic(ScalarOperator operator) {
@@ -1261,6 +1522,11 @@ public class PredicateStatisticsCalculator {
 
                 if (extracted.first.size() > 1 || mcvEstimate.isPresent()) {
                     return computeCompoundStatsWithMultiColumnOptimize(predicate, statistics, mcvEstimate, useMcv);
+                }
+                Optional<Statistics> intervals = estimateIntervals(predicate);
+                if (intervals.isPresent()) {
+                    return StatisticsEstimateUtils.adjustStatisticsByRowCount(intervals.get(),
+                            intervals.get().getOutputRowCount());
                 }
 
                 Statistics leftStatistics = finishEstimate(predicate.getChild(0), statistics,

@@ -14,6 +14,7 @@
 
 package com.starrocks.statistic.base;
 
+import com.starrocks.statistic.StatisticsCollectJob;
 import com.starrocks.statistic.sample.SampleInfo;
 import com.starrocks.type.Type;
 
@@ -50,7 +51,7 @@ public class PrimitiveTypeColumnStats extends BaseColumnStats {
     public String getMax() {
         String fn = "MAX";
         if (columnType.getPrimitiveType().isCharFamily()) {
-            fn = fn + "(LEFT(" + getQuotedColumnName() + ", 200))";
+            fn = fn + "(LEFT(" + getQuotedColumnName() + ", " + StatisticsCollectJob.STRING_BOUND_LENGTH + "))";
         } else {
             fn = fn + "(" + getQuotedColumnName() + ")";
         }
@@ -62,7 +63,7 @@ public class PrimitiveTypeColumnStats extends BaseColumnStats {
     public String getMin() {
         String fn = "MIN";
         if (columnType.getPrimitiveType().isCharFamily()) {
-            fn = fn + "(LEFT(" + getQuotedColumnName() + ", 200))";
+            fn = fn + "(LEFT(" + getQuotedColumnName() + ", " + StatisticsCollectJob.STRING_BOUND_LENGTH + "))";
         } else {
             fn = fn + "(" + getQuotedColumnName() + ")";
         }

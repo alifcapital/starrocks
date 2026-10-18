@@ -505,20 +505,32 @@ public class ExpressionStatisticCalculator {
             ColumnStatistic childStatistic = cast.getChild(0).accept(this, context);
 
             Type sourceType = cast.getChild(0).getType();
-            if (!childStatistic.isUnknown() && CastStatisticsUtils.preservesValues(sourceType, cast.getType())) {
+            if (!childStatistic.isUnknown() && CastStatisticsRules.preservesValues(sourceType, cast.getType())) {
                 return ColumnStatistic.buildFrom(childStatistic).setAverageRowSize(cast.getType().getTypeSize()).build();
             }
+            // The range, NDV, NULL rows and histogram of the cast, from the values of the source and the order the
+            // cast keeps; null when the pair is not covered.
+            ColumnStatistic derived = childStatistic.isUnknown() ? null
+                    : CastStatisticsDerivation.derive(childStatistic, sourceType, cast.getType());
             ColumnRefOperator source = McvCastStatistics.sourceColumn(cast);
             if (source != null) {
                 ColumnRefOperator output = new ColumnRefOperator(source.getId(), cast.getType(), source.getName(), true);
                 MultiColumnCombinedStats converted = McvCastStatistics.derive(output, cast, inputStatistics);
                 if (converted != null) {
-                    ColumnStatistic convertedBasic = ColumnStatistic.buildFrom(childStatistic).setHistogram(null)
-                            .setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY)
-                            .setMinString(null).setMaxString(null).setAverageRowSize(cast.getType().getTypeSize()).build();
-                    return new ExternalMcvStatistics.Group(List.of(output.getName()), (long) converted.getRowCount(),
-                            converted.getNdv(), converted.getMcv(), List.of(), converted.getNullCounts())
-                            .columnStatistic(cast.getType(), convertedBasic).orElse(convertedBasic);
+                    ColumnStatistic convertedBasic = derived != null
+                            ? ColumnStatistic.buildFrom(derived).setHistogram(null).build()
+                            : unordered(childStatistic, cast.getType());
+                    ColumnStatistic headed = new ExternalMcvStatistics.Group(List.of(output.getName()),
+                            (long) converted.getRowCount(), converted.getNdv(), converted.getMcv(), List.of(),
+                            converted.getNullCounts()).columnStatistic(cast.getType(), convertedBasic)
+                            .orElse(convertedBasic);
+                    // The head gives the exact rows of its values; the image of the histogram of the source also
+                    // spreads the other rows over buckets, where the head alone leaves them to an unknown range.
+                    if (derived != null && derived.getHistogram() != null
+                            && !derived.getHistogram().getBuckets().isEmpty()) {
+                        return ColumnStatistic.buildFrom(headed).setHistogram(derived.getHistogram()).build();
+                    }
+                    return headed;
                 }
             }
 
@@ -526,34 +538,15 @@ public class ExpressionStatisticCalculator {
                     inputStatistics.getColumnStatistics().values().stream().allMatch(ColumnStatistic::isUnknown)) {
                 return ColumnStatistic.unknown();
             }
+            return derived != null ? derived : unordered(childStatistic, cast.getType());
+        }
 
-            // A different value domain cannot reuse the original histogram. In particular a
-            // numeric/date cast of text can reorder values, merge distinct strings and introduce NULLs.
-            childStatistic = ColumnStatistic.buildFrom(childStatistic).setHistogram(null)
-                    .setMinString(null).setMaxString(null).build();
-            if (sourceType.isStringType() || cast.getType().isStringType()
-                    || !sourceType.isDateType() || !cast.getType().isDateType()) {
-                return ColumnStatistic.buildFrom(childStatistic)
-                        .setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY)
-                        .setAverageRowSize(cast.getType().getTypeSize()).build();
-            }
-
-            // DATE <-> DATETIME preserves the order, but DATETIME -> DATE truncates time.
-            // Transform the endpoints rather than forwarding the timestamp histogram unchanged.
-            try {
-                ConstantOperator min = ConstantOperator.createDatetime(
-                        Utils.getDatetimeFromLong((long) childStatistic.getMinValue())).castTo(cast.getType()).orElseThrow();
-                ConstantOperator max = ConstantOperator.createDatetime(
-                        Utils.getDatetimeFromLong((long) childStatistic.getMaxValue())).castTo(cast.getType()).orElseThrow();
-                return ColumnStatistic.buildFrom(childStatistic)
-                        .setMinValue(Utils.getLongFromDateTime(min.getDatetime()))
-                        .setMaxValue(Utils.getLongFromDateTime(max.getDatetime()))
-                        .setAverageRowSize(cast.getType().getTypeSize()).build();
-            } catch (Exception e) {
-                return ColumnStatistic.buildFrom(childStatistic)
-                        .setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY)
-                        .setAverageRowSize(cast.getType().getTypeSize()).build();
-            }
+        // A different value domain cannot reuse the original histogram. In particular a numeric/date cast of text
+        // can reorder values, merge distinct strings and introduce NULLs.
+        private static ColumnStatistic unordered(ColumnStatistic childStatistic, Type type) {
+            return ColumnStatistic.buildFrom(childStatistic).setHistogram(null).setMinString(null).setMaxString(null)
+                    .setStringBounds(null).setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY)
+                    .setAverageRowSize(type.getTypeSize()).build();
         }
 
         @Override

@@ -123,20 +123,34 @@ class HistogramCastStatisticsTest {
     }
 
     @Test
-    void dateStringRangesDoNotReadTailOrLexicalEndpoints() throws Exception {
+    void dateStringRangesReadOnlyBucketsOfOneLayout() throws Exception {
+        LocalDateTime from = LocalDateTime.of(2020, 1, 1, 0, 0);
+        LocalDateTime to = LocalDateTime.of(2026, 1, 1, 0, 0);
+        LocalDateTime point = LocalDateTime.of(2024, 1, 1, 0, 0);
+        double all = java.time.Duration.between(from, to).toDays();
+        double below = java.time.Duration.between(from, point).toDays();
         for (Type target : List.of(DateType.DATE, DateType.DATETIME)) {
             CastOperator cast = new CastOperator(target, TEXT);
-            for (Histogram histogram : List.of(stored(), Histogram.forStrings(
-                    List.of(new StringBucket("2020-01-01", "2026-01-01", 9_998_500L, 0L, 1000L, true, true)),
-                    Map.of("2021-01-01", 750L, "2025-01-01", 750L)))) {
-                Statistics input = input(TEXT, histogram);
-                for (BinaryType op : List.of(BinaryType.LT, BinaryType.LE, BinaryType.GT, BinaryType.GE)) {
-                    ConstantOperator constant = ConstantOperator.createDate(LocalDateTime.of(2024, 1, 1, 0, 0))
-                            .castTo(target).orElseThrow();
-                    Assertions.assertEquals(estimate(cast, op, constant, input(TEXT, null)).getOutputRowCount(),
-                            estimate(cast, op, constant, input).getOutputRowCount(), 0.01);
-                }
+            ConstantOperator constant = ConstantOperator.createDate(point).castTo(target).orElseThrow();
+            // A tail of unknown strings tells nothing about the dates
+            for (BinaryType op : List.of(BinaryType.LT, BinaryType.LE, BinaryType.GT, BinaryType.GE)) {
+                Assertions.assertEquals(estimate(cast, op, constant, input(TEXT, null)).getOutputRowCount(),
+                        estimate(cast, op, constant, input(TEXT, stored())).getOutputRowCount(), 0.01);
             }
+            // Strings of one layout sort as their dates: the bucket maps to its dates, the values to theirs
+            Statistics input = input(TEXT, Histogram.forStrings(
+                    List.of(new StringBucket("2020-01-01", "2026-01-01", 9_998_500L, 0L, 1000L, true, true)),
+                    Map.of("2021-01-01", 750L, "2025-01-01", 750L)));
+            Assertions.assertEquals(9_998_500 * below / all + 750,
+                    estimate(cast, BinaryType.LT, constant, input).getOutputRowCount(), ROWS * 0.01);
+            Assertions.assertEquals(9_998_500 * (all - below) / all + 750,
+                    estimate(cast, BinaryType.GE, constant, input).getOutputRowCount(), ROWS * 0.01);
+            // Bucket ends of two layouts do not sort as dates
+            Statistics mixed = input(TEXT, Histogram.forStrings(
+                    List.of(new StringBucket("20200101", "2026-01-01", 9_998_500L, 0L, 1000L, true, true)),
+                    Map.of()));
+            Assertions.assertEquals(estimate(cast, BinaryType.LT, constant, input(TEXT, null)).getOutputRowCount(),
+                    estimate(cast, BinaryType.LT, constant, mixed).getOutputRowCount(), 0.01);
         }
     }
 
@@ -158,7 +172,8 @@ class HistogramCastStatisticsTest {
     }
 
     @Test
-    void dateToDoubleCannotReuseTimestampBoundsOrHistogram() {
+    void dateToDoubleReadsTheLiteralNotTheTimestamp() {
+        // The BE casts a date to the number YYYYMMDD and a datetime to YYYYMMDDHHMMSS, not to seconds since 1970
         for (Type sourceType : List.of(DateType.DATE, DateType.DATETIME)) {
             ColumnRefOperator date = new ColumnRefOperator(1, sourceType, "date_value", true);
             double min = Utils.getLongFromDateTime(LocalDateTime.of(2024, 1, 1, 0, 0));
@@ -170,11 +185,14 @@ class HistogramCastStatisticsTest {
             Statistics input = Statistics.builder().setOutputRowCount(ROWS).addColumnStatistic(date, original).build();
             CastOperator cast = new CastOperator(FloatType.DOUBLE, date);
             ColumnStatistic converted = ExpressionStatisticCalculator.calculate(cast, input);
-            Assertions.assertEquals(Double.NEGATIVE_INFINITY, converted.getMinValue());
-            Assertions.assertEquals(Double.POSITIVE_INFINITY, converted.getMaxValue());
-            Assertions.assertNull(converted.getHistogram());
-            Assertions.assertEquals(ROWS / 2,
-                    estimate(cast, BinaryType.LE, ConstantOperator.createDouble(1979), input).getOutputRowCount());
+            double scale = sourceType.isDate() ? 1 : 1e6;
+            Assertions.assertEquals(20240101 * scale, converted.getMinValue());
+            Assertions.assertEquals(20250101 * scale, converted.getMaxValue());
+            Bucket bucket = converted.getHistogram().getBuckets().get(0);
+            Assertions.assertEquals(20240101 * scale, bucket.getLower());
+            Assertions.assertEquals(20250101 * scale, bucket.getUpper());
+            Assertions.assertTrue(
+                    estimate(cast, BinaryType.LE, ConstantOperator.createDouble(1979), input).getOutputRowCount() <= 1);
             Assertions.assertSame(histogram, original.getHistogram());
             Assertions.assertEquals(min, original.getMinValue());
         }
@@ -297,7 +315,7 @@ class HistogramCastStatisticsTest {
     }
 
     @Test
-    void datetimeToDateTransformsEndpointsAndDropsUntransformedHistogram() {
+    void datetimeToDateTransformsEndpointsAndHistogram() {
         ColumnRefOperator column = new ColumnRefOperator(1, DateType.DATETIME, "ts", false);
         LocalDateTime min = LocalDateTime.of(2025, 1, 1, 12, 30);
         LocalDateTime max = LocalDateTime.of(2025, 1, 3, 23, 0);
@@ -306,7 +324,8 @@ class HistogramCastStatisticsTest {
                         .setMinValue(Utils.getLongFromDateTime(min)).setMaxValue(Utils.getLongFromDateTime(max))
                         .setDistinctValuesCount(100).setHistogram(new Histogram(Map.of(min.toString(), 100L))).build()).build();
         ColumnStatistic result = ExpressionStatisticCalculator.calculate(new CastOperator(DateType.DATE, column), input);
-        Assertions.assertNull(result.getHistogram());
+        // The most common value keeps its rows on its day
+        Assertions.assertEquals(Map.of("2025-01-01", 100L), result.getHistogram().getMCV());
         Assertions.assertEquals(Utils.getLongFromDateTime(min.toLocalDate().atStartOfDay()), result.getMinValue());
         Assertions.assertEquals(Utils.getLongFromDateTime(max.toLocalDate().atStartOfDay()), result.getMaxValue());
     }

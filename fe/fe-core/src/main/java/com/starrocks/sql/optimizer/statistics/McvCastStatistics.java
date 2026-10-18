@@ -123,6 +123,18 @@ final class McvCastStatistics {
         return new MultiColumnCombinedStats(ndv, group.getRowCount(), columns, head, nulls);
     }
 
+    // The NDV the statistics of a cast of the source column give, see CastStatisticsDerivation; no bound for a
+    // nested cast.
+    private static double distinctBound(ScalarOperator expression, ColumnRefOperator source, Statistics input) {
+        if (!(expression instanceof CastOperator) || !source.equals(expression.getChild(0))) {
+            return Double.POSITIVE_INFINITY;
+        }
+        ColumnStatistic statistic = input.getColumnStatistics().get(source);
+        ColumnStatistic cast = statistic == null || statistic.isUnknown() ? null
+                : CastStatisticsDerivation.derive(statistic, source.getType(), expression.getType());
+        return cast == null ? Double.POSITIVE_INFINITY : cast.getDistinctValuesCount();
+    }
+
     static MultiColumnCombinedStats derive(ColumnRefOperator output, ScalarOperator expression, Statistics input) {
         if (input.getMultiColumnCombinedStats().isEmpty() || !MultiColumnMcvEstimator.isEnabled()) {
             return null;
@@ -201,7 +213,10 @@ final class McvCastStatistics {
         } else if (ndv >= 0 && Double.isFinite(ndv)) {
             // Account for observed collisions/invalid values, retaining the existing estimate for
             // unseen values. The tail can also collide or become NULL; it is not known exactly.
-            ndv = Math.max(converted.size(), ndv - values.size() + converted.size());
+            // The values of the cast in the range of the source bound the tail, as the days of a DATETIME cast to
+            // DATE do.
+            ndv = Math.max(converted.size(), Math.min(distinctBound(expression, source, input),
+                    ndv - values.size() + converted.size()));
         } else {
             return null;
         }

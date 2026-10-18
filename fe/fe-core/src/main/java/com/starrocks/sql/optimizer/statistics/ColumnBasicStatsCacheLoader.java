@@ -29,6 +29,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.statistic.StatisticExecutor;
 import com.starrocks.statistic.StatisticUtils;
+import com.starrocks.statistic.StatisticsCollectJob;
 import com.starrocks.thrift.TStatisticData;
 import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.Type;
@@ -158,6 +159,22 @@ public class ColumnBasicStatsCacheLoader implements AsyncCacheLoader<ColumnStats
                 statisticData.columnName, columnType);
     }
 
+    /**
+     * The bounds of a string column for estimates, see StringBounds. The collection writes '' both for a column of
+     * NULL rows and for a real empty string, so '' is no bound, except as the minimum of a column with values.
+     */
+    private static StringBounds stringBounds(TStatisticData statisticData) {
+        if (!statisticData.isSetMin() || !statisticData.isSetMax() || statisticData.getMax().isEmpty()) {
+            return null;
+        }
+        boolean allNull = statisticData.nullCount >= Math.max(statisticData.rowCount, 1);
+        if (statisticData.getMin().isEmpty() && allNull) {
+            return null;
+        }
+        return new StringBounds(statisticData.getMin(), statisticData.getMax(),
+                StatisticsCollectJob.STRING_BOUND_LENGTH, false);
+    }
+
     public static ColumnStatistic buildColumnStatistics(TStatisticData statisticData, String catalog, String db,
                                                  String table, String columnName, Type columnType) {
         ColumnStatistic.Builder builder = ColumnStatistic.builder();
@@ -166,7 +183,7 @@ public class ColumnBasicStatsCacheLoader implements AsyncCacheLoader<ColumnStats
         double distinctValues = statisticData.countDistinct;
         try {
             if (columnType.getPrimitiveType().isCharFamily()) {
-                // do nothing
+                builder.setStringBounds(stringBounds(statisticData));
             } else if (columnType.getPrimitiveType().equals(PrimitiveType.DATE)) {
                 if (statisticData.isSetMin() && !statisticData.getMin().isEmpty()) {
                     minValue = (double) getLongFromDateTime(DateUtils.parseStringWithDefaultHSM(

@@ -396,7 +396,7 @@ public final class ExpressionStatisticsMatcher {
             ScalarOperator conjunct = conjuncts.get(i);
             if (conjunct instanceof BinaryPredicateOperator && conjunct.getChild(0) instanceof CallOperator
                     && conjunct.getChild(1).isConstantRef()
-                    && MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) conjunct) != null) {
+                    && MonotonicFilterDerivation.reducesToColumnBounds((BinaryPredicateOperator) conjunct)) {
                 continue;
             }
             if (conjunct instanceof LikePredicateOperator && column.equals(conjunct.getChild(0))

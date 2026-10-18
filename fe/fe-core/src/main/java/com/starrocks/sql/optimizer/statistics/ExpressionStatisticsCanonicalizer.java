@@ -94,7 +94,7 @@ public final class ExpressionStatisticsCanonicalizer {
                 if (folded.isPresent()) {
                     return normalizeConstant(folded.get());
                 }
-            } else if (CastStatisticsUtils.preservesValues(child.getType(), operator.getType())
+            } else if (CastStatisticsRules.preservesValues(child.getType(), operator.getType())
                     && (use == Use.VALUE || sameText(child.getType(), operator.getType()))) {
                 return child;
             }

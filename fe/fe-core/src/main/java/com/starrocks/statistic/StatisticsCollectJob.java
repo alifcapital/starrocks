@@ -61,6 +61,8 @@ import java.util.stream.Collectors;
 
 public abstract class StatisticsCollectJob {
     private static final Logger LOG = LogManager.getLogger(StatisticsMetaManager.class);
+    // The characters of a string the collection keeps as its minimum and maximum: longer values are cut
+    public static final int STRING_BOUND_LENGTH = 200;
 
     protected final Database db;
     protected final Table table;
@@ -301,7 +303,7 @@ public abstract class StatisticsCollectJob {
     protected String getMinMaxFunction(Type columnType, String name, boolean isMax) {
         String fn = isMax ? "MAX" : "MIN";
         if (columnType.getPrimitiveType().isCharFamily()) {
-            fn = fn + "(LEFT(" + name + ", 200))";
+            fn = fn + "(LEFT(" + name + ", " + STRING_BOUND_LENGTH + "))";
         } else {
             fn = fn + "(" + name + ")";
         }

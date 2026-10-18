@@ -51,6 +51,8 @@ public class ColumnStatistic {
     private final String minString;
     private final String maxString;
     private final double collectionSize;
+    // The bounds of a string column for estimates only, see StringBounds
+    private final StringBounds stringBounds;
 
     // A runtime filter needs the domain of its keys: we expect a dimension filtered to a few of its keys to pass
     // few probe rows, even when the probe side has fewer distinct keys than the build side. So we keep the NDV of
@@ -71,12 +73,12 @@ public class ColumnStatistic {
             Histogram histogram,
             StatisticType type) {
         this(minValue, maxValue, nullsFraction, averageRowSize, distinctValuesCount,
-                collectionSize, histogram, type, null, null);
+                collectionSize, histogram, type, null, null, null);
     }
 
     private ColumnStatistic(double minValue, double maxValue, double nullsFraction, double averageRowSize,
                             double distinctValuesCount, double collectionSize, Histogram histogram,
-                            StatisticType type, String minString, String maxString) {
+                            StatisticType type, String minString, String maxString, StringBounds stringBounds) {
         this.minValue = minValue;
         this.maxValue = maxValue;
         this.nullsFraction = nullsFraction;
@@ -87,6 +89,7 @@ public class ColumnStatistic {
         this.type = type;
         this.minString = minString;
         this.maxString = maxString;
+        this.stringBounds = stringBounds;
     }
 
     public ColumnStatistic(double minValue, double maxValue, double nullsFraction, double averageRowSize,
@@ -109,6 +112,10 @@ public class ColumnStatistic {
 
     public String getMaxString() {
         return maxString;
+    }
+
+    public StringBounds getStringBounds() {
+        return stringBounds;
     }
 
     public double getMinValue() {
@@ -213,6 +220,7 @@ public class ColumnStatistic {
         return new Builder(other.minString, other.maxString, other.minValue, other.maxValue,
                 other.nullsFraction, other.averageRowSize, other.distinctValuesCount, other.histogram,
                 other.collectionSize, other.type)
+                .setStringBounds(other.stringBounds)
                 .setSourceDistinctValuesCount(other.getSourceDistinctValuesCount())
                 .setDistinctValuesFromDefaultSelectivity(other.distinctValuesFromDefaultSelectivity);
     }
@@ -321,6 +329,7 @@ public class ColumnStatistic {
         private StatisticType type = StatisticType.ESTIMATE;
         private String minString = null;
         private String maxString = null;
+        private StringBounds stringBounds = null;
         private double collectionSize = DEFAULT_COLLECTION_SIZE;
         private double sourceDistinctValuesCount = NaN;
         private boolean distinctValuesFromDefaultSelectivity;
@@ -406,6 +415,11 @@ public class ColumnStatistic {
             return this;
         }
 
+        public Builder setStringBounds(StringBounds stringBounds) {
+            this.stringBounds = stringBounds;
+            return this;
+        }
+
         public Builder setSourceDistinctValuesCount(double sourceDistinctValuesCount) {
             this.sourceDistinctValuesCount = sourceDistinctValuesCount;
             return this;
@@ -418,7 +432,7 @@ public class ColumnStatistic {
 
         public ColumnStatistic build() {
             ColumnStatistic columnStatistic = new ColumnStatistic(minValue, maxValue, nullsFraction, averageRowSize,
-                    distinctValuesCount, collectionSize, histogram, type, minString, maxString);
+                    distinctValuesCount, collectionSize, histogram, type, minString, maxString, stringBounds);
             columnStatistic.sourceDistinctValuesCount = sourceDistinctValuesCount;
             columnStatistic.distinctValuesFromDefaultSelectivity = distinctValuesFromDefaultSelectivity;
             return columnStatistic;
