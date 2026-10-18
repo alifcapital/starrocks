@@ -1454,6 +1454,263 @@ TEST_F(RuntimeMembershipFilterTest, TestEvaluateBitsetFilter) {
     }
 }
 
+// The tests below evaluate a filter in place over a selection that earlier stages (a conjunct, a delete
+// vector, another runtime filter) already thinned out. A row dropped before must stay dropped, NULL rows
+// included. The NULL rows carry placeholder values on purpose: a placeholder outside the filter range must not
+// drop a selected NULL row, and a placeholder inside it must not select a dropped NULL row.
+//
+//   row          0   1   2    3     4     5     6     7   8
+//   value       10  10  15  100  NULL  NULL  NULL  NULL  20
+//   placeholder                  100   100    15    10
+//   input        1   0   1    1     1     0     1     0   1
+static const std::vector<int32_t> kInPlaceValues = {10, 10, 15, 100, 100, 100, 15, 10, 20};
+static const std::vector<uint8_t> kInPlaceNulls = {0, 0, 0, 0, 1, 1, 1, 1, 0};
+static const std::vector<uint8_t> kInPlaceInput = {1, 0, 1, 1, 1, 0, 1, 0, 1};
+
+static std::vector<uint8_t> evaluate_in_place(const RuntimeFilter& rf) {
+    auto column = ColumnTestHelper::build_nullable_column<int32_t>(kInPlaceValues, kInPlaceNulls);
+    std::vector<uint8_t> selection = kInPlaceInput;
+    std::vector<uint32_t> hash_values;
+    rf.evaluate(column.get(), hash_values, selection.data(), 0, static_cast<uint16_t>(selection.size()));
+    return selection;
+}
+
+using Selection = std::vector<uint8_t>;
+
+// We expect a filter that accepts NULL to keep the NULL rows 5 and 7 dropped, and to select only the NULL rows 4
+// and 6 that were selected before.
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateMinMaxFilterKeepsDroppedNullRows) {
+    auto* rf = _pool.add(new Int32MinMaxRF());
+    rf->insert(10);
+    rf->insert(20);
+
+    // NULL is rejected: every NULL row is 0.
+    EXPECT_EQ(evaluate_in_place(*rf), (Selection{1, 0, 1, 0, 0, 0, 0, 0, 1}));
+
+    // NULL is accepted: only the selected NULL rows 4 and 6 are 1, whatever their placeholder is.
+    rf->insert_null();
+    EXPECT_EQ(evaluate_in_place(*rf), (Selection{1, 0, 1, 0, 1, 0, 1, 0, 1}));
+}
+
+// The empty membership filter evaluates nothing, so the min-max filter decides the NULL rows of an empty filter.
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateEmptyFilterKeepsDroppedNullRows) {
+    ComposedRuntimeEmptyFilter<TYPE_INT> rf;
+    rf.membership_filter().init(100);
+    rf.insert(10);
+    rf.insert(20);
+
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 1, 0, 0, 0, 0, 0, 1}));
+
+    rf.insert_null();
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 1, 0, 1, 0, 1, 0, 1}));
+}
+
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateBloomFilterKeepsDroppedNullRows) {
+    Int32RF rf;
+    rf.membership_filter().init(100);
+    rf.insert(10);
+    rf.insert(20);
+
+    // Row 2 is inside the min-max range but not in the bloom filter.
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 0, 0, 0, 0, 0, 0, 1}));
+
+    rf.insert_null();
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 0, 0, 1, 0, 1, 0, 1}));
+}
+
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateBitsetFilterKeepsDroppedNullRows) {
+    ComposedRuntimeBitsetFilter<TYPE_INT> rf;
+    rf.membership_filter().set_min_max(10, 20);
+    rf.membership_filter().init(100);
+    rf.insert(10);
+    rf.insert(20);
+
+    // Row 2 is inside the bitset range but not in the bitset.
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 0, 0, 0, 0, 0, 0, 1}));
+
+    rf.insert_null();
+    EXPECT_EQ(evaluate_in_place(rf), (Selection{1, 0, 0, 0, 1, 0, 1, 0, 1}));
+}
+
+// We expect the membership filter of a bloom or bitset filter to decide the NULL rows alone, so here only the
+// membership filter accepts NULL and the selected NULL rows 4 and 6 must stay selected.
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateMembershipFilterDecidesNullRows) {
+    Int32RF bloom;
+    bloom.membership_filter().init(100);
+    bloom.insert(10);
+    bloom.insert(20);
+    bloom.membership_filter().insert_null();
+    ASSERT_FALSE(bloom.min_max_filter().has_null());
+    EXPECT_EQ(evaluate_in_place(bloom), (Selection{1, 0, 0, 0, 1, 0, 1, 0, 1}));
+
+    ComposedRuntimeBitsetFilter<TYPE_INT> bitset;
+    bitset.membership_filter().set_min_max(10, 20);
+    bitset.membership_filter().init(100);
+    bitset.insert(10);
+    bitset.insert(20);
+    bitset.membership_filter().insert_null();
+    ASSERT_FALSE(bitset.min_max_filter().has_null());
+    EXPECT_EQ(evaluate_in_place(bitset), (Selection{1, 0, 0, 0, 1, 0, 1, 0, 1}));
+}
+
+// The evaluation over the selection vector lists the rows that are still selected: the rows 0, 2, 3, 4, 6 and 8
+// of the table above. A row that the filter drops is left out of the result, and a row that is not listed can not
+// come back.
+static std::vector<uint16_t> evaluate_selected_rows(const RuntimeFilter& rf) {
+    auto column = ColumnTestHelper::build_nullable_column<int32_t>(kInPlaceValues, kInPlaceNulls);
+    std::vector<uint16_t> sel;
+    for (size_t i = 0; i < kInPlaceInput.size(); i++) {
+        if (kInPlaceInput[i]) {
+            sel.push_back(static_cast<uint16_t>(i));
+        }
+    }
+    std::vector<uint16_t> dst_sel(sel.size());
+    std::vector<uint32_t> hash_values;
+    const uint16_t size =
+            rf.evaluate(column.get(), hash_values, sel.data(), static_cast<uint16_t>(sel.size()), dst_sel.data());
+    dst_sel.resize(size);
+    return dst_sel;
+}
+
+using SelectedRows = std::vector<uint16_t>;
+
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateSelectionVectorOfMinMaxFilter) {
+    auto* rf = _pool.add(new Int32MinMaxRF());
+    rf->insert(10);
+    rf->insert(20);
+    EXPECT_EQ(evaluate_selected_rows(*rf), (SelectedRows{0, 2, 8}));
+
+    rf->insert_null();
+    EXPECT_EQ(evaluate_selected_rows(*rf), (SelectedRows{0, 2, 4, 6, 8}));
+}
+
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateSelectionVectorOfEmptyFilter) {
+    ComposedRuntimeEmptyFilter<TYPE_INT> rf;
+    rf.membership_filter().init(100);
+    rf.insert(10);
+    rf.insert(20);
+    EXPECT_EQ(evaluate_selected_rows(rf), (SelectedRows{0, 2, 8}));
+
+    rf.insert_null();
+    EXPECT_EQ(evaluate_selected_rows(rf), (SelectedRows{0, 2, 4, 6, 8}));
+}
+
+// The membership filter of a bloom or bitset filter decides the NULL rows. Only the membership filter accepts NULL
+// here, so the min-max filter has to keep the selected NULL rows 4 and 6 for it.
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateSelectionVectorKeepsNullRowsOfMembershipFilter) {
+    Int32RF bloom;
+    bloom.membership_filter().init(100);
+    bloom.insert(10);
+    bloom.insert(20);
+    EXPECT_EQ(evaluate_selected_rows(bloom), (SelectedRows{0, 8}));
+    bloom.membership_filter().insert_null();
+    ASSERT_FALSE(bloom.min_max_filter().has_null());
+    EXPECT_EQ(evaluate_selected_rows(bloom), (SelectedRows{0, 4, 6, 8}));
+
+    ComposedRuntimeBitsetFilter<TYPE_INT> bitset;
+    bitset.membership_filter().set_min_max(10, 20);
+    bitset.membership_filter().init(100);
+    bitset.insert(10);
+    bitset.insert(20);
+    EXPECT_EQ(evaluate_selected_rows(bitset), (SelectedRows{0, 8}));
+    bitset.membership_filter().insert_null();
+    ASSERT_FALSE(bitset.min_max_filter().has_null());
+    EXPECT_EQ(evaluate_selected_rows(bitset), (SelectedRows{0, 4, 6, 8}));
+}
+
+// Merging filters merges what they accept, so a merged filter accepts NULL when one of the merged filters does,
+// in its min-max filter as well as in its membership filter.
+TEST_F(RuntimeMembershipFilterTest, TestMergeKeepsHasNull) {
+    auto* with_null = _pool.add(new Int32MinMaxRF());
+    with_null->insert(10);
+    with_null->insert_null();
+    auto* without_null = _pool.add(new Int32MinMaxRF());
+    without_null->insert(20);
+
+    Int32MinMaxRF merged;
+    merged.merge(without_null);
+    EXPECT_FALSE(merged.has_null());
+    merged.merge(with_null);
+    EXPECT_TRUE(merged.has_null());
+
+    Int32MinMaxRF concatenated;
+    concatenated.concat(without_null);
+    EXPECT_FALSE(concatenated.has_null());
+    concatenated.concat(with_null);
+    EXPECT_TRUE(concatenated.has_null());
+
+    // Both parts of a composed filter keep it, whichever way the partial filters are put together.
+    auto new_bloom_filter = [&]() {
+        auto* rf = _pool.add(new Int32RF());
+        rf->membership_filter().init(100);
+        return rf;
+    };
+    auto* bloom_with_null = new_bloom_filter();
+    bloom_with_null->insert(10);
+    bloom_with_null->insert_null();
+    auto* bloom_without_null = new_bloom_filter();
+    bloom_without_null->insert(20);
+
+    auto* merged_bloom = new_bloom_filter();
+    merged_bloom->merge(bloom_without_null);
+    merged_bloom->merge(bloom_with_null);
+    EXPECT_TRUE(merged_bloom->has_null());
+    EXPECT_TRUE(merged_bloom->membership_filter().has_null());
+    EXPECT_TRUE(merged_bloom->min_max_filter().has_null());
+    EXPECT_EQ(evaluate_selected_rows(*merged_bloom), (SelectedRows{0, 4, 6, 8}));
+    EXPECT_EQ(evaluate_in_place(*merged_bloom), (Selection{1, 0, 0, 0, 1, 0, 1, 0, 1}));
+
+    auto* concatenated_bloom = _pool.add(new Int32RF());
+    concatenated_bloom->concat(bloom_without_null);
+    concatenated_bloom->concat(bloom_with_null);
+    EXPECT_TRUE(concatenated_bloom->membership_filter().has_null());
+    EXPECT_TRUE(concatenated_bloom->min_max_filter().has_null());
+
+    // An empty filter decides the NULL rows in its min-max filter, so a merged one has to keep NULL there.
+    auto* empty_with_null = _pool.add(new ComposedRuntimeEmptyFilter<TYPE_INT>());
+    empty_with_null->insert(10);
+    empty_with_null->insert_null();
+    auto* empty_without_null = _pool.add(new ComposedRuntimeEmptyFilter<TYPE_INT>());
+    empty_without_null->insert(20);
+
+    ComposedRuntimeEmptyFilter<TYPE_INT> merged_empty;
+    merged_empty.merge(empty_without_null);
+    merged_empty.merge(empty_with_null);
+    EXPECT_TRUE(merged_empty.min_max_filter().has_null());
+    EXPECT_EQ(evaluate_in_place(merged_empty), (Selection{1, 0, 1, 0, 1, 0, 1, 0, 1}));
+    EXPECT_EQ(evaluate_selected_rows(merged_empty), (SelectedRows{0, 2, 4, 6, 8}));
+}
+
+// A composed filter rejects a constant column in its min-max filter, but the bitset filter handles one on its
+// own. We expect the dropped rows 1 and 3 to stay dropped whatever the constant is.
+TEST_F(RuntimeMembershipFilterTest, TestEvaluateBitsetFilterConstantColumnKeepsDroppedRows) {
+    ComposedRuntimeBitsetFilter<TYPE_INT> rf;
+    rf.membership_filter().set_min_max(10, 20);
+    rf.membership_filter().init(100);
+    rf.insert(10);
+    rf.insert(20);
+    const auto& bitset = rf.membership_filter();
+    const std::vector<uint32_t> hash_values;
+
+    auto evaluate_constant = [&](const Column* column) {
+        Selection selection = {1, 0, 1, 0};
+        bitset.evaluate(column, hash_values, selection.data(), 0, static_cast<uint16_t>(selection.size()));
+        return selection;
+    };
+
+    auto null_column = ColumnHelper::create_const_null_column(4);
+    EXPECT_EQ(evaluate_constant(null_column.get()), (Selection{0, 0, 0, 0}));
+
+    auto member_column = ColumnHelper::create_const_column<TYPE_INT>(10, 4);
+    EXPECT_EQ(evaluate_constant(member_column.get()), (Selection{1, 0, 1, 0}));
+
+    auto non_member_column = ColumnHelper::create_const_column<TYPE_INT>(15, 4);
+    EXPECT_EQ(evaluate_constant(non_member_column.get()), (Selection{0, 0, 0, 0}));
+
+    rf.membership_filter().insert_null();
+    EXPECT_EQ(evaluate_constant(null_column.get()), (Selection{1, 0, 1, 0}));
+}
+
 INSTANTIATE_TEST_SUITE_P(RuntimeFilterTest, RuntimeFilterTestFixture, ::testing::Values(RF_VERSION_V2, RF_VERSION_V3));
 INSTANTIATE_TEST_SUITE_P(RuntimeFilterTest, RuntimeMembershipFilterTestFixture,
                          ::testing::Values(RF_VERSION_V2, RF_VERSION_V3));

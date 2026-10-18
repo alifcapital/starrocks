@@ -21,6 +21,7 @@
 
 #include "column/chunk.h"
 #include "column/fixed_length_column.h"
+#include "common/config.h"
 #include "common/object_pool.h"
 #include "exec/partition/bucket_aware_partition.h"
 #include "exprs/runtime_filter.h"
@@ -28,7 +29,9 @@
 #include "exprs/runtime_filter_layout.h"
 #include "runtime/runtime_state.h"
 #include "testutil/assert.h"
+#include "testutil/column_test_helper.h"
 #include "testutil/exprs_test_helper.h"
+#include "util/defer_op.h"
 
 namespace starrocks {
 namespace {
@@ -134,6 +137,67 @@ protected:
         return filter;
     }
 
+    // Runs RuntimeFilterPredicates over rows that an earlier stage thinned out and checks that only the rows
+    // of `expected` stay selected. It covers the sample and the normal stage, in the branchless and in the
+    // selection mode.
+    //   row    0     1     2     3     4     5     6    7   8..15
+    //   value  10    NULL  NULL  100   200   300   NULL 20  1000
+    //   input  1     0     1     1     1     1     0    0   1
+    //   expected: rows 0 and 2.
+    // The filter holds 10 and 20 and accepts NULL, so the selected NULL row 2 stays selected and the dropped NULL
+    // rows 1 and 6 stay dropped. Most selected rows are out of the filter range, so the filter is selective
+    // enough to be kept after the sample stage.
+    void check_null_rows_stay_dropped(const RuntimeFilter* filter, int32_t filter_id) {
+        auto* desc = _pool.add(new RuntimeFilterProbeDescriptor());
+        ASSERT_OK(desc->init(filter_id, nullptr));
+        desc->set_runtime_filter(filter);
+
+        RuntimeFilterPredicate pred(desc, kProbeSlotId);
+        ASSERT_TRUE(pred.init(0 /*driver_sequence*/));
+
+        std::vector<int32_t> values = {10, 100, 100, 100, 200, 300, 100, 20};
+        std::vector<uint8_t> nulls = {0, 1, 1, 0, 0, 0, 1, 0};
+        std::vector<uint8_t> input = {1, 0, 1, 1, 1, 1, 0, 0};
+        for (int i = 0; i < 8; ++i) {
+            values.push_back(1000);
+            nulls.push_back(0);
+            input.push_back(1);
+        }
+        std::vector<uint8_t> expected(input.size(), 0);
+        expected[0] = 1;
+        expected[2] = 1;
+
+        ColumnPtr column = ColumnTestHelper::build_nullable_column<int32_t>(values, nulls);
+        auto chunk = std::make_shared<Chunk>();
+        chunk->append_column(column, static_cast<ColumnId>(kProbeSlotId), true);
+
+        const auto old_sample_rows = config::rf_sample_rows;
+        const auto old_branchless_ratio = config::rf_branchless_ratio;
+        DeferOp restore_config([&] {
+            config::rf_sample_rows = old_sample_rows;
+            config::rf_branchless_ratio = old_branchless_ratio;
+        });
+        // One chunk ends the sample stage, so the second evaluation runs the normal stage.
+        config::rf_sample_rows = 1;
+
+        // A ratio of 0 makes every chunk take the branchless path, a large ratio makes it take the selection path.
+        for (int64_t branchless_ratio : {0, 1000}) {
+            config::rf_branchless_ratio = branchless_ratio;
+            RuntimeFilterPredicates preds(0 /*driver_sequence*/);
+            preds.add_predicate(&pred);
+
+            std::vector<uint8_t> selection = input;
+            ASSERT_OK(preds.evaluate(chunk.get(), selection.data(), 0, static_cast<uint16_t>(selection.size())));
+            EXPECT_EQ(selection, expected) << "sample stage, branchless_ratio=" << branchless_ratio;
+
+            ASSERT_EQ(preds._state, RuntimeFilterPredicates::NORMAL);
+            ASSERT_FALSE(preds._selectivity_map.empty());
+            selection = input;
+            ASSERT_OK(preds.evaluate(chunk.get(), selection.data(), 0, static_cast<uint16_t>(selection.size())));
+            EXPECT_EQ(selection, expected) << "normal stage, branchless_ratio=" << branchless_ratio;
+        }
+    }
+
     ObjectPool _pool;
     RuntimeState _runtime_state;
 };
@@ -207,6 +271,46 @@ TEST_F(RuntimeFilterPredicateTest, SelectionAwareOverloadsIgnoreBucketProperties
                                     static_cast<uint16_t>(column->size()), selection_hash_values, &selection_ctx);
 
     EXPECT_NE(operator_ctx.hash_values, selection_hash_values);
+}
+
+// A null-safe join puts a NULL into the runtime filter, so the filter accepts NULL. The rows that an earlier
+// stage (a conjunct, a delete vector, another runtime filter) dropped must stay dropped, NULL rows included.
+TEST_F(RuntimeFilterPredicateTest, NullAcceptingFilterKeepsDroppedNullRowsDropped) {
+    auto* filter = _pool.add(new ComposedRuntimeBloomFilter<TYPE_INT>());
+    filter->membership_filter().init(100);
+    filter->insert(10);
+    filter->insert(20);
+    filter->insert_null();
+    ASSERT_NO_FATAL_FAILURE(check_null_rows_stay_dropped(filter, 3));
+}
+
+// The branchless mode evaluates the rows that are still selected. A bloom filter built by merging partial filters
+// accepts NULL when one of them does, and the selected NULL row has to stay selected. The second filter has NULL
+// only in its membership filter, which the min-max filter must not override.
+TEST_F(RuntimeFilterPredicateTest, MergedBloomFilterKeepsSelectedNullRows) {
+    auto new_bloom_filter = [&]() {
+        auto* filter = _pool.add(new ComposedRuntimeBloomFilter<TYPE_INT>());
+        filter->membership_filter().init(100);
+        return filter;
+    };
+    auto* with_null = new_bloom_filter();
+    with_null->insert(10);
+    with_null->insert_null();
+    auto* with_values = new_bloom_filter();
+    with_values->insert(20);
+
+    auto* merged = new_bloom_filter();
+    merged->merge(with_null);
+    merged->merge(with_values);
+    ASSERT_TRUE(merged->membership_filter().has_null());
+    ASSERT_NO_FATAL_FAILURE(check_null_rows_stay_dropped(merged, 4));
+
+    auto* membership_only = new_bloom_filter();
+    membership_only->insert(10);
+    membership_only->insert(20);
+    membership_only->membership_filter().insert_null();
+    ASSERT_FALSE(membership_only->min_max_filter().has_null());
+    ASSERT_NO_FATAL_FAILURE(check_null_rows_stay_dropped(membership_only, 5));
 }
 
 } // namespace starrocks

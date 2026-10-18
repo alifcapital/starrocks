@@ -278,6 +278,8 @@ public:
     /// Arguments:
     ///     - hash_values: only used for the multiple partition mode.
     ///     - selection: selection[i] represents the i-th row in the `input_column` is selected or filtered-out.
+    ///       The caller may pass rows that an earlier filter dropped. We expect them to stay dropped, so an
+    ///       implementation only clears entries of `selection` and never sets a 0 to 1, NULL rows included.
     ///     - from: the start index in the input_column (included).
     ///     - to: the end index in the input_column (excluded).
     virtual void evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values, uint8_t* selection,
@@ -709,7 +711,12 @@ public:
     void insert_null() { _has_null = true; }
 
     // this->max = std::max(other->max, this->max)
-    void merge(const RuntimeFilter* rf) override { _merge_min_max(down_cast<const MinMaxRuntimeFilter*>(rf)); }
+    // We expect the merged filter to accept NULL when any of the merged filters accepts it, as the membership
+    // filter does, so _has_null is merged together with the range.
+    void merge(const RuntimeFilter* rf) override {
+        RuntimeFilter::merge(rf);
+        _merge_min_max(down_cast<const MinMaxRuntimeFilter*>(rf));
+    }
 
     // this->min = std::max(other->min, this->min)
     // this->max = std::min(other->max, this->max)
@@ -719,7 +726,10 @@ public:
         update_min_max<false>(other->_max);
     }
 
-    void concat(RuntimeFilter* rf) override { _merge_min_max(down_cast<const MinMaxRuntimeFilter*>(rf)); }
+    void concat(RuntimeFilter* rf) override {
+        RuntimeFilter::concat(rf);
+        _merge_min_max(down_cast<const MinMaxRuntimeFilter*>(rf));
+    }
 
     template <bool is_min>
     void update_min_max(CppType val) {
@@ -810,6 +820,10 @@ public:
         }
     }
 
+    // `sel` lists the rows that are still selected. `evaluate_null` is false when the membership filter of a
+    // composed filter decides the NULL rows: this filter keeps them in `dst_sel`, because a row that it drops
+    // can not be added again by the membership filter.
+    template <bool evaluate_null>
     uint16_t t_evaluate(const Column* column, uint16_t* sel, uint16_t sel_size, uint16_t* dst_sel) const {
         DCHECK(_has_min_max);
         CHECK(dst_sel != nullptr) << "dst_sel must be set";
@@ -824,7 +838,7 @@ public:
                     uint16_t idx = sel[i];
                     dst_sel[new_size] = idx;
                     if (null_data[idx]) {
-                        new_size += _has_null;
+                        new_size += !evaluate_null || _has_null;
                     } else {
                         new_size += evaluate_min_max(data[idx]);
                     }
@@ -839,6 +853,13 @@ public:
         return new_size;
     }
 
+    // `selection` can hold rows that an earlier filter dropped. We expect them to stay dropped, so a NULL
+    // row is set from _has_null only when it is still selected.
+    // A NULL row holds a placeholder value. We fear an out-of-range placeholder drops a NULL row that the
+    // filter accepts, so NULL rows are not compared with min and max.
+    // `evaluate_null` is false when the membership filter of a composed filter decides the NULL rows: this
+    // filter leaves them as they are.
+    template <bool evaluate_null>
     void t_evaluate(const Column* column, uint8_t* selection, uint16_t from, uint16_t to) const {
         DCHECK(_has_min_max);
         CHECK(!column->is_constant()) << "not support constant column";
@@ -846,14 +867,18 @@ public:
         if (column->is_nullable()) {
             const auto* nullable_column = down_cast<const NullableColumn*>(column);
             const auto data = GetContainer<Type>::get_data(nullable_column->data_column());
-            evaluate_min_max(data, selection, from, to);
             if (nullable_column->has_null()) {
                 const uint8_t* null_data = nullable_column->immutable_null_column_data().data();
-                for (int i = from; i < to; i++) {
-                    if (null_data[i]) {
+                for (uint16_t i = from; i < to; i++) {
+                    if (!selection[i]) continue;
+                    if (!null_data[i]) {
+                        selection[i] = evaluate_min_max(data[i]);
+                    } else if constexpr (evaluate_null) {
                         selection[i] = _has_null;
                     }
                 }
+            } else {
+                evaluate_min_max(data, selection, from, to);
             }
         } else {
             const auto data = GetContainer<Type>::get_data(column);
@@ -1070,11 +1095,11 @@ public:
     }
     uint16_t evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values, uint16_t* sel,
                       uint16_t sel_size, uint16_t* dst_sel) const override {
-        return t_evaluate(input_column, sel, sel_size, dst_sel);
+        return t_evaluate<true>(input_column, sel, sel_size, dst_sel);
     }
     void evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values, uint8_t* selection,
                   uint16_t from, uint16_t to) const override {
-        t_evaluate(input_column, selection, from, to);
+        t_evaluate<true>(input_column, selection, from, to);
     }
 
 private:
@@ -1604,7 +1629,9 @@ private:
                 const uint8_t* null_data = nullable_column->immutable_null_column_data().data();
                 for (uint16_t i = from; i < to; i++) {
                     if (null_data[i]) {
-                        selection[i] = _has_null;
+                        // We expect a NULL row that an earlier filter dropped to stay dropped, so we
+                        // select it only if it is still selected.
+                        selection[i] = selection[i] && _has_null;
                     } else if (selection[i]) {
                         if constexpr (can_use_bf) {
                             selection[i] =
@@ -1725,7 +1752,7 @@ public:
 
     template <bool CheckRange>
     void contains_batch(uint8_t* __restrict selection, const CppType* __restrict values, size_t from, size_t to) const;
-    template <bool CheckRange, bool NullIsTrue>
+    template <bool CheckRange, bool NullIsTrue, bool KeepDropped>
     void contains_batch(uint8_t* __restrict selection, const CppType* __restrict values,
                         const uint8_t* __restrict is_nulls, size_t from, size_t to) const;
 
@@ -1814,7 +1841,9 @@ public:
     const Bitset<LT>& bitset() const { return _bitset; }
 
 private:
-    template <bool null_is_true>
+    // `keep_dropped` is true when `selection` holds rows dropped by earlier filters that must stay dropped,
+    // and false when `selection` is only the min-max result of the rows.
+    template <bool null_is_true, bool keep_dropped>
     void _evaluate_vectorized(const Column* __restrict input_column, uint8_t* __restrict selection, size_t from,
                               size_t to) const;
     template <bool null_is_true>
@@ -1879,21 +1908,21 @@ public:
     const MembershipFilter& membership_filter() const { return _membership_filter; }
 
     void evaluate(const Column* input_column, RunningContext* ctx) const override {
-        constexpr bool check_null_in_min_max_filter = std::is_same_v<MembershipFilter, RuntimeEmptyFilter<Type>>;
-        _min_max_filter.template t_evaluate<check_null_in_min_max_filter>(input_column, ctx);
+        _min_max_filter.template t_evaluate<_check_null_in_min_max_filter>(input_column, ctx);
         membership_filter().evaluate(input_column, ctx);
     }
 
     uint16_t evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values, uint16_t* sel,
                       uint16_t sel_size, uint16_t* dst_sel) const override {
-        uint16_t new_size = _min_max_filter.t_evaluate(input_column, sel, sel_size, dst_sel);
+        uint16_t new_size = _min_max_filter.template t_evaluate<_check_null_in_min_max_filter>(input_column, sel,
+                                                                                               sel_size, dst_sel);
         new_size = membership_filter().evaluate(input_column, hash_values, dst_sel, new_size, dst_sel);
         return new_size;
     }
 
     void evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values, uint8_t* selection,
                   uint16_t from, uint16_t to) const override {
-        _min_max_filter.t_evaluate(input_column, selection, from, to);
+        _min_max_filter.template t_evaluate<_check_null_in_min_max_filter>(input_column, selection, from, to);
         membership_filter().evaluate(input_column, hash_values, selection, from, to);
     }
 
@@ -1990,6 +2019,12 @@ public:
     }
 
 private:
+    // The membership filter owns _has_null of a bloom or bitset filter: it is the one that is serialized,
+    // and the min-max filter keeps a copy of it. We fear a copy that differs and drops NULL rows that the
+    // filter accepts, so the membership filter decides the NULL rows alone. An empty membership filter
+    // evaluates nothing, so there the min-max filter decides them.
+    static constexpr bool _check_null_in_min_max_filter = std::is_same_v<MembershipFilter, RuntimeEmptyFilter<Type>>;
+
     MembershipFilter _membership_filter;
     MinMaxRuntimeFilter<Type> _min_max_filter;
 };

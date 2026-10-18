@@ -363,9 +363,21 @@ void Bitset<LT>::contains_batch(uint8_t* __restrict selection, const CppType* __
 }
 
 template <LogicalType LT>
-template <bool CheckRange, bool NullIsTrue>
+template <bool CheckRange, bool NullIsTrue, bool KeepDropped>
 void Bitset<LT>::contains_batch(uint8_t* __restrict selection, const CppType* __restrict values,
                                 const uint8_t* __restrict is_nulls, size_t from, size_t to) const {
+    if constexpr (KeepDropped) {
+        // `selection` holds rows that an earlier filter dropped, and the min-max filter has not decided
+        // the NULL rows. We expect a dropped row to stay dropped, so a NULL row is selected only if it is
+        // still selected and the filter accepts NULL.
+        for (size_t i = from; i < to; i++) {
+            const bool selected = selection[i] != 0;
+            const bool is_null = is_nulls[i] != 0;
+            selection[i] = contains<CheckRange>(values[i], selected & !is_null) | (selected & is_null & NullIsTrue);
+        }
+        return;
+    }
+
     // `contains<false/*CheckRange*/>` considers the values[i] with true `selection[i]` is in the range, which is set
     // by the min-max-filter, and doesn't check range again.
     // However, min-max-filter will also set `selection[i]` to true, if NullIsTrue and `is_nulls[i]` is true regardless
@@ -405,9 +417,9 @@ void RuntimeBitsetFilter<LT>::evaluate(const Column* input_column, RunningContex
     uint8_t* selection = selection_filter.data();
 
     if (_has_null) {
-        _evaluate_vectorized<true>(input_column, selection, 0, num_rows);
+        _evaluate_vectorized<true, false>(input_column, selection, 0, num_rows);
     } else {
-        _evaluate_vectorized<false>(input_column, selection, 0, num_rows);
+        _evaluate_vectorized<false, false>(input_column, selection, 0, num_rows);
     }
 }
 
@@ -415,9 +427,9 @@ template <LogicalType LT>
 void RuntimeBitsetFilter<LT>::evaluate(const Column* input_column, const std::vector<uint32_t>& hash_values,
                                        uint8_t* selection, uint16_t from, uint16_t to) const {
     if (_has_null) {
-        _evaluate_vectorized<true>(input_column, selection, from, to);
+        _evaluate_vectorized<true, true>(input_column, selection, from, to);
     } else {
-        _evaluate_vectorized<false>(input_column, selection, from, to);
+        _evaluate_vectorized<false, true>(input_column, selection, from, to);
     }
 }
 
@@ -432,24 +444,40 @@ uint16_t RuntimeBitsetFilter<LT>::evaluate(const Column* input_column, const std
 }
 
 template <LogicalType LT>
-template <bool null_is_true>
+template <bool null_is_true, bool keep_dropped>
 void RuntimeBitsetFilter<LT>::_evaluate_vectorized(const Column* __restrict input_column, uint8_t* __restrict selection,
                                                    size_t from, size_t to) const {
     if (input_column->is_constant()) {
         const auto* const_column = down_cast<const ConstColumn*>(input_column);
         if (const_column->only_null()) {
-            memset(selection + from, _has_null, to - from);
+            if constexpr (keep_dropped) {
+                // We expect a dropped row to stay dropped, so we only clear rows when NULL is rejected.
+                if (!_has_null) {
+                    memset(selection + from, 0, to - from);
+                }
+            } else {
+                memset(selection + from, _has_null, to - from);
+            }
         } else {
             const auto& values = GetContainer<LT>::get_data(const_column->data_column());
-            const bool selected = _test_data(values[0], selection[0]);
-            memset(selection + from, selected, to - from);
+            if constexpr (keep_dropped) {
+                // _test_data does not check the bitset range and expects the min-max filter to have cleared the
+                // rows out of it. We test every row with its own selection, so a dropped row stays dropped.
+                for (size_t i = from; i < to; i++) {
+                    selection[i] = _test_data(values[0], selection[i]);
+                }
+            } else {
+                const bool selected = _test_data(values[0], selection[0]);
+                memset(selection + from, selected, to - from);
+            }
         }
     } else if (input_column->is_nullable()) {
         const auto* nullable_column = down_cast<const NullableColumn*>(input_column);
         const auto* values = GetContainer<LT>::get_data(nullable_column->data_column()).data();
         if (nullable_column->has_null()) {
             const uint8_t* null_data = nullable_column->immutable_null_column_data().data();
-            _bitset.template contains_batch<false /*CheckRange*/, null_is_true>(selection, values, null_data, from, to);
+            _bitset.template contains_batch<false /*CheckRange*/, null_is_true, keep_dropped>(selection, values,
+                                                                                              null_data, from, to);
         } else {
             _bitset.template contains_batch<false /*CheckRange*/>(selection, values, from, to);
         }
