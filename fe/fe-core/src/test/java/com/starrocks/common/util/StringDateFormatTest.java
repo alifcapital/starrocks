@@ -61,10 +61,12 @@ public class StringDateFormatTest {
         assertEquals(text, format.format(StringDateFormat.truncate(TIME, precision)));
     }
 
+    // The patterns with a zero byte are the last four: the model gives such a pattern no order, see DateFormatModel
     @ParameterizedTest
     @ValueSource(strings = {"%d.%m.%Y", "%m/%d/%Y", "%Y-%c-%e", "%y", "%y%m%d", "%Y-%m-%dT%H:%i:%s%z",
             "%Y-%m-%dT%H:%i:%s+05:00", "%Y-%m-%d %H:%i:%s-0500", "%Y %b %d", "%Y-%M-%d", "%Y-%m %H", "%Y-%d",
-            "%Y%m%d%H%i%f", "%Y-%m-%d%", "%Y%Y", "", "D%Y%m%d", "%Y-%m-%d %h:%i", "%Y-%m-%d %T"})
+            "%Y%m%d%H%i%f", "%Y-%m-%d%", "%Y%Y", "", "D%Y%m%d", "%Y-%m-%d %h:%i", "%Y-%m-%d %T",
+            "%Y-%m-%d\0x", "%Y-%m\0", "%Y\0-%m", "%Y-%m-%d\0"})
     public void testUnsuitablePatterns(String pattern) {
         assertThrows(IllegalArgumentException.class, () -> StringDateFormat.parse(pattern));
     }

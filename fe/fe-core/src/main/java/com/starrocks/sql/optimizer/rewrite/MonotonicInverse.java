@@ -258,7 +258,8 @@ public final class MonotonicInverse {
     /**
      * A format of date_format or from_unixtime that the inverses admit, and the period of its last field. The strings of
      * an ordered format sort in the order of their dates, so a comparison of the strings is a comparison of the
-     * dates cut to the period; the BE must also render every row, see DateFormatModel.isExactOnAllRows.
+     * dates cut to the period; the BE must also render every row and take the format, see DateFormatModel.isExactOnAllRows
+     * and DateFormatModel.isTakenBy.
      */
     private record RenderedFormat(DateFormatModel model, String unit) {
         /** The constant as the date it renders when it is a string that the format renders, or null. */
@@ -267,9 +268,9 @@ public final class MonotonicInverse {
         }
     }
 
-    private static RenderedFormat renderedFormat(String format) {
+    private static RenderedFormat renderedFormat(String format, DateFormatModel.Renderer renderer) {
         DateFormatModel model = DateFormatModel.of(format);
-        if (!model.isOrdered() || !model.isExactOnAllRows()) {
+        if (!model.isOrdered() || !model.isExactOnAllRows() || !model.isTakenBy(renderer)) {
             return null;
         }
         String unit;
@@ -307,7 +308,8 @@ public final class MonotonicInverse {
                     || !value.getType().isStringType()) {
                 return Optional.empty();
             }
-            RenderedFormat spec = renderedFormat(((ConstantOperator) fmtArg).getVarchar());
+            RenderedFormat spec = renderedFormat(((ConstantOperator) fmtArg).getVarchar(),
+                    DateFormatModel.Renderer.DATE_FORMAT);
             if (spec == null) {
                 return Optional.empty();
             }
@@ -412,7 +414,7 @@ public final class MonotonicInverse {
             } else {
                 return Optional.empty();
             }
-            RenderedFormat spec = renderedFormat(fmt);
+            RenderedFormat spec = renderedFormat(fmt, DateFormatModel.Renderer.FROM_UNIXTIME);
             if (spec == null) {
                 return Optional.empty();
             }
@@ -755,7 +757,7 @@ public final class MonotonicInverse {
             String constant = value.getVarchar();
             Type childType = dataChild.getType();
             if (childType.isDate()) {
-                LocalDateTime parsed = renderedFormat("%Y-%m-%d").read(constant);
+                LocalDateTime parsed = DateFormatModel.of("%Y-%m-%d").read(constant);
                 if (parsed == null) {
                     return Optional.empty();
                 }

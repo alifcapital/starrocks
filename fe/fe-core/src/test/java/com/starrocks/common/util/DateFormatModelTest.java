@@ -15,6 +15,7 @@
 package com.starrocks.common.util;
 
 import com.starrocks.common.util.DateFormatModel.Field;
+import com.starrocks.common.util.DateFormatModel.Renderer;
 import com.starrocks.sql.optimizer.statistics.StatisticsDatetimeParser;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -108,6 +109,84 @@ public class DateFormatModelTest {
         }
         Assertions.assertTrue(DateFormatModel.of("").hasNoFields());
         Assertions.assertTrue(DateFormatModel.of("").isExactOnAllRows());
+    }
+
+    // The BE returns the string up to the first zero byte of the format. A zero byte reaches the string from the text, or
+    // after a % as the character of an unknown specifier, so a format with one is outside of the model whatever its fields.
+    @Test
+    public void testFormatWithAZeroByteIsOutsideTheModel() {
+        for (String format : List.of("%Y-%m-%d\0x", "%Y-%m\0", "\0%Y", "%Y\0-%m", "%Y-%m-%d\0", "%Y-%m-%d %H:%i:%s\0",
+                "yyyy-MM-dd\0", "\0", "a\0b", "%Y%\0")) {
+            DateFormatModel model = DateFormatModel.of(format);
+            Assertions.assertTrue(model.hasZeroByte(), format);
+            Assertions.assertFalse(model.isOrdered(), format);
+            Assertions.assertFalse(model.isExactOnAllRows(), format);
+            for (Renderer renderer : Renderer.values()) {
+                Assertions.assertFalse(model.isMonotonicFor(renderer), format);
+            }
+        }
+        // the same formats without the zero byte are ordered and exact
+        for (String format : List.of("%Y-%m-%d\0x", "%Y-%m\0", "\0%Y", "%Y\0-%m", "%Y-%m-%d\0", "%Y-%m-%d %H:%i:%s\0")) {
+            DateFormatModel plain = DateFormatModel.of(format.replace("\0", ""));
+            Assertions.assertFalse(plain.hasZeroByte(), format);
+            Assertions.assertTrue(plain.isOrdered(), format);
+            Assertions.assertTrue(plain.isExactOnAllRows(), format);
+            Assertions.assertTrue(plain.isMonotonicFor(Renderer.DATE_FORMAT), format);
+        }
+        Assertions.assertFalse(DateFormatModel.of("%Y-%m-%d").hasZeroByte());
+    }
+
+    // The BE counts a zero byte as a byte that it wrote, so the rows that it gives NULL for are those of the whole format;
+    // the lengths and the distinct values of the model are upper bounds of the cut strings
+    @Test
+    public void testZeroByteCountsAsAByteOfTheBuffer() {
+        Assertions.assertTrue(DateFormatModel.of("\0" + "a".repeat(127)).isNullOnAllRows());
+        Assertions.assertFalse(DateFormatModel.of("\0" + "a".repeat(126)).isNullOnAllRows());
+        Assertions.assertFalse(DateFormatModel.of("%Y\0%m").isNullOnAllRows());
+        Assertions.assertEquals(7, DateFormatModel.of("%Y\0%m").maxRenderedLength());
+        Assertions.assertEquals(5, DateFormatModel.of("%Y\0%m").formatLength());
+        Assertions.assertTrue(DateFormatModel.of("\0").hasNoFields());
+        Assertions.assertEquals(Set.of(Field.YEAR, Field.MONTH), DateFormatModel.of("%Y\0%m").fields());
+    }
+
+    // from_unixtime fails to prepare a constant format of more than 100 bytes, while date_format renders a longer format row
+    // by row. The limit is in bytes of the format as it is written.
+    @Test
+    public void testFromUnixtimeTakesAFormatOfAtMost100Bytes() {
+        DateFormatModel fits = DateFormatModel.of("%Y" + "x".repeat(98));
+        DateFormatModel tooLong = DateFormatModel.of("%Y" + "x".repeat(99));
+        Assertions.assertEquals(100, fits.formatLength());
+        Assertions.assertEquals(101, tooLong.formatLength());
+        Assertions.assertTrue(fits.isTakenBy(Renderer.FROM_UNIXTIME));
+        Assertions.assertFalse(tooLong.isTakenBy(Renderer.FROM_UNIXTIME));
+        Assertions.assertTrue(fits.isTakenBy(Renderer.DATE_FORMAT));
+        Assertions.assertTrue(tooLong.isTakenBy(Renderer.DATE_FORMAT));
+        // the format is ordered and renders every row in both, and only from_unixtime does not run it
+        Assertions.assertTrue(tooLong.isOrdered());
+        Assertions.assertTrue(tooLong.isExactOnAllRows());
+        Assertions.assertTrue(fits.isMonotonicFor(Renderer.FROM_UNIXTIME));
+        Assertions.assertFalse(tooLong.isMonotonicFor(Renderer.FROM_UNIXTIME));
+        Assertions.assertTrue(tooLong.isMonotonicFor(Renderer.DATE_FORMAT));
+        // a text only format is monotonic too, unless the function does not run it
+        Assertions.assertTrue(DateFormatModel.of("x".repeat(100)).isMonotonicFor(Renderer.FROM_UNIXTIME));
+        Assertions.assertFalse(DateFormatModel.of("x".repeat(101)).isMonotonicFor(Renderer.FROM_UNIXTIME));
+        Assertions.assertTrue(DateFormatModel.of("x".repeat(101)).isMonotonicFor(Renderer.DATE_FORMAT));
+        // bytes, not characters: é is two bytes
+        Assertions.assertTrue(DateFormatModel.of("é".repeat(50)).isTakenBy(Renderer.FROM_UNIXTIME));
+        Assertions.assertFalse(DateFormatModel.of("é".repeat(51)).isTakenBy(Renderer.FROM_UNIXTIME));
+    }
+
+    @Test
+    public void testMonotonicFormats() {
+        for (Renderer renderer : Renderer.values()) {
+            for (String format : List.of("%Y", "%Y-%m-%d", "yyyyMMdd", "%Y-%m-%dT%H:%i:%S", "text only", "")) {
+                Assertions.assertTrue(DateFormatModel.of(format).isMonotonicFor(renderer), format);
+            }
+            // the order of the strings is not the order of the dates, or the BE writes a specifier it does not know as text
+            for (String format : List.of("%d.%m.%Y", "%y-%m", "%W", "%Y-%q", "%z")) {
+                Assertions.assertFalse(DateFormatModel.of(format).isMonotonicFor(renderer), format);
+            }
+        }
     }
 
     @Test

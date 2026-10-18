@@ -94,6 +94,26 @@ public class DateFormatRewriteTest extends PlanTestBase {
     }
 
     @Test
+    public void testFormatWithAZeroByteKeepsTheCondition() throws Exception {
+        // The BE takes the string of date_format up to the first zero byte of the format. date_format(ts, '%Y-%m-%d\0x') is
+        // '2026-08-01' and never equals '2026-08-01\0x': a range of ts would return the rows of the day.
+        String plan = getFragmentPlan(
+                "select * from df_time where date_format(ts, '%Y-%m-%d\\0x') = '2026-08-01\\0x'");
+        assertContains(plan, "date_format");
+        assertContains(plan, "partitions=4/4");
+        // '2026-08' is below '2026-08\0', so the rows of August are in the result and their partition must stay
+        plan = getFragmentPlan("select * from df_time where date_format(ts, '%Y-%m\\0') < '2026-08\\0'");
+        assertContains(plan, "date_format");
+        assertContains(plan, "partitions=4/4");
+        // the value in the list of columns is the same condition: the BE gives false for the first day of August
+        plan = getFragmentPlan("select date_format(ts, '%Y-%m-%d\\0') >= '2026-08-01\\0' from df_time");
+        assertContains(plan, "date_format");
+        plan = getFragmentPlan("select * from df_day where date_format(d, '%Y-%m-%d\\0') = '2026-08-01\\0'");
+        assertContains(plan, "date_format");
+        assertContains(plan, "partitions=4/4");
+    }
+
+    @Test
     public void testCastOfADateFormatThatTheBackendReadsOtherwiseHasNoBounds() throws Exception {
         // 10 digits are read with a year of two digits, and a month without a day gives NULL: the cast is not the start
         // of the period of the string, so nothing of it prunes, whatever the inverse of the string says

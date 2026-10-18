@@ -181,6 +181,66 @@ public class DateFormatInverseTest {
         assertSame(predicate, rule.apply(predicate, null));
     }
 
+    // The BE returns the string up to the first zero byte of the format: date_format(ts, '%Y-%m-%d\0x') is '2026-08-01' and
+    // never equals '2026-08-01\0x', and date_format(ts, '%Y-%m\0') is '2026-08', which is below '2026-08\0'. A period of ts
+    // would return the rows of a day for the first and cut the partition of August for the second, so no condition of such a
+    // format is replaced, whatever the constant is, the cut string included.
+    @Test
+    public void testFormatWithAZeroByteKeepsTheCondition() {
+        ColumnRefOperator day = new ColumnRefOperator(3, DateType.DATE, "d", true);
+        String[][] cases = {
+                {"%Y-%m-%d\0x", "2026-08-01\0x"}, {"%Y-%m-%d\0x", "2026-08-01"}, {"%Y-%m\0", "2026-08\0"},
+                {"%Y-%m\0", "2026-08"}, {"\0%Y", "\0" + "2026"}, {"\0%Y", ""}, {"%Y\0-%m", "2026\0-08"},
+                {"%Y\0-%m", "2026"}, {"%Y-%m-%d\0", "2026-08-01\0"}, {"%Y-%m-%d\0", "2026-08-01"},
+                {"%Y-%m-%d %H:%i:%s\0", "2026-08-01 10:20:30\0"}};
+        for (ColumnRefOperator column : new ColumnRefOperator[] {ts, day}) {
+            for (String[] row : cases) {
+                for (BinaryType type : new BinaryType[] {BinaryType.EQ, BinaryType.NE, BinaryType.GE, BinaryType.GT,
+                        BinaryType.LE, BinaryType.LT}) {
+                    ScalarOperator predicate = dateFormat(column, row[0], type, row[1]);
+                    assertSame(predicate, rule.apply(predicate, null), type + " " + row[0].replace("\0", "\\0") + " "
+                            + row[1].replace("\0", "\\0"));
+                }
+            }
+        }
+    }
+
+    // from_unixtime cuts the string at the zero byte as well: in +08:00 the epoch 1785542400 renders '2026-08-01', which is
+    // below '2026-08-01\0', and a bound ep < 1785513600 would cut that row
+    @Test
+    public void testEpochRenderingWithAZeroByteHasNoBounds() {
+        String[][] cases = {
+                {"%Y-%m-%d\0", "2026-08-01\0"}, {"%Y-%m-%d\0", "2026-08-01"}, {"%Y-%m\0x", "2026-08\0x"},
+                {"%Y-%m\0x", "2026-08"}, {"\0%Y", "\0" + "2026"}};
+        for (String[] row : cases) {
+            for (BinaryType type : new BinaryType[] {BinaryType.EQ, BinaryType.GE, BinaryType.GT, BinaryType.LE,
+                    BinaryType.LT}) {
+                assertNull(scanBounds(fromUnixtime(row[0], type, row[1])),
+                        type + " " + row[0].replace("\0", "\\0") + " " + row[1].replace("\0", "\\0"));
+            }
+        }
+    }
+
+    // from_unixtime fails to prepare a constant format of more than 100 bytes. A bound on the epoch could leave the scan
+    // with no partition, and then the query would return no rows where the BE returns an error. date_format has no such
+    // limit: it renders the format row by row, so its condition is replaced.
+    @Test
+    public void testFormatOfMoreThan100BytesIsInvertedForDateFormatOnly() {
+        String fits = "%Y" + "x".repeat(98);
+        String tooLong = "%Y" + "x".repeat(99);
+        assertEquals("2: ep >= 1767196800 AND 2: ep < 1798732800",
+                scanBounds(fromUnixtime(fits, BinaryType.EQ, "2026" + "x".repeat(98))).toString());
+        assertNull(scanBounds(fromUnixtime(tooLong, BinaryType.EQ, "2026" + "x".repeat(99))));
+        assertNull(scanBounds(fromUnixtime(tooLong, BinaryType.GE, "2026" + "x".repeat(99))));
+        assertEquals("1: ts >= 2026-01-01 00:00:00 AND 1: ts < 2027-01-01 00:00:00",
+                rule.apply(dateFormat(ts, tooLong, BinaryType.EQ, "2026" + "x".repeat(99)), null).toString());
+        // the limit counts bytes: %Y and 49 characters of two bytes are 100 bytes, and one more character makes 102
+        String wide = "%Y" + "é".repeat(49);
+        assertNull(scanBounds(fromUnixtime(wide + "é", BinaryType.EQ, "2026" + "é".repeat(50))));
+        assertEquals("2: ep >= 1767196800 AND 2: ep < 1798732800",
+                scanBounds(fromUnixtime(wide, BinaryType.EQ, "2026" + "é".repeat(49))).toString());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"%Y%m%d", "%Y-%m-%d", "yyyyMMdd"})
     public void testDayFormatOfADateIsAPoint(String format) {

@@ -244,6 +244,25 @@ public class DateFormatStatisticsTest {
                 of(TIME, "%Y-%m-%d %H:00:00").getStringBounds());
     }
 
+    // The BE cuts the string at the first zero byte of the format. The cut joins strings and shortens them, so the periods,
+    // the values of the fields and the length of the format stay upper bounds, and the model gives no bounds of the strings.
+    @Test
+    public void testFormatWithAZeroByteKeepsTheUpperBoundsAndHasNoBounds() {
+        Assertions.assertEquals(89, distinct(DATE, "%Y-%m\0"));
+        Assertions.assertEquals(89, distinct(DATE, "%Y-%m\0x"));
+        // the days after the zero byte are not in the string of the BE, and the estimate keeps them
+        Assertions.assertTrue(distinct(DATE, "%Y-%m\0%d") >= 89);
+        Assertions.assertEquals(1, distinct(DATE, "\0"));
+        for (String format : new String[] {"%Y-%m-%d\0", "%Y-%m-01 00:00:00\0", "\0%Y-%m-%d", "%Y-%m-%d\0x"}) {
+            Assertions.assertNull(of(DATE, format).getStringBounds(), format);
+            Assertions.assertNull(of(TIME, format).getStringBounds(), format);
+        }
+        // the zero byte is a byte that the BE wrote: 127 bytes of text and a zero byte never fit its buffer
+        ColumnStatistic never = of(DATE, "\0" + "x".repeat(127));
+        Assertions.assertEquals(1, never.getNullsFraction());
+        Assertions.assertEquals(0.1, of(DATE, "\0" + "x".repeat(126)).getNullsFraction(), 1e-9);
+    }
+
     @Test
     public void testNoBoundsWhereTheBackendReadsTheStringAnotherWay() {
         // the BE casts a month without a day to NULL, reads ten digits with a year of two digits, and these strings do not

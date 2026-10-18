@@ -53,6 +53,10 @@ public final class StringDateFormat {
             throw new IllegalArgumentException("the pattern must start with %Y");
         }
         DateFormatModel model = DateFormatModel.of(pattern);
+        // The model gives no order to a format with a zero byte, and then it has no precision to read
+        if (model.hasZeroByte()) {
+            throw new IllegalArgumentException("the pattern has a zero byte");
+        }
         if (model.endsWithSinglePercent()) {
             throw new IllegalArgumentException("the pattern ends with a single %");
         }

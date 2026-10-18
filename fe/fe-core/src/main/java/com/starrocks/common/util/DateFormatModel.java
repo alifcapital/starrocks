@@ -48,6 +48,12 @@ import java.util.function.Function;
  * The BE compares the format with the three Java style formats as they are, without trimming it, and reads every other
  * format as a pattern with percent signs: %% is a percent sign, a single % at the end is a character, and a character
  * that is no specifier is text.
+ * <p>
+ * The BE writes the string into a buffer and takes it back as a C string, so it returns the string up to the first zero
+ * byte. We fear that a bound on the strings of a format with a zero byte would replace a condition by another one, because
+ * the model would hold the text after the zero byte as a part of every string. So such a format is outside of the model:
+ * it is not ordered and not exact, see hasZeroByte. We expect no real format to have a zero byte, and the cut would need a
+ * second view of every fact, as the BE still counts the bytes after the zero byte for its NULL rows.
  */
 public final class DateFormatModel {
     /** The fields of a date, from the coarsest to the finest. */
@@ -68,6 +74,24 @@ public final class DateFormatModel {
 
         public ChronoUnit unit() {
             return unit;
+        }
+    }
+
+    /**
+     * The functions of the BE that render a date with a format, each with the longest constant format it takes. We fear
+     * that a reader would take a format that a function fails on: from_unixtime fails to prepare a constant format of more
+     * than 100 bytes, and a plan that prunes every partition could then return no rows where the BE returns an error. So a
+     * reader asks for the function it reads. date_format has no such limit, it renders a long format row by row, see
+     * isExactOnAllRows.
+     */
+    public enum Renderer {
+        DATE_FORMAT(Integer.MAX_VALUE),
+        FROM_UNIXTIME(100);
+
+        private final int maxFormatLength;
+
+        Renderer(int maxFormatLength) {
+            this.maxFormatLength = maxFormatLength;
         }
     }
 
@@ -176,9 +200,13 @@ public final class DateFormatModel {
     // The number of specifiers of an ordered format, from the year down; 0 when the format is not ordered
     private final int orderedFields;
     private final boolean hasText;
+    private final boolean zeroByte;
 
     private DateFormatModel(String format) {
         this.format = format;
+        // No specifier writes a zero byte, so one reaches the string only from the format: as text, or after a % as the
+        // character of an unknown specifier
+        this.zeroByte = format.indexOf('\0') >= 0;
         String pattern = JAVA_STYLE.getOrDefault(format, format);
         List<Token> parsed = new ArrayList<>();
         StringBuilder text = new StringBuilder();
@@ -241,7 +269,7 @@ public final class DateFormatModel {
         this.minRenderedLength = shortest;
         this.formatLength = format.getBytes(StandardCharsets.UTF_8).length;
         this.hasText = anyText;
-        this.orderedFields = orderedFieldsOf(tokens, allKnown);
+        this.orderedFields = zeroByte ? 0 : orderedFieldsOf(tokens, allKnown);
     }
 
     // The fields from the year down without a gap and with the width of an ordered format, or 0
@@ -283,6 +311,17 @@ public final class DateFormatModel {
     /** Whether the format ends with a single %, which the BE writes as a character of the string. */
     public boolean endsWithSinglePercent() {
         return endsWithSinglePercent;
+    }
+
+    /**
+     * Whether the format has a zero byte. The BE returns the string up to it, and the FE keeps the whole string, so no
+     * string of such a format is the rendering that the tokens of the model describe. The model gives no order and no
+     * exactness to the format. The distinct values, the lengths and the periods stay upper bounds, as the cut only joins
+     * and shortens strings. The NULL rows do not change: the BE counts the bytes after the zero byte, so isNullOnAllRows
+     * reads the whole format.
+     */
+    public boolean hasZeroByte() {
+        return zeroByte;
     }
 
     /** Whether the format has text only, and renders one string. */
@@ -328,10 +367,29 @@ public final class DateFormatModel {
      * Whether the BE renders every row: it gives NULL for a string that does not fit its buffer of 128 bytes. We count
      * a string of 127 bytes as not fitting, because the BE also gives NULL a few bytes before the end of the buffer for
      * the names of the days and months. We take a format of 128 bytes or more as not exact too: the BE renders it row
-     * by row, and we expect such a format to hold a long text. A bound on the strings is right only for an exact format.
+     * by row, and we expect such a format to hold a long text. We take a format with a zero byte as not exact, because the
+     * BE cuts its strings there, see hasZeroByte. A bound on the strings is right only for an exact format.
      */
     public boolean isExactOnAllRows() {
-        return maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
+        return !zeroByte && maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
+    }
+
+    /**
+     * Whether the function takes the format as a constant: it runs and does not fail on it. The length is in bytes, as the
+     * BE counts it before it reads the format.
+     */
+    public boolean isTakenBy(Renderer renderer) {
+        return formatLength <= renderer.maxFormatLength;
+    }
+
+    /**
+     * Whether the strings of the function follow the order of the dates, so the strings of the ends of a range of dates
+     * bound the strings of the range. The FE folds the ends and the BE renders the rows, and a bound is right only when both
+     * give the same string. So we admit a format when it is known, has no zero byte (the FE keeps it in the string, the BE
+     * cuts the string there), is taken by the function, and has text only or is ordered.
+     */
+    public boolean isMonotonicFor(Renderer renderer) {
+        return known && !zeroByte && isTakenBy(renderer) && (fields.isEmpty() || isOrdered());
     }
 
     /**
@@ -375,7 +433,8 @@ public final class DateFormatModel {
      * Whether the strings sort in the order of the dates they hold: the specifiers are %Y %m %d %H %i %s %f from the year
      * down without a gap, %S standing for %s, and the text between them and after them is constant. Each field has a
      * fixed width with leading zeros: four digits for %Y, six for %f, two for the others. Two strings of one such format
-     * differ first in a digit of a field, and the higher fields are equal before it.
+     * differ first in a digit of a field, and the higher fields are equal before it. A format with a zero byte is not
+     * ordered, see hasZeroByte.
      */
     public boolean isOrdered() {
         return orderedFields > 0;

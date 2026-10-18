@@ -101,9 +101,11 @@ public class DateFormatBoundsTest {
     }
 
     // The BE gives NULL for a month without a day, reads ten digits with a year of two digits, and reads a year alone as
-    // NULL: the cast is not the start of the period of the string for these formats
+    // NULL: the cast is not the start of the period of the string for these formats. It cuts the string at a zero byte of
+    // the format, which the model does not hold, so the last three formats have no bound too.
     @ParameterizedTest
-    @ValueSource(strings = {"%Y%m%d%H", "%Y-%m", "%Y%m", "%Y", "%d.%m.%Y", "%y-%m", "%m/%d/%Y %h", "%Y-%j", "year"})
+    @ValueSource(strings = {"%Y%m%d%H", "%Y-%m", "%Y%m", "%Y", "%d.%m.%Y", "%y-%m", "%m/%d/%Y %h", "%Y-%j", "year",
+            "%Y-%m-%d\0", "%Y-%m-%d\0x", "\0%Y-%m-%d"})
     public void testFormatThatTheBackendReadsOtherwiseHasNoBound(String format) {
         for (BinaryType type : new BinaryType[] {BinaryType.GE, BinaryType.EQ, BinaryType.LT}) {
             BinaryPredicateOperator predicate = castCompare(format, type, "2026-08-01 00:00:00");

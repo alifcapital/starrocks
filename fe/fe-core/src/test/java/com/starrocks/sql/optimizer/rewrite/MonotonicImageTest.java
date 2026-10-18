@@ -244,6 +244,38 @@ public class MonotonicImageTest {
         }
     }
 
+    // The FE folds the ends of the range and keeps a zero byte in the string, while the BE returns the string up to it, so
+    // the strings of the ends are not the strings of the rows, even for a format with text only
+    @Test
+    public void testFormatWithAZeroByteHasNoImage() {
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));
+        for (String format : new String[] {"%Y-%m-%d\0x", "%Y-%m\0", "\0%Y", "%Y\0-%m", "%Y-%m-%d\0", "\0", "a\0b"}) {
+            assertFalse(MonotonicImage.imageRange(dateFormat(format), dtCol, domain).isPresent(),
+                    format.replace("\0", "\\0"));
+        }
+        // the same formats without the zero byte have an image
+        assertTrue(MonotonicImage.imageRange(dateFormat("%Y-%m-%d"), dtCol, domain).isPresent());
+        assertTrue(MonotonicImage.imageRange(dateFormat("ab"), dtCol, domain).isPresent());
+    }
+
+    // from_unixtime fails to prepare a constant format of more than 100 bytes, and a plan that prunes by the image could
+    // return no rows where the BE returns an error. date_format renders the same format row by row and has an image.
+    @Test
+    public void testFromUnixtimeFormatOfMoreThan100BytesHasNoImage() {
+        Function fn = new Function(new FunctionName("from_unixtime"),
+                new Type[] {IntegerType.BIGINT, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        MinMax domain = epochDomain(1717200000L, 1719800000L);
+        String fits = "%Y" + "x".repeat(98);
+        String tooLong = "%Y" + "x".repeat(99);
+        assertTrue(MonotonicImage.imageRange(new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                ImmutableList.of(epochCol, ConstantOperator.createVarchar(fits)), fn), epochCol, domain).isPresent());
+        assertFalse(MonotonicImage.imageRange(new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                ImmutableList.of(epochCol, ConstantOperator.createVarchar(tooLong)), fn), epochCol, domain).isPresent());
+        assertTrue(MonotonicImage.imageRange(dateFormat(tooLong), dtCol,
+                datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30)))
+                .isPresent());
+    }
+
     // The cast of such a string to a date is the date it holds, cut to the period of the format, so the image is the cut of
     // the ends of the range. The BE casts '%Y-%m' and '%Y' to NULL and reads ten digits as a year of two digits, and no
     // order of the dates is left there.

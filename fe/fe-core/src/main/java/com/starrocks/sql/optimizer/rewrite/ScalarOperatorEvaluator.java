@@ -275,8 +275,10 @@ public enum ScalarOperatorEvaluator {
             }
             DateFormatModel model = DateFormatModel.of(((ConstantOperator) format).getVarchar());
             // A format with text only renders one string, which is monotonic as every constant function is. The other
-            // formats have to render the strings in the order of their dates.
-            return model.isKnown() && (model.hasNoFields() || model.isOrdered());
+            // formats have to render the strings in the order of their dates. The functions take formats of different
+            // lengths, so the model is asked for the function of the call.
+            return model.isMonotonicFor(FunctionSet.DATE_FORMAT.equals(name)
+                    ? DateFormatModel.Renderer.DATE_FORMAT : DateFormatModel.Renderer.FROM_UNIXTIME);
         }
 
         // The format is the second argument for every name in SUPPORTED. These functions parse a string with the format and
