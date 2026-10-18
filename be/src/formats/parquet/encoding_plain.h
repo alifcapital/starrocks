@@ -207,6 +207,10 @@ public:
             down_cast<NullableColumn*>(dst)->set_has_null(null_cnt > 0);
         }
 
+        if (filter != nullptr) {
+            return _next_batch_with_nulls_filtered(count, count - null_cnt, is_nulls, filter, dst);
+        }
+
         size_t max_size = 0;
         size_t read_count = count - null_cnt;
         // Reusable members rather than VLAs: a data page may hold ~1M values and
@@ -280,6 +284,18 @@ public:
 
         if (filter) {
             auto* binary_column = ColumnHelper::get_binary_column(dst);
+            // We fear a reader that looks at every non-NULL value of the column, for example the lookup in a
+            // global dictionary: it would fail on an empty value that a dropped row gets. So when the column is
+            // nullable we mark a dropped row as NULL, as the dictionary decoder does. The null column has
+            // already got `count` default entries, which are the last ones. A column that is not nullable keeps
+            // the empty value: such a column is not looked up before the dropped rows are removed.
+            NullableColumn* nullable_dst = dst->is_nullable() ? down_cast<NullableColumn*>(dst) : nullptr;
+            uint8_t* dst_nulls = nullptr;
+            if (nullable_dst != nullptr) {
+                auto& null_data = nullable_dst->null_column_raw_ptr()->get_data();
+                dst_nulls = null_data.data() + null_data.size() - count;
+            }
+            size_t num_dropped = 0;
             while (num_decoded < count && _offset < _data.size) {
                 uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
                 _offset += sizeof(int32_t);
@@ -287,11 +303,18 @@ public:
                     binary_column->append(Slice(_data.data + _offset, length));
                 } else {
                     binary_column->append_default();
+                    if (dst_nulls != nullptr) {
+                        dst_nulls[num_decoded] = 1;
+                        num_dropped++;
+                    }
                 }
                 _offset += length;
                 num_decoded++;
             }
             CHECK_DECODING_BOUND
+            if (num_dropped > 0) {
+                nullable_dst->set_has_null(true);
+            }
         } else {
             auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(count * sizeof(Slice));
             Slice* slices = reinterpret_cast<Slice*>(slices_data.get());
@@ -358,6 +381,88 @@ public:
     }
 
 private:
+    // We expect a pushed-down filter to keep few rows, so we copy the bytes of the selected rows only.
+    // We still read the length prefix of every non-null value, because it is the only way to find where
+    // the next value starts. A NULL row and a row that the filter drops both get an empty value. We fear a
+    // reader that looks at every non-NULL value of the column, for example the lookup in a global dictionary:
+    // it would fail on an empty value that is not NULL. So we also mark a dropped row as NULL, as the
+    // dictionary decoder does. The caller has already written the NULL flags of this batch to the last
+    // `count` entries of the null column.
+    // The filter has one byte per row of the batch, NULL rows included.
+    Status _next_batch_with_nulls_filtered(size_t count, size_t read_count, const uint8_t* __restrict is_nulls,
+                                           const FilterData* __restrict filter, Column* dst) {
+        auto* binary_column = ColumnHelper::get_binary_column(dst);
+        auto& offsets = binary_column->get_offset();
+        auto& bytes = binary_column->get_bytes();
+        const size_t prev_offsets = offsets.size();
+        raw::stl_vector_resize_uninitialized(&offsets, count + prev_offsets);
+
+        NullableColumn* nullable_dst = dst->is_nullable() ? down_cast<NullableColumn*>(dst) : nullptr;
+        uint8_t* dst_nulls = nullptr;
+        if (nullable_dst != nullptr) {
+            auto& null_data = nullable_dst->null_column_raw_ptr()->get_data();
+            dst_nulls = null_data.data() + null_data.size() - count;
+        }
+        size_t num_dropped = 0;
+
+        _temp_lengths.resize(read_count + 1);
+        _temp_datas.resize(read_count + 1);
+        uint32_t* lengths = _temp_lengths.data();
+        char** datas = _temp_datas.data();
+
+        size_t cursor = _offset;
+        size_t end_offset = bytes.size();
+        size_t num_selected = 0;
+        size_t max_size = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (!is_nulls[i]) {
+                if (UNLIKELY(cursor + sizeof(uint32_t) > _data.size)) {
+                    return Status::InternalError(strings::Substitute(
+                            "going to read out-of-bounds data, offset=$0,count=$1,size=$2", cursor, count, _data.size));
+                }
+                uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + cursor);
+                cursor += sizeof(uint32_t);
+                if (UNLIKELY(length > _data.size - cursor)) {
+                    return Status::InternalError(strings::Substitute(
+                            "going to read out-of-bounds data, offset=$0,count=$1,size=$2", cursor, count, _data.size));
+                }
+                if (filter[i]) {
+                    datas[num_selected] = _data.data + cursor;
+                    lengths[num_selected] = length;
+                    num_selected++;
+                    end_offset += length;
+                    max_size = max_size > length ? max_size : length;
+                } else if (dst_nulls != nullptr) {
+                    dst_nulls[i] = 1;
+                    num_dropped++;
+                }
+                cursor += length;
+            }
+            offsets[prev_offsets + i] = end_offset;
+        }
+        _offset = cursor;
+        if (num_dropped > 0) {
+            nullable_dst->set_has_null(true);
+        }
+
+        bytes.reserve(end_offset);
+        binary_column->invalidate_slice_cache();
+        if (num_selected == 0) {
+            return Status::OK();
+        }
+
+        // The overflow copy reads max_size bytes from the start of every selected value. We fear reading
+        // past the end of the page when the last selected value is close to it, so we use the exact copy there.
+        max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
+        if (datas[num_selected - 1] - _data.data + max_size <= _data.size) {
+            binary_column->append_bytes_overflow(datas, lengths, num_selected, max_size);
+        } else {
+            binary_column->append_bytes(datas, lengths, num_selected);
+        }
+        DCHECK_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
+        return Status::OK();
+    }
+
     Slice _data;
     size_t _offset = 0;
     std::vector<uint32_t> _temp_lengths;

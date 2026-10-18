@@ -18,8 +18,10 @@
 
 #include <limits>
 #include <random>
+#include <set>
 
 #include "column/binary_column.h"
+#include "column/column_helper.h"
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
 #include "common/config.h"
@@ -1202,6 +1204,368 @@ TEST_F(ParquetEncodingTest, PlainByteArrayLargeBatchWithNulls) {
     auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
     ASSERT_EQ(read_count * value.size(), binary_column->get_bytes().size());
     ASSERT_EQ(value, binary_column->get_slice(1).to_string());
+}
+
+namespace {
+
+NullInfos make_plain_null_infos(const std::vector<uint8_t>& nulls) {
+    NullInfos null_infos;
+    null_infos.reset_with_capacity(nulls.size());
+    size_t num_ranges = nulls.empty() ? 0 : 1;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        null_infos.nulls_data()[i] = nulls[i];
+        null_infos.num_nulls += nulls[i];
+        if (i > 0 && nulls[i] != nulls[i - 1]) {
+            num_ranges++;
+        }
+    }
+    null_infos.num_ranges = num_ranges;
+    return null_infos;
+}
+
+// The encoder owns the page memory, so it has to outlive the decoder.
+void make_plain_byte_array_page(const std::vector<std::string>& values, std::unique_ptr<Encoder>* encoder,
+                                std::unique_ptr<Decoder>* decoder) {
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+
+    std::vector<Slice> slices;
+    for (const auto& value : values) {
+        slices.emplace_back(value);
+    }
+    Status st = encoding->create_encoder(encoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = (*encoder)->append(reinterpret_cast<uint8_t*>(slices.data()), slices.size());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = encoding->create_decoder(decoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = (*decoder)->set_data((*encoder)->build());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+}
+
+// Decodes one batch and appends it to `dst`. `values` are the non-null values of the batch in page order.
+// A NULL row and a row the filter drops must both end up as an empty NULL value, and a NULL row must stay
+// NULL whatever the filter says. `dst` may already hold rows of earlier batches.
+void decode_and_check_plain_batch(Decoder* decoder, const std::vector<uint8_t>& nulls,
+                                  const std::vector<std::string>& values, const std::vector<uint8_t>* filter,
+                                  NullableColumn* dst) {
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+    const size_t prev_rows = dst->size();
+    const size_t prev_bytes = binary_column->get_bytes().size();
+
+    NullInfos null_infos = make_plain_null_infos(nulls);
+    Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst,
+                                               filter != nullptr ? filter->data() : nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+
+    ASSERT_EQ(prev_rows + nulls.size(), dst->size());
+    ASSERT_EQ(prev_rows + nulls.size() + 1, binary_column->get_offset().size());
+    size_t next_value = 0;
+    size_t expected_bytes = 0;
+    bool expect_null_row = false;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        std::string expected;
+        bool expected_null = nulls[i] != 0;
+        if (!nulls[i]) {
+            const std::string& value = values[next_value++];
+            if (filter == nullptr || (*filter)[i]) {
+                expected = value;
+            } else {
+                expected_null = true;
+            }
+        }
+        ASSERT_EQ(expected_null, dst->is_null(prev_rows + i)) << "row " << i;
+        ASSERT_EQ(expected, binary_column->get_slice(prev_rows + i).to_string()) << "row " << i;
+        expected_bytes += expected.size();
+        expect_null_row |= expected_null;
+    }
+    if (expect_null_row) {
+        ASSERT_TRUE(dst->has_null());
+    }
+    ASSERT_EQ(values.size(), next_value);
+    ASSERT_EQ(prev_bytes + expected_bytes, binary_column->get_bytes().size());
+    ASSERT_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
+}
+
+// Decodes `values.size()` rows from a page without NULL rows, the way the reader does for a required column or
+// for a page that has no nulls, and appends them to `dst`. A row the filter drops gets no bytes. It is NULL
+// when `dst` is nullable and an empty value when it is not.
+void decode_and_check_plain_batch_without_nulls(Decoder* decoder, const std::vector<std::string>& values,
+                                                const std::vector<uint8_t>* filter, Column* dst) {
+    auto* binary_column = down_cast<BinaryColumn*>(ColumnHelper::get_data_column(dst));
+    const size_t prev_rows = dst->size();
+    const size_t prev_bytes = binary_column->get_bytes().size();
+
+    Status st = decoder->next_batch(values.size(), ColumnContentType::VALUE, dst,
+                                    filter != nullptr ? filter->data() : nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+
+    ASSERT_EQ(prev_rows + values.size(), dst->size());
+    ASSERT_EQ(prev_rows + values.size() + 1, binary_column->get_offset().size());
+    size_t expected_bytes = 0;
+    bool expect_null_row = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        const bool dropped = filter != nullptr && !(*filter)[i];
+        const std::string expected = dropped ? std::string() : values[i];
+        if (dst->is_nullable()) {
+            ASSERT_EQ(dropped, dst->is_null(prev_rows + i)) << "row " << i;
+        }
+        ASSERT_EQ(expected, binary_column->get_slice(prev_rows + i).to_string()) << "row " << i;
+        expected_bytes += expected.size();
+        expect_null_row |= dropped;
+    }
+    if (dst->is_nullable() && expect_null_row) {
+        ASSERT_TRUE(dst->has_null());
+    }
+    ASSERT_EQ(prev_bytes + expected_bytes, binary_column->get_bytes().size());
+    ASSERT_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
+}
+
+} // namespace
+
+// The filter has one byte per row of the batch, NULL rows included. We fear that the decoder copies the bytes
+// of the rows the filter drops: they are never read, but a big string column pays for the copy. So we check
+// that the column holds the selected values only, and that the batches after a filtered one still start at the
+// right value.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilter) {
+    const std::vector<std::string> values = {
+            "alpha", "b",     "",     "gamma-gamma",         "delta", std::string(200, 'x'),
+            "zeta",  "theta", "iota", std::string(130, 'k'), "kappa", "mu"};
+    auto batch_values = [&](size_t from, size_t to) {
+        return std::vector<std::string>(values.begin() + from, values.begin() + to);
+    };
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+
+    // Rows 2, 5 and 7 hold a value the filter drops, so they must become NULL. Row 4 is a NULL row the filter
+    // drops. Row 3 is a kept empty value, so it must stay not NULL. The last selected value is followed by more
+    // values in the page.
+    {
+        const std::vector<uint8_t> nulls = {0, 1, 0, 0, 1, 0, 0, 0, 1, 0};
+        const std::vector<uint8_t> filter = {1, 1, 0, 1, 0, 0, 1, 0, 1, 1};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(0, 7), &filter, dst.get()));
+        // "alpha" + "" + "delta" + "zeta"
+        ASSERT_EQ(14U, binary_column->get_bytes().size());
+    }
+    // No filter: the batch after a filtered one has to start at "theta".
+    {
+        const std::vector<uint8_t> nulls = {0, 1, 0};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(7, 9), nullptr, dst.get()));
+        ASSERT_EQ(23U, binary_column->get_bytes().size());
+    }
+    // The last selected value is the last value of the page.
+    {
+        const std::vector<uint8_t> nulls = {0, 0, 1, 0};
+        const std::vector<uint8_t> filter = {0, 1, 0, 1};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(9, 12), &filter, dst.get()));
+        // "kappa" + "mu"
+        ASSERT_EQ(30U, binary_column->get_bytes().size());
+    }
+    ASSERT_EQ(17U, dst->size());
+}
+
+// Every row is dropped: the column must get no bytes at all and every row must be NULL, but the decoder still
+// has to move over all the values, or the next batch reads garbage.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterDropsAll) {
+    const std::vector<std::string> values = {"alpha", "b",     "",    "gamma-gamma", "delta", std::string(200, 'x'),
+                                             "zeta",  "theta", "iota"};
+    auto batch_values = [&](size_t from, size_t to) {
+        return std::vector<std::string>(values.begin() + from, values.begin() + to);
+    };
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+
+    {
+        const std::vector<uint8_t> nulls = {0, 1, 0, 0, 1, 0, 0, 0, 1, 0};
+        const std::vector<uint8_t> filter(nulls.size(), 0);
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(0, 7), &filter, dst.get()));
+        ASSERT_EQ(0U, binary_column->get_bytes().size());
+    }
+    // A batch of NULL rows has no value in the page, so the decoder must not move at all.
+    {
+        const std::vector<uint8_t> nulls = {1, 1, 1};
+        const std::vector<uint8_t> filter = {1, 1, 1};
+        ASSERT_NO_FATAL_FAILURE(decode_and_check_plain_batch(decoder.get(), nulls, {}, &filter, dst.get()));
+        ASSERT_EQ(0U, binary_column->get_bytes().size());
+    }
+    {
+        const std::vector<uint8_t> nulls = {0, 1, 0};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(7, 9), nullptr, dst.get()));
+        ASSERT_EQ(9U, binary_column->get_bytes().size());
+    }
+}
+
+// Every row is selected, so the result has to be the same as without a filter. This also reaches the copy of
+// a value longer than 128 bytes.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterKeepsAll) {
+    const std::vector<std::string> values = {"alpha", "b",     "",    "gamma-gamma", "delta", std::string(200, 'x'),
+                                             "zeta",  "theta", "iota"};
+    auto batch_values = [&](size_t from, size_t to) {
+        return std::vector<std::string>(values.begin() + from, values.begin() + to);
+    };
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+
+    {
+        const std::vector<uint8_t> nulls = {0, 1, 0, 0, 1, 0, 0, 0, 1, 0};
+        const std::vector<uint8_t> filter(nulls.size(), 1);
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(0, 7), &filter, dst.get()));
+        ASSERT_EQ(226U, binary_column->get_bytes().size());
+    }
+    {
+        const std::vector<uint8_t> nulls = {0, 0};
+        const std::vector<uint8_t> filter(nulls.size(), 1);
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch(decoder.get(), nulls, batch_values(7, 9), &filter, dst.get()));
+        ASSERT_EQ(235U, binary_column->get_bytes().size());
+    }
+}
+
+// The global dictionary reader (LowRowsColumnReader::fill_dst_column) looks up every non-NULL row of the column
+// it has just read, before the filter of that read is applied, and fails with GlobalDictNotMatch when a value is
+// not in the dictionary. So a row that the filter drops must be NULL: an empty value that is not NULL is not in
+// the dictionary. The batch has no NULL row, so only the filter can make the column know about NULL rows.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterDroppedRowsAreNull) {
+    const std::vector<std::string> values = {"red", "green", "blue", "green"};
+    const std::set<std::string> dict = {"red", "green", "blue"};
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+
+    const std::vector<uint8_t> nulls = {0, 0, 0, 0};
+    const std::vector<uint8_t> filter = {1, 0, 1, 0};
+    ASSERT_NO_FATAL_FAILURE(decode_and_check_plain_batch(decoder.get(), nulls, values, &filter, dst.get()));
+
+    ASSERT_TRUE(dst->has_null());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+    size_t num_not_null = 0;
+    for (size_t i = 0; i < dst->size(); ++i) {
+        if (!dst->is_null(i)) {
+            ASSERT_EQ(1U, dict.count(binary_column->get_slice(i).to_string())) << "row " << i;
+            num_not_null++;
+        }
+    }
+    ASSERT_EQ(2U, num_not_null);
+}
+
+// A required column and a page without nulls are read with next_batch(). The global dictionary reader looks up
+// every non-NULL row of the nullable column it has just read, before the filter of that read is applied, so a
+// row that the filter drops must be NULL and must not leak its bytes. The dictionary has neither an empty string
+// nor the long value that the filter drops.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithoutNullsAndFilterDroppedRowsAreNull) {
+    const std::vector<std::string> values = {"red", std::string(200, 'x'), "blue", "green", "red", "blue", "green",
+                                             "red"};
+    const std::set<std::string> dict = {"red", "green", "blue"};
+    auto batch_values = [&](size_t from, size_t to) {
+        return std::vector<std::string>(values.begin() + from, values.begin() + to);
+    };
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+
+    {
+        const std::vector<uint8_t> filter = {1, 0, 1, 0};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch_without_nulls(decoder.get(), batch_values(0, 4), &filter, dst.get()));
+        ASSERT_TRUE(dst->has_null());
+        // "red" + "blue"
+        ASSERT_EQ(7U, binary_column->get_bytes().size());
+    }
+    // No filter: the batch after a filtered one has to start at the right value, and nothing is NULL in it.
+    {
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch_without_nulls(decoder.get(), batch_values(4, 6), nullptr, dst.get()));
+        ASSERT_EQ(14U, binary_column->get_bytes().size());
+        ASSERT_FALSE(dst->is_null(4));
+        ASSERT_FALSE(dst->is_null(5));
+    }
+    // Every row is dropped.
+    {
+        const std::vector<uint8_t> filter = {0, 0};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch_without_nulls(decoder.get(), batch_values(6, 8), &filter, dst.get()));
+        ASSERT_EQ(14U, binary_column->get_bytes().size());
+        ASSERT_TRUE(dst->is_null(6));
+        ASSERT_TRUE(dst->is_null(7));
+    }
+
+    ASSERT_EQ(8U, dst->size());
+    size_t num_not_null = 0;
+    for (size_t i = 0; i < dst->size(); ++i) {
+        if (!dst->is_null(i)) {
+            ASSERT_EQ(1U, dict.count(binary_column->get_slice(i).to_string())) << "row " << i;
+            num_not_null++;
+        }
+    }
+    ASSERT_EQ(4U, num_not_null);
+}
+
+// A column that is not nullable cannot hold a NULL row and is not looked up before the dropped rows are removed,
+// so a dropped row keeps being an empty value there.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithoutNullsAndFilterNotNullableDestination) {
+    const std::vector<std::string> values = {"red", std::string(200, 'x'), "blue", "green", "red"};
+    auto batch_values = [&](size_t from, size_t to) {
+        return std::vector<std::string>(values.begin() + from, values.begin() + to);
+    };
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+    auto dst = BinaryColumn::create();
+
+    {
+        const std::vector<uint8_t> filter = {1, 0, 1, 0};
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch_without_nulls(decoder.get(), batch_values(0, 4), &filter, dst.get()));
+        ASSERT_EQ(7U, dst->get_bytes().size());
+    }
+    {
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_check_plain_batch_without_nulls(decoder.get(), batch_values(4, 5), nullptr, dst.get()));
+        ASSERT_EQ(10U, dst->get_bytes().size());
+    }
+    ASSERT_EQ(5U, dst->size());
+    ASSERT_FALSE(dst->has_null());
+}
+
+// The page is file data. A length prefix that does not fit in the page must come back as a Status, because the
+// filtered path parses the prefix of every value itself.
+TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterTruncatedPage) {
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page({"abc"}, &encoder, &decoder));
+    const Slice page = encoder->build();
+    ASSERT_EQ(7U, page.size);
+
+    const std::vector<uint8_t> nulls = {0};
+    const std::vector<uint8_t> filter = {1};
+    NullInfos null_infos = make_plain_null_infos(nulls);
+    // The first page misses 2 bytes of the value, the second one misses a part of the length prefix.
+    for (size_t truncated_size : {page.size - 2, static_cast<size_t>(2)}) {
+        ASSERT_TRUE(decoder->set_data(Slice(page.data, truncated_size)).ok());
+        auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(),
+                                                   filter.data());
+        ASSERT_FALSE(st.ok()) << "truncated_size=" << truncated_size;
+    }
 }
 
 } // namespace starrocks::parquet
