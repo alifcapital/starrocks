@@ -40,6 +40,7 @@
 #include "cache/mem_cache/page_cache.h"
 #include "common/config.h"
 #include "testutil/assert.h"
+#include "util/defer_op.h"
 
 namespace starrocks {
 
@@ -319,6 +320,67 @@ TEST_F(StarRocksMetricsTest, PageCacheMetrics) {
     ASSERT_STREQ("1025", lookup_metric->to_string().c_str());
     ASSERT_STREQ("1", hit_metric->to_string().c_str());
     ASSERT_STREQ(std::to_string(_page_cache->get_capacity()).c_str(), capacity_metric->to_string().c_str());
+}
+
+// The collector runs the hook of the page cache metrics at any time, and the page cache that the hook read can be gone:
+// a test or a shutdown destroys the page cache and its engine, and another page cache can register the metrics later.
+// The hook must not read a page cache that is destroyed, and must follow the page cache that registered last.
+TEST_F(StarRocksMetricsTest, PageCacheMetricsHookDoesNotOutliveThePageCache) {
+    const bool saved_enable_metric_calculator = config::enable_metric_calculator;
+    config::enable_metric_calculator = false;
+    DeferOp restore([&] { config::enable_metric_calculator = saved_enable_metric_calculator; });
+
+    auto* metrics = StarRocksMetrics::instance()->metrics();
+    TestMetricsVisitor visitor;
+    auto* capacity_metric = static_cast<UIntGauge*>(metrics->get_metric("page_cache_capacity"));
+    auto* lookup_metric = static_cast<UIntGauge*>(metrics->get_metric("page_cache_lookup_count"));
+    ASSERT_TRUE(capacity_metric != nullptr);
+    ASSERT_TRUE(lookup_metric != nullptr);
+
+    metrics->collect(&visitor);
+    ASSERT_EQ(std::to_string(_page_cache->get_capacity()), capacity_metric->to_string());
+
+    // The page cache and its engine are gone. The hook reads neither: the sentinel values stay.
+    _page_cache.reset();
+    _lru_cache.reset();
+    capacity_metric->set_value(12345);
+    lookup_metric->set_value(678);
+    metrics->collect(&visitor);
+    ASSERT_STREQ("12345", capacity_metric->to_string().c_str());
+    ASSERT_STREQ("678", lookup_metric->to_string().c_str());
+
+    // A later page cache registers the metrics again, and the metrics follow it.
+    auto make_cache = [](size_t mem_space_size, std::shared_ptr<LRUCacheEngine>* engine,
+                         std::shared_ptr<StoragePageCache>* cache) {
+        MemCacheOptions opts{.mem_space_size = mem_space_size};
+        *engine = std::make_shared<LRUCacheEngine>();
+        ASSERT_OK((*engine)->init(opts));
+        *cache = std::make_shared<StoragePageCache>();
+        (*cache)->init(engine->get());
+        (*cache)->init_metrics();
+    };
+    std::shared_ptr<LRUCacheEngine> engine1;
+    std::shared_ptr<StoragePageCache> cache1;
+    ASSERT_NO_FATAL_FAILURE(make_cache(20 * 1024 * 1024, &engine1, &cache1));
+    metrics->collect(&visitor);
+    ASSERT_EQ(std::to_string(cache1->get_capacity()), capacity_metric->to_string());
+
+    // A page cache that registered later is the source, and the destruction of the older one leaves it so.
+    std::shared_ptr<LRUCacheEngine> engine2;
+    std::shared_ptr<StoragePageCache> cache2;
+    ASSERT_NO_FATAL_FAILURE(make_cache(30 * 1024 * 1024, &engine2, &cache2));
+    ASSERT_NE(cache1->get_capacity(), cache2->get_capacity());
+    cache1.reset();
+    engine1.reset();
+    metrics->collect(&visitor);
+    ASSERT_EQ(std::to_string(cache2->get_capacity()), capacity_metric->to_string());
+
+    // The destruction of the source stops the updates again.
+    cache2.reset();
+    engine2.reset();
+    capacity_metric->set_value(54321);
+    metrics->collect(&visitor);
+    ASSERT_STREQ("54321", capacity_metric->to_string().c_str());
 }
 
 void assert_threadpool_metrics_register(const std::string& pool_name, MetricRegistry* instance) {

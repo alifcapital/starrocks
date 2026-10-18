@@ -58,8 +58,14 @@ struct StoragePageCacheMetrics {
 class StoragePageCache {
 public:
     StoragePageCache() = default;
-    virtual ~StoragePageCache() = default;
+    // The destructor takes this page cache away from the metrics (see init_metrics()).
+    virtual ~StoragePageCache();
 
+    // Registers the page cache metrics and makes this page cache the source of their values. The metric collector runs
+    // a hook that is not owned by the page cache, at any time, and the registry keeps the first hook of a name, so
+    // a hook that captured `this` would read a page cache that is gone, or the first page cache after a newer one
+    // took its place. So the registry gets one hook for the process, which reads the page cache that registered last,
+    // under a lock that the destructor takes too. After the destructor the hook reads nothing.
     void init_metrics();
 
     // Return global instance.

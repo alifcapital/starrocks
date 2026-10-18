@@ -36,6 +36,8 @@
 
 #include <malloc.h>
 
+#include <mutex>
+
 #include "runtime/current_thread.h"
 #include "util/defer_op.h"
 #include "util/lru_cache.h"
@@ -55,38 +57,52 @@ METRIC_DEFINE_UINT_GAUGE(page_cache_release_evict_count, MetricUnit::OPERATIONS)
 METRIC_DEFINE_UINT_GAUGE(page_cache_capacity, MetricUnit::BYTES);
 METRIC_DEFINE_UINT_GAUGE(page_cache_pinned_count, MetricUnit::BYTES);
 
+namespace {
+
+// The page cache that the metric hook reads, and the lock that keeps the page cache alive while the hook reads it.
+std::mutex g_page_cache_metrics_mutex;
+StoragePageCache* g_page_cache_metrics_source = nullptr;
+
+void update_page_cache_metrics() {
+    std::lock_guard l(g_page_cache_metrics_mutex);
+    StoragePageCache* cache = g_page_cache_metrics_source;
+    if (cache == nullptr || !cache->is_initialized()) {
+        return;
+    }
+    page_cache_lookup_count.set_value(cache->get_lookup_count());
+    page_cache_hit_count.set_value(cache->get_hit_count());
+    page_cache_insert_count.set_value(cache->get_insert_count());
+    page_cache_insert_evict_count.set_value(cache->get_insert_evict_count());
+    page_cache_release_evict_count.set_value(cache->get_release_evict_count());
+    page_cache_capacity.set_value(cache->get_capacity());
+    page_cache_pinned_count.set_value(cache->get_pinned_count());
+}
+
+} // namespace
+
+StoragePageCache::~StoragePageCache() {
+    std::lock_guard l(g_page_cache_metrics_mutex);
+    if (g_page_cache_metrics_source == this) {
+        g_page_cache_metrics_source = nullptr;
+    }
+}
+
 void StoragePageCache::init_metrics() {
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_lookup_count", &page_cache_lookup_count);
-    StarRocksMetrics::instance()->metrics()->register_hook(
-            "page_cache_lookup_count", [this]() { page_cache_lookup_count.set_value(get_lookup_count()); });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_hit_count", &page_cache_hit_count);
-    StarRocksMetrics::instance()->metrics()->register_hook(
-            "page_cache_hit_count", [this]() { page_cache_hit_count.set_value(get_hit_count()); });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_insert_count", &page_cache_insert_count);
-    StarRocksMetrics::instance()->metrics()->register_hook(
-            "page_cache_insert_count", [this]() { page_cache_insert_count.set_value(get_insert_count()); });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_insert_evict_count",
-                                                             &page_cache_insert_evict_count);
-    StarRocksMetrics::instance()->metrics()->register_hook("page_cache_insert_evict_count", [this]() {
-        page_cache_insert_evict_count.set_value(get_insert_evict_count());
-    });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_release_evict_count",
-                                                             &page_cache_release_evict_count);
-    StarRocksMetrics::instance()->metrics()->register_hook("page_cache_release_evict_count", [this]() {
-        page_cache_release_evict_count.set_value(get_release_evict_count());
-    });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_capacity", &page_cache_capacity);
-    StarRocksMetrics::instance()->metrics()->register_hook("page_cache_capacity",
-                                                           [this]() { page_cache_capacity.set_value(get_capacity()); });
-
-    StarRocksMetrics::instance()->metrics()->register_metric("page_cache_pinned_count", &page_cache_pinned_count);
-    StarRocksMetrics::instance()->metrics()->register_hook(
-            "page_cache_pinned_count", [this]() { page_cache_pinned_count.set_value(get_pinned_count()); });
+    auto* registry = StarRocksMetrics::instance()->metrics();
+    registry->register_metric("page_cache_lookup_count", &page_cache_lookup_count);
+    registry->register_metric("page_cache_hit_count", &page_cache_hit_count);
+    registry->register_metric("page_cache_insert_count", &page_cache_insert_count);
+    registry->register_metric("page_cache_insert_evict_count", &page_cache_insert_evict_count);
+    registry->register_metric("page_cache_release_evict_count", &page_cache_release_evict_count);
+    registry->register_metric("page_cache_capacity", &page_cache_capacity);
+    registry->register_metric("page_cache_pinned_count", &page_cache_pinned_count);
+    {
+        std::lock_guard l(g_page_cache_metrics_mutex);
+        g_page_cache_metrics_source = this;
+    }
+    // The registry keeps the first hook of a name, and the hook does not capture a page cache, so a second call
+    // registers nothing new and the hook follows the page cache of the last call.
+    registry->register_hook("page_cache_metrics", update_page_cache_metrics);
 }
 
 void StoragePageCache::prune() {
