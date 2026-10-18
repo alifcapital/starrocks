@@ -348,9 +348,7 @@ bool Bitset<LT>::contains_range(const CppType& min_value, const CppType& max_val
 
 template <LogicalType LT>
 void Bitset<LT>::init() {
-    const size_t key_interval = value_interval() + 1;
-    const size_t num_buckets = (key_interval + 7) / 8;
-    _bitset.resize(num_buckets);
+    _bitset.resize(num_bytes(_min_value, _max_value));
 }
 
 template <LogicalType LT>

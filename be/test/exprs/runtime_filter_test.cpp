@@ -17,12 +17,17 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <random>
 #include <utility>
 
 #include "column/column_helper.h"
+#include "column/decimalv3_column.h"
+#include "exec/pipeline/hashjoin/hash_joiner_fwd.h"
+#include "exec/pipeline/runtime_filter_types.h"
 #include "exprs/runtime_filter_bank.h"
 #include "simd/simd.h"
+#include "testutil/assert.h"
 #include "testutil/column_test_helper.h"
 #include "types/logical_type.h"
 
@@ -1709,6 +1714,122 @@ TEST_F(RuntimeMembershipFilterTest, TestEvaluateBitsetFilterConstantColumnKeepsD
 
     rf.membership_filter().insert_null();
     EXPECT_EQ(evaluate_constant(null_column.get()), (Selection{1, 0, 1, 0}));
+}
+
+TEST_F(RuntimeFilterTest, TestBitsetNumBytes) {
+    constexpr int64_t kInt64Min = std::numeric_limits<int64_t>::min();
+    constexpr int64_t kInt64Max = std::numeric_limits<int64_t>::max();
+    constexpr size_t kBytesFor2Pow64Values = size_t{1} << 61;
+
+    EXPECT_EQ(1, Bitset<TYPE_BIGINT>::num_bytes(0, 0));
+    EXPECT_EQ(1, Bitset<TYPE_BIGINT>::num_bytes(0, 7));
+    EXPECT_EQ(2, Bitset<TYPE_BIGINT>::num_bytes(0, 8));
+    EXPECT_EQ(13, Bitset<TYPE_BIGINT>::num_bytes(0, 99));
+    EXPECT_EQ(2, Bitset<TYPE_BIGINT>::num_bytes(kInt64Max - 15, kInt64Max));
+
+    // Intervals of 2^64 - k values for k in [0, 8]. The value count and `count + 7` do not fit in size_t here.
+    EXPECT_EQ(kBytesFor2Pow64Values, Bitset<TYPE_BIGINT>::num_bytes(kInt64Min, kInt64Max));
+    for (int64_t k = 1; k <= 7; k++) {
+        EXPECT_EQ(kBytesFor2Pow64Values, Bitset<TYPE_BIGINT>::num_bytes(kInt64Min + k, kInt64Max)) << k;
+    }
+    EXPECT_EQ(kBytesFor2Pow64Values - 1, Bitset<TYPE_BIGINT>::num_bytes(kInt64Min + 8, kInt64Max));
+    EXPECT_EQ(kBytesFor2Pow64Values, Bitset<TYPE_DECIMAL64>::num_bytes(-kInt64Max, kInt64Max));
+
+    EXPECT_EQ(size_t{1} << 29,
+              Bitset<TYPE_INT>::num_bytes(std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()));
+    EXPECT_EQ(8192, Bitset<TYPE_SMALLINT>::num_bytes(std::numeric_limits<int16_t>::min(),
+                                                     std::numeric_limits<int16_t>::max()));
+    EXPECT_EQ(32,
+              Bitset<TYPE_TINYINT>::num_bytes(std::numeric_limits<int8_t>::min(), std::numeric_limits<int8_t>::max()));
+    EXPECT_EQ(1, Bitset<TYPE_BOOLEAN>::num_bytes(false, true));
+}
+
+// Builds and fills a broadcast join runtime filter the way PartialRuntimeFilterMerger does.
+// `keys` holds the hash join placeholder in row 0, as a join key column does.
+static RuntimeFilter* build_broadcast_join_runtime_filter(ObjectPool* pool, LogicalType type, MutableColumnPtr keys,
+                                                          size_t row_count) {
+    Columns columns;
+    columns.emplace_back(std::move(keys));
+    pipeline::RuntimeMembershipFilterBuildParam param(false, false, false, columns, nullptr, TypeDescriptor(type));
+    RuntimeFilter* rf = RuntimeFilterHelper::create_join_runtime_filter(
+            pool, type, TRuntimeFilterBuildJoinMode::BROADCAST, param, kHashJoinKeyColumnOffset, row_count);
+    rf->get_membership_filter()->init(row_count);
+    EXPECT_OK(RuntimeFilterHelper::fill_runtime_filter(param, type, rf, kHashJoinKeyColumnOffset));
+    return rf;
+}
+
+TEST_F(RuntimeFilterTest, TestJoinRuntimeFilterFallsBackToBloomForHugeIntervals) {
+    constexpr int64_t kInt64Min = std::numeric_limits<int64_t>::min();
+    constexpr int64_t kInt64Max = std::numeric_limits<int64_t>::max();
+    ObjectPool pool;
+
+    auto expect_bloom = [&](LogicalType type, MutableColumnPtr keys, size_t row_count) {
+        RuntimeFilter* rf = build_broadcast_join_runtime_filter(&pool, type, std::move(keys), row_count);
+        EXPECT_EQ(RuntimeFilterSerializeType::BLOOM_FILTER, rf->type()) << rf->debug_string();
+    };
+
+    // `a IN (SELECT c FROM t)` where t.c holds both -(2^63 - 1) and 2^63 - 1.
+    expect_bloom(TYPE_BIGINT, ColumnTestHelper::build_column<int64_t>({0, kInt64Max, -kInt64Max}), 2);
+    expect_bloom(TYPE_BIGINT, ColumnTestHelper::build_column<int64_t>({0, kInt64Min, kInt64Max}), 2);
+    for (int64_t k = 1; k <= 8; k++) {
+        expect_bloom(TYPE_BIGINT, ColumnTestHelper::build_column<int64_t>({0, kInt64Min + k, kInt64Max}), 2);
+    }
+
+    {
+        auto keys = Decimal64Column::create(18, 0);
+        const std::vector<int64_t> values{0, kInt64Max, -kInt64Max};
+        keys->append_numbers(values.data(), values.size() * sizeof(int64_t));
+        expect_bloom(TYPE_DECIMAL64, std::move(keys), 2);
+    }
+
+    expect_bloom(TYPE_INT,
+                 ColumnTestHelper::build_column<int32_t>(
+                         {0, std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()}),
+                 2);
+
+    // LARGEINT has no bitset filter.
+    {
+        auto keys = Int128Column::create();
+        const std::vector<int128_t> values{0, std::numeric_limits<int128_t>::min(),
+                                           std::numeric_limits<int128_t>::max()};
+        keys->append_numbers(values.data(), values.size() * sizeof(int128_t));
+        expect_bloom(TYPE_LARGEINT, std::move(keys), 2);
+    }
+}
+
+TEST_F(RuntimeFilterTest, TestJoinRuntimeBitsetFilterAtTypeEdges) {
+    ObjectPool pool;
+
+    auto check_bitset = [&]<LogicalType LT>(const std::vector<RunTimeCppType<LT>>& keys, size_t row_count,
+                                            size_t expected_bytes, RunTimeCppType<LT> absent) {
+        using CppType = RunTimeCppType<LT>;
+        std::vector<CppType> column_values{CppType{}};
+        column_values.insert(column_values.end(), keys.begin(), keys.end());
+        RuntimeFilter* rf = build_broadcast_join_runtime_filter(
+                &pool, LT, ColumnTestHelper::build_column<CppType>(column_values), row_count);
+        ASSERT_EQ(RuntimeFilterSerializeType::BITSET_FILTER, rf->type()) << rf->debug_string();
+
+        const auto& bitset = down_cast<const RuntimeBitsetFilter<LT>*>(rf->get_membership_filter())->bitset();
+        EXPECT_EQ(expected_bytes, bitset.size());
+        for (const auto& key : keys) {
+            EXPECT_TRUE(bitset.template contains<true>(key, 1)) << key;
+        }
+        EXPECT_FALSE(bitset.template contains<true>(absent, 1)) << absent;
+    };
+
+    constexpr int64_t kInt64Min = std::numeric_limits<int64_t>::min();
+    constexpr int64_t kInt64Max = std::numeric_limits<int64_t>::max();
+    check_bitset.operator()<TYPE_BIGINT>({kInt64Max - 15, kInt64Max}, 2, 2, kInt64Max - 1);
+    check_bitset.operator()<TYPE_BIGINT>({kInt64Min, kInt64Min + 7}, 2, 1, kInt64Min + 1);
+    check_bitset.operator()<TYPE_BIGINT>({-1, 0, 99}, 13, 13, 50);
+
+    constexpr int32_t kInt32Max = std::numeric_limits<int32_t>::max();
+    check_bitset.operator()<TYPE_INT>({kInt32Max - 63, kInt32Max}, 8, 8, kInt32Max - 1);
+
+    check_bitset.operator()<TYPE_SMALLINT>({std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max()},
+                                           8192, 8192, 0);
+    check_bitset.operator()<TYPE_TINYINT>({std::numeric_limits<int8_t>::min(), std::numeric_limits<int8_t>::max()}, 32,
+                                          32, 0);
 }
 
 INSTANTIATE_TEST_SUITE_P(RuntimeFilterTest, RuntimeFilterTestFixture, ::testing::Values(RF_VERSION_V2, RF_VERSION_V3));

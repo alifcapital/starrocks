@@ -1774,6 +1774,13 @@ public:
         }
     }
 
+    /// Bytes needed for one bit per value in [min_value, max_value], requires min_value <= max_value.
+    /// A BIGINT range can hold up to 2^64 values, and this count does not fit in size_t. We want a byte count
+    /// that cannot wrap to a small number, so we divide `max_value - min_value` by 8 before we add 1.
+    static size_t num_bytes(const CppType& min_value, const CppType& max_value) {
+        return (static_cast<size_t>(to_numeric(max_value)) - to_numeric(min_value)) / 8 + 1;
+    }
+
 private:
     size_t _value_interval(const CppType& value) const {
         return static_cast<size_t>(to_numeric(value)) - to_numeric(_min_value);

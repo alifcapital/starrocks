@@ -176,17 +176,15 @@ struct try_create_runtime_bitset_filter {
         const auto& [l2_cache_size, l3_cache_size] = cache_sizes;
 
         const auto [min_value, max_value] = calc_min_max_from_columns<LT>(param.columns, column_offset);
-        const size_t value_interval = static_cast<size_t>(RuntimeBitsetFilter<LT>::to_numeric(max_value)) -
-                                      RuntimeBitsetFilter<LT>::to_numeric(min_value) + 1;
-
-        VLOG_FILE << "[BITSET] min_value=" << min_value << ", max_value=" << max_value
-                  << ", value_interval=" << value_interval;
-
-        if (min_value > max_value || value_interval == 0) { // Overflow.
+        if (min_value > max_value) {
             return nullptr;
         }
 
-        const size_t bitset_memory_usage = (value_interval + 7) / 8;
+        // `Bitset::init` allocates exactly this many bytes, so the size we compare is the size we allocate.
+        const size_t bitset_memory_usage = Bitset<LT>::num_bytes(min_value, max_value);
+        VLOG_FILE << "[BITSET] min_value=" << min_value << ", max_value=" << max_value
+                  << ", bitset_memory_usage=" << bitset_memory_usage;
+
         const size_t bloom_memory_usage = row_count;
         if (bitset_memory_usage <= bloom_memory_usage ||
             (bitset_memory_usage <= bloom_memory_usage * 4 && bitset_memory_usage <= l2_cache_size) ||
