@@ -984,6 +984,32 @@ public class StatisticsCalculatorTest {
     }
 
     /**
+     * The conditions of a JOIN other than its equalities go to estimateStatistics as a list, and all of them filter.
+     */
+    @Test
+    public void testEstimateStatisticsAppliesEveryPredicate() {
+        final var a = columnRefFactory.create("a", IntegerType.BIGINT, true);
+        final var b = columnRefFactory.create("b", IntegerType.BIGINT, true);
+        final var builder = Statistics.builder();
+        builder.setOutputRowCount(1000);
+        builder.addColumnStatistics(ImmutableMap.of(
+                a, new ColumnStatistic(0, 100, 0, 8, 100),
+                b, new ColumnStatistic(0, 100, 0, 8, 100)));
+        final Statistics input = builder.build();
+        final ScalarOperator onA = new BinaryPredicateOperator(BinaryType.LT, a, ConstantOperator.createBigint(50));
+        final ScalarOperator onB = new BinaryPredicateOperator(BinaryType.LT, b, ConstantOperator.createBigint(10));
+
+        final Statistics both = new StatisticsCalculator().estimateStatistics(List.of(onA, onB), input);
+        final Statistics onlyB = PredicateStatisticsCalculator.statisticsCalculate(onB, input);
+        final Statistics oneAfterOther = PredicateStatisticsCalculator.statisticsCalculate(onB,
+                PredicateStatisticsCalculator.statisticsCalculate(onA, input));
+
+        Assertions.assertEquals(oneAfterOther.getOutputRowCount(), both.getOutputRowCount(), 1e-6);
+        Assertions.assertTrue(both.getOutputRowCount() < onlyB.getOutputRowCount(),
+                both.getOutputRowCount() + " " + onlyB.getOutputRowCount());
+    }
+
+    /**
      * Selectivity path: When outer has MORE rows than inner and all stats are known,
      * the inner-side null fraction should reflect the unmatched-row gap.
      */
