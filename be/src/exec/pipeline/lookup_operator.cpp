@@ -283,7 +283,23 @@ Status LookUpOperator::_try_to_trigger_io_task(RuntimeState* state) {
             VLOG_ROW << "[GLM] LookUpOperator::submit_io_task, num_running_io_tasks: " << _num_running_io_tasks << ", "
                      << (void*)this << ", dispatcher: " << (void*)_dispatcher.get() << ", idx: " << i;
             processor->set_running(true);
-            task.workgroup->executors()->scan_executor()->submit(std::move(task));
+            auto* scan_executor = task.workgroup->executors()->scan_executor();
+            if (!scan_executor->submit(std::move(task))) {
+                // The executor rejects the task when its queue is full or it is closed, and the task never runs. We
+                // took the requests from the dispatcher, and nobody else answers them or clears the running state,
+                // so we fear the requesters and this operator wait forever if we do not do both here. A retry has
+                // no delay, so we expect the queue to be as full as before. We fail the requests and the operator
+                // like a failed IO task does.
+                _num_running_io_tasks--;
+                processor->set_running(false);
+                Status status = Status::ServiceUnavailable("lookup IO task is rejected by the scan executor");
+                LOG(WARNING) << "LookUpOperator " << (void*)this << " failed to submit the IO task: " << status;
+                for (auto& request_ctx : lookup_task_ctx->request_ctxs) {
+                    request_ctx->callback(status);
+                }
+                _set_io_task_status(status);
+                return status;
+            }
         }
     }
 

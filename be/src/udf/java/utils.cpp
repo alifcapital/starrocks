@@ -51,9 +51,14 @@ PromiseStatusPtr call_function_in_pthread(RuntimeState* state, const std::functi
 PromiseStatusPtr call_hdfs_scan_function_in_pthread(const std::function<Status()>& func) {
     PromiseStatusPtr ms = std::make_unique<PromiseStatus>();
     if (bthread_self()) {
-        ExecEnv::GetInstance()->connector_scan_executor()->submit(workgroup::ScanTask(
+        bool submitted = ExecEnv::GetInstance()->connector_scan_executor()->submit(workgroup::ScanTask(
                 ExecEnv::GetInstance()->workgroup_manager()->get_default_workgroup(),
                 [promise = ms.get(), func](workgroup::YieldContext&) { promise->set_value(func()); }));
+        if (!submitted) {
+            // The executor is full or closed and the rejected task never runs. The caller waits for the promise, so
+            // we fear it waits forever if we do not set it here.
+            ms->set_value(Status::ServiceUnavailable("connector scan executor rejects the task"));
+        }
     } else {
         ms->set_value(func());
     }

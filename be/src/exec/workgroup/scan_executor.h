@@ -40,6 +40,7 @@ public:
     void close();
     void change_num_threads(int32_t num_threads);
 
+    // A closed executor never runs a task: submit returns false and force_submit drops the task.
     bool submit(ScanTask task);
 
     void force_submit(ScanTask task);
@@ -56,6 +57,8 @@ private:
     // _thread_pool must be placed after _task_queue, because worker threads in _thread_pool use _task_queue.
     std::unique_ptr<ThreadPool> _thread_pool;
 
+    // The metrics outlive the executor and are used after close(): a worker of another executor can still call
+    // submit or force_submit, and both update the metrics.
     pipeline::ScanExecutorMetrics* _metrics;
 };
 

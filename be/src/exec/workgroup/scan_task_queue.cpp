@@ -39,11 +39,11 @@ bool PriorityScanTaskQueue::try_offer(ScanTask task) {
     return _queue.try_put(std::move(task));
 }
 
-void PriorityScanTaskQueue::force_put(ScanTask task) {
+bool PriorityScanTaskQueue::force_put(ScanTask task) {
     if (task.peak_scan_task_queue_size_counter != nullptr) {
         task.peak_scan_task_queue_size_counter->set(_queue.get_size());
     }
-    _queue.force_put(std::move(task));
+    return _queue.force_put(std::move(task));
 }
 
 /// WorkGroupScanTaskQueue.
@@ -113,6 +113,12 @@ StatusOr<ScanTask> WorkGroupScanTaskQueue::take() {
 bool WorkGroupScanTaskQueue::try_offer(ScanTask task) {
     std::lock_guard<std::mutex> lock(_global_mutex);
 
+    // We check under the same mutex as close(): nobody takes a task from a closed queue, so a task that is queued
+    // after close() would stay in the queue of its workgroup.
+    if (_is_closed) {
+        return false;
+    }
+
     if (task.peak_scan_task_queue_size_counter != nullptr) {
         task.peak_scan_task_queue_size_counter->set(_num_tasks);
     }
@@ -130,8 +136,13 @@ bool WorkGroupScanTaskQueue::try_offer(ScanTask task) {
     return true;
 }
 
-void WorkGroupScanTaskQueue::force_put(ScanTask task) {
+bool WorkGroupScanTaskQueue::force_put(ScanTask task) {
     std::lock_guard<std::mutex> lock(_global_mutex);
+
+    // See try_offer.
+    if (_is_closed) {
+        return false;
+    }
 
     if (task.peak_scan_task_queue_size_counter != nullptr) {
         task.peak_scan_task_queue_size_counter->set(_num_tasks);
@@ -147,6 +158,7 @@ void WorkGroupScanTaskQueue::force_put(ScanTask task) {
 
     _num_tasks++;
     _cv.notify_one();
+    return true;
 }
 
 void WorkGroupScanTaskQueue::update_statistics(ScanTask& task, int64_t runtime_ns) {

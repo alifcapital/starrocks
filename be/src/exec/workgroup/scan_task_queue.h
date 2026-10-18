@@ -72,6 +72,8 @@ struct YieldContext {
 struct ScanTask {
 public:
     using WorkFunction = std::function<void(YieldContext&)>;
+    // ScanExecutor calls it for an unfinished task instead of queueing the task again. We expect nobody else to
+    // queue the task, so the function must submit it to the executor that runs it next.
     using YieldFunction = std::function<void(ScanTask&&)>;
 
     ScanTask() : ScanTask(nullptr, nullptr) {}
@@ -103,7 +105,11 @@ public:
 
     void execute_yield_function() {
         DCHECK(yield_function != nullptr) << "yield function must be set";
-        yield_function(std::move(*this));
+        // The yield function moves this task, with its yield_function member, to another executor. We fear that
+        // the task is finished and destroyed there while the function still reads its captures, so we call a copy
+        // of the function. The task keeps its own yield function for the next yield.
+        auto fn = yield_function;
+        fn(std::move(*this));
     }
 
     const YieldContext& get_work_context() const { return work_context; }
@@ -137,8 +143,10 @@ public:
     virtual void close() = 0;
 
     virtual StatusOr<ScanTask> take() = 0;
+    // A closed queue refuses every task: try_offer and force_put return false and do not queue the task. The check
+    // and the queueing are atomic with close(), so no task is queued after close() returned.
     virtual bool try_offer(ScanTask task) = 0;
-    virtual void force_put(ScanTask task) = 0;
+    virtual bool force_put(ScanTask task) = 0;
 
     virtual size_t size() const = 0;
     bool empty() const { return size() == 0; }
@@ -156,7 +164,7 @@ public:
 
     StatusOr<ScanTask> take() override;
     bool try_offer(ScanTask task) override;
-    void force_put(ScanTask task) override;
+    bool force_put(ScanTask task) override;
 
     size_t size() const override { return _queue.get_size(); }
 
@@ -176,7 +184,7 @@ public:
 
     StatusOr<ScanTask> take() override;
     bool try_offer(ScanTask task) override;
-    void force_put(ScanTask task) override;
+    bool force_put(ScanTask task) override;
 
     size_t size() const override { return _num_tasks.load(std::memory_order_acquire); }
 

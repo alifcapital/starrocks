@@ -28,7 +28,6 @@ ScanExecutor::ScanExecutor(std::unique_ptr<ThreadPool> thread_pool, std::unique_
 void ScanExecutor::close() {
     _task_queue->close();
     _thread_pool->shutdown();
-    _metrics = nullptr;
 }
 
 void ScanExecutor::initialize(int num_threads) {
@@ -63,13 +62,15 @@ void ScanExecutor::worker_thread() {
             current_thread->set_idle(true);
         }
         auto maybe_task = _task_queue->take();
-        _metrics->pending_tasks.increment(-1);
         if (current_thread != nullptr) {
             current_thread->set_idle(false);
         }
+        // A cancelled take returns no task, and only a task that submit or force_submit counted may be uncounted
+        // here. Otherwise the pending counter drops below zero once for every worker thread when the queue closes.
         if (maybe_task.status().is_cancelled()) {
             return;
         }
+        _metrics->pending_tasks.increment(-1);
         auto& task = maybe_task.value();
 
         _metrics->running_tasks.increment(1);
@@ -86,21 +87,37 @@ void ScanExecutor::worker_thread() {
         _metrics->finished_tasks.increment(1);
         _metrics->execution_time.increment(task.query_type(), time_spent_ns);
 
-        // task
+        // The task yielded. A task with a yield function may need another executor to go on (a spill IO task moves
+        // between the local and the remote IO executor), so we give it to that function. A task without one is
+        // queued again in this executor. We use force_submit for it, because taking the task decreased the pending
+        // counter and we fear the counter drifts below zero if the task is not counted again.
         if (!task.is_finished()) {
-            _task_queue->force_put(std::move(task));
+            if (task.has_yield_function()) {
+                task.execute_yield_function();
+            } else {
+                force_submit(std::move(task));
+            }
         }
     }
 }
 
 bool ScanExecutor::submit(ScanTask task) {
+    // The queue of a closed executor refuses the task, so we return false and the caller handles it like a full
+    // queue.
     bool ret = _task_queue->try_offer(std::move(task));
     _metrics->pending_tasks.increment(ret);
     return ret;
 }
 
 void ScanExecutor::force_submit(ScanTask task) {
-    _task_queue->force_put(std::move(task));
+    // A worker of another executor can yield a task into this executor after it was closed. The queue refuses the
+    // task, which cannot run here, and force_submit has no way to tell its owner, so we log it and count nothing.
+    // We expect a closed executor only while the BE shuts down, where the tasks already queued in the executor are
+    // dropped as well.
+    if (!_task_queue->force_put(std::move(task))) {
+        LOG(WARNING) << "drop a scan task, the scan executor is closed";
+        return;
+    }
     _metrics->pending_tasks.increment(1);
 }
 
