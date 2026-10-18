@@ -136,7 +136,9 @@ public final class StatisticsHll {
             }
         }
 
-        private void addHash(long hash) {
+        // The low bits of the hash choose the register and the high bits give the rank, so a caller that counts its
+        // own values mixes them over all 64 bits first.
+        void addHash(long hash) {
             if (registers != null) {
                 updateRegister(hash);
                 return;

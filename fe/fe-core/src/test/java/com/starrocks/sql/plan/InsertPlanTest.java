@@ -44,6 +44,7 @@ import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.common.MetaUtils;
 import com.starrocks.sql.optimizer.dump.QueryDumpInfo;
+import com.starrocks.sql.optimizer.statistics.ValuesStatisticsCalls;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.thrift.TDataSink;
 import com.starrocks.thrift.TExplainLevel;
@@ -78,6 +79,7 @@ public class InsertPlanTest extends PlanTestBase {
     @BeforeAll
     public static void beforeClass() throws Exception {
         PlanTestBase.beforeClass();
+        ValuesStatisticsCalls.install();
         starRocksAssert.withTable("CREATE TABLE iceberg_shuffle_src (\n" +
                 "  id INT,\n" +
                 "  dt DATE,\n" +
@@ -1192,6 +1194,74 @@ public class InsertPlanTest extends PlanTestBase {
                 "iceberg_catalog_transform", "iceberg_transform_table", 12345567, icebergSchema, bucketSpec,
                 Lists.newArrayList(k1, k2), Lists.newArrayList(k1), Arrays.asList(0), "select v1, v2 from t0");
         assertHashPartitionedByExpression(actualRes, "__iceberg_transform_bucket");
+    }
+
+    // The rows of an INSERT have only projections above them, and nothing reads the statistics of their columns: they
+    // are not computed, whatever the target is.
+    @Test
+    public void testInsertValuesComputesNoValuesStatistics() throws Exception {
+        Schema icebergSchema = new Schema(
+                Types.NestedField.required(1, "k1", Types.IntegerType.get()),
+                Types.NestedField.required(2, "k2", Types.IntegerType.get())
+        );
+        PartitionSpec bucketSpec = PartitionSpec.builderFor(icebergSchema).bucket("k1", 10).build();
+        Column k1 = new Column("k1", IntegerType.INT);
+        Column k2 = new Column("k2", IntegerType.INT);
+        String[] plan = new String[1];
+        Assertions.assertEquals(0, ValuesStatisticsCalls.during(() -> plan[0] =
+                getIcebergInsertExecPlanWithGlobalShuffle("iceberg_catalog_values", "iceberg_values_table", 12345571,
+                        icebergSchema, bucketSpec, Lists.newArrayList(k1, k2), Lists.newArrayList(k1),
+                        Arrays.asList(0), "values (1, 2), (3, 4)")));
+        // The transform of the partition is a projection over the constants.
+        Assertions.assertTrue(plan[0].contains("__iceberg_transform_bucket"), plan[0]);
+
+        Assertions.assertEquals(0, ValuesStatisticsCalls.during(() -> getInsertExecPlan(
+                "explain insert into files('path' = 's3://xxx/yyy/', 'format' = 'parquet', "
+                        + "'compression' = 'uncompressed', 'aws.s3.access_key' = 'abc', "
+                        + "'aws.s3.secret_key' = 'def', 'aws.s3.region' = 'us-west-2') values (1, 'a'), (2, 'b')")));
+    }
+
+    @Test
+    public void testInsertValuesWithShadowAndGeneratedColumnsComputesNoValuesStatistics() throws Exception {
+        OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore()
+                .getDb(connectContext.getDatabase()).getTable("insert_online_optimize_shadow_generated_column");
+        List<Column> originalFullSchema = table.getFullSchema();
+        List<Column> schemaWithStaleGeneratedColumns = new ArrayList<>(originalFullSchema);
+        for (Column column : table.getBaseSchema()) {
+            if (column.isGeneratedColumn()) {
+                schemaWithStaleGeneratedColumns.add(column.deepCopy());
+                Column shadowColumn = column.deepCopy();
+                shadowColumn.setName(SchemaChangeHandler.SHADOW_NAME_PREFIX + column.getName());
+                schemaWithStaleGeneratedColumns.add(shadowColumn);
+            }
+        }
+
+        String sql = "insert into insert_online_optimize_shadow_generated_column (pk, v, tags) "
+                + "values (1, 2, parse_json('{\"vendorId\": \"a\"}')), (3, 4, null)";
+        InsertStmt insertStmt = (InsertStmt) SqlParser.parse(sql, connectContext.getSessionVariable().getSqlMode())
+                .get(0);
+        boolean originalOptimizeRewrite = connectContext.isOptimizeRewrite();
+        connectContext.setOptimizeRewrite(true);
+        try {
+            connectContext.setQueryId(UUIDUtil.genUUID());
+            connectContext.setExecutionId(UUIDUtil.toTUniqueId(connectContext.getQueryId()));
+            connectContext.setDumpInfo(new QueryDumpInfo(connectContext));
+            connectContext.getDumpInfo().setOriginStmt(sql);
+            Analyzer.analyze(insertStmt, connectContext);
+            AnalyzerUtils.collectAllDatabase(connectContext, insertStmt);
+            table.setNewFullSchema(schemaWithStaleGeneratedColumns);
+            PlannerMetaLocker locker = new PlannerMetaLocker(connectContext, insertStmt);
+            StatementPlanner.lock(locker);
+            try {
+                Assertions.assertEquals(0, ValuesStatisticsCalls.during(
+                        () -> new InsertPlanner(locker, true).plan(insertStmt, connectContext)));
+            } finally {
+                StatementPlanner.unLock(locker);
+            }
+        } finally {
+            connectContext.setOptimizeRewrite(originalOptimizeRewrite);
+            table.setNewFullSchema(originalFullSchema);
+        }
     }
 
     @Test

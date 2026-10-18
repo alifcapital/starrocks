@@ -2176,8 +2176,14 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     private Void computeValuesNode(ExpressionContext context, List<ColumnRefOperator> columnRefSet,
                                    List<List<ScalarOperator>> rows) {
         Statistics.Builder builder = Statistics.builder();
-        for (ColumnRefOperator columnRef : columnRefSet) {
-            builder.addColumnStatistic(columnRef, ColumnStatistic.unknown());
+        // A VALUES that no operator above it reads keeps unknown statistics, see ValuesStatisticsReaders.
+        boolean read = optimizerContext == null || optimizerContext.isValuesStatisticsRead();
+        ExpressionStatisticsCache cache = optimizerContext == null ? null
+                : optimizerContext.getExpressionStatisticsCache();
+        List<ColumnStatistic> statistics = read ? ValuesStatistics.of(columnRefSet, rows, cache) : null;
+        for (int i = 0; i < columnRefSet.size(); i++) {
+            builder.addColumnStatistic(columnRefSet.get(i),
+                    statistics == null ? ColumnStatistic.unknown() : statistics.get(i));
         }
 
         builder.setOutputRowCount(rows.size());

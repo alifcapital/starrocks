@@ -140,6 +140,7 @@ import com.starrocks.sql.optimizer.rule.tree.lowcardinality.LowCardinalityRewrit
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.PruneSubfieldRule;
 import com.starrocks.sql.optimizer.rule.tree.prunesubfield.PushDownSubfieldRule;
 import com.starrocks.sql.optimizer.statistics.StatisticsPrefetcher;
+import com.starrocks.sql.optimizer.statistics.ValuesStatisticsReaders;
 import com.starrocks.sql.optimizer.task.OptimizeGroupTask;
 import com.starrocks.sql.optimizer.task.PrepareCollectMetaTask;
 import com.starrocks.sql.optimizer.task.TaskContext;
@@ -193,6 +194,9 @@ public class QueryOptimizer extends Optimizer {
         // collect all olap scan operator
         Utils.extractOperator(logicOperatorTree, allLogicalOlapScanOperators,
                 op -> op instanceof LogicalOlapScanOperator);
+
+        // No statistics are derived before this point, so the flag is set before the first one.
+        context.setValuesStatisticsRead(ValuesStatisticsReaders.hasReader(logicOperatorTree));
     }
 
     public OptExpression optimize(OptExpression logicOperatorTree, PhysicalPropertySet requiredProperty,
@@ -437,6 +441,11 @@ public class QueryOptimizer extends Optimizer {
         if (Utils.isOptHasAppliedRule(tree, OP_MV_TRANSPARENT_REWRITE)) {
             tree = new SeparateProjectRule().rewrite(tree, rootTaskContext);
             deriveLogicalProperty(tree);
+            // We want the statistics of a VALUES in the definition of the view when an operator above it reads
+            // them. The rewrite puts the definition into the tree after prepare looked for the readers, so we look
+            // again. No statistics are derived before this rewrite, so no VALUES has kept unknown statistics.
+            context.setValuesStatisticsRead(context.isValuesStatisticsRead()
+                    || ValuesStatisticsReaders.hasReader(tree));
         }
         return tree;
     }

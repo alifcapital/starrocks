@@ -154,6 +154,10 @@ public class OptimizerContext {
     private final java.util.concurrent.atomic.AtomicInteger expressionStatisticsColumnIds =
             new java.util.concurrent.atomic.AtomicInteger();
     private final ExpressionStatisticsCache expressionStatisticsCache = new ExpressionStatisticsCache();
+    // We count the statistics of the columns of a VALUES operator only when an operator above one of them reads
+    // them, see ValuesStatisticsReaders. QueryOptimizer sets this before any statistics are derived. An optimizer
+    // that does not set it counts, because the count is the right statistics and a missing flag must not hide them.
+    private boolean valuesStatisticsRead = true;
     // The estimates of predicates ask for the format of a column many times, and reading it walks the properties of
     // the table, which do not change during the query. The key names the table without its metadata: reading the
     // metadata of a table can fail, and the estimate must not.
@@ -227,6 +231,14 @@ public class OptimizerContext {
     /** The work of the statistics on expressions that the query repeats, see ExpressionStatisticsCache. */
     public ExpressionStatisticsCache getExpressionStatisticsCache() {
         return expressionStatisticsCache;
+    }
+
+    public boolean isValuesStatisticsRead() {
+        return valuesStatisticsRead;
+    }
+
+    public void setValuesStatisticsRead(boolean valuesStatisticsRead) {
+        this.valuesStatisticsRead = valuesStatisticsRead;
     }
 
     public ColumnRefFactory getColumnRefFactory() {
