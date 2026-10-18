@@ -16,9 +16,12 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Sets;
+import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.OperatorType;
+import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.property.RangeExtractor;
@@ -207,6 +210,64 @@ public class ScalarRangePredicateExtractor {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Whether every row that the predicate keeps also passes the derived range: the values that the predicate allows
+     * for the operand of the range lie inside the range. We need the extraction to describe the range exactly, so the
+     * range must have a form this class derives on one operand, see rangeOperand; for any other form, and when the
+     * extraction cannot tell, the answer is false.
+     */
+    public static boolean isImpliedBy(ScalarOperator derived, ScalarOperator predicate) {
+        ScalarOperator operand = rangeOperand(derived);
+        if (operand == null) {
+            return false;
+        }
+        Map<ScalarOperator, ValueDescriptor> range = new RangeExtractor().apply(derived, null);
+        if (range.size() != 1 || !range.containsKey(operand)) {
+            return false;
+        }
+        ValueDescriptor values = new RangeExtractor().apply(predicate, null).get(operand);
+        return values != null && values.hasSameValues(values.intersect(range.get(operand)));
+    }
+
+    /**
+     * The operand of a range in a form that ValueDescriptor#toScalarOperator builds: a comparison with a constant or
+     * an IN list of constants, two such comparisons joined by AND, either of them OR the operand IS NULL, or the
+     * operand IS NULL alone. Null for any other form.
+     */
+    private static ScalarOperator rangeOperand(ScalarOperator range) {
+        if (range instanceof IsNullPredicateOperator isNull) {
+            return isNull.isNotNull() ? null : isNull.getChild(0);
+        }
+        if (range instanceof CompoundPredicateOperator compound && compound.isOr()) {
+            if (!(compound.getChild(1) instanceof IsNullPredicateOperator isNull) || isNull.isNotNull()) {
+                return null;
+            }
+            ScalarOperator operand = boundsOperand(compound.getChild(0));
+            return operand != null && operand.equals(isNull.getChild(0)) ? operand : null;
+        }
+        return boundsOperand(range);
+    }
+
+    private static ScalarOperator boundsOperand(ScalarOperator bounds) {
+        if (bounds instanceof CompoundPredicateOperator compound && compound.isAnd()) {
+            ScalarOperator left = boundOperand(compound.getChild(0));
+            return left != null && left.equals(boundOperand(compound.getChild(1))) ? left : null;
+        }
+        return boundOperand(bounds);
+    }
+
+    private static ScalarOperator boundOperand(ScalarOperator bound) {
+        if (bound instanceof BinaryPredicateOperator binary && binary.getChild(1).isConstantRef()) {
+            BinaryType type = binary.getBinaryType();
+            return type == BinaryType.EQ || type.isRange() ? binary.getChild(0) : null;
+        }
+        if (bound instanceof InPredicateOperator in && !in.isNotIn()
+                && in.allValuesMatch(ScalarOperator::isConstantRef)) {
+            return in.getChild(0);
+        }
+        return null;
     }
 
     private Map<ScalarOperator, ValueDescriptor> extractImpl(ScalarOperator scalarOperator) {

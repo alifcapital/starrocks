@@ -135,7 +135,8 @@ final class ScanEstimateKey {
 
     // The session values the estimate reads: the switches of the estimators, and what the constant folding of a call
     // on a head value reads, the time zone, the base type of an equality of a number with a string, the
-    // consolidation of LIKE and the start time of the query for now(). The estimate is a function of them, so the key
+    // consolidation of LIKE and the start time of the query for now(). The check of the ranges implied by another
+    // conjunct reads the IS NULL alternatives of the range extraction. The estimate is a function of them, so the key
     // holds them, even though the cache lives in the optimizer context of one query.
     static List<Object> session() {
         ConnectContext context = ConnectContext.get();
@@ -148,7 +149,7 @@ final class ScanEstimateKey {
                 variables.isCboEnableHistogramJoinEstimation(), variables.isEnableMonotonicPredicateEstimate(),
                 variables.isEnableMonotonicPredicateRewrite(), variables.getSqlMode(), variables.getTimeZone(),
                 variables.getCboEqBaseType(), variables.getLikePredicateConsolidateMin(),
-                context.getStartTimeInstant());
+                variables.isCboDerivePredicateNullAlternative(), context.getStartTimeInstant());
     }
 
     static List<Object> content(Statistics statistics) {

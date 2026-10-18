@@ -180,7 +180,9 @@ public class TPCDSPushAggTest extends TPCDS1TTestBase {
                 Arguments.of("Q43", 2, 2, false, 4, true, 4, true, 4, true),
                 Arguments.of("Q45", 6, 6, false, 8, true, 6, false, 8, true),
                 Arguments.of("Q46", 2, 2, false, 4, true, 2, false, 2, false),
-                Arguments.of("Q47", 2, 2, false, 4, true, 4, true, 4, true),
+                // Auto mode pushes no aggregate in Q47, but the plan text differs: the two consumers of the CTE are
+                // symmetric, so the two orders of their joins cost the same, and auto mode takes the other one.
+                Arguments.of("Q47", 2, 2, true, 4, true, 4, true, 4, true),
                 Arguments.of("Q51", 4, 4, false, 8, true, 8, true, 8, true),
                 Arguments.of("Q52", 2, 2, false, 4, true, 4, true, 4, true),
                 Arguments.of("Q53", 2, 2, false, 4, true, 4, true, 4, true),

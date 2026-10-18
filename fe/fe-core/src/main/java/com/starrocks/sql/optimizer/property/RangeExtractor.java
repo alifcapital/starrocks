@@ -35,6 +35,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public class RangeExtractor {
@@ -294,6 +295,12 @@ public class RangeExtractor {
 
         public abstract Range<ConstantOperator> toRange();
 
+        /**
+         * Whether both descriptors allow the same values and the same NULL. A set of values and a range are never
+         * the same here, even when the range holds only those values.
+         */
+        public abstract boolean hasSameValues(ValueDescriptor other);
+
         public int getSourceCount() {
             return sourceCount;
         }
@@ -458,6 +465,11 @@ public class RangeExtractor {
             ConstantOperator max = values.stream().max(ConstantOperator::compareTo).get();
             return Range.closed(min, max);
         }
+
+        @Override
+        public boolean hasSameValues(ValueDescriptor other) {
+            return other instanceof MultiValuesDescriptor o && admitsNull == o.admitsNull && values.equals(o.values);
+        }
     }
 
     public static class RangeDescriptor extends ValueDescriptor {
@@ -549,6 +561,11 @@ public class RangeExtractor {
         @Override
         public Range<ConstantOperator> toRange() {
             return range == null ? Range.all() : range;
+        }
+
+        @Override
+        public boolean hasSameValues(ValueDescriptor other) {
+            return other instanceof RangeDescriptor o && admitsNull == o.admitsNull && Objects.equals(range, o.range);
         }
     }
 }

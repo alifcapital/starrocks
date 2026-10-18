@@ -2767,10 +2767,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         }
 
         // The predicates hold together, so each one filters the rows that the ones before it keep.
-        Statistics result = statistics;
-        for (ScalarOperator predicate : predicateList) {
-            result = PredicateStatisticsCalculator.statisticsCalculate(predicate, result);
-        }
+        Statistics result = PredicateStatisticsCalculator.statisticsCalculate(predicateList, statistics);
 
         // avoid sample statistics filter all data, save one rows least
         if (statistics.getOutputRowCount() > 0 && result.getOutputRowCount() == 0) {

@@ -24,8 +24,10 @@ import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
@@ -34,8 +36,10 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 public class PredicateStatisticsCalculatorTest {
     @Test
@@ -804,5 +808,206 @@ public class PredicateStatisticsCalculatorTest {
 
         // THEN
         Assertions.assertEquals(200, nullOrNotNullNulls, 0.001);
+    }
+
+    private static final double DERIVED_ROWS = 394_000_000;
+    private static final ColumnRefOperator DERIVED_S = new ColumnRefOperator(2, IntegerType.INT, "s", true);
+    private static final ColumnRefOperator DERIVED_U = new ColumnRefOperator(3, IntegerType.BIGINT, "u", true);
+
+    private static Statistics derivedRangeStatistics() {
+        return Statistics.builder().setOutputRowCount(DERIVED_ROWS)
+                .addColumnStatistic(DERIVED_S, new ColumnStatistic(0, 22, 0, 4, 20))
+                .addColumnStatistic(DERIVED_U, new ColumnStatistic(1, 1e10, 0, 8, 1e7)).build();
+    }
+
+    private static ScalarOperator sIn(int... values) {
+        InPredicateOperator in = new InPredicateOperator(false, DERIVED_S);
+        for (int value : values) {
+            in.getChildren().add(ConstantOperator.createInt(value));
+        }
+        return in;
+    }
+
+    private static ScalarOperator derivedConjunct(ScalarOperator predicate) {
+        return Utils.extractConjuncts(predicate).stream().filter(ScalarOperator::isFromPredicateRangeDerive)
+                .findFirst().orElseThrow();
+    }
+
+    @Test
+    public void testRangeImpliedByOrIsNotCountedAgain() {
+        Statistics statistics = derivedRangeStatistics();
+        ScalarOperator or = Utils.compoundOr(Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(2)),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0))), sIn(0, 1));
+        ScalarOperator withRange = new ScalarRangePredicateExtractor().rewriteAll(or);
+        ScalarOperator range = derivedConjunct(withRange);
+        Assertions.assertEquals(sIn(2, 0, 1), range);
+
+        double orRows = PredicateStatisticsCalculator.statisticsCalculate(or, statistics).getOutputRowCount();
+        Assertions.assertEquals(DERIVED_ROWS * 0.15, orRows, 1);
+        Statistics estimated = PredicateStatisticsCalculator.statisticsCalculate(withRange, statistics);
+        Assertions.assertEquals(orRows, estimated.getOutputRowCount(), 1e-6);
+        // The range still narrows its column to its three values.
+        ColumnStatistic s = estimated.getColumnStatistic(DERIVED_S);
+        Assertions.assertEquals(3, s.getDistinctValuesCount(), 1e-9);
+        Assertions.assertEquals(0, s.getMinValue(), 1e-9);
+        Assertions.assertEquals(2, s.getMaxValue(), 1e-9);
+        // The other columns are bounded by the rows of the OR, not by fewer rows.
+        Assertions.assertEquals(1e7, estimated.getColumnStatistic(DERIVED_U).getDistinctValuesCount(), 1e-6);
+
+        // The plain row count that the MCV estimators ask for leaves the range out the same way.
+        Assertions.assertEquals(Double.doubleToRawLongBits(
+                        PredicateStatisticsCalculator.statisticsCalculate(withRange, statistics, false).getOutputRowCount()),
+                Double.doubleToRawLongBits(PredicateStatisticsCalculator.plainRowCount(withRange, statistics)));
+        Assertions.assertEquals(orRows, PredicateStatisticsCalculator.plainRowCount(withRange, statistics), 1e-6);
+
+        // Predicates that hold together, as the conjuncts of a join, count the range the same way.
+        Statistics list = new StatisticsCalculator().estimateStatistics(List.of(or, range), statistics);
+        Assertions.assertEquals(orRows, list.getOutputRowCount(), 1e-6);
+
+        // Without the OR, as when the range is pushed down alone, the range is the only estimate of its condition.
+        Assertions.assertEquals(DERIVED_ROWS * 0.15,
+                PredicateStatisticsCalculator.statisticsCalculate(range, statistics).getOutputRowCount(), 1);
+    }
+
+    @Test
+    public void testRangeOfSeveralConjunctsIsCounted() {
+        Statistics statistics = derivedRangeStatistics();
+        ScalarOperator predicate = Utils.compoundAnd(sIn(1, 2, 3), sIn(2, 3, 4),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0)));
+        ScalarOperator withRange = new ScalarRangePredicateExtractor().rewriteAll(predicate);
+        ScalarOperator range = derivedConjunct(withRange);
+        Assertions.assertEquals(sIn(2, 3), range);
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(range, sIn(1, 2, 3)));
+
+        // Neither IN list alone implies the range, and the estimate takes the range after them.
+        Statistics expected = PredicateStatisticsCalculator.statisticsCalculate(range,
+                PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics));
+        Assertions.assertEquals(expected.getOutputRowCount(),
+                PredicateStatisticsCalculator.statisticsCalculate(withRange, statistics).getOutputRowCount(), 1e-6);
+    }
+
+    @Test
+    public void testRangeIsImpliedOnlyByItsValues() {
+        ScalarOperator range = sIn(2, 0, 1);
+        Assertions.assertTrue(ScalarRangePredicateExtractor.isImpliedBy(range, sIn(0, 1)));
+        Assertions.assertTrue(ScalarRangePredicateExtractor.isImpliedBy(range,
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(2))));
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(range, sIn(0, 5)));
+        // An OR with a branch that does not bound s allows every value of s.
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(range, Utils.compoundOr(sIn(0, 1),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0)))));
+        ScalarOperator atLeastOne = new BinaryPredicateOperator(BinaryType.GE, DERIVED_S, ConstantOperator.createInt(1));
+        Assertions.assertTrue(ScalarRangePredicateExtractor.isImpliedBy(atLeastOne,
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_S, ConstantOperator.createInt(3))));
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(atLeastOne,
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_S, ConstantOperator.createInt(0))));
+        // A predicate of another form than a derived range is never taken as implied, even when the extraction of
+        // its operand would allow it: s IN (1, 2, 3) does not imply s IN (1, 2) OR (s = 3 AND u = 4).
+        ScalarOperator notDerivedForm = Utils.compoundOr(sIn(1, 2), Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(3)),
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_U, ConstantOperator.createBigint(4))));
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(notDerivedForm, sIn(1, 2, 3)));
+        Assertions.assertFalse(ScalarRangePredicateExtractor.isImpliedBy(
+                new InPredicateOperator(true, DERIVED_S, ConstantOperator.createInt(5)), sIn(0, 1)));
+    }
+
+    @Test
+    public void testRangesNarrowInTheOrderOfTheConjuncts() {
+        Statistics statistics = derivedRangeStatistics();
+        ScalarOperator or = Utils.compoundOr(
+                Utils.compoundAnd(new BinaryPredicateOperator(BinaryType.GE, DERIVED_S, ConstantOperator.createInt(3)),
+                        new BinaryPredicateOperator(BinaryType.LE, DERIVED_S, ConstantOperator.createInt(5)),
+                        new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0))),
+                Utils.compoundAnd(new BinaryPredicateOperator(BinaryType.GE, DERIVED_S, ConstantOperator.createInt(10)),
+                        new BinaryPredicateOperator(BinaryType.LE, DERIVED_S, ConstantOperator.createInt(12))));
+        ScalarOperator withRange = new ScalarRangePredicateExtractor().rewriteAll(or);
+        List<ScalarOperator> ranges = Utils.extractConjuncts(withRange).stream()
+                .filter(ScalarOperator::isFromPredicateRangeDerive).toList();
+        Assertions.assertEquals(2, ranges.size(), withRange.toString());
+
+        Statistics orStatistics = PredicateStatisticsCalculator.statisticsCalculate(or, statistics);
+        Statistics estimated = PredicateStatisticsCalculator.statisticsCalculate(withRange, statistics);
+        Assertions.assertEquals(orStatistics.getOutputRowCount(), estimated.getOutputRowCount(), 1e-6);
+        ColumnStatistic expected = PredicateStatisticsCalculator.statisticsCalculate(ranges.get(1),
+                        PredicateStatisticsCalculator.statisticsCalculate(ranges.get(0), orStatistics))
+                .getColumnStatistic(DERIVED_S);
+        ColumnStatistic s = estimated.getColumnStatistic(DERIVED_S);
+        Assertions.assertEquals(expected.getDistinctValuesCount(), s.getDistinctValuesCount(), 0);
+        Assertions.assertEquals(expected.getMinValue(), s.getMinValue(), 0);
+        Assertions.assertEquals(expected.getMaxValue(), s.getMaxValue(), 0);
+    }
+
+    @Test
+    public void testPredicateWithoutRangesKeepsItsShape() {
+        ScalarOperator or = Utils.compoundOr(Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(2)),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0))), sIn(0, 1));
+        ScalarOperator range = derivedConjunct(new ScalarRangePredicateExtractor().rewriteAll(or));
+        ScalarOperator left = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                new BinaryPredicateOperator(BinaryType.LT, DERIVED_U, ConstantOperator.createBigint(100)),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(5)));
+        ScalarOperator predicate = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND, left,
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND, or, range));
+
+        PredicateStatisticsCalculator.ImpliedRanges implied = PredicateStatisticsCalculator.ImpliedRanges.find(predicate);
+        Assertions.assertNotNull(implied);
+        ScalarOperator stripped = implied.stripped();
+        // The other conjuncts keep their places and objects: the AND of the OR and the range becomes the OR.
+        Assertions.assertSame(left, stripped.getChild(0));
+        Assertions.assertSame(or, stripped.getChild(1));
+        // The same predicate object gives the same object without its ranges, which the caches keyed by identity
+        // find again.
+        Assertions.assertSame(stripped, PredicateStatisticsCalculator.ImpliedRanges.find(predicate).stripped());
+    }
+
+    @Test
+    public void testRangesAreFoundAgainAfterAConjunctChangesInPlace() {
+        Statistics statistics = derivedRangeStatistics();
+        InPredicateOperator branch = (InPredicateOperator) sIn(0, 1);
+        ScalarOperator or = Utils.compoundOr(Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(2)),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0))), branch);
+        ScalarOperator withRange = new ScalarRangePredicateExtractor().rewriteAll(or);
+        Assertions.assertNotNull(PredicateStatisticsCalculator.ImpliedRanges.find(withRange));
+
+        // A rewrite replaces a child of the OR in place: s IN (0, 1, 7) no longer lies inside s IN (2, 0, 1).
+        int index = or.getChild(0) == branch ? 0 : 1;
+        or.setChild(index, sIn(0, 1, 7));
+        Assertions.assertNull(PredicateStatisticsCalculator.ImpliedRanges.find(withRange));
+        Assertions.assertEquals(
+                PredicateStatisticsCalculator.statisticsCalculate(withRange.clone(), statistics).getOutputRowCount(),
+                PredicateStatisticsCalculator.statisticsCalculate(withRange, statistics).getOutputRowCount(), 1e-6);
+    }
+
+    @Test
+    public void testFindingTheRangesOfALongPredicateAgainIsCheap() {
+        // An OR with an IN list of 10000 values and the range derived from it, as a large query has.
+        int[] values = IntStream.range(0, 10_000).toArray();
+        ScalarOperator or = Utils.compoundOr(Utils.compoundAnd(
+                new BinaryPredicateOperator(BinaryType.EQ, DERIVED_S, ConstantOperator.createInt(20_000)),
+                new BinaryPredicateOperator(BinaryType.GT, DERIVED_U, ConstantOperator.createBigint(0))), sIn(values));
+        ScalarOperator withRange = new ScalarRangePredicateExtractor().rewriteAll(or);
+        List<ScalarOperator> conjuncts = new ArrayList<>();
+        PredicateStatisticsCalculator.ImpliedRanges.collectConjuncts(withRange, conjuncts);
+        Assertions.assertNotNull(PredicateStatisticsCalculator.ImpliedRanges.find(withRange));
+
+        int rounds = 200;
+        for (int i = 0; i < rounds; i++) {
+            PredicateStatisticsCalculator.ImpliedRanges.find(withRange);
+            PredicateStatisticsCalculator.ImpliedRanges.find(conjuncts);
+        }
+        long start = System.nanoTime();
+        for (int i = 0; i < rounds; i++) {
+            Assertions.assertNotNull(PredicateStatisticsCalculator.ImpliedRanges.find(withRange));
+        }
+        long memo = (System.nanoTime() - start) / rounds;
+        start = System.nanoTime();
+        for (int i = 0; i < rounds; i++) {
+            Assertions.assertNotNull(PredicateStatisticsCalculator.ImpliedRanges.find(conjuncts));
+        }
+        long fresh = (System.nanoTime() - start) / rounds;
+        System.out.println("ImpliedRanges lookup of 10000 values: memo " + memo + " ns, fresh check " + fresh + " ns");
+        Assertions.assertTrue(memo < fresh, "memo " + memo + " ns, fresh check " + fresh + " ns");
     }
 }

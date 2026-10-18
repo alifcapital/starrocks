@@ -15,9 +15,12 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.google.common.base.Preconditions;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.ConstantOperatorUtils;
 import com.starrocks.sql.optimizer.Utils;
@@ -34,6 +37,7 @@ import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
 import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
+import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
 import org.apache.commons.math3.util.Precision;
@@ -41,13 +45,16 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -72,10 +79,14 @@ public class PredicateStatisticsCalculator {
      */
     public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics, boolean useMcv,
                                                  ScanExpressionStatistics expressions) {
-        Statistics plain = statisticsCalculate(predicate, statistics, useMcv);
         if (expressions == null || predicate == null) {
-            return plain;
+            return statisticsCalculate(predicate, statistics, useMcv);
         }
+        ImpliedRanges implied = ImpliedRanges.find(predicate);
+        if (implied != null) {
+            return implied.narrow(statisticsCalculate(implied.stripped(), statistics, useMcv, expressions), useMcv);
+        }
+        Statistics plain = statisticsCalculate(predicate, statistics, useMcv);
         try {
             ExpressionStatisticsMatcher.Result match = ExpressionStatisticsMatcher.match(predicate, expressions,
                     statistics);
@@ -221,6 +232,39 @@ public class PredicateStatisticsCalculator {
         if (predicate == null) {
             return statistics;
         }
+        ImpliedRanges implied = ImpliedRanges.find(predicate);
+        if (implied != null) {
+            return implied.narrow(estimate(implied.stripped(), statistics, useMcv), useMcv);
+        }
+        return estimate(predicate, statistics, useMcv);
+    }
+
+    /**
+     * The estimate of predicates that hold together: each one filters the rows that the ones before it keep. A range
+     * derived from a conjunct of one of them counts as in {@link ImpliedRanges}.
+     */
+    public static Statistics statisticsCalculate(List<ScalarOperator> predicates, Statistics statistics) {
+        if (predicates.size() == 1) {
+            return statisticsCalculate(predicates.get(0), statistics);
+        }
+        List<ScalarOperator> conjuncts = new ArrayList<>();
+        for (ScalarOperator predicate : predicates) {
+            if (predicate != null) {
+                ImpliedRanges.collectConjuncts(predicate, conjuncts);
+            }
+        }
+        ImpliedRanges implied = ImpliedRanges.find(conjuncts);
+        Statistics result = statistics;
+        for (ScalarOperator predicate : predicates) {
+            ScalarOperator kept = implied == null || predicate == null ? predicate : implied.without(predicate);
+            if (kept != null) {
+                result = statisticsCalculate(kept, result);
+            }
+        }
+        return implied == null ? result : implied.narrow(result, true);
+    }
+
+    private static Statistics estimate(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
         return finishEstimate(predicate, statistics, visit(predicate, statistics, useMcv), useMcv);
     }
 
@@ -228,13 +272,16 @@ public class PredicateStatisticsCalculator {
      * The row count of statisticsCalculate(predicate, statistics, false). The MCV estimators ask for the plain row
      * count of a condition many times, once per value of a head tuple, so we skip the propagation of the MCV lists
      * that the estimate ends with: it builds the distributions and the column statistics of the output and keeps
-     * its row count.
+     * its row count. The ranges implied by another conjunct are left out as in statisticsCalculate, whose narrowing
+     * keeps the row count too.
      */
     static double plainRowCount(ScalarOperator predicate, Statistics statistics) {
         if (predicate == null) {
             return statistics.getOutputRowCount();
         }
-        return visit(predicate, statistics, false).getOutputRowCount();
+        ImpliedRanges implied = ImpliedRanges.find(predicate);
+        ScalarOperator estimated = implied == null ? predicate : implied.stripped();
+        return visit(estimated, statistics, false).getOutputRowCount();
     }
 
     private static Statistics visit(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
@@ -243,6 +290,265 @@ public class PredicateStatisticsCalculator {
             return predicate.accept(new LargeOrCalculatingVisitor(statistics, useMcv), null);
         }
         return predicate.accept(new BaseCalculatingVisitor(statistics, useMcv), null);
+    }
+
+    /**
+     * The ranges that ScalarRangePredicateExtractor adds to a predicate so that the scan can skip data, such as
+     * {@code s IN (2, 0, 1)} next to {@code (s = 2 AND u > 0) OR s IN (0, 1)}. When one other conjunct of the same
+     * predicate implies such a range, the range keeps every row of that conjunct. The estimate of the conjunct
+     * does not always narrow the statistics of the column to its values: {@code s = 2} keeps the NDV of s. So we fear
+     * that the range, estimated after it, takes its selectivity from the whole column a second time. We leave the
+     * range out of the row count and use it only to narrow the statistics of its columns.
+     * <p>
+     * A range that no single conjunct implies counts in the row count: when two conjuncts give it together, such as
+     * two IN lists on one column, it corrects their estimates, which treat them as independent. A range without its
+     * conjunct, such as one pushed down to a scan while its OR stays above a join, is the only estimate of its
+     * condition there, and it counts too.
+     */
+    static final class ImpliedRanges {
+        // The statistics of a group are derived again for each plan alternative with the same predicate object, and
+        // the estimate with statistics on expressions keeps its work by the identity of the predicate. So we keep
+        // the result by the identity of the predicate, and the same predicate always gives the same object without
+        // its ranges. The keys are weak: an entry goes away with its predicate.
+        private static final Cache<ScalarOperator, Memo> MEMO =
+                CacheBuilder.newBuilder().weakKeys().maximumSize(10_000).build();
+        private static final Set<Class<?>> FAILURES_LOGGED = ConcurrentHashMap.newKeySet();
+
+        // In the order of the conjuncts, so that the narrowing and the statistics do not depend on the run.
+        private final List<ScalarOperator> ranges;
+        // By identity: a conjunct that is equal to a range but is not the derived one stays in the estimate.
+        private final Set<ScalarOperator> identities;
+        // The predicate of find(ScalarOperator) without the ranges; null for a list of predicates.
+        private ScalarOperator stripped;
+
+        private ImpliedRanges(List<ScalarOperator> ranges) {
+            this.ranges = ranges;
+            this.identities = Collections.newSetFromMap(new IdentityHashMap<>());
+            this.identities.addAll(ranges);
+        }
+
+        /**
+         * What the result for a predicate object depends on: its conjunct objects, which a rewrite can replace, the
+         * structure of each conjunct, which a rewrite can change in place through setChild, their flags, which an
+         * operator can take after it is built, and the session setting for IS NULL alternatives of the extraction.
+         */
+        private record Memo(List<ScalarOperator> conjuncts, long[] fingerprints, List<Boolean> flags,
+                            boolean nullAlternative, ImpliedRanges result) {
+            boolean holds(List<ScalarOperator> currentConjuncts, long[] currentFingerprints, List<Boolean> currentFlags,
+                          boolean currentNull) {
+                if (nullAlternative != currentNull || conjuncts.size() != currentConjuncts.size()
+                        || !flags.equals(currentFlags) || !Arrays.equals(fingerprints, currentFingerprints)) {
+                    return false;
+                }
+                for (int i = 0; i < conjuncts.size(); i++) {
+                    if (conjuncts.get(i) != currentConjuncts.get(i)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // A hash of the whole structure of an operator: its own properties and those of all its children in order.
+        private static long fingerprint(ScalarOperator operator) {
+            long hash = operator.getOpType().ordinal() * 0x9E3779B97F4A7C15L + operator.hashCodeSelf();
+            List<ScalarOperator> children = operator.getChildren();
+            hash = hash * 31 + children.size();
+            for (ScalarOperator child : children) {
+                hash = hash * 0x100000001B3L + fingerprint(child);
+            }
+            return hash;
+        }
+
+        /** Null when the predicate has no implied range or when the check fails. */
+        static ImpliedRanges find(ScalarOperator predicate) {
+            if (!hasDerivedConjunct(predicate)) {
+                return null;
+            }
+            List<ScalarOperator> conjuncts = new ArrayList<>();
+            collectConjuncts(predicate, conjuncts);
+            if (conjuncts.size() < 2) {
+                // A range alone has no conjunct to imply it. The entry would also hold its own weak key.
+                return null;
+            }
+            List<Boolean> flags = new ArrayList<>(2 * conjuncts.size());
+            for (ScalarOperator conjunct : conjuncts) {
+                flags.add(conjunct.isFromPredicateRangeDerive());
+                flags.add(conjunct.isNotEvalEstimate());
+            }
+            long[] fingerprints = new long[conjuncts.size()];
+            for (int i = 0; i < fingerprints.length; i++) {
+                fingerprints[i] = fingerprint(conjuncts.get(i));
+            }
+            ConnectContext context = ConnectContext.get();
+            boolean nullAlternative = context != null
+                    && context.getSessionVariable().isCboDerivePredicateNullAlternative();
+            Memo memo = MEMO.getIfPresent(predicate);
+            if (memo != null && memo.holds(conjuncts, fingerprints, flags, nullAlternative)) {
+                return memo.result();
+            }
+            ImpliedRanges result = find(conjuncts);
+            if (result != null) {
+                result.stripped = result.without(predicate);
+            }
+            MEMO.put(predicate, new Memo(conjuncts, fingerprints, flags, nullAlternative, result));
+            return result;
+        }
+
+        static ImpliedRanges find(List<ScalarOperator> conjuncts) {
+            try {
+                List<ScalarOperator> implied = null;
+                for (ScalarOperator range : conjuncts) {
+                    if (!isEstimatedRange(range)) {
+                        continue;
+                    }
+                    List<ColumnRefOperator> columns = Utils.extractColumnRef(range);
+                    for (ScalarOperator source : conjuncts) {
+                        if (source.isFromPredicateRangeDerive() || source.isNotEvalEstimate()
+                                || Collections.disjoint(columns, Utils.extractColumnRef(source))) {
+                            continue;
+                        }
+                        if (ScalarRangePredicateExtractor.isImpliedBy(range, source)) {
+                            if (implied == null) {
+                                implied = new ArrayList<>();
+                            }
+                            // The same range object can stand twice in a predicate; it narrows its columns once.
+                            if (implied.stream().noneMatch(found -> found == range)) {
+                                implied.add(range);
+                            }
+                            break;
+                        }
+                    }
+                }
+                return implied == null ? null : new ImpliedRanges(implied);
+            } catch (RuntimeException e) {
+                logFailure("find the derived ranges implied by other conjuncts", e);
+                return null;
+            }
+        }
+
+        // The first failure of each class of exception is logged with its stack, the next ones only at debug level:
+        // one estimate runs many times in a query, and a predicate can hold long IN lists, so the predicate is not
+        // printed.
+        private static void logFailure(String action, RuntimeException e) {
+            if (FAILURES_LOGGED.add(e.getClass())) {
+                LOG.warn("Failed to {}", action, e);
+            } else {
+                LOG.debug("Failed to {}: {}", action, e.toString());
+            }
+        }
+
+        // A derived range that the calculator can estimate. A derived range that is not estimated, or that is skipped
+        // because a column has unknown statistics (see checkNeedEvalEstimate), does not change the row count anyway;
+        // the narrowing below skips it the same way.
+        private static boolean isEstimatedRange(ScalarOperator conjunct) {
+            return conjunct.isFromPredicateRangeDerive() && !conjunct.isNotEvalEstimate();
+        }
+
+        private static boolean hasDerivedConjunct(ScalarOperator predicate) {
+            if (isEstimatedRange(predicate)) {
+                return true;
+            }
+            if (predicate instanceof CompoundPredicateOperator compound && compound.isAnd()
+                    && !compound.isNotEvalEstimate()) {
+                return hasDerivedConjunct(compound.getChild(0)) || hasDerivedConjunct(compound.getChild(1));
+            }
+            return false;
+        }
+
+        /**
+         * The conjuncts as the calculator sees them: an AND that is not estimated is skipped whole, so it stays one
+         * conjunct and keeps its flag.
+         */
+        static void collectConjuncts(ScalarOperator predicate, List<ScalarOperator> conjuncts) {
+            if (predicate instanceof CompoundPredicateOperator compound && compound.isAnd()
+                    && !compound.isNotEvalEstimate()) {
+                collectConjuncts(compound.getChild(0), conjuncts);
+                collectConjuncts(compound.getChild(1), conjuncts);
+            } else {
+                conjuncts.add(predicate);
+            }
+        }
+
+        /** The predicate that find(ScalarOperator) was called with, without the ranges. */
+        ScalarOperator stripped() {
+            return stripped;
+        }
+
+        /**
+         * The predicate without the ranges; TRUE when nothing else is left. The estimate of an AND depends on the
+         * shape of its tree, so the other conjuncts keep their places: an AND that loses one side becomes its other
+         * side, and an AND whose sides change is built again with its flags.
+         */
+        ScalarOperator without(ScalarOperator predicate) {
+            ScalarOperator kept = strip(predicate);
+            return kept == null ? ConstantOperator.TRUE : kept;
+        }
+
+        private ScalarOperator strip(ScalarOperator node) {
+            if (identities.contains(node)) {
+                return null;
+            }
+            if (!(node instanceof CompoundPredicateOperator compound) || !compound.isAnd()
+                    || compound.isNotEvalEstimate()) {
+                return node;
+            }
+            ScalarOperator left = strip(compound.getChild(0));
+            ScalarOperator right = strip(compound.getChild(1));
+            if (left == compound.getChild(0) && right == compound.getChild(1)) {
+                return node;
+            }
+            if (left == null || right == null) {
+                return left == null ? right : left;
+            }
+            CompoundPredicateOperator rebuilt =
+                    new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND, left, right);
+            rebuilt.setFromPredicateRangeDerive(compound.isFromPredicateRangeDerive());
+            rebuilt.setRedundant(compound.isRedundant());
+            rebuilt.setIsPushdown(compound.isPushdown());
+            return rebuilt;
+        }
+
+        /**
+         * The estimate with the columns of the ranges narrowed by them. The row count and the other columns stay as
+         * the estimate gives them.
+         */
+        Statistics narrow(Statistics estimated, boolean useMcv) {
+            try {
+                Statistics narrowed = estimated;
+                for (ScalarOperator range : ranges) {
+                    narrowed = estimate(range, narrowed, useMcv);
+                }
+                Statistics.Builder builder = null;
+                for (ScalarOperator range : ranges) {
+                    for (ColumnRefOperator column : Utils.extractColumnRef(range)) {
+                        ColumnStatistic before = estimated.getColumnStatistics().get(column);
+                        ColumnStatistic after = narrowed.getColumnStatistics().get(column);
+                        // When the estimate of a range falls back to a default selectivity, the NDV it sets is a
+                        // guess, not the number of values in the rows. We do not want to pass the guess on as a fact,
+                        // so the column keeps the statistics it had before the range.
+                        if (before == null || after == null || after == before || after.isUnknown()
+                                || after.isDistinctValuesFromDefaultSelectivity()
+                                && !before.isDistinctValuesFromDefaultSelectivity()) {
+                            continue;
+                        }
+                        if (builder == null) {
+                            builder = Statistics.buildFrom(estimated)
+                                    .setScanExpressionStatistics(estimated.getScanExpressionStatistics());
+                        }
+                        builder.addColumnStatistic(column, after);
+                    }
+                }
+                if (builder == null) {
+                    return estimated;
+                }
+                return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(),
+                        estimated.getOutputRowCount());
+            } catch (RuntimeException e) {
+                logFailure("narrow the columns by the derived ranges", e);
+                return estimated;
+            }
+        }
     }
 
     private static Statistics finishEstimate(ScalarOperator predicate, Statistics statistics, Statistics output,
