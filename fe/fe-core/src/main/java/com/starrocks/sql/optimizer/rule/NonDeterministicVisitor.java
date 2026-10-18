@@ -36,7 +36,7 @@ public class NonDeterministicVisitor extends OptExpressionVisitor<Boolean, Void>
     public NonDeterministicVisitor() {
     }
 
-    private boolean checkColumnRefMap(Map<ColumnRefOperator, ScalarOperator> columnRefMap) {
+    private static boolean checkColumnRefMap(Map<ColumnRefOperator, ScalarOperator> columnRefMap) {
         if (columnRefMap == null) {
             return false;
         }
@@ -48,7 +48,7 @@ public class NonDeterministicVisitor extends OptExpressionVisitor<Boolean, Void>
         return false;
     }
 
-    private boolean hasNonDeterministicFunc(ScalarOperator scalarOperator) {
+    public static boolean hasNonDeterministicFunc(ScalarOperator scalarOperator) {
         if (scalarOperator instanceof CallOperator) {
             String fnName = ((CallOperator) scalarOperator).getFnName();
             if (FunctionSet.allNonDeterministicFunctions.contains(fnName)) {
@@ -71,7 +71,7 @@ public class NonDeterministicVisitor extends OptExpressionVisitor<Boolean, Void>
 
     private boolean checkAggCall(Map<ColumnRefOperator, CallOperator> aggregations) {
         for (Map.Entry<ColumnRefOperator, CallOperator> entry : aggregations.entrySet()) {
-            if (entry.getValue().getChildren().stream().anyMatch(this::hasNonDeterministicFunc)) {
+            if (entry.getValue().getChildren().stream().anyMatch(NonDeterministicVisitor::hasNonDeterministicFunc)) {
                 return true;
             }
         }
@@ -161,6 +161,9 @@ public class NonDeterministicVisitor extends OptExpressionVisitor<Boolean, Void>
 
     @Override
     public Boolean visitLogicalWindow(OptExpression optExpression, Void context) {
+        if (checkCommon(optExpression)) {
+            return true;
+        }
         LogicalWindowOperator operator = (LogicalWindowOperator) optExpression.getOp();
         if (checkAggCall(operator.getWindowCall())) {
             return true;

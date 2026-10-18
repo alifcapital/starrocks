@@ -318,6 +318,45 @@ public class CTEPlanTest extends PlanTestBase {
                 "     avgRowSize=24.0\n");
     }
 
+    // The scan node of t0 in a plan, up to its last property line
+    private static String scanNode(String plan) {
+        Matcher matcher = Pattern.compile("OlapScanNode\n     TABLE: t0\n(     [^\n]*\n)*").matcher(plan);
+        Assertions.assertTrue(matcher.find(), plan);
+        return matcher.group();
+    }
+
+    // The consumer keeps rand() < 0.5. If the producer also filtered by it, a row with v1 != 1 would get two draws
+    // and stay with probability 0.25, so we expect rand() only at the consumer.
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    public void testCTENonDeterministicPredicate(int forceReuseNodeCount) throws Exception {
+        connectContext.getSessionVariable().setCboCTEForceReuseNodeCount(forceReuseNodeCount);
+        String sql = "with c as (select * from t0) " +
+                "select * from c where rand() < 0.5 union all select * from c where v1 = 1";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "MultiCastDataSinks");
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, "rand()"), plan);
+        assertNotContains(scanNode(plan), "PREDICATES");
+
+        // The deterministic conjunct v2 = 2 is still pushed to the producer.
+        sql = "with c as (select * from t0) " +
+                "select * from c where rand() < 0.5 and v2 = 2 union all select * from c where v1 = 1";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "MultiCastDataSinks");
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, "rand()"), plan);
+        String predicates = scanPredicates(plan);
+        assertContains(predicates, "2: v2 = 2", "1: v1 = 1");
+        assertNotContains(predicates, "rand()");
+
+        // The limit of the first consumer applies after rand() < 0.5, so the producer must not get a limit.
+        sql = "with c as (select * from t0) " +
+                "(select * from c where rand() < 0.5 limit 10) union all (select * from c limit 20)";
+        plan = getFragmentPlan(sql);
+        assertContains(plan, "MultiCastDataSinks");
+        Assertions.assertEquals(1, StringUtils.countMatches(plan, "rand()"), plan);
+        assertNotContains(scanNode(plan), "limit:");
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {0, 1})
     public void testCTEPruneColumns(int forceReuseNodeCount) throws Exception {
