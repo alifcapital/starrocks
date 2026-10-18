@@ -321,11 +321,11 @@ public class ExpressionStatisticsEstimateTest {
                 entries, List.of(), List.of(0L, 0L));
         // The head lists every status.
         Assertions.assertEquals(5, ScanExpressionStatistics.elementStatistic(group, 0, VarcharType.VARCHAR,
-                ColumnStatistic.unknown()).getDistinctValuesCount(), 1e-9);
+                ColumnStatistic.unknown(), Double.POSITIVE_INFINITY).getDistinctValuesCount(), 1e-9);
         // 500 rows of other cities hold at most 500 values, next to the 5 cities of the head and the one the tail
         // has at least.
         Assertions.assertEquals(506, ScanExpressionStatistics.elementStatistic(group, 1, VarcharType.VARCHAR,
-                ColumnStatistic.unknown()).getDistinctValuesCount(), 1e-9);
+                ColumnStatistic.unknown(), Double.POSITIVE_INFINITY).getDistinctValuesCount(), 1e-9);
     }
 
     @Test
@@ -336,7 +336,7 @@ public class ExpressionStatisticsEstimateTest {
                 List.of(new MultiColumnCombinedStats.McvEntry(List.of("v", "5"), 100, List.of(100L, 300L))),
                 List.of(), List.of(0L, 0L));
         ColumnStatistic statistic = ScanExpressionStatistics.elementStatistic(mixed, 0, VarcharType.VARCHAR,
-                ColumnStatistic.unknown());
+                ColumnStatistic.unknown(), Double.POSITIVE_INFINITY);
         Assertions.assertEquals(ColumnStatistic.StatisticType.ESTIMATE, statistic.getType());
         ScanExpressionStatistics expressions = new ScanExpressionStatistics("t", List.of(new ScanExpressionStatistics.Entry(
                 canonical, ExpressionStatisticsCanonicalizer.keyOf(canonical), X, statistic)),
@@ -830,10 +830,11 @@ public class ExpressionStatisticsEstimateTest {
 
     @Test
     public void testNdvAtTinyPlainRowCountTakesTheScan() {
-        // The plain estimate of left(c, 3) = '103' divides 10M rows by the NDV of left(c, 3), a few rows, and caps
-        // every NDV there without a mark. x gives 6M rows, so c and d take their NDV from the scan, within 6M.
+        // The values of c have 3 characters, so left(c, 3) has the 10M values of c, and the plain estimate of
+        // left(c, 3) = '103' divides 10M rows by them: one row, which caps every NDV there without a mark. x gives 6M
+        // rows, so c and d take their NDV from the scan, within 6M.
         Statistics scan = Statistics.builder().setOutputRowCount(10_000_000)
-                .addColumnStatistic(C, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 8,
+                .addColumnStatistic(C, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 3,
                         10_000_000))
                 .addColumnStatistic(D, new ColumnStatistic(0, 9, 0, 4, 10)).build();
         ScanExpressionStatistics expressions = expressions(left(8), singleton(Map.of("10312345", 6_000_000L,

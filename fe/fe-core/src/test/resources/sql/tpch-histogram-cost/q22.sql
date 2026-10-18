@@ -6,11 +6,11 @@ RESULT SINK
 
 18:MERGING-EXCHANGE
 distribution type: GATHER
-cardinality: 150000
+cardinality: 5
 column statistics:
-* substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
-* count-->[0.0, 1500000.0, 0.0, 8.0, 150000.0] ESTIMATE
-* sum-->[-1091.382358719141, 10913.921812585948, 0.0, 8.0, 137439.0] ESTIMATE
+* substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
+* count-->[0.0, 1500000.0, 0.0, 8.0, 4.899429369235693] ESTIMATE
+* sum-->[-999.9900000000001, 9999.99, 0.0, 8.0, 4.899429369235693] ESTIMATE
 
 PLAN FRAGMENT 1(F08)
 
@@ -21,25 +21,25 @@ OutPut Exchange Id: 18
 17:SORT
 |  order by: [32, VARCHAR, true] ASC
 |  offset: 0
-|  cardinality: 150000
+|  cardinality: 5
 |  column statistics:
-|  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
-|  * count-->[0.0, 1500000.0, 0.0, 8.0, 150000.0] ESTIMATE
-|  * sum-->[-1091.382358719141, 10913.921812585948, 0.0, 8.0, 137439.0] ESTIMATE
+|  * substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
+|  * count-->[0.0, 1500000.0, 0.0, 8.0, 4.899429369235693] ESTIMATE
+|  * sum-->[-999.9900000000001, 9999.99, 0.0, 8.0, 4.899429369235693] ESTIMATE
 |
 16:AGGREGATE (merge finalize)
 |  aggregate: count[([33: count, BIGINT, false]); args: ; result: BIGINT; args nullable: false; result nullable: false], sum[([34: sum, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true]
 |  group by: [32: substring, VARCHAR, true]
-|  cardinality: 150000
+|  cardinality: 5
 |  column statistics:
-|  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
-|  * count-->[0.0, 1500000.0, 0.0, 8.0, 150000.0] ESTIMATE
-|  * sum-->[-1091.382358719141, 10913.921812585948, 0.0, 8.0, 137439.0] ESTIMATE
+|  * substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
+|  * count-->[0.0, 1500000.0, 0.0, 8.0, 4.899429369235693] ESTIMATE
+|  * sum-->[-999.9900000000001, 9999.99, 0.0, 8.0, 4.899429369235693] ESTIMATE
 |
 15:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [32: substring, VARCHAR, true]
-cardinality: 150000
+cardinality: 5
 
 PLAN FRAGMENT 2(F07)
 
@@ -51,11 +51,11 @@ OutPut Exchange Id: 15
 |  STREAMING
 |  aggregate: count[(*); args: ; result: BIGINT; args nullable: false; result nullable: false], sum[([6: C_ACCTBAL, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true]
 |  group by: [32: substring, VARCHAR, true]
-|  cardinality: 150000
+|  cardinality: 5
 |  column statistics:
-|  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
-|  * count-->[0.0, 1500000.0, 0.0, 8.0, 150000.0] ESTIMATE
-|  * sum-->[-1091.382358719141, 10913.921812585948, 0.0, 8.0, 137439.0] ESTIMATE
+|  * substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
+|  * count-->[0.0, 1500000.0, 0.0, 8.0, 4.899429369235693] ESTIMATE
+|  * sum-->[-999.9900000000001, 9999.99, 0.0, 8.0, 4.899429369235693] ESTIMATE
 |
 13:Project
 |  output columns:
@@ -64,7 +64,7 @@ OutPut Exchange Id: 15
 |  cardinality: 1500000
 |  column statistics:
 |  * C_ACCTBAL-->[-999.99, 9999.99, 0.0, 8.0, 137439.0] MCV: [[3863.78:400][5610.32:400][-101.79:400][1237.93:400][5209.06:400]] ESTIMATE
-|  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
+|  * substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
 |
 12:HASH JOIN
 |  join op: RIGHT ANTI JOIN (PARTITIONED)
@@ -79,7 +79,7 @@ OutPut Exchange Id: 15
 |  * C_ACCTBAL-->[-999.99, 9999.99, 0.0, 8.0, 137439.0] MCV: [[3863.78:400][5610.32:400][-101.79:400][1237.93:400][5209.06:400]] ESTIMATE
 |  * avg-->[0.0, 9999.99, 0.0, 8.0, 1.0] ESTIMATE
 |  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1500000.0] ESTIMATE
-|  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
+|  * substring-->[-Infinity, Infinity, 0.0, 2.0, 4.899429369235693] ESTIMATE
 |
 |----11:EXCHANGE
 |       distribution type: SHUFFLE

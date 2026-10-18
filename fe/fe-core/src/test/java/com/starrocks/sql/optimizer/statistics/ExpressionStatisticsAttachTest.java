@@ -19,6 +19,7 @@ import com.starrocks.catalog.Table;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.UtFrameUtils;
@@ -147,6 +148,138 @@ public class ExpressionStatisticsAttachTest {
         Assertions.assertNotNull(statistics.getColumnStatistic(name).getHistogram());
     }
 
+    private Statistics baseWithPhoneNdv(Map<ColumnRefOperator, Column> read, double phoneNdv) {
+        Statistics.Builder builder = Statistics.builder().setOutputRowCount(1000);
+        read.keySet().forEach(ref -> builder.addColumnStatistic(ref, new ColumnStatistic(Double.NEGATIVE_INFINITY,
+                Double.POSITIVE_INFINITY, 0, 10, ref.equals(phone) ? phoneNdv : 500)));
+        return builder.build();
+    }
+
+    private ColumnStatistic elementOfPhone(double phoneNdv) {
+        Map<ColumnRefOperator, Column> read = read(name, phone);
+        int[] ids = {0};
+        Statistics statistics = ScanExpressionStatistics.attach(baseWithPhoneNdv(read, phoneNdv),
+                new ExternalMcvStatistics(List.of(mixed())), read, table, () -> --ids[0]);
+        return statistics.getScanExpressionStatistics().getEntries().get(0).getStatistic();
+    }
+
+    @Test
+    public void testElementNdvIsBoundedByTheColumnsItIsReadFromAndNotByTheEstimateOfTheExpression() {
+        // The head holds one value of x and 300 rows are outside it, and the group has 50 values. The estimate of the
+        // prefix of 3 characters of a column of 500 values and 10 characters is 500^(3/10) = 6.45, which is a guess and not
+        // a bound: x has the 50 values of the group.
+        Assertions.assertEquals(50, elementOfPhone(500).getDistinctValuesCount(), 1e-9);
+        // The column has 20 values, so x has no more: the bound is the NDV of the column.
+        Assertions.assertEquals(20, elementOfPhone(20).getDistinctValuesCount(), 1e-9);
+        // A column of one value bounds x to the head value and the tail: at least the 2 values it has.
+        Assertions.assertEquals(2, elementOfPhone(1).getDistinctValuesCount(), 1e-9);
+        // The rows of the prefix are not bounded by the guess of the expression either way.
+        Assertions.assertEquals(0.1, elementOfPhone(20).getNullsFraction(), 1e-9);
+    }
+
+    // The statistics of the scan: c_phone of the NDV, which is a guess when flagged, c_name with a known NDV.
+    private Statistics guessedBase(Map<ColumnRefOperator, Column> read, double phoneNdv, boolean guess) {
+        Statistics.Builder builder = Statistics.builder().setOutputRowCount(1000);
+        read.keySet().forEach(ref -> builder.addColumnStatistic(ref, ColumnStatistic.builder()
+                .setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY).setNullsFraction(0)
+                .setAverageRowSize(10).setDistinctValuesCount(ref.equals(phone) ? phoneNdv : 500)
+                .setDistinctValuesFromDefaultSelectivity(ref.equals(phone) && guess).build()));
+        return builder.build();
+    }
+
+    private ColumnStatistic xOf(List<ExternalMcvStatistics.Group> groups, double phoneNdv, boolean guess) {
+        Map<ColumnRefOperator, Column> read = read(name, phone);
+        int[] ids = {0};
+        Statistics statistics = ScanExpressionStatistics.attach(guessedBase(read, phoneNdv, guess),
+                new ExternalMcvStatistics(groups), read, table, () -> --ids[0]);
+        return statistics.getScanExpressionStatistics().getEntries().get(0).getStatistic();
+    }
+
+    @Test
+    public void testCollectedNdvOfTheExpressionIsNotAGuessWhateverTheColumnIs() {
+        // The estimate of the prefix takes the mark of a guess from the column, which is its precondition.
+        Map<ColumnRefOperator, Column> read = read(name, phone);
+        ScalarOperator prefix = ExpressionStatisticsCanonicalizer.canonicalize(ExpressionTemplate.parse(TEXT, table, context)
+                .instantiate(Map.of("c_phone", phone)));
+        Assertions.assertTrue(ExpressionStatisticCalculator.calculate(prefix, guessedBase(read, 500, true))
+                .isDistinctValuesFromDefaultSelectivity());
+        Assertions.assertFalse(ExpressionStatisticCalculator.calculate(prefix, guessedBase(read, 500, false))
+                .isDistinctValuesFromDefaultSelectivity());
+        for (boolean guess : new boolean[] {false, true}) {
+            // The singleton group gives the NDV of x: 4, the 5 values of the group and the NULL.
+            ColumnStatistic singleton = xOf(List.of(singleton()), 500, guess);
+            Assertions.assertEquals(4, singleton.getDistinctValuesCount(), 1e-9);
+            Assertions.assertFalse(singleton.isDistinctValuesFromDefaultSelectivity(), "singleton " + guess);
+            // The group of two elements gives the NDV of the group, 50, and the column of 500 values does not bind it.
+            ColumnStatistic element = xOf(List.of(mixed()), 500, guess);
+            Assertions.assertEquals(50, element.getDistinctValuesCount(), 1e-9);
+            Assertions.assertFalse(element.isDistinctValuesFromDefaultSelectivity(), "element " + guess);
+            // The column of 20 values binds it: x is as much a guess as the NDV of the column.
+            ColumnStatistic bound = xOf(List.of(mixed()), 20, guess);
+            Assertions.assertEquals(20, bound.getDistinctValuesCount(), 1e-9);
+            Assertions.assertEquals(guess, bound.isDistinctValuesFromDefaultSelectivity(), "bound " + guess);
+        }
+    }
+
+    @Test
+    public void testSingletonExpressionTakesTheAverageSizeFromTheEstimateOfThePrefix() {
+        Map<ColumnRefOperator, Column> read = read(name, phone);
+        int[] ids = {0};
+        Statistics statistics = ScanExpressionStatistics.attach(base(read), new ExternalMcvStatistics(List.of(singleton())),
+                read, table, () -> --ids[0]);
+        ColumnStatistic x = statistics.getScanExpressionStatistics().getEntries().get(0).getStatistic();
+        // The prefix of 3 characters of strings of 10: 3 bytes, and the collected NDV and NULL fraction.
+        Assertions.assertEquals(3, x.getAverageRowSize(), 1e-9);
+        Assertions.assertEquals(4, x.getDistinctValuesCount(), 1e-9);
+        Assertions.assertEquals(0.1, x.getNullsFraction(), 1e-9);
+    }
+
+    @Test
+    public void testSourceNdvIsTheProductOfTheColumnsNotAboveTheRows() {
+        ColumnRefOperator a = new ColumnRefOperator(11, com.starrocks.type.VarcharType.VARCHAR, "a", true);
+        ColumnRefOperator b = new ColumnRefOperator(12, com.starrocks.type.VarcharType.VARCHAR, "b", true);
+        ColumnRefOperator unknown = new ColumnRefOperator(13, com.starrocks.type.VarcharType.VARCHAR, "u", true);
+        Statistics statistics = Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(a, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 10, 20))
+                .addColumnStatistic(b, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 10, 30))
+                .addColumnStatistic(unknown, ColumnStatistic.unknown()).build();
+        // One column: its NDV. Two columns: the product. A column twice counts once.
+        Assertions.assertEquals(20, ScanExpressionStatistics.sourceNdv(call(a), statistics), 1e-9);
+        Assertions.assertEquals(600, ScanExpressionStatistics.sourceNdv(call(a, b), statistics), 1e-9);
+        Assertions.assertEquals(20, ScanExpressionStatistics.sourceNdv(call(a, a), statistics), 1e-9);
+        // Not more than the rows.
+        Statistics fewRows = statistics.withOutputRowCount(100);
+        Assertions.assertEquals(100, ScanExpressionStatistics.sourceNdv(call(a, b), fewRows), 1e-9);
+        // A column of unknown statistics, or none, gives no bound.
+        Assertions.assertTrue(Double.isInfinite(ScanExpressionStatistics.sourceNdv(call(a, unknown), statistics)));
+        Assertions.assertTrue(Double.isInfinite(ScanExpressionStatistics.sourceNdv(call(), statistics)));
+        ColumnRefOperator missing = new ColumnRefOperator(14, com.starrocks.type.VarcharType.VARCHAR, "m", true);
+        Assertions.assertTrue(Double.isInfinite(ScanExpressionStatistics.sourceNdv(call(missing), statistics)));
+    }
+
+    private static com.starrocks.sql.optimizer.operator.scalar.ScalarOperator call(ColumnRefOperator... columns) {
+        List<com.starrocks.sql.optimizer.operator.scalar.ScalarOperator> arguments = new java.util.ArrayList<>(List.of(columns));
+        arguments.add(com.starrocks.sql.optimizer.operator.scalar.ConstantOperator.createVarchar("x"));
+        return new com.starrocks.sql.optimizer.operator.scalar.CallOperator("concat",
+                com.starrocks.type.VarcharType.VARCHAR, arguments);
+    }
+
+    @Test
+    public void testElementNdvWithTheBoundOfItsColumns() {
+        ExternalMcvStatistics.Group group = mixed();
+        // The bound given to the element: within the group, at least the head and the tail.
+        Assertions.assertEquals(7, ScanExpressionStatistics.elementStatistic(group, 1,
+                com.starrocks.type.VarcharType.VARCHAR, ColumnStatistic.unknown(), 7).getDistinctValuesCount(), 1e-9);
+        Assertions.assertEquals(50, ScanExpressionStatistics.elementStatistic(group, 1,
+                com.starrocks.type.VarcharType.VARCHAR, ColumnStatistic.unknown(), 500).getDistinctValuesCount(), 1e-9);
+        Assertions.assertEquals(2, ScanExpressionStatistics.elementStatistic(group, 1,
+                com.starrocks.type.VarcharType.VARCHAR, ColumnStatistic.unknown(), 1).getDistinctValuesCount(), 1e-9);
+        // Without a bound the tail's rows are the most values it can have, and the group's NDV: min(50, 1 + 300).
+        Assertions.assertEquals(50, ScanExpressionStatistics.elementStatistic(group, 1,
+                com.starrocks.type.VarcharType.VARCHAR, ColumnStatistic.unknown(), Double.POSITIVE_INFINITY)
+                .getDistinctValuesCount(), 1e-9);
+    }
+
     @Test
     public void testOneVirtualColumnPerExpression() {
         Statistics statistics = attach(List.of(singleton(), mixed()), read(name, phone));
@@ -185,6 +318,22 @@ public class ExpressionStatisticsAttachTest {
         Assertions.assertEquals(40, column.getDistinctValuesCount(), 1e-9);
         Assertions.assertEquals(ColumnStatistic.StatisticType.ESTIMATE, column.getType());
         Assertions.assertEquals(1, statistics.getColumnStatistic(phone).getHistogram().getMCV().size());
+    }
+
+    @Test
+    public void testNdvOfTheMarginalOfAColumnIsNotAboveTheNdvOfTheColumn() {
+        ExternalMcvStatistics.Group group = new ExternalMcvStatistics.Group(List.of("c_name", "c_phone"), 1000, 40,
+                List.of(new MultiColumnCombinedStats.McvEntry(List.of("alice", "103"), 300, List.of(400L, 600L)),
+                        new MultiColumnCombinedStats.McvEntry(List.of("bob", "103"), 200, List.of(250L, 600L))),
+                List.of(), List.of(50L, 0L));
+        Map<ColumnRefOperator, Column> read = read(name, phone);
+        Statistics narrow = Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(name, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 10, 25))
+                .addColumnStatistic(phone, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 10, 500))
+                .build();
+        // The column has 25 values, and the group 40: the marginal has the 25 of the column, as it is its own source.
+        Assertions.assertEquals(25, StatisticsCalcUtils.attachExternalMcvStats(narrow,
+                new ExternalMcvStatistics(List.of(group)), read).getColumnStatistic(name).getDistinctValuesCount(), 1e-9);
     }
 
     private static ExternalMcvStatistics.Group plainNameGroup(long rows) {

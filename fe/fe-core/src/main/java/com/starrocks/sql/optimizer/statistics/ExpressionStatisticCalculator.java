@@ -1249,12 +1249,18 @@ public class ExpressionStatisticCalculator {
                     averageRowSize = left.getAverageRowSize() + right.getAverageRowSize();
                     break;
                 case FunctionSet.LEFT:
+                case FunctionSet.STRLEFT:
+                    return SubstringStatistics.of(left,
+                            SubstringStatistics.charactersOfLength(constantNumber(callOperator.getChild(1))), rowCount);
                 case FunctionSet.RIGHT:
                     minValue = Double.NEGATIVE_INFINITY;
                     maxValue = Double.POSITIVE_INFINITY;
                     averageRowSize = Math.max(1, left.getAverageRowSize() - right.getAverageRowSize());
                     distinctValues = left.getDistinctValuesCount() * averageRowSize / left.getAverageRowSize();
                     break;
+                case FunctionSet.SUBSTR:
+                case FunctionSet.SUBSTRING:
+                    return substringStatistics(callOperator, List.of(left, right));
                 case FunctionSet.LIKE:
                 case FunctionSet.ILIKE:
                     minValue = 0;
@@ -1657,8 +1663,10 @@ public class ExpressionStatisticCalculator {
                             .setDistinctValuesCount(distinctValues) //
                             .setHistogram(histogram) //
                             .build();
-                // use child column statistics for now
+                case FunctionSet.SUBSTR:
                 case FunctionSet.SUBSTRING:
+                    return substringStatistics(callOperator, childColumnStatisticList);
+                // use child column statistics for now
                 case FunctionSet.REGEXP_REPLACE:
                     return childColumnStatisticList.get(0);
                 case FunctionSet.CONCAT:
@@ -2009,6 +2017,28 @@ public class ExpressionStatisticCalculator {
             }
 
             return Optional.of(newBuckets.isEmpty() ? new Histogram(newMcv) : new Histogram(newBuckets, newMcv));
+        }
+
+        // substr(c, 1, n) is the prefix that SubstringStatistics gives, and substr(c, 1) is the whole string. We expect a
+        // part from any other start, a negative one or one that is not a constant included, to tell as many values
+        // apart as the whole string, and fear that the NDV of the column makes an equality on it keep one row where the
+        // part has far more. We know no better, so the part has no statistics and a condition on it is estimated by the
+        // default path.
+        private ColumnStatistic substringStatistics(CallOperator callOperator, List<ColumnStatistic> arguments) {
+            OptionalDouble start = constantNumber(callOperator.getChild(1));
+            if (start.isEmpty() || start.getAsDouble() != 1) {
+                return ColumnStatistic.unknown();
+            }
+            OptionalDouble length = callOperator.getChildren().size() == 3 ? constantNumber(callOperator.getChild(2))
+                    : OptionalDouble.empty();
+            return SubstringStatistics.of(arguments.get(0), SubstringStatistics.charactersOfLength(length), rowCount);
+        }
+
+        // The value of a numeric constant argument; empty for any other argument.
+        private OptionalDouble constantNumber(ScalarOperator operator) {
+            Optional<ConstantOperator> constant = toConstantOperator(operator);
+            return constant.isPresent() ? ConstantOperatorUtils.doubleValueFromConstant(constant.get())
+                    : OptionalDouble.empty();
         }
 
         private Optional<ConstantOperator> toConstantOperator(ScalarOperator op) {

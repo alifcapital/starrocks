@@ -215,7 +215,7 @@ public class ExpressionProjectionStatisticsTest {
                         new MultiColumnCombinedStats.McvEntry(List.of("20412345", "6"), 100, List.of(200L, 300L))),
                 List.of(), List.of(0L, 0L));
         ColumnStatistic statistic = ScanExpressionStatistics.elementStatistic(group, 0, VarcharType.VARCHAR,
-                ColumnStatistic.unknown());
+                ColumnStatistic.unknown(), Double.POSITIVE_INFINITY);
         ScalarOperator canonical = ExpressionStatisticsCanonicalizer.canonicalize(left(8));
         return new ScanExpressionStatistics("t", List.of(new ScanExpressionStatistics.Entry(canonical,
                 ExpressionStatisticsCanonicalizer.keyOf(canonical), X, statistic)),

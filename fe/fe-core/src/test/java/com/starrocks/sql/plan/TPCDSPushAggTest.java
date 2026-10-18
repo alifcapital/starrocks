@@ -161,7 +161,9 @@ public class TPCDSPushAggTest extends TPCDS1TTestBase {
                 // This is caused by the CTE. orig: CTE inline, auto~high: CTE
                 Arguments.of("Q04", 12, 12, true, 12, true, 12, true, 12, true),
                 Arguments.of("Q05", 8, 12, true, 16, true, 16, true, 16, true),
-                Arguments.of("Q08", 4, 4, true, 6, true, 6, true, 6, true),
+                // The two aggregates on substr(ca_zip, 1, 5) have the values of the zip codes, not one value, so each of
+                // them has two phases.
+                Arguments.of("Q08", 6, 6, true, 8, true, 8, true, 8, true),
                 Arguments.of("Q11", 8, 8, true, 8, true, 8, true, 8, true),
                 Arguments.of("Q12", 2, 2, false, 4, true, 4, true, 4, true),
                 Arguments.of("Q15", 2, 2, false, 4, true, 4, true, 4, true),

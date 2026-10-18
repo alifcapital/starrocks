@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -371,7 +372,8 @@ public final class ScanExpressionStatistics {
             ColumnStatistic base = ExpressionStatisticCalculator.calculate(entry.getExpression(), statistics);
             ColumnStatistic statistic = singletonStatistic(entry, attachedGroups, attachedRefs, base);
             if (statistic == null) {
-                statistic = elementStatistic(entry.getColumn(), allGroups, allRefs, base);
+                statistic = elementStatistic(entry.getColumn(), allGroups, allRefs, base,
+                        sourceNdv(entry.getExpression(), statistics));
             }
             if (statistic == null) {
                 // Every virtual column of a group must have statistics, or the estimate would fail on it.
@@ -387,6 +389,28 @@ public final class ScanExpressionStatistics {
         entries.values().forEach(entry -> virtual.add(entry.getColumn()));
         return new Attached(new ScanExpressionStatistics(table == null ? null : table.getName(), result, groups, null,
                 null, false, cache), allGroups, allRefs, virtual);
+    }
+
+    /**
+     * The most distinct values the expression can take, from the columns it reads alone: the product of their NDV, not
+     * more than the rows. We fear the NDV that the estimate gives the expression itself, which is a guess, as the one of
+     * a prefix of a string from the length of the strings, being taken for a bound that the collected NDV of x must
+     * not pass; the columns it reads are the only bound we know. Infinite when a column has no known NDV, as the NDV of
+     * 1 of an unknown statistic would put the whole tail on one value.
+     */
+    static double sourceNdv(ScalarOperator expression, Statistics statistics) {
+        double product = 1;
+        boolean read = false;
+        for (ColumnRefOperator source : new LinkedHashSet<>(expression.getColumnRefs())) {
+            ColumnStatistic statistic = statistics.getColumnStatistics().get(source);
+            if (statistic == null || statistic.isUnknown() || Double.isNaN(statistic.getDistinctValuesCount())
+                    || Double.isInfinite(statistic.getDistinctValuesCount())) {
+                return Double.POSITIVE_INFINITY;
+            }
+            product *= Math.max(1, statistic.getDistinctValuesCount());
+            read = true;
+        }
+        return read ? Math.min(product, Math.max(1, statistics.getOutputRowCount())) : Double.POSITIVE_INFINITY;
     }
 
     // The expression over the scan columns, or null when a source is not read or no longer matches the recording.
@@ -418,7 +442,12 @@ public final class ScanExpressionStatistics {
         for (int i = 0; i < groups.size(); i++) {
             if (refs.get(i).size() == 1 && entry.getColumn().equals(refs.get(i).get(0))) {
                 ColumnStatistic basic = base.isUnknown() ? ColumnStatistic.unknown() : base;
-                return groups.get(i).columnStatistic(entry.getColumn().getType(), basic).orElse(null);
+                // The NDV is the collected one, and not a guess whatever the base says: the choice of the source of
+                // an estimate reads the mark of a guess.
+                return groups.get(i).columnStatistic(entry.getColumn().getType(), basic)
+                        .map(statistic -> ColumnStatistic.buildFrom(statistic)
+                                .setDistinctValuesFromDefaultSelectivity(false).build())
+                        .orElse(null);
             }
         }
         return null;
@@ -427,12 +456,23 @@ public final class ScanExpressionStatistics {
     /**
      * The statistics of one element of the multi-element groups: the group whose head covers more rows of the
      * element gives the head of the element from the component counts, the tail as one bucket of unknown bounds and
-     * the NULL fraction. The NDV is the base NDV kept within what the group allows: at least the distinct head
-     * values plus one for a non-empty tail, at most the group NDV and the base NDV. An unknown base does not bound
-     * the NDV: an NDV of 1 from an unknown estimate would put the whole tail on one value.
+     * the NULL fraction. The NDV is within what the group allows: at least the distinct head values plus one for a
+     * non-empty tail, at most the group NDV and the bound, the NDV of the columns the element is read from. Without a
+     * bound the NDV does not pass the rows outside the head: an NDV of 1 from an unknown estimate would put the whole
+     * tail on one value.
      */
     static ColumnStatistic elementStatistic(ColumnRefOperator element, List<ExternalMcvStatistics.Group> groups,
                                             List<List<ColumnRefOperator>> refs, ColumnStatistic base) {
+        return elementStatistic(element, groups, refs, base, ndvOf(base));
+    }
+
+    // The NDV of the statistics of a column that is its own source; infinite for a statistic that is not known.
+    private static double ndvOf(ColumnStatistic base) {
+        return base == null || base.isUnknown() ? Double.POSITIVE_INFINITY : base.getDistinctValuesCount();
+    }
+
+    static ColumnStatistic elementStatistic(ColumnRefOperator element, List<ExternalMcvStatistics.Group> groups,
+                                            List<List<ColumnRefOperator>> refs, ColumnStatistic base, double ndvBound) {
         ExternalMcvStatistics.Group best = null;
         int bestPosition = -1;
         long bestCoverage = -1;
@@ -456,11 +496,15 @@ public final class ScanExpressionStatistics {
         if (best == null) {
             return null;
         }
-        return elementStatistic(best, bestPosition, element.getType(), base);
+        return elementStatistic(best, bestPosition, element.getType(), base, ndvBound);
     }
 
+    /**
+     * ndvBound is the most distinct values the element can take, see sourceNdv; the bounds of its range and its other
+     * statistics come from base.
+     */
     static ColumnStatistic elementStatistic(ExternalMcvStatistics.Group group, int position,
-                                            com.starrocks.type.Type type, ColumnStatistic base) {
+                                            com.starrocks.type.Type type, ColumnStatistic base, double ndvBound) {
         ExternalMcvStatistics.Group view = group.elementGroup(position);
         boolean knownBase = base != null && !base.isUnknown();
         ColumnStatistic basic = knownBase ? base : ColumnStatistic.unknown();
@@ -473,13 +517,17 @@ public final class ScanExpressionStatistics {
         long tail = Math.max(0, group.getRowCount() - headRows - nulls);
         double lower = view.getMcv().size() + (tail > 0 ? 1 : 0);
         double ndv;
+        // The NDV from the head or the group is collected, and not a guess whatever the base says. It is the guess of
+        // the base when the NDV of the columns binds it: x has no more values than they have.
+        boolean guess = false;
         if (tail == 0) {
             // The head lists every value of the element, so their number is its NDV; the NDV of the group counts
             // the combinations with the other elements.
             ndv = view.getMcv().size();
-        } else if (knownBase) {
-            double upper = Math.min(group.getNdv(), base.getDistinctValuesCount());
-            ndv = Math.max(lower, Math.min(base.getDistinctValuesCount(), upper));
+        } else if (!Double.isNaN(ndvBound) && !Double.isInfinite(ndvBound)) {
+            ndv = Math.max(lower, Math.min(group.getNdv(), ndvBound));
+            guess = knownBase && base.isDistinctValuesFromDefaultSelectivity() && ndv == ndvBound
+                    && ndvBound < group.getNdv();
         } else {
             // The NDV of the group bounds the values of one element, and the rows outside the head hold at most one
             // value each.
@@ -497,7 +545,8 @@ public final class ScanExpressionStatistics {
                 }
             }
         }
-        ColumnStatistic.Builder builder = ColumnStatistic.buildFrom(statistic).setDistinctValuesCount(ndv);
+        ColumnStatistic.Builder builder = ColumnStatistic.buildFrom(statistic).setDistinctValuesCount(ndv)
+                .setDistinctValuesFromDefaultSelectivity(guess);
         if (min <= max) {
             builder.setMinValue(min).setMaxValue(max);
         }

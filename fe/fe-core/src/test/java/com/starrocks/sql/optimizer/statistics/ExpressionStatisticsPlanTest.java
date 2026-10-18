@@ -182,6 +182,69 @@ public class ExpressionStatisticsPlanTest extends ConnectorPlanTestBase {
         });
     }
 
+    // The rows of a CTE scan that the predicate keeps; the CTE reads the statistics of the table as they are, 15M
+    // rows and 15M values of c_name of 25 characters.
+    private double keptRows(String where) throws Exception {
+        return cardinality(getCostExplain("with t as (select c_name from hive0.tpch.customer where " + where
+                + ") select * from t"), "HdfsScanNode");
+    }
+
+    @Test
+    public void testPrefixOfAColumnWithoutStatisticsOnExpressions() throws Exception {
+        withExpressionStatistics(ExternalMcvStatistics.EMPTY, () -> {
+            double rows = keptRows("c_name is not null");
+            // 3 of the 25 characters hold 15M ^ (3 / 25) values: about 7 prefixes, not one row and not the whole
+            // table.
+            double expected = rows / Math.pow(15_000_000, 3 / 25.0);
+            for (String prefix : List.of("left(c_name, 3)", "strleft(c_name, 3)")) {
+                Assertions.assertEquals(expected, keptRows(prefix + " = 'Cus'"), expected * 1e-3 + 1, prefix);
+            }
+        });
+    }
+
+    @Test
+    public void testSubstringOfAColumnWithoutStatisticsOnExpressions() throws Exception {
+        withExpressionStatistics(ExternalMcvStatistics.EMPTY, () -> {
+            double rows = keptRows("c_name is not null");
+            for (String name : List.of("substring", "substr")) {
+                // 3 characters from the start take 15M ^ (3 / 25) values, as left(c_name, 3).
+                Assertions.assertEquals(rows / Math.pow(15_000_000, 3 / 25.0),
+                        keptRows(name + "(c_name, 1, 3) = 'Cus'"), rows / Math.pow(15_000_000, 3 / 25.0) * 1e-3 + 1, name);
+                // A part from the 5th character, the rest of the string from the 5th, and a suffix have no statistics:
+                // the equality keeps the rows, not the 1 / NDV of 15M that is one row.
+                for (String part : List.of("(c_name, 5, 3)", "(c_name, 5)", "(c_name, -9)")) {
+                    Assertions.assertEquals(rows, keptRows(name + part + " = 'Cus'"), 1.0, name + part);
+                }
+            }
+        });
+    }
+
+    @Test
+    public void testAggregateAndJoinOverASubstringAwayFromTheStartAreEstimatedByTheDefault() throws Exception {
+        withExpressionStatistics(ExternalMcvStatistics.EMPTY, () -> {
+            // The groups of a prefix of 3 characters are about 7, and a part away from the start has no statistics.
+            for (String name : List.of("substring", "substr")) {
+                String prefix = getCostExplain("with t as (select " + name + "(c_name, 1, 3) k from hive0.tpch.customer) "
+                        + "select k, count(*) from t group by k");
+                Assertions.assertTrue(cardinality(prefix, "AGGREGATE") < 100, prefix);
+                for (String part : List.of("(c_name, 5, 3)", "(c_name, 5)", "(c_name, -9)")) {
+                    String plan = getCostExplain("with t as (select " + name + part + " k from hive0.tpch.customer) "
+                            + "select k, count(*) from t group by k");
+                    long groups = cardinality(plan, "AGGREGATE");
+                    String md5 = getCostExplain("with t as (select md5(c_name) k from hive0.tpch.customer) "
+                            + "select k, count(*) from t group by k");
+                    Assertions.assertEquals(cardinality(md5, "AGGREGATE"), groups, name + part + "\n" + plan);
+                    String join = getCostExplain("with t as (select " + name + part + " k from hive0.tpch.customer) "
+                            + "select count(*) from t a join t b on a.k = b.k");
+                    Assertions.assertTrue(join.contains("JOIN"), join);
+                    String md5Join = getCostExplain("with t as (select md5(c_name) k from hive0.tpch.customer) "
+                            + "select count(*) from t a join t b on a.k = b.k");
+                    Assertions.assertEquals(cardinality(md5Join, "JOIN"), cardinality(join, "JOIN"), name + part);
+                }
+            }
+        });
+    }
+
     @Test
     public void testWithoutStatisticsOnExpressionsTheEstimateIsAsBefore() throws Exception {
         String sql = "select c_phone from hive0.tpch.customer where left(c_phone, 3) = '103'";
