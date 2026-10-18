@@ -52,6 +52,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class StatisticsCalcUtils {
@@ -128,15 +129,11 @@ public class StatisticsCalcUtils {
         if (cached == null || cached.isEmpty()) {
             return statistics;
         }
-        Statistics attached = attachExternalMcvStats(statistics, cached, colRefToColumnMetaMap);
-        if (cached.getGroups().stream().anyMatch(ExternalMcvStatistics.Group::hasExpressions)) {
-            int[] localIds = {0};
-            java.util.function.IntSupplier ids = optimizerContext != null
-                    ? optimizerContext::nextExpressionStatisticsColumnId : () -> --localIds[0];
-            attached = ScanExpressionStatistics.attach(attached, cached, colRefToColumnMetaMap, table, ids,
-                    optimizerContext != null ? optimizerContext.getExpressionStatisticsCache()
-                            : new ExpressionStatisticsCache());
-        }
+        ExpressionStatisticsCache queryCache = optimizerContext == null ? null
+                : optimizerContext.getExpressionStatisticsCache();
+        Supplier<Statistics> attach = () -> attach(table, statistics, cached, colRefToColumnMetaMap, optimizerContext);
+        Statistics attached = queryCache == null ? attach.get()
+                : queryCache.mcvAttachment(table, cached, colRefToColumnMetaMap, statistics, attach);
         if (optimizerContext != null && optimizerContext.getDumpInfo() != null) {
             for (ExternalMcvStatistics.Group group : cached.getGroups()) {
                 optimizerContext.getDumpInfo().addExternalMcvStatistics(table, group);
@@ -146,6 +143,21 @@ public class StatisticsCalcUtils {
             optimizerContext.getDumpInfo().addExternalTableRowCount(table, (long) attached.getOutputRowCount());
             attached.getColumnStatistics().forEach((column, value) ->
                     optimizerContext.getDumpInfo().addTableStatistics(table, column.getName(), value));
+        }
+        return attached;
+    }
+
+    private static Statistics attach(Table table, Statistics statistics, ExternalMcvStatistics cached,
+                                     Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                     OptimizerContext optimizerContext) {
+        Statistics attached = attachExternalMcvStats(statistics, cached, colRefToColumnMetaMap);
+        if (cached.getGroups().stream().anyMatch(ExternalMcvStatistics.Group::hasExpressions)) {
+            int[] localIds = {0};
+            java.util.function.IntSupplier ids = optimizerContext != null
+                    ? optimizerContext::nextExpressionStatisticsColumnId : () -> --localIds[0];
+            attached = ScanExpressionStatistics.attach(attached, cached, colRefToColumnMetaMap, table, ids,
+                    optimizerContext != null ? optimizerContext.getExpressionStatisticsCache()
+                            : new ExpressionStatisticsCache());
         }
         return attached;
     }

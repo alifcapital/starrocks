@@ -51,18 +51,20 @@ import java.util.function.IntFunction;
 
 /**
  * Measures what an MCV list of a six-column group with 300 head tuples adds to the planning time of queries that
- * filter the table on the columns of the group, and counts the scan derivations and head evaluations of one planning.
+ * filter the table on the columns of the group, and counts the scan derivations, the estimates of their predicates
+ * and the head evaluations of one planning.
  * The heavy query repeats a filtered scan in several CTEs and joins it, as the reports of BI tools do. We expect the
  * numbers to vary between hosts, so the test logs them and asserts only a generous bound.
  */
 public class McvPlanningCostTest extends ConnectorPlanTestBase {
-    private static final int WARM_UP = 20;
-    private static final int RUNS = 40;
+    // Few runs keep the test cheap in the unit test suite; -Dmcv.planning.runs=60 gives stable numbers.
+    private static final int RUNS = Integer.getInteger("mcv.planning.runs", 10);
+    private static final int WARM_UP = RUNS / 2;
     private static final long TABLE_ROWS = 600_037_902L;
     private static final List<String> COLUMNS = List.of("l_returnflag", "l_linenumber", "l_suppkey", "l_partkey",
             "l_quantity", "l_tax");
 
-    private interface Body {
+    interface Body {
         void run() throws Exception;
     }
 
@@ -259,6 +261,8 @@ public class McvPlanningCostTest extends ConnectorPlanTestBase {
     /** The calls of one planning: scan derivations, head evaluations and conversions of a stored value. */
     private static final class Counts {
         final AtomicLong scans = new AtomicLong();
+        final AtomicLong scanEstimates = new AtomicLong();
+        final AtomicLong scanEstimatesComputed = new AtomicLong();
         final AtomicLong estimates = new AtomicLong();
         final AtomicLong filters = new AtomicLong();
         final AtomicLong completeHeads = new AtomicLong();
@@ -268,6 +272,8 @@ public class McvPlanningCostTest extends ConnectorPlanTestBase {
         Counts copy() {
             Counts copy = new Counts();
             copy.scans.set(scans.get());
+            copy.scanEstimates.set(scanEstimates.get());
+            copy.scanEstimatesComputed.set(scanEstimatesComputed.get());
             copy.estimates.set(estimates.get());
             copy.filters.set(filters.get());
             copy.completeHeads.set(completeHeads.get());
@@ -279,6 +285,8 @@ public class McvPlanningCostTest extends ConnectorPlanTestBase {
         Counts minus(Counts other) {
             Counts result = copy();
             result.scans.addAndGet(-other.scans.get());
+            result.scanEstimates.addAndGet(-other.scanEstimates.get());
+            result.scanEstimatesComputed.addAndGet(-other.scanEstimatesComputed.get());
             result.estimates.addAndGet(-other.estimates.get());
             result.filters.addAndGet(-other.filters.get());
             result.completeHeads.addAndGet(-other.completeHeads.get());
@@ -289,8 +297,9 @@ public class McvPlanningCostTest extends ConnectorPlanTestBase {
 
         @Override
         public String toString() {
-            return String.format("scan derivations %d, MCV estimates %d, filters %d, complete heads %d, "
-                    + "component matches %d, casts %d", scans.get(), estimates.get(), filters.get(),
+            return String.format("scan derivations %d, scan predicate estimates %d (computed %d), MCV estimates %d, "
+                    + "filters %d, complete heads %d, component matches %d, casts %d", scans.get(),
+                    scanEstimates.get(), scanEstimatesComputed.get(), estimates.get(), filters.get(),
                     completeHeads.get(), matches.get(), casts.get());
         }
     }
@@ -341,6 +350,18 @@ public class McvPlanningCostTest extends ConnectorPlanTestBase {
                                                       Statistics statistics) {
                 counts.completeHeads.incrementAndGet();
                 return invocation.proceed();
+            }
+        };
+        new MockUp<ExpressionStatisticsCache>() {
+            @Mock
+            Statistics scanEstimate(Invocation invocation, ScalarOperator predicate, Statistics input,
+                                    java.util.function.Supplier<Statistics> compute) {
+                counts.scanEstimates.incrementAndGet();
+                java.util.function.Supplier<Statistics> counted = () -> {
+                    counts.scanEstimatesComputed.incrementAndGet();
+                    return compute.get();
+                };
+                return invocation.proceed(predicate, input, counted);
             }
         };
         new MockUp<StatisticsCastEvaluator>() {

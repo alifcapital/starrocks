@@ -189,6 +189,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.statistics.ColumnStatistic.buildFrom;
@@ -297,8 +298,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         ScanExpressionStatistics expressions = node instanceof LogicalScanOperator || node instanceof PhysicalScanOperator
                 ? statistics.getScanExpressionStatistics() : null;
         if (estimatePredicate && null != predicate && !predicate.isNotEvalEstimate()) {
-            statistics = expressions == null ? estimateStatistics(ImmutableList.of(predicate), statistics)
-                    : estimateScanStatistics(predicate, statistics, expressions);
+            statistics = estimatePredicate(node, predicate, statistics, expressions);
         }
 
         Statistics.Builder statisticsBuilder = null;
@@ -2732,6 +2732,23 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 .setNullsFraction(0)
                 .setAverageRowSize(call.getType().getTypeSize())
                 .build();
+    }
+
+    // The estimate of the predicate of the operator over its input. The estimate of the predicate of a scan of a table
+    // with MCV statistics is kept for the query, see ExpressionStatisticsCache#scanEstimate.
+    private Statistics estimatePredicate(Operator node, ScalarOperator predicate, Statistics statistics,
+                                         ScanExpressionStatistics expressions) {
+        Supplier<Statistics> estimate = () -> expressions == null
+                ? estimateStatistics(ImmutableList.of(predicate), statistics)
+                : estimateScanStatistics(predicate, statistics, expressions);
+        ExpressionStatisticsCache cache = optimizerContext == null ? null
+                : optimizerContext.getExpressionStatisticsCache();
+        boolean scan = node instanceof LogicalScanOperator || node instanceof PhysicalScanOperator;
+        if (cache == null || !scan
+                || statistics.getMultiColumnCombinedStats().values().stream().noneMatch(MultiColumnCombinedStats::hasMcv)) {
+            return estimate.get();
+        }
+        return cache.scanEstimate(predicate, statistics, estimate);
     }
 
     private static Statistics estimateScanStatistics(ScalarOperator predicate, Statistics statistics,

@@ -14,7 +14,10 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.catalog.Column;
+import com.starrocks.catalog.Table;
 import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
 import java.util.ArrayDeque;
@@ -31,7 +34,8 @@ import java.util.function.ToLongFunction;
 /**
  * The work of the statistics on expressions that one query repeats: the statistics of a group are derived again
  * for each plan alternative, and the same predicate and projection objects come back. The cache lives as long as
- * the optimizer context of the query, so nothing it holds outlives the query.
+ * the optimizer context of the query, so nothing it holds outlives the query. It also keeps the estimate of the
+ * predicate of a scan of a table with MCV statistics, see #scanEstimate.
  *
  * We fear that a query with long predicates or many scans makes the cache large, so it is bounded by an estimate of
  * what it holds, not by the number of entries: one unit per operator of a kept expression, per bucket and head value
@@ -59,6 +63,8 @@ public final class ExpressionStatisticsCache {
             new IdentityHashMap<>();
     private final Map<List<Object>, ScanExpressionStatistics.Attached> attachments = new HashMap<>();
     private final Map<List<Object>, Object> parts = new HashMap<>();
+    private final Map<ScanEstimateKey, Statistics> scanEstimates = new HashMap<>();
+    private final Map<List<Object>, Statistics> mcvAttachments = new HashMap<>();
     private long units;
 
     /** An object compared by identity in a key. */
@@ -222,6 +228,96 @@ public final class ExpressionStatisticsCache {
         }
     }
 
+    /**
+     * The estimate of the predicate of a scan over the statistics of the scan, computed once per key, see
+     * ScanEstimateKey. We expect the planner to derive the statistics of one scan many times: the memo derives the
+     * scan for each plan alternative, and the rules that reorder joins derive it again outside of the memo. Every
+     * derivation estimates the same predicate over the same statistics of the table, and with an MCV list each
+     * estimate evaluates the head many times. A predicate the key cannot compare is estimated every time; a failure
+     * to build the key leaves the estimate as it is.
+     */
+    Statistics scanEstimate(ScalarOperator predicate, Statistics statistics, Supplier<Statistics> compute) {
+        ScanEstimateKey key;
+        try {
+            key = ScanEstimateKey.of(predicate, statistics);
+        } catch (RuntimeException e) {
+            key = null;
+        }
+        if (key == null) {
+            return compute.get();
+        }
+        synchronized (this) {
+            Statistics known = scanEstimates.get(key);
+            if (known != null) {
+                return known;
+            }
+        }
+        Statistics result = compute.get();
+        ScanEstimateKey kept;
+        try {
+            kept = key.copy();
+        } catch (RuntimeException e) {
+            return result;
+        }
+        long size = units(predicate) + units(result);
+        synchronized (this) {
+            return put(scanEstimates, kept, result, size);
+        }
+    }
+
+    /**
+     * The statistics of a scan with the MCV statistics of its table attached, see
+     * StatisticsCalcUtils#withExternalMcvStats, computed once per key. We expect the planner to derive each scan many
+     * times in a query, and the attach builds the column groups and the statistics of their elements every time. The
+     * key holds what the attach reads: the table and its MCV statistics by identity, the column references of the
+     * scan with their columns in the order of the scan, every value of the statistics it attaches to, and the session
+     * values, see ScanEstimateKey. Two copies of one CTE read the table through other column references and get other
+     * keys. A result that is the input statistics itself is not kept, and a failure to build the key leaves the
+     * attach as it is.
+     */
+    Statistics mcvAttachment(Table table, ExternalMcvStatistics mcv, Map<ColumnRefOperator, Column> columns,
+                             Statistics statistics, Supplier<Statistics> compute) {
+        List<Object> key;
+        try {
+            List<Object> scanColumns = new ArrayList<>(2 * columns.size());
+            columns.forEach((column, meta) -> {
+                scanColumns.add(ScanEstimateKey.ColumnKey.of(column));
+                scanColumns.add(new Identity(meta));
+            });
+            key = List.of(new Identity(table), new Identity(mcv), scanColumns, ScanEstimateKey.content(statistics),
+                    ScanEstimateKey.session());
+        } catch (RuntimeException e) {
+            return compute.get();
+        }
+        synchronized (this) {
+            Statistics known = mcvAttachments.get(key);
+            if (known != null) {
+                return known;
+            }
+        }
+        Statistics result = compute.get();
+        if (result == statistics) {
+            return result;
+        }
+        // The heads of the column groups belong to the MCV statistics of the table, and every attach of the table
+        // shares them. We fear that counting a head for each kept attach clears the cache early, and a clear makes
+        // the next attach create virtual columns with new ids, so we count one unit per group.
+        long size = key.size() + columns.size() + 1 + result.getColumnStatistics().size()
+                + result.getMultiColumnCombinedStats().size();
+        synchronized (this) {
+            return put(mcvAttachments, key, result, size);
+        }
+    }
+
+    /** The size of statistics in units: the column statistics and the head tuples of the column groups. */
+    static long units(Statistics statistics) {
+        long count = 1 + statistics.getColumnStatistics().size();
+        for (MultiColumnCombinedStats group : statistics.getMultiColumnCombinedStats().values()) {
+            count += 1 + group.getMcv().size();
+        }
+        return count;
+    }
+
     /** Counts units that an entry kept earlier takes as it grows. */
     synchronized void grow(long added) {
         units += added;
@@ -280,6 +376,8 @@ public final class ExpressionStatisticsCache {
         projections.clear();
         attachments.clear();
         parts.clear();
+        scanEstimates.clear();
+        mcvAttachments.clear();
         units = 0;
     }
 }

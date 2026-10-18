@@ -14,9 +14,14 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.catalog.Function;
+import com.starrocks.catalog.FunctionName;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
@@ -328,5 +333,152 @@ public class McvEstimateEquivalenceTest {
         // The predicates must narrow the rows and reach the propagation, or the comparison proves nothing.
         Assertions.assertTrue(narrowed > 1000, Integer.toString(narrowed));
         Assertions.assertTrue(propagations.get() > 10_000, Long.toString(propagations.get()));
+    }
+
+    // A copy of the statistics with a column reference of another id in place of each one, as a copy of a CTE reads
+    // the table.
+    private static Statistics renumbered(Statistics statistics, Map<ColumnRefOperator, ColumnRefOperator> mapping) {
+        Statistics.Builder builder = Statistics.builder().setOutputRowCount(statistics.getOutputRowCount());
+        statistics.getColumnStatistics().forEach((column, statistic) ->
+                builder.addColumnStatistic(mapping.get(column), statistic));
+        statistics.getMultiColumnCombinedStats().forEach((key, group) -> {
+            List<ColumnRefOperator> columns = group.getColumns().stream().map(mapping::get).toList();
+            builder.addMultiColumnStatistics(Set.copyOf(columns), new MultiColumnCombinedStats(group.getNdv(),
+                    group.getRowCount(), columns, group.getMcv(), group.getNullCounts()));
+        });
+        return builder.build();
+    }
+
+    // The key of a scan estimate holds everything the estimate reads, and only that: new objects of the same content
+    // share a key, a scan through other column references or with other flags or switches does not.
+    @Test
+    public void testScanEstimateKeys() {
+        Random random = new Random(20261014);
+        Statistics statistics = statistics(random, false);
+        ScalarOperator predicate = Utils.compoundAnd(new BinaryPredicateOperator(BinaryType.EQ, STATUS,
+                ConstantOperator.createVarchar("approved")), new InPredicateOperator(true, OPERATION,
+                ConstantOperator.createInt(5)), new BinaryPredicateOperator(BinaryType.GE, OUTSIDE,
+                ConstantOperator.createInt(10)));
+        ScanEstimateKey key = ScanEstimateKey.of(predicate, statistics);
+        Assertions.assertNotNull(key);
+
+        // New statistics objects of the same values, and a copy of the predicate.
+        Statistics.Builder rebuilt = Statistics.buildFrom(statistics);
+        statistics.getColumnStatistics().forEach((column, statistic) ->
+                rebuilt.addColumnStatistic(column, ColumnStatistic.buildFrom(statistic).build()));
+        Assertions.assertEquals(key, ScanEstimateKey.of(predicate.clone(), rebuilt.build()));
+        Assertions.assertEquals(key, key.copy());
+        Assertions.assertEquals(key.hashCode(), ScanEstimateKey.of(predicate.clone(), rebuilt.build()).hashCode());
+
+        // A copy of a CTE reads the table through other column references.
+        Map<ColumnRefOperator, ColumnRefOperator> mapping = new HashMap<>();
+        for (ColumnRefOperator column : statistics.getColumnStatistics().keySet()) {
+            mapping.put(column, new ColumnRefOperator(column.getId() + 100, column.getType(), column.getName(),
+                    column.isNullable()));
+        }
+        ScalarOperator copied = new com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter(
+                new HashMap<>(mapping)).rewrite(predicate);
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(copied, renumbered(statistics, mapping)));
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, renumbered(statistics, mapping)));
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(copied, statistics));
+
+        // A flag the estimate reads.
+        ScalarOperator flagged = predicate.clone();
+        flagged.getChild(1).setNotEvalEstimate(true);
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(flagged, statistics));
+        // A kept key does not follow a later change of the predicate.
+        ScanEstimateKey kept = ScanEstimateKey.of(flagged, statistics).copy();
+        flagged.getChild(1).setNotEvalEstimate(false);
+        Assertions.assertNotEquals(kept, ScanEstimateKey.of(flagged, statistics));
+        Assertions.assertEquals(key, ScanEstimateKey.of(flagged, statistics));
+
+        // A value of the statistics, down to the last bit of a double.
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, statistics.withOutputRowCount(
+                Math.nextUp(statistics.getOutputRowCount()))));
+        ColumnStatistic gate = statistics.getColumnStatistic(GATE);
+        Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, Statistics.buildFrom(statistics)
+                .addColumnStatistic(GATE, ColumnStatistic.buildFrom(gate).setNullsFraction(0.03).build()).build()));
+        // A histogram is compared by identity: an equal copy is another key.
+        ColumnStatistic withHistogram = ColumnStatistic.buildFrom(gate)
+                .setHistogram(new Histogram(List.of(), Map.of("1", 10L))).build();
+        Statistics histogram = Statistics.buildFrom(statistics).addColumnStatistic(GATE, withHistogram).build();
+        Assertions.assertEquals(ScanEstimateKey.of(predicate, histogram), ScanEstimateKey.of(predicate,
+                Statistics.buildFrom(statistics).addColumnStatistic(GATE, withHistogram).build()));
+        Assertions.assertNotEquals(ScanEstimateKey.of(predicate, histogram), ScanEstimateKey.of(predicate,
+                Statistics.buildFrom(statistics).addColumnStatistic(GATE, ColumnStatistic.buildFrom(gate)
+                        .setHistogram(new Histogram(List.of(), Map.of("1", 10L))).build()).build()));
+
+        // A session value the estimate reads, also through the folding of a call on a head value.
+        ConnectContext context = ConnectContext.get();
+        SessionVariable variables = context.getSessionVariable();
+        boolean correlated = variables.isUseCorrelatedPredicateEstimate();
+        String baseType = variables.getCboEqBaseType();
+        int consolidateMin = variables.getLikePredicateConsolidateMin();
+        java.time.Instant start = context.getStartTimeInstant();
+        try {
+            variables.setUseCorrelatedPredicateEstimate(!correlated);
+            Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, statistics));
+            variables.setUseCorrelatedPredicateEstimate(correlated);
+            variables.setCboEqBaseType("decimal".equalsIgnoreCase(baseType) ? "varchar" : "decimal");
+            Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, statistics));
+            variables.setCboEqBaseType(baseType);
+            variables.setLikePredicateConsolidateMin(consolidateMin + 1);
+            Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, statistics));
+            variables.setLikePredicateConsolidateMin(consolidateMin);
+            context.setStartTime(start.plusSeconds(1));
+            Assertions.assertNotEquals(key, ScanEstimateKey.of(predicate, statistics));
+        } finally {
+            variables.setUseCorrelatedPredicateEstimate(correlated);
+            variables.setCboEqBaseType(baseType);
+            variables.setLikePredicateConsolidateMin(consolidateMin);
+            context.setStartTime(start);
+        }
+        Assertions.assertEquals(key, ScanEstimateKey.of(predicate, statistics));
+
+        // An operator of a class the key does not know is not keyed.
+        ScalarOperator unknown = new InPredicateOperator(false, OPERATION, ConstantOperator.createInt(1)) {
+        };
+        Assertions.assertNull(ScanEstimateKey.of(unknown, statistics));
+    }
+
+    // The folding of a call on a head value reads the time zone of the session, so two time zones give two estimates
+    // of one predicate, and the key tells them apart.
+    @Test
+    public void testScanEstimateKeyHoldsTheTimeZone() {
+        ColumnRefOperator ts = new ColumnRefOperator(21, IntegerType.BIGINT, "ts", true);
+        ColumnRefOperator k = new ColumnRefOperator(22, IntegerType.INT, "k", true);
+        List<MultiColumnCombinedStats.McvEntry> entries = List.of(
+                new MultiColumnCombinedStats.McvEntry(List.of("0", "1"), 600, List.of(600L, 600L)),
+                new MultiColumnCombinedStats.McvEntry(List.of("3600", "2"), 300, List.of(300L, 300L)),
+                new MultiColumnCombinedStats.McvEntry(List.of("7200", "3"), 100, List.of(100L, 100L)));
+        Statistics statistics = Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(ts, ColumnStatistic.builder().setMinValue(0).setMaxValue(7200)
+                        .setDistinctValuesCount(3).setNullsFraction(0).setAverageRowSize(8).build())
+                .addColumnStatistic(k, ColumnStatistic.builder().setMinValue(1).setMaxValue(3)
+                        .setDistinctValuesCount(3).setNullsFraction(0).setAverageRowSize(4).build())
+                .addMultiColumnStatistics(Set.of(ts, k), new MultiColumnCombinedStats(3, 1000, List.of(ts, k),
+                        entries, List.of(0L, 0L)))
+                .build();
+        Function fromUnixtime = new Function(new FunctionName("from_unixtime"), new Type[] {IntegerType.BIGINT},
+                VarcharType.VARCHAR, false);
+        ScalarOperator predicate = new BinaryPredicateOperator(BinaryType.EQ,
+                new CallOperator("from_unixtime", VarcharType.VARCHAR, List.of(ts), fromUnixtime),
+                ConstantOperator.createVarchar("1970-01-01 08:00:00"));
+        SessionVariable variables = ConnectContext.get().getSessionVariable();
+        String zone = variables.getTimeZone();
+        try {
+            variables.setTimeZone("Asia/Shanghai");
+            ScanEstimateKey shanghai = ScanEstimateKey.of(predicate, statistics);
+            double inShanghai = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, true)
+                    .getOutputRowCount();
+            variables.setTimeZone("UTC");
+            ScanEstimateKey utc = ScanEstimateKey.of(predicate, statistics);
+            double inUtc = PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics, true)
+                    .getOutputRowCount();
+            Assertions.assertNotEquals(inShanghai, inUtc);
+            Assertions.assertNotEquals(shanghai, utc);
+        } finally {
+            variables.setTimeZone(zone);
+        }
     }
 }
