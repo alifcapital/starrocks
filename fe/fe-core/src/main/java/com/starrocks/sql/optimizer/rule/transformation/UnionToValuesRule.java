@@ -28,8 +28,11 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 // Transform all constant UNION ALLs into a single Values operator
 //
@@ -69,8 +72,9 @@ public class UnionToValuesRule extends TransformationRule {
 
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
-        return input.getInputs().stream()
-                .filter(UnionToValuesRule::isMergeable)
+        LogicalUnionOperator unionOp = (LogicalUnionOperator) input.getOp();
+        return IntStream.range(0, input.getInputs().size())
+                .filter(i -> isMergeable(input.getInputs().get(i), unionOp.getChildOutputColumns().get(i)))
                 .skip(1)
                 .findFirst()
                 .isPresent();
@@ -87,20 +91,20 @@ public class UnionToValuesRule extends TransformationRule {
         final int numChildren = input.getInputs().size();
         for (int i = 0; i < numChildren; i++) {
             OptExpression child = input.getInputs().get(i);
-            if (isMergeable(child)) {
+            List<ColumnRefOperator> childOutput = unionOp.getChildOutputColumns().get(i);
+            if (isMergeable(child, childOutput)) {
                 LogicalValuesOperator valuesOp = (LogicalValuesOperator) child.getOp();
-                List<List<ScalarOperator>> rows = valuesOp.getRows();
                 if (isConstantUnion(valuesOp)) {
-                    List<ScalarOperator> scalarOperators = unionOp.getChildOutputColumns().get(i)
+                    List<ScalarOperator> scalarOperators = childOutput
                             .stream()
                             .map(valuesOp.getProjection().getColumnRefMap()::get)
                             .collect(Collectors.toList());
                     newRows.add(scalarOperators);
                 } else {
-                    newRows.addAll(rows);
+                    newRows.addAll(rowsInChildOutputOrder(valuesOp, childOutput));
                 }
             } else {
-                newChildOutputs.add(unionOp.getChildOutputColumns().get(i));
+                newChildOutputs.add(childOutput);
                 otherChildren.add(child);
             }
         }
@@ -156,7 +160,49 @@ public class UnionToValuesRule extends TransformationRule {
         }
     }
 
-    private static boolean isMergeable(OptExpression input) {
+    // The union reads a Values child through its child output columns. We expect this list to differ from the
+    // Values columns: it can be in another order, repeat a column or skip a column (a project that only rearranges
+    // columns is removed before this rule runs). So we take every value by the position of the child output column
+    // in the Values columns, and the merged rows get the same column order as the union output.
+    // isMergeable has already checked that every child output column is a Values column.
+    private static List<List<ScalarOperator>> rowsInChildOutputOrder(LogicalValuesOperator valuesOp,
+                                                                     List<ColumnRefOperator> childOutput) {
+        int[] positions = positionsInValues(valuesOp, childOutput);
+        List<List<ScalarOperator>> rows = new ArrayList<>(valuesOp.getRows().size());
+        for (List<ScalarOperator> row : valuesOp.getRows()) {
+            List<ScalarOperator> newRow = new ArrayList<>(positions.length);
+            for (int position : positions) {
+                newRow.add(row.get(position));
+            }
+            rows.add(newRow);
+        }
+        return rows;
+    }
+
+    // Returns the position of every child output column in the Values columns, or null if the Values has no
+    // column for one of them.
+    private static int[] positionsInValues(LogicalValuesOperator valuesOp, List<ColumnRefOperator> childOutput) {
+        Map<ColumnRefOperator, Integer> valuesPositions = new HashMap<>();
+        List<ColumnRefOperator> valuesColumns = valuesOp.getColumnRefSet();
+        for (int i = 0; i < valuesColumns.size(); i++) {
+            valuesPositions.putIfAbsent(valuesColumns.get(i), i);
+        }
+
+        int[] positions = new int[childOutput.size()];
+        for (int i = 0; i < positions.length; i++) {
+            Integer position = valuesPositions.get(childOutput.get(i));
+            if (position == null) {
+                return null;
+            }
+            positions[i] = position;
+        }
+        return positions;
+    }
+
+    // We merge a Values child only when it has every column the union reads from it. If the child output names a
+    // column the Values does not have, we cannot tell what the union reads, so the child stays an ordinary union
+    // child: a missed merge loses only the optimization, while a wrong merge loses the query.
+    private static boolean isMergeable(OptExpression input, List<ColumnRefOperator> childOutput) {
         if (input.getOp().getOpType() != OperatorType.LOGICAL_VALUES) {
             return false;
         }
@@ -166,7 +212,10 @@ public class UnionToValuesRule extends TransformationRule {
         }
 
         LogicalValuesOperator values = (LogicalValuesOperator) input.getOp();
-        return isConstantValues(values) || isConstantUnion(values);
+        if (isConstantUnion(values)) {
+            return values.getProjection().getColumnRefMap().keySet().containsAll(childOutput);
+        }
+        return isConstantValues(values) && positionsInValues(values, childOutput) != null;
     }
 
     private static boolean isConstantUnion(LogicalValuesOperator valuesOp) {

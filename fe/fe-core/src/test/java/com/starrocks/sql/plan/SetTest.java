@@ -741,6 +741,110 @@ public class SetTest extends PlanTestBase {
     }
 
     @Test
+    public void testUnionToValuesChildColumnOrder() throws Exception {
+        // The union reads a Values child in the order of its child output, which can differ from the order of the
+        // Values columns, so every merged row has to follow the child output.
+        String sql = "select * from (values (1, 2)) t(a, b) union all select b, a from (values (3, 4)) t(a, b)";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 2\n" +
+                "         4 | 3\n");
+
+        sql = "select x, y, count(*) from (select * from (values (1, 2)) t(a, b) " +
+                "union all select b, a from (values (3, 4)) t(a, b)) u(x, y) group by x, y";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 2\n" +
+                "         4 | 3\n");
+
+        sql = "select * from (values (1, 2)) t(a, b) union select b, a from (values (3, 4)) t(a, b)";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 2\n" +
+                "         4 | 3\n");
+
+        // A swap is its own inverse, so a rotation is needed to tell the child output position from its inverse.
+        sql = "select * from (values (1, 2, 3)) t(a, b, c) " +
+                "union all select b, c, a from (values (4, 5, 6)) t(a, b, c) " +
+                "union all select c, a, b from (values (7, 8, 9)) t(a, b, c)";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 2 | 3\n" +
+                "         5 | 6 | 4\n" +
+                "         9 | 7 | 8\n");
+    }
+
+    @Test
+    public void testUnionToValuesChildRepeatedColumn() throws Exception {
+        // One Values column can be read by several union output columns.
+        String sql = "select a, a from (values (1, 2)) t(a, b) union all select b, a from (values (3, 4)) t(a, b)";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 1\n" +
+                "         4 | 3\n");
+
+        sql = "select b, b from (values (1, 2)) t(a, b) union all select a, a from (values (3, 4)) t(a, b)";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         2 | 2\n" +
+                "         3 | 3\n");
+
+        sql = "select c, c, a from (values (1, 2, 3)) t(a, b, c) " +
+                "union all select b, a, b from (values (4, 5, 6)) t(a, b, c)";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         3 | 3 | 1\n" +
+                "         5 | 4 | 5\n");
+    }
+
+    @Test
+    public void testUnionToValuesChildColumnOrderWithOtherChild() throws Exception {
+        // The Values children are merged into one new Values child, and the other child stays in the union.
+        String sql = "select * from (values (cast(1 as bigint), cast(2 as bigint))) t(a, b) " +
+                "union all select b, a from (values (cast(3 as bigint), cast(4 as bigint))) t(a, b) " +
+                "union all select v1, v2 from t0";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "     constant exprs: \n" +
+                "         1 | 2\n" +
+                "         4 | 3\n");
+
+        // The other child is in the middle, so the merged children are not at the positions 0 and 1.
+        sql = "select b, a from (values (cast(1 as bigint), cast(2 as bigint))) t(a, b) " +
+                "union all select v1, v2 from t0 " +
+                "union all select * from (values (cast(3 as bigint), cast(4 as bigint))) t(a, b) " +
+                "union all select b, a from (values (cast(5 as bigint), cast(6 as bigint))) t(a, b)";
+        plan = getVerboseExplain(sql);
+        assertContains(plan, "     constant exprs: \n" +
+                "         2 | 1\n" +
+                "         3 | 4\n" +
+                "         6 | 5\n");
+    }
+
+    @Test
+    public void testUnionToValuesManyChildrenColumnOrder() throws Exception {
+        String sql = "select * from (values (1, 2), (3, 4)) t(a, b) " +
+                "union all select b, a from (values (5, 6), (7, 8)) t(a, b) " +
+                "union all select a, b from (values (9, 10)) t(a, b) " +
+                "union all select b, a from (values (11, 12)) t(a, b)";
+        String plan = getVerboseExplain(sql);
+        assertContains(plan, "  0:UNION\n" +
+                "     constant exprs: \n" +
+                "         1 | 2\n" +
+                "         3 | 4\n" +
+                "         6 | 5\n" +
+                "         8 | 7\n" +
+                "         9 | 10\n" +
+                "         12 | 11\n");
+    }
+
+    @Test
     public void testStruct() throws Exception {
         connectContext.getSessionVariable().setOptimizerExecuteTimeout(-1);
         String sql = "with input as ("
