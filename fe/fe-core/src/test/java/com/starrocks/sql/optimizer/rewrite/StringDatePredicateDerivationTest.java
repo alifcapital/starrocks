@@ -32,17 +32,17 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class StringDatePredicateDerivationTest {
@@ -56,14 +56,17 @@ public class StringDatePredicateDerivationTest {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
         context = new ConnectContext();
         context.setThreadLocalInfo();
-        context.getSessionVariable().setEnableStringDatePredicatePushdown(true);
-        context.getSessionVariable().setStringDatePredicateFormat("%Y%m%d");
     }
 
     @AfterEach
     public void tearDown() {
         TimeZone.setDefault(savedJvmZone);
         ConnectContext.remove();
+    }
+
+    private static Function<ColumnRefOperator, StringDateFormat> formats(String pattern) {
+        StringDateFormat format = StringDateFormat.parse(pattern);
+        return column -> column.getId() == 1 ? format : null;
     }
 
     private BinaryPredicateOperator predicate(Type type, BinaryType comparison, LocalDateTime value) {
@@ -73,94 +76,112 @@ public class StringDatePredicateDerivationTest {
 
     @Test
     public void testDateEqualityCoversWholeTimestampDay() {
-        context.getSessionVariable().setStringDatePredicateFormat("%Y-%m-%dT%H:%i:%s.%f");
+        var formats = formats("%Y-%m-%dT%H:%i:%s.%f");
         var original = predicate(DateType.DATE, BinaryType.EQ, LocalDateTime.of(2024, 2, 29, 0, 0));
-        var bound = StringDatePredicateDerivation.derive(original);
+        var bound = StringDatePredicateDerivation.derive(original, formats);
         assertEquals("1: s >= 2024-02-29T00:00:00.000000 AND 1: s < 2024-03-01T00:00:00.000000", bound.toString());
-        var combined = MonotonicFilterDerivation.addScanBounds(original);
+        var combined = MonotonicFilterDerivation.addScanBounds(original, formats);
         assertTrue(Utils.extractConjuncts(combined).contains(original));
-        assertSame(combined, MonotonicFilterDerivation.addScanBounds(combined));
+        assertSame(combined, MonotonicFilterDerivation.addScanBounds(combined, formats));
     }
 
     @Test
     public void testDatetimeWithDateOnlyStringsRoundsFractionalBoundary() {
+        var formats = formats("%Y%m%d");
         var value = LocalDateTime.of(2024, 2, 29, 12, 0);
         assertEquals("1: s >= 20240301", StringDatePredicateDerivation.derive(
-                predicate(DateType.DATETIME, BinaryType.GE, value)).toString());
+                predicate(DateType.DATETIME, BinaryType.GE, value), formats).toString());
         assertEquals("1: s < 20240301", StringDatePredicateDerivation.derive(
-                predicate(DateType.DATETIME, BinaryType.LT, value)).toString());
+                predicate(DateType.DATETIME, BinaryType.LT, value), formats).toString());
     }
 
     @Test
     public void testStrictAndInclusiveSecondBoundaries() {
-        context.getSessionVariable().setStringDatePredicateFormat("%Y-%m-%d %H:%i:%s");
+        var formats = formats("%Y-%m-%d %H:%i:%s");
         LocalDateTime value = LocalDateTime.of(2024, 12, 31, 23, 59, 59, 500000000);
         assertEquals("1: s >= 2025-01-01 00:00:00", StringDatePredicateDerivation.derive(
-                predicate(DateType.DATETIME, BinaryType.GE, value)).toString());
+                predicate(DateType.DATETIME, BinaryType.GE, value), formats).toString());
         assertEquals("1: s < 2025-01-01 00:00:00", StringDatePredicateDerivation.derive(
-                predicate(DateType.DATETIME, BinaryType.LE, value)).toString());
+                predicate(DateType.DATETIME, BinaryType.LE, value), formats).toString());
         var equality = predicate(DateType.DATETIME, BinaryType.EQ, value);
-        assertSame(equality, StringDatePredicateDerivation.derive(equality));
+        assertSame(equality, StringDatePredicateDerivation.derive(equality, formats));
+    }
+
+    @Test
+    public void testMonthAndYearStringsCutDateBoundsToTheirUnit() {
+        var months = formats("%Y-%m");
+        LocalDateTime middle = LocalDateTime.of(2024, 3, 15, 0, 0);
+        assertEquals("1: s >= 2024-04", StringDatePredicateDerivation.derive(
+                predicate(DateType.DATE, BinaryType.GE, middle), months).toString());
+        assertEquals("1: s < 2024-04", StringDatePredicateDerivation.derive(
+                predicate(DateType.DATE, BinaryType.LT, middle), months).toString());
+        var mid = predicate(DateType.DATE, BinaryType.EQ, middle);
+        assertSame(mid, StringDatePredicateDerivation.derive(mid, months));
+        assertEquals("1: s >= 2024-03 AND 1: s < 2024-04", StringDatePredicateDerivation.derive(
+                predicate(DateType.DATE, BinaryType.EQ, LocalDateTime.of(2024, 3, 1, 0, 0)), months).toString());
+        var years = formats("%Y");
+        assertEquals("1: s >= 2025", StringDatePredicateDerivation.derive(
+                predicate(DateType.DATETIME, BinaryType.GT, LocalDateTime.of(2024, 1, 1, 0, 0)), years).toString());
+        assertEquals("1: s < 2025", StringDatePredicateDerivation.derive(
+                predicate(DateType.DATETIME, BinaryType.LE, LocalDateTime.of(2024, 1, 1, 0, 0)), years).toString());
     }
 
     @Test
     public void testMaxDateKeepsOnlyRepresentableBound() {
+        var formats = formats("%Y%m%d");
         var original = predicate(DateType.DATE, BinaryType.EQ, LocalDateTime.of(9999, 12, 31, 0, 0));
-        assertEquals("1: s >= 99991231", StringDatePredicateDerivation.derive(original).toString());
+        assertEquals("1: s >= 99991231", StringDatePredicateDerivation.derive(original, formats).toString());
         var after = predicate(DateType.DATE, BinaryType.GT, LocalDateTime.of(9999, 12, 31, 0, 0));
-        assertSame(after, StringDatePredicateDerivation.derive(after));
+        assertSame(after, StringDatePredicateDerivation.derive(after, formats));
         var minimum = predicate(DateType.DATE, BinaryType.GE, LocalDateTime.of(0, 1, 1, 0, 0));
-        assertEquals("1: s >= 00000101", StringDatePredicateDerivation.derive(minimum).toString());
+        assertEquals("1: s >= 00000101", StringDatePredicateDerivation.derive(minimum, formats).toString());
     }
 
     @Test
-    public void testSettingsAndUnsupportedFormats() {
+    public void testColumnWithoutFormat() {
         var original = predicate(DateType.DATE, BinaryType.EQ, LocalDateTime.of(2024, 3, 1, 0, 0));
-        context.getSessionVariable().setEnableStringDatePredicatePushdown(false);
-        assertSame(original, MonotonicFilterDerivation.addScanBounds(original));
-        context.getSessionVariable().setEnableStringDatePredicatePushdown(true);
-        context.getSessionVariable().setStringDatePredicateFormat("");
-        assertSame(original, MonotonicFilterDerivation.addScanBounds(original));
-        for (String invalid : List.of("%d-%m-%Y", "%y%m%d", "%Y%m", "%Y-%c-%e",
-                "%Y-%m-%dT%H:%i:%s%z", "%Y-%m-%dT%H:%i:%s+05:00")) {
-            assertThrows(IllegalArgumentException.class,
-                    () -> context.getSessionVariable().setStringDatePredicateFormat(invalid));
-        }
-        context.getSessionVariable().setStringDatePredicateFormat("%Y%m%d");
+        assertSame(original, MonotonicFilterDerivation.addScanBounds(original, column -> null));
+        assertSame(original, StringDatePredicateDerivation.derive(original, column -> null));
+        var formats = formats("%Y%m%d");
+        ColumnRefOperator other = new ColumnRefOperator(2, VarcharType.VARCHAR, "t", true);
+        var otherColumn = new BinaryPredicateOperator(BinaryType.EQ, new CastOperator(DateType.DATE, other),
+                ConstantOperator.createDate(LocalDateTime.of(2024, 3, 1, 0, 0)));
+        assertSame(otherColumn, StringDatePredicateDerivation.derive(otherColumn, formats));
+        // The string bounds do not depend on the registry of monotonic functions.
         context.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
-        assertTrue(Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(original)).size() > 1);
-        ConnectContext.remove();
-        assertSame(original, StringDatePredicateDerivation.derive(original));
+        assertTrue(Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(original, formats)).size() > 1);
     }
 
     @Test
     public void testDoesNotReplaceValueOrNullContext() {
+        var formats = formats("%Y%m%d");
         var original = predicate(DateType.DATE, BinaryType.EQ, LocalDateTime.of(2024, 3, 1, 0, 0));
         var isNull = new IsNullPredicateOperator(false, original);
-        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull));
+        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull, formats));
         assertEquals(original, new ScalarOperatorRewriter().rewrite(original.clone(),
                 ScalarOperatorRewriter.DEFAULT_REWRITE_RULES));
         var nullSafe = new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
                 new CastOperator(DateType.DATE, column), ConstantOperator.createNull(DateType.DATE));
-        assertSame(nullSafe, MonotonicFilterDerivation.addScanBounds(nullSafe));
+        assertSame(nullSafe, MonotonicFilterDerivation.addScanBounds(nullSafe, formats));
         var notEqual = predicate(DateType.DATE, BinaryType.NE, LocalDateTime.of(2024, 3, 1, 0, 0));
-        assertSame(notEqual, StringDatePredicateDerivation.derive(notEqual));
+        assertSame(notEqual, StringDatePredicateDerivation.derive(notEqual, formats));
     }
 
     @Test
     public void testTimezoneIndependentCastAndTimezoneDependentEpoch() {
-        context.getSessionVariable().setStringDatePredicateFormat("%Y-%m-%d %H:%i:%s");
+        var formats = formats("%Y-%m-%d %H:%i:%s");
         var cast = new CastOperator(DateType.DATETIME, column);
         for (String zone : List.of("+00:00", "+05:00", "America/New_York", "Europe/Berlin")) {
             context.getSessionVariable().setTimeZone(zone);
             LocalDateTime wall = LocalDateTime.of(2024, 3, 1, 12, 0);
             var direct = predicate(DateType.DATETIME, BinaryType.GE, wall);
-            assertEquals("1: s >= 2024-03-01 12:00:00", StringDatePredicateDerivation.derive(direct).toString());
+            assertEquals("1: s >= 2024-03-01 12:00:00",
+                    StringDatePredicateDerivation.derive(direct, formats).toString());
             long seconds = wall.atZone(ZoneId.of(zone)).toEpochSecond();
             var epoch = new BinaryPredicateOperator(BinaryType.EQ,
                     new CallOperator("unix_timestamp", IntegerType.BIGINT, List.of(cast)),
                     ConstantOperator.createBigint(seconds));
-            var derived = MonotonicFilterDerivation.addScanBounds(epoch);
+            var derived = MonotonicFilterDerivation.addScanBounds(epoch, formats);
             assertTrue(Utils.extractConjuncts(derived).stream().anyMatch(
                     p -> p.toString().equals("1: s >= 2024-03-01 12:00:00")), derived.toString());
             assertTrue(Utils.extractConjuncts(derived).contains(epoch));
@@ -171,18 +192,26 @@ public class StringDatePredicateDerivationTest {
             var epoch = new BinaryPredicateOperator(BinaryType.EQ,
                     new CallOperator("unix_timestamp", IntegerType.BIGINT, List.of(cast)),
                     ConstantOperator.createBigint(wall.atZone(ZoneId.of("America/New_York")).toEpochSecond()));
-            assertSame(epoch, MonotonicFilterDerivation.addScanBounds(epoch));
+            assertSame(epoch, MonotonicFilterDerivation.addScanBounds(epoch, formats));
         }
     }
 
+    // Each precision from years to microseconds, and for each the bound of every comparison agrees with the
+    // comparison of the times on strings of the format.
     @ParameterizedTest
-    @EnumSource(StringDateFormat.class)
-    public void testBoundsAgreeWithCalendarComparisons(StringDateFormat format) {
-        context.getSessionVariable().setStringDatePredicateFormat(format.getSqlFormat());
+    @ValueSource(strings = {"%Y", "%Y-%m", "%Y%m%d", "%Y-%m-%d", "%Y-%m-%d %H", "%Y/%m/%d %H:%i",
+            "%Y%m%d%H%i%s", "%Y-%m-%d %H:%i:%s", "%Y-%m-%dT%H:%i:%s", "%Y-%m-%d %H:%i:%s.%f",
+            "%Y-%m-%dT%H:%i:%s.%f", "%Y-%m-%dT%H:%i:%sZ", "%Y-%m-%dT%H:%i:%s.%fZ"})
+    public void testBoundsAgreeWithCalendarComparisons(String pattern) {
+        StringDateFormat format = StringDateFormat.parse(pattern);
+        var formats = formats(pattern);
         List<LocalDateTime> values = List.of(
                 LocalDateTime.of(0, 1, 1, 0, 0), LocalDateTime.of(1999, 12, 31, 23, 59, 59, 999999000),
+                LocalDateTime.of(2024, 1, 1, 0, 0), LocalDateTime.of(2024, 2, 1, 0, 0),
                 LocalDateTime.of(2024, 2, 28, 23, 59, 59, 999999000), LocalDateTime.of(2024, 2, 29, 0, 0),
-                LocalDateTime.of(2024, 2, 29, 12, 30, 0, 1_000), LocalDateTime.of(2024, 3, 1, 0, 0),
+                LocalDateTime.of(2024, 2, 29, 12, 0), LocalDateTime.of(2024, 2, 29, 12, 30),
+                LocalDateTime.of(2024, 2, 29, 12, 30, 15), LocalDateTime.of(2024, 2, 29, 12, 30, 15, 1_000),
+                LocalDateTime.of(2024, 3, 1, 0, 0), LocalDateTime.of(2024, 12, 31, 23, 59, 59),
                 LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999999000));
         for (Type type : List.of(DateType.DATE, DateType.DATETIME)) {
             for (BinaryType comparison : List.of(BinaryType.EQ, BinaryType.EQ_FOR_NULL,
@@ -194,18 +223,18 @@ public class StringDatePredicateDerivationTest {
                         continue;
                     }
                     var original = predicate(type, comparison, constant);
-                    var derived = StringDatePredicateDerivation.derive(original);
+                    var derived = StringDatePredicateDerivation.derive(original, formats);
                     if (derived == original) {
                         continue;
                     }
                     for (LocalDateTime input : values) {
-                        LocalDateTime stored = input.truncatedTo(format.getPrecision());
+                        LocalDateTime stored = StringDateFormat.truncate(input, format.getPrecision());
                         LocalDateTime cast = type.isDate() ? stored.truncatedTo(ChronoUnit.DAYS) : stored;
                         boolean expected = compare(cast.compareTo(constant), comparison);
                         boolean actual = Utils.extractConjuncts(derived).stream().allMatch(p -> compare(
                                 format.format(stored).compareTo(((ConstantOperator) p.getChild(1)).getVarchar()),
                                 ((BinaryPredicateOperator) p).getBinaryType()));
-                        assertEquals(expected, actual, () -> format + " " + type + " " + original + " at " + input);
+                        assertEquals(expected, actual, () -> pattern + " " + type + " " + original + " at " + input);
                     }
                 }
             }
@@ -214,8 +243,8 @@ public class StringDatePredicateDerivationTest {
 
     @Test
     public void testUtcSuffixUsesBackendFieldsAndRequiresUtcJvm() {
-        var format = StringDateFormat.ISO_DATETIME_MICROS_UTC;
-        context.getSessionVariable().setStringDatePredicateFormat(format.getSqlFormat());
+        var format = StringDateFormat.parse("%Y-%m-%dT%H:%i:%s.%fZ");
+        var formats = formats(format.getPattern());
         for (String sessionZone : List.of("UTC", "Asia/Dushanbe", "Asia/Shanghai")) {
             context.getSessionVariable().setTimeZone(sessionZone);
             for (String input : List.of("2026-09-24T19:22:17.235962Z", "2026-09-24T19:22:17.827734Z",
@@ -225,14 +254,14 @@ public class StringDatePredicateDerivationTest {
                 LocalDateTime fields = LocalDateTime.parse(input.substring(0, input.length() - 1));
                 assertEquals(fields, folded.getDatetime());
                 var original = predicate(DateType.DATETIME, BinaryType.GE, fields);
-                assertEquals("1: s >= " + input, StringDatePredicateDerivation.derive(original).toString());
+                assertEquals("1: s >= " + input, StringDatePredicateDerivation.derive(original, formats).toString());
             }
         }
         var original = predicate(DateType.DATETIME, BinaryType.GE, LocalDateTime.of(2026, 9, 24, 19, 0));
         TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
-        assertSame(original, StringDatePredicateDerivation.derive(original));
+        assertSame(original, StringDatePredicateDerivation.derive(original, formats));
         TimeZone.setDefault(TimeZone.getTimeZone("Europe/London"));
-        assertSame(original, StringDatePredicateDerivation.derive(original));
+        assertSame(original, StringDatePredicateDerivation.derive(original, formats));
     }
 
     private boolean compare(int result, BinaryType comparison) {

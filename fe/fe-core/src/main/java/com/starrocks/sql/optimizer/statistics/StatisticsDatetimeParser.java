@@ -25,7 +25,7 @@ import java.time.LocalDateTime;
  * gives the same results as the fallback, so only the fallback is ported. The parser walks bytes: a string with
  * other than ASCII characters is read as its UTF-8 bytes.
  */
-final class StatisticsDatetimeParser {
+public final class StatisticsDatetimeParser {
     private static final int YY_PART_YEAR = 70;
     private static final int[][] DAYS_IN_MONTH = {
             {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
@@ -48,7 +48,7 @@ final class StatisticsDatetimeParser {
     }
 
     /** The DATETIME the BE casts the text to, or null when the BE gives NULL. CAST AS DATE keeps its date. */
-    static LocalDateTime parse(String text) {
+    public static LocalDateTime parse(String text) {
         int[] fields = new int[MAX_DATE_PARTS];
         if (!parseFallback(bytes(text), fields)) {
             return null;

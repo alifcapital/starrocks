@@ -61,7 +61,7 @@ public class InvertMonotonicPredicateRuleTest {
 
     private ScalarOperator scanBound(ScalarOperator predicate) {
         assertSame(predicate, apply(predicate));
-        ScalarOperator result = MonotonicFilterDerivation.addScanBounds(predicate);
+        ScalarOperator result = MonotonicFilterDerivation.addScanBounds(predicate, unused -> null);
         assertTrue(Utils.extractConjuncts(result).contains(predicate));
         return Utils.compoundAnd(Utils.extractConjuncts(result).stream()
                 .filter(p -> !p.equals(predicate)).toList());

@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
+import com.starrocks.connector.iceberg.MockIcebergMetadata;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +44,7 @@ public class MonotonicRangeSafetyTest extends PlanTestNoneDBBase {
                 + "DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')");
         starRocksAssert.withTable("CREATE TABLE times (ts DATETIME, id INT) DUPLICATE KEY(ts) "
                 + "DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')");
+        ConnectorPlanTestBase.mockCatalog(connectContext, MockIcebergMetadata.MOCKED_ICEBERG_CATALOG_NAME);
     }
 
     @ParameterizedTest
@@ -88,28 +90,14 @@ public class MonotonicRangeSafetyTest extends PlanTestNoneDBBase {
 
     @Test
     public void testStringJoinRequiresStoredFormat() throws Exception {
-        var variables = connectContext.getSessionVariable();
-        boolean oldJoin = variables.isEnableStringDateJoinPruning();
-        boolean oldPushdown = variables.isEnableStringDatePredicatePushdown();
-        String oldFormat = variables.getStringDatePredicateFormat();
-        try {
-            variables.setEnableStringDateJoinPruning(true);
-            variables.setEnableStringDatePredicatePushdown(false);
-            variables.setStringDatePredicateFormat("");
-            String sql = "select sv.id from sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) "
-                    + "where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00'";
-            // A stored ISO value 2024-03-01T01:00:00 passes the space-separated string bounds.
-            // Inferring the stored format from those bounds would incorrectly reject its matching f.ts.
-            assertNotContains(getFragmentPlan(sql), "ts >= '2024-03-01 12:00:00'");
-            variables.setStringDatePredicateFormat("%Y-%m-%dT%H:%i:%s");
-            assertNotContains(getFragmentPlan(sql), "ts >= '2024-03-01 12:00:00'");
-            // The declared format enables the JOIN path independently of inverse string pushdown.
-            assertContains(getFragmentPlan(sql.replace("01 12:00:00", "01T12:00:00")
-                    .replace("02 12:00:00", "02T12:00:00")), "ts >= '2024-03-01 12:00:00'");
-        } finally {
-            variables.setEnableStringDateJoinPruning(oldJoin);
-            variables.setEnableStringDatePredicatePushdown(oldPushdown);
-            variables.setStringDatePredicateFormat(oldFormat);
-        }
+        String sql = "select sv.id from %s sv join times f on sv.id=f.id and f.ts=cast(sv.s as datetime) "
+                + "where sv.s between '2024-03-01 12:00:00' and '2024-03-02 12:00:00'";
+        // A stored ISO value 2024-03-01T01:00:00 passes the space-separated string bounds.
+        // Inferring the stored format from those bounds would incorrectly reject its matching f.ts.
+        assertNotContains(getFragmentPlan(String.format(sql, "sv")), "ts >= '2024-03-01 12:00:00'");
+        String iso = String.format(sql, "iceberg0.string_date_db.strdate_iso");
+        assertNotContains(getFragmentPlan(iso), "ts >= '2024-03-01 12:00:00'");
+        String isoBounds = iso.replace("01 12:00:00", "01T12:00:00").replace("02 12:00:00", "02T12:00:00");
+        assertContains(getFragmentPlan(isoBounds), "ts >= '2024-03-01 12:00:00'");
     }
 }

@@ -221,62 +221,37 @@ If you want to activate the roles assigned to you in a session, use the [SET ROL
 * **Data Type**: String
 * **Introduced in**: v4.1
 
-### enable_string_date_join_pruning
+### enable_string_date_format_property
 
-* **Default**: false
+* **Default**: true
 * **Data Type**: Boolean
-* **Description**: Allows join predicate derivation through a VARCHAR-to-DATE/DATETIME cast. Requires `enable_monotonic_predicate_move_around` and an explicit, nonempty `string_date_predicate_format`. Every participating string column must store valid calendar values in that declared format. Both filter bounds must also match the declared format; otherwise the range is not derived. `enable_string_date_predicate_pushdown` does not need to be enabled.
+* **Description**: Whether the optimizer uses the Iceberg table property `string-date-format.<column>`, which declares how a VARCHAR column writes dates. For a column with this property, the optimizer adds VARCHAR scan bounds for comparisons over `CAST(column AS DATE/DATETIME)`, so that Iceberg can skip files and row groups, and derives JOIN predicates through such a cast. The property itself is the consent to these optimizations; set this variable to `false` to turn off all such properties, for example when a property turns out to be wrong.
 
-This setting is a data-format assertion, not validation: it neither checks stored rows nor changes CAST parsing. Do not enable it for columns containing mixed formats, short years, or malformed values. Supported formats, fixed fractional precision, and the UTC requirement for `Z` suffixes are listed under `string_date_predicate_format`.
-
-The format cannot be inferred from the filter literals. For example, `2024-03-01T01:00:00` is lexically greater than `2024-03-01 12:00:00`, although its timestamp is earlier. Declaring the stored format prevents the optimizer from treating those mismatched boundaries as a calendar range.
+Declare the format with ALTER TABLE:
 
 ```sql
-SET string_date_predicate_format = '%Y%m%d';
-SET enable_string_date_join_pruning = true;
+ALTER TABLE iceberg_catalog.db.events SET ("string-date-format.created_at" = "%Y-%m-%dT%H:%i:%s.%fZ");
+
+SELECT * FROM iceberg_catalog.db.events WHERE CAST(created_at AS DATE) = '2024-03-05';
+-- Additional scan bounds: created_at >= '2024-03-05T00:00:00.000000Z' AND created_at < '2024-03-06T00:00:00.000000Z'
 ```
 
-### enable_string_date_predicate_pushdown
+The value is a `date_format` pattern whose strings sort in the order of their times:
 
-* **Default**: false
-* **Data Type**: Boolean
-* **Description**: Adds VARCHAR scan bounds for comparisons over `CAST(column AS DATE/DATETIME)`, using the encoding declared by `string_date_predicate_format`. A nonempty supported format is required. This works in ordinary WHERE clauses and for predicates delivered through a JOIN; it does not require a partitioned table or `enable_string_date_join_pruning`.
+- only the fields `%Y`, `%m`, `%d`, `%H`, `%i`, `%s`, `%f`;
+- the fields go from the year down without a gap and may stop at any field;
+- each field has a fixed width with leading zeros: four digits for `%Y`, six for `%f`, two for the others;
+- the text between the fields and after the last field is constant, for example `T`, `/`, `.` or `Z`; `%%` stands for `%`.
 
-The original date comparison remains. Raw string bounds can prune partitions, files, or data blocks where the storage engine supports it. For supported date functions, `enable_monotonic_predicate_rewrite` first derives bounds on the CAST, then this setting allows bounds on the string column. CAST to DATE covers the entire day even when strings contain a time. Only positive AND conjuncts are processed; predicates in SELECT expressions, OR, or IS NULL are not replaced.
+For example, `%Y-%m-%d`, `%Y/%m/%d %H:%i`, `%Y%m%d%H%i%s`, `%Y-%m-%dT%H:%i:%s.%fZ` and `%Y-%m` are accepted. `%d.%m.%Y`, `%m/%d/%Y`, `%Y-%c-%e`, `%y`, time zone offsets and month names are not. The BE must also cast the strings of the format to the times they hold: `%Y%m%d%H%i` is not accepted, because the BE reads a string of 12 digits with a two-digit year, and a format without a day is accepted only because the BE casts its strings to NULL. A value that is not accepted is ignored with a warning in the FE log, and the query runs as without the property. The column name in the property is matched without regard to case. Only Iceberg tables are supported.
 
-Enabling this option asserts that **all non-NULL values of every participating VARCHAR date column use the configured format and are valid calendar values**. It does not validate rows or change CAST parsing. Do not enable it for queries mixing date encodings across participating columns. A wrong format, short year, unpadded field, extra whitespace, or malformed input can cause matching rows to be pruned. Prefer session or query-level settings over a global assertion on unrelated datasets.
+The property is an assertion by the table owner, not validation: StarRocks checks neither the stored rows nor the property on ALTER, and it does not change CAST parsing. All non-NULL values of the column must be valid dates in the declared format. A wrong format, short year, unpadded field, extra whitespace or malformed value can cause matching rows to be skipped. The original date comparison remains in the plan.
 
-```sql
-SET string_date_predicate_format = '%Y%m%d';
-SET enable_string_date_predicate_pushdown = true;
+CAST to DATE covers the entire day even when strings contain a time. Only positive AND conjuncts are processed; predicates in SELECT expressions, OR, or IS NULL are not replaced. For supported date functions, `enable_monotonic_predicate_rewrite` first derives bounds on the CAST, and then the property gives bounds on the string column. A JOIN predicate is derived only when both bounds of the filter on the string column are strings of the declared format, and only for a column of one table, not for an expression or the output of a UNION. The format cannot be inferred from the filter literals: `2024-03-01T01:00:00` is lexically greater than `2024-03-01 12:00:00`, although its timestamp is earlier.
 
-SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
--- Additional scan bounds: date_string >= '20240101' AND date_string < '20250101'
-```
-
-### string_date_predicate_format
-
-* **Default**: empty string (disables string-date range derivation in both directions)
-* **Data Type**: String
-* **Description**: Declares the stored date encoding shared by `enable_string_date_predicate_pushdown` and `enable_string_date_join_pruning`. The empty string disables both derivations. Only the following case-sensitive formats are accepted; unsupported values produce a SET error.
-
-| Format | Example |
-|---|---|
-| `%Y%m%d` | `20240305` |
-| `%Y-%m-%d` | `2024-03-05` |
-| `%Y%m%d%H%i%s` | `20240305123045` |
-| `%Y-%m-%d %H:%i:%s` | `2024-03-05 12:30:45` |
-| `%Y-%m-%dT%H:%i:%s` | `2024-03-05T12:30:45` |
-| `%Y-%m-%d %H:%i:%s.%f` | `2024-03-05 12:30:45.123456` |
-| `%Y-%m-%dT%H:%i:%s.%f` | `2024-03-05T12:30:45.123456` |
-| `%Y-%m-%dT%H:%i:%sZ` | `2024-03-05T12:30:45Z` |
-| `%Y-%m-%dT%H:%i:%s.%fZ` | `2024-03-05T12:30:45.123456Z` |
-
-All fields must be zero-padded, years must have four digits, and `%f` requires exactly six fractional digits. Variable precision, numeric offsets, and zone names inside stored strings are not supported. The two `Z` formats require the FE JVM system timezone to be fixed UTC; otherwise no bounds are derived for them. This keeps FE constant folding consistent with BE parsing without changing either parser. The session timezone can differ. Formats ordered by day or month before year cannot produce calendar ranges by lexical comparison and are rejected.
+Formats that end with `Z` require the FE JVM system timezone to be fixed UTC; otherwise no bounds are derived for them. This keeps FE constant folding consistent with BE parsing without changing either parser. The session timezone can differ.
 
 Plain DATE/DATETIME casts do not apply a timezone conversion to these encodings. Session timezone therefore does not shift their string bounds. Expressions involving `unix_timestamp` or `from_unixtime` use the existing timezone and DST checks; the optimizer declines derivation where those checks cannot prove a safe range. `convert_tz` with constant source and destination zones can derive input bounds while retaining the original filter. Both numeric offsets and named zones are supported, for example `UTC` and `Asia/Dushanbe`. Boundaries within 72 hours of a transition in either zone are conservatively declined, as are ambiguous local times and unrepresentable bounds. Away from transitions, named zones use the offset for the comparison date, including seasonal offsets. Declaring an input format never declares or changes its timezone.
-
-The two optimization switches are independent, but both require this format. The JOIN path validates its input bounds against the declared encoding even when inverse string predicate pushdown is disabled.
 
 ### auto_increment_increment
 

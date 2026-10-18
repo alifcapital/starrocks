@@ -62,14 +62,17 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.types.Types;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -93,6 +96,8 @@ public class MockIcebergMetadata implements ConnectorMetadata {
     // V2 tables that carry committed equality-delete files, used by the equality-delete
     // partition-scoping rewrite tests.
     public static final String MOCKED_EQ_DELETE_DB_NAME = "eq_delete_db";
+    // Tables whose VARCHAR columns declare how they write dates, see StringDateFormatProperty.
+    public static final String MOCKED_STRING_DATE_DB_NAME = "string_date_db";
 
     // equality deletes written only under an unpartitioned spec -> GLOBAL scope only.
     public static final String MOCKED_EQ_DELETE_GLOBAL_TABLE_NAME = "eq_delete_global";
@@ -173,6 +178,7 @@ public class MockIcebergMetadata implements ConnectorMetadata {
             mockPartitionedTable();
             mockPartitionTransforms();
             mockEqualityDeleteTables();
+            mockStringDateTables();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -457,6 +463,65 @@ public class MockIcebergMetadata implements ConnectorMetadata {
 
             registerEqDeleteTable(icebergTableInfoMap, name, fullSchemas, baseTable);
         }
+    }
+
+    // The table names carry a prefix: TestTables registers native tables by name for the whole JVM.
+    public static void mockStringDateTables() throws IOException {
+        MOCK_TABLE_MAP.putIfAbsent(MOCKED_STRING_DATE_DB_NAME, new CaseInsensitiveMap<>());
+        Map<String, IcebergTableInfo> tables = MOCK_TABLE_MAP.get(MOCKED_STRING_DATE_DB_NAME);
+        Map<String, String> formats = new LinkedHashMap<>();
+        formats.put("d_dash", "%Y-%m-%d");
+        formats.put("d_compact", "%Y%m%d");
+        formats.put("dt_space", "%Y-%m-%d %H:%i:%s");
+        formats.put("dt_compact", "%Y%m%d%H%i%s");
+        formats.put("dt_slash_minute", "%Y/%m/%d %H:%i");
+        formats.put("ts_iso", "%Y-%m-%dT%H:%i:%s");
+        formats.put("ts_iso_micro", "%Y-%m-%dT%H:%i:%s.%f");
+        formats.put("ts_iso_micro_z", "%Y-%m-%dT%H:%i:%s.%fZ");
+        formats.put("m_month", "%Y-%m");
+        formats.put("y_year", "%Y");
+        formats.put("s_bad", "%d.%m.%Y");
+        formats.put("s_garbage", "%Q");
+        formats.put("s_two_digit_year", "%Y%m%d%H%i");
+        List<String> columns = new ArrayList<>(formats.keySet());
+        columns.add("s_none");
+        columns.add("MixedCase");
+        Map<String, String> properties = new LinkedHashMap<>();
+        formats.forEach((column, format) -> properties.put("string-date-format." + column, format));
+        properties.put("string-date-format.mixedcase", "%Y-%m-%d");
+        registerStringDateTable(tables, "strdate_formats", columns, properties);
+        registerStringDateTable(tables, "strdate_iso", List.of("s"),
+                Map.of("string-date-format.s", "%Y-%m-%dT%H:%i:%s"));
+        registerStringDateTable(tables, "strdate_compact", List.of("s"), Map.of("string-date-format.s", "%Y%m%d"));
+        registerStringDateTable(tables, "strdate_plain", List.of("s"), Map.of());
+    }
+
+    private static void registerStringDateTable(Map<String, IcebergTableInfo> tables, String name,
+                                                List<String> stringColumns, Map<String, String> properties)
+            throws IOException {
+        List<Column> columns = new ArrayList<>();
+        List<Types.NestedField> fields = new ArrayList<>();
+        columns.add(new Column("id", IntegerType.BIGINT, true));
+        fields.add(Types.NestedField.optional(1, "id", Types.LongType.get()));
+        for (String column : stringColumns) {
+            columns.add(new Column(column, StringType.STRING, true));
+            fields.add(Types.NestedField.optional(fields.size() + 1, column, Types.StringType.get()));
+        }
+        Schema schema = new Schema(fields);
+        TestTables.TestTable baseTable = TestTables.create(
+                new File(getStarRocksHome() + "/" + MOCKED_STRING_DATE_DB_NAME + "/" + name), name,
+                schema, PartitionSpec.unpartitioned(), 2);
+        if (!properties.isEmpty()) {
+            UpdateProperties update = baseTable.updateProperties();
+            properties.forEach(update::set);
+            update.commit();
+        }
+        columns = addMetaColumns(columns);
+        MockIcebergTable table = new MockIcebergTable(name.hashCode(), name, MOCKED_ICEBERG_CATALOG_NAME, null,
+                MOCKED_STRING_DATE_DB_NAME, name, columns, baseTable, null, "");
+        Map<String, ColumnStatistic> statistics = columns.stream().collect(Collectors.toMap(Column::getName,
+                column -> ColumnStatistic.unknown()));
+        tables.put(name, new IcebergTableInfo(table, Lists.newArrayList(), 100, statistics));
     }
 
     private static void registerEqDeleteTable(Map<String, IcebergTableInfo> icebergTableInfoMap,

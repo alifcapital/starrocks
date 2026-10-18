@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.rule.transformation;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -38,6 +39,7 @@ import com.starrocks.sql.optimizer.property.DomainPropertyDeriver;
 import com.starrocks.sql.optimizer.property.ReplaceShuttle;
 import com.starrocks.sql.optimizer.rewrite.MinMax;
 import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
+import com.starrocks.sql.optimizer.rewrite.StringDateFormatProperty;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.ArrayList;
@@ -72,6 +74,13 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
+        // The domains of the children map the range of a VARCHAR column of dates through a cast only when the table
+        // of the column declares its format.
+        return StringDateFormatProperty.withQueryColumns(context.getColumnRefFactory(),
+                () -> deriveFromDomains(input, context));
+    }
+
+    private List<OptExpression> deriveFromDomains(OptExpression input, OptimizerContext context) {
         LogicalJoinOperator joinOperator = input.getOp().cast();
         ScalarOperator onPredicate = joinOperator.getOnPredicate();
         boolean enableMonotonicDerive = context.getSessionVariable().isEnableMonotonicPredicateMoveAround();
@@ -389,7 +398,9 @@ public class OnPredicateMoveAroundRule extends TransformationRule {
         if (columnDomain == null) {
             return null;
         }
-        return MonotonicImage.imageRange(seed, column, columnDomain.getMinMaxForMonotonicImage()).orElse(null);
+        StringDateFormat format = StringDateFormatProperty.ofQueryColumn(column);
+        return MonotonicImage.imageRange(seed, column, columnDomain.getMinMaxForMonotonicImage(format), format)
+                .orElse(null);
     }
 
     /**

@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
+import com.starrocks.connector.iceberg.MockIcebergMetadata;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -27,11 +28,15 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
     public static void beforeClass() throws Exception {
         PlanTestBase.beforeClass();
         FeConstants.runningUnitTest = true;
+        // A VARCHAR source of dates needs the format its Iceberg table declares.
+        ConnectorPlanTestBase.mockCatalog(connectContext, MockIcebergMetadata.MOCKED_ICEBERG_CATALOG_NAME);
         for (String type : new String[] {"date", "int", "varchar"}) {
             String sqlType = type.equals("varchar") ? "varchar(20)" : type;
-            starRocksAssert.withTable("CREATE TABLE matrix_source_" + type
-                    + " (id bigint, k " + sqlType + ") DUPLICATE KEY(id) "
-                    + "DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES (\"replication_num\"=\"1\")");
+            if (!type.equals("varchar")) {
+                starRocksAssert.withTable("CREATE TABLE matrix_source_" + type
+                        + " (id bigint, k " + sqlType + ") DUPLICATE KEY(id) "
+                        + "DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES (\"replication_num\"=\"1\")");
+            }
             StringBuilder partitions = new StringBuilder();
             for (int month = 1; month <= 6; month++) {
                 if (month > 1) {
@@ -69,21 +74,21 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
         String oldComparison = variables.getCboEqBaseType();
         boolean oldMove = variables.isEnableMonotonicPredicateMoveAround();
         boolean oldRewrite = variables.isEnableMonotonicPredicateRewrite();
-        boolean oldString = variables.isEnableStringDateJoinPruning();
-        String oldFormat = variables.getStringDatePredicateFormat();
-        String date = source.equals("date") ? "e.k" : "cast(e.k as date)";
+        boolean oldFormat = variables.isEnableStringDateFormatProperty();
+        String key = source.equals("varchar") ? "e.s" : "e.k";
+        String sourceTable = source.equals("varchar") ? "iceberg0.string_date_db.strdate_compact"
+                : "matrix_source_" + source;
+        String date = source.equals("date") ? key : "cast(" + key + " as date)";
         String expression = target.equals("date") ? "date_trunc('month', " + date + ")"
                 : "date_format(" + date + ", '%Y%m')";
         String range = source.equals("date") ? "'2024-03-05' AND '2024-04-10'"
                 : source.equals("int") ? "20240305 AND 20240410" : "'20240305' AND '20240410'";
-        String sql = "SELECT f.id FROM matrix_target_" + target + " f JOIN matrix_source_" + source
-                + " e ON f.id=e.id AND f.k=" + expression + " WHERE e.k BETWEEN " + range;
+        String sql = "SELECT f.id FROM matrix_target_" + target + " f JOIN " + sourceTable
+                + " e ON f.id=e.id AND f.k=" + expression + " WHERE " + key + " BETWEEN " + range;
         String name = source + "-" + target + "-" + comparison;
         try {
             variables.setCboEqBaseType(comparison);
             variables.setEnableMonotonicPredicateRewrite(true);
-            variables.setEnableStringDateJoinPruning(true);
-            variables.setStringDatePredicateFormat("%Y%m%d");
             variables.setEnableMonotonicPredicateMoveAround(false);
             String off = getFragmentPlan(sql);
             assertContains(off, "partitions=6/6");
@@ -94,15 +99,14 @@ public class MonotonicJoinTypeMatrixTest extends PlanTestBase {
             int expected = target.equals("int") && comparison.equals("varchar") ? 3 : 2;
             assertContains(on, "partitions=" + expected + "/6");
             if (source.equals("varchar")) {
-                variables.setEnableStringDateJoinPruning(false);
+                variables.setEnableStringDateFormatProperty(false);
                 assertContains(getFragmentPlan(sql), "partitions=6/6");
             }
         } finally {
             variables.setCboEqBaseType(oldComparison);
             variables.setEnableMonotonicPredicateMoveAround(oldMove);
             variables.setEnableMonotonicPredicateRewrite(oldRewrite);
-            variables.setEnableStringDateJoinPruning(oldString);
-            variables.setStringDatePredicateFormat(oldFormat);
+            variables.setEnableStringDateFormatProperty(oldFormat);
         }
     }
 

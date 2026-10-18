@@ -97,7 +97,7 @@ public class DerivedBoundEstimateTest {
     @Test
     public void testBoundHeldByTheScanIsNotEstimated() {
         ScalarOperator original = fromYear2025();
-        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(original);
+        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(original, unused -> null);
         List<ScalarOperator> bounds = Utils.extractConjuncts(withBound).stream()
                 .filter(conjunct -> conjunct != original).toList();
         Assertions.assertEquals(1, bounds.size());
@@ -113,7 +113,7 @@ public class DerivedBoundEstimateTest {
                 ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 11, 0, 0)));
         ScalarOperator other = new BinaryPredicateOperator(BinaryType.EQ, OTHER, ConstantOperator.createInt(5));
         ScalarOperator predicate = Utils.compoundAnd(original, other);
-        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(predicate);
+        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(predicate, unused -> null);
         Assertions.assertEquals(3, Utils.extractConjuncts(withBound).size());
         Assertions.assertEquals(rows(predicate, table()), rows(withBound, table()), 1);
     }
@@ -137,7 +137,7 @@ public class DerivedBoundEstimateTest {
         Assertions.assertTrue(Math.abs(estimated - notEstimated) > ROWS * 0.01, estimated + " " + notEstimated);
         // The scan holds the bound without estimating it in either case
         ScalarOperator original = fromYear2025();
-        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(original);
+        ScalarOperator withBound = MonotonicFilterDerivation.addScanBounds(original, unused -> null);
         Assertions.assertTrue(Utils.extractConjuncts(withBound).stream()
                 .filter(conjunct -> conjunct != original).allMatch(ScalarOperator::isNotEvalEstimate));
     }

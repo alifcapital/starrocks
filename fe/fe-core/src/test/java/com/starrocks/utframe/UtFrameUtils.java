@@ -887,7 +887,8 @@ public class UtFrameUtils {
                 // partition DataFile carries its true row count instead of an even split of the total.
                 Map<String, Long> partRowCounts =
                         replayDumpInfo.getPartitionRowCountMap().getOrDefault(key, Collections.emptyMap());
-                meta.registerTable(db, table, columns, rowCount, columnStats, partTransforms, partNames, partRowCounts);
+                meta.registerTable(db, table, columns, rowCount, columnStats, partTransforms, partNames, partRowCounts,
+                        replayDumpInfo.getIcebergStringDateFormatMap().getOrDefault(key, Collections.emptyMap()));
                 catalogType.put(catalog, "iceberg");
                 consumed.add(key);
             } else if (engine.equalsIgnoreCase("hive")) {

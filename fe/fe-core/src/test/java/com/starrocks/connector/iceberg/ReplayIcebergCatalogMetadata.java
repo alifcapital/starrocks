@@ -40,6 +40,7 @@ import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
@@ -65,7 +66,8 @@ import static com.starrocks.catalog.Table.TableType.ICEBERG;
  * For a partitioned table the dump also carries the partition spec (transforms) and partition names; this
  * rebuilds the real {@link PartitionSpec} and appends one {@link DataFile} per partition so the native
  * {@code planFiles} reproduces partition pruning ({@code partitions=X/Y}) exactly, driven by the same
- * predicate the query carries.
+ * predicate the query carries. The table properties the dump carries, such as the string date formats of columns,
+ * are set on the native table.
  */
 public class ReplayIcebergCatalogMetadata extends ReplayConnectorMetadata {
 
@@ -77,7 +79,8 @@ public class ReplayIcebergCatalogMetadata extends ReplayConnectorMetadata {
 
     public void registerTable(String dbName, String tableName, List<Column> columns, long rowCount,
                               Map<String, ColumnStatistic> columnStats, List<String> partitionTransforms,
-                              List<String> partitionNames, Map<String, Long> partitionRowCounts) throws IOException {
+                              List<String> partitionNames, Map<String, Long> partitionRowCounts,
+                              Map<String, String> properties) throws IOException {
         Schema schema = IcebergApiConverter.toIcebergApiSchema(columns);
         PartitionSpec spec = buildPartitionSpec(schema, partitionTransforms);
         long tableId = GlobalStateMgr.getCurrentState().getNextId();
@@ -123,6 +126,12 @@ public class ReplayIcebergCatalogMetadata extends ReplayConnectorMetadata {
                 }
             }
             append.commit();
+        }
+        // The properties that change the plan, such as the string date formats of columns
+        if (!properties.isEmpty()) {
+            UpdateProperties update = nativeTable.updateProperties();
+            properties.forEach(update::set);
+            update.commit();
         }
         MockIcebergTable table = new MockIcebergTable(tableId, tableName, catalogName, null,
                 dbName, tableName, columns, nativeTable, Maps.newHashMap(), "");

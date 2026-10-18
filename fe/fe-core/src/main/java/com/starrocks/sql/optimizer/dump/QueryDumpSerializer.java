@@ -180,6 +180,15 @@ public class QueryDumpSerializer implements JsonSerializer<QueryDumpInfo> {
             }
             dumpJson.add("external_table_partition_names", namesData);
         }
+        if (!dumpInfo.getIcebergStringDateFormatMap().isEmpty()) {
+            JsonObject formatData = new JsonObject();
+            for (Map.Entry<String, Map<String, String>> entry : dumpInfo.getIcebergStringDateFormatMap().entrySet()) {
+                JsonObject properties = new JsonObject();
+                entry.getValue().forEach(properties::addProperty);
+                formatData.add(entry.getKey(), properties);
+            }
+            dumpJson.add("iceberg_string_date_formats", formatData);
+        }
         // hive meta store table info
         if (!dumpInfo.getHmsTableMap().isEmpty()) {
             JsonObject externalTableInfoData = new JsonObject();

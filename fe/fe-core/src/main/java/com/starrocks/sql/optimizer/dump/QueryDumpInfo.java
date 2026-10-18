@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.dump;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
+import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.Resource;
 import com.starrocks.catalog.Table;
@@ -28,6 +29,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.MaterializedViewOptimizer;
+import com.starrocks.sql.optimizer.rewrite.StringDateFormatProperty;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.ExternalMcvStatistics;
 
@@ -84,6 +86,9 @@ public class QueryDumpInfo implements DumpInfo {
     // db.table -> iceberg partition names ("col=value"), so replay recreates the partitions and reproduces
     // partition pruning (partitions=X/Y). Only emitted by newer dumps for partitioned iceberg tables.
     private final Map<String, List<String>> externalTablePartitionNameMap = new LinkedHashMap<>();
+    // db.table -> the string-date-format.<column> properties of an iceberg table. They give bounds on strings of
+    // dates, see StringDateFormatProperty, so replay sets them on the table it rebuilds to get the same plan.
+    private final Map<String, Map<String, String>> icebergStringDateFormatMap = new LinkedHashMap<>();
     // tableName->createTableStmt
     private final Map<String, String> createTableStmtMap = new LinkedHashMap<>();
     // viewName->createViewStmt
@@ -168,6 +173,26 @@ public class QueryDumpInfo implements DumpInfo {
         } else {
             tableMap.put(table.getId(), new Pair<>(dbName, table));
         }
+        if (table instanceof IcebergTable iceberg) {
+            addIcebergStringDateFormats(dbName + "." + table.getName(), iceberg);
+        }
+    }
+
+    private void addIcebergStringDateFormats(String dbAndTable, IcebergTable table) {
+        Map<String, String> formats = new LinkedHashMap<>();
+        try {
+            for (Map.Entry<String, String> property : table.getProperties().entrySet()) {
+                if (property.getKey().startsWith(StringDateFormatProperty.PREFIX)) {
+                    formats.put(property.getKey(), property.getValue());
+                }
+            }
+        } catch (RuntimeException e) {
+            addException("Cannot read the properties of " + dbAndTable + ": " + e.getMessage());
+            return;
+        }
+        if (!formats.isEmpty()) {
+            icebergStringDateFormatMap.put(dbAndTable, formats);
+        }
     }
 
     @Override
@@ -242,6 +267,7 @@ public class QueryDumpInfo implements DumpInfo {
         this.currentWarehouseId = WarehouseManager.DEFAULT_WAREHOUSE_ID;
         this.resourceSet.clear();
         this.hmsTableMap.clear();
+        this.icebergStringDateFormatMap.clear();
         this.exceptionList.clear();
     }
 
@@ -364,6 +390,14 @@ public class QueryDumpInfo implements DumpInfo {
 
     public Map<String, List<String>> getExternalTablePartitionNameMap() {
         return externalTablePartitionNameMap;
+    }
+
+    public void addIcebergStringDateFormats(String dbAndTable, Map<String, String> formats) {
+        icebergStringDateFormatMap.put(dbAndTable, formats);
+    }
+
+    public Map<String, Map<String, String>> getIcebergStringDateFormatMap() {
+        return icebergStringDateFormatMap;
     }
 
     public Map<String, String> getCreateTableStmtMap() {

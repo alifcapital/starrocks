@@ -72,10 +72,10 @@ public class MonotonicFilterDerivationTest {
     }
 
     private List<ScalarOperator> addedBounds(ScalarOperator original) {
-        ScalarOperator result = MonotonicFilterDerivation.addScanBounds(original);
+        ScalarOperator result = MonotonicFilterDerivation.addScanBounds(original, unused -> null);
         assertTrue(Utils.extractConjuncts(result).contains(original));
         assertSame(original, new InvertMonotonicPredicateRule().apply(original, null));
-        assertSame(result, MonotonicFilterDerivation.addScanBounds(result));
+        assertSame(result, MonotonicFilterDerivation.addScanBounds(result, unused -> null));
         return Utils.extractConjuncts(result).stream().filter(p -> !p.equals(original)).toList();
     }
 
@@ -86,9 +86,9 @@ public class MonotonicFilterDerivationTest {
         ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(isNull.clone(),
                 ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
         assertEquals(isNull, rewritten);
-        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull));
+        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull, unused -> null));
         CompoundPredicateOperator not = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, comparison);
-        assertSame(not, MonotonicFilterDerivation.addScanBounds(not));
+        assertSame(not, MonotonicFilterDerivation.addScanBounds(not, unused -> null));
         assertFalse(addedBounds(comparison).isEmpty());
     }
 
@@ -97,7 +97,7 @@ public class MonotonicFilterDerivationTest {
         ScalarOperator plain = new BinaryPredicateOperator(BinaryType.GE, epoch, ConstantOperator.createBigint(0));
         ScalarOperator predicate = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
                 plain, plain.clone());
-        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate, unused -> null));
         assertEquals(2, Utils.extractConjuncts(predicate).size());
     }
 
@@ -123,7 +123,7 @@ public class MonotonicFilterDerivationTest {
         ScalarOperator comparison = new BinaryPredicateOperator(BinaryType.GE,
                 new CallOperator("to_date", DateType.DATE, ImmutableList.of(day)),
                 ConstantOperator.createDate(LocalDateTime.of(2024, 1, 1, 0, 0)));
-        List<ScalarOperator> bounds = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(comparison))
+        List<ScalarOperator> bounds = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(comparison, unused -> null))
                 .stream().filter(p -> p != comparison).toList();
         assertFalse(bounds.isEmpty());
         for (ScalarOperator bound : bounds) {
@@ -146,13 +146,13 @@ public class MonotonicFilterDerivationTest {
                         new Function(new FunctionName("from_unixtime"), new Type[] {IntegerType.BIGINT},
                                 VarcharType.VARCHAR, false)),
                 ConstantOperator.createVarchar("2024-03-05 10:30:00"));
-        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate, unused -> null));
 
         // Next to it a comparison of from_unixtime(ep) still gives the bound on ep
         ScalarOperator columnBound = comparison("from_unixtime", BinaryType.EQ, "2024-03-05 10:30:00");
         ScalarOperator both = Utils.compoundAnd(predicate, columnBound);
-        List<ScalarOperator> added = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(both)).stream()
-                .filter(p -> !p.equals(predicate) && !p.equals(columnBound)).toList();
+        List<ScalarOperator> added = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(both, unused -> null))
+                .stream().filter(p -> !p.equals(predicate) && !p.equals(columnBound)).toList();
         assertEquals("1: ep >= 1709634600 AND 1: ep < 1709634601", Utils.compoundAnd(added).toString());
     }
 
@@ -273,8 +273,8 @@ public class MonotonicFilterDerivationTest {
                         ConstantOperator.createDate(LocalDateTime.of(2024, 1, 1, 0, 0))),
                 new BinaryPredicateOperator(BinaryType.LE, day,
                         ConstantOperator.createDate(LocalDateTime.of(2024, 1, 31, 0, 0))));
-        List<String> conjuncts = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(predicate)).stream()
-                .map(ScalarOperator::toString).toList();
+        List<String> conjuncts = Utils.extractConjuncts(MonotonicFilterDerivation.addScanBounds(predicate, unused -> null))
+                .stream().map(ScalarOperator::toString).toList();
         assertTrue(conjuncts.contains("3: d >= 19723"), conjuncts.toString());
         assertTrue(conjuncts.contains("3: d <= 19753"), conjuncts.toString());
     }
@@ -291,7 +291,7 @@ public class MonotonicFilterDerivationTest {
     public void testDisableLeavesPartialPredicatesAlone() {
         ctx.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
         ScalarOperator predicate = comparison("from_unixtime", BinaryType.GE, "2024-03-05 10:30:00");
-        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate));
+        assertSame(predicate, MonotonicFilterDerivation.addScanBounds(predicate, unused -> null));
         // The option decides which predicates the plan gets, not how the statistics read the one it has
         MonotonicFilterDerivation.ColumnBounds forEstimate =
                 MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) predicate);

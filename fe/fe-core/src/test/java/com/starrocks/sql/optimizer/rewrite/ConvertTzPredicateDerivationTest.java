@@ -86,10 +86,10 @@ public class ConvertTzPredicateDerivationTest {
         var original = predicate("UTC", "Asia/Dushanbe", BinaryType.GE, target);
         for (String zone : List.of("UTC", "Asia/Dushanbe", "America/New_York")) {
             context.getSessionVariable().setTimeZone(zone);
-            var result = MonotonicFilterDerivation.addScanBounds(original);
+            var result = MonotonicFilterDerivation.addScanBounds(original, unused -> null);
             assertTrue(Utils.extractConjuncts(result).contains(original));
             assertTrue(result.toString().contains("1: ts >= 2024-02-29 19:00:00"), result.toString());
-            assertSame(result, MonotonicFilterDerivation.addScanBounds(result));
+            assertSame(result, MonotonicFilterDerivation.addScanBounds(result, unused -> null));
         }
     }
 
@@ -112,12 +112,12 @@ public class ConvertTzPredicateDerivationTest {
             for (String[] zones : List.of(new String[] {"UTC", "America/New_York"},
                     new String[] {"America/New_York", "UTC"})) {
                 var original = predicate(zones[0], zones[1], BinaryType.GE, target);
-                assertSame(original, MonotonicFilterDerivation.addScanBounds(original));
+                assertSame(original, MonotonicFilterDerivation.addScanBounds(original, unused -> null));
             }
         }
         var skippedDay = predicate("UTC", "Pacific/Apia", BinaryType.GE,
                 LocalDateTime.of(2011, 12, 30, 12, 0));
-        assertSame(skippedDay, MonotonicFilterDerivation.addScanBounds(skippedDay));
+        assertSame(skippedDay, MonotonicFilterDerivation.addScanBounds(skippedDay, unused -> null));
     }
 
     @Test
@@ -148,22 +148,22 @@ public class ConvertTzPredicateDerivationTest {
         var original = predicate("UTC", "Asia/Dushanbe", BinaryType.GE, target);
         assertSame(original, new InvertMonotonicPredicateRule().apply(original, null));
         var isNull = new IsNullPredicateOperator(false, original);
-        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull));
+        assertSame(isNull, MonotonicFilterDerivation.addScanBounds(isNull, unused -> null));
         var nullValue = new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL, call("UTC", "Asia/Dushanbe"),
                 ConstantOperator.createNull(DateType.DATETIME));
-        assertSame(nullValue, MonotonicFilterDerivation.addScanBounds(nullValue));
+        assertSame(nullValue, MonotonicFilterDerivation.addScanBounds(nullValue, unused -> null));
         var badZone = predicate("UTC", "not/a/zone", BinaryType.GE, target);
-        assertSame(badZone, MonotonicFilterDerivation.addScanBounds(badZone));
+        assertSame(badZone, MonotonicFilterDerivation.addScanBounds(badZone, unused -> null));
         var dynamicZone = new CallOperator("convert_tz", DateType.DATETIME, List.of(column,
                 ConstantOperator.createVarchar("UTC"), new ColumnRefOperator(2, VarcharType.VARCHAR, "zone", true)));
         var dynamic = new BinaryPredicateOperator(BinaryType.GE, dynamicZone, ConstantOperator.createDatetime(target));
-        assertSame(dynamic, MonotonicFilterDerivation.addScanBounds(dynamic));
+        assertSame(dynamic, MonotonicFilterDerivation.addScanBounds(dynamic, unused -> null));
         var underflow = predicate("UTC", "+05:00", BinaryType.GE, ConstantOperator.MIN_DATETIME);
-        assertSame(underflow, MonotonicFilterDerivation.addScanBounds(underflow));
+        assertSame(underflow, MonotonicFilterDerivation.addScanBounds(underflow, unused -> null));
         var overflow = predicate("+05:00", "UTC", BinaryType.LE, ConstantOperator.MAX_DATETIME);
-        assertSame(overflow, MonotonicFilterDerivation.addScanBounds(overflow));
+        assertSame(overflow, MonotonicFilterDerivation.addScanBounds(overflow, unused -> null));
         context.getSessionVariable().setEnableMonotonicPredicateRewrite(false);
-        assertSame(original, MonotonicFilterDerivation.addScanBounds(original));
+        assertSame(original, MonotonicFilterDerivation.addScanBounds(original, unused -> null));
     }
 
     private static boolean compare(int result, BinaryType cmp) {

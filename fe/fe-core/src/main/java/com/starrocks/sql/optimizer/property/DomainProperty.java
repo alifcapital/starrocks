@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.property;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -26,6 +27,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.MinMax;
 import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
+import com.starrocks.sql.optimizer.rewrite.StringDateFormatProperty;
 
 import java.util.HashSet;
 import java.util.List;
@@ -129,8 +131,9 @@ public class DomainProperty {
         if (columnWrapper == null) {
             return null;
         }
-        Range<ConstantOperator> image =
-                MonotonicImage.imageRange(expr, column, columnWrapper.getMinMaxForMonotonicImage()).orElse(null);
+        StringDateFormat format = StringDateFormatProperty.ofQueryColumn(column);
+        Range<ConstantOperator> image = MonotonicImage.imageRange(expr, column,
+                columnWrapper.getMinMaxForMonotonicImage(format), format).orElse(null);
         if (image == null) {
             return null;
         }
@@ -215,10 +218,12 @@ public class DomainProperty {
             return minMax;
         }
 
-        public MinMax getMinMaxForMonotonicImage() {
-            ConnectContext context = ConnectContext.get();
-            if (!needDeriveRange || context == null
-                    || !context.getSessionVariable().isEnableStringDateJoinPruning()) {
+        /**
+         * @param columnFormat the format of the column when it is a VARCHAR column of dates, see
+         *                     StringDateFormatProperty; the range of other strings stays unknown
+         */
+        public MinMax getMinMaxForMonotonicImage(StringDateFormat columnFormat) {
+            if (!needDeriveRange || columnFormat == null) {
                 return minMax;
             }
             // Only the image evaluator may use these string bounds. It checks the canonical

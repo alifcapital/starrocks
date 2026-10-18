@@ -18,7 +18,6 @@ import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.common.util.TimeUtils;
-import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -75,7 +74,16 @@ public class MonotonicImage {
      */
     public static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
                                                                MinMax columnDomain) {
-        return imageRange(expr, column, columnDomain, false);
+        return imageRange(expr, column, columnDomain, null, false);
+    }
+
+    /**
+     * Range of {@code expr} values when {@code column} stays inside {@code columnDomain}, for a VARCHAR column that
+     * holds dates in {@code columnFormat}, see StringDateFormatProperty.
+     */
+    public static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
+                                                               MinMax columnDomain, StringDateFormat columnFormat) {
+        return imageRange(expr, column, columnDomain, columnFormat, false);
     }
 
     // Partition pruning also admits INT -> VARCHAR, after checking the intermediate range at that cast.
@@ -83,11 +91,12 @@ public class MonotonicImage {
     // it preserves order within one partition.
     static Optional<Range<ConstantOperator>> partitionImageRange(ScalarOperator expr, ColumnRefOperator column,
                                                                  MinMax columnDomain) {
-        return imageRange(expr, column, columnDomain, true);
+        return imageRange(expr, column, columnDomain, null, true);
     }
 
     private static Optional<Range<ConstantOperator>> imageRange(ScalarOperator expr, ColumnRefOperator column,
-                                                                MinMax columnDomain, boolean partitionCasts) {
+                                                                MinMax columnDomain, StringDateFormat columnFormat,
+                                                                boolean partitionCasts) {
         // Need both endpoints. The registry does not say whether the function increases or
         // decreases, so a single endpoint could turn into either a lower or an upper bound.
         // With two endpoints we fold both and sort the results, so direction does not matter.
@@ -104,9 +113,9 @@ public class MonotonicImage {
             return Optional.empty();
         }
         // A VARCHAR domain alone proves no date ordering: MySQL accepts short years and
-        // variable-width compact forms. The session option is an explicit data-format
+        // variable-width compact forms. The table property of the column is an explicit data-format
         // assertion; matching, canonical endpoints are still required for this derivation.
-        boolean canonicalString = canonicalStringDateDomain(column, columnDomain);
+        boolean canonicalString = canonicalStringDateDomain(column, columnDomain, columnFormat);
         if (column.getType().isStringType() && !canonicalString) {
             return Optional.empty();
         }
@@ -329,21 +338,17 @@ public class MonotonicImage {
         }
     }
 
-    private static boolean canonicalStringDateDomain(ColumnRefOperator column, MinMax domain) {
-        ConnectContext context = ConnectContext.get();
-        if (!column.getType().isStringType() || context == null
-                || !context.getSessionVariable().isEnableStringDateJoinPruning()) {
+    private static boolean canonicalStringDateDomain(ColumnRefOperator column, MinMax domain,
+                                                     StringDateFormat declared) {
+        if (!column.getType().isStringType() || declared == null) {
             return false;
         }
         String lo = domain.getMin().orElseThrow().getVarchar();
         String hi = domain.getMax().orElseThrow().getVarchar();
         // The literals do not tell us the stored encoding. An ISO value '2024-03-01T01:00:00'
         // passes a string lower bound '2024-03-01 12:00:00', but its date is earlier. Require
-        // the declared column format even when inverse string predicate pushdown is disabled.
-        StringDateFormat declared = StringDateFormat.fromFormat(
-                context.getSessionVariable().getStringDatePredicateFormat());
-        return declared != null && declared.isSupportedInCurrentTimezone()
-                && declared.matches(lo) && declared.matches(hi);
+        // the declared column format.
+        return declared.isSupportedInCurrentTimezone() && declared.matches(lo) && declared.matches(hi);
     }
 
     /**

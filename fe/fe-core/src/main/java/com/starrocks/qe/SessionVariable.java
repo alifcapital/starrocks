@@ -52,7 +52,6 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.CompressionUtils;
-import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.connector.ConnectorSinkShuffleMode;
 import com.starrocks.connector.ConnectorSinkSortScope;
@@ -1119,11 +1118,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND = "enable_monotonic_predicate_move_around";
 
-    public static final String ENABLE_STRING_DATE_JOIN_PRUNING = "enable_string_date_join_pruning";
-
-    public static final String ENABLE_STRING_DATE_PREDICATE_PUSHDOWN = "enable_string_date_predicate_pushdown";
-
-    public static final String STRING_DATE_PREDICATE_FORMAT = "string_date_predicate_format";
+    public static final String ENABLE_STRING_DATE_FORMAT_PROPERTY = "enable_string_date_format_property";
 
     public static final String ENABLE_MONOTONIC_PREDICATE_REWRITE = "enable_monotonic_predicate_rewrite";
     public static final String ENABLE_MONOTONIC_PREDICATE_ESTIMATE = "enable_monotonic_predicate_estimate";
@@ -3427,17 +3422,11 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_MONOTONIC_PREDICATE_MOVE_AROUND)
     private boolean enableMonotonicPredicateMoveAround = true;
 
-    // Explicit data contract for VARCHAR -> date range derivation: all source columns use
-    // stringDatePredicateFormat. Does not change CAST parsing or validate rows.
-    @VarAttr(name = ENABLE_STRING_DATE_JOIN_PRUNING)
-    private boolean enableStringDateJoinPruning = false;
-
-    // The format is shared by forward JOIN derivation and inverse string predicate pushdown.
-    @VarAttr(name = ENABLE_STRING_DATE_PREDICATE_PUSHDOWN)
-    private boolean enableStringDatePredicatePushdown = false;
-
-    @VarAttr(name = STRING_DATE_PREDICATE_FORMAT)
-    private String stringDatePredicateFormat = "";
+    // The Iceberg table property string-date-format.<column> declares how a VARCHAR column writes dates; the scan
+    // and the JOIN derivation take bounds on such strings from it. The property is the consent of the owner of the
+    // table, so this is only a switch to turn all such properties off.
+    @VarAttr(name = ENABLE_STRING_DATE_FORMAT_PROPERTY)
+    private boolean enableStringDateFormatProperty = true;
 
     // rewrite f(col) cmp constant into the equivalent predicate on col when f has an exact
     // preimage (date_trunc periods, fixed-duration shifts). Kill switch only: toggling it
@@ -6229,31 +6218,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         this.enableMonotonicPredicateMoveAround = enableMonotonicPredicateMoveAround;
     }
 
-    public boolean isEnableStringDateJoinPruning() {
-        return enableStringDateJoinPruning;
+    public boolean isEnableStringDateFormatProperty() {
+        return enableStringDateFormatProperty;
     }
 
-    public void setEnableStringDateJoinPruning(boolean enableStringDateJoinPruning) {
-        this.enableStringDateJoinPruning = enableStringDateJoinPruning;
-    }
-
-    public boolean isEnableStringDatePredicatePushdown() {
-        return enableStringDatePredicatePushdown;
-    }
-
-    public void setEnableStringDatePredicatePushdown(boolean enabled) {
-        enableStringDatePredicatePushdown = enabled;
-    }
-
-    public String getStringDatePredicateFormat() {
-        return stringDatePredicateFormat;
-    }
-
-    public void setStringDatePredicateFormat(String format) {
-        if (format == null || (!format.isEmpty() && StringDateFormat.fromFormat(format) == null)) {
-            throw new IllegalArgumentException("Unsupported string_date_predicate_format: " + format);
-        }
-        stringDatePredicateFormat = format;
+    public void setEnableStringDateFormatProperty(boolean enableStringDateFormatProperty) {
+        this.enableStringDateFormatProperty = enableStringDateFormatProperty;
     }
 
     public boolean isEnableMonotonicPredicateRewrite() {

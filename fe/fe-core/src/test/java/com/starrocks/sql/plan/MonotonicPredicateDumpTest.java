@@ -50,7 +50,6 @@ public class MonotonicPredicateDumpTest extends ReplayFromDumpTestBase {
             QueryDumpInfo dump = getDumpInfoFromJson(json);
             dump.getSessionVariable().setEnableMonotonicPredicateMoveAround(enabled);
             dump.getSessionVariable().setEnableMonotonicPredicateRewrite(enabled);
-            dump.getSessionVariable().setEnableStringDateJoinPruning(false);
             dump.getSessionVariable().setOptimizerExecuteTimeout(60000);
             connectContext.setThreadLocalInfo();
             String plan = UtFrameUtils.getNewPlanAndFragmentFromDump(connectContext, dump)

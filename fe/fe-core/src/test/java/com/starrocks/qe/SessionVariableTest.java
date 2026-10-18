@@ -71,20 +71,12 @@ public class SessionVariableTest {
     }
 
     @Test
-    public void testStringDatePredicateDefaultsAndClone() {
+    public void testStringDateFormatPropertySwitch() {
         SessionVariable variables = new SessionVariable();
-        Assertions.assertFalse(variables.isEnableStringDatePredicatePushdown());
-        Assertions.assertEquals("", variables.getStringDatePredicateFormat());
-        variables.setEnableStringDatePredicatePushdown(true);
-        variables.setStringDatePredicateFormat("%Y-%m-%dT%H:%i:%s.%f");
-        SessionVariable copy = (SessionVariable) variables.clone();
-        Assertions.assertTrue(copy.isEnableStringDatePredicatePushdown());
-        Assertions.assertEquals("%Y-%m-%dT%H:%i:%s.%f", copy.getStringDatePredicateFormat());
-        Assertions.assertThrows(IllegalArgumentException.class,
-                () -> variables.setStringDatePredicateFormat("%d-%m-%Y"));
-        Assertions.assertEquals("%Y-%m-%dT%H:%i:%s.%f", variables.getStringDatePredicateFormat());
-        variables.setStringDatePredicateFormat("");
-        Assertions.assertEquals("", variables.getStringDatePredicateFormat());
+        Assertions.assertTrue(variables.isEnableStringDateFormatProperty());
+        variables.setEnableStringDateFormatProperty(false);
+        Assertions.assertFalse(((SessionVariable) variables.clone()).isEnableStringDateFormatProperty());
+        Assertions.assertTrue(new VariableMgr().containsVariable(SessionVariable.ENABLE_STRING_DATE_FORMAT_PROPERTY));
     }
 
     @Test

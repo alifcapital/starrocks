@@ -40,6 +40,7 @@ import java.io.IOException;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -103,6 +104,15 @@ public class QueryDumpDeserializer implements JsonDeserializer<QueryDumpInfo> {
                     specObj.getAsJsonArray(key).forEach(e -> spec.add(e.getAsString()));
                 }
                 dumpInfo.addExternalTablePartitions(key, spec, names);
+            }
+        }
+        if (dumpJsonObject.has("iceberg_string_date_formats")) {
+            JsonObject formatData = dumpJsonObject.getAsJsonObject("iceberg_string_date_formats");
+            for (Map.Entry<String, JsonElement> entry : formatData.entrySet()) {
+                Map<String, String> properties = new LinkedHashMap<>();
+                entry.getValue().getAsJsonObject().entrySet()
+                        .forEach(property -> properties.put(property.getKey(), property.getValue().getAsString()));
+                dumpInfo.addIcebergStringDateFormats(entry.getKey(), properties);
             }
         }
         // hive meta store table info

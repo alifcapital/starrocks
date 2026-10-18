@@ -14,12 +14,14 @@
 
 package com.starrocks.sql.optimizer.rewrite;
 
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -30,13 +32,18 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Function;
 
 /** Adds necessary bounds for positive scan conjuncts without changing their SQL NULL semantics. */
 public final class MonotonicFilterDerivation {
     private MonotonicFilterDerivation() {
     }
 
-    public static ScalarOperator addScanBounds(ScalarOperator predicate) {
+    /**
+     * @param stringDateFormats the format a scan declares for a VARCHAR column, or null when it declares none
+     */
+    public static ScalarOperator addScanBounds(ScalarOperator predicate,
+                                               Function<ColumnRefOperator, StringDateFormat> stringDateFormats) {
         if (predicate == null) {
             return predicate;
         }
@@ -47,7 +54,7 @@ public final class MonotonicFilterDerivation {
         boolean added = false;
         for (ScalarOperator original : originals) {
             // Do not descend into OR, NOT, IS NULL or other boolean/value expressions.
-            ScalarOperator bound = derive(original, useRegistry, true).predicate();
+            ScalarOperator bound = derive(original, useRegistry, stringDateFormats).predicate();
             if (bound != original) {
                 ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(bound,
                         ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
@@ -122,7 +129,7 @@ public final class MonotonicFilterDerivation {
         if (context != null && !context.getSessionVariable().isEnableMonotonicPredicateEstimate()) {
             return null;
         }
-        Bound bound = derive(predicate, true, false);
+        Bound bound = derive(predicate, true, column -> null);
         if (bound.predicate() == predicate) {
             return null;
         }
@@ -165,7 +172,7 @@ public final class MonotonicFilterDerivation {
         if (context != null && !context.getSessionVariable().isEnableMonotonicPredicateEstimate()) {
             return false;
         }
-        Bound bound = derive(predicate, true, true);
+        Bound bound = derive(predicate, true, column -> null);
         if (bound.predicate() == predicate) {
             return false;
         }
@@ -231,9 +238,10 @@ public final class MonotonicFilterDerivation {
     private record Bound(ScalarOperator predicate, boolean wider) {
     }
 
-    // stringDates: whether a comparison of a string cast to a date takes the bounds on the string from the session
-    // format, see StringDatePredicateDerivation. The scan takes them to skip files; the estimate does not need them.
-    private static Bound derive(ScalarOperator predicate, boolean useRegistry, boolean stringDates) {
+    // stringDateFormats: the format of a VARCHAR column for bounds on the string under a cast to a date, see
+    // StringDatePredicateDerivation. The scan takes them to skip files; the estimate does not need them.
+    private static Bound derive(ScalarOperator predicate, boolean useRegistry,
+                                Function<ColumnRefOperator, StringDateFormat> stringDateFormats) {
         Bound none = new Bound(predicate, false);
         if (!(predicate instanceof BinaryPredicateOperator)
                 || !(predicate.getChild(0) instanceof CallOperator)
@@ -242,10 +250,8 @@ public final class MonotonicFilterDerivation {
             return none;
         }
         if (predicate.getChild(0) instanceof CastOperator) {
-            if (!stringDates) {
-                return none;
-            }
-            ScalarOperator bound = StringDatePredicateDerivation.derive((BinaryPredicateOperator) predicate);
+            ScalarOperator bound = StringDatePredicateDerivation.derive((BinaryPredicateOperator) predicate,
+                    stringDateFormats);
             return new Bound(bound, bound != predicate);
         }
         if (!useRegistry) {
@@ -274,7 +280,7 @@ public final class MonotonicFilterDerivation {
         List<ScalarOperator> conjuncts = Utils.extractConjuncts(bound);
         List<ScalarOperator> layers = new ArrayList<>(conjuncts.size());
         for (ScalarOperator conjunct : conjuncts) {
-            Bound layer = derive(conjunct, useRegistry, stringDates);
+            Bound layer = derive(conjunct, useRegistry, stringDateFormats);
             layers.add(layer.predicate());
             wider |= layer.wider();
         }

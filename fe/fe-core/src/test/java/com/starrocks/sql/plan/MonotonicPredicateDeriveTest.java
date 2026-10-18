@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.starrocks.common.FeConstants;
+import com.starrocks.connector.iceberg.MockIcebergMetadata;
 import com.starrocks.qe.SessionVariableConstants;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -91,6 +92,12 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
                 + "DISTRIBUTED BY HASH(`id`) BUCKETS 3\n"
                 + "PROPERTIES (\"replication_num\" = \"1\");");
 
+        // dimension keyed by a VARCHAR date like '20240305'
+        starRocksAssert.withTable("CREATE TABLE event_dates_text (id bigint, datadate varchar(20)) "
+                + "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
+                + "PROPERTIES (\"replication_num\"=\"1\")");
+        ConnectorPlanTestBase.mockCatalog(connectContext, MockIcebergMetadata.MOCKED_ICEBERG_CATALOG_NAME);
+
         // dimension keyed by an INT date like 20240305
         starRocksAssert.withTable("CREATE TABLE `event_dates_int` (\n"
                 + "  `id` bigint NOT NULL,\n"
@@ -104,30 +111,24 @@ public class MonotonicPredicateDeriveTest extends PlanTestBase {
 
     @Test
     public void testCanonicalVarcharDateJoinPrunesInBothComparisonModes() throws Exception {
-        starRocksAssert.withTable("CREATE TABLE event_dates_text (id bigint, datadate varchar(20)) "
-                + "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
-                + "PROPERTIES (\"replication_num\"=\"1\")");
         var variables = connectContext.getSessionVariable();
         String oldMode = variables.getCboEqBaseType();
-        boolean oldAssumption = variables.isEnableStringDateJoinPruning();
-        String oldFormat = variables.getStringDatePredicateFormat();
         try {
-            variables.setStringDatePredicateFormat("%Y%m%d");
-            String sql = "select f.id from fact_month_int f join event_dates_text e "
-                    + "on f.id=e.id and f.datamonth=date_format(cast(e.datadate as date), '%Y%m') "
-                    + "where e.datadate between '20240305' and '20240410'";
+            String sql = "select f.id from fact_month_int f join %s e "
+                    + "on f.id=e.id and f.datamonth=date_format(cast(e.%s as date), '%%Y%%m') "
+                    + "where e.%s between '20240305' and '20240410'";
             for (String mode : new String[] {"varchar", "decimal"}) {
                 variables.setCboEqBaseType(mode);
-                variables.setEnableStringDateJoinPruning(false);
-                assertContains(getFragmentPlan(sql), "partitions=6/6");
-                variables.setEnableStringDateJoinPruning(true);
-                assertContains(getFragmentPlan(sql), mode.equals("varchar") ? "partitions=3/6" : "partitions=2/6");
+                // Only the format an Iceberg table declares for the column makes its strings dates in order.
+                assertContains(getFragmentPlan(String.format(sql, "event_dates_text", "datadate", "datadate")),
+                        "partitions=6/6");
+                assertContains(getFragmentPlan(String.format(sql, "iceberg0.string_date_db.strdate_plain", "s", "s")),
+                        "partitions=6/6");
+                assertContains(getFragmentPlan(String.format(sql, "iceberg0.string_date_db.strdate_compact", "s", "s")),
+                        mode.equals("varchar") ? "partitions=3/6" : "partitions=2/6");
             }
         } finally {
             variables.setCboEqBaseType(oldMode);
-            variables.setEnableStringDateJoinPruning(oldAssumption);
-            variables.setStringDatePredicateFormat(oldFormat);
-            starRocksAssert.dropTable("event_dates_text");
         }
     }
 

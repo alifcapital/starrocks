@@ -193,62 +193,37 @@ ALTER USER 'jack' SET PROPERTIES ('session.query_timeout' = '600');
 * **数据类型**: boolean
 * **引入版本**: v3.3.0, v3.4.0, v3.5.0
 
-### enable_string_date_join_pruning
+### enable_string_date_format_property
 
-* **默认值**：false
-* **类型**：Boolean
-* **描述**：允许通过 VARCHAR 到 DATE/DATETIME 的 CAST 推导 JOIN 过滤条件。需要启用 `enable_monotonic_predicate_move_around`，并明确指定非空的 `string_date_predicate_format`。所有参与的字符串列必须按指定格式存储有效日期，过滤范围的两个边界也必须符合该格式，否则不推导范围。无需启用 `enable_string_date_predicate_pushdown`。
-
-该变量表示用户对数据格式的保证，不会检查存储的行，也不会改变 CAST 的解析规则。对于混合格式、两位年份或无效日期字符串，不要启用此变量。支持的格式、固定小数精度及 `Z` 后缀的 UTC 要求见 `string_date_predicate_format`。
-
-不能从过滤边界推断存储格式。例如，`2024-03-01T01:00:00` 在字典序上大于 `2024-03-01 12:00:00`，但对应的时间更早。明确声明存储格式可防止优化器将不同格式的边界当作日期范围。
-
-```sql
-SET string_date_predicate_format = '%Y%m%d';
-SET enable_string_date_join_pruning = true;
-```
-
-### enable_string_date_predicate_pushdown
-
-* **默认值**：false
+* **默认值**：true
 * **数据类型**：Boolean
-* **描述**：根据 `string_date_predicate_format` 声明的存储格式，为 `CAST(column AS DATE/DATETIME)` 上的比较添加 VARCHAR 扫描范围。必须指定受支持的非空格式。适用于普通 WHERE 和通过 JOIN 传递的谓词，不要求表已分区，也不要求开启 `enable_string_date_join_pruning`。
+* **描述**：优化器是否使用 Iceberg 表属性 `string-date-format.<column>`。该属性声明 VARCHAR 列写入日期的格式。对于带有该属性的列，优化器为 `CAST(column AS DATE/DATETIME)` 上的比较添加 VARCHAR 扫描范围，使 Iceberg 可以跳过文件和行组，并通过这种 CAST 推导 JOIN 过滤条件。属性本身即表示同意这些优化；将此变量设为 `false` 可关闭所有此类属性，例如在发现属性有误时。
 
-原始日期比较会保留。存储引擎支持时，字符串范围可用于裁剪分区、文件或数据块。对于受支持的日期函数，`enable_monotonic_predicate_rewrite` 先生成 CAST 上的范围，然后此选项生成原始字符串列上的范围。CAST 为 DATE 时，即使字符串包含时间，日期相等条件也覆盖整天。仅处理 AND 中的正向过滤条件，不替换 SELECT 表达式、OR 或 IS NULL 中的谓词。
-
-启用此选项表示用户保证：**所有参与优化的 VARCHAR 日期列的全部非 NULL 值均为有效日期，并采用指定格式**。它不会检查数据，也不会修改 CAST 的解析行为。参与列使用不同格式时不要启用。格式不符、短年份、未补零字段、多余空白或无效日期可能导致错误裁剪。建议针对会话或查询设置，不要对无关数据集作全局保证。
+使用 ALTER TABLE 声明格式：
 
 ```sql
-SET string_date_predicate_format = '%Y%m%d';
-SET enable_string_date_predicate_pushdown = true;
+ALTER TABLE iceberg_catalog.db.events SET ("string-date-format.created_at" = "%Y-%m-%dT%H:%i:%s.%fZ");
 
-SELECT * FROM events WHERE year(CAST(date_string AS DATE)) = 2024;
--- Additional scan bounds: date_string >= '20240101' AND date_string < '20250101'
+SELECT * FROM iceberg_catalog.db.events WHERE CAST(created_at AS DATE) = '2024-03-05';
+-- Additional scan bounds: created_at >= '2024-03-05T00:00:00.000000Z' AND created_at < '2024-03-06T00:00:00.000000Z'
 ```
 
-### string_date_predicate_format
+属性值为 `date_format` 格式，其字符串的字典序与时间顺序一致：
 
-* **默认值**：空字符串（禁用两个方向的字符串日期范围推导）
-* **数据类型**：String
-* **描述**：声明 `enable_string_date_predicate_pushdown` 和 `enable_string_date_join_pruning` 共用的存储格式。空字符串禁用两个方向的推导。仅接受以下区分大小写的格式；不支持的值会导致 SET 报错。
+- 只能使用字段 `%Y`、`%m`、`%d`、`%H`、`%i`、`%s`、`%f`；
+- 字段从年份开始依次向下，不能跳过，可以在任意字段处结束；
+- 每个字段宽度固定并补零：`%Y` 为四位，`%f` 为六位，其他为两位；
+- 字段之间及最后一个字段之后的文本为常量，例如 `T`、`/`、`.` 或 `Z`；`%%` 表示 `%`。
 
-| 格式 | 示例 |
-|---|---|
-| `%Y%m%d` | `20240305` |
-| `%Y-%m-%d` | `2024-03-05` |
-| `%Y%m%d%H%i%s` | `20240305123045` |
-| `%Y-%m-%d %H:%i:%s` | `2024-03-05 12:30:45` |
-| `%Y-%m-%dT%H:%i:%s` | `2024-03-05T12:30:45` |
-| `%Y-%m-%d %H:%i:%s.%f` | `2024-03-05 12:30:45.123456` |
-| `%Y-%m-%dT%H:%i:%s.%f` | `2024-03-05T12:30:45.123456` |
-| `%Y-%m-%dT%H:%i:%sZ` | `2024-03-05T12:30:45Z` |
-| `%Y-%m-%dT%H:%i:%s.%fZ` | `2024-03-05T12:30:45.123456Z` |
+例如，接受 `%Y-%m-%d`、`%Y/%m/%d %H:%i`、`%Y%m%d%H%i%s`、`%Y-%m-%dT%H:%i:%s.%fZ` 和 `%Y-%m`；不接受 `%d.%m.%Y`、`%m/%d/%Y`、`%Y-%c-%e`、`%y`、时区偏移和月份名称。BE 还必须把该格式的字符串转换为其表示的时间：不接受 `%Y%m%d%H%i`，因为 BE 将 12 位数字的字符串按两位年份读取；没有日的格式之所以被接受，是因为 BE 将其字符串转换为 NULL。不被接受的值会被忽略，并在 FE 日志中记录警告，查询按没有该属性的情况执行。属性中的列名匹配不区分大小写。仅支持 Iceberg 表。
 
-字段必须补零，年份必须为四位，`%f` 必须恰好为六位小数。不支持可变精度以及字符串中的数字时区偏移或时区名称。两种 `Z` 格式要求 FE JVM 系统时区为固定 UTC，否则不推导边界。这使 FE 常量折叠与 BE 解析一致，不改变解析器；会话时区可以不同。日或月位于年份之前的格式不能按字典序表示日期范围，因此不接受。
+该属性是表所有者的保证，而不是校验：StarRocks 不检查存储的行，ALTER 时也不检查属性，并且不改变 CAST 的解析规则。该列的所有非 NULL 值必须是声明格式的有效日期。格式不符、短年份、未补零字段、多余空白或无效值可能导致匹配的行被跳过。原始日期比较会保留在计划中。
+
+CAST 为 DATE 时，即使字符串包含时间，也覆盖整天。仅处理 AND 中的正向过滤条件，不替换 SELECT 表达式、OR 或 IS NULL 中的谓词。对于受支持的日期函数，`enable_monotonic_predicate_rewrite` 先生成 CAST 上的范围，然后该属性生成字符串列上的范围。仅当字符串列上过滤范围的两个边界都是声明格式的字符串，并且该列属于单个表（不是表达式或 UNION 的输出）时，才推导 JOIN 过滤条件。不能从过滤边界推断存储格式：`2024-03-01T01:00:00` 在字典序上大于 `2024-03-01 12:00:00`，但对应的时间更早。
+
+以 `Z` 结尾的格式要求 FE JVM 系统时区为固定 UTC，否则不推导边界。这使 FE 常量折叠与 BE 解析一致，不改变解析器；会话时区可以不同。
 
 这些格式的普通 DATE/DATETIME CAST 不转换时区，会话时区不会移动字符串范围。含 `unix_timestamp` 或 `from_unixtime` 的表达式仍使用原有时区和夏令时检查，无法证明范围安全时不进行推导。`convert_tz` 的来源和目标时区均为常量时，可以推导输入边界，同时保留原始过滤条件。支持数字偏移和 `UTC`、`Asia/Dushanbe` 等命名时区。任一时区在比较边界前后 72 小时内有时区切换、当地时间有歧义或边界越界时，不推导；其他情况下使用比较日期对应的时区偏移。指定格式不会指定或改变时区。
-
-两个优化开关相互独立，但都要求指定此格式。即使未启用反向字符串谓词下推，JOIN 路径仍会按照声明的存储格式检查输入边界。
 
 ### auto_increment_increment
 

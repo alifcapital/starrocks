@@ -15,7 +15,6 @@
 package com.starrocks.sql.optimizer.rewrite;
 
 import com.starrocks.common.util.StringDateFormat;
-import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -26,30 +25,38 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.function.Function;
 
 /** Necessary scan bounds for VARCHAR date inputs with an explicitly declared encoding. */
 public final class StringDatePredicateDerivation {
     private StringDatePredicateDerivation() {
     }
 
-    public static ScalarOperator derive(BinaryPredicateOperator predicate) {
-        ConnectContext context = ConnectContext.get();
-        if (context == null || !context.getSessionVariable().isEnableStringDatePredicatePushdown()) {
-            return predicate;
-        }
-        StringDateFormat format = StringDateFormat.fromFormat(context.getSessionVariable().getStringDatePredicateFormat());
-        if (format == null || !format.isSupportedInCurrentTimezone() || !(predicate.getChild(0) instanceof CastOperator cast)
+    /**
+     * @param formats the declared format of a column, or null when the column has none
+     */
+    public static ScalarOperator derive(BinaryPredicateOperator predicate,
+                                        Function<ColumnRefOperator, StringDateFormat> formats) {
+        if (!(predicate.getChild(0) instanceof CastOperator cast)
                 || !(cast.getChild(0) instanceof ColumnRefOperator column) || !column.getType().isVarchar()
                 || !cast.getType().isDateType()
                 || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
                 || !constant.getType().isDateType()) {
             return predicate;
         }
+        StringDateFormat format = formats.apply(column);
+        if (format == null || !format.isSupportedInCurrentTimezone()) {
+            return predicate;
+        }
 
         // DATE drops the time even when the string contains seconds or microseconds.
-        ChronoUnit precision = cast.getType().isDate() ? ChronoUnit.DAYS : format.getPrecision();
+        // A string of months or years holds less than a day, and its bound is cut to that unit.
+        ChronoUnit precision = format.getPrecision();
+        if (cast.getType().isDate() && precision.compareTo(ChronoUnit.DAYS) < 0) {
+            precision = ChronoUnit.DAYS;
+        }
         LocalDateTime value = constant.getDatetime();
-        LocalDateTime floor = value.truncatedTo(precision);
+        LocalDateTime floor = StringDateFormat.truncate(value, precision);
         LocalDateTime next = floor.plus(1, precision);
         LocalDateTime ceil = floor.equals(value) ? floor : next;
         ScalarOperator result;
