@@ -15,7 +15,9 @@
 #include "formats/parquet/scalar_column_reader.h"
 
 #include "common/compiler_util.h"
+#include "common/config.h"
 #include "formats/parquet/column_reader.h"
+#include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
 #include "formats/parquet/stored_column_reader_with_index.h"
@@ -39,6 +41,18 @@ static std::string describe_column(const ParquetField* field) {
 static Status invalid_index(const std::string& message) {
     LOG(WARNING) << message;
     return Status::Corruption(message);
+}
+
+// The feedback of the scan on the offset index is kept by the path of the column in the schema of the file.
+static std::string offset_index_feedback_key(const tparquet::ColumnMetaData& column_metadata) {
+    std::string key;
+    for (const std::string& part : column_metadata.path_in_schema) {
+        if (!key.empty()) {
+            key += '.';
+        }
+        key += part;
+    }
+    return key;
 }
 
 // FixedValueColumnReader
@@ -72,6 +86,13 @@ StatusOr<bool> FixedValueColumnReader::page_index_zone_map_filter(const std::vec
 }
 
 // RawColumnReader
+
+RawColumnReader::~RawColumnReader() {
+    // The row group is read, and the scan learns whether the offset index that this reader read has paid.
+    if (_skip_advisor != nullptr) {
+        _skip_advisor->observe(_skip_column, _offset_index_skip_enabled ? _reader->offset_index_skipped_pages() : 0);
+    }
+}
 
 void RawColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges,
                                               int64_t* end_offset, ColumnIOTypeFlags types, bool active) {
@@ -112,6 +133,18 @@ void RawColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInpu
         }
         // all column need offset index
         if (column.__isset.offset_index_offset &&
+            _check_region(column.offset_index_offset, column.offset_index_length, kMaxPageIndexBytes, "offset index")
+                    .ok()) {
+            auto r = io::SharedBufferedInputStream::IORange(column.offset_index_offset, column.offset_index_length);
+            ranges->emplace_back(r);
+        }
+    } else if ((types & ColumnIOType::OFFSET_INDEX) != 0) {
+        // We plan the offset index alone for a column that reads it to skip pages. A Repeated column reads page
+        // by page, a chunk of one data page has no page to skip, and a column that the scan has seen skip no page
+        // does not read it any more, so we do not plan the index for them.
+        const ParquetField* field = get_column_parquet_field();
+        if (column.__isset.offset_index_offset && field != nullptr && field->max_rep_level() == 0 &&
+            _may_read_offset_index_for_skip() &&
             _check_region(column.offset_index_offset, column.offset_index_length, kMaxPageIndexBytes, "offset index")
                     .ok()) {
             auto r = io::SharedBufferedInputStream::IORange(column.offset_index_offset, column.offset_index_length);
@@ -242,6 +275,138 @@ void RawColumnReader::select_offset_index(const SparseRange<uint64_t>& range, co
     // be compatible with PARQUET-1850
     has_dict_page |= _offset_index_ctx->check_dictionary_page(column_metadata.data_page_offset);
     _reader = std::make_unique<StoredColumnReaderWithIndex>(std::move(_reader), _offset_index_ctx.get(), has_dict_page);
+}
+
+Status RawColumnReader::_read_stored_range(const Range<uint64_t>& range, const Filter* filter,
+                                           ColumnContentType content_type, Column* dst) {
+    // The offset index helps a read where some rows of the range are dropped, or where the reader has to pass rows
+    // between this range and the last one. We expect many columns to never get such a read, so we load the offset
+    // index at the first one, and the other columns do not load it.
+    if (!_offset_index_skip_tried && filter != nullptr && config::parquet_offset_index_skip_enable &&
+        (range.begin() > _read_end || SIMD::contain_zero(*filter))) {
+        _enable_offset_index_skip();
+    }
+    _read_end = range.end();
+    return _reader->read_range(range, filter, content_type, dst);
+}
+
+void RawColumnReader::_enable_offset_index_skip() {
+    _offset_index_skip_tried = true;
+    if (!_reader->supports_offset_index_skip() || !get_chunk_metadata()->__isset.offset_index_offset ||
+        !_may_have_several_data_pages()) {
+        return;
+    }
+    // We fear that the read of the offset index is wasted in every row group of a column that skips no page, so a
+    // column that the scan has given up on does not read it. An index that the static page selection has already read
+    // costs nothing more, so the scan neither stops it nor counts it.
+    if (_offset_index_ctx == nullptr) {
+        OffsetIndexSkipAdvisor* advisor = _opts.offset_index_skip_advisor;
+        if (advisor != nullptr) {
+            _skip_column = offset_index_feedback_key(get_chunk_metadata()->meta_data);
+            if (!advisor->should_load(_skip_column)) {
+                _opts.stats->offset_index_skip_given_up += 1;
+                return;
+            }
+            _skip_advisor = advisor;
+        }
+        _opts.stats->offset_index_skip_loads += 1;
+    }
+    // The index is optional, so an error leaves the column on the path that reads page by page. get_offset_index()
+    // logs an index that is not valid, and we ask only once.
+    if (!get_offset_index(_opts.first_row_index).ok() || !_offset_index_fits_chunk()) {
+        return;
+    }
+    _offset_index_skip_enabled = true;
+    const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
+    const int64_t chunk_start = column_metadata.__isset.dictionary_page_offset ? column_metadata.dictionary_page_offset
+                                                                               : column_metadata.data_page_offset;
+    // the bytes before the first data page are the dictionary page
+    const bool has_dict_page = _offset_index_ctx->offset_index.page_locations.front().offset > chunk_start;
+    _reader->set_offset_index_skip(_offset_index_ctx.get(), has_dict_page);
+}
+
+bool RawColumnReader::_may_have_several_data_pages() const {
+    const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
+    if (!column_metadata.__isset.encoding_stats || column_metadata.encoding_stats.empty()) {
+        return true;
+    }
+    int64_t data_pages = 0;
+    for (const tparquet::PageEncodingStats& stats : column_metadata.encoding_stats) {
+        if (stats.page_type == tparquet::PageType::DATA_PAGE || stats.page_type == tparquet::PageType::DATA_PAGE_V2) {
+            data_pages += stats.count;
+        }
+    }
+    return data_pages > 1;
+}
+
+bool RawColumnReader::_may_read_offset_index_for_skip() const {
+    if (!_may_have_several_data_pages()) {
+        return false;
+    }
+    OffsetIndexSkipAdvisor* advisor = _opts.offset_index_skip_advisor;
+    return advisor == nullptr || advisor->should_load(offset_index_feedback_key(get_chunk_metadata()->meta_data));
+}
+
+bool RawColumnReader::_offset_index_fits_chunk() const {
+    const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
+    const auto& pages = _offset_index_ctx->offset_index.page_locations;
+    const int64_t chunk_start = column_metadata.__isset.dictionary_page_offset ? column_metadata.dictionary_page_offset
+                                                                               : column_metadata.data_page_offset;
+    if (pages.empty() || chunk_start < 0 || column_metadata.total_compressed_size < 0) {
+        return false;
+    }
+    // A non-repeated column has one value for each row, and a page of it holds the rows that the offset index gives.
+    if (_opts.row_group_meta != nullptr && column_metadata.num_values != _opts.row_group_meta->num_rows) {
+        return false;
+    }
+
+    // The reader reads a chunk page after page, so the pages of the index follow each other without a gap. The first
+    // one starts at the chunk, or after the dictionary page, and the last one ends where the chunk ends. The offsets
+    // are not negative (_validate_offset_index checked it), so the sums fit in 64 bits.
+    uint64_t page_end = chunk_start;
+    for (size_t i = 0; i < pages.size(); ++i) {
+        const int64_t offset = pages[i].offset;
+        if (offset < 0 ||
+            (i == 0 ? static_cast<uint64_t>(offset) < page_end : static_cast<uint64_t>(offset) != page_end)) {
+            return false;
+        }
+        page_end = static_cast<uint64_t>(offset) + pages[i].compressed_page_size;
+    }
+    if (page_end != static_cast<uint64_t>(chunk_start) + column_metadata.total_compressed_size) {
+        return false;
+    }
+
+    // The bytes before the first data page are the dictionary page, and the footer must agree: it names a dictionary
+    // page exactly when there is room for one, the encodings of the chunk include a dictionary encoding exactly when
+    // there is a dictionary page, and the page counts of the encoding statistics are the pages of the index.
+    const bool has_dict_page = pages.front().offset > chunk_start;
+    if (column_metadata.__isset.dictionary_page_offset && !has_dict_page) {
+        return false;
+    }
+    if (!column_metadata.encodings.empty()) {
+        const bool dict_encoded = std::ranges::any_of(column_metadata.encodings, [](tparquet::Encoding::type encoding) {
+            return encoding == tparquet::Encoding::PLAIN_DICTIONARY || encoding == tparquet::Encoding::RLE_DICTIONARY;
+        });
+        if (dict_encoded != has_dict_page) {
+            return false;
+        }
+    }
+    if (column_metadata.__isset.encoding_stats) {
+        int64_t data_pages = 0;
+        int64_t dict_pages = 0;
+        for (const tparquet::PageEncodingStats& stats : column_metadata.encoding_stats) {
+            if (stats.page_type == tparquet::PageType::DATA_PAGE ||
+                stats.page_type == tparquet::PageType::DATA_PAGE_V2) {
+                data_pages += stats.count;
+            } else if (stats.page_type == tparquet::PageType::DICTIONARY_PAGE) {
+                dict_pages += stats.count;
+            }
+        }
+        if (data_pages != static_cast<int64_t>(pages.size()) || dict_pages != (has_dict_page ? 1 : 0)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool RawColumnReader::column_all_pages_dict_encoded() const {
@@ -729,11 +894,11 @@ Status ScalarColumnReader::_read_range_impl(const Range<uint64_t>& range, const 
         dst = _code_column;
         dst->as_mutable_raw_ptr()->reserve(range.span_size());
         SCOPED_RAW_TIMER(&_opts.stats->column_read_ns);
-        return _reader->read_range(range, filter, content_type, dst->as_mutable_raw_ptr());
+        return _read_stored_range(range, filter, content_type, dst->as_mutable_raw_ptr());
     } else {
         if (!_converter->need_convert) {
             SCOPED_RAW_TIMER(&_opts.stats->column_read_ns);
-            return _reader->read_range(range, filter, content_type, dst->as_mutable_raw_ptr());
+            return _read_stored_range(range, filter, content_type, dst->as_mutable_raw_ptr());
         } else {
             if (_tmp_intermediate_column == nullptr) {
                 _tmp_intermediate_column = _converter->create_src_column();
@@ -742,8 +907,8 @@ Status ScalarColumnReader::_read_range_impl(const Range<uint64_t>& range, const 
             _tmp_intermediate_column->as_mutable_raw_ptr()->reserve(range.span_size());
             {
                 SCOPED_RAW_TIMER(&_opts.stats->column_read_ns);
-                RETURN_IF_ERROR(_reader->read_range(range, filter, content_type,
-                                                    _tmp_intermediate_column->as_mutable_raw_ptr()));
+                RETURN_IF_ERROR(_read_stored_range(range, filter, content_type,
+                                                   _tmp_intermediate_column->as_mutable_raw_ptr()));
             }
             if constexpr (!LAZY_CONVERT) {
                 {
@@ -908,7 +1073,7 @@ Status LowCardColumnReader::read_range(const Range<uint64_t>& range, const Filte
 
     {
         SCOPED_RAW_TIMER(&_opts.stats->column_read_ns);
-        return _reader->read_range(range, filter, content_type, dst->as_mutable_raw_ptr());
+        return _read_stored_range(range, filter, content_type, dst->as_mutable_raw_ptr());
     }
 }
 
@@ -1066,7 +1231,7 @@ Status LowRowsColumnReader::read_range(const Range<uint64_t>& range, const Filte
 
     {
         SCOPED_RAW_TIMER(&_opts.stats->column_read_ns);
-        return _reader->read_range(range, filter, content_type, dst->as_mutable_raw_ptr());
+        return _read_stored_range(range, filter, content_type, dst->as_mutable_raw_ptr());
     }
 }
 

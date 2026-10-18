@@ -181,13 +181,17 @@ Status FileReader::_build_split_tasks() {
 
 // when doing row group filter, there maybe some error, but we'd better just ignore it instead of returning the error
 // status and lead to the query failed.
-bool FileReader::_filter_group(const GroupReaderPtr& group_reader) {
-    bool& filtered = group_reader->get_is_group_filtered();
-    filtered = false;
+bool FileReader::_use_page_index() {
     bool use_page_index = _scanner_ctx->options.parquet_page_index_enable;
     if (use_page_index && !_page_index_feedback_key.empty()) {
         use_page_index = _scanner_ctx->page_index_read_advisor->should_read(_page_index_feedback_key);
     }
+    return use_page_index;
+}
+
+bool FileReader::_filter_group(const GroupReaderPtr& group_reader, bool use_page_index) {
+    bool& filtered = group_reader->get_is_group_filtered();
+    filtered = false;
     auto visitor = PredicateFilterEvaluator{_scanner_ctx->predicates.predicate_tree, group_reader.get(), use_page_index,
                                             _scanner_ctx->options.parquet_bloom_filter_enable};
     auto sparse_range = _scanner_ctx->predicates.predicate_tree.visit(visitor);
@@ -273,14 +277,19 @@ bool FileReader::_select_row_group(const tparquet::RowGroup& row_group) {
     return false;
 }
 
-Status FileReader::_collect_row_group_io(std::shared_ptr<GroupReader>& group_reader) {
+Status FileReader::_collect_row_group_io(std::shared_ptr<GroupReader>& group_reader, bool use_page_index) {
     // collect io ranges.
     if (config::parquet_coalesce_read_enable && _sb_stream != nullptr) { //should move to scanner_ctx
         std::vector<io::SharedBufferedInputStream::IORange> ranges;
         int64_t end_offset = 0;
         ColumnIOTypeFlags flags = 0;
-        if (_scanner_ctx->options.parquet_page_index_enable) {
+        if (use_page_index) {
             flags |= ColumnIOType::PAGE_INDEX;
+        } else if (config::parquet_offset_index_skip_enable) {
+            // The page index is not read for this row group, and the columns read their offset indexes to skip
+            // pages. We fear that the column indexes next to the offset indexes join their buffers and are loaded
+            // with them for nothing, so we plan the offset indexes alone.
+            flags |= ColumnIOType::OFFSET_INDEX;
         }
         if (_scanner_ctx->options.parquet_bloom_filter_enable) {
             flags |= ColumnIOType::BLOOM_FILTER;
@@ -335,9 +344,10 @@ Status FileReader::_init_group_readers(InitMode mode) {
 
         _group_reader_param.stats->total_row_groups += 1;
 
-        RETURN_IF_ERROR(_collect_row_group_io(row_group_reader));
+        const bool use_page_index = _use_page_index();
+        RETURN_IF_ERROR(_collect_row_group_io(row_group_reader, use_page_index));
         // You should call row_group_reader->init() before _filter_group()
-        if (_filter_group(row_group_reader)) {
+        if (_filter_group(row_group_reader, use_page_index)) {
             DLOG(INFO) << "row group " << i << " of file has been filtered";
             _group_reader_param.stats->filtered_row_groups += 1;
             continue;

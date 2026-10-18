@@ -34,7 +34,9 @@ struct ParquetField;
 
 enum ColumnContentType { VALUE, DICT_CODE };
 
-enum ColumnIOType { INVALID = 0, PAGE_INDEX = 1, PAGES = 2, BLOOM_FILTER = 4 };
+// PAGE_INDEX plans the column indexes and the offset indexes. OFFSET_INDEX plans the offset indexes alone, for the
+// scans that do not read the column indexes but still read the offset indexes to skip pages.
+enum ColumnIOType { INVALID = 0, PAGE_INDEX = 1, PAGES = 2, BLOOM_FILTER = 4, OFFSET_INDEX = 8 };
 enum CacheType { META, PAGE };
 
 using ColumnIOTypeFlags = int32_t;

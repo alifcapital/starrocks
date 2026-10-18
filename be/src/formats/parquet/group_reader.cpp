@@ -980,6 +980,7 @@ Status GroupReader::_create_column_readers() {
     opts.modification_time = _param.modification_time;
     opts.file_size = _param.file_size;
     opts.datacache_options = _param.datacache_options;
+    opts.offset_index_skip_advisor = _param.scanner_ctx->offset_index_skip_advisor.get();
     for (const auto& column : _param.read_cols) {
         ASSIGN_OR_RETURN(ColumnReaderPtr column_reader, _create_column_reader(column));
         _column_readers[column.slot_id()] = std::move(column_reader);

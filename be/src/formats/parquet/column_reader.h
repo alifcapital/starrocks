@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -62,10 +63,13 @@ namespace starrocks::parquet {
 // UNKNOWN means footer metadata cannot prove either outcome.
 enum class ZoneMapMatch { UNKNOWN, NONE, ALL };
 
+class OffsetIndexSkipAdvisor;
+
 struct ColumnOffsetIndexCtx {
     tparquet::OffsetIndex offset_index;
+    // The pages that the row ranges of the row group touch. It is empty when no page selection was made.
     std::vector<bool> page_selected;
-    uint64_t rg_first_row;
+    uint64_t rg_first_row = 0;
 
     void collect_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                           bool active);
@@ -73,6 +77,25 @@ struct ColumnOffsetIndexCtx {
     // be compatible with PARQUET-1850
     bool check_dictionary_page(int64_t data_page_offset) {
         return offset_index.page_locations.size() > 0 && offset_index.page_locations[0].offset > data_page_offset;
+    }
+
+    // The first row of the page, as a row of the file.
+    uint64_t page_first_row(size_t page_idx) const {
+        return rg_first_row + offset_index.page_locations[page_idx].first_row_index;
+    }
+
+    // The page that holds the row of the file: the last page that starts at or before the row. A row before the
+    // first page is in the first page, and a row after the last page start is in the last page.
+    size_t page_of_row(uint64_t row) const {
+        const auto& pages = offset_index.page_locations;
+        if (row < rg_first_row) {
+            return 0;
+        }
+        const int64_t row_in_group = static_cast<int64_t>(row - rg_first_row);
+        auto next_page = std::upper_bound(
+                pages.begin(), pages.end(), row_in_group,
+                [](int64_t value, const tparquet::PageLocation& page) { return value < page.first_row_index; });
+        return next_page == pages.begin() ? 0 : static_cast<size_t>(next_page - pages.begin()) - 1;
     }
 };
 
@@ -89,6 +112,8 @@ struct ColumnReaderOptions {
     int64_t modification_time = 0;
     uint64_t file_size = 0;
     const DataCacheOptions* datacache_options;
+    // Feedback of the scan on the columns that read their offset index to skip pages. Null: no feedback.
+    OffsetIndexSkipAdvisor* offset_index_skip_advisor = nullptr;
 };
 
 class StoredColumnReader;

@@ -16,6 +16,8 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 #include <ostream>
 #include <vector>
@@ -106,8 +108,32 @@ Status PageReader::_deal_page_with_cache() {
     return Status::OK();
 }
 
+size_t PageReader::_page_size_at(uint64_t offset) const {
+    constexpr size_t kUnknown = std::numeric_limits<size_t>::max();
+    if (_page_locations == nullptr || _page_locations->empty()) {
+        return kUnknown;
+    }
+    // the first page that starts after the offset
+    auto next_page = std::upper_bound(_page_locations->begin(), _page_locations->end(), offset,
+                                      [](uint64_t value, const tparquet::PageLocation& location) {
+                                          return value < static_cast<uint64_t>(location.offset);
+                                      });
+    if (next_page == _page_locations->begin()) {
+        // The position is before the first data page of the chunk, where the dictionary page is.
+        return static_cast<uint64_t>(next_page->offset) - offset;
+    }
+    const tparquet::PageLocation& page = *(next_page - 1);
+    if (static_cast<uint64_t>(page.offset) != offset || page.compressed_page_size <= 0) {
+        return kUnknown;
+    }
+    return page.compressed_page_size;
+}
+
 Status PageReader::_read_and_deserialize_header(bool need_fill_cache) {
-    size_t allowed_page_size = kDefaultPageHeaderSize;
+    // We expect the header to lie inside its page, so when the offset index gives the size of the page, we start
+    // with that size and not with the default one. If the index is wrong and the header is longer, the parse below
+    // fails and the loop reads more bytes.
+    size_t allowed_page_size = std::min(kDefaultPageHeaderSize, _page_size_at(_offset));
     size_t remaining = _finish_offset - _offset;
     _header_length = 0;
 

@@ -27,6 +27,7 @@
 #include "formats/parquet/column_chunk_reader.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/schema.h"
 #include "formats/parquet/stored_column_reader.h"
 #include "fs/fs_memory.h"
@@ -318,6 +319,137 @@ TEST_F(ParquetPageReaderTest, LevelsLengthLongerThanDataPageV2) {
         ASSERT_FALSE(data.ok()) << lengths.first << " " << lengths.second;
         ASSERT_TRUE(data.status().is_corruption()) << data.status().to_string();
     }
+}
+
+// A page header lies inside its page. When the offset index gives the size of the page, the reader asks the stream for
+// the bytes of that page and no more, so the bytes of the next page stay unread. The dictionary page is the bytes
+// before the first page of the offset index, and the read of its header stops there. If the offset index names a page
+// that is shorter than its header, the reader reads more bytes and still returns the header. A position that the index
+// does not list as the start of a page does not limit the read, unless the position is before the first listed page:
+// by the rule above that position is the dictionary page, whatever the index lists after it.
+TEST_F(ParquetPageReaderTest, HeaderReadStaysInsideThePageOfTheOffsetIndex) {
+    // an optional dictionary page and three data pages, each a header and 20 bytes of body
+    auto make_chunk = [](bool with_dict, std::string* buffer, std::vector<tparquet::PageLocation>* locations) {
+        if (with_dict) {
+            *buffer += make_page(make_dictionary_page_header(5, 20), 20);
+        }
+        for (int i = 0; i < 3; ++i) {
+            auto page_header = make_data_page_header(10);
+            page_header.compressed_page_size = 20;
+            page_header.uncompressed_page_size = 20;
+            std::string page = make_page(page_header, 20);
+            tparquet::PageLocation location;
+            location.offset = static_cast<int64_t>(buffer->size());
+            location.compressed_page_size = static_cast<int32_t>(page.size());
+            location.first_row_index = i * 10;
+            locations->push_back(location);
+            *buffer += page;
+        }
+    };
+
+    // Reads the header at `start` and returns whether the stream gave out a byte at or after `boundary`.
+    auto read_header_at = [](const std::string& buffer, const std::vector<tparquet::PageLocation>* page_locations,
+                             int64_t start, int64_t boundary, tparquet::PageType::type expected_type) {
+        RecordingInputStream stream(buffer);
+        HdfsScannerStats stats;
+        ColumnReaderOptions opts;
+        opts.stats = &stats;
+        PageReader reader(&stream, 0, buffer.size(), 30, opts, tparquet::CompressionCodec::UNCOMPRESSED);
+        reader.set_page_locations(page_locations);
+        EXPECT_TRUE(reader.seek_to_offset(start).ok());
+        Status st = reader.next_header();
+        EXPECT_TRUE(st.ok()) << st.to_string();
+        EXPECT_EQ(expected_type, reader.current_header()->type);
+        EXPECT_EQ(20, reader.current_header()->compressed_page_size);
+        return stream.touched(boundary, buffer.size());
+    };
+
+    // the headers of the data pages that have a page after them: the read stops at the end of the page
+    {
+        std::string buffer;
+        std::vector<tparquet::PageLocation> locations;
+        make_chunk(false, &buffer, &locations);
+        const auto type = tparquet::PageType::DATA_PAGE;
+
+        // the same index with every page one byte later than it is
+        std::vector<tparquet::PageLocation> shifted = locations;
+        for (auto& location : shifted) {
+            location.offset += 1;
+        }
+
+        for (size_t i = 0; i + 1 < locations.size(); ++i) {
+            SCOPED_TRACE("page " + std::to_string(i));
+            const int64_t start = locations[i].offset;
+            const int64_t next_page_begin = locations[i + 1].offset;
+
+            // without the offset index the header read takes the bytes after the page
+            ASSERT_TRUE(read_header_at(buffer, nullptr, start, next_page_begin, type));
+            ASSERT_FALSE(read_header_at(buffer, &locations, start, next_page_begin, type));
+
+            // a size that is shorter than the header: the reader reads more and returns the header
+            std::vector<tparquet::PageLocation> too_short = locations;
+            too_short[i].compressed_page_size = 1;
+            ASSERT_FALSE(read_header_at(buffer, &too_short, start, next_page_begin, type));
+
+            if (i == 0) {
+                // We expect the reader to take the bytes before the first page of the index for the dictionary page,
+                // also when the index is wrong about it. Here that page is one byte long, so the first read is short
+                // of the header, and the reader grows the read until the header parses. It stays short of the next
+                // page.
+                ASSERT_FALSE(read_header_at(buffer, &shifted, start, next_page_begin, type));
+            } else {
+                // a page that the offset index gives at another position than the reader is at does not limit the read
+                ASSERT_TRUE(read_header_at(buffer, &shifted, start, next_page_begin, type));
+            }
+        }
+    }
+
+    // the header of the dictionary page: the read stops at the first data page
+    {
+        std::string buffer;
+        std::vector<tparquet::PageLocation> locations;
+        make_chunk(true, &buffer, &locations);
+        const int64_t first_page_begin = locations[0].offset;
+        const auto type = tparquet::PageType::DICTIONARY_PAGE;
+
+        ASSERT_TRUE(read_header_at(buffer, nullptr, 0, first_page_begin, type));
+        ASSERT_FALSE(read_header_at(buffer, &locations, 0, first_page_begin, type));
+    }
+}
+
+// next_header() ends the chunk by the values of the headers that it has read. A reader that jumps over pages has not read
+// their headers, so it sets the values before the page that it jumps to, and then the chunk ends after the last page.
+// Without it the count stays below the values of the chunk, and the reader that goes on gets a corrupt header.
+TEST_F(ParquetPageReaderTest, EndOfFileAfterAJumpNeedsTheValuesRead) {
+    // three pages of 10 values
+    std::string buffer;
+    std::vector<int64_t> offsets;
+    for (int i = 0; i < 3; ++i) {
+        offsets.push_back(static_cast<int64_t>(buffer.size()));
+        buffer += make_page(make_data_page_header(10), 64);
+    }
+
+    // jumps to the last page, reads its header, and asks for the page after it
+    auto read_past_the_last_page = [&](bool set_values_read) -> Status {
+        RecordingInputStream stream(buffer);
+        HdfsScannerStats stats;
+        ColumnReaderOptions opts;
+        opts.stats = &stats;
+        PageReader reader(&stream, 0, buffer.size(), 30, opts, tparquet::CompressionCodec::UNCOMPRESSED);
+        RETURN_IF_ERROR(reader.seek_to_offset(offsets[2]));
+        if (set_values_read) {
+            reader.set_num_values_read(20);
+        }
+        RETURN_IF_ERROR(reader.next_header());
+        RETURN_IF_ERROR(reader.next_page());
+        return reader.next_header();
+    };
+
+    Status st = read_past_the_last_page(true);
+    ASSERT_TRUE(st.is_end_of_file()) << st.to_string();
+    st = read_past_the_last_page(false);
+    ASSERT_FALSE(st.ok());
+    ASSERT_FALSE(st.is_end_of_file()) << st.to_string();
 }
 
 class ParquetColumnChunkReaderTest : public testing::Test {

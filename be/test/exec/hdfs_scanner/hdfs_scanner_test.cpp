@@ -17,6 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "cache/datacache.h"
 #include "cache/disk_cache/block_cache.h"
@@ -274,6 +277,40 @@ TEST_F(HdfsScannerTest, TestCacheSelectReaderReadPopulatesDataCache) {
     EXPECT_GT(second_populate_stats.read_block_cache_bytes, 0);
 }
 #endif
+
+// The stand reads the page skip of the offset index from the profile by the names of the counters, so a counter that
+// is renamed, not registered or not updated shows as zero there. The test fills the stats of the scanner and checks the
+// value that each counter has in the profile, with its unit.
+TEST_F(HdfsScannerTest, TestParquetOffsetIndexSkipCountersReachTheProfile) {
+    auto scanner = std::make_shared<HdfsParquetScanner>();
+
+    auto* range = _create_scan_range(default_parquet_file, 4, 1024);
+    auto* tuple_desc = _create_tuple_desc(default_parquet_descs);
+    auto* ctx = _create_ctx(default_parquet_file, range, tuple_desc);
+    ASSERT_OK(scanner->init(_runtime_state, ctx));
+
+    scanner->_app_stats.page_skip_by_offset_index = 37;
+    scanner->_app_stats.page_skip_by_offset_index_undecoded_bytes = 5 * 1024 * 1024 + 17;
+    scanner->_app_stats.offset_index_skip_loads = 11;
+    scanner->_app_stats.offset_index_skip_given_up = 3;
+
+    HdfsScannerProfile profile;
+    profile.runtime_profile = _runtime_profile;
+    scanner->do_update_counter(&profile);
+
+    const std::vector<std::tuple<std::string, int64_t, TUnit::type>> expected = {
+            {"PageSkipByOffsetIndexCounter", 37, TUnit::UNIT},
+            {"PageSkipByOffsetIndexBytes", 5 * 1024 * 1024 + 17, TUnit::BYTES},
+            {"OffsetIndexSkipLoadCounter", 11, TUnit::UNIT},
+            {"OffsetIndexSkipGivenUpCounter", 3, TUnit::UNIT},
+    };
+    for (const auto& [name, value, unit] : expected) {
+        auto* counter = _runtime_profile->get_counter(name);
+        ASSERT_NE(nullptr, counter) << name;
+        ASSERT_EQ(value, counter->value()) << name;
+        ASSERT_EQ(unit, counter->type()) << name;
+    }
+}
 
 TEST_F(HdfsScannerTest, TestHdfsRunningTime) {
     auto scanner = std::make_shared<HdfsParquetScanner>();

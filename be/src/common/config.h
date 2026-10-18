@@ -1246,6 +1246,15 @@ CONF_mBool(parquet_reader_bloom_filter_enable, "true");
 CONF_mBool(parquet_statistics_process_more_filter_enable, "true");
 CONF_mBool(parquet_fast_timezone_conversion, "false");
 CONF_mBool(parquet_push_down_filter_to_decoder_enable, "true");
+// A column that is read under a row filter finds the pages that hold a selected row by its offset index, so it does
+// not read the headers of the pages in between and does not decode them. The remote bytes of those pages are saved
+// only when the stream loads a column chunk in parts: piece by piece, or by the blocks of the data cache. A stream
+// that loads a chunk as one buffer loads all of it at the first header read, and the skip saves only the CPU there.
+// It does not depend on the page index: when the page index is not read, the scan plans the offset indexes alone.
+CONF_mBool(parquet_offset_index_skip_enable, "true");
+// The read of an offset index is a remote read. A column that read its offset index in this many row groups of a scan,
+// and skipped no page in any of them, does not read it for the rest of the scan. 0 never gives up.
+CONF_mInt32(parquet_offset_index_skip_give_up_row_groups, "4");
 CONF_mBool(parquet_cache_aware_dict_decoder_enable, "true");
 // Evaluate join runtime filters against decoded rows inside the parquet reader, so
 // non-matching rows are dropped before lazy columns are materialized. When disabled,

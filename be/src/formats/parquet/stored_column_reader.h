@@ -83,6 +83,23 @@ public:
     virtual void set_page_num(size_t page_num) {}
 
     virtual void set_page_change_on_record_boundry() {}
+
+    // A reader that supports offset index skipping, when it reads a range under a filter, finds the pages that hold
+    // a selected row by their offsets in the offset index. It gives the rows of the other pages their default
+    // values, as it does for a page without a selected row that it has loaded, and it neither reads their headers
+    // nor decodes them.
+    virtual bool supports_offset_index_skip() const { return false; }
+
+    // Switches skipping on, with the offset index of the column chunk, which must outlive the reader. nullptr
+    // switches it off. has_dict_page tells that the chunk has a dictionary page before its first data page.
+    virtual void set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) {}
+
+    // True if read_range() with this filter moves the reader to the page of the first selected row by itself, so the
+    // caller does not need to load the page where the range starts.
+    virtual bool seeks_by_offset_index(const Filter* filter) const { return false; }
+
+    // The pages that this reader jumped over through the offset index.
+    virtual int64_t offset_index_skipped_pages() const { return 0; }
 };
 
 class StoredColumnReaderImpl : public StoredColumnReader {
@@ -109,11 +126,23 @@ public:
 
     void set_page_num(size_t page_num) override { _reader->set_page_num(page_num); }
 
+    bool supports_offset_index_skip() const override { return _can_skip_pages(); }
+
+    void set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) override;
+
+    bool seeks_by_offset_index(const Filter* filter) const override { return _skips_pages(filter); }
+
+    int64_t offset_index_skipped_pages() const override { return _skipped_pages; }
+
     static size_t count_not_null(level_t* def_levels, size_t num_parsed_levels, level_t max_def_level);
 
 protected:
     virtual Status _next_page();
     virtual bool _cur_page_selected(size_t row_readed, const Filter* filter, size_t to_read);
+
+    // True for the readers whose page holds one value for each row, so the first row of a page and the rows of a
+    // page come from the offset index without reading the page.
+    virtual bool _can_skip_pages() const { return false; }
 
     // The rows of the current page between the decoders and the first row of the next decode.
     size_t _rows_to_skip_in_cur_page() const {
@@ -128,6 +157,13 @@ protected:
     virtual void _append_default_levels(size_t row_nums) {}
 
     std::unique_ptr<ColumnChunkReader> _reader;
+    // The offset index of the chunk, when skipping pages through it is switched on by set_offset_index_skip().
+    const ColumnOffsetIndexCtx* _skip_index = nullptr;
+    bool _skip_index_has_dict_page = false;
+    // The last read gave default values to the rows at its end and did not move the reader over them, so the reader
+    // is before the end of the range.
+    bool _behind = false;
+    int64_t _skipped_pages = 0;
     size_t _num_values_left_in_cur_page = 0;
     // The Required and Optional readers do not move the value decoder and the def level decoder over rows that are
     // skipped or filtered out, because the page may end before a later row is read. We keep the number of rows of the
@@ -145,7 +181,30 @@ private:
     Status _lazy_load_page_rows(size_t batch_size, ColumnContentType content_type, Column* dst);
 
     Status _skip(uint64_t row_to_skip);
-    Status _read(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type, Column* dst);
+    // `row_readed` rows at the start of the range have been appended to dst already.
+    Status _read(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type, Column* dst,
+                 size_t row_readed = 0);
+
+    // Page skipping through the offset index. It applies to a read under a filter, when the config is on and the
+    // reader has the offset index.
+    bool _skips_pages(const Filter* filter) const {
+        return _skip_index != nullptr && filter != nullptr && config::parquet_offset_index_skip_enable;
+    }
+    // A read without a filter goes through the offset index too when an earlier read left the reader behind its
+    // range: the pages between the reader and the range may be pages that no read needs, and walking over them reads
+    // their headers.
+    bool _seeks_without_filter(const Filter* filter) const {
+        return filter == nullptr && _behind && _skip_index != nullptr && config::parquet_offset_index_skip_enable;
+    }
+    Status _read_skipping_pages(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type,
+                                Column* dst);
+    Status _enter_next_page(const Range<uint64_t>& range, const Filter& filter, ColumnContentType content_type,
+                            Column* dst, size_t* row_readed, size_t* unread_rows);
+    Status _jump_to_page(size_t page_idx, size_t reader_page);
+
+    // The reader compares every page that it enters with the offset index while the skipping is on.
+    bool _checks_pages() const { return _skip_index != nullptr && config::parquet_offset_index_skip_enable; }
+    Status _check_entered_page();
 
     // input is target row, this function will convert row to values bases on _num_values_left_in_cur_page,
     // only convert in the current page, the return is the num of values that will be used and

@@ -32,6 +32,7 @@
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
 #include "column/struct_column.h"
+#include "common/config.h"
 #include "common/logging.h"
 #include "connector/hive_connector.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
@@ -42,6 +43,7 @@
 #include "formats/parquet/column_chunk_reader.h"
 #include "formats/parquet/column_materializer.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/page_index_read_advisor.h"
 #include "formats/parquet/page_reader.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
@@ -4021,6 +4023,78 @@ TEST(ParquetPageIndexAdvisorTest, BothDataSourceConstructorsShareScanFeedback) {
     connector::HiveDataSourceProvider other_provider(nullptr, node);
     connector::HiveDataSource other(&other_provider, full_range);
     EXPECT_NE(ordinary._scanner_ctx.page_index_read_advisor, other._scanner_ctx.page_index_read_advisor);
+
+    // the feedback of the offset index reads is shared the same way
+    ASSERT_NE(nullptr, ordinary._scanner_ctx.offset_index_skip_advisor);
+    ASSERT_EQ(ordinary._scanner_ctx.offset_index_skip_advisor, split._scanner_ctx.offset_index_skip_advisor);
+    EXPECT_NE(ordinary._scanner_ctx.offset_index_skip_advisor, other._scanner_ctx.offset_index_skip_advisor);
+}
+
+namespace {
+class ScopedGiveUpRowGroups {
+public:
+    explicit ScopedGiveUpRowGroups(int32_t value) : _old_value(config::parquet_offset_index_skip_give_up_row_groups) {
+        config::parquet_offset_index_skip_give_up_row_groups = value;
+    }
+    ~ScopedGiveUpRowGroups() { config::parquet_offset_index_skip_give_up_row_groups = _old_value; }
+
+private:
+    int32_t _old_value;
+};
+} // namespace
+
+TEST(ParquetOffsetIndexSkipAdvisorTest, GivesUpOnAColumnThatSkippedNoPage) {
+    ScopedGiveUpRowGroups guard(3);
+    OffsetIndexSkipAdvisor advisor;
+    EXPECT_TRUE(advisor.should_load("c"));
+    advisor.observe("c", 0);
+    advisor.observe("c", 0);
+    EXPECT_TRUE(advisor.should_load("c"));
+    advisor.observe("c", 0);
+    EXPECT_FALSE(advisor.should_load("c"));
+    EXPECT_FALSE(advisor.should_load("c"));
+    // the other columns, and another scan, have their own feedback
+    EXPECT_TRUE(advisor.should_load("d"));
+    OffsetIndexSkipAdvisor other;
+    EXPECT_TRUE(other.should_load("c"));
+}
+
+TEST(ParquetOffsetIndexSkipAdvisorTest, NeverGivesUpOnAColumnThatSkippedAPage) {
+    ScopedGiveUpRowGroups guard(2);
+    OffsetIndexSkipAdvisor advisor;
+    advisor.observe("c", 0);
+    advisor.observe("c", 5);
+    for (int i = 0; i < 100; ++i) {
+        advisor.observe("c", 0);
+        EXPECT_TRUE(advisor.should_load("c"));
+    }
+
+    // A row group that was read at the same time as the last of the first ones, and that skipped a page, brings the
+    // column back.
+    advisor.observe("e", 0);
+    advisor.observe("e", 0);
+    EXPECT_FALSE(advisor.should_load("e"));
+    advisor.observe("e", 1);
+    EXPECT_TRUE(advisor.should_load("e"));
+}
+
+TEST(ParquetOffsetIndexSkipAdvisorTest, ZeroRowGroupsNeverGivesUp) {
+    ScopedGiveUpRowGroups guard(0);
+    OffsetIndexSkipAdvisor advisor;
+    for (int i = 0; i < 100; ++i) {
+        advisor.observe("c", 0);
+        EXPECT_TRUE(advisor.should_load("c"));
+    }
+}
+
+TEST(ParquetOffsetIndexSkipAdvisorTest, ForgetsColumnsToStayBounded) {
+    ScopedGiveUpRowGroups guard(1);
+    OffsetIndexSkipAdvisor advisor;
+    for (int i = 0; i < 10000; ++i) {
+        advisor.observe(std::to_string(i), 0);
+    }
+    // forgetting a column makes it read the index again, and never the other way
+    EXPECT_TRUE(advisor.should_load("new column"));
 }
 
 TEST(ParquetPageIndexAdvisorTest, RechecksAndResetsAfterBenefit) {
@@ -4325,6 +4399,100 @@ TEST_F(FileReaderTest, page_index_feedback_retries_useful_index_without_losing_r
         }
         EXPECT_EQ(5000, matches);
     }
+}
+
+// The page index read advisor turns the page index off for a scan whose earlier page indexes did not help. The skipping
+// of pages through the offset index is not a filter by the page index, so it goes on, and when the advisor turns the page
+// index off for a row group, the reader plans the offset indexes of the columns without their column indexes. The
+// reads of the offset indexes are not feedback for the advisor: it takes feedback from the page index filters only.
+TEST_F(FileReaderTest, offset_index_skip_ignores_the_page_index_advisor) {
+    const std::string path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+    auto descriptor = gen_runtime_filter_desc(0);
+    ASSERT_TRUE(descriptor.ok());
+    _rf_probe_collector->add_descriptor(descriptor.value());
+
+    struct Result {
+        int64_t planned_ranges = 0;
+        int64_t skipped_pages = 0;
+        int64_t page_index_tried = 0;
+        int64_t page_index_ns = 0;
+        size_t rows = 0;
+    };
+    // The advisor has seen two scans without a benefit from the page index when it turns the page index off for the
+    // first row group. The conjunct keeps nine rows of that row group, and the statistics prune the second one.
+    auto run = [&](bool skip, Result* result) {
+        const bool old_skip = config::parquet_offset_index_skip_enable;
+        config::parquet_offset_index_skip_enable = skip;
+        struct Restore {
+            bool value;
+            ~Restore() { config::parquet_offset_index_skip_enable = value; }
+        } restore{old_skip};
+
+        HdfsScannerStats stats;
+        auto file = _create_file(path);
+        const uint64_t file_size = std::filesystem::file_size(path);
+        auto shared_buffer = std::make_shared<io::SharedBufferedInputStream>(file->stream(), path, file_size);
+        auto reader = std::make_shared<FileReader>(4096, file.get(), file_size, _mock_datacache_options(),
+                                                   shared_buffer.get());
+
+        Utils::SlotDesc slots[] = {{"c0", TYPE_INT_DESC, 0}, {"c1", TYPE_INT_DESC, 1}, {""}};
+        auto* ctx = _create_scan_context(slots, path);
+        ctx->stats = &stats;
+        std::vector<TExpr> expressions;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::GT, 0, 5000, &expressions);
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LT, 0, 5010, &expressions);
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &expressions, &ctx->conjunct_ctxs_by_slot[0]);
+        auto* tuple = Utils::create_tuple_descriptor(_runtime_state, &_pool, slots);
+        ParquetUTBase::setup_conjuncts_manager(ctx->conjunct_ctxs_by_slot[0], nullptr, tuple, _runtime_state, ctx);
+        auto advisor = std::make_shared<PageIndexReadAdvisor>();
+        ctx->runtime_filter_collector = _rf_probe_collector;
+        ctx->page_index_read_advisor = advisor;
+        const auto key = ctx->predicates.predicate_tree.root().debug_string();
+        advisor->observe(key, false);
+        advisor->observe(key, false);
+
+        ASSERT_OK(reader->init(ctx));
+        ASSERT_EQ(1, reader->row_group_size());
+        result->planned_ranges = shared_buffer->current_range_ref_sum();
+
+        ChunkPtr chunk = std::make_shared<Chunk>();
+        _append_column_for_chunk(TYPE_INT, &chunk);
+        _append_column_for_chunk(TYPE_INT, &chunk);
+        while (true) {
+            chunk->reset();
+            auto status = reader->get_next(&chunk);
+            ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status.to_string();
+            for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                const int32_t c0 = chunk->get_column_by_slot_id(0)->get(i).get_int32();
+                ASSERT_TRUE(c0 > 5000 && c0 < 5010) << c0;
+                ASSERT_EQ(20001 - c0, chunk->get_column_by_slot_id(1)->get(i).get_int32());
+            }
+            result->rows += chunk->num_rows();
+            if (status.is_end_of_file()) break;
+        }
+        result->skipped_pages = stats.page_skip_by_offset_index;
+        result->page_index_tried = stats.page_index_tried_counter;
+        result->page_index_ns = stats.page_index_ns;
+    };
+
+    Result advisor_off, advisor_off_no_skip;
+    ASSERT_NO_FATAL_FAILURE(run(true, &advisor_off));
+    ASSERT_NO_FATAL_FAILURE(run(false, &advisor_off_no_skip));
+    EXPECT_EQ(9U, advisor_off.rows);
+    EXPECT_EQ(9U, advisor_off_no_skip.rows);
+
+    // the skipping works with the page index off, and the config turns it off
+    EXPECT_GT(advisor_off.skipped_pages, 0);
+    EXPECT_EQ(0, advisor_off_no_skip.skipped_pages);
+    // the reads of the offset indexes are no page index filter: they are not counted as one
+    EXPECT_EQ(0, advisor_off.page_index_tried);
+    EXPECT_EQ(0, advisor_off.page_index_ns);
+    EXPECT_EQ(0, advisor_off_no_skip.page_index_tried);
+
+    // The first row group plans nothing for the page index when the advisor turns it off and the skipping is off, and
+    // the offset indexes of its two columns, without the column index of the active column, when the skipping is on.
+    // The second row group plans the same in both scans.
+    EXPECT_EQ(2, advisor_off.planned_ranges - advisor_off_no_skip.planned_ranges);
 }
 
 // ── Join runtime filter row-level pushdown (GroupReader stage 4.1) ──────────

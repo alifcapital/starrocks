@@ -109,6 +109,10 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     RuntimeProfile::Counter* has_page_statistics = nullptr;
     // page skip
     RuntimeProfile::Counter* page_skip = nullptr;
+    RuntimeProfile::Counter* page_skip_by_offset_index = nullptr;
+    RuntimeProfile::Counter* page_skip_by_offset_index_undecoded_bytes = nullptr;
+    RuntimeProfile::Counter* offset_index_skip_loads = nullptr;
+    RuntimeProfile::Counter* offset_index_skip_given_up = nullptr;
     // round-by-round
     RuntimeProfile::Counter* group_min_round_cost = nullptr;
     // page index
@@ -181,6 +185,16 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
 
     has_page_statistics = ADD_CHILD_COUNTER(root, "HasPageStatistics", TUnit::UNIT, kParquetProfileSectionPrefix);
     page_skip = ADD_CHILD_COUNTER(root, "PageSkipCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
+    page_skip_by_offset_index =
+            ADD_CHILD_COUNTER(root, "PageSkipByOffsetIndexCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
+    // The compressed sizes that the offset index gives to the pages that the reader jumped over. They are the bytes
+    // that no one decoded, and not always the bytes that the stream did not load.
+    page_skip_by_offset_index_undecoded_bytes =
+            ADD_CHILD_COUNTER(root, "PageSkipByOffsetIndexBytes", TUnit::BYTES, kParquetProfileSectionPrefix);
+    offset_index_skip_loads =
+            ADD_CHILD_COUNTER(root, "OffsetIndexSkipLoadCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
+    offset_index_skip_given_up =
+            ADD_CHILD_COUNTER(root, "OffsetIndexSkipGivenUpCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
     group_min_round_cost = root->AddLowWaterMarkCounter(
             "GroupMinRound", TUnit::UNIT, RuntimeProfile::Counter::create_strategy(TCounterAggregateType::AVG),
             kParquetProfileSectionPrefix);
@@ -242,6 +256,10 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     int64_t page_stats = _app_stats.has_page_statistics ? 1 : 0;
     COUNTER_UPDATE(has_page_statistics, page_stats);
     COUNTER_UPDATE(page_skip, _app_stats.page_skip);
+    COUNTER_UPDATE(page_skip_by_offset_index, _app_stats.page_skip_by_offset_index);
+    COUNTER_UPDATE(page_skip_by_offset_index_undecoded_bytes, _app_stats.page_skip_by_offset_index_undecoded_bytes);
+    COUNTER_UPDATE(offset_index_skip_loads, _app_stats.offset_index_skip_loads);
+    COUNTER_UPDATE(offset_index_skip_given_up, _app_stats.offset_index_skip_given_up);
     COUNTER_SET(group_min_round_cost, _app_stats.group_min_round_cost);
     do_update_deletion_vector_filter_counter(root);
     COUNTER_UPDATE(rows_before_page_index, _app_stats.rows_before_page_index);

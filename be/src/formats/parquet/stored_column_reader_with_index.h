@@ -65,6 +65,18 @@ public:
         return _inner_reader->get_dict_values(dict_codes, nulls, column);
     }
 
+    bool supports_offset_index_skip() const override { return _inner_reader->supports_offset_index_skip(); }
+
+    void set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) override {
+        _inner_reader->set_offset_index_skip(ctx, has_dict_page);
+    }
+
+    bool seeks_by_offset_index(const Filter* filter) const override {
+        return _inner_reader->seeks_by_offset_index(filter);
+    }
+
+    int64_t offset_index_skipped_pages() const override { return _inner_reader->offset_index_skipped_pages(); }
+
 private:
     std::unique_ptr<StoredColumnReader> _inner_reader;
     ColumnOffsetIndexCtx* _offset_index_ctx;

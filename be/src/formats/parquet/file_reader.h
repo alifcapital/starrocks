@@ -98,8 +98,12 @@ private:
 
     Status _init_group_readers(InitMode mode);
 
+    // Whether the page index is read to filter the row group. The read advisor can turn it off for a scan whose
+    // earlier page indexes did not help. Each call counts as one row group for the advisor.
+    bool _use_page_index();
+
     // filter row group by conjuncts
-    bool _filter_group(const GroupReaderPtr& group_reader);
+    bool _filter_group(const GroupReaderPtr& group_reader, bool use_page_index);
     StatusOr<bool> _update_rf_and_filter_group(const GroupReaderPtr& group_reader);
 
     // get row group to read
@@ -110,7 +114,7 @@ private:
 
     Status _build_split_tasks();
 
-    Status _collect_row_group_io(std::shared_ptr<GroupReader>& group_reader);
+    Status _collect_row_group_io(std::shared_ptr<GroupReader>& group_reader, bool use_page_index);
 
     RandomAccessFile* _file = nullptr;
     uint64_t _file_size = 0;

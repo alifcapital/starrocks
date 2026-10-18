@@ -79,6 +79,7 @@ HiveDataSource::HiveDataSource(const HiveDataSourceProvider* provider, const TSc
 HiveDataSource::HiveDataSource(const HiveDataSourceProvider* provider, const THdfsScanRange& hdfs_scan_range)
         : _provider(provider), _scan_range(hdfs_scan_range) {
     _scanner_ctx.page_index_read_advisor = provider->_page_index_read_advisor;
+    _scanner_ctx.offset_index_skip_advisor = provider->_offset_index_skip_advisor;
 }
 
 Status HiveDataSource::_check_all_slots_nullable() {

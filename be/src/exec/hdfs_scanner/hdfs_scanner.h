@@ -39,6 +39,7 @@
 namespace starrocks {
 
 namespace parquet {
+class OffsetIndexSkipAdvisor;
 class PageIndexReadAdvisor;
 }
 
@@ -127,6 +128,16 @@ struct HdfsScannerStats {
     bool has_page_statistics = false;
     // page skip
     int64_t page_skip = 0;
+    // The pages that a column read under a filter jumped over through its offset index, without reading their
+    // headers or decoding them, and the compressed sizes of these pages from the offset index. The sizes are the bytes
+    // that the reader did not decode. The bytes that the stream did not load are fewer or the same: a stream that
+    // loads a chunk as one buffer loads the pages that nobody decodes too.
+    int64_t page_skip_by_offset_index = 0;
+    int64_t page_skip_by_offset_index_undecoded_bytes = 0;
+    // The offset indexes that columns read to skip pages, and the columns that did not read it because the scan had
+    // given up on them (OffsetIndexSkipAdvisor).
+    int64_t offset_index_skip_loads = 0;
+    int64_t offset_index_skip_given_up = 0;
     // page index
     int64_t rows_before_page_index = 0;
     int64_t page_index_ns = 0;
@@ -360,6 +371,7 @@ struct HdfsScannerContext {
 
     // ===== shared scan fields =====
     std::shared_ptr<parquet::PageIndexReadAdvisor> page_index_read_advisor;
+    std::shared_ptr<parquet::OffsetIndexSkipAdvisor> offset_index_skip_advisor;
     const RuntimeFilterProbeCollector* runtime_filter_collector = nullptr;
     // Driver sequence of the owning pipeline driver, set by HiveDataSource from
     // runtime_membership_filter_eval_context.  Mirrors what the lake connector

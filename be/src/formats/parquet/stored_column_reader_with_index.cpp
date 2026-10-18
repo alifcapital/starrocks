@@ -78,10 +78,15 @@ Status StoredColumnReaderWithIndex::read_range(const Range<uint64_t>& range, con
                                                              range.begin(), range.end(), _cur_page_idx));
         }
 
-        RETURN_IF_ERROR(_inner_reader->load_specific_page(
-                _cur_page_idx, _offset_index_ctx->offset_index.page_locations[_cur_page_idx].offset,
-                _offset_index_ctx->offset_index.page_locations[_cur_page_idx].first_row_index +
-                        _offset_index_ctx->rg_first_row));
+        // A reader that skips pages through the offset index moves to the page of the first selected row by itself.
+        // The rows at the start of the range may be not selected, so that page may be a later one, and we do not
+        // want to read the header of the page where the range starts. So we leave the move to such a reader.
+        if (!_inner_reader->seeks_by_offset_index(filter)) {
+            RETURN_IF_ERROR(_inner_reader->load_specific_page(
+                    _cur_page_idx, _offset_index_ctx->offset_index.page_locations[_cur_page_idx].offset,
+                    _offset_index_ctx->offset_index.page_locations[_cur_page_idx].first_row_index +
+                            _offset_index_ctx->rg_first_row));
+        }
         return _inner_reader->read_range(range, filter, content_type, dst);
     }
 }

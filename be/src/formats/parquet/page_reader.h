@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 #include "common/status.h"
 #include "common/statusor.h"
@@ -67,9 +68,32 @@ public:
 
     void set_next_read_page_idx(size_t cur_page_idx) { _next_read_page_idx = cur_page_idx; }
 
+    // The index of the data page whose header is read next. After a header read it is the index of the page after
+    // the page of that header, because a jump sets it and every data page header adds one.
+    size_t next_read_page_idx() const { return _next_read_page_idx; }
+
+    // next_header() returns the end of the file when the headers that it has read hold all the values of the chunk.
+    // A reader that jumps over pages does not read their headers, so it sets the count of the values before the page
+    // that it jumps to. Otherwise the count stays below the values of the chunk, and the reader that reads past the
+    // last page gets a corrupt header and not the end of the file.
+    void set_num_values_read(uint64_t num_values_read) { _num_values_read = num_values_read; }
+
+    // The pages of the offset index of the chunk, which must outlive the reader. We expect a page header to lie inside
+    // its page, so when a page of the list starts at the position of a header, we do not ask the stream for more
+    // bytes than the page has. The same holds for the dictionary page, which is the bytes before the first page of
+    // the list. A reader that jumps over pages by their offsets wants a stream that loads in parts to leave the pages
+    // that it skips alone, and a header read of the default size from a short page would touch them.
+    void set_page_locations(const std::vector<tparquet::PageLocation>* page_locations) {
+        _page_locations = page_locations;
+    }
+
     StatusOr<Slice> read_and_decompress_page_data();
 
 private:
+    // The size of the page that starts at the offset, the distance to the first page of the offset index when the
+    // offset is before it, or the largest size when the offset index says nothing about the offset.
+    size_t _page_size_at(uint64_t offset) const;
+
     // Must call this function after next_header called. The total read size
     // after one next_header can not exceed the page's compressed_page_size.
     Status _read_bytes(void* buffer, size_t size);
@@ -108,6 +132,7 @@ private:
 
     size_t _page_num = 0xffffffff;
     size_t _next_read_page_idx = 0;
+    const std::vector<tparquet::PageLocation>* _page_locations = nullptr;
 
     StoragePageCache* _cache = nullptr;
     std::string _page_cache_key;

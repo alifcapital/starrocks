@@ -22,10 +22,12 @@
 #include <vector>
 
 #include "column/column_helper.h"
+#include "common/config.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "exprs/binary_predicate.h"
 #include "formats/parquet/file_reader.h"
 #include "formats/parquet/group_reader.h"
+#include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
 #include "formats/parquet/parquet_test_util/util.h"
 #include "formats/parquet/parquet_ut_base.h"
@@ -784,6 +786,14 @@ public:
         _opts.row_group_meta = &_row_group;
     }
 
+    // The column is nested in a list, so it has repetition levels.
+    void set_max_rep_level(int16_t max_rep_level) { _field.level_info.max_rep_level = max_rep_level; }
+
+    // The feedback of the scan on the offset indexes, which must outlive the reader.
+    void set_skip_advisor(OffsetIndexSkipAdvisor* advisor) { _opts.offset_index_skip_advisor = advisor; }
+
+    HdfsScannerStats& stats() { return _stats; }
+
     // The column has null_count NULL values.
     void set_null_count(int64_t null_count) {
         tparquet::Statistics statistics;
@@ -965,9 +975,21 @@ public:
         loaded_pages.push_back(cur_page_idx);
         return Status::OK();
     }
+    bool supports_offset_index_skip() const override { return supports_skip; }
+    int64_t offset_index_skipped_pages() const override { return skipped_pages; }
+    void set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) override {
+        ++skip_calls;
+        skip_ctx = ctx;
+        skip_has_dict_page = has_dict_page;
+    }
 
     std::vector<Range<uint64_t>> read_ranges;
     std::vector<size_t> loaded_pages;
+    bool supports_skip = true;
+    int64_t skipped_pages = 0;
+    int skip_calls = 0;
+    const ColumnOffsetIndexCtx* skip_ctx = nullptr;
+    bool skip_has_dict_page = false;
 };
 
 SparseRange<uint64_t> make_range(uint64_t begin, uint64_t end) {
@@ -1089,6 +1111,553 @@ TEST_F(PageIndexTest, ReaderWithIndexReturnsAnErrorWhenItsInvariantsBreak) {
         Status st = reader->read_range(Range<uint64_t>(100, 103), nullptr, ColumnContentType::VALUE, nullptr);
         ASSERT_TRUE(st.is_internal_error()) << page_selected.size() << " " << st.to_string();
         ASSERT_TRUE(inner->read_ranges.empty());
+    }
+}
+
+namespace {
+
+// The pages of a chunk of 10 rows: [100, 150) and [150, 200), one after the other.
+tparquet::PageEncodingStats make_encoding_stats(tparquet::PageType::type page_type, int32_t count) {
+    tparquet::PageEncodingStats stats;
+    stats.page_type = page_type;
+    stats.encoding = tparquet::Encoding::PLAIN;
+    stats.count = count;
+    return stats;
+}
+
+std::vector<tparquet::PageLocation> contiguous_pages() {
+    return {make_page_location(100, 50, 0), make_page_location(150, 50, 5)};
+}
+
+// A column whose chunk is made of the two pages of contiguous_pages() and 10 rows, with a stored reader that records
+// what the raw reader asks of it.
+class SkipIndexEnv {
+public:
+    explicit SkipIndexEnv(const tparquet::OffsetIndex& offset_index = make_offset_index(contiguous_pages()))
+            : _file(make_page_index_file(make_column_index(2, 2, 2), offset_index)), _env(_file.bytes) {
+        _env.set_page_index(0, _file.column_index_length, _file.column_index_length, _file.offset_index_length);
+        _env.set_row_group_rows(10);
+        _env.chunk()->meta_data.data_page_offset = 100;
+        _env.chunk()->meta_data.total_compressed_size = 100;
+        auto recording = std::make_unique<RecordingStoredColumnReader>();
+        _inner = recording.get();
+        _env.reader()->_reader = std::move(recording);
+    }
+
+    Status read(uint64_t begin, uint64_t end, const Filter* filter) {
+        return _env.reader()->_read_stored_range(Range<uint64_t>(begin, end), filter, ColumnContentType::VALUE,
+                                                 nullptr);
+    }
+
+    // True if the raw reader has handed the offset index to the stored reader.
+    bool enabled() const { return _inner->skip_calls > 0; }
+    bool loaded_index() { return _env.reader()->_offset_index_ctx != nullptr; }
+
+    // The ranges that the column plans for the offset index alone.
+    std::vector<io::SharedBufferedInputStream::IORange> planned_offset_index() {
+        std::vector<io::SharedBufferedInputStream::IORange> ranges;
+        int64_t end_offset = 0;
+        _env.reader()->collect_column_io_range(&ranges, &end_offset, ColumnIOType::OFFSET_INDEX, true);
+        return ranges;
+    }
+
+    IndexEnv& env() { return _env; }
+    HdfsScannerStats& stats() { return _env.stats(); }
+    RecordingStoredColumnReader* inner() { return _inner; }
+
+private:
+    PageIndexFile _file;
+    IndexEnv _env;
+    RecordingStoredColumnReader* _inner = nullptr;
+};
+
+class ScopedOffsetIndexSkipConfig {
+public:
+    explicit ScopedOffsetIndexSkipConfig(bool value) : _old_value(config::parquet_offset_index_skip_enable) {
+        config::parquet_offset_index_skip_enable = value;
+    }
+    ~ScopedOffsetIndexSkipConfig() { config::parquet_offset_index_skip_enable = _old_value; }
+
+private:
+    bool _old_value;
+};
+
+} // namespace
+
+// The offset index is loaded for a read where the stored reader can use it: some rows of the range are dropped, or the
+// range does not follow the last one. A column that never has such a read does not load it. The reader gets the index
+// once, with the flag of the dictionary page.
+TEST_F(PageIndexTest, OffsetIndexSkipIsEnabledAtTheFirstUsefulRead) {
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    Filter all_ones(10, 1);
+
+    // a filter that keeps every row, in a range that follows the first row of the group, and reads without a filter
+    {
+        SkipIndexEnv env;
+        ASSERT_TRUE(env.read(0, 10, &all_ones).ok());
+        ASSERT_TRUE(env.read(10, 20, nullptr).ok());
+        ASSERT_TRUE(env.read(30, 40, nullptr).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_FALSE(env.loaded_index());
+        ASSERT_EQ(3U, env.inner()->read_ranges.size());
+    }
+    // a filter that drops a row
+    {
+        SkipIndexEnv env;
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_EQ(env.env().reader()->_offset_index_ctx.get(), env.inner()->skip_ctx);
+        ASSERT_FALSE(env.inner()->skip_has_dict_page);
+        ASSERT_EQ(2U, env.inner()->skip_ctx->offset_index.page_locations.size());
+        // the next reads do not hand it over again
+        ASSERT_TRUE(env.read(10, 20, &with_zero).ok());
+        ASSERT_EQ(1, env.inner()->skip_calls);
+        ASSERT_EQ(2U, env.inner()->read_ranges.size());
+    }
+    // a gap between two ranges, with a filter that keeps every row
+    {
+        SkipIndexEnv env;
+        Filter five_ones(5, 1);
+        ASSERT_TRUE(env.read(0, 5, &five_ones).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_TRUE(env.read(5, 10, &five_ones).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_TRUE(env.read(20, 25, &five_ones).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+    // the first range of the group does not start at the first row
+    {
+        SkipIndexEnv env;
+        Filter five_ones(5, 1);
+        ASSERT_TRUE(env.read(3, 8, &five_ones).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+    // the chunk starts with a dictionary page: the bytes before the first page
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.__set_dictionary_page_offset(60);
+        env.env().chunk()->meta_data.total_compressed_size = 140;
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_TRUE(env.inner()->skip_has_dict_page);
+    }
+    // the footer agrees with the index: the encodings and the page counts of the encoding statistics
+    for (bool dict : {false, true}) {
+        SkipIndexEnv env;
+        auto& meta = env.env().chunk()->meta_data;
+        if (dict) {
+            meta.__set_dictionary_page_offset(60);
+            meta.total_compressed_size = 140;
+        }
+        meta.__set_encodings(
+                dict ? std::vector<tparquet::Encoding::type>{tparquet::Encoding::PLAIN,
+                                                             tparquet::Encoding::RLE_DICTIONARY}
+                     : std::vector<tparquet::Encoding::type>{tparquet::Encoding::PLAIN, tparquet::Encoding::RLE});
+        std::vector<tparquet::PageEncodingStats> stats;
+        stats.push_back(make_encoding_stats(tparquet::PageType::DATA_PAGE, 1));
+        stats.push_back(make_encoding_stats(tparquet::PageType::DATA_PAGE_V2, 1));
+        if (dict) {
+            stats.push_back(make_encoding_stats(tparquet::PageType::DICTIONARY_PAGE, 1));
+        }
+        meta.__set_encoding_stats(stats);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled()) << dict;
+        ASSERT_EQ(dict, env.inner()->skip_has_dict_page);
+    }
+}
+
+// The offset index is optional, and a column that cannot use it is read page by page without an error.
+TEST_F(PageIndexTest, OffsetIndexSkipFallsBackWithoutAnError) {
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+
+    // Reads the column twice, and checks that the stored reader did not get the index and the reads were not refused.
+    auto not_enabled = [&](SkipIndexEnv& env, bool loads_index) {
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.read(10, 20, &with_zero).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_EQ(loads_index, env.loaded_index());
+        // the reads reached the stored reader
+        ASSERT_EQ(2U, env.inner()->read_ranges.size());
+        // and the column does not try again
+        ASSERT_TRUE(env.env().reader()->_offset_index_skip_tried);
+    };
+
+    // the stored reader reads page by page only, like a Repeated reader
+    {
+        SkipIndexEnv env;
+        env.inner()->supports_skip = false;
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, false));
+    }
+    // the chunk has no offset index
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->__isset.offset_index_offset = false;
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, false));
+    }
+    // an offset index that is not valid: the first rows of the pages do not grow
+    {
+        SkipIndexEnv env(make_offset_index({make_page_location(100, 50, 0), make_page_location(150, 50, 0)}));
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, false));
+    }
+    // An offset index that does not fit the chunk: the first page is before its start, or the last page ends after
+    // its end or before it.
+    for (const auto& [data_page_offset, total_compressed_size] :
+         std::vector<std::pair<int64_t, int64_t>>{{101, 99}, {99, 100}, {100, 99}, {100, 101}, {100, 50}}) {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.data_page_offset = data_page_offset;
+        env.env().chunk()->meta_data.total_compressed_size = total_compressed_size;
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    // The pages overlap, or leave a gap: the reader reads a chunk page after page, so the index does not describe it.
+    for (const auto& pages : std::vector<std::vector<tparquet::PageLocation>>{
+                 {make_page_location(100, 120, 0), make_page_location(150, 50, 5)},
+                 {make_page_location(100, 40, 0), make_page_location(150, 50, 5)}}) {
+        SkipIndexEnv env(make_offset_index(pages));
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    // a non-repeated column has one value for each row
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.num_values = 9;
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    // the footer names a dictionary page, but the first page of the index starts at the chunk
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.__set_dictionary_page_offset(100);
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    // the encodings of the chunk and the room for a dictionary page disagree, in both directions
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.__set_encodings({tparquet::Encoding::PLAIN, tparquet::Encoding::RLE_DICTIONARY});
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.__set_dictionary_page_offset(60);
+        env.env().chunk()->meta_data.total_compressed_size = 140;
+        env.env().chunk()->meta_data.__set_encodings({tparquet::Encoding::PLAIN});
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, true));
+    }
+    // The page counts of the encoding statistics are not the pages of the index. A chunk of one data page has no page
+    // to skip, so the index is not even loaded for it.
+    for (const auto& [data_pages, dict_pages] : std::vector<std::pair<int32_t, int32_t>>{{3, 0}, {1, 0}, {2, 1}}) {
+        SkipIndexEnv env;
+        std::vector<tparquet::PageEncodingStats> stats;
+        stats.push_back(make_encoding_stats(tparquet::PageType::DATA_PAGE, data_pages));
+        if (dict_pages > 0) {
+            stats.push_back(make_encoding_stats(tparquet::PageType::DICTIONARY_PAGE, dict_pages));
+        }
+        env.env().chunk()->meta_data.__set_encoding_stats(stats);
+        ASSERT_NO_FATAL_FAILURE(not_enabled(env, data_pages > 1));
+    }
+    // the config is off: the column does not even try
+    {
+        ScopedOffsetIndexSkipConfig config_guard(false);
+        SkipIndexEnv env;
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_FALSE(env.loaded_index());
+        ASSERT_FALSE(env.env().reader()->_offset_index_skip_tried);
+    }
+}
+
+namespace {
+
+class ScopedGiveUpRowGroups {
+public:
+    explicit ScopedGiveUpRowGroups(int32_t value) : _old_value(config::parquet_offset_index_skip_give_up_row_groups) {
+        config::parquet_offset_index_skip_give_up_row_groups = value;
+    }
+    ~ScopedGiveUpRowGroups() { config::parquet_offset_index_skip_give_up_row_groups = _old_value; }
+
+private:
+    int32_t _old_value;
+};
+
+// A column "a.b" like SkipIndexEnv has, with the feedback of a scan.
+class FeedbackSkipIndexEnv : public SkipIndexEnv {
+public:
+    explicit FeedbackSkipIndexEnv(OffsetIndexSkipAdvisor* advisor, const std::string& column = "a") : SkipIndexEnv() {
+        env().chunk()->meta_data.path_in_schema = {column, "b"};
+        env().set_skip_advisor(advisor);
+    }
+};
+
+} // namespace
+
+// A chunk of at most one data page has no page to skip, so its offset index is not planned and not loaded. The
+// encoding statistics tell the number of data pages; a footer without them, or with an empty list, says nothing, and
+// the column goes on to load the index.
+TEST_F(PageIndexTest, OffsetIndexIsNotLoadedForAChunkOfOneDataPage) {
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+
+    for (const auto& [stats, loads] : std::vector<std::pair<std::vector<tparquet::PageEncodingStats>, bool>>{
+                 {{make_encoding_stats(tparquet::PageType::DATA_PAGE, 1)}, false},
+                 {{make_encoding_stats(tparquet::PageType::DATA_PAGE_V2, 1)}, false},
+                 {{make_encoding_stats(tparquet::PageType::DATA_PAGE, 2)}, true},
+                 {{make_encoding_stats(tparquet::PageType::DATA_PAGE, 1),
+                   make_encoding_stats(tparquet::PageType::DATA_PAGE_V2, 1)},
+                  true},
+                 {{make_encoding_stats(tparquet::PageType::DICTIONARY_PAGE, 1)}, false},
+                 {{}, true}}) {
+        SkipIndexEnv env;
+        env.env().chunk()->meta_data.__set_encoding_stats(stats);
+        ASSERT_EQ(loads ? 1U : 0U, env.planned_offset_index().size());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_EQ(loads, env.loaded_index()) << stats.size();
+        ASSERT_EQ(loads ? 1 : 0, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(0, env.stats().offset_index_skip_given_up);
+        ASSERT_EQ(1U, env.inner()->read_ranges.size());
+    }
+    // without the statistics
+    {
+        SkipIndexEnv env;
+        ASSERT_EQ(1U, env.planned_offset_index().size());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+}
+
+// We fear a column whose rows are not clustered, where no read can jump over a page, so every row group of the scan
+// reads its offset index for nothing. A column that read the index in the first row groups of the scan and skipped no
+// page stops reading it, and the scan counts the loads and the columns that gave up.
+TEST_F(PageIndexTest, OffsetIndexIsNotLoadedAfterTheColumnSkippedNoPageInTheFirstRowGroups) {
+    ScopedGiveUpRowGroups guard(2);
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    OffsetIndexSkipAdvisor advisor;
+
+    // The first row groups read the index, and the reader skips no page.
+    for (int i = 0; i < 2; ++i) {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_EQ(1U, env.planned_offset_index().size());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_EQ(1, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(0, env.stats().offset_index_skip_given_up);
+        ASSERT_EQ("a.b", env.env().reader()->_skip_column);
+    }
+    // the readers of the row groups are gone, and the scan has the feedback
+    EXPECT_FALSE(advisor.should_load("a.b"));
+
+    // The next row group does not plan the index, does not load it, and reads page by page without an error.
+    {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_TRUE(env.planned_offset_index().empty());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.read(10, 20, &with_zero).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_FALSE(env.loaded_index());
+        ASSERT_EQ(2U, env.inner()->read_ranges.size());
+        ASSERT_EQ(0, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(1, env.stats().offset_index_skip_given_up);
+        // the reader has nothing to report
+        ASSERT_TRUE(env.env().reader()->_skip_advisor == nullptr);
+    }
+    // another column of the scan has its own feedback
+    {
+        FeedbackSkipIndexEnv env(&advisor, "other");
+        ASSERT_EQ(1U, env.planned_offset_index().size());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+    // and so has another scan
+    {
+        OffsetIndexSkipAdvisor other_scan;
+        FeedbackSkipIndexEnv env(&other_scan);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+    // the config can switch the giving up off
+    {
+        ScopedGiveUpRowGroups never(0);
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_EQ(1U, env.planned_offset_index().size());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+    }
+}
+
+// A column that skipped a page in a row group has shown that the index pays, so it is never given up, however many
+// row groups skipped nothing after that.
+TEST_F(PageIndexTest, OffsetIndexIsLoadedForEveryRowGroupOfAColumnThatSkippedAPage) {
+    ScopedGiveUpRowGroups guard(2);
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    OffsetIndexSkipAdvisor advisor;
+
+    for (int i = 0; i < 10; ++i) {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok()) << i;
+        ASSERT_TRUE(env.enabled()) << i;
+        ASSERT_EQ(1, env.stats().offset_index_skip_loads) << i;
+        // the first row group skips a page, the other ones do not
+        env.inner()->skipped_pages = i == 0 ? 1 : 0;
+    }
+    EXPECT_TRUE(advisor.should_load("a.b"));
+}
+
+// An index that the reader loads and cannot use, because it does not fit the chunk, costs the read like any other, so
+// it counts as a row group where no page was skipped. The column that has the bad index in every row group gives up.
+TEST_F(PageIndexTest, OffsetIndexThatCannotBeUsedCountsAsAReadThatSkippedNoPage) {
+    ScopedGiveUpRowGroups guard(2);
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    OffsetIndexSkipAdvisor advisor;
+
+    for (int i = 0; i < 2; ++i) {
+        FeedbackSkipIndexEnv env(&advisor);
+        env.env().chunk()->meta_data.num_values = 9;
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.loaded_index());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_EQ(1, env.stats().offset_index_skip_loads);
+    }
+    EXPECT_FALSE(advisor.should_load("a.b"));
+}
+
+// The static page selection reads the offset index whatever the skip does, so an index that it has read is free for
+// the skip: the column does not give it up, and does not count it.
+TEST_F(PageIndexTest, OffsetIndexThatTheStaticSelectionReadIsNotPartOfTheFeedback) {
+    ScopedGiveUpRowGroups guard(1);
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    OffsetIndexSkipAdvisor advisor;
+    advisor.observe("a.b", 0);
+    ASSERT_FALSE(advisor.should_load("a.b"));
+
+    {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_TRUE(env.env().reader()->get_offset_index(0).ok());
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_EQ(0, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(0, env.stats().offset_index_skip_given_up);
+        ASSERT_TRUE(env.env().reader()->_skip_advisor == nullptr);
+    }
+    // the feedback has not changed: one row group without a skipped page
+    ASSERT_FALSE(advisor.should_load("a.b"));
+    advisor.observe("a.b", 1);
+    ASSERT_TRUE(advisor.should_load("a.b"));
+}
+
+// A scan that does not read the column indexes still reads the offset indexes to skip pages, and plans them alone. The
+// offset index of a column that has repetition levels is not read for that, because it is read page by page.
+TEST_F(PageIndexTest, OffsetIndexIsPlannedAlone) {
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(two_pages()));
+    auto collect = [&](IndexEnv& env, ColumnIOTypeFlags types, bool active) {
+        std::vector<io::SharedBufferedInputStream::IORange> ranges;
+        int64_t end_offset = 0;
+        env.reader()->collect_column_io_range(&ranges, &end_offset, types, active);
+        return ranges;
+    };
+    auto set_regions = [&](IndexEnv& env) {
+        env.set_page_index(0, file.column_index_length, file.column_index_length, file.offset_index_length);
+    };
+
+    IndexEnv env(file.bytes);
+    set_regions(env);
+    // the page index: the column index of an active column, and the offset index of every column
+    ASSERT_EQ(2U, collect(env, ColumnIOType::PAGE_INDEX, true).size());
+    ASSERT_EQ(1U, collect(env, ColumnIOType::PAGE_INDEX, false).size());
+    // the offset index alone, for an active and for a lazy column
+    for (bool active : {true, false}) {
+        auto ranges = collect(env, ColumnIOType::OFFSET_INDEX, active);
+        ASSERT_EQ(1U, ranges.size());
+        ASSERT_EQ(file.column_index_length, ranges[0].offset);
+        ASSERT_EQ(file.offset_index_length, ranges[0].size);
+    }
+    // the two flags together do not plan the offset index twice, because overlapping ranges are an error
+    ASSERT_EQ(2U, collect(env, ColumnIOType::PAGE_INDEX | ColumnIOType::OFFSET_INDEX, true).size());
+    // the pages are not planned by the flag
+    ASSERT_TRUE(collect(env, ColumnIOType::INVALID, true).empty());
+
+    // a column with repetition levels
+    {
+        IndexEnv repeated(file.bytes);
+        set_regions(repeated);
+        repeated.set_max_rep_level(1);
+        ASSERT_TRUE(collect(repeated, ColumnIOType::OFFSET_INDEX, true).empty());
+        ASSERT_EQ(1U, collect(repeated, ColumnIOType::PAGE_INDEX, false).size());
+    }
+    // a chunk without an offset index, and an offset index outside the file
+    {
+        IndexEnv no_index(file.bytes);
+        ASSERT_TRUE(collect(no_index, ColumnIOType::OFFSET_INDEX, true).empty());
+        IndexEnv outside(file.bytes);
+        outside.set_page_index(0, file.column_index_length, file.bytes.size(), file.offset_index_length);
+        ASSERT_TRUE(collect(outside, ColumnIOType::OFFSET_INDEX, true).empty());
+    }
+}
+
+// A predicate keeps nine rows of one page of a file with pages of 1000 values. The page index does not narrow the
+// rows, so the lazy columns have nothing to read in the chunks before the rows, and they read the page of the rows
+// without reading the pages before it. The rows are the same with the skipping off. The skipping does not depend on
+// the page index: it works when the scan does not read the page index too.
+TEST_F(PageIndexTest, OffsetIndexSkipJumpsToThePageOfTheSelectedRows) {
+    const std::string file_path = "./be/test/formats/parquet/test_data/page_index_small_page.parquet";
+
+    for (auto [enable, page_index] : std::vector<std::pair<bool, bool>>{{true, true}, {true, false}, {false, true}}) {
+        SCOPED_TRACE(std::string(enable ? "skip on" : "skip off") + (page_index ? ", page index" : ", no page index"));
+        ScopedOffsetIndexSkipConfig config_guard(enable);
+
+        HdfsScannerStats stats;
+        auto ctx = _create_file_c0_c1_c2_context(file_path);
+        ctx->stats = &stats;
+        ctx->options.parquet_page_index_enable = page_index;
+        ctx->conjunct_ctxs_by_slot[0].clear();
+        ctx->conjuncts.min_max_ctxs.clear();
+        // c0: 1->20000, so the rows 15001..15009
+        std::vector<TExpr> t_conjuncts;
+        ParquetUTBase::append_int_conjunct(TExprOpcode::GT, 0, 15000, &t_conjuncts);
+        ParquetUTBase::append_int_conjunct(TExprOpcode::LT, 0, 15010, &t_conjuncts);
+        ParquetUTBase::create_conjunct_ctxs(&_pool, _runtime_state, &t_conjuncts, &ctx->conjunct_ctxs_by_slot[0]);
+
+        auto file = _create_file(file_path);
+        auto file_reader = std::make_shared<FileReader>(config::vector_chunk_size, file.get(),
+                                                        std::filesystem::file_size(file_path));
+        Status status = file_reader->init(ctx);
+        ASSERT_TRUE(status.ok()) << status.to_string();
+
+        auto chunk = std::make_shared<Chunk>();
+        chunk->append_column(
+                ColumnHelper::create_column(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT), true),
+                chunk->num_columns());
+        chunk->append_column(
+                ColumnHelper::create_column(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT), true),
+                chunk->num_columns());
+        chunk->append_column(
+                ColumnHelper::create_column(TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR), true),
+                chunk->num_columns());
+
+        size_t total_rows = 0;
+        while (!status.is_end_of_file()) {
+            chunk->reset();
+            status = file_reader->get_next(&chunk);
+            ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status.to_string();
+            chunk->check_or_die();
+            for (size_t i = 0; i < chunk->num_rows(); ++i) {
+                const int32_t c0 = chunk->get_column_by_index(0)->get(i).get_int32();
+                ASSERT_TRUE(c0 > 15000 && c0 < 15010) << c0;
+                ASSERT_EQ(20001 - c0, chunk->get_column_by_index(1)->get(i).get_int32());
+                ASSERT_FALSE(chunk->get_column_by_index(2)->is_null(i));
+                ASSERT_EQ(std::to_string(c0 % 100), chunk->get_column_by_index(2)->get(i).get_slice().to_string());
+            }
+            total_rows += chunk->num_rows();
+        }
+        ASSERT_EQ(9U, total_rows);
+        if (enable) {
+            ASSERT_GT(stats.page_skip_by_offset_index, 0);
+            ASSERT_GT(stats.page_skip_by_offset_index_undecoded_bytes, 0);
+        } else {
+            ASSERT_EQ(0, stats.page_skip_by_offset_index);
+            ASSERT_EQ(0, stats.page_skip_by_offset_index_undecoded_bytes);
+        }
     }
 }
 

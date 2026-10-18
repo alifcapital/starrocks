@@ -120,6 +120,11 @@ public:
     }
 
     Status seek_to_offset(const uint64_t off) {
+        // We leave the page that we are on. If its data was not read, next_page() would count it as a skipped
+        // page, so we count it here too: the header was read and the data was skipped.
+        if (_page_parse_state == PAGE_HEADER_PARSED) {
+            _opts.stats->page_skip += 1;
+        }
         RETURN_IF_ERROR(_page_reader->seek_to_offset(off));
         _page_parse_state = INITIALIZED;
         return Status::OK();
@@ -128,6 +133,14 @@ public:
     void set_page_num(size_t page_num) { _page_reader->set_page_num(page_num); }
 
     void set_next_read_page_idx(size_t cur_page_idx) { _page_reader->set_next_read_page_idx(cur_page_idx); }
+
+    size_t next_read_page_idx() const { return _page_reader->next_read_page_idx(); }
+
+    void set_num_values_read(uint64_t num_values_read) { _page_reader->set_num_values_read(num_values_read); }
+
+    void set_page_locations(const std::vector<tparquet::PageLocation>* page_locations) {
+        _page_reader->set_page_locations(page_locations);
+    }
 
     Status load_dictionary_page();
 

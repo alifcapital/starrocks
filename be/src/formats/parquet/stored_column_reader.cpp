@@ -151,6 +151,8 @@ private:
         }
     }
 
+    bool _can_skip_pages() const override { return true; }
+
     const ParquetField* _field = nullptr;
 
     // When the flag is false, the information of levels does not need to be materialized,
@@ -186,6 +188,7 @@ private:
     Status _lazy_skip_values() override;
     Status _read_values_on_levels(size_t num_values, starrocks::parquet::ColumnContentType content_type,
                                   starrocks::Column* dst, bool append_default, const FilterData* filter) override;
+    bool _can_skip_pages() const override { return true; }
     const ParquetField* _field = nullptr;
 };
 
@@ -318,10 +321,120 @@ Status StoredColumnReaderImpl::read_range(const Range<uint64_t>& range, const Fi
                                           ColumnContentType content_type, Column* dst) {
     // reset_levels() to prepare levels for new reading
     reset_levels();
+    if (_skips_pages(filter) || _seeks_without_filter(filter)) {
+        return _read_skipping_pages(range, filter, content_type, dst);
+    }
     if (_read_cursor < range.begin()) {
         RETURN_IF_ERROR(_skip(range.begin() - _read_cursor));
     }
     return _read(range, filter, content_type, dst);
+}
+
+void StoredColumnReaderImpl::set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) {
+    if (ctx != nullptr && !_can_skip_pages()) {
+        return;
+    }
+    _skip_index = ctx;
+    _skip_index_has_dict_page = has_dict_page;
+    _reader->set_page_locations(ctx != nullptr ? &ctx->offset_index.page_locations : nullptr);
+}
+
+// We read a column under a filter, and we expect some of its pages to hold no selected row. We fear that reading
+// the headers of such pages one by one touches the first bytes of each of them, and a stream that loads a chunk in
+// parts (piece by piece, or by the blocks of the data cache) then loads a piece or a block for every page. A stream
+// that loads the chunk as one buffer loads it all at the first header, and there we save only the work on the
+// pages. So we find the first selected row of the range and look up its page in the offset index. If the pages
+// between the reader and that page hold no row that we need, we give the rows before the page their default values
+// and load the page by its offset.
+//
+// The reader keeps the invariant of the sequential read: the cursor is the row where the current page, or the next
+// page of the stream when the current one is used up, continues. So when no row of the range is selected, we only
+// append the default values and leave the reader where it is: a later read that needs a later page jumps over all
+// of these pages at once, and a later read in the current page skips the rows in between as it does when it finds a
+// gap between two ranges. A read without a filter comes here only when the reader is behind its range, and then every
+// row of the range is selected.
+Status StoredColumnReaderImpl::_read_skipping_pages(const Range<uint64_t>& range, const Filter* filter,
+                                                    ColumnContentType content_type, Column* dst) {
+    const size_t num_rows = range.span_size();
+    const size_t num_filter_rows = filter != nullptr ? std::min(num_rows, filter->size()) : num_rows;
+    const size_t first_selected = filter != nullptr ? SIMD::find_nonzero(*filter, 0) : 0;
+    if (first_selected >= num_filter_rows) {
+        _behind = true;
+        return _read_values_on_levels(num_rows, content_type, dst, true);
+    }
+
+    size_t row_readed = 0;
+    const size_t reader_page = _skip_index->page_of_row(_read_cursor);
+    const size_t target_page = _skip_index->page_of_row(range.begin() + first_selected);
+    if (target_page > reader_page) {
+        const uint64_t target_first_row = _skip_index->page_first_row(target_page);
+        if (target_first_row > range.begin()) {
+            row_readed = target_first_row - range.begin();
+            RETURN_IF_ERROR(_read_values_on_levels(row_readed, content_type, dst, true));
+        }
+        RETURN_IF_ERROR(_jump_to_page(target_page, reader_page));
+    }
+    if (_read_cursor < range.begin() + row_readed) {
+        RETURN_IF_ERROR(_skip(range.begin() + row_readed - _read_cursor));
+    }
+    return _read(range, filter, content_type, dst, row_readed);
+}
+
+// The current page has no values left and the range has rows left. The next page of the stream starts at the next
+// row of the range. When the first selected row of the rest of the range is in a later page, the pages in between
+// hold no selected row, so we jump over them as _read_skipping_pages() does. When there is no selected row left, the
+// rest of the range gets default values, and the reader stays at the start of the next page, which we do not need.
+Status StoredColumnReaderImpl::_enter_next_page(const Range<uint64_t>& range, const Filter& filter,
+                                                ColumnContentType content_type, Column* dst, size_t* row_readed,
+                                                size_t* unread_rows) {
+    const size_t num_rows = range.span_size();
+    const size_t num_filter_rows = std::min(num_rows, filter.size());
+    const size_t next_selected = SIMD::find_nonzero(filter, *row_readed);
+    if (next_selected >= num_filter_rows) {
+        *unread_rows = num_rows - *row_readed;
+        RETURN_IF_ERROR(_read_values_on_levels(*unread_rows, content_type, dst, true));
+        *row_readed = num_rows;
+        return Status::OK();
+    }
+
+    const uint64_t next_row = range.begin() + *row_readed;
+    const size_t next_page = _skip_index->page_of_row(next_row);
+    const size_t target_page = _skip_index->page_of_row(range.begin() + next_selected);
+    if (target_page <= next_page) {
+        return _next_page();
+    }
+    const size_t skipped_rows = _skip_index->page_first_row(target_page) - next_row;
+    RETURN_IF_ERROR(_read_values_on_levels(skipped_rows, content_type, dst, true));
+    *row_readed += skipped_rows;
+    return _jump_to_page(target_page, next_page);
+}
+
+// Loads the page by its offset, and counts the pages that the jump passes. reader_page is the page that holds the
+// cursor of the reader: the page that is loaded, or the next page of the stream when the loaded one is used up.
+Status StoredColumnReaderImpl::_jump_to_page(size_t page_idx, size_t reader_page) {
+    const auto& pages = _skip_index->offset_index.page_locations;
+    // The data pages need the dictionary, and the dictionary page is before the first of them.
+    if (_skip_index_has_dict_page) {
+        RETURN_IF_ERROR(_reader->load_dictionary_page());
+    }
+    const size_t first_passed_page = _num_values_left_in_cur_page > 0 ? reader_page + 1 : reader_page;
+    // load_specific_page() compares the page with the offset index.
+    RETURN_IF_ERROR(load_specific_page(page_idx, pages[page_idx].offset, _skip_index->page_first_row(page_idx)));
+
+    // The headers of the pages before this page were not read, so we give the page reader the values of these pages
+    // and this one. A page has one value for each row, so the values are the rows.
+    _reader->set_num_values_read(pages[page_idx].first_row_index + _reader->num_values());
+
+    if (page_idx > first_passed_page) {
+        int64_t passed_bytes = 0;
+        for (size_t i = first_passed_page; i < page_idx; ++i) {
+            passed_bytes += pages[i].compressed_page_size;
+        }
+        _skipped_pages += page_idx - first_passed_page;
+        _opts.stats->page_skip_by_offset_index += page_idx - first_passed_page;
+        _opts.stats->page_skip_by_offset_index_undecoded_bytes += passed_bytes;
+    }
+    return Status::OK();
 }
 
 Status StoredColumnReaderImpl::_skip(uint64_t rows_to_skip) {
@@ -349,10 +462,13 @@ Status StoredColumnReaderImpl::_skip(uint64_t rows_to_skip) {
 }
 
 Status StoredColumnReaderImpl::_read(const Range<uint64_t>& range, const starrocks::Filter* filter,
-                                     starrocks::parquet::ColumnContentType content_type, starrocks::Column* dst) {
+                                     starrocks::parquet::ColumnContentType content_type, starrocks::Column* dst,
+                                     size_t row_readed) {
     uint64_t row_count = range.span_size();
-    size_t row_readed = 0;
     _set_filter_share(filter);
+    // The rows at the end of the range that got default values and were not taken from the pages, see
+    // _enter_next_page(). The cursor stays before them.
+    size_t unread_rows = 0;
     while (row_readed < row_count) {
         if (_num_values_left_in_cur_page > 0) {
             size_t to_read = static_cast<size_t>(row_count) - row_readed;
@@ -370,11 +486,14 @@ Status StoredColumnReaderImpl::_read(const Range<uint64_t>& range, const starroc
             }
             row_readed += to_read;
             _num_values_left_in_cur_page -= num_values;
+        } else if (_skips_pages(filter)) {
+            RETURN_IF_ERROR(_enter_next_page(range, *filter, content_type, dst, &row_readed, &unread_rows));
         } else {
             RETURN_IF_ERROR(_next_page());
         }
     }
-    _read_cursor = range.end();
+    _read_cursor = range.end() - unread_rows;
+    _behind = unread_rows > 0;
     return Status::OK();
 }
 
@@ -557,6 +676,9 @@ Status StoredColumnReaderImpl::_next_page() {
         _cur_page_loaded = false;
         _num_values_left_in_cur_page = _reader->num_values();
         _decoder_pos_in_cur_page = 0;
+        if (_checks_pages()) {
+            RETURN_IF_ERROR(_check_entered_page());
+        }
     }
     return Status::OK();
 }
@@ -591,6 +713,42 @@ Status StoredColumnReaderImpl::load_specific_page(size_t cur_page_idx, uint64_t 
     _num_values_left_in_cur_page = _reader->num_values();
     _decoder_pos_in_cur_page = 0;
     _read_cursor = first_row;
+    if (_checks_pages()) {
+        RETURN_IF_ERROR(_check_entered_page());
+    }
+    return Status::OK();
+}
+
+// A page has one value for each row, so the rows that the offset index gives to a page must equal the values in its
+// header. The header of a page that the reader enters is parsed already, so the comparison costs nothing, and we make
+// it for every page that the reader enters: after a jump, and when the reader walks to the next page, also in the
+// walk over a gap. An index that contradicts a header puts the values of the page on rows that are not their rows.
+// We cannot go on page by page when we find it: the rows before this page were placed by the index already (as
+// default values, or as the values of an earlier page), and a jump has passed pages whose values nobody counted. So
+// we return Corruption, and not the values.
+Status StoredColumnReaderImpl::_check_entered_page() {
+    const auto& pages = _skip_index->offset_index.page_locations;
+    // after the header of a data page, the next index is the index of the page after it
+    const size_t page_idx = _reader->next_read_page_idx() - 1;
+    int64_t expected_rows = -1;
+    if (page_idx < pages.size()) {
+        if (page_idx + 1 < pages.size()) {
+            expected_rows = pages[page_idx + 1].first_row_index - pages[page_idx].first_row_index;
+        } else if (_opts.row_group_meta != nullptr) {
+            expected_rows = _opts.row_group_meta->num_rows - pages[page_idx].first_row_index;
+        }
+    }
+    if (UNLIKELY(_reader->current_page_is_dict() || page_idx >= pages.size() ||
+                 (expected_rows >= 0 && static_cast<int64_t>(_reader->num_values()) != expected_rows))) {
+        std::string column;
+        for (const std::string& part : _reader->metadata().path_in_schema) {
+            column += column.empty() ? part : "." + part;
+        }
+        return Status::Corruption(fmt::format(
+                "Parquet page {} of column '{}' has {} values, but the offset index gives it {} rows, file: {}",
+                page_idx, column, _reader->current_page_is_dict() ? 0 : _reader->num_values(), expected_rows,
+                _opts.file->filename()));
+    }
     return Status::OK();
 }
 

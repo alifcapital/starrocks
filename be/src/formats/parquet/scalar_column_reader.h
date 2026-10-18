@@ -70,7 +70,7 @@ public:
             : ColumnReader(reader.get_column_parquet_field()),
               _opts(reader._opts),
               _chunk_metadata(reader._chunk_metadata) {}
-    ~RawColumnReader() override = default;
+    ~RawColumnReader() override;
 
     Status prepare() override {
         return StoredColumnReader::create(_opts, get_column_parquet_field(), get_chunk_metadata(), &_reader);
@@ -95,6 +95,26 @@ public:
     bool column_all_pages_dict_encoded() const;
 
 private:
+    // Hands the offset index of the chunk to the stored reader. The index is optional: a column without it, or with an
+    // index that is not valid or does not fit the chunk, is read page by page, and we do not ask for the index again.
+    // The same holds for a chunk of one data page and for a column that the scan has given up on.
+    void _enable_offset_index_skip();
+
+    // Checks what the footer says about the chunk against the offset index, so that an index that does not describe the
+    // chunk is not used: the pages follow each other from the start of the chunk, or from the end of its dictionary page,
+    // to its end; the rows and the page counts agree; and the dictionary page exists exactly when the footer says so. A
+    // reader that jumps to a page by its offset relies on all of that, and a jump checks the page that it lands on.
+    bool _offset_index_fits_chunk() const;
+
+    // A chunk of one data page has no page to jump over. The footer tells the number of data pages in its encoding
+    // statistics, when the writer wrote them. Without them we do not know, and we say true.
+    bool _may_have_several_data_pages() const;
+
+    // We fear that the read of the offset index is wasted in every row group of a scan, because no page of the column
+    // can be skipped, so the scan stops reading it for a column that has shown that (OffsetIndexSkipAdvisor). This
+    // tells if the column may still read it, and it does not count anything.
+    bool _may_read_offset_index_for_skip() const;
+
     // The largest column index or offset index that we read. The sizes come from the footer, and we size a
     // buffer from them, so we stop an index that no real file has.
     static constexpr int64_t kMaxPageIndexBytes = 256 * 1024 * 1024;
@@ -111,6 +131,12 @@ private:
     Status _init_column_bloom_filter(int64_t offset, int32_t length, BloomFilter& bloom_filter) const;
 
 protected:
+    // Reads the range with the stored reader. The stored reader can skip the pages that hold no selected row of a
+    // read under a filter through the offset index, so the first read of the column where that can happen loads the
+    // offset index.
+    Status _read_stored_range(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type,
+                              Column* dst);
+
     StatusOr<bool> _row_group_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
                                               CompoundNodeType pred_relation, const TypeDescriptor& col_type,
                                               uint64_t rg_first_row, uint64_t rg_num_rows) const;
@@ -155,6 +181,15 @@ protected:
 
     const tparquet::ColumnChunk* _chunk_metadata = nullptr;
     std::unique_ptr<ColumnOffsetIndexCtx> _offset_index_ctx;
+    bool _offset_index_skip_tried = false;
+    bool _offset_index_skip_enabled = false;
+    // The feedback of the scan, and the key of this column in it, set when this reader reads the offset index for the
+    // skip, because the destructor reports the pages that the reader skipped, and the options and the metadata of the
+    // chunk can be gone by then. Null: nothing to report.
+    OffsetIndexSkipAdvisor* _skip_advisor = nullptr;
+    std::string _skip_column;
+    // The end of the range that was read last.
+    uint64_t _read_end = _opts.first_row_index;
 
     // LOGICAL column saved when a PHYSICAL column is swapped into the slot
     // during read_range().  Restored by _restore_physical_column() or at
