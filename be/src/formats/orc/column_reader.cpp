@@ -14,6 +14,8 @@
 
 #include "formats/orc/column_reader.h"
 
+#include <algorithm>
+
 #include "common/statusor.h"
 #include "formats/orc/orc_chunk_reader.h"
 #include "formats/orc/utils.h"
@@ -519,7 +521,14 @@ Status StringColumnReader::get_next(orc::ColumnVectorBatch* cvb, Column* col, si
 
     auto& vb = values->get_bytes();
     // Need to resize after insert, because of padding char existed
-    vb.reserve(vb.size() + len);
+    const size_t needed_bytes = vb.size() + len;
+    // A nullable array, map or struct with NULL rows calls this once for every run of rows that are not NULL, and
+    // all the calls fill the same column. We fear an exact reserve: it leaves no spare room, so every call would
+    // reallocate and copy all the bytes of the column. So we reserve only when the capacity is short, and then at
+    // least twice the capacity.
+    if (needed_bytes > vb.capacity()) {
+        vb.reserve(std::max(needed_bytes, 2 * vb.capacity()));
+    }
 
     auto& vo = values->get_offset();
     // We can resize directly

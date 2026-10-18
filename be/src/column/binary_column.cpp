@@ -29,6 +29,22 @@
 
 namespace starrocks {
 
+namespace {
+
+// We append to the same column batch after batch. An exact reserve for each batch leaves no spare room, so the next
+// batch reallocates and copies the whole buffer again, and n batches copy O(n^2) elements. So we grow only when the
+// capacity is short, and then to at least twice the capacity, which keeps the copies at O(the final size). A buffer
+// without capacity gets exactly `needed`, as one big batch wants. `needed` is the size of the buffer after the batch.
+template <typename Container>
+void reserve_amortized(Container* container, size_t needed) {
+    const size_t capacity = container->capacity();
+    if (needed > capacity) {
+        container->reserve(std::max(needed, 2 * capacity));
+    }
+}
+
+} // namespace
+
 template <typename T>
 void BinaryColumnBase<T>::check_or_die() const {
     CHECK_EQ(get_immutable_bytes().size(), _offsets.back());
@@ -307,7 +323,7 @@ bool BinaryColumnBase<T>::append_continuous_strings(const Slice* data, size_t si
     const auto* q = reinterpret_cast<const uint8_t*>(data[size - 1].data + data[size - 1].size);
     bytes.insert(bytes.end(), p, q);
 
-    _offsets.reserve(_offsets.size() + size);
+    reserve_amortized(&_offsets, _offsets.size() + size);
     for (size_t i = 0; i < size; i++) {
         const auto& s = data[i];
         new_size += s.size;
@@ -367,6 +383,13 @@ bool BinaryColumnBase<T>::append_continuous_fixed_length_strings(const char* dat
 template <typename T>
 void BinaryColumnBase<T>::append_bytes(char* const* data, uint32_t* length, size_t size) {
     auto& bytes = get_bytes();
+    // One reserve for the whole batch saves the growth steps of the inserts below. It is amortized and not exact, so
+    // that callers that add a few values to the column in every call do not copy all its bytes in every call.
+    size_t new_size = bytes.size();
+    for (size_t i = 0; i < size; i++) {
+        new_size += length[i];
+    }
+    reserve_amortized(&bytes, new_size);
     for (size_t i = 0; i < size; i++) {
         bytes.insert(bytes.end(), data[i], data[i] + length[i]);
     }
@@ -419,7 +442,7 @@ void BinaryColumnBase<T>::append_value_multiple_times(const void* value, size_t 
     const auto* slice = reinterpret_cast<const Slice*>(value);
     size_t size = slice->size * count;
     auto& bytes = get_bytes();
-    bytes.reserve(size);
+    reserve_amortized(&bytes, bytes.size() + size);
 
     const auto* const p = reinterpret_cast<const uint8_t*>(slice->data);
     const uint8_t* const pend = p + slice->size;

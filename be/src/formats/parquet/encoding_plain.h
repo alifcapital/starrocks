@@ -370,8 +370,6 @@ public:
                     offset += is_nulls[i] ? 0 : lengths[cnt++];
                     offsets[prev_offsets + i] = offset;
                 }
-
-                binary_column->get_bytes().reserve(offset);
             }
 
             if (read_count == 0) {
@@ -593,7 +591,6 @@ private:
             nullable_dst->set_has_null(true);
         }
 
-        bytes.reserve(end_offset);
         binary_column->invalidate_slice_cache();
         if (num_selected == 0) {
             return Status::OK();
@@ -804,7 +801,6 @@ public:
         if (count == 0) return Status::OK();
 
         const auto* slices = (const Slice*)vals;
-        _buffer.reserve(_buffer.size() + count * slices[0].size);
         for (int i = 0; i < count; ++i) {
             DCHECK_EQ(slices[0].size, slices[i].size);
             _buffer.append(slices[i].data, slices[i].size);

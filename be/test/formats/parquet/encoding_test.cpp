@@ -1937,6 +1937,91 @@ TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterTruncatedPage) {
 
 namespace {
 
+constexpr size_t kSmallBatchRows = 4;
+constexpr size_t kNumSmallBatches = 1024;
+
+// The bytes of a column are reallocated when, and only when, their capacity changes. A buffer that grows by at least
+// a factor of two on each reallocation is reallocated about log2(batches) times in all the batches, and an exact
+// reserve in front of each batch gives a reallocation per batch.
+size_t max_bytes_reallocations(size_t num_batches) {
+    return static_cast<size_t>(std::ceil(std::log2(static_cast<double>(num_batches)))) + 4;
+}
+
+struct SmallBatchCase {
+    const char* name;
+    size_t width;
+    // next_batch_with_nulls() with one NULL row in each batch, or next_batch().
+    bool with_nulls;
+    bool with_filter;
+    bool nullable_dst;
+};
+
+} // namespace
+
+// The reader fills one column from many small batches: a read range with few rows, or a page that ends, is one
+// call. We fear a decoder that reserves the exact size of the bytes for every batch: it reallocates and copies all
+// the bytes of the column in every call, and a column of wide strings, for example JSON, costs O(batches^2). So we
+// check that the number of reallocations of the bytes grows with the logarithm of the number of batches. A value
+// wider than 128 bytes is appended value by value, and a narrower one is copied by the fixed-size copy of the column,
+// so we check both.
+TEST_F(ParquetEncodingTest, PlainByteArraySmallBatchesDoNotReallocateTheBytesEveryTime) {
+    const std::vector<SmallBatchCase> cases = {
+            {"wide, NULL rows", 200, true, false, true},
+            {"wide, NULL rows, filter", 200, true, true, true},
+            {"wide, no NULL rows", 200, false, false, true},
+            {"wide, no NULL rows, filter", 200, false, true, true},
+            {"wide, no NULL rows, not nullable", 200, false, false, false},
+            {"narrow, NULL rows", 40, true, false, true},
+            {"narrow, NULL rows, filter", 40, true, true, true},
+            {"narrow, no NULL rows", 40, false, false, true},
+            {"narrow, no NULL rows, filter", 40, false, true, true},
+    };
+    for (const SmallBatchCase& c : cases) {
+        SCOPED_TRACE(c.name);
+        // Row 1 of a batch is NULL, the filter drops the value of row 2.
+        const std::vector<uint8_t> nulls = c.with_nulls ? std::vector<uint8_t>{0, 1, 0, 0} : std::vector<uint8_t>{};
+        const std::vector<uint8_t> filter = {1, 1, 0, 1};
+        const size_t values_per_batch = c.with_nulls ? kSmallBatchRows - 1 : kSmallBatchRows;
+
+        std::vector<std::string> values;
+        for (size_t i = 0; i < kNumSmallBatches * values_per_batch; ++i) {
+            values.push_back(std::string(c.width, static_cast<char>('a' + i % 26)));
+        }
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_plain_byte_array_page(values, &encoder, &decoder));
+
+        MutableColumnPtr dst;
+        if (c.nullable_dst) {
+            dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        } else {
+            dst = BinaryColumn::create();
+        }
+        auto* binary_column = down_cast<BinaryColumn*>(ColumnHelper::get_data_column(dst.get()));
+        size_t capacity = binary_column->get_bytes().capacity();
+        size_t num_reallocations = 0;
+        for (size_t batch = 0; batch < kNumSmallBatches; ++batch) {
+            const std::vector<std::string> batch_values(values.begin() + batch * values_per_batch,
+                                                        values.begin() + (batch + 1) * values_per_batch);
+            if (c.with_nulls) {
+                ASSERT_NO_FATAL_FAILURE(decode_and_check_plain_batch(decoder.get(), nulls, batch_values,
+                                                                     c.with_filter ? &filter : nullptr,
+                                                                     down_cast<NullableColumn*>(dst.get())));
+            } else {
+                ASSERT_NO_FATAL_FAILURE(decode_and_check_plain_batch_without_nulls(
+                        decoder.get(), batch_values, c.with_filter ? &filter : nullptr, dst.get()));
+            }
+            const size_t new_capacity = binary_column->get_bytes().capacity();
+            num_reallocations += new_capacity != capacity;
+            capacity = new_capacity;
+        }
+        ASSERT_EQ(kNumSmallBatches * kSmallBatchRows, dst->size());
+        ASSERT_LE(num_reallocations, max_bytes_reallocations(kNumSmallBatches));
+    }
+}
+
+namespace {
+
 struct RawPlainPage {
     std::string name;
     std::string bytes;
@@ -2806,6 +2891,49 @@ TEST_F(ParquetEncodingTest, StringDictDecidesByWidthAndTheShareItIsTold) {
             }
         }
         ASSERT_EQ(c.expect_used, used);
+    }
+}
+
+// The same check as for the PLAIN decoder, for a dictionary page. The values are wider than 128 bytes, so each batch
+// is appended value by value.
+TEST_F(ParquetEncodingTest, StringDictSmallBatchesDoNotReallocateTheBytesEveryTime) {
+    for (bool with_nulls : {true, false}) {
+        SCOPED_TRACE(with_nulls ? "NULL rows" : "no NULL rows");
+        const std::vector<uint8_t> nulls =
+                with_nulls ? std::vector<uint8_t>{0, 1, 0, 0} : std::vector<uint8_t>(kSmallBatchRows, 0);
+        const size_t values_per_batch = count_non_null_rows(nulls);
+        std::vector<std::string> values;
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(
+                make_string_dict_page(kNumSmallBatches * values_per_batch, 200, &values, &encoder, &decoder));
+
+        auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        auto* binary_column = down_cast<BinaryColumn*>(dst->data_column_raw_ptr());
+        NullInfos null_infos = make_dict_null_infos(nulls);
+        size_t capacity = binary_column->get_bytes().capacity();
+        size_t num_reallocations = 0;
+        for (size_t batch = 0; batch < kNumSmallBatches; ++batch) {
+            Status st = with_nulls ? decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE,
+                                                                    dst.get(), nullptr)
+                                   : decoder->next_batch(nulls.size(), ColumnContentType::VALUE, dst.get(), nullptr);
+            ASSERT_TRUE(st.ok()) << st.to_string();
+            const size_t new_capacity = binary_column->get_bytes().capacity();
+            num_reallocations += new_capacity != capacity;
+            capacity = new_capacity;
+        }
+        ASSERT_LE(num_reallocations, max_bytes_reallocations(kNumSmallBatches));
+
+        ASSERT_EQ(kNumSmallBatches * kSmallBatchRows, dst->size());
+        size_t next_value = 0;
+        for (size_t row = 0; row < dst->size(); ++row) {
+            if (nulls[row % kSmallBatchRows]) {
+                ASSERT_TRUE(dst->is_null(row)) << "row " << row;
+            } else {
+                ASSERT_FALSE(dst->is_null(row)) << "row " << row;
+                ASSERT_EQ(values[next_value++], binary_column->get_slice(row).to_string()) << "row " << row;
+            }
+        }
     }
 }
 

@@ -575,7 +575,6 @@ private:
         if (string_buffer_.length() + total_increment_size > std::numeric_limits<int32_t>::max()) {
             return Status::Corruption("excess expansion in DELTA_LENGTH_BYTE_ARRAY");
         }
-        string_buffer_.reserve(string_buffer_.length() + total_increment_size);
         for (int idx = 0; idx < num_values; idx++) {
             string_buffer_.append(src[idx].data, src[idx].size);
         }

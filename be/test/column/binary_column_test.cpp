@@ -16,6 +16,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <string>
+
 #include "column/column_helper.h"
 #include "column/const_column.h"
 #include "column/fixed_length_column.h"
@@ -698,6 +701,93 @@ PARALLEL_TEST(BinaryColumnTest, test_reference_memory_usage) {
     column->append("456");
 
     ASSERT_EQ(0, column->Column::reference_memory_usage());
+}
+
+namespace {
+
+constexpr size_t kNumSmallAppends = 1024;
+
+// Runs `append` kNumSmallAppends times and returns how many times it reallocated `container`, which shows as a
+// change of the capacity. We fear an exact reserve in front of every append: it reallocates and copies the whole
+// container in every call, so n small appends cost O(n^2). A container that grows by at least a factor of two on
+// each reallocation is reallocated about log2(n) times in all the appends.
+template <typename Container, typename Append>
+size_t count_reallocations(const Container& container, Append&& append) {
+    size_t capacity = container.capacity();
+    size_t num_reallocations = 0;
+    for (size_t i = 0; i < kNumSmallAppends; ++i) {
+        append();
+        num_reallocations += container.capacity() != capacity;
+        capacity = container.capacity();
+    }
+    return num_reallocations;
+}
+
+size_t max_reallocations() {
+    return static_cast<size_t>(std::ceil(std::log2(static_cast<double>(kNumSmallAppends)))) + 4;
+}
+
+} // namespace
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_append_bytes_overflow_in_small_batches) {
+    // 200 bytes are appended value by value, 40 bytes are copied by the fixed-size copy of 64 bytes, which reads
+    // 64 bytes at the start of every value.
+    for (size_t width : {200, 40}) {
+        const size_t copy_length = width > 128 ? 256 : 64;
+        const std::string source(256, 'x');
+        auto column = BinaryColumn::create();
+        auto& offsets = column->get_offset();
+        const size_t num_reallocations = count_reallocations(column->get_bytes(), [&]() {
+            char* datas[3];
+            uint32_t lengths[3];
+            for (size_t i = 0; i < 3; ++i) {
+                datas[i] = const_cast<char*>(source.data());
+                lengths[i] = width;
+                offsets.push_back(offsets.back() + width);
+            }
+            column->append_bytes_overflow(datas, lengths, 3, copy_length);
+        });
+        ASSERT_LE(num_reallocations, max_reallocations()) << "width " << width;
+
+        column->check_or_die();
+        ASSERT_EQ(3 * kNumSmallAppends, column->size());
+        for (size_t i = 0; i < column->size(); ++i) {
+            ASSERT_EQ(std::string(width, 'x'), column->get_slice(i).to_string()) << "row " << i;
+        }
+    }
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_append_continuous_strings_in_small_batches) {
+    const std::string source = "abcdefghij";
+    const Slice slices[] = {Slice(source.data(), 3), Slice(source.data() + 3, 3), Slice(source.data() + 6, 4)};
+    auto column = BinaryColumn::create();
+    const size_t num_reallocations =
+            count_reallocations(column->get_offset(), [&]() { column->append_continuous_strings(slices, 3); });
+    ASSERT_LE(num_reallocations, max_reallocations());
+
+    column->check_or_die();
+    ASSERT_EQ(3 * kNumSmallAppends, column->size());
+    for (size_t i = 0; i < column->size(); i += 3) {
+        ASSERT_EQ("abc", column->get_slice(i).to_string());
+        ASSERT_EQ("def", column->get_slice(i + 1).to_string());
+        ASSERT_EQ("ghij", column->get_slice(i + 2).to_string());
+    }
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_append_value_multiple_times_in_small_batches) {
+    const std::string value(200, 'y');
+    const Slice slice(value);
+    auto column = BinaryColumn::create();
+    const size_t num_reallocations =
+            count_reallocations(column->get_bytes(), [&]() { column->append_value_multiple_times(&slice, 3); });
+    ASSERT_LE(num_reallocations, max_reallocations());
+
+    column->check_or_die();
+    ASSERT_EQ(3 * kNumSmallAppends, column->size());
+    ASSERT_EQ(value, column->get_slice(column->size() - 1).to_string());
 }
 
 class BinaryColumnAppendSelectiveTestFixture : public ::testing::TestWithParam<std::tuple<uint32_t>> {};
