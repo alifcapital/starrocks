@@ -14,21 +14,29 @@
 
 #include "formats/parquet/group_reader.h"
 
+#include <fmt/format.h>
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <numeric>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
 #include "agent/master_info.h"
 #include "column/chunk.h"
+#include "column/column_helper.h"
+#include "column/column_viewer.h"
+#include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "common/config.h"
 #include "common/status.h"
 #include "common/statusor.h"
 #include "exec/exec_node.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
+#include "exprs/dictmapping_expr.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
 #include "formats/parquet/column_materializer.h"
@@ -45,8 +53,11 @@
 #include "formats/reserved_columns.h"
 #include "gen_cpp/Exprs_types.h"
 #include "gen_cpp/RuntimeFilter_types.h"
+#include "runtime/current_thread.h"
 #include "runtime/types.h"
 #include "simd/simd.h"
+#include "util/defer_op.h"
+#include "util/raw_container.h"
 #include "utils.h"
 
 namespace starrocks::parquet {
@@ -206,14 +217,29 @@ Status GroupReader::get_next(ChunkPtr* chunk, size_t* row_count) {
             continue;
         }
 
+        // A join runtime filter that has arrived costs a hash probe per row and often drops most
+        // rows, while a compound conjunct can cost much more per row. So we probe the filter before
+        // stage 3. The rows that it drops are zeros in chunk_filter, and stage 3 then evaluates the
+        // conjuncts on the rows that are left only.
+        const bool runtime_filters_first = _should_probe_runtime_filters_first();
+        if (runtime_filters_first) {
+            ASSIGN_OR_RETURN(rows_survive, _evaluate_runtime_filters(r, state));
+            if (!rows_survive) {
+                state.active_chunk->set_missing_column_provider(nullptr);
+                continue;
+            }
+        }
+
         // 3. Evaluate compound predicates
-        ASSIGN_OR_RETURN(rows_survive, _evaluate_compound_predicates(r, state));
+        ASSIGN_OR_RETURN(rows_survive, _evaluate_compound_predicates(r, state, &lazy_ctx));
         state.active_chunk->set_missing_column_provider(nullptr);
         if (!rows_survive) continue;
 
         // 3.1 Probe join runtime filters
-        ASSIGN_OR_RETURN(rows_survive, _evaluate_runtime_filters(r, state));
-        if (!rows_survive) continue;
+        if (!runtime_filters_first) {
+            ASSIGN_OR_RETURN(rows_survive, _evaluate_runtime_filters(r, state));
+            if (!rows_survive) continue;
+        }
 
         // 4. Apply combined filter and backfill lazy columns
         ASSIGN_OR_RETURN(rows_survive, _filter_and_backfill_lazy(r, state));
@@ -269,10 +295,172 @@ StatusOr<bool> GroupReader::_read_and_filter_active_columns(const Range<uint64_t
 
 // ── 3. Evaluate compound predicates ──────
 
-StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state) {
-    if (_param.scanner_ctx->conjuncts.scanner_ctxs.empty()) {
+namespace {
+
+// A dictionary mapping reads its column of codes through slot_id(), while get_slot_ids() reports
+// the slots of the expression that it maps. We add the code slots of every dictionary mapping in
+// the tree to slots. do_for_each_child() also visits the common expressions that a lambda host
+// keeps outside its children.
+void collect_dict_mapping_slots(Expr* expr, std::vector<SlotId>* slots) {
+    if (expr->is_dictmapping_expr()) {
+        slots->push_back(down_cast<DictMappingExpr*>(expr)->slot_id());
+    }
+    (void)expr->do_for_each_child([slots](Expr* child) {
+        collect_dict_mapping_slots(child, slots);
+        return Status::OK();
+    });
+}
+
+// A chunk with only the columns for slots (the slots that a conjunct reads), sharing the columns of
+// active_chunk without a copy. Expr::evaluate_selected() copies the inputs of the expression for
+// the selected rows, and it copies every column of the chunk when none of the inputs is in it. We
+// expect a compound conjunct to read few columns, often only lazy ones, so we give it this narrow
+// chunk. A chunk keeps its row count only through a column, so when no input is present we add the
+// smallest column of active_chunk; it is copied but never read.
+//
+// A lambda host and a dictionary mapping read their input columns from the chunk with
+// Chunk::get_column_by_slot_id(), and only a ColumnRef asks the missing column provider for a
+// lazy column. We fear that such a conjunct (has_indirect_inputs) meets a lazy column that is not
+// in the chunk, so we read the lazy columns that it needs before the evaluation and put them in
+// the narrow chunk. The read goes through lazy_ctx, so it honors the filter that lazy_ctx holds
+// and the later backfill of the lazy columns reuses the result.
+StatusOr<ChunkPtr> compound_conjunct_input(const std::vector<SlotId>& slots, bool has_indirect_inputs,
+                                           const ChunkPtr& active_chunk, LazyMaterializationContext* lazy_ctx) {
+    auto input = std::make_shared<Chunk>();
+    for (SlotId slot : slots) {
+        if (active_chunk->is_slot_exist(slot)) {
+            input->append_column(active_chunk->get_column_by_slot_id(slot), slot);
+        } else if (has_indirect_inputs && lazy_ctx->can_materialize(slot)) {
+            ASSIGN_OR_RETURN(ColumnPtr column, lazy_ctx->provide(slot));
+            input->append_column(std::move(column), slot);
+        }
+    }
+    if (input->num_columns() == 0) {
+        SlotId carrier = 0;
+        size_t carrier_bytes = std::numeric_limits<size_t>::max();
+        for (const auto& [slot, index] : active_chunk->get_slot_id_to_index_map()) {
+            const size_t bytes = active_chunk->get_column_by_index(index)->byte_size();
+            if (bytes < carrier_bytes) {
+                carrier = slot;
+                carrier_bytes = bytes;
+            }
+        }
+        input->append_column(active_chunk->get_column_by_slot_id(carrier), carrier);
+    }
+    input->set_missing_column_provider(active_chunk->missing_column_provider());
+    return input;
+}
+
+// 0, 1, 2, ... for at least num_rows elements. We want to select the positions of the nonzero bytes of a
+// filter with filter_range() over this array, since it has a SIMD path. The array lives as long as the
+// thread and serves every query that runs on it, and we do not want the query that first grows it to
+// carry its memory, so we charge the growth to the process.
+const uint32_t* row_positions(size_t num_rows) {
+    thread_local std::vector<uint32_t> positions;
+    if (positions.size() < num_rows) {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(nullptr);
+        const size_t old_size = positions.size();
+        positions.resize(num_rows);
+        std::iota(positions.begin() + old_size, positions.end(), static_cast<uint32_t>(old_size));
+    }
+    return positions.data();
+}
+
+// The positions of the nonzero bytes of the first num_rows bytes of filter, in ascending order.
+void selected_rows_of(const Filter& filter, size_t num_rows, std::vector<uint32_t>* rows) {
+    raw::stl_vector_resize_uninitialized(rows, num_rows);
+    rows->resize(ColumnHelper::filter_range<uint32_t>(filter, rows->data(), row_positions(num_rows), 0, num_rows));
+}
+
+// ANDs the result of a conjunct evaluated on rows into filter, with NULL as false and the same byte
+// arithmetic as ColumnHelper::merge_two_filters(), and keeps in rows only the rows that passed.
+// We expect every row in rows to have its filter byte at 1, so only a row that failed changes the
+// filter. We also expect most conjuncts to keep most of the rows that they see, so we look for the failed
+// rows with SIMD and touch only those.
+Status apply_selected_result(const ColumnPtr& result, std::vector<uint32_t>* rows, Filter* filter) {
+    const size_t num_rows = rows->size();
+    uint8_t* __restrict out = filter->data();
+    uint32_t* __restrict idx = rows->data();
+    if (result->is_constant()) {
+        ColumnViewer<TYPE_BOOLEAN> viewer(result);
+        if (!viewer.is_null(0) && (viewer.value(0) & 1)) {
+            return Status::OK();
+        }
+        for (size_t i = 0; i < num_rows; ++i) {
+            out[idx[i]] = 0;
+        }
+        rows->clear();
+        return Status::OK();
+    }
+    if (result->size() != num_rows) {
+        return Status::InternalError(
+                fmt::format("compound predicate returned {} rows for {} selected rows", result->size(), num_rows));
+    }
+
+    Filter keep;
+    raw::stl_vector_resize_uninitialized(&keep, num_rows);
+    uint8_t* __restrict keep_data = keep.data();
+    const uint8_t* __restrict values =
+            down_cast<const UInt8Column*>(ColumnHelper::get_data_column(result.get()))->immutable_data().data();
+    if (result->is_nullable()) {
+        const uint8_t* __restrict nulls =
+                down_cast<const NullableColumn*>(result.get())->immutable_null_column_data().data();
+        for (size_t i = 0; i < num_rows; ++i) {
+            keep_data[i] = static_cast<uint8_t>(1 & (!nulls[i]) & values[i]);
+        }
+    } else {
+        for (size_t i = 0; i < num_rows; ++i) {
+            keep_data[i] = static_cast<uint8_t>(1 & values[i]);
+        }
+    }
+
+    const size_t failed = SIMD::count_zero(keep);
+    if (failed == 0) {
+        return Status::OK();
+    }
+    if (failed * 8 < num_rows) {
+        for (size_t i = SIMD::find_zero(keep, 0); i < num_rows; i = SIMD::find_zero(keep, i + 1)) {
+            out[idx[i]] = 0;
+        }
+    } else {
+        for (size_t i = 0; i < num_rows; ++i) {
+            out[idx[i]] = keep_data[i];
+        }
+    }
+    rows->resize(ColumnHelper::filter_range<uint32_t>(keep, idx, 0, num_rows));
+    return Status::OK();
+}
+
+} // namespace
+
+void GroupReader::_collect_compound_conjunct_info() {
+    _compound_conjuncts.clear();
+    _has_compound_conjunct_with_indirect_inputs = false;
+    if (_param.scanner_ctx == nullptr) {
+        return;
+    }
+    for (ExprContext* ctx : _param.scanner_ctx->conjuncts.scanner_ctxs) {
+        Expr* root = ctx->root();
+        CompoundConjunctInfo info;
+        info.has_indirect_inputs = root->has_indirect_inputs();
+        root->get_slot_ids(&info.slots);
+        if (info.has_indirect_inputs) {
+            collect_dict_mapping_slots(root, &info.slots);
+        }
+        std::sort(info.slots.begin(), info.slots.end());
+        info.slots.erase(std::unique(info.slots.begin(), info.slots.end()), info.slots.end());
+        _has_compound_conjunct_with_indirect_inputs |= info.has_indirect_inputs;
+        _compound_conjuncts.push_back(std::move(info));
+    }
+}
+
+StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state,
+                                                          LazyMaterializationContext* lazy_ctx) {
+    const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    if (conjuncts.empty()) {
         return true;
     }
+    DCHECK_EQ(conjuncts.size(), _compound_conjuncts.size());
 
     // Append side columns to active_chunk so compound conjuncts referencing
     // partition / not-existed / extended slots can be evaluated correctly.
@@ -287,9 +475,26 @@ StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>&
         RETURN_IF_ERROR(_column_materializer->finalize_active_slot(slot_id, state.active_chunk));
     }
 
-    ASSIGN_OR_RETURN(size_t compound_hit,
-                     ExecNode::eval_conjuncts_into_filter(_param.scanner_ctx->conjuncts.scanner_ctxs,
-                                                          state.active_chunk.get(), &state.chunk_filter));
+    SCOPED_RAW_TIMER(&_param.stats->compound_pred_eval_ns);
+    // We fear two things about a row that the earlier stages already dropped. An expensive conjunct
+    // (a JSON parse, for example) costs time on it, since most expressions ignore the filter passed
+    // to them and evaluate every row. A lazy column read under the filter holds a placeholder in it,
+    // and a function may raise an error on that value. So when at least one row is dropped we
+    // evaluate the conjuncts on the rows that are left only. When no row is dropped every row is
+    // left, every column holds real values, and we evaluate the conjuncts on the whole chunk.
+    // chunk_filter keeps its full-range positions, so the later stages see it as before.
+    const size_t rows_left = SIMD::count_nonzero(state.chunk_filter.data(), state.row_count);
+    const bool on_selected_rows = state.active_chunk->num_rows() > 0 && rows_left < state.row_count;
+    size_t compound_hit = 0;
+    if (on_selected_rows) {
+        _param.stats->compound_pred_input_rows += rows_left;
+        _param.stats->compound_pred_selected_rows += rows_left;
+        ASSIGN_OR_RETURN(compound_hit, _evaluate_compound_predicates_on_selected_rows(state, lazy_ctx));
+    } else {
+        _param.stats->compound_pred_input_rows += state.row_count;
+        ASSIGN_OR_RETURN(compound_hit, _evaluate_compound_predicates_on_whole_chunk(state, lazy_ctx));
+    }
+    _param.stats->compound_pred_output_rows += compound_hit;
     if (compound_hit == 0) {
         _param.stats->late_materialize_skip_rows += state.row_count;
         return false;
@@ -298,11 +503,75 @@ StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>&
     return true;
 }
 
+StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_whole_chunk(RowGroupScanState& state,
+                                                                           LazyMaterializationContext* lazy_ctx) {
+    const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    // We fear that a narrow chunk made from a chunk without rows has no column to carry the row
+    // count, so we pass such a chunk on as it is; eval_conjuncts_into_filter() returns at once for it.
+    if (!_has_compound_conjunct_with_indirect_inputs || state.active_chunk->num_rows() == 0) {
+        return ExecNode::eval_conjuncts_into_filter(conjuncts, state.active_chunk.get(), &state.chunk_filter);
+    }
+
+    // A conjunct with indirect inputs gets its own chunk, with the lazy columns that it needs read
+    // for the whole range, since no row is dropped. The other conjuncts read active_chunk.
+    for (size_t i = 0; i < conjuncts.size(); ++i) {
+        ExprContext* ctx = conjuncts[i];
+        const CompoundConjunctInfo& info = _compound_conjuncts[i];
+        ChunkPtr input = state.active_chunk;
+        if (info.has_indirect_inputs) {
+            ASSIGN_OR_RETURN(
+                    input, compound_conjunct_input(info.slots, info.has_indirect_inputs, state.active_chunk, lazy_ctx));
+        }
+        ASSIGN_OR_RETURN(size_t hit, ExecNode::eval_conjuncts_into_filter({ctx}, input.get(), &state.chunk_filter));
+        if (hit == 0) {
+            return 0;
+        }
+    }
+    return SIMD::count_nonzero(state.chunk_filter.data(), state.row_count);
+}
+
+StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_selected_rows(RowGroupScanState& state,
+                                                                             LazyMaterializationContext* lazy_ctx) {
+    // Here an expression touches only selected rows, and they stay inside chunk_filter, so a lazy
+    // column read for it may skip the rows outside chunk_filter. Stage 4 keeps only rows inside it.
+    lazy_ctx->set_filter(&state.chunk_filter);
+    DeferOp reset_filter([lazy_ctx] { lazy_ctx->set_filter(nullptr); });
+
+    // rows holds the positions where chunk_filter is 1. Each conjunct sees only the rows the conjuncts
+    // before it kept, so apply_selected_result() drops from rows the rows that a conjunct rejects, and
+    // rows stays in step with chunk_filter.
+    std::vector<uint32_t> rows;
+    selected_rows_of(state.chunk_filter, state.row_count, &rows);
+    const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    for (size_t conjunct_idx = 0; conjunct_idx < conjuncts.size(); ++conjunct_idx) {
+        if (rows.empty()) {
+            return 0;
+        }
+        ExprContext* ctx = conjuncts[conjunct_idx];
+        const CompoundConjunctInfo& info = _compound_conjuncts[conjunct_idx];
+        Expr* root = ctx->root();
+        ASSIGN_OR_RETURN(ChunkPtr input,
+                         compound_conjunct_input(info.slots, info.has_indirect_inputs, state.active_chunk, lazy_ctx));
+        StatusOr<ColumnPtr> result;
+        // Same error conversion as ExprContext::evaluate().
+        try {
+            result = root->evaluate_selected(ctx, input.get(), rows);
+        } catch (std::runtime_error& e) {
+            return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
+        }
+        RETURN_IF_ERROR(result);
+        RETURN_IF_ERROR(apply_selected_result(result.value(), &rows, &state.chunk_filter));
+    }
+    return rows.size();
+}
+
 // ── 3.1 Evaluate join runtime filters ──────
 //
-// Sits immediately before stage 4 so the filter is applied where it pays off: it
-// narrows the lazy-column read range and shrinks the emitted chunk. Like stages 1-3
-// this only ANDs into state.chunk_filter, so it can never change query results --
+// Runs before stage 4 so the filter is applied where it pays off: it narrows the
+// lazy-column read range and shrinks the emitted chunk. Once a filter has arrived it
+// runs before stage 3 instead (see _should_probe_runtime_filters_first()), so the
+// compound predicates see fewer rows too. Like stages 1-3 this only ANDs into
+// state.chunk_filter, so it can never change query results --
 // worst case it is a no-op. The scan operator still probes the same filters
 // afterwards (has_push_down_to_storage stays false for connector scans), so a slot we
 // cannot serve here stays correct, just not accelerated.
@@ -407,6 +676,18 @@ StatusOr<bool> GroupReader::_evaluate_runtime_filters(const Range<uint64_t>& r, 
         return false;
     }
     return true;
+}
+
+// We expect the join filter to cost a hash probe per row and to drop many rows, while a compound
+// predicate can cost much more per row (a JSON parse, for example). So when a join filter has
+// arrived and there are compound predicates, the join filter goes first and the compound
+// predicates see only the rows that it kept. Both stages only AND into chunk_filter, and stage 3
+// reads the rows left from chunk_filter, so the order does not change the result. Without compound
+// predicates there is nothing to save, and before a filter arrives stage 3.1 does nothing, so then
+// stage 3 stays first. Stage 3 runs for every chunk, so this reads members only.
+bool GroupReader::_should_probe_runtime_filters_first() const {
+    return !_param.scanner_ctx->conjuncts.scanner_ctxs.empty() && !_rf_probe_columns.empty() &&
+           _rf_predicates.any_filter_ready();
 }
 
 // ── 5. Filter & backfill lazy ──────
@@ -677,6 +958,9 @@ void GroupReader::_process_columns_and_conjunct_ctxs() {
     if (_column_materializer->active_slot_ids().empty() && !has_reserved_field_filter) {
         _column_materializer->promote_lazy_to_active();
     }
+
+    // ── Compound conjuncts ────────────────────────────────────────────────────
+    _collect_compound_conjunct_info();
 
     // ── Join runtime filter pushdown ──────────────────────────────────────────
     // Must run last: it needs the final active/lazy split.

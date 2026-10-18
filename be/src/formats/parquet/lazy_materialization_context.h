@@ -81,6 +81,9 @@ public:
 
     const Range<uint64_t>& range() const { return _range; }
     const Filter* filter() const { return _filter; }
+    // Rows outside the filter may hold placeholder values in a column read under it. Set a
+    // filter only while every reader of the provided columns touches rows inside it.
+    void set_filter(const Filter* filter) { _filter = filter; }
     ChunkPtr& active_chunk() { return _active_chunk; }
 
 private:

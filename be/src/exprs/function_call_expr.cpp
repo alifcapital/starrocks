@@ -53,17 +53,24 @@ bool is_expensive_scalar_function(const std::string& name) {
     };
     return kExpensiveScalarFns.find(std::string_view(name)) != kExpensiveScalarFns.end();
 }
-bool has_selected_kernel(Expr* expr) {
-    if (auto* call = dynamic_cast<VectorizedFunctionCallExpr*>(expr)) {
+bool has_selected_kernel(const Expr* expr) {
+    if (auto* call = dynamic_cast<const VectorizedFunctionCallExpr*>(expr)) {
         const auto* desc = call->get_function_desc();
         if (desc != nullptr && desc->selected_function != nullptr) return true;
     }
-    for (auto* child : expr->children()) {
+    for (const auto* child : expr->children()) {
         if (has_selected_kernel(child)) return true;
     }
     return false;
 }
 } // namespace
+
+// We fear that the walk of the subtree runs on every pass, since the reader evaluates a compound
+// conjunct on every chunk, so the result is kept in the node. prepare() sets the function
+// descriptors, so we expect the first call after it.
+bool VectorizedFunctionCallExpr::subtree_has_selected_kernel() const {
+    return _subtree_has_selected_kernel.get([this] { return has_selected_kernel(this); });
+}
 
 bool VectorizedFunctionCallExpr::is_expensive_node() const {
     return is_expensive_scalar_function(_fn.name.function_name);
@@ -251,7 +258,7 @@ StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_selected(ExprContext* c
         return finish_result(std::move(result));
     }
     // Preserve one shared compact input for trees without a selection-aware kernel.
-    if (!has_selected_kernel(this)) return Expr::evaluate_selected(context, chunk, rows);
+    if (!subtree_has_selected_kernel()) return Expr::evaluate_selected(context, chunk, rows);
     Columns args;
     args.reserve(_children.size());
     for (Expr* child : _children) {

@@ -16,11 +16,16 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "column/chunk.h"
 #include "column/column_helper.h"
@@ -28,11 +33,15 @@
 #include "column/nullable_column.h"
 #include "column/type_traits.h"
 #include "common/object_pool.h"
+#include "exprs/arithmetic_expr.h"
+#include "exprs/array_expr.h"
+#include "exprs/array_map_expr.h"
 #include "exprs/cast_expr.h"
 #include "exprs/column_ref.h"
 #include "exprs/conditional_two_phase_stats.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
+#include "exprs/lambda_function.h"
 #include "exprs/literal.h"
 #include "exprs/selected_column.h"
 #include "runtime/runtime_state.h"
@@ -910,6 +919,206 @@ TEST_F(ConditionalTwoPhaseLazyColumnTest, chunk_without_provider) {
     expect(selected, [](int r) -> std::optional<int> { return r % 3 == 0 ? r * 3 + r * 100 : (-r - 1); });
     EXPECT_EQ(2, value.seen_columns);
     EXPECT_TRUE(provider.calls.empty());
+}
+
+// Counts how often the tree asks this node for its inputs, so a test can tell a kept answer from a new walk
+// of the tree. The counters are shared by the copies of the node.
+class InputCountingExpr final : public Expr {
+public:
+    InputCountingExpr() : Expr(TypeDescriptor(TYPE_INT), false) {}
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new InputCountingExpr(*this)); }
+    bool is_constant() const override { return false; }
+    bool is_dictmapping_expr() const override {
+        ++*indirect_inputs_calls;
+        return indirect_inputs;
+    }
+    int get_slot_ids(std::vector<SlotId>* out) const override {
+        ++*slot_ids_calls;
+        out->insert(out->end(), slots.begin(), slots.end());
+        return slots.size();
+    }
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext*, Chunk* chunk) override {
+        return chunk->get_column_by_slot_id(slots.front());
+    }
+
+    std::vector<SlotId> slots;
+    bool indirect_inputs = false;
+    std::shared_ptr<std::atomic<int>> slot_ids_calls = std::make_shared<std::atomic<int>>(0);
+    std::shared_ptr<std::atomic<int>> indirect_inputs_calls = std::make_shared<std::atomic<int>>(0);
+};
+
+// The reader evaluates a conjunct with evaluate_selected() on every chunk. We fear that every pass walks
+// the expression to learn its slots, so the node must answer from what it kept after the first pass.
+TEST_F(ConditionalTwoPhaseTest, selected_evaluation_asks_for_inputs_once) {
+    Chunk chunk;
+    chunk.append_column(make_int([](int r) { return r; }), 17);
+    chunk.append_column(make_int([](int r) { return -r; }), 31);
+    chunk.append_column(make_varchar([](int) { return std::string(64, 'x'); }), 90);
+    InputCountingExpr value;
+    value.slots = {31, 17, 31};
+    auto guard = make_bool([](int r) { return r % 3 == 0; });
+    auto guard_fn = [&](int) -> StatusOr<ColumnPtr> { return guard; };
+    for (int pass = 0; pass < 5; ++pass) {
+        ASSIGN_OR_ABORT(auto result, two_phase_eval_predicate_routed(nullptr, &chunk, int_type(), 1, guard_fn, {&value},
+                                                                     {1}, nullptr, false, true));
+        expect(result, [](int r) -> std::optional<int> { return r % 3 == 0 ? std::optional<int>(-r) : std::nullopt; });
+    }
+    EXPECT_EQ(1, value.slot_ids_calls->load());
+    EXPECT_EQ(1, value.indirect_inputs_calls->load());
+    EXPECT_EQ(std::vector<SlotId>({17, 31}), value.sorted_unique_slot_ids());
+    EXPECT_EQ(1, value.slot_ids_calls->load());
+}
+
+TEST_F(ConditionalTwoPhaseTest, sorted_unique_slot_ids_equal_sorted_unique_get_slot_ids) {
+    InputCountingExpr value;
+    value.slots = {9, 3, 9, 5, 3};
+    std::vector<SlotId> expected;
+    value.get_slot_ids(&expected);
+    std::sort(expected.begin(), expected.end());
+    expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+    EXPECT_EQ(std::vector<SlotId>({3, 5, 9}), expected);
+
+    const std::vector<SlotId>& cached = value.sorted_unique_slot_ids();
+    EXPECT_EQ(expected, cached);
+    // The same list comes back and get_slot_ids() is not asked again (once above, once for the list).
+    EXPECT_EQ(&cached, &value.sorted_unique_slot_ids());
+    EXPECT_EQ(2, value.slot_ids_calls->load());
+
+    InputCountingExpr empty;
+    EXPECT_TRUE(empty.sorted_unique_slot_ids().empty());
+}
+
+TEST_F(ConditionalTwoPhaseTest, indirect_inputs_are_computed_once_per_node) {
+    InputCountingExpr indirect_child;
+    indirect_child.slots = {1};
+    indirect_child.indirect_inputs = true;
+    InputCountingExpr direct_child;
+    direct_child.slots = {2};
+    InputCountingExpr over_indirect;
+    over_indirect.slots = {3};
+    over_indirect.add_child(&indirect_child);
+    InputCountingExpr over_direct;
+    over_direct.slots = {4};
+    over_direct.add_child(&direct_child);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(over_indirect.has_indirect_inputs());
+        EXPECT_TRUE(indirect_child.has_indirect_inputs());
+        EXPECT_FALSE(over_direct.has_indirect_inputs());
+        EXPECT_FALSE(direct_child.has_indirect_inputs());
+    }
+    // Each node asked its own is_dictmapping_expr() once, and the parents did not ask the children again.
+    EXPECT_EQ(1, over_indirect.indirect_inputs_calls->load());
+    EXPECT_EQ(1, indirect_child.indirect_inputs_calls->load());
+    EXPECT_EQ(1, over_direct.indirect_inputs_calls->load());
+    EXPECT_EQ(1, direct_child.indirect_inputs_calls->load());
+}
+
+// We fear that a clone, which is edited after the copy, answers with what was computed for the original.
+TEST_F(ConditionalTwoPhaseTest, copy_of_an_expression_computes_its_own_inputs) {
+    ObjectPool pool;
+    InputCountingExpr value;
+    value.slots = {17};
+    ASSERT_EQ(std::vector<SlotId>({17}), value.sorted_unique_slot_ids());
+    ASSERT_FALSE(value.has_indirect_inputs());
+
+    auto* copy = static_cast<InputCountingExpr*>(value.clone(&pool));
+    copy->slots = {31, 5};
+    copy->indirect_inputs = true;
+    EXPECT_EQ(std::vector<SlotId>({5, 31}), copy->sorted_unique_slot_ids());
+    EXPECT_TRUE(copy->has_indirect_inputs());
+    EXPECT_EQ(std::vector<SlotId>({17}), value.sorted_unique_slot_ids());
+    EXPECT_FALSE(value.has_indirect_inputs());
+}
+
+// The tree is shared by the drivers of a fragment, so several threads can make the first call together.
+TEST_F(ConditionalTwoPhaseTest, concurrent_first_use_computes_inputs_once) {
+    constexpr int kThreads = 8;
+    for (int round = 0; round < 50; ++round) {
+        InputCountingExpr value;
+        value.slots = {9, 3, 9};
+        std::atomic<bool> start{false};
+        std::vector<std::vector<SlotId>> seen(kThreads);
+        std::vector<char> indirect(kThreads, 1);
+        std::vector<std::thread> threads;
+        for (int t = 0; t < kThreads; ++t) {
+            threads.emplace_back([&, t] {
+                while (!start.load()) std::this_thread::yield();
+                seen[t] = value.sorted_unique_slot_ids();
+                indirect[t] = value.has_indirect_inputs();
+            });
+        }
+        start = true;
+        for (auto& thread : threads) thread.join();
+        EXPECT_EQ(1, value.slot_ids_calls->load());
+        EXPECT_EQ(1, value.indirect_inputs_calls->load());
+        for (int t = 0; t < kThreads; ++t) {
+            EXPECT_EQ(std::vector<SlotId>({3, 9}), seen[t]);
+            EXPECT_FALSE(indirect[t]);
+        }
+    }
+}
+
+// array_map(x -> x + b, [a]) reports the lambda argument before prepare() and does not after it. We fear
+// that the kept list was filled too early, so it is filled by the first call, after prepare().
+TEST_F(ConditionalTwoPhaseTest, lambda_host_reports_prepared_slots_through_the_cache) {
+    constexpr SlotId kA = 1;
+    constexpr SlotId kB = 2;
+    constexpr SlotId kArgument = 100000;
+    ObjectPool pool;
+    // Added first, so it is destroyed after the expression context that uses it.
+    auto* state = pool.add(new RuntimeState(TQueryGlobals()));
+    auto column_ref = [&](SlotId slot) { return pool.add(new ColumnRef(int_type(), slot)); };
+
+    TExprNode add_node;
+    add_node.node_type = TExprNodeType::ARITHMETIC_EXPR;
+    add_node.opcode = TExprOpcode::ADD;
+    add_node.__isset.opcode = true;
+    add_node.num_children = 2;
+    add_node.type = gen_type_desc(TPrimitiveType::INT);
+    auto* add = pool.add(VectorizedArithmeticExprFactory::from_thrift(add_node));
+    add->add_child(column_ref(kArgument));
+    add->add_child(column_ref(kB));
+
+    TExprNode lambda_node;
+    lambda_node.node_type = TExprNodeType::LAMBDA_FUNCTION_EXPR;
+    lambda_node.num_children = 2;
+    lambda_node.type = gen_type_desc(TPrimitiveType::INT);
+    auto* lambda = pool.add(new LambdaFunction(lambda_node));
+    lambda->add_child(add);
+    lambda->add_child(column_ref(kArgument));
+
+    TExprNode array_node;
+    array_node.node_type = TExprNodeType::ARRAY_EXPR;
+    array_node.num_children = 1;
+    array_node.__set_is_nullable(true);
+    array_node.type = TYPE_INT_ARRAY_DESC.to_thrift();
+    auto* array = pool.add(ArrayExprFactory::from_thrift(array_node));
+    array->add_child(column_ref(kA));
+
+    auto* host = pool.add(new ArrayMapExpr(TYPE_INT_ARRAY_DESC));
+    host->add_child(lambda);
+    host->add_child(array);
+
+    std::vector<SlotId> before_prepare;
+    host->get_slot_ids(&before_prepare);
+    std::sort(before_prepare.begin(), before_prepare.end());
+    EXPECT_EQ(std::vector<SlotId>({kA, kB, kArgument}), before_prepare);
+
+    auto* ctx = pool.add(new ExprContext(host));
+    ASSERT_OK(ctx->prepare(state));
+    ASSERT_OK(ctx->open(state));
+
+    std::vector<SlotId> prepared;
+    host->get_slot_ids(&prepared);
+    std::sort(prepared.begin(), prepared.end());
+    prepared.erase(std::unique(prepared.begin(), prepared.end()), prepared.end());
+    EXPECT_EQ(std::vector<SlotId>({kA, kB}), prepared);
+
+    const std::vector<SlotId>& cached = host->sorted_unique_slot_ids();
+    EXPECT_EQ(prepared, cached);
+    EXPECT_EQ(&cached, &host->sorted_unique_slot_ids());
+    // A lambda host reads its inputs through the chunk, so the evaluation does not use the list.
+    EXPECT_TRUE(host->has_indirect_inputs());
 }
 
 } // namespace starrocks

@@ -35,6 +35,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,29 @@ class JITExpr;
 struct JitScore;
 struct LLVMDatum;
 class LambdaFunction;
+
+// A value that the first get() computes and every later get(), on any thread, returns. An Expr tree is
+// shared by the pipeline drivers of a fragment, so we expect two threads to make the first call together;
+// std::call_once lets one of them compute while the other waits, as for Expr::_constant_column_evaluate_once.
+// A copy starts empty. We fear that a clone, which is edited after the copy (children added, slots
+// changed), keeps a value computed for the tree that it was copied from, so the copy computes its own.
+template <typename T>
+class LazyValue {
+public:
+    LazyValue() = default;
+    LazyValue(const LazyValue&) {}
+    LazyValue& operator=(const LazyValue&) = delete;
+
+    template <typename Compute>
+    const T& get(Compute&& compute) const {
+        std::call_once(_once, [&] { _value = compute(); });
+        return _value;
+    }
+
+private:
+    mutable std::once_flag _once;
+    mutable T _value{};
+};
 
 // This is the superclass of all expr evaluation nodes.
 class Expr {
@@ -266,6 +290,18 @@ public:
     // True iff this subtree (this node or any descendant) contains an expensive node.
     bool contains_expensive() const;
 
+    // True when this subtree may read slots that get_slot_ids() does not report, so a copy of the
+    // input that holds only the reported slots is not enough to evaluate it.
+    //
+    // This and sorted_unique_slot_ids() are computed on the first call and kept in the node, because
+    // Expr::evaluate_selected() needs them on every call and a walk of the subtree per call is too
+    // expensive. We expect the first call after the tree is prepared, since a lambda host reports other
+    // slots before prepare(), and no change of the tree after it.
+    bool has_indirect_inputs() const;
+
+    // The slots that get_slot_ids() reports, sorted and without duplicates.
+    const std::vector<SlotId>& sorted_unique_slot_ids() const;
+
     // Return true if this expr or any of its children support ngram bloom filter, otherwise return flase
     virtual bool support_ngram_bloom_filter(ExprContext* context) const;
 
@@ -399,6 +435,11 @@ private:
     // Create a new vectorized expr
     static Status create_vectorized_expr(ObjectPool* pool, const TExprNode& texpr_node, Expr** expr,
                                          RuntimeState* state);
+
+    // The cached results of has_indirect_inputs() and sorted_unique_slot_ids(). Expr(const Expr&) does
+    // not copy them: a LazyValue starts empty in a copy.
+    LazyValue<bool> _has_indirect_inputs;
+    LazyValue<std::vector<SlotId>> _sorted_unique_slot_ids;
 };
 
 } // namespace starrocks

@@ -36,6 +36,7 @@
 
 #include <thrift/protocol/TDebugProtocol.h>
 
+#include <algorithm>
 #include <memory>
 #include <sstream>
 #include <unordered_map>
@@ -100,6 +101,7 @@ using std::vector;
 namespace starrocks {
 
 // No children here
+// The LazyValue members are not copied: a copy computes its own.
 Expr::Expr(const Expr& expr)
         : _cache_entry(expr._cache_entry),
           _node_type(expr._node_type),
@@ -765,22 +767,34 @@ StatusOr<ColumnPtr> Expr::evaluate_const(ExprContext* context) {
     return _constant_column;
 }
 
-namespace {
 // Dictionary rewrites can read encoded slots not reported by get_slot_ids(). Lambda expressions
 // also introduce local/captured slots and common expressions outside the ordinary child tree.
 // Keep the original copying path for these shapes until their physical dependencies are explicit.
-bool has_indirect_inputs(const Expr* expr) {
-    if (expr->is_dictmapping_expr() || expr->node_type() == TExprNodeType::LAMBDA_FUNCTION_EXPR) {
-        return true;
-    }
-    for (const Expr* child : expr->children()) {
-        if (has_indirect_inputs(child)) {
+bool Expr::has_indirect_inputs() const {
+    return _has_indirect_inputs.get([this] {
+        if (is_dictmapping_expr() || node_type() == TExprNodeType::LAMBDA_FUNCTION_EXPR) {
             return true;
         }
-    }
-    return false;
+        for (const Expr* child : _children) {
+            if (child->has_indirect_inputs()) {
+                return true;
+            }
+        }
+        return false;
+    });
 }
 
+const std::vector<SlotId>& Expr::sorted_unique_slot_ids() const {
+    return _sorted_unique_slot_ids.get([this] {
+        std::vector<SlotId> slots;
+        get_slot_ids(&slots);
+        std::sort(slots.begin(), slots.end());
+        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+        return slots;
+    });
+}
+
+namespace {
 // The copy made for a routed branch has only the routed rows, while the provider of the original
 // chunk returns columns with the rows of the original chunk. We wrap that provider so a lazy column
 // is still read on demand, and only when the branch touches it, and is cut down to the routed rows.
@@ -826,18 +840,16 @@ struct SubChunk {
     std::unique_ptr<RoutedRowsColumnProvider> provider;
 };
 
+const std::vector<SlotId> kNoSlots{};
+
 // Copy only the branch's inputs, preserving slot IDs and routed row order. The input chunk is immutable.
 // Slots that the input chunk does not hold but its provider can supply are left out of the copy; the
 // copy gets its own provider that supplies them with the routed rows.
 SubChunk make_subchunk(Chunk* chunk, const std::vector<uint32_t>& idx, const Expr* value,
                        ConditionalTwoPhaseStats* stats) {
     MissingColumnProvider* parent = chunk->missing_column_provider();
-    std::vector<SlotId> slots;
-    if (chunk->num_columns() > 1 && !has_indirect_inputs(value)) {
-        value->get_slot_ids(&slots);
-        std::sort(slots.begin(), slots.end());
-        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
-    }
+    const bool use_reported_slots = chunk->num_columns() > 1 && !value->has_indirect_inputs();
+    const std::vector<SlotId>& slots = use_reported_slots ? value->sorted_unique_slot_ids() : kNoSlots;
     SubChunk result;
     // An empty Chunk cannot carry a row count. Retain the old path for slot-free expressions,
     // and conservatively fall back if the dependency list does not describe the current input.

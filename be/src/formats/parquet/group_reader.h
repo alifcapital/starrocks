@@ -149,6 +149,9 @@ private:
     // Extract dict filter columns and conjuncts
     void _process_columns_and_conjunct_ctxs();
 
+    // Fills _compound_conjuncts and _has_compound_conjunct_with_indirect_inputs.
+    void _collect_compound_conjunct_info();
+
     // ── get_next() pipeline phases ───────────────────────────────────────────
 
     // Bundles the per-range mutable state that flows through the filter pipeline.
@@ -172,12 +175,32 @@ private:
     // 3. Evaluate compound (multi-slot) conjuncts via scanner_ctxs.
     //    Side columns are appended to active_chunk for predicate evaluation.
     //    lazy_ctx must still be attached.  Returns true if rows survive.
-    StatusOr<bool> _evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state);
+    StatusOr<bool> _evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state,
+                                                 LazyMaterializationContext* lazy_ctx);
+
+    // Stage 3 when at least one row is dropped: each conjunct is evaluated on the rows that
+    // chunk_filter keeps, and its result is ANDed back into chunk_filter. A conjunct that reads
+    // its inputs from the chunk directly (lambda, dictionary mapping) gets the lazy columns it
+    // needs read under chunk_filter. Returns the surviving row count.
+    StatusOr<size_t> _evaluate_compound_predicates_on_selected_rows(RowGroupScanState& state,
+                                                                    LazyMaterializationContext* lazy_ctx);
+
+    // Stage 3 when no row is dropped: the conjuncts are evaluated on the whole chunk, and the lazy
+    // columns that a conjunct reading its inputs directly needs are read for the whole range.
+    // Returns the surviving row count.
+    StatusOr<size_t> _evaluate_compound_predicates_on_whole_chunk(RowGroupScanState& state,
+                                                                  LazyMaterializationContext* lazy_ctx);
 
     // 3.1 Probe join runtime filters against decoded rows, ANDing into chunk_filter
     //     so non-matching rows are dropped before lazy columns are materialized.
-    //     Returns true if rows survive.
+    //     A lazy probe column is read under chunk_filter and cached, so stages 3 and 4
+    //     reuse it. Returns true if rows survive.
     StatusOr<bool> _evaluate_runtime_filters(const Range<uint64_t>& r, RowGroupScanState& state);
+
+    // True when stage 3.1 should run before stage 3 for the current chunk: there are compound
+    // conjuncts and a join runtime filter has arrived. Stage 3 then evaluates the conjuncts on
+    // the rows that the filter kept.
+    bool _should_probe_runtime_filters_first() const;
 
     // 4. Apply combined chunk_filter, compute post-filter range (internal),
     //    and backfill lazy physical columns.
@@ -224,6 +247,23 @@ private:
         bool is_active;
     };
     std::vector<RuntimeFilterProbeColumn> _rf_probe_columns;
+
+    // ── Compound conjuncts ─────────────────────────────────────────────────
+    // The conjuncts in scanner_ctx->conjuncts.scanner_ctxs are prepared before the group reader is
+    // created and do not change while it scans, and stage 3 runs for every chunk. So we walk the
+    // expression trees once, in _process_columns_and_conjunct_ctxs(), and keep the result here.
+    struct CompoundConjunctInfo {
+        // True when the conjunct may read slots that get_slot_ids() does not report (a lambda
+        // host, a dictionary mapping), so it needs the lazy columns read for it.
+        bool has_indirect_inputs = false;
+        // The slots that the conjunct reads, sorted and without duplicates: get_slot_ids(), and
+        // when has_indirect_inputs is true also the code slot of every dictionary mapping.
+        std::vector<SlotId> slots;
+    };
+    // One entry per conjunct, in the order of scanner_ctxs.
+    std::vector<CompoundConjunctInfo> _compound_conjuncts;
+    // True when at least one entry of _compound_conjuncts has has_indirect_inputs.
+    bool _has_compound_conjunct_with_indirect_inputs = false;
 
     // param for read row group
     const GroupReaderParam& _param;

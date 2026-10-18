@@ -110,6 +110,15 @@ struct HdfsScannerStats {
     int64_t rf_cond_input_rows = 0;
     int64_t rf_cond_output_rows = 0;
     int64_t rf_cond_evaluate_ns = 0;
+    // Compound (multi-slot) conjuncts evaluated inside the parquet reader. Input rows are
+    // the rows the conjuncts were evaluated on, so they show whether the conjuncts saw
+    // only the rows left by the earlier stages or the whole chunk.
+    int64_t compound_pred_input_rows = 0;
+    int64_t compound_pred_output_rows = 0;
+    int64_t compound_pred_eval_ns = 0;
+    // Of compound_pred_input_rows, the rows that were evaluated on the selected rows with
+    // Expr::evaluate_selected(). The rest were evaluated on the whole chunk.
+    int64_t compound_pred_selected_rows = 0;
     // page statistics
     bool has_page_statistics = false;
     // page skip

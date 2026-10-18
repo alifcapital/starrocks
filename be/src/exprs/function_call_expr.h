@@ -31,7 +31,7 @@ public:
 
     Expr* clone(ObjectPool* pool) const override { return pool->add(new VectorizedFunctionCallExpr(*this)); }
 
-    const FunctionDescriptor* get_function_desc() { return _fn_desc; }
+    const FunctionDescriptor* get_function_desc() const { return _fn_desc; }
 
     bool is_expensive_node() const override;
 
@@ -66,9 +66,14 @@ private:
     const FunctionDescriptor* _get_function(const TFunction& fn, const std::vector<TypeDescriptor>& arg_types,
                                             const TypeDescriptor& result_type, std::vector<bool> arg_nullables);
 
+    // True when this node or a node below it has a selection-aware kernel. Valid after prepare().
+    bool subtree_has_selected_kernel() const;
+
     const FunctionDescriptor* _fn_desc{nullptr};
 
     bool _is_returning_random_value = false;
+
+    LazyValue<bool> _subtree_has_selected_kernel;
 
     // only set when it's a agg state combinator function to track its lifecycle be with the expr
     StateCombinatorPtr _agg_state_func = nullptr;

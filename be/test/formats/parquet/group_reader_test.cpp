@@ -18,11 +18,27 @@
 #include <gtest/gtest.h>
 #include <testutil/assert.h>
 
+#include <algorithm>
+#include <functional>
 #include <memory>
 
 #include "column/column_helper.h"
+#include "column/column_viewer.h"
+#include "column/nullable_column.h"
+#include "common/config.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
+#include "exprs/arithmetic_expr.h"
+#include "exprs/array_expr.h"
+#include "exprs/array_map_expr.h"
+#include "exprs/binary_predicate.h"
+#include "exprs/column_ref.h"
+#include "exprs/dictmapping_expr.h"
 #include "exprs/expr.h"
+#include "exprs/function_call_expr.h"
+#include "exprs/lambda_function.h"
+#include "exprs/literal.h"
+#include "exprs/runtime_filter.h"
+#include "exprs/runtime_filter_bank.h"
 #include "formats/parquet/column_materializer.h"
 #include "formats/parquet/column_reader_factory.h"
 #include "formats/parquet/complex_column_reader.h"
@@ -34,7 +50,9 @@
 #include "runtime/descriptor_helper.h"
 #include "runtime/global_dict/parser.h"
 #include "runtime/runtime_state.h"
+#include "simd/simd.h"
 #include "storage/column_expr_predicate.h"
+#include "storage/runtime_filter_predicate.h"
 #include "testutil/exprs_test_helper.h"
 
 namespace starrocks::parquet {
@@ -248,12 +266,65 @@ public:
     bool _finalize_called = false;
 };
 
+// An INT column that only the compound conjunct reads, so the group reader reads it lazily.
+// value(row) is its value at a row of the row group.
+struct CompoundLazyColumn {
+    SlotId slot_id = 0;
+    std::function<int32_t(uint64_t)> value;
+};
+
+// Setup of GroupReaderTest::_scan_with_compound_predicate(). The row group has num_rows rows, 12
+// unless the test says otherwise. Column a (slot kActiveSlot) holds the row number and has the
+// single-slot conjunct a >= active_min, so it is active. The lazy columns and the compound
+// conjuncts over them are given by the test.
+struct CompoundScanCase {
+    static constexpr SlotId kActiveSlot = 700;
+
+    using MakeConjunct = std::function<StatusOr<Expr*>(ObjectPool*, RuntimeState*)>;
+
+    size_t num_rows = 12;
+    // Rows asked for in each GroupReader::get_next() call.
+    size_t rows_per_read = 12;
+    int32_t active_min = 0;
+    std::vector<CompoundLazyColumn> lazy_columns;
+    // Creates the root of the compound conjunct. The setup prepares and opens it afterwards, so a
+    // dictionary that the conjunct needs is registered in the runtime state here.
+    MakeConjunct make_conjunct;
+    // Compound conjuncts after the first one, in the order of evaluation.
+    std::vector<MakeConjunct> more_conjuncts;
+    // A join runtime filter that holds join_values and probes the column of join_filter_slot; no
+    // filter when join_values is empty. With join_filter_ready false the filter is declared but
+    // has not arrived yet.
+    std::vector<int32_t> join_values;
+    SlotId join_filter_slot = kActiveSlot;
+    bool join_filter_ready = true;
+    // The scan reads every lazy column of the output chunk as INT, which fails on a NULL. The group
+    // reader fills a lazy column with NULL when no conjunct reads it and no output needs it, so a case
+    // with such a column sets this to false and the scan collects no lazy values.
+    bool collect_lazy_values = true;
+};
+
+struct CompoundScanResult {
+    std::vector<int32_t> a_values;
+    // One entry per lazy column, in the order of CompoundScanCase::lazy_columns.
+    std::vector<std::vector<int32_t>> lazy_values;
+    std::vector<size_t> lazy_read_counts;
+    // Rows kept by the filter of each read of the column; -1 for a read without a filter.
+    std::vector<std::vector<int64_t>> lazy_read_filter_rows;
+    // What the group reader cached about the compound conjunct before the scan.
+    bool conjunct_has_indirect_inputs = false;
+    std::vector<SlotId> conjunct_slots;
+    HdfsScannerStats stats;
+};
+
 class GroupReaderTest : public ::testing::Test {
 protected:
     void SetUp() override {}
     void TearDown() override {}
 
 private:
+    StatusOr<CompoundScanResult> _scan_with_compound_predicate(const CompoundScanCase& scan_case);
+
     RandomAccessFile* _create_file();
     tparquet::ColumnChunk* _create_t_column_chunk(const std::string& file_path);
     tparquet::RowGroup* _create_t_row_group(GroupReaderParam* param);
@@ -272,6 +343,8 @@ private:
     static void _check_double_column(Column* column, size_t start, size_t count);
     static void _check_chunk(GroupReaderParam* param, const ChunkPtr& chunk, size_t start, size_t count);
 
+    // The number of rows of the row groups that _create_filemeta() describes.
+    size_t _row_group_num_rows = 12;
     ObjectPool _pool;
 };
 
@@ -382,7 +455,7 @@ tparquet::RowGroup* GroupReaderTest::_create_t_row_group(GroupReaderParam* param
     // create row group
     auto* row_group = _pool.add(new tparquet::RowGroup());
     row_group->__set_columns(cols);
-    row_group->__set_num_rows(12);
+    row_group->__set_num_rows(_row_group_num_rows);
 
     return row_group;
 }
@@ -1845,6 +1918,923 @@ TEST_F(GroupReaderTest, ReservedSlotConjunctFiltersAllSkipsActiveColumns) {
                     materializer.read_active_range_round_by_round(Range<uint64_t>(0, 2), &filter, &chunk, nullptr));
     EXPECT_EQ(0u, hit_count);
     EXPECT_EQ(0u, active_reader->read_count());
+}
+
+// Returns value(row) for each row, the row number when no function is given. A row outside the
+// filter gets a placeholder, since a real reader may skip such a row and leave any value in its place.
+class MockIntColumnReader : public ColumnReader {
+public:
+    static constexpr int32_t kPlaceholder = -1000;
+
+    explicit MockIntColumnReader(std::function<int32_t(uint64_t)> value =
+                                         [](uint64_t row) { return static_cast<int32_t>(row); })
+            : ColumnReader(nullptr), _value(std::move(value)) {}
+    ~MockIntColumnReader() override = default;
+
+    Status prepare() override { return Status::OK(); }
+
+    Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst_col) override {
+        ++read_count;
+        read_filter_rows.push_back(filter == nullptr ? -1 : static_cast<int64_t>(SIMD::count_nonzero(*filter)));
+        auto* column = dst_col->as_mutable_raw_ptr();
+        for (uint64_t row = range.begin(); row < range.end(); ++row) {
+            const bool selected = filter == nullptr || (*filter)[row - range.begin()] != 0;
+            column->append_datum(Datum(selected ? _value(row) : kPlaceholder));
+        }
+        return Status::OK();
+    }
+
+    void set_need_parse_levels(bool need_parse_levels) override {}
+    void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
+    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
+                                 ColumnIOTypeFlags types, bool active) override {}
+    void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
+
+    size_t read_count = 0;
+    std::vector<int64_t> read_filter_rows;
+
+private:
+    std::function<int32_t(uint64_t)> _value;
+};
+
+// "input is odd" over one INT child. It records every value it is evaluated on, so a test can
+// tell which rows a compound predicate saw.
+class OddIntPredicate final : public Expr {
+public:
+    OddIntPredicate() : Expr(TypeDescriptor(TYPE_BOOLEAN)) {}
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new OddIntPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        ASSIGN_OR_RETURN(ColumnPtr input, get_child(0)->evaluate_checked(context, chunk));
+        ColumnViewer<TYPE_INT> viewer(input);
+        auto result = BooleanColumn::create();
+        for (size_t i = 0; i < chunk->num_rows(); ++i) {
+            const bool is_null = viewer.is_null(i);
+            const int32_t value = is_null ? 0 : viewer.value(i);
+            evaluated_values.push_back(value);
+            result->append(static_cast<uint8_t>(!is_null && value % 2 != 0));
+        }
+        ColumnPtr output = std::move(result);
+        return output;
+    }
+
+    std::vector<int32_t> evaluated_values;
+};
+
+// A predicate over one INT child. verdict(value) decides each row: 1 keeps it, 0 drops it and any
+// other value gives NULL, which drops it too. It records every value it is evaluated on, so a test
+// can tell which rows a compound predicate saw.
+class IntVerdictPredicate final : public Expr {
+public:
+    explicit IntVerdictPredicate(std::function<int(int32_t)> verdict)
+            : Expr(TypeDescriptor(TYPE_BOOLEAN)), _verdict(std::move(verdict)) {}
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new IntVerdictPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        ASSIGN_OR_RETURN(ColumnPtr input, get_child(0)->evaluate_checked(context, chunk));
+        ColumnViewer<TYPE_INT> viewer(input);
+        auto values = BooleanColumn::create();
+        auto nulls = NullColumn::create();
+        for (size_t i = 0; i < chunk->num_rows(); ++i) {
+            const int32_t value = viewer.is_null(i) ? 0 : viewer.value(i);
+            evaluated_values.push_back(value);
+            const int verdict = _verdict(value);
+            values->append(static_cast<uint8_t>(verdict == 1));
+            nulls->append(static_cast<uint8_t>(verdict != 1 && verdict != 0));
+        }
+        ColumnPtr output = NullableColumn::create(std::move(values), std::move(nulls));
+        return output;
+    }
+
+    std::vector<int32_t> evaluated_values;
+
+private:
+    std::function<int(int32_t)> _verdict;
+};
+
+// A predicate that gives the same verdict for every row, as a constant column: 1 keeps the rows, 0
+// drops them and any other value gives NULL. It records the number of rows of each evaluation.
+class ConstantVerdictPredicate final : public Expr {
+public:
+    explicit ConstantVerdictPredicate(int verdict) : Expr(TypeDescriptor(TYPE_BOOLEAN)), _verdict(verdict) {}
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new ConstantVerdictPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        evaluated_rows.push_back(chunk->num_rows());
+        if (_verdict != 1 && _verdict != 0) {
+            return ColumnHelper::create_const_null_column(chunk->num_rows());
+        }
+        return ColumnHelper::create_const_column<TYPE_BOOLEAN>(_verdict == 1, chunk->num_rows());
+    }
+
+    std::vector<size_t> evaluated_rows;
+
+private:
+    int _verdict;
+};
+
+// Passes the INT column of its child through and records every value that it sees, so a test can
+// tell which rows a real expression tree was evaluated on. It changes no result.
+class IntRecorderExpr final : public Expr {
+public:
+    IntRecorderExpr() : Expr(TypeDescriptor(TYPE_INT)) {}
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new IntRecorderExpr(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        ASSIGN_OR_RETURN(ColumnPtr column, get_child(0)->evaluate_checked(context, chunk));
+        ColumnViewer<TYPE_INT> viewer(column);
+        for (size_t i = 0; i < column->size(); ++i) {
+            recorded_values.push_back(viewer.is_null(i) ? 0 : viewer.value(i));
+        }
+        return column;
+    }
+
+    std::vector<int32_t> recorded_values;
+};
+
+static constexpr SlotId kLambdaArgumentSlot = 100000;
+
+static ColumnRef* create_int_column_ref(ObjectPool* pool, SlotId slot_id) {
+    return pool->add(new ColumnRef(TYPE_INT_DESC, slot_id));
+}
+
+// array_contains(array_map(x -> x + recorder(b), [a]), target). The lambda captures b, and the
+// recorder sees the values of b that the lambda reads.
+static Expr* create_array_map_conjunct(ObjectPool* pool, SlotId a_slot, SlotId b_slot, int32_t target,
+                                       IntRecorderExpr** recorder_out) {
+    auto* recorder = pool->add(new IntRecorderExpr());
+    recorder->add_child(create_int_column_ref(pool, b_slot));
+    *recorder_out = recorder;
+
+    TExprNode add_node;
+    add_node.node_type = TExprNodeType::ARITHMETIC_EXPR;
+    add_node.opcode = TExprOpcode::ADD;
+    add_node.__isset.opcode = true;
+    add_node.num_children = 2;
+    add_node.type = gen_type_desc(TPrimitiveType::INT);
+    auto* add = pool->add(VectorizedArithmeticExprFactory::from_thrift(add_node));
+    add->add_child(create_int_column_ref(pool, kLambdaArgumentSlot));
+    add->add_child(recorder);
+
+    TExprNode lambda_node;
+    lambda_node.node_type = TExprNodeType::LAMBDA_FUNCTION_EXPR;
+    lambda_node.num_children = 2;
+    lambda_node.type = gen_type_desc(TPrimitiveType::INT);
+    auto* lambda = pool->add(new LambdaFunction(lambda_node));
+    lambda->add_child(add);
+    lambda->add_child(create_int_column_ref(pool, kLambdaArgumentSlot));
+
+    TExprNode array_node;
+    array_node.node_type = TExprNodeType::ARRAY_EXPR;
+    array_node.num_children = 1;
+    array_node.__set_is_nullable(true);
+    array_node.type = TYPE_INT_ARRAY_DESC.to_thrift();
+    auto* array = pool->add(ArrayExprFactory::from_thrift(array_node));
+    array->add_child(create_int_column_ref(pool, a_slot));
+
+    auto* array_map = pool->add(new ArrayMapExpr(TYPE_INT_ARRAY_DESC));
+    array_map->add_child(lambda);
+    array_map->add_child(array);
+
+    TFunction fn;
+    TFunctionName fn_name;
+    fn_name.__set_function_name("array_contains");
+    fn.__set_name(fn_name);
+    fn.__set_binary_type(TFunctionBinaryType::BUILTIN);
+    fn.__set_has_var_args(false);
+    // array_contains(ARRAY_INT, INT)
+    fn.__set_fid(15000204);
+    TExprNode contains_node;
+    contains_node.node_type = TExprNodeType::FUNCTION_CALL;
+    contains_node.num_children = 2;
+    contains_node.type = gen_type_desc(TPrimitiveType::BOOLEAN);
+    contains_node.__set_fn(fn);
+    auto* contains = pool->add(new VectorizedFunctionCallExpr(contains_node));
+    contains->add_child(array_map);
+    contains->add_child(
+            pool->add(new VectorizedLiteral(ExprsTestHelper::create_literal<TYPE_INT, int32_t>(target, false))));
+    return contains;
+}
+
+// recorder(a) <= dictmap(code), where dictmap(code) is the INT that the dictionary string of the
+// code converts to. The dictionary mapping keeps its code column in code_slot, and the expression
+// that it maps reads placeholder_slot.
+static StatusOr<Expr*> create_dict_mapping_conjunct(ObjectPool* pool, SlotId a_slot, SlotId code_slot,
+                                                    SlotId placeholder_slot, IntRecorderExpr** recorder_out) {
+    TExprNode dict_node;
+    dict_node.node_type = TExprNodeType::DICT_EXPR;
+    dict_node.num_children = 2;
+    dict_node.type = gen_type_desc(TPrimitiveType::INT);
+    dict_node.__set_is_nullable(true);
+    dict_node.__set_has_nullable_child(true);
+
+    TExprNode cast_node;
+    cast_node.node_type = TExprNodeType::CAST_EXPR;
+    cast_node.num_children = 1;
+    cast_node.type = gen_type_desc(TPrimitiveType::INT);
+    cast_node.__set_child_type(TPrimitiveType::VARCHAR);
+    cast_node.__set_is_nullable(true);
+
+    TExprNode placeholder_node;
+    placeholder_node.node_type = TExprNodeType::PLACEHOLDER_EXPR;
+    placeholder_node.num_children = 0;
+    placeholder_node.type = gen_type_desc(TPrimitiveType::VARCHAR);
+    placeholder_node.__set_is_nullable(true);
+    TPlaceHolder holder;
+    holder.__set_slot_id(placeholder_slot);
+    holder.__set_nullable(true);
+    placeholder_node.__set_vslot_ref(holder);
+
+    TExpr dict_expr;
+    dict_expr.nodes = {dict_node, ExprsTestHelper::create_slot_expr_node_t<TYPE_INT>(0, code_slot, true), cast_node,
+                       placeholder_node};
+    ExprContext* dict_ctx = nullptr;
+    RETURN_IF_ERROR(Expr::create_expr_tree(pool, dict_expr, &dict_ctx, nullptr));
+
+    auto* recorder = pool->add(new IntRecorderExpr());
+    recorder->add_child(create_int_column_ref(pool, a_slot));
+    *recorder_out = recorder;
+
+    auto* le = pool->add(VectorizedBinaryPredicateFactory::from_thrift(
+            ExprsTestHelper::create_binary_pred_node(TPrimitiveType::INT, TExprOpcode::LE)));
+    le->add_child(recorder);
+    le->add_child(dict_ctx->root());
+    return le;
+}
+
+static Status prepare_and_open_conjunct(ObjectPool* pool, RuntimeState* state, Expr* root, ExprContext** ctx) {
+    *ctx = pool->add(new ExprContext(root));
+    RETURN_IF_ERROR((*ctx)->prepare(state));
+    return (*ctx)->open(state);
+}
+
+static Status create_int_ge_conjunct_ctxs(ObjectPool* pool, RuntimeState* state, SlotId slot_id, int32_t value,
+                                          std::vector<ExprContext*>* conjunct_ctxs) {
+    TExprNode pred_node = ExprsTestHelper::create_binary_pred_node(TPrimitiveType::INT, TExprOpcode::GE);
+    TExprNode slot_ref = ExprsTestHelper::create_slot_expr_node_t<TYPE_INT>(0, slot_id, true);
+    TExprNode literal = ExprsTestHelper::create_literal<TYPE_INT, int32_t>(value, false);
+
+    TExpr expr;
+    expr.nodes.emplace_back(pred_node);
+    expr.nodes.emplace_back(slot_ref);
+    expr.nodes.emplace_back(literal);
+
+    std::vector<TExpr> conjunct_exprs{expr};
+    RETURN_IF_ERROR(Expr::create_expr_trees(pool, conjunct_exprs, conjunct_ctxs, nullptr));
+    RETURN_IF_ERROR(Expr::prepare(*conjunct_ctxs, state));
+    DictOptimizeParser::disable_open_rewrite(conjunct_ctxs);
+    RETURN_IF_ERROR(Expr::open(*conjunct_ctxs, state));
+    return Status::OK();
+}
+
+static StatusOr<RuntimeFilterProbeDescriptor*> create_int_runtime_filter_desc(ObjectPool* pool, RuntimeState* state,
+                                                                              SlotId slot_id) {
+    TRuntimeFilterDescription desc;
+    desc.__set_filter_id(1);
+    desc.__set_has_remote_targets(false);
+    desc.__set_build_plan_node_id(1);
+    desc.__set_build_join_mode(TRuntimeFilterBuildJoinMode::BROADCAST);
+    desc.__set_filter_type(TRuntimeFilterBuildType::TOPN_FILTER);
+    TExpr col_ref = ExprsTestHelper::create_column_ref_t_expr<TYPE_INT>(slot_id, true);
+    desc.__isset.plan_node_id_to_target_expr = true;
+    desc.plan_node_id_to_target_expr.emplace(1, col_ref);
+
+    auto* probe_desc = pool->add(new RuntimeFilterProbeDescriptor());
+    RETURN_IF_ERROR(probe_desc->init(pool, desc, 1, state));
+    return probe_desc;
+}
+
+StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(const CompoundScanCase& scan_case) {
+    // Added to the pool first, so it is destroyed after the expression contexts that refer to it.
+    auto* runtime_state = _pool.add(new RuntimeState(TQueryGlobals()));
+
+    auto* param = _create_group_reader_param();
+    _row_group_num_rows = scan_case.num_rows;
+    FileMetaData* file_meta;
+    RETURN_IF_ERROR(_create_filemeta(&file_meta, param));
+    param->file_metadata = file_meta;
+    param->chunk_size = config::vector_chunk_size;
+    param->stats = _pool.add(new HdfsScannerStats());
+
+    auto* slot_a = _pool.add(new SlotDescriptor(CompoundScanCase::kActiveSlot, "a", TYPE_INT_DESC));
+    GroupReaderParam::Column ca{};
+    ca.slot_desc = slot_a;
+    param->read_cols = {ca};
+    for (const auto& lazy : scan_case.lazy_columns) {
+        auto* slot = _pool.add(new SlotDescriptor(lazy.slot_id, fmt::format("c{}", lazy.slot_id), TYPE_INT_DESC));
+        GroupReaderParam::Column column{};
+        column.slot_desc = slot;
+        param->read_cols.push_back(column);
+    }
+
+    std::vector<ExprContext*> a_ctxs;
+    RETURN_IF_ERROR(create_int_ge_conjunct_ctxs(&_pool, runtime_state, slot_a->id(), scan_case.active_min, &a_ctxs));
+    param->conjunct_ctxs_by_slot[slot_a->id()] = a_ctxs;
+
+    std::vector<CompoundScanCase::MakeConjunct> make_conjuncts = {scan_case.make_conjunct};
+    make_conjuncts.insert(make_conjuncts.end(), scan_case.more_conjuncts.begin(), scan_case.more_conjuncts.end());
+    param->scanner_ctx->conjuncts.scanner_ctxs.clear();
+    for (const auto& make_conjunct : make_conjuncts) {
+        ASSIGN_OR_RETURN(auto* compound, make_conjunct(&_pool, runtime_state));
+        ExprContext* compound_ctx = nullptr;
+        RETURN_IF_ERROR(prepare_and_open_conjunct(&_pool, runtime_state, compound, &compound_ctx));
+        param->scanner_ctx->conjuncts.scanner_ctxs.push_back(compound_ctx);
+    }
+
+    if (!scan_case.join_values.empty()) {
+        const SlotId probe_slot = scan_case.join_filter_slot;
+        ASSIGN_OR_RETURN(auto* probe_desc, create_int_runtime_filter_desc(&_pool, runtime_state, probe_slot));
+        if (scan_case.join_filter_ready) {
+            auto* rf = _pool.add(new ComposedRuntimeBloomFilter<TYPE_INT>());
+            rf->get_membership_filter()->init(10);
+            for (int32_t value : scan_case.join_values) {
+                rf->insert(value);
+            }
+            probe_desc->set_runtime_filter(rf);
+        }
+        auto& preds = param->scanner_ctx->predicates.runtime_filter_preds;
+        preds = RuntimeFilterPredicates(0 /*driver_sequence*/);
+        preds.add_predicate(_pool.add(new RuntimeFilterPredicate(probe_desc, probe_slot)));
+        param->scanner_ctx->runtime_filter_preds = &preds;
+        param->scanner_ctx->driver_sequence = 0;
+    }
+
+    SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    auto* group_reader = _pool.add(new GroupReader(*param, 0, skip_rows_ctx, 0));
+    group_reader->_column_readers.emplace(slot_a->id(), std::make_unique<MockIntColumnReader>());
+    std::vector<MockIntColumnReader*> lazy_readers;
+    for (const auto& lazy : scan_case.lazy_columns) {
+        auto reader = std::make_unique<MockIntColumnReader>(lazy.value);
+        lazy_readers.push_back(reader.get());
+        group_reader->_column_readers.emplace(lazy.slot_id, std::move(reader));
+    }
+    group_reader->_process_columns_and_conjunct_ctxs();
+    // The scan reads the facts about the conjuncts from _compound_conjuncts, which init() also fills by this call.
+    if (group_reader->_compound_conjuncts.size() != make_conjuncts.size()) {
+        return Status::InternalError("the facts about the compound conjuncts were not collected");
+    }
+    RETURN_IF_ERROR(group_reader->_column_materializer->init_read_chunk());
+    prepare_row_range(group_reader);
+
+    CompoundScanResult result;
+    result.conjunct_has_indirect_inputs = group_reader->_compound_conjuncts[0].has_indirect_inputs;
+    result.conjunct_slots = group_reader->_compound_conjuncts[0].slots;
+    result.lazy_values.resize(scan_case.lazy_columns.size());
+    while (true) {
+        auto chunk = _create_chunk(param);
+        size_t row_count = scan_case.rows_per_read;
+        Status st = group_reader->get_next(&chunk, &row_count);
+        if (!st.ok() && !st.is_end_of_file()) {
+            return st;
+        }
+        for (size_t i = 0; i < row_count; ++i) {
+            result.a_values.push_back(chunk->get_column_by_slot_id(slot_a->id())->get(i).get_int32());
+            if (!scan_case.collect_lazy_values) {
+                continue;
+            }
+            for (size_t col = 0; col < scan_case.lazy_columns.size(); ++col) {
+                result.lazy_values[col].push_back(
+                        chunk->get_column_by_slot_id(scan_case.lazy_columns[col].slot_id)->get(i).get_int32());
+            }
+        }
+        if (st.is_end_of_file()) {
+            break;
+        }
+    }
+    for (auto* reader : lazy_readers) {
+        result.lazy_read_counts.push_back(reader->read_count);
+        result.lazy_read_filter_rows.push_back(reader->read_filter_rows);
+    }
+    result.stats = *param->stats;
+    return result;
+}
+
+static int32_t row_as_value(uint64_t row) {
+    return static_cast<int32_t>(row);
+}
+
+// Covers: GroupReader::_evaluate_compound_predicates evaluates the compound predicate only on
+//         the rows that the column predicates kept, and reads its lazy column under that filter.
+TEST_F(GroupReaderTest, CompoundPredicateSeesOnlyRowsLeftByColumnPredicates) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case;
+    scan_case.active_min = 6;
+    scan_case.lazy_columns = {{701, row_as_value}};
+    scan_case.make_conjunct = [&odd](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+        odd = pool->add(new OddIntPredicate());
+        odd->add_child(create_int_column_ref(pool, 701));
+        return odd;
+    };
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_FALSE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({701}), result.conjunct_slots);
+    EXPECT_EQ(6, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({6}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when every row passed the column predicates, the compound predicate runs on the
+//         whole chunk without a copy and its lazy column is read without a filter.
+TEST_F(GroupReaderTest, CompoundPredicateOnWholeChunkWhenAllRowsLeft) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case;
+    scan_case.active_min = 0;
+    scan_case.lazy_columns = {{701, row_as_value}};
+    scan_case.make_conjunct = [&odd](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+        odd = pool->add(new OddIntPredicate());
+        odd->add_child(create_int_column_ref(pool, 701));
+        return odd;
+    };
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_FALSE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({701}), result.conjunct_slots);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(std::vector<int64_t>({-1}), result.lazy_read_filter_rows[0]);
+}
+
+// array_contains(array_map(x -> x + b, [a]), 12) over a = row and b = 12 - row on even rows, 0 on
+// odd rows: it holds on the even rows.
+static CompoundScanCase create_array_map_scan_case(int32_t active_min, IntRecorderExpr** recorder) {
+    CompoundScanCase scan_case;
+    scan_case.active_min = active_min;
+    scan_case.lazy_columns = {{701, [](uint64_t row) { return row % 2 == 0 ? static_cast<int32_t>(12 - row) : 0; }}};
+    scan_case.make_conjunct = [recorder](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+        return create_array_map_conjunct(pool, CompoundScanCase::kActiveSlot, 701, 12, recorder);
+    };
+    return scan_case;
+}
+
+// Covers: a compound conjunct with a lambda host reads the lazy column that its lambda captures
+//         with Chunk::get_column_by_slot_id(), so the group reader reads that column before the
+//         evaluation, under the filter of the rows that the column predicate kept.
+TEST_F(GroupReaderTest, CompoundLambdaPredicateReadsCapturedLazyColumnOnSurvivingRows) {
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_array_map_scan_case(6, &recorder)));
+
+    EXPECT_EQ(std::vector<int32_t>({6, 8, 10}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({6, 4, 2}), result.lazy_values[0]);
+    // The lambda saw b of the rows 6..11 only, never the placeholder of a dropped row.
+    EXPECT_EQ(std::vector<int32_t>({6, 0, 4, 0, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, 701}), result.conjunct_slots);
+    EXPECT_EQ(6, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    // b is read once, for the conjunct, and the backfill of the lazy columns reuses it.
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({6}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when no row is dropped, a compound conjunct with a lambda host gets its captured lazy
+//         column read for the whole range, and the chunk it is evaluated on holds that column.
+TEST_F(GroupReaderTest, CompoundLambdaPredicateReadsCapturedLazyColumnOnWholeChunk) {
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_array_map_scan_case(0, &recorder)));
+
+    EXPECT_EQ(std::vector<int32_t>({0, 2, 4, 6, 8, 10}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({12, 10, 8, 6, 4, 2}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({12, 0, 10, 0, 8, 0, 6, 0, 4, 0, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, 701}), result.conjunct_slots);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({-1}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: get_slot_ids() of a prepared lambda host reports the slots that its lambda captures and
+//         its input array reads, which are the slots that the group reader has to supply.
+TEST_F(GroupReaderTest, PreparedLambdaHostReportsCapturedAndInputSlots) {
+    auto* runtime_state = _pool.add(new RuntimeState(TQueryGlobals()));
+    IntRecorderExpr* recorder = nullptr;
+    Expr* root = create_array_map_conjunct(&_pool, CompoundScanCase::kActiveSlot, 701, 12, &recorder);
+    ExprContext* ctx = nullptr;
+    ASSERT_OK(prepare_and_open_conjunct(&_pool, runtime_state, root, &ctx));
+
+    std::vector<SlotId> slots;
+    root->get_slot_ids(&slots);
+    std::sort(slots.begin(), slots.end());
+    slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, 701}), slots);
+    EXPECT_TRUE(root->has_indirect_inputs());
+}
+
+static constexpr SlotId kDictCodeSlot = 702;
+static constexpr SlotId kDictPlaceholderSlot = 710;
+
+// recorder(a) <= dictmap(code) over a = row, the code of the dictionary string "11 - row" is
+// 12 - row: it holds on the rows 0..5.
+static CompoundScanCase create_dict_mapping_scan_case(int32_t active_min, IntRecorderExpr** recorder) {
+    CompoundScanCase scan_case;
+    scan_case.active_min = active_min;
+    scan_case.lazy_columns = {{kDictCodeSlot, [](uint64_t row) { return static_cast<int32_t>(12 - row); }}};
+    scan_case.make_conjunct = [recorder](ObjectPool* pool, RuntimeState* state) -> StatusOr<Expr*> {
+        state->init_instance_mem_tracker();
+        std::vector<int32_t> ids;
+        std::vector<std::string> strings;
+        for (int32_t code = 1; code <= 12; ++code) {
+            ids.push_back(code);
+            strings.push_back(std::to_string(code - 1));
+        }
+        TGlobalDict dict;
+        dict.__set_columnId(kDictCodeSlot);
+        dict.__set_ids(ids);
+        dict.__set_strings(strings);
+        RETURN_IF_ERROR(state->init_query_global_dict({dict}));
+        return create_dict_mapping_conjunct(pool, CompoundScanCase::kActiveSlot, kDictCodeSlot, kDictPlaceholderSlot,
+                                            recorder);
+    };
+    return scan_case;
+}
+
+// Covers: a compound conjunct with a dictionary mapping reads its lazy code column with
+//         Chunk::get_column_by_slot_id(), and get_slot_ids() of the mapping does not report that
+//         slot, so the group reader reads the code column under the filter of the surviving rows.
+TEST_F(GroupReaderTest, CompoundDictMappingPredicateReadsLazyCodeColumnOnSurvivingRows) {
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_dict_mapping_scan_case(3, &recorder)));
+
+    EXPECT_EQ(std::vector<int32_t>({3, 4, 5}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({9, 8, 7}), result.lazy_values[0]);
+    // The conjunct saw the rows 3..11 only. The code of a dropped row is a placeholder, which is
+    // not a code of the dictionary.
+    EXPECT_EQ(std::vector<int32_t>({3, 4, 5, 6, 7, 8, 9, 10, 11}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, kDictCodeSlot, kDictPlaceholderSlot}),
+              result.conjunct_slots);
+    EXPECT_EQ(9, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({9}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when no row is dropped, a compound conjunct with a dictionary mapping gets its lazy
+//         code column read for the whole range and evaluated on the whole chunk.
+TEST_F(GroupReaderTest, CompoundDictMappingPredicateReadsLazyCodeColumnOnWholeChunk) {
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_dict_mapping_scan_case(0, &recorder)));
+
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 4, 5}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({12, 11, 10, 9, 8, 7}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, kDictCodeSlot, kDictPlaceholderSlot}),
+              result.conjunct_slots);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({-1}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: slot_id() of a prepared dictionary mapping is its code column, while get_slot_ids()
+//         reports the slot of the mapped expression.
+TEST_F(GroupReaderTest, PreparedDictMappingKeepsCodeColumnApartFromReportedSlots) {
+    auto* runtime_state = _pool.add(new RuntimeState(TQueryGlobals()));
+    runtime_state->init_instance_mem_tracker();
+    TGlobalDict dict;
+    dict.__set_columnId(kDictCodeSlot);
+    dict.__set_ids({1});
+    dict.__set_strings({"0"});
+    ASSERT_OK(runtime_state->init_query_global_dict({dict}));
+
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto* root, create_dict_mapping_conjunct(&_pool, CompoundScanCase::kActiveSlot, kDictCodeSlot,
+                                                             kDictPlaceholderSlot, &recorder));
+    ExprContext* ctx = nullptr;
+    ASSERT_OK(prepare_and_open_conjunct(&_pool, runtime_state, root, &ctx));
+
+    auto* dict_mapping = down_cast<DictMappingExpr*>(root->get_child(1));
+    EXPECT_EQ(kDictCodeSlot, dict_mapping->slot_id());
+    std::vector<SlotId> slots;
+    root->get_slot_ids(&slots);
+    std::sort(slots.begin(), slots.end());
+    EXPECT_EQ(std::vector<SlotId>({CompoundScanCase::kActiveSlot, kDictPlaceholderSlot}), slots);
+    EXPECT_TRUE(root->has_indirect_inputs());
+}
+
+// "input is odd" over the lazy column 701, on top of the setup of CompoundScanCase. The test reads
+// the values that the predicate was evaluated on from *odd after the scan.
+static CompoundScanCase create_odd_scan_case(int32_t active_min, OddIntPredicate** odd) {
+    CompoundScanCase scan_case;
+    scan_case.active_min = active_min;
+    scan_case.lazy_columns = {{701, row_as_value}};
+    scan_case.make_conjunct = [odd](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+        *odd = pool->add(new OddIntPredicate());
+        (*odd)->add_child(create_int_column_ref(pool, 701));
+        return *odd;
+    };
+    return scan_case;
+}
+
+// Covers: a join runtime filter that has arrived runs before the compound predicate on the lazy
+//         column that it probes, so the predicate sees only the rows that the filter kept. The
+//         column is read once, under the filter of the rows left by the column predicate, and the
+//         compound predicate and the backfill of the lazy columns reuse it.
+TEST_F(GroupReaderTest, JoinRuntimeFilterOnLazyColumnRunsBeforeCompoundPredicate) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = 701;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({9}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({9}), result.lazy_values[0]);
+    EXPECT_EQ(10, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(2, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({9, 10}), odd->evaluated_values);
+    EXPECT_EQ(2, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(1, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({10}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: a join runtime filter on the active column runs before the compound predicate, and the
+//         lazy column that the compound predicate reads is read under the filter of the rows that
+//         the join filter kept.
+TEST_F(GroupReaderTest, JoinRuntimeFilterOnActiveColumnRunsBeforeCompoundPredicate) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = CompoundScanCase::kActiveSlot;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({9}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({9}), result.lazy_values[0]);
+    EXPECT_EQ(10, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(2, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({9, 10}), odd->evaluated_values);
+    EXPECT_EQ(2, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(1, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({2}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when the join runtime filter has not arrived, the compound predicate runs first, on the
+//         rows that the column predicate kept, and the join filter probes nothing.
+TEST_F(GroupReaderTest, CompoundPredicateRunsFirstWhenJoinRuntimeFilterNotArrived) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    scan_case.join_values = {9, 10};
+    scan_case.join_filter_slot = 701;
+    scan_case.join_filter_ready = false;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({3, 5, 7, 9, 11}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_EQ(10, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(5, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(0, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({10}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when the join runtime filter drops every row, it ends the pass before the compound
+//         predicate, which is never evaluated.
+TEST_F(GroupReaderTest, JoinRuntimeFilterDroppingAllRowsSkipsCompoundPredicate) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    scan_case.join_values = {100};
+    scan_case.join_filter_slot = 701;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_TRUE(result.a_values.empty());
+    EXPECT_TRUE(odd->evaluated_values.empty());
+    EXPECT_EQ(10, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(0, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(12, result.stats.late_materialize_skip_rows);
+}
+
+// Covers: a join runtime filter that drops rows runs before a compound conjunct with a lambda host
+//         that captures the lazy column that the filter probes. The conjunct runs only on the rows
+//         that the filter kept and gets the real values of that column, and the column is read
+//         once, for the join filter.
+TEST_F(GroupReaderTest, JoinRuntimeFilterBeforeCompoundLambdaPredicateOnLazyProbeColumn) {
+    IntRecorderExpr* recorder = nullptr;
+    CompoundScanCase scan_case = create_array_map_scan_case(2, &recorder);
+    // b is 12 - row on the even rows and 0 on the odd rows. Of the rows 2..11 that the column
+    // predicate kept, the filter drops the rows 2 and 4, where b is 10 and 8.
+    scan_case.join_values = {0, 2, 4, 6};
+    scan_case.join_filter_slot = 701;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({6, 8, 10}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({6, 4, 2}), result.lazy_values[0]);
+    EXPECT_EQ(10, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(8, result.stats.rf_cond_output_rows);
+    // The lambda saw b of the rows 3 and 5..11, never the value of a dropped row or the placeholder
+    // of the rows 0 and 1.
+    EXPECT_EQ(std::vector<int32_t>({0, 0, 6, 0, 4, 0, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(8, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({10}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: the same for a compound conjunct with a dictionary mapping, whose lazy code column is
+//         the column that the join filter probes.
+TEST_F(GroupReaderTest, JoinRuntimeFilterBeforeCompoundDictMappingPredicateOnLazyProbeColumn) {
+    IntRecorderExpr* recorder = nullptr;
+    CompoundScanCase scan_case = create_dict_mapping_scan_case(3, &recorder);
+    // The code is 12 - row. Of the rows 3..11 that the column predicate kept, the filter keeps the
+    // rows 4..8, where the code is 8..4.
+    scan_case.join_values = {4, 5, 6, 7, 8};
+    scan_case.join_filter_slot = kDictCodeSlot;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({4, 5}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({8, 7}), result.lazy_values[0]);
+    EXPECT_EQ(9, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(5, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({4, 5, 6, 7, 8}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(5, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(2, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({9}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: when the join runtime filter runs first and drops no row, and the column predicate
+//         dropped none either, every row is a surviving row, so the compound predicate runs on the
+//         whole chunk. It gets the lazy column that the join filter read.
+TEST_F(GroupReaderTest, CompoundPredicateOnWholeChunkWhenJoinRuntimeFilterDropsNoRow) {
+    OddIntPredicate* odd = nullptr;
+    CompoundScanCase scan_case = create_odd_scan_case(0, &odd);
+    scan_case.join_values = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    scan_case.join_filter_slot = 701;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.lazy_values[0]);
+    EXPECT_EQ(12, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(12, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({12}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: the same for a compound conjunct with a lambda host that captures the lazy column that
+//         the join filter probes: the conjunct runs on the whole chunk, and the column is the one
+//         that the join filter read, not read a second time.
+TEST_F(GroupReaderTest, CompoundLambdaPredicateOnWholeChunkWhenJoinRuntimeFilterDropsNoRow) {
+    IntRecorderExpr* recorder = nullptr;
+    CompoundScanCase scan_case = create_array_map_scan_case(0, &recorder);
+    // The filter holds every value of b: 12 - row on the even rows and 0 on the odd rows.
+    scan_case.join_values = {0, 2, 4, 6, 8, 10, 12};
+    scan_case.join_filter_slot = 701;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({0, 2, 4, 6, 8, 10}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({12, 10, 8, 6, 4, 2}), result.lazy_values[0]);
+    EXPECT_EQ(12, result.stats.rf_cond_input_rows);
+    EXPECT_EQ(12, result.stats.rf_cond_output_rows);
+    EXPECT_EQ(std::vector<int32_t>({12, 0, 10, 0, 8, 0, 6, 0, 4, 0, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(1u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({12}), result.lazy_read_filter_rows[0]);
+}
+
+// The values in [from, to) that keep() accepts, in ascending order.
+static std::vector<int32_t> values_where(int32_t from, int32_t to, const std::function<bool(int32_t)>& keep) {
+    std::vector<int32_t> values;
+    for (int32_t value = from; value < to; ++value) {
+        if (keep(value)) {
+            values.push_back(value);
+        }
+    }
+    return values;
+}
+
+// Makes a compound conjunct that applies verdict to the lazy column 701, and returns the predicate in
+// *predicate when the scan creates it.
+static CompoundScanCase::MakeConjunct make_int_verdict_conjunct(IntVerdictPredicate** predicate,
+                                                                std::function<int(int32_t)> verdict) {
+    return [predicate, verdict = std::move(verdict)](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+        *predicate = pool->add(new IntVerdictPredicate(verdict));
+        (*predicate)->add_child(create_int_column_ref(pool, 701));
+        return *predicate;
+    };
+}
+
+// Covers: the rows that a compound predicate keeps are the rows that the group reader outputs,
+//         whether the predicate fails no row, a few rows, most rows or every row, with false or with
+//         NULL. The row group has more rows than one SIMD batch of the row bookkeeping holds, and the
+//         counters show that the selected rows were evaluated once.
+TEST_F(GroupReaderTest, CompoundPredicateVerdictsOnManySelectedRows) {
+    struct Verdict {
+        const char* name;
+        std::function<int(int32_t)> verdict;
+    };
+    const std::vector<Verdict> verdicts = {
+            {"no row fails", [](int32_t) { return 1; }},
+            {"one row fails and one is NULL", [](int32_t value) { return value == 50 ? 0 : (value == 77 ? -1 : 1); }},
+            {"most rows fail or are NULL",
+             [](int32_t value) { return value % 3 == 0 ? 1 : (value % 3 == 1 ? 0 : -1); }},
+            {"every row fails", [](int32_t) { return 0; }},
+            {"every row is NULL", [](int32_t) { return -1; }},
+    };
+    for (const auto& entry : verdicts) {
+        const auto& verdict = entry.verdict;
+        SCOPED_TRACE(entry.name);
+        // The rows 10..99 pass the column predicate.
+        IntVerdictPredicate* predicate = nullptr;
+        CompoundScanCase scan_case;
+        scan_case.num_rows = 100;
+        scan_case.rows_per_read = 100;
+        scan_case.active_min = 10;
+        scan_case.lazy_columns = {{701, row_as_value}};
+        scan_case.make_conjunct = make_int_verdict_conjunct(&predicate, verdict);
+
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        const auto kept = values_where(10, 100, [&verdict](int32_t value) { return verdict(value) == 1; });
+        EXPECT_EQ(kept, result.a_values);
+        EXPECT_EQ(kept, result.lazy_values[0]);
+        EXPECT_EQ(values_where(10, 100, [](int32_t) { return true; }), predicate->evaluated_values);
+        EXPECT_EQ(90, result.stats.compound_pred_input_rows);
+        EXPECT_EQ(90, result.stats.compound_pred_selected_rows);
+        EXPECT_EQ(static_cast<int64_t>(kept.size()), result.stats.compound_pred_output_rows);
+    }
+}
+
+// Covers: a compound predicate that gives the same verdict for every row, as a constant column,
+//         keeps all selected rows or drops all of them.
+TEST_F(GroupReaderTest, CompoundPredicateWithConstantVerdictOnSelectedRows) {
+    for (int verdict : {1, 0, -1}) {
+        SCOPED_TRACE(verdict);
+        ConstantVerdictPredicate* predicate = nullptr;
+        CompoundScanCase scan_case;
+        scan_case.active_min = 1;
+        // The conjunct reads no slot, so nothing reads the lazy column 701 and the group reader fills it
+        // with NULL. We do not collect the values of a NULL column.
+        scan_case.lazy_columns = {{701, row_as_value}};
+        scan_case.collect_lazy_values = false;
+        scan_case.make_conjunct = [&predicate, verdict](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+            predicate = pool->add(new ConstantVerdictPredicate(verdict));
+            return predicate;
+        };
+
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        EXPECT_EQ(std::vector<size_t>({11}), predicate->evaluated_rows);
+        EXPECT_EQ(11, result.stats.compound_pred_input_rows);
+        EXPECT_EQ(11, result.stats.compound_pred_selected_rows);
+        if (verdict == 1) {
+            EXPECT_EQ(values_where(1, 12, [](int32_t) { return true; }), result.a_values);
+            EXPECT_EQ(11, result.stats.compound_pred_output_rows);
+        } else {
+            EXPECT_TRUE(result.a_values.empty());
+            EXPECT_EQ(0, result.stats.compound_pred_output_rows);
+            EXPECT_EQ(12, result.stats.late_materialize_skip_rows);
+        }
+    }
+}
+
+// Covers: the second compound conjunct is evaluated only on the rows that the first one kept, and
+//         the rows count once in the counters.
+TEST_F(GroupReaderTest, SecondCompoundPredicateSeesOnlyRowsKeptByTheFirst) {
+    IntVerdictPredicate* first = nullptr;
+    IntVerdictPredicate* second = nullptr;
+    CompoundScanCase scan_case;
+    scan_case.num_rows = 100;
+    scan_case.rows_per_read = 100;
+    scan_case.active_min = 10;
+    scan_case.lazy_columns = {{701, row_as_value}};
+    // The first conjunct fails the multiples of 10, which are few of the selected rows, and the
+    // second one the multiples of 3.
+    scan_case.make_conjunct = make_int_verdict_conjunct(&first, [](int32_t value) { return value % 10 == 0 ? 0 : 1; });
+    scan_case.more_conjuncts = {
+            make_int_verdict_conjunct(&second, [](int32_t value) { return value % 3 == 0 ? 0 : 1; })};
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    const auto kept_by_first = values_where(10, 100, [](int32_t value) { return value % 10 != 0; });
+    const auto kept = values_where(10, 100, [](int32_t value) { return value % 10 != 0 && value % 3 != 0; });
+    EXPECT_EQ(kept, result.a_values);
+    EXPECT_EQ(kept, result.lazy_values[0]);
+    EXPECT_EQ(values_where(10, 100, [](int32_t) { return true; }), first->evaluated_values);
+    EXPECT_EQ(kept_by_first, second->evaluated_values);
+    EXPECT_EQ(90, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(90, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(static_cast<int64_t>(kept.size()), result.stats.compound_pred_output_rows);
 }
 
 } // namespace starrocks::parquet
