@@ -431,6 +431,8 @@ final class CastStatisticsDerivation {
 
     private static Optional<Image> computeImage(Histogram histogram, Type from, Type to) {
         Map<String, Long> mcv = new HashMap<>();
+        // The statistic value of each most common value of the image, to find the buckets that hold it
+        Map<String, Double> mcvValues = new HashMap<>();
         long nullRows = 0;
         for (Map.Entry<String, Long> entry : histogram.getMCV().entrySet()) {
             ConstantOperator value = StatisticsCastEvaluator.cast(ConstantOperator.createVarchar(entry.getKey()), from)
@@ -442,7 +444,12 @@ final class CastStatisticsDerivation {
             if (image.isNull()) {
                 nullRows += entry.getValue();
             } else {
-                mcv.merge(MultiColumnMcvEstimator.constantText(image), entry.getValue(), Long::sum);
+                String text = MultiColumnMcvEstimator.constantText(image);
+                mcv.merge(text, entry.getValue(), Long::sum);
+                OptionalDouble number = ConstantOperatorUtils.doubleValueFromConstant(image);
+                if (number.isPresent()) {
+                    mcvValues.put(text, number.getAsDouble());
+                }
             }
         }
         List<Bucket> buckets = new ArrayList<>(histogram.getBuckets().size());
@@ -517,8 +524,70 @@ final class CastStatisticsDerivation {
             }
             buckets.add(bucket(low, high, bucket.getCount(), repeats, distinct));
         }
+        if (merges && !buckets.isEmpty() && !mcvValues.isEmpty()) {
+            buckets = withoutMostCommonValues(buckets, mcv, mcvValues, to);
+        }
         Histogram image = buckets.isEmpty() ? new Histogram(mcv) : new Histogram(buckets, mcv);
         return Optional.of(new Image(image, nullRows));
+    }
+
+    /**
+     * We expect a most common value of a histogram to hold all the rows of its value and the buckets to hold none of
+     * them, as the estimate of an equality reads the list alone for a value that is in it. A cast that merges values
+     * breaks this: the most common time of a day is a most common value of the day, and the buckets still hold the
+     * other times of the day. We fear that an equality on the day would then count the rows of that time only, so each
+     * bucket gives the rows it holds for each most common value inside it to the list: for a value below its upper end,
+     * the rows that a range of that value takes from it, and for its upper end, the rows of the end. The rows are
+     * taken out of the bucket and out of the counts of the buckets after it, so the rows of the image are those of the
+     * histogram. A value below the upper end is no longer one of the distinct values of the bucket, so an equality on
+     * another value of the bucket reads the same rows as before. A target with no next value, as a DOUBLE, has no
+     * value to take. We accept that a range of the other days of the bucket is estimated lower by about 1 / the days of
+     * the bucket, because the bucket keeps spreading the rows it has left over its whole range, the given days included.
+     */
+    private static List<Bucket> withoutMostCommonValues(List<Bucket> buckets, Map<String, Long> mcv,
+                                                        Map<String, Double> mcvValues, Type to) {
+        // The values in their order, so that the cap on the rows a bucket gives does not depend on the order of the map
+        List<Map.Entry<String, Double>> values = new ArrayList<>(mcvValues.entrySet());
+        values.sort(Map.Entry.comparingByValue());
+        List<Bucket> result = new ArrayList<>(buckets.size());
+        long previous = 0;
+        long moved = 0;
+        for (Bucket bucket : buckets) {
+            long rows = bucket.getCount() - previous;
+            previous = bucket.getCount();
+            long repeats = Math.min(bucket.getUpperRepeats(), rows);
+            // The rows other than those of the upper end, which the bucket spreads evenly between its ends
+            long spread = rows - repeats;
+            long fromSpread = 0;
+            long fromUpper = 0;
+            long valuesInside = 0;
+            for (Map.Entry<String, Double> entry : values) {
+                double value = entry.getValue();
+                double next = CastStatisticsRules.nextValue(to, value);
+                if (value < bucket.getLower() || value > bucket.getUpper() || Double.isNaN(next)) {
+                    continue;
+                }
+                long share;
+                if (value == bucket.getUpper()) {
+                    share = repeats;
+                    fromUpper = share;
+                } else {
+                    share = Math.min(spread - fromSpread, Math.round(bucket.spreadRowsOn(spread, value, next)));
+                    fromSpread += share;
+                    valuesInside++;
+                }
+                mcv.merge(entry.getKey(), share, Long::sum);
+            }
+            Optional<Long> distinct = bucket.getDistinctCount();
+            if (distinct.isPresent() && valuesInside > 0) {
+                distinct = Optional.of(Math.max(1L, distinct.get() - valuesInside));
+            }
+            long taken = fromSpread + fromUpper;
+            result.add(bucket(bucket.getLower(), bucket.getUpper(), bucket.getCount() - moved - taken,
+                    bucket.getUpperRepeats() - fromUpper, distinct));
+            moved += taken;
+        }
+        return result;
     }
 
     // Text read as a DATE merges the times of a day. A date and a datetime of the same fields share a layout, so we

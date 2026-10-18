@@ -27,6 +27,7 @@ import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
+import com.starrocks.sql.optimizer.rule.NonDeterministicVisitor;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.Type;
 import org.apache.logging.log4j.LogManager;
@@ -237,13 +238,22 @@ final class EstimatePredicateNormalizer {
                 && call.getFnName().equalsIgnoreCase(FunctionSet.IF);
     }
 
-    // A range comparison of a column of whole numbers or days, or of a function of a column, with a constant: it can be
-    // a side of a point.
+    // A range comparison of a column of whole numbers or days, of a cast to such a type, or of a function of a column,
+    // with a constant: it can be a side of a point.
     private static boolean isPointSide(ScalarOperator operator) {
         return operator instanceof BinaryPredicateOperator binary && binary.getBinaryType().isRange()
                 && binary.getChild(1).isConstantRef()
                 && ((binary.getChild(0).isColumnRef() && isDiscreteType(binary.getChild(0).getType()))
+                || isDiscreteCast(binary.getChild(0))
                 || (binary.getChild(0) instanceof CallOperator && !(binary.getChild(0) instanceof CastOperator)));
+    }
+
+    // A cast to a type of whole numbers or days: the days or the numbers it gives have none between a and a + 1,
+    // whatever the source is. The two evaluations of a non-deterministic source can differ, and then the sides of a
+    // range are not on one value.
+    private static boolean isDiscreteCast(ScalarOperator operator) {
+        return operator instanceof CastOperator cast && isDiscreteType(cast.getType())
+                && !NonDeterministicVisitor.hasNonDeterministicFunc(cast);
     }
 
     // A type of whole numbers or days: a range on a column of it can keep one value.
@@ -659,7 +669,7 @@ final class EstimatePredicateNormalizer {
                     return falseLike(and);
                 }
             }
-            Map<ColumnRefOperator, DiscreteInterval> columns = discreteIntervals(rewritten);
+            Map<ScalarOperator, DiscreteInterval> columns = discreteIntervals(rewritten);
             if (columns != null) {
                 // The values of the ranges are none: no row has them, and the conjunction is false.
                 if (columns.values().stream().anyMatch(DiscreteInterval::isEmpty)) {
@@ -698,7 +708,7 @@ final class EstimatePredicateNormalizer {
          * share, and the ranges take the rows of the range. The same list when no sides are replaced.
          */
         private List<ScalarOperator> withPointEqualities(List<ScalarOperator> conjuncts,
-                                                         Map<ColumnRefOperator, DiscreteInterval> columns) {
+                                                         Map<ScalarOperator, DiscreteInterval> columns) {
             Points points = pointSides(conjuncts, columns);
             if (points == null) {
                 return conjuncts;
@@ -717,13 +727,13 @@ final class EstimatePredicateNormalizer {
         private record Points(ScalarOperator[] equalities, boolean[] dropped) {
         }
 
-        private Points pointSides(List<ScalarOperator> conjuncts, Map<ColumnRefOperator, DiscreteInterval> columns) {
+        private Points pointSides(List<ScalarOperator> conjuncts, Map<ScalarOperator, DiscreteInterval> columns) {
             ScalarOperator[] equalities = new ScalarOperator[conjuncts.size()];
             boolean[] dropped = new boolean[conjuncts.size()];
             boolean changed = false;
-            for (Map.Entry<ColumnRefOperator, DiscreteInterval> entry : columns.entrySet()) {
-                ScalarOperator equality = entry.getValue().equality(entry.getKey());
-                if (equality == null || !hasKnownStatistics(entry.getKey())) {
+            for (Map.Entry<ScalarOperator, DiscreteInterval> entry : columns.entrySet()) {
+                ScalarOperator equality = entry.getValue().equality();
+                if (equality == null || !hasKnownStatistics(entry.getValue().expression)) {
                     continue;
                 }
                 List<Integer> sides = entry.getValue().indexes;
@@ -753,7 +763,7 @@ final class EstimatePredicateNormalizer {
                     owners.add(i);
                 }
             }
-            Map<ColumnRefOperator, DiscreteInterval> columns = discreteIntervals(conjuncts);
+            Map<ScalarOperator, DiscreteInterval> columns = discreteIntervals(conjuncts);
             if (columns == null) {
                 return predicates;
             }
@@ -796,30 +806,35 @@ final class EstimatePredicateNormalizer {
 
         // The ranges of each column of whole numbers or days in the conjuncts, by the positions of their conjuncts; null
         // when there are none.
-        private Map<ColumnRefOperator, DiscreteInterval> discreteIntervals(List<ScalarOperator> conjuncts) {
-            Map<ColumnRefOperator, DiscreteInterval> columns = null;
+        private Map<ScalarOperator, DiscreteInterval> discreteIntervals(List<ScalarOperator> conjuncts) {
+            Map<ScalarOperator, DiscreteInterval> columns = null;
             for (int i = 0; i < conjuncts.size(); i++) {
                 DiscreteSide side = discreteSide(conjuncts.get(i));
                 if (side != null) {
                     if (columns == null) {
                         columns = new LinkedHashMap<>();
                     }
-                    columns.computeIfAbsent(side.column(), key -> new DiscreteInterval()).add(side, i);
+                    columns.computeIfAbsent(PredicateStatisticsCalculator.intervalKey(side.expression()),
+                            key -> new DiscreteInterval(side.expression())).add(side, i);
                 }
             }
             return columns;
         }
 
-        // Whether the column has statistics. The statistics can be older than the data, so the equality decides what to
-        // do with a value outside of their range, and the point takes the same estimate as it.
-        private boolean hasKnownStatistics(ColumnRefOperator column) {
-            ColumnStatistic statistic = statistics.getColumnStatistics().get(column);
-            return statistic != null && !statistic.isUnknown();
+        // Whether the column or the cast has statistics. The statistics can be older than the data, so the equality
+        // decides what to do with a value outside of their range, and the point takes the same estimate as it.
+        private boolean hasKnownStatistics(ScalarOperator expression) {
+            if (expression instanceof ColumnRefOperator) {
+                ColumnStatistic statistic = statistics.getColumnStatistics().get(expression);
+                return statistic != null && !statistic.isUnknown();
+            }
+            return !ExpressionStatisticCalculator.calculate(expression, statistics).isUnknown();
         }
 
-        // A range comparison of a column of whole numbers or days with a constant of its type: the first and the last
-        // value it keeps. A comparison of a function of the column, such as days_add('1970-01-01', date) >= a, is read
-        // as the bound on the column that it reduces to, when that bound keeps exactly its rows.
+        // A range comparison of a column of whole numbers or days, or of a cast to such a type, with a constant of its
+        // type: the first and the last value it keeps. A comparison of a function of the column, such as
+        // days_add('1970-01-01', date) >= a, is read as the bound on the column that it reduces to, when that bound
+        // keeps exactly its rows.
         private DiscreteSide discreteSide(ScalarOperator conjunct) {
             if (!(conjunct instanceof BinaryPredicateOperator written) || !written.getBinaryType().isRange()
                     || !PredicateStatisticsCalculator.needsEvalEstimate(conjunct, statistics)) {
@@ -837,9 +852,10 @@ final class EstimatePredicateNormalizer {
                 }
                 binary = bound;
             }
-            if (!(binary.getChild(0) instanceof ColumnRefOperator column)
+            ScalarOperator expression = binary.getChild(0);
+            if (!(expression instanceof ColumnRefOperator || isDiscreteCast(expression))
                     || !(binary.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
-                    || !constant.getType().equals(column.getType())) {
+                    || !constant.getType().equals(expression.getType())) {
                 return null;
             }
             Long value = discreteValue(constant);
@@ -848,13 +864,13 @@ final class EstimatePredicateNormalizer {
             }
             BinaryType type = binary.getBinaryType();
             if (type == BinaryType.GE || type == BinaryType.LE) {
-                return new DiscreteSide(column, type == BinaryType.GE, value);
+                return new DiscreteSide(expression, type == BinaryType.GE, value);
             }
             // > a keeps from a + 1 and < a keeps up to a - 1; a bound at the end of the longs is not read.
             if (value == Long.MAX_VALUE || value == Long.MIN_VALUE) {
                 return null;
             }
-            return new DiscreteSide(column, type == BinaryType.GT, type == BinaryType.GT ? value + 1 : value - 1);
+            return new DiscreteSide(expression, type == BinaryType.GT, type == BinaryType.GT ? value + 1 : value - 1);
         }
 
         // The value of a constant of a whole number type or of a DATE as a long; null for any other type.
@@ -894,16 +910,22 @@ final class EstimatePredicateNormalizer {
             return null;
         }
 
-        // The first value (lower) or the last value (not lower) that a range comparison of a column keeps.
-        private record DiscreteSide(ColumnRefOperator column, boolean lower, long value) {
+        // The first value (lower) or the last value (not lower) that a range comparison of a column or a cast keeps.
+        private record DiscreteSide(ScalarOperator expression, boolean lower, long value) {
         }
 
-        // The ranges of one column of whole numbers or days in a conjunction, by the positions of their conjuncts: the
-        // values they keep are from the highest first value to the lowest last value.
+        // The ranges of one column of whole numbers or days, or of one cast to such a type, in a conjunction, by the
+        // positions of their conjuncts: the values they keep are from the highest first value to the lowest last
+        // value. The expression is that of the first range.
         private static final class DiscreteInterval {
+            private final ScalarOperator expression;
             private final List<Integer> indexes = new ArrayList<>(2);
             private Long first;
             private Long last;
+
+            private DiscreteInterval(ScalarOperator expression) {
+                this.expression = expression;
+            }
 
             private void add(DiscreteSide side, int index) {
                 indexes.add(index);
@@ -919,13 +941,13 @@ final class EstimatePredicateNormalizer {
                 return first != null && last != null && first > last;
             }
 
-            // column = v when the ranges keep the one value v, null otherwise
-            private ScalarOperator equality(ColumnRefOperator column) {
+            // expression = v when the ranges keep the one value v, null otherwise
+            private ScalarOperator equality() {
                 if (first == null || last == null || !first.equals(last)) {
                     return null;
                 }
-                ConstantOperator value = discreteConstant(column.getType(), first);
-                return value == null ? null : new BinaryPredicateOperator(BinaryType.EQ, column, value);
+                ConstantOperator value = discreteConstant(expression.getType(), first);
+                return value == null ? null : new BinaryPredicateOperator(BinaryType.EQ, expression, value);
             }
         }
     }

@@ -265,9 +265,11 @@ public class StringCastStatisticsTest {
         double window = rows2026 * (second(2026, 9, 22, 14, 30, 0) - second(2026, 9, 22, 13, 55, 0))
                 / (high2026 - low2026);
         Assertions.assertEquals(window, rows(predicates.get(0), statistics), 2);
-        // The day of predicate 2 and the equality of predicate 6 are the hot value
-        Assertions.assertEquals(hot, rows(predicates.get(1), statistics), 2);
-        Assertions.assertEquals(hot, rows(predicates.get(4), statistics), 2);
+        // The hot value is a time of the day of predicates 2 and 6, which holds the rows of the recent bucket for the
+        // 86,400 seconds of the day as well
+        double dayOfBucket = rows2026 * 86400 / (high2026 - low2026);
+        Assertions.assertEquals(hot + dayOfBucket, rows(predicates.get(1), statistics), 2);
+        Assertions.assertEquals(hot + dayOfBucket, rows(predicates.get(4), statistics), 2);
         // Predicate 3 takes the part of the older bucket from 2020-12-31 19:00 UTC, the recent bucket and the value
         double from2021 = rows2025 * (high2025 - second(2020, 12, 31, 19, 0, 0)) / (high2025 - low2025)
                 + rows2026 + hot;

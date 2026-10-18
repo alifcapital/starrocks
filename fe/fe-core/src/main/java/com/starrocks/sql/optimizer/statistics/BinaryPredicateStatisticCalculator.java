@@ -729,7 +729,6 @@ public class BinaryPredicateStatisticCalculator {
 
             if (bucket.getUpper() >= constantDouble && bucket.getLower() <= constantDouble) {
                 StatisticRangeValues bucketRange = new StatisticRangeValues(bucket.getLower(), bucket.getUpper(), NaN);
-                StatisticRangeValues columnRange = new StatisticRangeValues(bucket.getLower(), constantDouble, NaN);
 
                 long bucketRowCount;
                 long repeat;
@@ -737,10 +736,17 @@ public class BinaryPredicateStatisticCalculator {
                     bucketRowCount = bucket.getCount() - previousTotalRowCount;
                     repeat = bucket.getUpperRepeats();
                 } else {
+                    // x <= d keeps the range of the value d, from d up to the next day or integer, see afterCountable
+                    double next = containUpper ? afterCountable(constant.get().getType(), constantDouble) : NaN;
+                    boolean keepsValue = next > constantDouble;
+                    double cutEnd = keepsValue ? Math.min(next, bucket.getUpper()) : constantDouble;
+                    StatisticRangeValues columnRange = new StatisticRangeValues(bucket.getLower(), cutEnd, NaN);
                     double predicateFactor = bucketRange.overlapPercentWith(columnRange);
                     long bucketTotalRows = bucket.getCount() - bucket.getUpperRepeats() - previousTotalRowCount;
                     bucketRowCount = (long) (bucketTotalRows * predicateFactor);
-                    repeat = 0;
+                    // The rows of the value d are the last of the bucket that stays
+                    repeat = keepsValue ? Math.min(bucketRowCount,
+                            (long) bucket.spreadRowsOn(bucketTotalRows, constantDouble, cutEnd)) : 0;
                 }
 
                 bucketList.add(new Bucket(bucket.getLower(), constantDouble, previousTotalRowCount + bucketRowCount, repeat));
@@ -777,6 +783,17 @@ public class BinaryPredicateStatisticCalculator {
         return Optional.of(new Histogram(bucketList, estimatedMCV));
     }
 
+    /**
+     * The value after d among the values of its type, when the type has days or integers only: a histogram spreads the
+     * rows of a bucket over its range, so the day d is the range from d up to the next day. We fear that a closed end
+     * that cuts the range at d drops the rows of d, and a range of one day then keeps none. So x <= d keeps the range
+     * of d, and x > d drops it. NaN for any other type. The callers take the value only when it is above d: an integer
+     * that the statistics, which are doubles, cannot tell from the next one has no next value in them.
+     */
+    private static double afterCountable(Type type, double value) {
+        return type.isDate() || type.isFixedPointType() ? CastStatisticsRules.nextValue(type, value) : NaN;
+    }
+
     public static Optional<Histogram> updateHistWithGreaterThan(ColumnStatistic columnStatistic,
                                                                 Optional<ConstantOperator> constant,
                                                                 boolean containUpper) {
@@ -799,8 +816,7 @@ public class BinaryPredicateStatisticCalculator {
         for (; i < histogram.getBuckets().size(); i++) {
             Bucket bucket = histogram.getBuckets().get(i);
             if (bucket.getUpper() >= constantDouble && bucket.getLower() <= constantDouble) {
-                StatisticRangeValues bucketRange = new StatisticRangeValues(bucket.getLower(), bucket.getUpper(), NaN);
-                StatisticRangeValues columnRange = new StatisticRangeValues(constantDouble, bucket.getUpper(), NaN);
+                double rest = constantDouble;
 
                 long bucketRowCount;
                 if (constantDouble == bucket.getUpper()) {
@@ -810,16 +826,21 @@ public class BinaryPredicateStatisticCalculator {
                         previousTotalRowCount = bucket.getCount();
                     }
                 } else {
+                    // x > d drops the range of the value d, from d up to the next day or integer, see afterCountable
+                    double next = containUpper ? NaN : afterCountable(constant.get().getType(), constantDouble);
+                    if (next > constantDouble) {
+                        rest = Math.min(next, bucket.getUpper());
+                    }
                     // The upper value lies above the constant and keeps all its rows; the other rows of the bucket
                     // spread over its range, as in updateHistWithLessThan
-                    double predicateFactor = bucketRange.overlapPercentWith(columnRange);
                     long bucketTotalRows = bucket.getCount() - bucket.getUpperRepeats() - previousTotalRowCount;
-                    bucketRowCount = (long) (bucketTotalRows * predicateFactor) + bucket.getUpperRepeats();
+                    bucketRowCount = (long) bucket.spreadRowsOn(bucketTotalRows, rest, bucket.getUpper())
+                            + bucket.getUpperRepeats();
                     previousTotalRowCount = bucket.getCount() - bucketRowCount;
                 }
 
                 if (bucket.getCount() - previousTotalRowCount != 0) {
-                    bucketList.add(new Bucket(constantDouble, bucket.getUpper(),
+                    bucketList.add(new Bucket(rest, bucket.getUpper(),
                             bucket.getCount() - previousTotalRowCount, bucket.getUpperRepeats()));
                 }
                 i++;

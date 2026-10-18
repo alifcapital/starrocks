@@ -93,6 +93,12 @@ public class StatisticRangeValues {
             if (this.distinctValues == 1 && length() > 1) {
                 return 0.5;
             }
+            // The distinct value count can be unknown (NaN), as it is for a bucket, and then the share below would be
+            // NaN. We expect a point of a longer range to hold none of it, as a point of a continuous range does, and
+            // a range that is itself the point to be covered by it.
+            if (isNaN(this.distinctValues)) {
+                return length() == 0 ? 1 : 0;
+            }
             return 1 / max(this.distinctValues, 1);
         }
         if (lengthOfIntersect < 0) {

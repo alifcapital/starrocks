@@ -171,6 +171,92 @@ public class PredicateStatisticsCalculator {
         return castComparison(above ? BinaryType.GE : BinaryType.LT, cast, first);
     }
 
+    /**
+     * The comparison of a VARCHAR column whose table declares the format of its dates, see asDatetimeComparison, with a
+     * constant that is not a string of the format, written with the first string of the format on the other side of the
+     * constant: the strings above '2026-08-1' are those from '2026-08-10 00:00:00'. We want the buckets that stay when
+     * the strings of the column are narrowed to end with strings of the format. A bucket cut at the constant would end
+     * with '2026-08-1', which is no date, and the statistics of the cast read the buckets of a column only when their
+     * ends are strings of one layout, so the next condition on the cast would find no histogram and take its share of
+     * the whole range of the column. The comparison stays as it is when the constant is a string of the format, when no
+     * string of the format is above it, and when the conversion fails: we fear that an exception would fail the
+     * planning of the query, while a lost narrowing falls back to the constant.
+     */
+    static BinaryPredicateOperator inFormatOfColumn(BinaryPredicateOperator predicate) {
+        try {
+            BinaryType type = predicate.getBinaryType();
+            if (type == BinaryType.EQ || !(predicate.getChild(0) instanceof ColumnRefOperator column)
+                    || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
+                    || !constant.getType().isStringType()) {
+                return predicate;
+            }
+            StringDateFormat format = dayFormatOf(column);
+            String text = constant.getVarchar();
+            if (format == null || format.matches(text)) {
+                return predicate;
+            }
+            LocalDateTime first = firstTimeAbove(format, text, type == BinaryType.GT || type == BinaryType.LE);
+            if (first == null) {
+                return predicate;
+            }
+            boolean above = type == BinaryType.GE || type == BinaryType.GT;
+            return new BinaryPredicateOperator(above ? BinaryType.GE : BinaryType.LT, column,
+                    ConstantOperator.createVarchar(format.format(first)));
+        } catch (RuntimeException e) {
+            LOG.debug("Failed to read the bound of a comparison of a column with a format of dates in the format", e);
+            return predicate;
+        }
+    }
+
+    /**
+     * The statistics of a column of strings of dates with the smallest and the largest string narrowed by comparisons
+     * of the column with strings of its format. We want the cast of the column to read the range of the strings that
+     * stay: the days of the cast, and the NDV of it, are those between its bounds, so bounds that are those of the
+     * whole column would give the days of the whole table to a period of ten. A bound moves inward only, and not when
+     * the bounds may be cut or incremented, as the bounds of an Iceberg file, which the strings of the format do not
+     * stand for.
+     */
+    static ColumnStatistic withBoundsOf(ColumnStatistic statistic, StringDateFormat format,
+                                        List<BinaryPredicateOperator> comparisons) {
+        StringBounds bounds = statistic.getStringBounds();
+        if (format == null || bounds == null || bounds.incrementedMax() || bounds.cutLength() == StringBounds.UNKNOWN) {
+            return statistic;
+        }
+        try {
+            String min = bounds.min();
+            String max = bounds.max();
+            for (BinaryPredicateOperator comparison : comparisons) {
+                if (!(comparison.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
+                        || !constant.getType().isStringType() || comparison.getBinaryType() == BinaryType.NE) {
+                    continue;
+                }
+                String text = constant.getVarchar();
+                BinaryType type = comparison.getBinaryType();
+                if ((type == BinaryType.GE || type == BinaryType.GT || type == BinaryType.EQ)
+                        && StringBucket.compare(text, min) > 0) {
+                    min = text;
+                }
+                if (type == BinaryType.LT) {
+                    // The largest string of the format below the constant; the constant itself when it is not read
+                    LocalDateTime time = StatisticsDatetimeParser.parse(text);
+                    text = time == null ? text : format.format(time.minus(1, format.getPrecision()));
+                }
+                if ((type == BinaryType.LE || type == BinaryType.LT || type == BinaryType.EQ)
+                        && StringBucket.compare(text, max) < 0) {
+                    max = text;
+                }
+            }
+            if (StringBucket.compare(min, max) > 0) {
+                return statistic;
+            }
+            return ColumnStatistic.buildFrom(statistic)
+                    .setStringBounds(new StringBounds(min, max, bounds.cutLength(), false)).build();
+        } catch (RuntimeException e) {
+            LOG.debug("Failed to narrow the bounds of a column with a format of dates", e);
+            return statistic;
+        }
+    }
+
     // The statistics of a DATETIME hold whole seconds, so a time with a fraction of a second would compare as its
     // second and keep the rows of that second on the wrong side. Past the start of a second, a range starts after it.
     private static BinaryPredicateOperator castComparison(BinaryType type, CastOperator cast, LocalDateTime time) {
@@ -1298,14 +1384,18 @@ public class PredicateStatisticsCalculator {
          * The estimate by the cast of the comparisons of a column with a format of dates, see asDatetimeComparison,
          * with the statistics of the column narrowed as the comparisons of strings narrow them. A constant of the
          * format filters the strings exactly, while the estimate of the cast keeps the statistics of the column as
-         * they were. The row count stays that of the cast.
+         * they were. The bounds of the column narrow with its histogram, see withBoundsOf. The row count stays that of
+         * the cast.
          */
         private Statistics narrowedByStrings(List<ScalarOperator> conjuncts, Statistics from, Statistics byCast) {
             Statistics strings = from;
             ColumnRefOperator column = null;
+            List<BinaryPredicateOperator> inFormat = new ArrayList<>(conjuncts.size());
             for (ScalarOperator conjunct : conjuncts) {
                 if (conjunct instanceof BinaryPredicateOperator binary && asDatetimeComparison(binary) != null) {
-                    strings = new BaseCalculatingVisitor(strings, useMcv).estimateBinaryPredicate(binary, null);
+                    BinaryPredicateOperator bound = inFormatOfColumn(binary);
+                    inFormat.add(bound);
+                    strings = new BaseCalculatingVisitor(strings, useMcv).estimateBinaryPredicate(bound, null);
                     column = (ColumnRefOperator) binary.getChild(0);
                 }
             }
@@ -1313,6 +1403,7 @@ public class PredicateStatisticsCalculator {
             if (narrowed == null) {
                 return byCast;
             }
+            narrowed = withBoundsOf(narrowed, dayFormatOf(column), inFormat);
             double rows = byCast.getOutputRowCount();
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(
                     Statistics.buildFrom(byCast).addColumnStatistic(column, narrowed).build(), rows);

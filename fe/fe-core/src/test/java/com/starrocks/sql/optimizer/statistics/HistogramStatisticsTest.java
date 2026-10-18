@@ -63,17 +63,20 @@ public class HistogramStatisticsTest {
                 .build());
         Statistics statistics = builder.build();
 
+        // The column holds integers, so x > d keeps no row of the value d and x <= d keeps its rows: a bucket spreads
+        // the rows other than those of its upper value over the values from its lower value up to the one before the
+        // upper, 80 rows over the 9 values of 1 to 9 in the first bucket
         check(columnRefOperator, "GT", 0, statistics, 1000);
-        check(columnRefOperator, "GT", 1, statistics, 1000);
+        check(columnRefOperator, "GT", 1, statistics, 991);
         check(columnRefOperator, "GT", 10, statistics, 900);
         check(columnRefOperator, "GT", 12, statistics, 900);
-        check(columnRefOperator, "GT", 15, statistics, 900);
+        check(columnRefOperator, "GT", 15, statistics, 884);
         check(columnRefOperator, "GT", 20, statistics, 800);
         // The upper value of the bucket, 36 with 20 rows, lies above 25 and keeps its rows
-        check(columnRefOperator, "GT", 25, statistics, 778);
+        check(columnRefOperator, "GT", 25, statistics, 773);
         check(columnRefOperator, "GT", 37, statistics, 700);
-        check(columnRefOperator, "GT", 48, statistics, 400);
-        check(columnRefOperator, "GT", 49, statistics, 393);
+        check(columnRefOperator, "GT", 48, statistics, 393);
+        check(columnRefOperator, "GT", 49, statistics, 386);
         check(columnRefOperator, "GT", 99, statistics, 100);
         check(columnRefOperator, "GT", 100, statistics, 50);
         check(columnRefOperator, "GT", 105, statistics, 1);
@@ -108,35 +111,35 @@ public class HistogramStatisticsTest {
         check(columnRefOperator, "LT", 105, statistics, 1000);
 
         check(columnRefOperator, "LE", 0, statistics, 1);
-        check(columnRefOperator, "LE", 1, statistics, 1);
+        check(columnRefOperator, "LE", 1, statistics, 8);
         check(columnRefOperator, "LE", 10, statistics, 100);
         check(columnRefOperator, "LE", 12, statistics, 100);
-        check(columnRefOperator, "LE", 15, statistics, 100);
+        check(columnRefOperator, "LE", 15, statistics, 116);
         check(columnRefOperator, "LE", 20, statistics, 200);
-        check(columnRefOperator, "LE", 25, statistics, 221);
+        check(columnRefOperator, "LE", 25, statistics, 226);
         check(columnRefOperator, "LE", 37, statistics, 300);
-        check(columnRefOperator, "LE", 48, statistics, 600);
-        check(columnRefOperator, "LE", 49, statistics, 606);
+        check(columnRefOperator, "LE", 48, statistics, 606);
+        check(columnRefOperator, "LE", 49, statistics, 613);
         check(columnRefOperator, "LE", 99, statistics, 900);
         check(columnRefOperator, "LE", 100, statistics, 1000);
         check(columnRefOperator, "LE", 105, statistics, 1000);
 
-        between(columnRefOperator, "GT", 1, "LT", 10, statistics, 80);
-        between(columnRefOperator, "GT", 1, "LT", 16, statistics, 116);
-        between(columnRefOperator, "GT", 1, "LT", 36, statistics, 280);
-        between(columnRefOperator, "GT", 1, "LT", 43, statistics, 348);
-        between(columnRefOperator, "GT", 16, "LT", 47, statistics, 384);
-        between(columnRefOperator, "GT", 16, "LT", 53, statistics, 517);
+        between(columnRefOperator, "GT", 1, "LT", 10, statistics, 71);
+        between(columnRefOperator, "GT", 1, "LT", 16, statistics, 107);
+        between(columnRefOperator, "GT", 1, "LT", 36, statistics, 271);
+        between(columnRefOperator, "GT", 1, "LT", 43, statistics, 339);
+        between(columnRefOperator, "GT", 16, "LT", 47, statistics, 368);
+        between(columnRefOperator, "GT", 16, "LT", 53, statistics, 501);
         between(columnRefOperator, "GT", 46, "LT", 47, statistics, 1);
         between(columnRefOperator, "GT", 60, "LT", 99, statistics, 180);
-        between(columnRefOperator, "GT", 1, "LT", 100, statistics, 900);
+        between(columnRefOperator, "GT", 1, "LT", 100, statistics, 891);
 
         between(columnRefOperator, "GE", 1, "LE", 10, statistics, 100);
-        between(columnRefOperator, "GE", 1, "LE", 16, statistics, 116);
+        between(columnRefOperator, "GE", 1, "LE", 16, statistics, 132);
         between(columnRefOperator, "GE", 1, "LE", 36, statistics, 300);
-        between(columnRefOperator, "GE", 1, "LE", 43, statistics, 348);
+        between(columnRefOperator, "GE", 1, "LE", 43, statistics, 364);
         between(columnRefOperator, "GE", 16, "LE", 47, statistics, 484);
-        between(columnRefOperator, "GE", 16, "LE", 53, statistics, 517);
+        between(columnRefOperator, "GE", 16, "LE", 53, statistics, 524);
         between(columnRefOperator, "GE", 46, "LE", 47, statistics, 200);
         between(columnRefOperator, "GE", 60, "LE", 99, statistics, 220);
         between(columnRefOperator, "GE", 1, "LE", 100, statistics, 1000);

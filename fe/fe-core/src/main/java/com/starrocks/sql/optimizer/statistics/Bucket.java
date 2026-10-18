@@ -60,6 +60,15 @@ public class Bucket {
         return distinctCount;
     }
 
+    /**
+     * The rows of the bucket on the segment [from, to) of its range. We expect the rows other than those of its upper
+     * value to spread evenly between its ends, so a segment holds that part of them which is its part of the range.
+     * The segment is cut to the range, and one outside of it holds none.
+     */
+    double spreadRowsOn(long spreadRows, double from, double to) {
+        return spreadRows * (Math.max(0, Math.min(to, upper) - Math.max(from, lower)) / (upper - lower));
+    }
+
     public Optional<Long> getRowCountInBucket(double value, Long previousBucketCount, double distinctValuesCount,
                                               boolean useFixedPointEstimation) {
         if (lower <= value && value < upper) {
