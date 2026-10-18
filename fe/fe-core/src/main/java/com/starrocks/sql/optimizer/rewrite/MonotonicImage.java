@@ -271,8 +271,8 @@ public class MonotonicImage {
                 if (FunctionSet.DATE_FORMAT.equals(inner.getFnName().toLowerCase())
                         && inner.getChildren().size() == 2 && inner.getChild(1).isConstantRef()
                         && !((ConstantOperator) inner.getChild(1)).isNull()
-                        && MonotonicFunctionRegistry.isDigitsOnlyFormat(
-                                ((ConstantOperator) inner.getChild(1)).getVarchar())) {
+                        && fitsDigits(MonotonicFunctionRegistry.digitsOnlyLength(
+                                ((ConstantOperator) inner.getChild(1)).getVarchar()), cast.getType())) {
                     return isMonotonicExpression(inner, dateCastColumn, partitionCasts);
                 }
             }
@@ -413,6 +413,34 @@ public class MonotonicImage {
         // date order.
         return from.isDateType() && to.isStringType();
         // everything else is out, notably int -> varchar and floating point
+    }
+
+    // Whether any string of that many digits casts to the type without overflow; 0 digits is no pattern of digits only
+    private static boolean fitsDigits(int digits, Type type) {
+        if (digits == 0) {
+            return false;
+        }
+        int capacity;
+        if (type.isTinyint()) {
+            capacity = 2;
+        } else if (type.isSmallint()) {
+            capacity = 4;
+        } else if (type.isInt()) {
+            capacity = 9;
+        } else if (type.isBigint()) {
+            capacity = 18;
+        } else if (type.isLargeint()) {
+            capacity = 37;
+        } else if (type.isDouble()) {
+            // the 15 digits that a double holds exactly
+            capacity = 15;
+        } else if (type.isDecimalOfAnyVersion()) {
+            ScalarType decimal = (ScalarType) type;
+            capacity = decimal.getScalarPrecision() - decimal.getScalarScale();
+        } else {
+            return false;
+        }
+        return digits <= capacity;
     }
 
     static boolean isIntToStringCast(CastOperator cast) {

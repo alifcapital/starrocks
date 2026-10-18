@@ -336,9 +336,16 @@ public class CastStatisticsTest {
         Assertions.assertFalse(bounds.wider());
         ScalarOperator window = Utils.compoundAnd(from, new BinaryPredicateOperator(BinaryType.LE, shifted, fiveAm));
         assertClose(30, rows(window, dates.statistics()), 1.01);
-        // A comparison of a cast is left to the statistics of the cast
-        Assertions.assertNull(MonotonicFilterDerivation.columnBoundsForEstimate(new BinaryPredicateOperator(
-                BinaryType.GE, new CastOperator(DateType.DATETIME, dates.ref()), fiveAm)));
+        // A comparison of the cast of a date to a DATETIME is the comparison of the date, as the plan rule reduces it:
+        // the days from the fourth, which are the days whose midnight is not before 05:00 of the third
+        BinaryPredicateOperator cast = new BinaryPredicateOperator(BinaryType.GE,
+                new CastOperator(DateType.DATETIME, dates.ref()), fiveAm);
+        MonotonicFilterDerivation.ColumnBounds castBounds = MonotonicFilterDerivation.columnBoundsForEstimate(cast);
+        Assertions.assertFalse(castBounds.wider());
+        Assertions.assertEquals("1: d >= 2026-08-04", Utils.compoundAnd(castBounds.bounds()).toString());
+        // The model of a range counts the 7 days from the fourth as 6 of the 9 days between the first and the tenth,
+        // as it does for any comparison of a date column: 200 rows against the 210 that hold
+        assertClose(210, rows(cast, dates.statistics()), 1.1);
     }
 
     private static Column column(Type type, List<ConstantOperator> values) {

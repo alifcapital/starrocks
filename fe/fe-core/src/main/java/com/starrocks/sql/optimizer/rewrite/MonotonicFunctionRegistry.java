@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -202,14 +203,14 @@ public final class MonotonicFunctionRegistry {
     }
 
     /**
-     * Order-preserving date_format patterns that render digits only. Their numeric value is
-     * ordered like the dates, so a numeric cast on top keeps order. Formats with separators
-     * do not cast to numbers and are not listed.
+     * The number of digits of the strings of a date_format pattern that renders digits only, or 0 for another pattern.
+     * Such a pattern is ordered and has no text, and the BE renders its every row, see DateFormatModel. Its numeric
+     * value is ordered like the dates, so a numeric cast on top keeps order when the digits fit the type of the cast.
+     * Formats with separators do not cast to numbers.
      */
-    private static final Set<String> DIGITS_ONLY_FORMATS = Set.of("%Y", "%Y%m", "%Y%m%d");
-
-    public static boolean isDigitsOnlyFormat(String format) {
-        return DIGITS_ONLY_FORMATS.contains(format);
+    public static int digitsOnlyLength(String format) {
+        DateFormatModel model = DateFormatModel.of(format);
+        return model.isDigitsOnly() && model.isExactOnAllRows() ? model.digitCount() : 0;
     }
 
     /**

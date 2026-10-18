@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.ExprUtils;
@@ -36,6 +37,7 @@ import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -96,12 +98,11 @@ public final class MonotonicInverse {
     public static final MonotonicFunctionRegistry.PredicateInverse DATEDIFF_DAYS = MonotonicInverse::invertDatediff;
 
     /**
-     * date_format(x, fmt) cmp string, for a whitelist of fixed-width formats. A constant is
-     * admitted when it has the format's canonical length, parses strictly, and re-renders to
-     * exactly itself; then string comparison against the rendered images coincides with date
-     * comparison and the constant maps to a period of the format's granularity. On a DATE
-     * column a day format is a single point: the equality inverts to col = value (bucket
-     * pruning consumes point filters only) and NE / null-safe-equal invert too.
+     * date_format(x, fmt) cmp string, for the ordered formats that the BE renders on every row, see DateFormatModel. A
+     * constant is admitted when it is a string that the format renders: read strictly and printed back to exactly itself.
+     * Then string comparison against the rendered images coincides with date comparison and the constant maps to a
+     * period of the format's last field. On a DATE column a day format is a single point: the equality inverts to
+     * col = value (bucket pruning consumes point filters only) and NE / null-safe-equal invert too.
      */
     public static final MonotonicFunctionRegistry.PredicateInverse RENDERED_PERIOD = MonotonicInverse::invertDateFormat;
 
@@ -125,9 +126,9 @@ public final class MonotonicInverse {
     public static final MonotonicFunctionRegistry.PredicateInverse UNIX_EPOCH = MonotonicInverse::invertUnixTimestamp;
 
     /**
-     * from_unixtime[_ms](x[, fmt]) cmp string for an integer x. The constant is admitted by
-     * the fixed-width format machinery (canonical length, strict parse, render round-trip)
-     * and maps to an epoch period of the format's granularity. Outside [0, MAX] the
+     * from_unixtime[_ms](x[, fmt]) cmp string for an integer x. The constant is admitted as
+     * for date_format (a string of an ordered format, read strictly and printed back to itself)
+     * and maps to an epoch period of the format's last field. Outside [0, MAX] the
      * rendering can be NULL: the bounds are necessary scan conditions only, retaining the
      * original expression. Millisecond boundaries follow BE's division before range checking.
      * A period endpoint falling into a fall-back overlap of the session zone refuses: that
@@ -254,36 +255,48 @@ public final class MonotonicInverse {
         }
     }
 
-    /** Whitelisted formats: canonical rendered length and period granularity. */
-    private static final Map<String, FormatSpec> RENDERED_FORMATS = ImmutableMap.<String, FormatSpec>builder()
-            .put("%Y", new FormatSpec(4, TimeUnitUtils.YEAR, "uuuu"))
-            .put("%Y%m", new FormatSpec(6, TimeUnitUtils.MONTH, "uuuuMM"))
-            .put("%Y-%m", new FormatSpec(7, TimeUnitUtils.MONTH, "uuuu-MM"))
-            .put("%Y%m%d", new FormatSpec(8, TimeUnitUtils.DAY, "uuuuMMdd"))
-            .put("%Y-%m-%d", new FormatSpec(10, TimeUnitUtils.DAY, "uuuu-MM-dd"))
-            .put("%Y-%m-%d %H:%i:%s", new FormatSpec(19, TimeUnitUtils.SECOND, "uuuu-MM-dd HH:mm:ss"))
-            .build();
-
-    private static final class FormatSpec {
-        final int length;
-        final String unit;
-        final DateTimeFormatter parser;
-
-        FormatSpec(int length, String unit, String javaPattern) {
-            this.length = length;
-            this.unit = unit;
-            // strict, zero-padded, day/month defaulted to 1 for the coarse formats: exactly
-            // the canonical rendered images and nothing else
-            this.parser = new DateTimeFormatterBuilder()
-                    .appendPattern(javaPattern)
-                    .parseDefaulting(ChronoField.MONTH_OF_YEAR, 1)
-                    .parseDefaulting(ChronoField.DAY_OF_MONTH, 1)
-                    .parseDefaulting(ChronoField.HOUR_OF_DAY, 0)
-                    .parseDefaulting(ChronoField.MINUTE_OF_HOUR, 0)
-                    .parseDefaulting(ChronoField.SECOND_OF_MINUTE, 0)
-                    .toFormatter()
-                    .withResolverStyle(ResolverStyle.STRICT);
+    /**
+     * A format of date_format or from_unixtime that the inverses admit, and the period of its last field. The strings of
+     * an ordered format sort in the order of their dates, so a comparison of the strings is a comparison of the
+     * dates cut to the period; the BE must also render every row, see DateFormatModel.isExactOnAllRows.
+     */
+    private record RenderedFormat(DateFormatModel model, String unit) {
+        /** The constant as the date it renders when it is a string that the format renders, or null. */
+        LocalDateTime read(String constant) {
+            return model.read(constant);
         }
+    }
+
+    private static RenderedFormat renderedFormat(String format) {
+        DateFormatModel model = DateFormatModel.of(format);
+        if (!model.isOrdered() || !model.isExactOnAllRows()) {
+            return null;
+        }
+        String unit;
+        switch (model.precision()) {
+            case YEARS:
+                unit = TimeUnitUtils.YEAR;
+                break;
+            case MONTHS:
+                unit = TimeUnitUtils.MONTH;
+                break;
+            case DAYS:
+                unit = TimeUnitUtils.DAY;
+                break;
+            case HOURS:
+                unit = TimeUnitUtils.HOUR;
+                break;
+            case MINUTES:
+                unit = TimeUnitUtils.MINUTE;
+                break;
+            case SECONDS:
+                unit = TimeUnitUtils.SECOND;
+                break;
+            default:
+                // the fraction of a second has no period that date_trunc cuts to
+                return null;
+        }
+        return new RenderedFormat(model, unit);
     }
 
     private static Optional<ScalarOperator> invertDateFormat(CallOperator call, ScalarOperator dataChild,
@@ -294,27 +307,32 @@ public final class MonotonicInverse {
                     || !value.getType().isStringType()) {
                 return Optional.empty();
             }
-            FormatSpec spec = RENDERED_FORMATS.get(((ConstantOperator) fmtArg).getVarchar());
+            RenderedFormat spec = renderedFormat(((ConstantOperator) fmtArg).getVarchar());
             if (spec == null) {
                 return Optional.empty();
             }
-            String constant = value.getVarchar();
-            // admission: canonical length, strict parse, exact render round-trip - together
-            // they admit exactly the strings date_format itself can produce
-            if (constant.length() != spec.length) {
-                return Optional.empty();
-            }
-            LocalDateTime parsed = LocalDateTime.from(spec.parser.parse(constant));
-            if (!spec.parser.format(parsed).equals(constant)) {
+            // admission: a string that the format renders, read strictly and printed back to exactly itself -
+            // together they admit exactly the strings date_format itself can produce
+            LocalDateTime parsed = spec.read(value.getVarchar());
+            if (parsed == null) {
                 return Optional.empty();
             }
             Type childType = dataChild.getType();
-            if (childType.isDate() && !DATE_ONLY_UNITS.contains(spec.unit)) {
-                return Optional.empty();
+            String unit = spec.unit();
+            boolean aligned = true;
+            if (childType.isDate() && !DATE_ONLY_UNITS.contains(unit)) {
+                // The BE renders a DATE as its midnight, so the fields below the day are zero in every string, and
+                // the period is the day. A constant is aligned to it only when those fields are zero: for
+                // '2026-08-01 05:00:00' the equality holds for no date, the inequality holds for every date, and the
+                // ranges round to the day. We fear a point on the date: it would drop the time of the constant and
+                // replace the condition by d = '2026-08-01', which is another condition.
+                aligned = parsed.toLocalTime().equals(LocalTime.MIDNIGHT);
+                parsed = parsed.toLocalDate().atStartOfDay();
+                unit = TimeUnitUtils.DAY;
             }
-            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(parsed, spec.unit);
-            boolean pointCollapse = childType.isDate() && TimeUnitUtils.DAY.equals(spec.unit);
-            return periodCells(dataChild, cmp, true, parsed, nextStart, pointCollapse);
+            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(parsed, unit);
+            boolean pointCollapse = childType.isDate() && TimeUnitUtils.DAY.equals(unit);
+            return periodCells(dataChild, cmp, aligned, parsed, nextStart, pointCollapse);
         } catch (Exception e) {
             // strict parse rejections land here: '999913', '0000-00-00', '2024-3-05', ...
             return Optional.empty();
@@ -394,20 +412,16 @@ public final class MonotonicInverse {
             } else {
                 return Optional.empty();
             }
-            FormatSpec spec = RENDERED_FORMATS.get(fmt);
+            RenderedFormat spec = renderedFormat(fmt);
             if (spec == null) {
                 return Optional.empty();
             }
-            String constant = value.getVarchar();
-            if (constant.length() != spec.length) {
-                return Optional.empty();
-            }
-            LocalDateTime parsed = LocalDateTime.from(spec.parser.parse(constant));
-            if (!spec.parser.format(parsed).equals(constant)) {
+            LocalDateTime parsed = spec.read(value.getVarchar());
+            if (parsed == null) {
                 return Optional.empty();
             }
             long unitScale = FunctionSet.FROM_UNIXTIME_MS.equals(call.getFnName().toLowerCase()) ? 1000L : 1L;
-            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(parsed, spec.unit);
+            LocalDateTime nextStart = SyncPartitionUtils.nextUpperDateTime(parsed, spec.unit());
             if (!nextStart.isAfter(parsed)) {
                 return Optional.empty();
             }
@@ -418,13 +432,11 @@ public final class MonotonicInverse {
             if (!unambiguous(zone, parsed) || !unambiguous(zone, nextStart)) {
                 return Optional.empty();
             }
-            // a sub-day rendering repeats a wall-clock hour at a fall-back: rows just past
-            // the transition render below the constant again and a range preimage is not an
-            // interval. Only transitions near the period matter - a far fall-back rewinds
-            // the rendering by an hour but not below the constant. Day-and-coarser
-            // renderings never decrease.
-            if (TimeUnitUtils.SECOND.equals(spec.unit)
-                    && !transitionFree(zone, parsed.minusHours(26), nextStart.plusHours(26))) {
+            // a rendering repeats a wall-clock hour at a fall-back: rows just past the transition render below the
+            // constant again and a range preimage is not an interval. A zone that changes its clock at midnight
+            // does the same to a rendering of days, so we ask for every field. Only transitions near the period
+            // matter - a far fall-back rewinds the rendering by an hour but not below the constant.
+            if (!transitionFree(zone, parsed.minusHours(26), nextStart.plusHours(26))) {
                 return Optional.empty();
             }
             long lower = parsed.atZone(zone).toEpochSecond() * unitScale;
@@ -743,12 +755,8 @@ public final class MonotonicInverse {
             String constant = value.getVarchar();
             Type childType = dataChild.getType();
             if (childType.isDate()) {
-                FormatSpec spec = RENDERED_FORMATS.get("%Y-%m-%d");
-                if (constant.length() != spec.length) {
-                    return Optional.empty();
-                }
-                LocalDateTime parsed = LocalDateTime.from(spec.parser.parse(constant));
-                if (!spec.parser.format(parsed).equals(constant)) {
+                LocalDateTime parsed = renderedFormat("%Y-%m-%d").read(constant);
+                if (parsed == null) {
                     return Optional.empty();
                 }
                 return Optional.of(new BinaryPredicateOperator(cmp, dataChild,

@@ -151,7 +151,7 @@ final class EstimatePredicateNormalizer {
         PrefixCall prefix = prefixCall(left);
         if (prefix != null) {
             reads = PredicateStatisticsCalculator.dayFormatOf(prefix.column()) != null;
-        } else if (left instanceof CallOperator && !(left instanceof CastOperator)) {
+        } else if (isInvertibleCall(left)) {
             reads = MonotonicFilterDerivation.columnBoundsForEstimate(
                     new BinaryPredicateOperator(BinaryType.EQ, left, values.get(0))) != null;
         } else if (left instanceof ColumnRefOperator column) {
@@ -227,7 +227,7 @@ final class EstimatePredicateNormalizer {
             ScalarOperator left = in.getChild(0);
             return !in.isNotIn() && !in.isSubquery() && in.getChildren().size() >= 2
                     && in.getChildren().size() - 1 <= StatisticsEstimateCoefficient.IN_AS_OR_LIMIT
-                    && ((left instanceof CallOperator && !(left instanceof CastOperator))
+                    && (isInvertibleCall(left)
                     || (left instanceof ColumnRefOperator column && PredicateStatisticsCalculator.dayFormatOf(column) != null));
         }
         return false;
@@ -245,7 +245,15 @@ final class EstimatePredicateNormalizer {
                 && binary.getChild(1).isConstantRef()
                 && ((binary.getChild(0).isColumnRef() && isDiscreteType(binary.getChild(0).getType()))
                 || isDiscreteCast(binary.getChild(0))
-                || (binary.getChild(0) instanceof CallOperator && !(binary.getChild(0) instanceof CastOperator)));
+                || isInvertibleCall(binary.getChild(0)));
+    }
+
+    // A call whose comparison with a constant the estimate reads by the bounds on a column that follow from it, see
+    // MonotonicFilterDerivation.columnBoundsForEstimate: a function, or a cast that has an inverse. The statistics of any
+    // other cast estimate its comparison. The check looks at the types and the names only.
+    private static boolean isInvertibleCall(ScalarOperator operator) {
+        return operator instanceof CallOperator
+                && (!(operator instanceof CastOperator cast) || MonotonicFilterDerivation.castHasInverse(cast));
     }
 
     // A cast to a type of whole numbers or days: the days or the numbers it gives have none between a and a + 1,
@@ -841,8 +849,7 @@ final class EstimatePredicateNormalizer {
                 return null;
             }
             BinaryPredicateOperator binary = written;
-            if (written.getChild(0) instanceof CallOperator && !(written.getChild(0) instanceof CastOperator)
-                    && written.getChild(1).isConstantRef()) {
+            if (isInvertibleCall(written.getChild(0)) && written.getChild(1).isConstantRef()) {
                 MonotonicFilterDerivation.ColumnBounds bounds =
                         MonotonicFilterDerivation.columnBoundsForEstimate(written);
                 if (bounds == null || bounds.wider() || bounds.bounds().size() != 1

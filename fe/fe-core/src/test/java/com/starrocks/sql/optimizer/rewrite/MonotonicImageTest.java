@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Range;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionName;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -209,5 +210,60 @@ public class MonotonicImageTest {
             assertFalse(MonotonicImage.imageRange(cast, text, stringDomain(bounds[0], bounds[1]), format("%Y%m%d"))
                     .isPresent(), bounds[0]);
         }
+    }
+
+    private CallOperator dateFormat(String format) {
+        Function fn = new Function(new FunctionName("date_format"),
+                new Type[] {DateType.DATETIME, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        return new CallOperator("date_format", VarcharType.VARCHAR,
+                ImmutableList.of(dtCol, ConstantOperator.createVarchar(format)), fn);
+    }
+
+    // The strings of an ordered format sort as their dates, so the image of a range of dates is the range of the strings of
+    // its ends; %S is %s for the BE
+    @Test
+    public void testOrderedFormatsOfDateFormatHaveAnImage() {
+        LocalDateTime min = LocalDateTime.of(2024, 3, 5, 6, 30, 15);
+        LocalDateTime max = LocalDateTime.of(2024, 3, 7, 10, 20, 30);
+        for (String format : new String[] {"%Y", "%Y-%m", "%Y%m%d", "%Y-%m-%d %H", "%Y%m%d%H", "%Y-%m-%dT%H:%i:%s",
+                "%Y-%m-%d %H:%i:%S", "%Y-%m-01 00:00:00", "%Y-%m-%d %H:00:00", "yyyy-MM-dd HH:mm:ss"}) {
+            Range<ConstantOperator> image = MonotonicImage.imageRange(dateFormat(format), dtCol,
+                    datetimeDomain(min, max)).orElseThrow();
+            DateFormatModel model = DateFormatModel.of(format);
+            assertEquals(model.render(min), image.lowerEndpoint().getVarchar(), format);
+            assertEquals(model.render(max), image.upperEndpoint().getVarchar(), format);
+        }
+    }
+
+    @Test
+    public void testFormatsThatAreNotOrderedHaveNoImage() {
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));
+        for (String format : new String[] {"%d.%m.%Y", "%y-%m", "%Y-%c", "%m/%d/%Y %h", "%e%c%Y", "%Y%m%d%i", "%W", "%Y-%q"}) {
+            assertFalse(MonotonicImage.imageRange(dateFormat(format), dtCol, domain).isPresent(), format);
+        }
+    }
+
+    // A cast of the digits to a number keeps the order where every string fits the type: 8 digits fit an INT and a
+    // DOUBLE, 10 digits a BIGINT and a DOUBLE and not an INT, and 20 digits no BIGINT and no DOUBLE
+    @Test
+    public void testNumericCastOfDigitsKeepsOrderWhereTheDigitsFit() {
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));
+        Object[][] cases = {
+                {"%Y%m%d", 8, true, true, true},
+                {"%Y%m%d%H", 10, false, true, true},
+                {"%Y%m%d%H%i%s", 14, false, true, true},
+                {"%Y%m%d%H%i%s%f", 20, false, false, false}};
+        for (Object[] row : cases) {
+            String format = (String) row[0];
+            assertEquals(row[2], MonotonicImage.imageRange(new CastOperator(IntegerType.INT, dateFormat(format)), dtCol,
+                    domain).isPresent(), format + " as INT");
+            assertEquals(row[3], MonotonicImage.imageRange(new CastOperator(IntegerType.BIGINT, dateFormat(format)),
+                    dtCol, domain).isPresent(), format + " as BIGINT");
+            assertEquals(row[4], MonotonicImage.imageRange(new CastOperator(FloatType.DOUBLE, dateFormat(format)), dtCol,
+                    domain).isPresent(), format + " as DOUBLE");
+        }
+        // a format with text does not cast to a number at all
+        assertFalse(MonotonicImage.imageRange(new CastOperator(IntegerType.BIGINT, dateFormat("%Y-%m-%d")), dtCol, domain)
+                .isPresent());
     }
 }

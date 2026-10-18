@@ -24,6 +24,7 @@ import com.google.common.collect.Sets;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionName;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.common.ErrorType;
@@ -263,19 +264,31 @@ public enum ScalarOperatorEvaluator {
             return false;
         }
 
+        // The formats of date_format and from_unixtime are read by DateFormatModel. The three-argument call of
+        // from_unixtime() takes a time zone as the third one, and the format still has to be checked there: a
+        // three-argument call used to skip this block entirely and come out monotonic whatever its format said.
+        String name = invoker.getSignature().getName().toLowerCase();
+        if (MODELED_FORMAT_FUNCTIONS.contains(name) && operator.getChildren().size() >= 2) {
+            ScalarOperator format = operator.getChild(1);
+            if (!(format instanceof ConstantOperator) || ((ConstantOperator) format).isNull()) {
+                return false;
+            }
+            DateFormatModel model = DateFormatModel.of(((ConstantOperator) format).getVarchar());
+            // A format with text only renders one string, which is monotonic as every constant function is. The other
+            // formats have to render the strings in the order of their dates.
+            return model.isKnown() && (model.hasNoFields() || model.isOrdered());
+        }
+
+        // The format is the second argument for every name in SUPPORTED. These functions parse a string with the format and
+        // do not render a date, and the BE reads their formats by the rules of the parser, which the model of a rendering
+        // does not know. So they keep the reading by characters, see stripFormatValue, until they get a model of their own.
         final ImmutableSet<String> SUPPORTED = ImmutableSet.of(
-                FunctionSet.DATE_FORMAT,
                 FunctionSet.STR_TO_DATE,
                 FunctionSet.STR2DATE,
-                FunctionSet.FROM_UNIXTIME,
-                FunctionSet.FROM_UNIXTIME_MS,
                 FunctionSet.TO_DATETIME
         );
 
-        // The format is the second argument for every name in SUPPORTED. from_unixtime() also takes a
-        // third -- the time zone -- and the format still has to be checked there: a three-argument
-        // call used to skip this block entirely and come out monotonic whatever its format said.
-        if (SUPPORTED.contains(invoker.getSignature().getName().toLowerCase()) && operator.getChildren().size() >= 2) {
+        if (SUPPORTED.contains(name) && operator.getChildren().size() >= 2) {
             String pattern = operator.getChild(1).toString();
             if (pattern.isEmpty()) {
                 return true;
@@ -292,6 +305,13 @@ public enum ScalarOperatorEvaluator {
 
         return true;
     }
+
+    private static final ImmutableSet<String> MODELED_FORMAT_FUNCTIONS = ImmutableSet.of(
+            FunctionSet.DATE_FORMAT,
+            FunctionSet.FROM_UNIXTIME,
+            FunctionSet.FROM_UNIXTIME_MS
+    );
+
     private Optional<String> stripFormatValue(String pattern) {
         StringBuilder builder = new StringBuilder();
         boolean unsupportedFormat = false;

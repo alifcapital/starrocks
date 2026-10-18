@@ -197,7 +197,13 @@ public class ReduceCastRule extends TopDownScalarOperatorRewriteRule {
         return ((ScalarType) castType).getLength() != ((ScalarType) childType).getLength();
     }
 
-    private ScalarOperator reduceDateToDatetimeCast(BinaryPredicateOperator operator) {
+    /**
+     * CAST(date AS DATETIME) cmp datetime as a comparison of the date with a date: the dates that the comparison keeps.
+     * The plan rule and the bounds that are derived from a comparison of such a cast are this one function. A
+     * constant with a time of day makes the equality false for every date, and it stays as it is; so does a constant a
+     * day from the end of the supported range.
+     */
+    public static ScalarOperator reduceDateToDatetimeCast(BinaryPredicateOperator operator) {
         ScalarOperator castChild = operator.getChild(0).getChild(0);
         ConstantOperator child2 = (ConstantOperator) operator.getChild(1);
 

@@ -25,7 +25,9 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.scalar.ReduceCastRule;
 import com.starrocks.sql.optimizer.statistics.CastStatisticsRules;
+import com.starrocks.type.Type;
 
 import java.time.LocalTime;
 import java.util.ArrayList;
@@ -91,8 +93,9 @@ public final class MonotonicFilterDerivation {
      * where the function returns NULL, such as a shift past the last date, and the statistics of the function do
      * not show these rows either.
      * <p>
-     * A comparison of a cast is not taken here: the statistics of the cast estimate it, see
-     * ExpressionStatisticCalculator. A bound on the cast of a column that keeps the order, such as
+     * A comparison of a cast is taken only when the cast has an inverse, see castHasInverse: the cast of a date to a
+     * DATETIME, and the cast of date_format of a date to a date. The statistics of another cast estimate its comparison,
+     * see ExpressionStatisticCalculator. A bound on the cast of a column that keeps the order, such as
      * CAST(ts AS DATETIME) >= c from hours_add(CAST(ts AS DATETIME), 5) >= c', counts as a bound on the column, see
      * CastStatisticsRules.boundsColumn, and the statistics of the cast estimate it in turn.
      * <p>
@@ -120,9 +123,7 @@ public final class MonotonicFilterDerivation {
                 || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()) {
             return null;
         }
-        if (call instanceof CastOperator
-                || (MonotonicFunctionRegistry.filterInverse(call.getFnName()) == null
-                && MonotonicFunctionRegistry.exactInverse(call.getFnName()) == null)) {
+        if (!hasInverse(call)) {
             return null;
         }
         ConnectContext context = ConnectContext.get();
@@ -163,9 +164,7 @@ public final class MonotonicFilterDerivation {
                 || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()) {
             return false;
         }
-        if (!(call instanceof CastOperator)
-                && MonotonicFunctionRegistry.filterInverse(call.getFnName()) == null
-                && MonotonicFunctionRegistry.exactInverse(call.getFnName()) == null) {
+        if (!hasInverse(call)) {
             return false;
         }
         ConnectContext context = ConnectContext.get();
@@ -249,10 +248,8 @@ public final class MonotonicFilterDerivation {
                 || ((ConstantOperator) predicate.getChild(1)).isNull()) {
             return none;
         }
-        if (predicate.getChild(0) instanceof CastOperator) {
-            ScalarOperator bound = StringDatePredicateDerivation.derive((BinaryPredicateOperator) predicate,
-                    stringDateFormats);
-            return new Bound(bound, bound != predicate);
+        if (predicate.getChild(0) instanceof CastOperator cast) {
+            return deriveCast((BinaryPredicateOperator) predicate, cast, useRegistry, stringDateFormats);
         }
         if (!useRegistry) {
             return none;
@@ -280,11 +277,85 @@ public final class MonotonicFilterDerivation {
         List<ScalarOperator> conjuncts = Utils.extractConjuncts(bound);
         List<ScalarOperator> layers = new ArrayList<>(conjuncts.size());
         for (ScalarOperator conjunct : conjuncts) {
-            Bound layer = derive(conjunct, useRegistry, stringDateFormats);
+            Bound layer = deriveLayer(conjunct, useRegistry, stringDateFormats);
             layers.add(layer.predicate());
             wider |= layer.wider();
         }
         return new Bound(Utils.compoundAnd(layers), wider);
+    }
+
+    // One conjunct that an inverse gave. The inverse of <> is an OR of two bounds, and a bound can be an AND of two, so
+    // we expect the comparisons of a chain with <> to hold their functions inside these: we go down into them, and
+    // derive each comparison, or the layers below the first would be left out.
+    private static Bound deriveLayer(ScalarOperator conjunct, boolean useRegistry,
+                                     Function<ColumnRefOperator, StringDateFormat> stringDateFormats) {
+        if (!(conjunct instanceof CompoundPredicateOperator compound) || compound.isNot()) {
+            return derive(conjunct, useRegistry, stringDateFormats);
+        }
+        boolean wider = false;
+        List<ScalarOperator> parts = new ArrayList<>(compound.getChildren().size());
+        for (ScalarOperator child : compound.getChildren()) {
+            Bound part = deriveLayer(child, useRegistry, stringDateFormats);
+            parts.add(part.predicate());
+            wider |= part.wider();
+        }
+        return new Bound(compound.isAnd() ? Utils.compoundAnd(parts) : Utils.compoundOr(parts), wider);
+    }
+
+    /**
+     * The inverse of a comparison of a cast with a constant, and the inverses of the conjuncts it gives, each one layer
+     * down as for a function. A cast has an inverse when it is the cast of a date to a DATETIME, which is the comparison
+     * of the date with a date, or the cast of a string with a known layout to a date, which bounds the string. The
+     * bounds on a string that a table declares are necessary conditions for the rows that the cast turns into NULL, so
+     * they are wider; the layout of date_format(y, f) is exact, see StringDatePredicateDerivation.renderedLayout.
+     */
+    private static Bound deriveCast(BinaryPredicateOperator predicate, CastOperator cast, boolean useRegistry,
+                                    Function<ColumnRefOperator, StringDateFormat> stringDateFormats) {
+        Bound none = new Bound(predicate, false);
+        ScalarOperator bound;
+        boolean wider;
+        if (cast.getChild(0).getType().isDate() && predicate.getChild(1).getType().isDatetime()) {
+            bound = ReduceCastRule.reduceDateToDatetimeCast(predicate);
+            wider = false;
+        } else {
+            bound = StringDatePredicateDerivation.derive(predicate, stringDateFormats);
+            wider = StringDatePredicateDerivation.renderedLayout(cast.getChild(0)) == null;
+        }
+        if (bound == predicate) {
+            return none;
+        }
+        List<ScalarOperator> conjuncts = Utils.extractConjuncts(bound);
+        List<ScalarOperator> layers = new ArrayList<>(conjuncts.size());
+        for (ScalarOperator conjunct : conjuncts) {
+            Bound layer = deriveLayer(conjunct, useRegistry, stringDateFormats);
+            layers.add(layer.predicate());
+            wider |= layer.wider();
+        }
+        return new Bound(Utils.compoundAnd(layers), wider);
+    }
+
+    /**
+     * Whether a comparison of this cast with a constant has an inverse that the estimate reads: the cast of a date to a
+     * DATETIME, or the cast of date_format(y, f) with a layout we know to a date. We expect this to run for every
+     * comparison of a cast that the statistics estimate, so it looks at the types and the name before anything else, and
+     * allocates nothing.
+     */
+    public static boolean castHasInverse(CastOperator cast) {
+        Type from = cast.getChild(0).getType();
+        Type to = cast.getType();
+        if (from.isDate() && to.isDatetime()) {
+            return true;
+        }
+        return from.isStringType() && to.isDateType() && StringDatePredicateDerivation.renderedLayout(cast.getChild(0)) != null;
+    }
+
+    // A function with an inverse in the registry, or a cast that has one
+    private static boolean hasInverse(CallOperator call) {
+        if (call instanceof CastOperator cast) {
+            return castHasInverse(cast);
+        }
+        return MonotonicFunctionRegistry.filterInverse(call.getFnName()) != null
+                || MonotonicFunctionRegistry.exactInverse(call.getFnName()) != null;
     }
 
     // A DATE, or a DATE cast to DATETIME, as MonotonicInverse.monthShift reads its input
