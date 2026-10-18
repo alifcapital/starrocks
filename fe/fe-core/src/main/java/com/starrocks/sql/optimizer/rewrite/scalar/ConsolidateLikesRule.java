@@ -102,7 +102,9 @@ public class ConsolidateLikesRule extends TopDownScalarOperatorRewriteRule {
                         return Optional.empty();
                     }
                 } else {
-                    sb.append(BACKSLASH);
+                    // The BE drops a trailing '\' when it matches a LIKE. We fear that a regexp with a literal
+                    // backslash would match other texts, so we do not merge such a pattern.
+                    return Optional.empty();
                 }
             } else if (ch == LIKE_META_DASH) {
                 sb.append(REGEX_META_DOT);

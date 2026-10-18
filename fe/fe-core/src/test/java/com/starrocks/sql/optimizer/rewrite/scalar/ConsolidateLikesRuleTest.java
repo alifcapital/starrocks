@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
@@ -34,6 +35,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ConsolidateLikesRuleTest {
     private final ConsolidateLikesRule rule = ConsolidateLikesRule.INSTANCE;
@@ -108,6 +110,9 @@ public class ConsolidateLikesRuleTest {
                 or(regexp(a, "x.*y"), regexp(a, ".*z.*")),
                 // prefix patterns are not merged
                 or(like(a, "x%"), like(a, "y%")),
+                // a pattern that ends with the escape character is not merged
+                or(like(a, "x%y"), like(a, "%z\\")),
+                and(notLike(a, "x%y"), notLike(a, "%z\\")),
                 // a NOT over an OR of likes, and an OR without likes
                 new CompoundPredicateOperator(CompoundType.NOT, or(like(a, "x%y"), like(a, "%z%"))),
                 or(equalsK(a), equalsK(b)));
@@ -126,6 +131,14 @@ public class ConsolidateLikesRuleTest {
         ScalarOperator result = apply(chain);
         CompoundPredicateOperator top = assertInstanceOf(CompoundPredicateOperator.class, result);
         assertEquals(regexp(a, "^((x.*y)|(.*z.*))$"), findRegexp(top));
+    }
+
+    @Test
+    public void aPatternThatEndsWithTheEscapeCharacterStaysALike() {
+        ScalarOperator endsWithEscape = like(a, "%q\\");
+        ScalarOperator result = apply(or(or(like(a, "x%y"), like(a, "%z%")), endsWithEscape));
+        assertEquals(regexp(a, "^((x.*y)|(.*z.*))$"), findRegexp(result));
+        assertTrue(Utils.extractDisjunctive(result).contains(endsWithEscape));
     }
 
     private static ScalarOperator findRegexp(ScalarOperator root) {

@@ -15,6 +15,7 @@
 
 package com.starrocks.connector.paimon;
 
+import com.starrocks.connector.LikePatternUtils;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.sql.ast.expression.BoolLiteral;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -214,8 +215,9 @@ public class PaimonPredicateConverter extends ScalarOperatorVisitor<Predicate, P
                     return null;
                 }
                 String literal = ((BinaryString) objectLiteral).toString();
-                if (literal.length() > 1 && literal.indexOf("%") == literal.length() - 1 && literal.charAt(0) != '%') {
-                    return builder.startsWith(idx, BinaryString.fromString(literal.substring(0, literal.length() - 1)));
+                Optional<String> prefix = LikePatternUtils.literalPrefix(literal);
+                if (prefix.isPresent()) {
+                    return builder.startsWith(idx, BinaryString.fromString(prefix.get()));
                 }
             }
         }

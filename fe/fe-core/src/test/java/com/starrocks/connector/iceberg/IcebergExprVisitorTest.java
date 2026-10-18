@@ -20,6 +20,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
@@ -585,5 +586,94 @@ public class IcebergExprVisitorTest {
                         ConstantOperator.createBigint(1))),
                 context);
         Assertions.assertEquals(Expression.Operation.TRUE, convertedExpr.op());
+    }
+
+    private static ScalarOperator like(ScalarOperator column, String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, column,
+                ConstantOperator.createVarchar(pattern));
+    }
+
+    @Test
+    public void testLikeIsPushedDownOnlyAsAnExactPrefix() {
+        ScalarOperatorToIcebergExpr.IcebergContext context = new ScalarOperatorToIcebergExpr.IcebergContext(SCHEMA.asStruct());
+        ScalarOperatorToIcebergExpr converter = new ScalarOperatorToIcebergExpr();
+
+        // The patterns are as the BE receives them. The second element is the prefix of startsWith, null for no filter.
+        String[][] cases = {
+                {"app%", "app"},
+                {"app_%", null},
+                {"a\\_b%", "a_b"},
+                {"a\\%%", "a%"},
+                {"a\\\\%", "a\\"},
+                {"a%b%", null},
+                {"%", null},
+                {"a\\%", null},
+                {"a\\", null},
+                {"", null},
+                {"日本%", "日本"},
+        };
+        for (String[] c : cases) {
+            for (ScalarOperator column : List.of(K6, K15)) {
+                String name = column == K6 ? "k6" : "k10.k15";
+                Expression expected = c[1] == null ? Expressions.alwaysTrue() : Expressions.startsWith(name, c[1]);
+                Assertions.assertEquals(expected.toString(),
+                        converter.convert(Lists.newArrayList(like(column, c[0])), context).toString(), c[0]);
+
+                Expression strict = converter.convertStrict(Lists.newArrayList(like(column, c[0])), context);
+                if (c[1] == null) {
+                    Assertions.assertNull(strict, c[0]);
+                } else {
+                    Assertions.assertEquals(expected.toString(), strict.toString(), c[0]);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testNotLikeRegexpAndIlikeAreNotPushedAsPrefix() {
+        ScalarOperatorToIcebergExpr.IcebergContext context = new ScalarOperatorToIcebergExpr.IcebergContext(SCHEMA.asStruct());
+        ScalarOperatorToIcebergExpr converter = new ScalarOperatorToIcebergExpr();
+
+        ScalarOperator notLike = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                like(K6, "app%"));
+        ScalarOperator regexp = new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, K6,
+                ConstantOperator.createVarchar("app%"));
+        // ilike(a, b) is like(lower(a), lower(b)), and the lower of a column is not a column.
+        ScalarOperator ilike = like(new CallOperator("lower", StringType.STRING, Lists.newArrayList(K6)), "app%");
+        for (ScalarOperator operator : List.of(notLike, regexp, ilike)) {
+            Assertions.assertEquals(Expression.Operation.TRUE,
+                    converter.convert(Lists.newArrayList(operator), context).op(), operator.toString());
+            Assertions.assertNull(converter.convertStrict(Lists.newArrayList(operator), context), operator.toString());
+        }
+    }
+
+    @Test
+    public void testLikeThatIsNotAPrefixDoesNotNarrowOrNegateOtherPredicates() {
+        ScalarOperatorToIcebergExpr.IcebergContext context = new ScalarOperatorToIcebergExpr.IcebergContext(SCHEMA.asStruct());
+        ScalarOperatorToIcebergExpr converter = new ScalarOperatorToIcebergExpr();
+        ScalarOperator k1Equals = new BinaryPredicateOperator(BinaryType.EQ, K1, ConstantOperator.createInt(1));
+        ScalarOperator underscore = like(K6, "app_%");
+        ScalarOperator prefix = like(K6, "app%");
+
+        ScalarOperator or = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
+                underscore, k1Equals);
+        Assertions.assertEquals(Expression.Operation.TRUE, converter.convert(Lists.newArrayList(or), context).op());
+
+        ScalarOperator and = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                k1Equals, underscore);
+        Assertions.assertEquals(Expressions.equal("k1", 1).toString(),
+                converter.convert(Lists.newArrayList(and), context).toString());
+
+        ScalarOperator notAnd = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, and);
+        Assertions.assertEquals(Expression.Operation.TRUE,
+                converter.convert(Lists.newArrayList(notAnd), context).op());
+
+        // The exact prefix stays pushed under NOT, where the negation of a longer or shorter prefix would be wrong.
+        ScalarOperator notPrefixAnd = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND, k1Equals, prefix));
+        Assertions.assertEquals(
+                Expressions.not(Expressions.and(Expressions.equal("k1", 1), Expressions.startsWith("k6", "app")))
+                        .toString(),
+                converter.convert(Lists.newArrayList(notPrefixAnd), context).toString());
     }
 }

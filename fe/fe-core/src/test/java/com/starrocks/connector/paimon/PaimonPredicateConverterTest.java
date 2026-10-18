@@ -17,6 +17,7 @@ package com.starrocks.connector.paimon;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CaseWhenOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -239,6 +240,72 @@ public class PaimonPredicateConverterTest {
         LeafPredicate leafPredicate = (LeafPredicate) result;
         Assertions.assertTrue(leafPredicate.function() instanceof StartsWith);
         Assertions.assertEquals("ttt", leafPredicate.literals().get(0).toString());
+    }
+
+    private static ScalarOperator like(ScalarOperator column, String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, column,
+                ConstantOperator.createVarchar(pattern));
+    }
+
+    @Test
+    public void testLikeIsPushedDownOnlyAsAnExactPrefix() {
+        // The patterns are as the BE receives them. The second element is the prefix of StartsWith, null for no filter.
+        String[][] cases = {
+                {"app%", "app"},
+                {"app_%", null},
+                {"a\\_b%", "a_b"},
+                {"a\\%%", "a%"},
+                {"a\\\\%", "a\\"},
+                {"a%b%", null},
+                {"%", null},
+                {"a\\%", null},
+                {"a\\", null},
+                {"", null},
+                {"日本%", "日本"},
+        };
+        for (String[] c : cases) {
+            Predicate result = CONVERTER.convert(like(F1, c[0]));
+            if (c[1] == null) {
+                Assertions.assertNull(result, c[0]);
+            } else {
+                Assertions.assertTrue(result instanceof LeafPredicate, c[0]);
+                LeafPredicate leafPredicate = (LeafPredicate) result;
+                Assertions.assertTrue(leafPredicate.function() instanceof StartsWith, c[0]);
+                Assertions.assertEquals(c[1], leafPredicate.literals().get(0).toString(), c[0]);
+            }
+        }
+    }
+
+    @Test
+    public void testNotLikeRegexpAndIlikeAreNotPushedAsPrefix() {
+        ScalarOperator notLike = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                like(F1, "app%"));
+        ScalarOperator regexp = new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, F1,
+                ConstantOperator.createVarchar("app%"));
+        // ilike(a, b) is like(lower(a), lower(b)), and the lower of a column is not a column.
+        ScalarOperator ilike = like(new CallOperator("lower", VarcharType.VARCHAR, Lists.newArrayList(F1)), "app%");
+        for (ScalarOperator operator : List.of(notLike, regexp, ilike)) {
+            Assertions.assertNull(CONVERTER.convert(operator), operator.toString());
+        }
+    }
+
+    @Test
+    public void testLikeThatIsNotAPrefixDoesNotNarrowOrNegateOtherPredicates() {
+        ScalarOperator f0Equals = new BinaryPredicateOperator(BinaryType.EQ, F0, ConstantOperator.createInt(1));
+        ScalarOperator underscore = like(F1, "app_%");
+
+        ScalarOperator or = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
+                underscore, f0Equals);
+        Assertions.assertNull(CONVERTER.convert(or));
+
+        ScalarOperator and = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
+                f0Equals, underscore);
+        Predicate result = CONVERTER.convert(and);
+        Assertions.assertTrue(result instanceof LeafPredicate);
+        Assertions.assertTrue(((LeafPredicate) result).function() instanceof Equal);
+
+        ScalarOperator notAnd = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, and);
+        Assertions.assertNull(CONVERTER.convert(notAnd));
     }
 
     @Test

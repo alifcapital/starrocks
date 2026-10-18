@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.connector.LikePatternUtils;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.sql.ast.expression.BoolLiteral;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -345,8 +346,9 @@ public class ScalarOperatorToIcebergExpr {
                     if (literal == null) {
                         return null;
                     }
-                    if (literal.indexOf("%") == literal.length() - 1) {
-                        return startsWith(columnName, literal.substring(0, literal.length() - 1));
+                    Optional<String> prefix = LikePatternUtils.literalPrefix(literal);
+                    if (prefix.isPresent()) {
+                        return startsWith(columnName, prefix.get());
                     }
                 }
             }
