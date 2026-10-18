@@ -169,7 +169,7 @@ OutPut Exchange Id: 06
 4:Project
 |  output columns:
 |  15 <-> [15: C_ACCTBAL, DOUBLE, false]
-|  cardinality: 6815795
+|  cardinality: 6815878
 |  column statistics:
 |  * C_ACCTBAL-->[0.0, 9999.99, 0.0, 8.0, 137439.0] MCV: [[3863.78:400][5610.32:400][3123.67:400][1237.93:400][487.64:400]] ESTIMATE
 |
@@ -179,7 +179,7 @@ preAggregation: on
 Predicates: [15: C_ACCTBAL, DOUBLE, false] > 0.0, substring[([14: C_PHONE, CHAR, false], 1, 2); args: VARCHAR,INT,INT; result: VARCHAR; args nullable: false; result nullable: true] IN ('21', '28', '24', '32', '35', '34', '37')
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=23.0
-cardinality: 6815795
+cardinality: 6815878
 column statistics:
 * C_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
 * C_ACCTBAL-->[0.0, 9999.99, 0.0, 8.0, 137439.0] MCV: [[3863.78:400][5610.32:400][3123.67:400][1237.93:400][487.64:400]] ESTIMATE

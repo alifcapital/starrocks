@@ -12,7 +12,7 @@ column statistics:
 * O_ORDERDATE-->[6.941952E8, 7.948512E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1993-03-19:69500][1994-09-12:69400][1992-10-24:69200][1993-01-22:69000]] ESTIMATE
 * O_SHIPPRIORITY-->[0.0, 0.0, 0.0, 4.0, 1.0] ESTIMATE
 * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.188210822278891E7] ESTIMATE
-* sum-->[810.9, 5342663.074635099, 0.0, 8.0, 932377.0] ESTIMATE
+* sum-->[810.9, 5343007.966934444, 0.0, 8.0, 932377.0] ESTIMATE
 
 PLAN FRAGMENT 1(F00)
 
@@ -29,17 +29,17 @@ OutPut Exchange Id: 13
 |  * O_ORDERDATE-->[6.941952E8, 7.948512E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1993-03-19:69500][1994-09-12:69400][1992-10-24:69200][1993-01-22:69000]] ESTIMATE
 |  * O_SHIPPRIORITY-->[0.0, 0.0, 0.0, 4.0, 1.0] ESTIMATE
 |  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.188210822278891E7] ESTIMATE
-|  * sum-->[810.9, 5342663.074635099, 0.0, 8.0, 932377.0] ESTIMATE
+|  * sum-->[810.9, 5343007.966934444, 0.0, 8.0, 932377.0] ESTIMATE
 |
 11:AGGREGATE (update finalize)
 |  aggregate: sum[([37: expr, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true]
 |  group by: [20: L_ORDERKEY, INT, false], [14: O_ORDERDATE, DATE, false], [17: O_SHIPPRIORITY, INT, false]
-|  cardinality: 47464506
+|  cardinality: 47467570
 |  column statistics:
 |  * O_ORDERDATE-->[6.941952E8, 7.948512E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1993-03-19:69500][1994-09-12:69400][1992-10-24:69200][1993-01-22:69000]] ESTIMATE
 |  * O_SHIPPRIORITY-->[0.0, 0.0, 0.0, 4.0, 1.0] ESTIMATE
 |  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.188210822278891E7] ESTIMATE
-|  * sum-->[810.9, 5342663.074635099, 0.0, 8.0, 932377.0] ESTIMATE
+|  * sum-->[810.9, 5343007.966934444, 0.0, 8.0, 932377.0] ESTIMATE
 |
 10:Project
 |  output columns:
@@ -47,7 +47,7 @@ OutPut Exchange Id: 13
 |  17 <-> [17: O_SHIPPRIORITY, INT, false]
 |  20 <-> [20: L_ORDERKEY, INT, false]
 |  37 <-> [25: L_EXTENDEDPRICE, DOUBLE, false] * 1.0 - [26: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 47464506
+|  cardinality: 47467570
 |  column statistics:
 |  * O_ORDERDATE-->[6.941952E8, 7.948512E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1993-03-19:69500][1994-09-12:69400][1992-10-24:69200][1993-01-22:69000]] ESTIMATE
 |  * O_SHIPPRIORITY-->[0.0, 0.0, 0.0, 4.0, 1.0] ESTIMATE
@@ -60,7 +60,7 @@ OutPut Exchange Id: 13
 |  build runtime filters:
 |  - filter_id = 1, build_expr = (10: O_ORDERKEY), remote = false
 |  output columns: 14, 17, 20, 25, 26
-|  cardinality: 47464506
+|  cardinality: 47467570
 |  column statistics:
 |  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.188210822278891E7] ESTIMATE
 |  * O_ORDERDATE-->[6.941952E8, 7.948512E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1993-03-19:69500][1994-09-12:69400][1992-10-24:69200][1993-01-22:69000]] ESTIMATE
@@ -80,7 +80,7 @@ OutPut Exchange Id: 13
 |  20 <-> [20: L_ORDERKEY, INT, false]
 |  25 <-> [25: L_EXTENDEDPRICE, DOUBLE, false]
 |  26 <-> [26: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 325365172
+|  cardinality: 325386175
 |  column statistics:
 |  * L_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 1.5E8] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -92,7 +92,7 @@ preAggregation: on
 Predicates: [30: L_SHIPDATE, DATE, false] > '1995-03-11'
 partitionsRatio=1/1, tabletsRatio=20/20
 actualRows=0, avgRowSize=28.0
-cardinality: 325365172
+cardinality: 325386175
 probe runtime filters:
 - filter_id = 1, probe_expr = (20: L_ORDERKEY)
 column statistics:

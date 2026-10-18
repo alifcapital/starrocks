@@ -59,7 +59,7 @@ OutPut Exchange Id: 25
 14:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [15: PS_SUPPKEY, INT, false]
-cardinality: 40862130
+cardinality: 40868289
 
 PLAN FRAGMENT 2(F07)
 
@@ -143,7 +143,7 @@ OutPut Exchange Id: 14
 13:Project
 |  output columns:
 |  15 <-> [15: PS_SUPPKEY, INT, false]
-|  cardinality: 40862130
+|  cardinality: 40868289
 |  column statistics:
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 1000000.0] ESTIMATE
 |
@@ -155,14 +155,14 @@ OutPut Exchange Id: 14
 |  build runtime filters:
 |  - filter_id = 1, build_expr = (14: PS_PARTKEY), remote = true
 |  output columns: 15
-|  cardinality: 40862130
+|  cardinality: 40868289
 |  column statistics:
 |  * PS_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 5000000.0] ESTIMATE
 |  * PS_SUPPKEY-->[1.0, 1000000.0, 0.0, 8.0, 1000000.0] ESTIMATE
 |  * PS_AVAILQTY-->[1.0, 9999.0, 0.0, 4.0, 9999.0] ESTIMATE
 |  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 5000000.0] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
-|  * sum-->[1.0, 9.080473404135662E7, 0.0, 8.0, 50.0] ESTIMATE
+|  * sum-->[1.0, 9.08184192700978E7, 0.0, 8.0, 50.0] ESTIMATE
 |
 |----11:EXCHANGE
 |       distribution type: SHUFFLE
@@ -172,16 +172,16 @@ OutPut Exchange Id: 14
 4:AGGREGATE (merge finalize)
 |  aggregate: sum[([48: sum, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true]
 |  group by: [33: L_SUPPKEY, INT, false], [32: L_PARTKEY, INT, false]
-|  cardinality: 90804734
+|  cardinality: 90818419
 |  column statistics:
 |  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2.0E7] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
-|  * sum-->[1.0, 9.080473404135662E7, 0.0, 8.0, 50.0] ESTIMATE
+|  * sum-->[1.0, 9.08184192700978E7, 0.0, 8.0, 50.0] ESTIMATE
 |
 3:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [32: L_PARTKEY, INT, false]
-cardinality: 90804734
+cardinality: 90818419
 probe runtime filters:
 - filter_id = 1, probe_expr = (32: L_PARTKEY)
 
@@ -268,18 +268,18 @@ OutPut Exchange Id: 03
 |  STREAMING
 |  aggregate: sum[([35: L_QUANTITY, DOUBLE, false]); args: DOUBLE; result: DOUBLE; args nullable: false; result nullable: true]
 |  group by: [33: L_SUPPKEY, INT, false], [32: L_PARTKEY, INT, false]
-|  cardinality: 90804734
+|  cardinality: 90818419
 |  column statistics:
 |  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2.0E7] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
-|  * sum-->[1.0, 9.080473404135662E7, 0.0, 8.0, 50.0] ESTIMATE
+|  * sum-->[1.0, 9.08184192700978E7, 0.0, 8.0, 50.0] ESTIMATE
 |
 1:Project
 |  output columns:
 |  32 <-> [32: L_PARTKEY, INT, false]
 |  33 <-> [33: L_SUPPKEY, INT, false]
 |  35 <-> [35: L_QUANTITY, DOUBLE, false]
-|  cardinality: 90804734
+|  cardinality: 90818419
 |  column statistics:
 |  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 2.0E7] ESTIMATE
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
@@ -291,7 +291,7 @@ preAggregation: on
 Predicates: [41: L_SHIPDATE, DATE, false] >= '1993-01-01', [41: L_SHIPDATE, DATE, false] < '1994-01-01'
 partitionsRatio=1/1, tabletsRatio=20/20
 actualRows=0, avgRowSize=24.0
-cardinality: 90804734
+cardinality: 90818419
 probe runtime filters:
 - filter_id = 1, probe_expr = (32: L_PARTKEY)
 - filter_id = 4, probe_expr = (33: L_SUPPKEY)

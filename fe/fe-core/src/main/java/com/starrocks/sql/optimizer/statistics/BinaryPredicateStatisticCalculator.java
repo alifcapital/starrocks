@@ -273,7 +273,8 @@ public class BinaryPredicateStatisticCalculator {
                     * ((double) rowCountInHistogram / (double) columnStatistic.getHistogram().getTotalRows());
 
             ColumnStatistic newEstimateColumnStatistics =
-                    estimateColumnStatisticsWithHistogram(columnStatistic, estimatedHistogram);
+                    estimateColumnStatisticsWithHistogram(columnStatistic, estimatedHistogram,
+                            constant.get().getType());
 
             ColumnStatistic finalNewEstimateColumnStatistics = adjustColumnStatisticsMinMax(
                     newEstimateColumnStatistics, constant, statistics, columnRefOperator, true);
@@ -313,7 +314,8 @@ public class BinaryPredicateStatisticCalculator {
                     * ((double) rowCountInHistogram / (double) columnStatistic.getHistogram().getTotalRows());
 
             ColumnStatistic newEstimateColumnStatistics =
-                    estimateColumnStatisticsWithHistogram(columnStatistic, estimatedHistogram);
+                    estimateColumnStatisticsWithHistogram(columnStatistic, estimatedHistogram,
+                            constant.get().getType());
 
             ColumnStatistic finalNewEstimateColumnStatistics = adjustColumnStatisticsMinMax(
                     newEstimateColumnStatistics, constant, statistics, columnRefOperator, false);
@@ -808,10 +810,12 @@ public class BinaryPredicateStatisticCalculator {
                         previousTotalRowCount = bucket.getCount();
                     }
                 } else {
+                    // The upper value lies above the constant and keeps all its rows; the other rows of the bucket
+                    // spread over its range, as in updateHistWithLessThan
                     double predicateFactor = bucketRange.overlapPercentWith(columnRange);
-                    long bucketTotalRows = bucket.getCount() - previousTotalRowCount;
-                    bucketRowCount = (long) (bucketTotalRows * predicateFactor);
-                    previousTotalRowCount = previousTotalRowCount + (bucketTotalRows - bucketRowCount);
+                    long bucketTotalRows = bucket.getCount() - bucket.getUpperRepeats() - previousTotalRowCount;
+                    bucketRowCount = (long) (bucketTotalRows * predicateFactor) + bucket.getUpperRepeats();
+                    previousTotalRowCount = bucket.getCount() - bucketRowCount;
                 }
 
                 if (bucket.getCount() - previousTotalRowCount != 0) {
@@ -862,16 +866,27 @@ public class BinaryPredicateStatisticCalculator {
         return Optional.of(new Histogram(bucketList, estimatedMCV));
     }
 
+    /**
+     * The statistics of a column after a range filter, with the histogram the filter kept. The range of the column
+     * holds the buckets and the most common values that remain: the most common values can lie beyond the buckets, as
+     * the last days of a table that grows. valueType reads the most common values, as in the filter of the
+     * histogram. With no bucket left, the range is NaN and the caller takes it from the filter and the input: the most
+     * common values alone do not bound the column, and the range of the input can be newer than the histogram.
+     */
     public static ColumnStatistic estimateColumnStatisticsWithHistogram(ColumnStatistic columnStatistic,
-                                                                        Histogram histogram) {
-        double min;
-        double max;
-        if (histogram.getBuckets().isEmpty()) {
-            min = NaN;
-            max = NaN;
-        } else {
+                                                                        Histogram histogram, Type valueType) {
+        double min = NaN;
+        double max = NaN;
+        if (!histogram.getBuckets().isEmpty()) {
             min = histogram.getBuckets().get(0).getLower();
             max = histogram.getBuckets().get(histogram.getBuckets().size() - 1).getUpper();
+            for (String value : histogram.getMCV().keySet()) {
+                Optional<Double> number = StatisticUtils.convertStatisticsToDouble(valueType, value);
+                if (number.isPresent()) {
+                    min = min(min, number.get());
+                    max = max(max, number.get());
+                }
+            }
         }
 
         ColumnStatistic.Builder newEstimateColumnStatistics = ColumnStatistic.builder().

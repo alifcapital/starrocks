@@ -80,6 +80,6 @@ PREDICATES: 5: O_ORDERDATE >= '1994-09-01', 5: O_ORDERDATE < '1994-12-01'
 partitions=1/1
 rollup: orders
 tabletRatio=10/10
-cardinality=5574948
+cardinality=5625748
 avgRowSize=27.0
 [end]

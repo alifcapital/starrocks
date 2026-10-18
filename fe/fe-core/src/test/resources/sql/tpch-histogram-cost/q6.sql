@@ -30,7 +30,7 @@ OutPut Exchange Id: 03
 |  output columns:
 |  6 <-> [6: L_EXTENDEDPRICE, DOUBLE, false]
 |  7 <-> [7: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 11504008
+|  cardinality: 11513807
 |  column statistics:
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.02, 0.04, 0.0, 8.0, 11.0] MCV: [[0.02:54617300][0.04:54554500][0.03:54529300]] ESTIMATE
@@ -41,7 +41,7 @@ preAggregation: on
 Predicates: [11: L_SHIPDATE, DATE, false] >= '1995-01-01', [11: L_SHIPDATE, DATE, false] < '1996-01-01', [7: L_DISCOUNT, DOUBLE, false] >= 0.02, [7: L_DISCOUNT, DOUBLE, false] <= 0.04, [5: L_QUANTITY, DOUBLE, false] < 24.0
 partitionsRatio=1/1, tabletsRatio=20/20
 actualRows=0, avgRowSize=36.0
-cardinality: 11504008
+cardinality: 11513807
 column statistics:
 * L_QUANTITY-->[1.0, 24.0, 0.0, 8.0, 50.0] MCV: [[23.00:12059300][16.00:12051800][9.00:12050300][1.00:12040100][19.00:12036300]] ESTIMATE
 * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE

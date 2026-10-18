@@ -189,6 +189,27 @@ public class DerivedBoundEstimateTest {
         ColumnStatistic days = filtered.getColumnStatistic(DAYS);
         Assertions.assertEquals(20089, days.getMinValue(), 0.5, days.toString());
         Assertions.assertEquals(243, days.getDistinctValuesCount(), 5, days.toString());
+        // The ten days of the list lie beyond the last bucket, up to day 20509
+        Assertions.assertEquals(20509, days.getMaxValue(), 0.5, days.toString());
+    }
+
+    @Test
+    public void testRangeBeyondTheBucketsKeepsTheRangeOfTheColumn() {
+        // The histogram is older than the column: buckets to day 20400 and two most common days to 20500, while the
+        // column reaches day 20507. date >= 20450 leaves no bucket, and the column keeps its days to 20507, not only
+        // the most common ones.
+        Histogram histogram = new Histogram(List.of(new Bucket(20001, 20400, 400L, 1L)),
+                Map.of("20450", 60L, "20500", 60L));
+        Statistics statistics = Statistics.builder().setOutputRowCount(520)
+                .addColumnStatistic(DAYS, ColumnStatistic.builder().setMinValue(20001).setMaxValue(20507)
+                        .setNullsFraction(0).setAverageRowSize(4).setDistinctValuesCount(402)
+                        .setHistogram(histogram).build())
+                .build();
+        ScalarOperator recent = new BinaryPredicateOperator(BinaryType.GE, DAYS, ConstantOperator.createInt(20450));
+        ColumnStatistic days = PredicateStatisticsCalculator.statisticsCalculate(recent, statistics)
+                .getColumnStatistic(DAYS);
+        Assertions.assertEquals(20450, days.getMinValue(), 0.5, days.toString());
+        Assertions.assertEquals(20507, days.getMaxValue(), 0.5, days.toString());
     }
 
     // Most rows are recent: 100 rows from 2017 to 2024-10 and 300 rows to 2025-11 in the buckets, 600 rows on the ten

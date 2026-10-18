@@ -57,7 +57,7 @@ OutPut Exchange Id: 24
 |  output columns:
 |  46 <-> [46: N_NAME, VARCHAR, false]
 |  54 <-> [25: L_EXTENDEDPRICE, DOUBLE, false] * 1.0 - [26: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 16381891
+|  cardinality: 16421332
 |  column statistics:
 |  * N_NAME-->[-Infinity, Infinity, 0.0, 25.0, 5.0] MCV: [[CANADA:1][UNITED STATES:1][VIETNAM:1][MOROCCO:1][ARGENTINA:1]] ESTIMATE
 |  * expr-->[810.9, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -69,7 +69,7 @@ OutPut Exchange Id: 24
 |  build runtime filters:
 |  - filter_id = 5, build_expr = (10: O_ORDERKEY), remote = false
 |  output columns: 25, 26, 46
-|  cardinality: 16381891
+|  cardinality: 16421332
 |  column statistics:
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
@@ -81,7 +81,7 @@ OutPut Exchange Id: 24
 |----20:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [10: O_ORDERKEY, INT, false]
-|       cardinality: 22752627
+|       cardinality: 22807405
 |
 13:Project
 |  output columns:
@@ -142,26 +142,26 @@ OutPut Exchange Id: 20
 |  output columns:
 |  4 <-> [4: C_NATIONKEY, INT, false]
 |  10 <-> [10: O_ORDERKEY, INT, false]
-|  cardinality: 22752627
+|  cardinality: 22807405
 |  column statistics:
 |  * C_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE
-|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2752627E7] ESTIMATE
+|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2807405E7] ESTIMATE
 |
 18:HASH JOIN
 |  join op: INNER JOIN (BUCKET_SHUFFLE)
 |  equal join conjunct: [1: C_CUSTKEY, INT, false] = [11: O_CUSTKEY, INT, false]
 |  output columns: 4, 10
-|  cardinality: 22752627
+|  cardinality: 22807405
 |  column statistics:
 |  * C_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 9999600.0] ESTIMATE
 |  * C_NATIONKEY-->[0.0, 24.0, 0.0, 4.0, 25.0] ESTIMATE
-|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2752627E7] ESTIMATE
+|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2807405E7] ESTIMATE
 |  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 9999600.0] ESTIMATE
 |
 |----17:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [11: O_CUSTKEY, INT, false]
-|       cardinality: 22752627
+|       cardinality: 22807405
 |
 14:OlapScanNode
 table: customer, rollup: customer
@@ -183,9 +183,9 @@ OutPut Exchange Id: 17
 |  output columns:
 |  10 <-> [10: O_ORDERKEY, INT, false]
 |  11 <-> [11: O_CUSTKEY, INT, false]
-|  cardinality: 22752627
+|  cardinality: 22807405
 |  column statistics:
-|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2752627E7] ESTIMATE
+|  * O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2807405E7] ESTIMATE
 |  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 9999600.0] ESTIMATE
 |
 15:OlapScanNode
@@ -194,9 +194,9 @@ preAggregation: on
 Predicates: [14: O_ORDERDATE, DATE, false] >= '1995-01-01', [14: O_ORDERDATE, DATE, false] < '1996-01-01'
 partitionsRatio=1/1, tabletsRatio=10/10
 actualRows=0, avgRowSize=20.0
-cardinality: 22752627
+cardinality: 22807405
 column statistics:
-* O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2752627E7] ESTIMATE
+* O_ORDERKEY-->[1.0, 6.0E8, 0.0, 8.0, 2.2807405E7] ESTIMATE
 * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 9999600.0] ESTIMATE
 * O_ORDERDATE-->[7.888896E8, 8.204256E8, 0.0, 4.0, 2406.0] MCV: [[1995-01-13:70200][1995-04-13:69000][1995-03-26:68500][1995-01-26:68300][1995-11-15:68100]] ESTIMATE
 

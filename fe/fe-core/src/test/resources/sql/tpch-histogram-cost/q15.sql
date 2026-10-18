@@ -197,7 +197,7 @@ OutPut Exchange Id: 09
 |  output columns:
 |  30 <-> [30: L_SUPPKEY, INT, false]
 |  45 <-> [33: L_EXTENDEDPRICE, DOUBLE, false] * 1.0 - [34: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 23339376
+|  cardinality: 23353045
 |  column statistics:
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * expr-->[810.9, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -208,7 +208,7 @@ preAggregation: on
 Predicates: [38: L_SHIPDATE, DATE, false] >= '1995-07-01', [38: L_SHIPDATE, DATE, false] < '1995-10-01'
 partitionsRatio=1/1, tabletsRatio=20/20
 actualRows=0, avgRowSize=32.0
-cardinality: 23339376
+cardinality: 23353045
 column statistics:
 * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -235,7 +235,7 @@ OutPut Exchange Id: 04
 |  output columns:
 |  11 <-> [11: L_SUPPKEY, INT, false]
 |  26 <-> [14: L_EXTENDEDPRICE, DOUBLE, false] * 1.0 - [15: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 23339376
+|  cardinality: 23353045
 |  column statistics:
 |  * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 |  * expr-->[810.9, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -246,7 +246,7 @@ preAggregation: on
 Predicates: [19: L_SHIPDATE, DATE, false] >= '1995-07-01', [19: L_SHIPDATE, DATE, false] < '1995-10-01'
 partitionsRatio=1/1, tabletsRatio=20/20
 actualRows=0, avgRowSize=32.0
-cardinality: 23339376
+cardinality: 23353045
 column statistics:
 * L_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 1000000.0] ESTIMATE
 * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE

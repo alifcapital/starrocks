@@ -45,7 +45,7 @@ OutPut Exchange Id: 07
 |  common expressions:
 |  33 <-> 1.0 - [7: L_DISCOUNT, DOUBLE, false]
 |  34 <-> [6: L_EXTENDEDPRICE, DOUBLE, false] * [33: subtract, DOUBLE, false]
-|  cardinality: 7013947
+|  cardinality: 7060947
 |  column statistics:
 |  * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 |  * expr-->[810.9, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -56,12 +56,12 @@ OutPut Exchange Id: 07
 |  build runtime filters:
 |  - filter_id = 0, build_expr = (2: L_PARTKEY), remote = false
 |  output columns: 6, 7, 22
-|  cardinality: 7013947
+|  cardinality: 7060947
 |  column statistics:
-|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7013946.675798152] ESTIMATE
+|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7060947.158200463] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
-|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7013946.675798152] ESTIMATE
+|  * P_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7060947.158200463] ESTIMATE
 |  * P_TYPE-->[-Infinity, Infinity, 0.0, 25.0, 150.0] MCV: [[SMALL ANODIZED TIN:134400][MEDIUM BRUSHED BRASS:133900][STANDARD BRUSHED BRASS:133900][PROMO BURNISHED TIN:133800][SMALL ANODIZED COPPER:133800]] ESTIMATE
 |  * case-->[0.0, 104949.5, 0.0, 8.0, 932378.0] ESTIMATE
 |  * expr-->[810.9, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
@@ -69,7 +69,7 @@ OutPut Exchange Id: 07
 |----3:EXCHANGE
 |       distribution type: SHUFFLE
 |       partition exprs: [2: L_PARTKEY, INT, false]
-|       cardinality: 7013947
+|       cardinality: 7060947
 |
 0:OlapScanNode
 table: part, rollup: part
@@ -95,9 +95,9 @@ OutPut Exchange Id: 03
 |  2 <-> [2: L_PARTKEY, INT, false]
 |  6 <-> [6: L_EXTENDEDPRICE, DOUBLE, false]
 |  7 <-> [7: L_DISCOUNT, DOUBLE, false]
-|  cardinality: 7013947
+|  cardinality: 7060947
 |  column statistics:
-|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7013946.675798152] ESTIMATE
+|  * L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7060947.158200464] ESTIMATE
 |  * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 |  * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 |
@@ -108,9 +108,9 @@ Predicates: [11: L_SHIPDATE, DATE, false] >= '1997-02-01', [11: L_SHIPDATE, DATE
 partitionsRatio=1/1, tabletsRatio=20/20
 tabletList=10338,10340,10342,10344,10346,10348,10350,10352,10354,10356 ...
 actualRows=0, avgRowSize=28.0
-cardinality: 7013947
+cardinality: 7060947
 column statistics:
-* L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7013946.675798152] ESTIMATE
+* L_PARTKEY-->[1.0, 2.0E7, 0.0, 8.0, 7060947.158200464] ESTIMATE
 * L_EXTENDEDPRICE-->[901.0, 104949.5, 0.0, 8.0, 932377.0] ESTIMATE
 * L_DISCOUNT-->[0.0, 0.1, 0.0, 8.0, 11.0] MCV: [[0.05:54639500][0.07:54619200][0.02:54617300][0.01:54583400][0.10:54581500]] ESTIMATE
 * L_SHIPDATE-->[8.547264E8, 8.571456E8, 0.0, 4.0, 2526.0] MCV: [[1997-02-16:261100]] ESTIMATE
