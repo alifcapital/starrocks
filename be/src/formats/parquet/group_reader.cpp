@@ -75,8 +75,7 @@ GroupReader::GroupReader(GroupReaderParam& param, int row_group_number, SkipRows
 GroupReader::~GroupReader() {
     if (_param.sb_stream) {
         // The stream may have been given to another row group already.
-        if (_page_cache_io_planner != nullptr &&
-            _param.sb_stream->skip_ranges_provider() == _page_cache_io_planner.get()) {
+        if (_param.sb_stream->skip_ranges_provider() == &_skip_ranges_chain) {
             _param.sb_stream->set_skip_ranges_provider(nullptr);
         }
         _param.sb_stream->release_to_offset(_end_offset);
@@ -155,6 +154,7 @@ Status GroupReader::prepare() {
         _set_end_offset(end_offset);
         RETURN_IF_ERROR(_param.sb_stream->set_io_ranges(ranges, coalesce_lazy));
         _setup_page_cache_io();
+        _install_skip_ranges_providers();
     }
 
     RETURN_IF_ERROR(_column_materializer->rewrite_dict_conjuncts_to_predicate(&_is_group_filtered));
@@ -988,6 +988,13 @@ Status GroupReader::_create_column_readers() {
     opts.file_size = _param.file_size;
     opts.datacache_options = _param.datacache_options;
     opts.offset_index_skip_advisor = _param.scanner_ctx->offset_index_skip_advisor.get();
+    // The shared buffers hold the chunks only when the coalesce read plans their io ranges (see prepare()). With the
+    // narrowing off the row group has no planner, and the readers and the stream do nothing for it.
+    if (config::parquet_coalesce_read_enable && config::parquet_offset_index_narrow_io_enable &&
+        _param.sb_stream != nullptr) {
+        _narrow_io_planner = std::make_unique<NarrowIoPlanner>(_param.stats);
+        opts.narrow_io = _narrow_io_planner.get();
+    }
     for (const auto& column : _param.read_cols) {
         ASSIGN_OR_RETURN(ColumnReaderPtr column_reader, _create_column_reader(column));
         _column_readers[column.slot_id()] = std::move(column_reader);
@@ -1154,7 +1161,17 @@ void GroupReader::_setup_page_cache_io() {
     for (PageCacheIoChunk& chunk : chunks) {
         _page_cache_io_planner->add_chunk(std::move(chunk));
     }
-    _param.sb_stream->set_skip_ranges_provider(_page_cache_io_planner.get());
+}
+
+// The stream has one provider. The page cache aware IO and the narrowing of the buffers both name bytes that a buffer
+// should not load, so the stream asks the two through a chain, and the buffer loads the runs of the bytes that neither
+// names.
+void GroupReader::_install_skip_ranges_providers() {
+    _skip_ranges_chain.add(_page_cache_io_planner.get());
+    _skip_ranges_chain.add(_narrow_io_planner.get());
+    if (!_skip_ranges_chain.empty()) {
+        _param.sb_stream->set_skip_ranges_provider(&_skip_ranges_chain);
+    }
 }
 
 void GroupReader::_process_columns_and_conjunct_ctxs() {

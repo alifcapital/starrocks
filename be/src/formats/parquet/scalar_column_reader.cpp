@@ -43,18 +43,6 @@ static Status invalid_index(const std::string& message) {
     return Status::Corruption(message);
 }
 
-// The feedback of the scan on the offset index is kept by the path of the column in the schema of the file.
-static std::string offset_index_feedback_key(const tparquet::ColumnMetaData& column_metadata) {
-    std::string key;
-    for (const std::string& part : column_metadata.path_in_schema) {
-        if (!key.empty()) {
-            key += '.';
-        }
-        key += part;
-    }
-    return key;
-}
-
 // FixedValueColumnReader
 Status FixedValueColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {
     Column* dst_col = dst->as_mutable_raw_ptr();

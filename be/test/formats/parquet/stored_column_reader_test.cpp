@@ -32,12 +32,15 @@
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/narrow_io_planner.h"
+#include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/schema.h"
 #include "formats/parquet/stored_column_reader_with_index.h"
 #include "formats/parquet/utils.h"
 #include "fs/fs.h"
 #include "gen_cpp/parquet_types.h"
+#include "io/shared_buffered_input_stream.h"
 #include "io/string_input_stream.h"
 #include "runtime/types.h"
 #include "storage/range.h"
@@ -675,6 +678,9 @@ struct SkipLayout {
     // The number of rows of each page. The pages have different sizes, so a page boundary does not fall at a
     // multiple of anything.
     std::vector<size_t> page_rows = {30, 50, 40, 64, 20, 60, 36, 40};
+    // The chunk is read through a shared buffer of the stream that holds the whole chunk, with the planner of the
+    // narrowing as its provider (NarrowIoPlanner). Otherwise the reader reads the stream of the chunk directly.
+    bool shared_buffer = false;
 };
 
 // A filter of `rows` rows that selects the rows of the given [begin, end) pieces.
@@ -791,9 +797,21 @@ public:
         if (_layout.dict) {
             _chunk.meta_data.__set_dictionary_page_offset(0);
         }
+        // The test gives the reader the offset index itself, and the chunk says that it has one.
+        _chunk.__set_offset_index_offset(static_cast<int64_t>(buffer.size()));
+        _chunk.__set_offset_index_length(1);
 
+        _chunk_size = static_cast<int64_t>(buffer.size());
         _stream = std::make_shared<RecordingInputStream>(std::move(buffer));
-        _file = std::make_unique<RandomAccessFile>(_stream, "skip_chunk_test");
+        if (_layout.shared_buffer) {
+            _sb_stream = std::make_shared<io::SharedBufferedInputStream>(_stream, "skip_chunk_test", _chunk_size);
+            ASSERT_OK(_sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, _chunk_size)}));
+            _planner = std::make_unique<NarrowIoPlanner>(&_stats);
+            _sb_stream->set_skip_ranges_provider(_planner.get());
+            _file = std::make_unique<RandomAccessFile>(_sb_stream, "skip_chunk_test");
+        } else {
+            _file = std::make_unique<RandomAccessFile>(_stream, "skip_chunk_test");
+        }
 
         tparquet::FileMetaData t_file_meta;
         t_file_meta.__set_version(1);
@@ -813,6 +831,7 @@ public:
         _opts.row_group_meta = &_row_group;
         _opts.chunk_size = 4096;
         _opts.datacache_options = nullptr;
+        _opts.narrow_io = _planner.get();
         ASSERT_OK(StoredColumnReader::create(_opts, field, &_chunk, &_reader));
         if (reader_case == ReaderCase::OPTIONAL_WITH_LEVELS) {
             _reader->set_need_parse_levels(true);
@@ -843,6 +862,17 @@ public:
     size_t first_row(size_t page) const { return _first_rows[page]; }
     const HdfsScannerStats& stats() const { return _stats; }
     RecordingInputStream& stream() { return *_stream; }
+    io::SharedBufferedInputStream& shared_stream() { return *_sb_stream; }
+    // The reader loads the dictionary page, as a dictionary filter does before any range is read.
+    Status load_dictionary() { return _reader->load_dictionary_page(); }
+    // The chunk says that it has no offset index, and the scan gives the reader a feedback of the skipping.
+    void hide_offset_index() { _chunk.__isset.offset_index_offset = false; }
+    void set_skip_advisor(OffsetIndexSkipAdvisor* advisor) { _opts.offset_index_skip_advisor = advisor; }
+    // The bytes of the chunk in the file: the whole chunk, the dictionary page, and a data page.
+    int64_t chunk_size() const { return _chunk_size; }
+    int64_t dict_size() const { return _dict_size; }
+    int64_t page_begin(size_t page) const { return _page_offsets[page]; }
+    int64_t page_end(size_t page) const { return _page_offsets[page] + _page_sizes[page]; }
     bool page_touched(size_t page) const {
         return _stream->touched(_page_offsets[page], _page_offsets[page] + _page_sizes[page]);
     }
@@ -1036,13 +1066,16 @@ private:
     std::vector<int64_t> _page_offsets;
     std::vector<int64_t> _page_sizes;
     int64_t _dict_size = 0;
+    int64_t _chunk_size = 0;
     std::vector<ExpectedValue> _values;
     std::vector<int32_t> _dict_values;
     std::map<int32_t, int32_t> _dict_codes;
 
     std::shared_ptr<RecordingInputStream> _stream;
+    std::shared_ptr<io::SharedBufferedInputStream> _sb_stream;
     std::unique_ptr<RandomAccessFile> _file;
     HdfsScannerStats _stats;
+    std::unique_ptr<NarrowIoPlanner> _planner;
     tparquet::ColumnChunk _chunk;
     tparquet::RowGroup _row_group;
     std::unique_ptr<FileMetaData> _file_meta;
@@ -1433,7 +1466,399 @@ TEST_P(OffsetIndexSkipTest, EveryPageThatTheReaderEntersIsComparedWithTheIndex) 
     }
 }
 
+// Sets the configs of the narrowing of the shared buffers for the scope of a test.
+class ScopedNarrowConfig {
+public:
+    ScopedNarrowConfig(bool enable, int32_t distance, int64_t read_ahead, double min_dead_ratio = 0.5)
+            : _enable(config::parquet_offset_index_narrow_io_enable),
+              _distance(config::io_coalesce_read_max_distance_size),
+              _read_ahead(config::parquet_offset_index_narrow_io_read_ahead_size),
+              _min_dead_ratio(config::parquet_offset_index_narrow_io_defer_min_dead_ratio) {
+        config::parquet_offset_index_narrow_io_enable = enable;
+        config::io_coalesce_read_max_distance_size = distance;
+        config::parquet_offset_index_narrow_io_read_ahead_size = read_ahead;
+        config::parquet_offset_index_narrow_io_defer_min_dead_ratio = min_dead_ratio;
+    }
+    ~ScopedNarrowConfig() {
+        config::parquet_offset_index_narrow_io_enable = _enable;
+        config::io_coalesce_read_max_distance_size = _distance;
+        config::parquet_offset_index_narrow_io_read_ahead_size = _read_ahead;
+        config::parquet_offset_index_narrow_io_defer_min_dead_ratio = _min_dead_ratio;
+    }
+
+private:
+    bool _enable;
+    int32_t _distance;
+    int64_t _read_ahead;
+    double _min_dead_ratio;
+};
+
+using FileRanges = std::vector<std::pair<int64_t, int64_t>>;
+
+// A chunk of 12 pages with 50 rows each, so a page starts at the row 50 * p. The chunk is read through a shared buffer
+// of one io range, and the planner of the narrowing advises the buffer.
+class OffsetIndexNarrowIoTest : public OffsetIndexSkipTest {
+protected:
+    SkipLayout narrow_layout() const {
+        SkipLayout narrow = layout();
+        narrow.page_rows.assign(12, 50);
+        narrow.shared_buffer = true;
+        return narrow;
+    }
+
+    static int64_t page_size(SkipChunk& chunk, size_t page) { return chunk.page_end(page) - chunk.page_begin(page); }
+
+    // The file ranges that the stream loaded, as (begin, end), for the dictionary page when the layout has one and then
+    // for the pages.
+    FileRanges loaded(SkipChunk& chunk, std::initializer_list<size_t> pages) const {
+        FileRanges ranges;
+        if (GetParam().dict) {
+            ranges.emplace_back(0, chunk.dict_size());
+        }
+        for (size_t page : pages) {
+            ranges.emplace_back(chunk.page_begin(page), chunk.page_end(page));
+        }
+        return ranges;
+    }
+};
+
+// A read that selects pages 2, 5 and 9 of 12: the stream loads the dictionary page and the runs of these pages only,
+// with one request for each, and the reader gets the same values as without the narrowing.
+TEST_P(OffsetIndexNarrowIoTest, LoadsOnlyTheNeededPages) {
+    ScopedNarrowConfig config_guard(true, 8, -1);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    Filter filter = make_filter(600, {{103, 104}, {250, 251}, {499, 500}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 600, &filter));
+
+    ASSERT_EQ(loaded(chunk, {2, 5, 9}), chunk.stream().ranges());
+    ASSERT_NO_FATAL_FAILURE(chunk.finish());
+
+    // The planner named every other byte of the chunk, and the stream did not load them.
+    int64_t needed_bytes = chunk.dict_size();
+    for (size_t page : {2, 5, 9}) {
+        needed_bytes += page_size(chunk, page);
+    }
+    ASSERT_EQ(1, chunk.stats().narrow_io_named_buffers);
+    ASSERT_EQ(chunk.chunk_size() - needed_bytes, chunk.stats().narrow_io_named_bytes);
+    ASSERT_EQ(chunk.chunk_size() - needed_bytes, chunk.shared_stream().skip_ranges_bytes());
+    ASSERT_EQ(1, chunk.shared_stream().skip_ranges_split_count());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_deferred_bytes());
+    ASSERT_EQ(GetParam().dict ? 4 : 3, chunk.shared_stream().shared_io_count());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_recover_count());
+    ASSERT_GT(chunk.stats().narrow_io_plan_ns, 0);
+}
+
+// With the config off the first header read loads the whole chunk, as before, and the values are the same.
+TEST_P(OffsetIndexNarrowIoTest, ConfigOffLoadsTheWholeChunk) {
+    ScopedNarrowConfig config_guard(false, 8, -1);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    Filter filter = make_filter(600, {{103, 104}, {250, 251}, {499, 500}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 600, &filter));
+    ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+    ASSERT_NO_FATAL_FAILURE(chunk.check_default_rows());
+    ASSERT_NO_FATAL_FAILURE(chunk.check_counters());
+    ASSERT_EQ(0, chunk.stats().narrow_io_named_buffers);
+    ASSERT_EQ(0, chunk.stats().narrow_io_plan_ns);
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_bytes());
+}
+
+// Three consecutive ranges: [0, 150) needs the page 1, [150, 450) needs the pages 4 and 7, and [450, 600) needs the
+// page 10. Each range loads only its pages: the buffer of the chunk is split at the first range, the buffer that is not
+// loaded is asked again for the second range, and so on. No read is direct, and the reader touches no other page.
+TEST_P(OffsetIndexNarrowIoTest, ThreeConsecutiveRangesLoadOnlyTheirPages) {
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+
+    Filter first = make_filter(150, {{60, 61}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 150, &first));
+    ASSERT_EQ(loaded(chunk, {1}), chunk.stream().ranges());
+    // the pages 0 and 2 are dead, and the pages behind the range are deferred
+    ASSERT_EQ(page_size(chunk, 0) + page_size(chunk, 2), chunk.shared_stream().skip_ranges_bytes());
+    ASSERT_EQ(chunk.chunk_size() - chunk.page_begin(3), chunk.shared_stream().skip_ranges_deferred_bytes());
+
+    Filter second = make_filter(300, {{60, 61}, {205, 206}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(150, 450, &second));
+    ASSERT_EQ(loaded(chunk, {1, 4, 7}), chunk.stream().ranges());
+
+    Filter third = make_filter(150, {{70, 71}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(450, 600, &third));
+    ASSERT_EQ(loaded(chunk, {1, 4, 7, 10}), chunk.stream().ranges());
+
+    ASSERT_NO_FATAL_FAILURE(chunk.finish());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_recover_count());
+    // every byte that is not the dictionary page or one of the four pages was cut out
+    int64_t loaded_pages = 0;
+    for (size_t page : {1, 4, 7, 10}) {
+        loaded_pages += page_size(chunk, page);
+    }
+    ASSERT_EQ(chunk.chunk_size() - chunk.dict_size() - loaded_pages, chunk.shared_stream().skip_ranges_bytes());
+}
+
+// The config of the page skipping can be switched off while a scan runs. The first range narrows the chunk and cuts the
+// pages 0 and 2 out of the buffer, and the switch comes after it. The reader keeps skipping pages for this chunk, so it
+// does not walk over the cut pages: the stream loads the same pages as without the switch, no read is direct, and no read
+// recovers a cut span.
+TEST_P(OffsetIndexNarrowIoTest, SwitchingTheSkipOffMidScanKeepsTheNarrowedChunkSkipping) {
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+
+    Filter first = make_filter(150, {{60, 61}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 150, &first));
+    ASSERT_EQ(loaded(chunk, {1}), chunk.stream().ranges());
+    ASSERT_EQ(page_size(chunk, 0) + page_size(chunk, 2), chunk.shared_stream().skip_ranges_bytes());
+
+    {
+        ScopedSkipConfig skip_guard(false);
+        Filter second = make_filter(300, {{60, 61}, {205, 206}});
+        ASSERT_NO_FATAL_FAILURE(chunk.read(150, 450, &second));
+        ASSERT_EQ(loaded(chunk, {1, 4, 7}), chunk.stream().ranges());
+
+        Filter third = make_filter(150, {{70, 71}});
+        ASSERT_NO_FATAL_FAILURE(chunk.read(450, 600, &third));
+        ASSERT_EQ(loaded(chunk, {1, 4, 7, 10}), chunk.stream().ranges());
+    }
+    ASSERT_NO_FATAL_FAILURE(chunk.finish());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_recover_count());
+}
+
+// The page that holds the end of the range also holds the rows of the next range, so it is not dead: it is deferred, and
+// the next range, which starts in it, loads it from the buffer that is asked again.
+TEST_P(OffsetIndexNarrowIoTest, PageThatStraddlesTheEndOfTheRangeIsDeferred) {
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    // the range [0, 270) ends in the middle of the page 5, which has the rows 250 to 299
+    Filter first = make_filter(270, {{103, 104}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 270, &first));
+    ASSERT_EQ(loaded(chunk, {2}), chunk.stream().ranges());
+    // the next range needs a row of the page 5
+    Filter second = make_filter(30, {{15, 16}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(270, 300, &second));
+    ASSERT_EQ(loaded(chunk, {2, 5}), chunk.stream().ranges());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+    ASSERT_NO_FATAL_FAILURE(chunk.finish());
+}
+
+// The first bytes behind the range are read ahead with its pages, up to whole pages: the range [0, 100) needs the page 1
+// and ends with it, and the page 2 is read ahead, in the request of the page 1. The next range, which needs the page 2,
+// loads nothing.
+TEST_P(OffsetIndexNarrowIoTest, ReadAheadIsLoadedWithThePages) {
+    // We want to test the read ahead, which the planner applies to a chunk that defers its pages. The range [0, 100)
+    // jumps over the page 0 only, so the chunk defers when the page 0 is at least the min dead ratio of the pages 0 and
+    // 1. In a column with nulls the page 1 holds a few more values than the page 0, so with the default ratio of a half
+    // the share is just under it and the planner loads the rest of the chunk. So the test asks for a lower ratio.
+    ScopedNarrowConfig config_guard(true, 8, 1, 0.25);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    Filter first = make_filter(100, {{60, 61}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 100, &first));
+    FileRanges expected;
+    if (GetParam().dict) {
+        expected.emplace_back(0, chunk.dict_size());
+    }
+    expected.emplace_back(chunk.page_begin(1), chunk.page_end(2));
+    ASSERT_EQ(expected, chunk.stream().ranges());
+
+    Filter second = make_filter(50, {{20, 21}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(100, 150, &second));
+    ASSERT_EQ(expected, chunk.stream().ranges());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+}
+
+// A chunk whose ranges need all its pages does not defer: the first request loads the whole buffer, and the next ranges
+// do not pay a request each.
+TEST_P(OffsetIndexNarrowIoTest, DenseChunkIsLoadedWhole) {
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    Filter first = make_filter(300, {{10, 11}, {60, 61}, {110, 111}, {160, 161}, {210, 211}, {260, 261}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 300, &first));
+    ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_deferred_bytes());
+    ASSERT_EQ(0, chunk.shared_stream().skip_ranges_bytes());
+
+    Filter second = make_filter(300, {{10, 11}, {120, 121}, {250, 251}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(300, 600, &second));
+    ASSERT_EQ(1u, chunk.stream().ranges().size());
+}
+
+// Twenty ranges of 30 rows, each with one selected row, need every page of the chunk. The first range loads its page and
+// the next page, which is read ahead. The ranges that the buffer serves never ask the planner, and the reader tells it
+// what it passed, so the planner sees that no page was dead and stops deferring: the rest of the chunk is loaded with one
+// request, not with one request for each page.
+TEST_P(OffsetIndexNarrowIoTest, ScanThatNeedsAllPagesStopsDeferring) {
+    ScopedNarrowConfig config_guard(true, 8, 1);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    for (size_t begin = 0; begin < 600; begin += 30) {
+        Filter filter = make_filter(30, {{15, 16}});
+        ASSERT_NO_FATAL_FAILURE(chunk.read(begin, begin + 30, &filter));
+    }
+    ASSERT_NO_FATAL_FAILURE(chunk.check_default_rows());
+    ASSERT_NO_FATAL_FAILURE(chunk.check_counters());
+    // the dictionary page, the page 0 and the page 1 are one run, and the pages 2 to 11 are the other
+    FileRanges expected;
+    expected.emplace_back(0, chunk.page_end(1));
+    expected.emplace_back(chunk.page_begin(2), chunk.chunk_size());
+    ASSERT_EQ(expected, chunk.stream().ranges());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+}
+
+// The reader reads the dictionary page before any range, as a dictionary filter does. The data behind it is deferred, so
+// only the dictionary page is loaded, and the first range loads only its pages.
+TEST_P(OffsetIndexNarrowIoTest, DictionaryReadLoadsOnlyTheDictionaryPage) {
+    if (!GetParam().dict) {
+        return;
+    }
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    ASSERT_OK(chunk.load_dictionary());
+    ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.dict_size())}, chunk.stream().ranges());
+    ASSERT_EQ(chunk.chunk_size() - chunk.dict_size(), chunk.shared_stream().skip_ranges_deferred_bytes());
+
+    Filter filter = make_filter(600, {{480, 481}});
+    ASSERT_NO_FATAL_FAILURE(chunk.read(0, 600, &filter));
+    ASSERT_EQ(loaded(chunk, {9}), chunk.stream().ranges());
+    ASSERT_EQ(0, chunk.shared_stream().direct_io_count());
+    ASSERT_NO_FATAL_FAILURE(chunk.finish());
+}
+
+// With the dictionary defer off, the dictionary read loads the whole buffer.
+TEST_P(OffsetIndexNarrowIoTest, DictionaryReadLoadsTheWholeBufferWhenDeferIsOff) {
+    if (!GetParam().dict) {
+        return;
+    }
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    const bool saved = config::parquet_offset_index_narrow_io_dict_defer_enable;
+    config::parquet_offset_index_narrow_io_dict_defer_enable = false;
+    SkipChunk chunk;
+    ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+    ASSERT_OK(chunk.load_dictionary());
+    ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+    config::parquet_offset_index_narrow_io_dict_defer_enable = saved;
+}
+
+// The dictionary defer is for a column that skips pages through its offset index afterwards. A scan with the page skipping
+// switched off, a chunk without an offset index and a column that the scan has given up on read the buffer whole, as the
+// reader does not narrow it later.
+TEST_P(OffsetIndexNarrowIoTest, DictionaryReadLoadsTheWholeBufferWhenTheColumnDoesNotSkipPages) {
+    if (!GetParam().dict) {
+        return;
+    }
+    ScopedNarrowConfig config_guard(true, 8, 0);
+    {
+        ScopedSkipConfig skip_guard(false);
+        SkipChunk chunk;
+        ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+        ASSERT_OK(chunk.load_dictionary());
+        ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+        ASSERT_EQ(0, chunk.shared_stream().skip_ranges_deferred_bytes());
+    }
+    {
+        SkipChunk chunk;
+        ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+        chunk.hide_offset_index();
+        ASSERT_OK(chunk.load_dictionary());
+        ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+        ASSERT_EQ(0, chunk.shared_stream().skip_ranges_deferred_bytes());
+    }
+    {
+        OffsetIndexSkipAdvisor advisor;
+        for (int32_t i = 0; i < config::parquet_offset_index_skip_give_up_row_groups; ++i) {
+            advisor.observe("c", 0);
+        }
+        SkipChunk chunk;
+        ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+        chunk.set_skip_advisor(&advisor);
+        ASSERT_OK(chunk.load_dictionary());
+        ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.chunk_size())}, chunk.stream().ranges());
+        ASSERT_EQ(0, chunk.shared_stream().skip_ranges_deferred_bytes());
+    }
+    {
+        // a column that skipped a page keeps deferring
+        OffsetIndexSkipAdvisor advisor;
+        for (int32_t i = 0; i < config::parquet_offset_index_skip_give_up_row_groups; ++i) {
+            advisor.observe("c", 1);
+        }
+        SkipChunk chunk;
+        ASSERT_NO_FATAL_FAILURE(chunk.init(narrow_layout()));
+        chunk.set_skip_advisor(&advisor);
+        ASSERT_OK(chunk.load_dictionary());
+        ASSERT_EQ(FileRanges{std::make_pair(static_cast<int64_t>(0), chunk.dict_size())}, chunk.stream().ranges());
+    }
+}
+
+// Ranges with gaps and a different filter each time, with the shared buffer cut and deferred by the planner: every
+// selected row has its value, and the rows of the pages that nobody needs get the default values.
+TEST_P(OffsetIndexNarrowIoTest, RandomReads) {
+    for (int64_t read_ahead : {-1, 0, 150}) {
+        for (int32_t distance : {8, 1000000}) {
+            for (double min_dead_ratio : {0.0, 0.5, 1.0}) {
+                ScopedNarrowConfig config_guard(true, distance, read_ahead, min_dead_ratio);
+                for (uint32_t seed = 1; seed <= 20; ++seed) {
+                    SCOPED_TRACE("read-ahead " + std::to_string(read_ahead) + " distance " + std::to_string(distance) +
+                                 " ratio " + std::to_string(min_dead_ratio) + " seed " + std::to_string(seed));
+                    std::mt19937 gen(seed);
+                    SkipChunk chunk;
+                    SkipLayout random_layout = layout();
+                    random_layout.shared_buffer = true;
+                    ASSERT_NO_FATAL_FAILURE(chunk.init(random_layout));
+                    if (GetParam().dict && gen() % 2 == 0) {
+                        ASSERT_OK(chunk.load_dictionary());
+                    }
+                    static constexpr size_t kGaps[] = {0, 0, 0, 1, 5, 30, 80};
+                    size_t pos = 0;
+                    while (pos < chunk.num_rows()) {
+                        const size_t begin = std::min(pos + kGaps[gen() % 7], chunk.num_rows());
+                        if (begin >= chunk.num_rows()) {
+                            break;
+                        }
+                        const size_t end = std::min(begin + 1 + gen() % 120, chunk.num_rows());
+                        Filter filter = make_random_filter(&gen, end - begin);
+                        ASSERT_NO_FATAL_FAILURE(chunk.read(begin, end, &filter));
+                        pos = end;
+                    }
+                    ASSERT_NO_FATAL_FAILURE(chunk.check_default_rows());
+                    ASSERT_NO_FATAL_FAILURE(chunk.check_counters());
+                }
+            }
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(AllSkipCases, OffsetIndexSkipTest,
+                         testing::Values(SkipParam{ReaderCase::REQUIRED, false}, SkipParam{ReaderCase::REQUIRED, true},
+                                         SkipParam{ReaderCase::OPTIONAL, false}, SkipParam{ReaderCase::OPTIONAL, true},
+                                         SkipParam{ReaderCase::OPTIONAL_WITH_LEVELS, false},
+                                         SkipParam{ReaderCase::OPTIONAL_WITH_LEVELS, true}),
+                         [](const testing::TestParamInfo<SkipParam>& info) {
+                             std::string name;
+                             switch (info.param.reader_case) {
+                             case ReaderCase::REQUIRED:
+                                 name = "Required";
+                                 break;
+                             case ReaderCase::OPTIONAL:
+                                 name = "Optional";
+                                 break;
+                             case ReaderCase::OPTIONAL_WITH_LEVELS:
+                                 name = "OptionalWithLevels";
+                                 break;
+                             case ReaderCase::REPEATED:
+                                 name = "Repeated";
+                                 break;
+                             }
+                             return name + (info.param.dict ? "Dict" : "Plain");
+                         });
+
+INSTANTIATE_TEST_SUITE_P(AllNarrowIoCases, OffsetIndexNarrowIoTest,
                          testing::Values(SkipParam{ReaderCase::REQUIRED, false}, SkipParam{ReaderCase::REQUIRED, true},
                                          SkipParam{ReaderCase::OPTIONAL, false}, SkipParam{ReaderCase::OPTIONAL, true},
                                          SkipParam{ReaderCase::OPTIONAL_WITH_LEVELS, false},

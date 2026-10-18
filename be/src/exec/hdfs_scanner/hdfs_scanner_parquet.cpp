@@ -115,6 +115,12 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     RuntimeProfile::Counter* offset_index_skip_given_up = nullptr;
     RuntimeProfile::Counter* page_cache_io_index_loads = nullptr;
     RuntimeProfile::Counter* page_cache_io_index_load_timer = nullptr;
+    RuntimeProfile::Counter* narrow_io_named_buffers = nullptr;
+    RuntimeProfile::Counter* narrow_io_named_bytes = nullptr;
+    RuntimeProfile::Counter* narrow_io_deferred_bytes = nullptr;
+    RuntimeProfile::Counter* narrow_io_plan_timer = nullptr;
+    RuntimeProfile::Counter* narrow_io_stream_deferred_bytes = nullptr;
+    RuntimeProfile::Counter* narrow_io_stream_deferred_count = nullptr;
     // round-by-round
     RuntimeProfile::Counter* group_min_round_cost = nullptr;
     // page index
@@ -200,6 +206,19 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     page_cache_io_index_loads =
             ADD_CHILD_COUNTER(root, "PageCacheIOIndexLoadCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
     page_cache_io_index_load_timer = ADD_CHILD_TIMER(root, "PageCacheIOIndexLoadTime", kParquetProfileSectionPrefix);
+    narrow_io_named_buffers =
+            ADD_CHILD_COUNTER(root, "NarrowIONamedBuffers", TUnit::UNIT, kParquetProfileSectionPrefix);
+    narrow_io_named_bytes = ADD_CHILD_COUNTER(root, "NarrowIONamedBytes", TUnit::BYTES, kParquetProfileSectionPrefix);
+    narrow_io_deferred_bytes =
+            ADD_CHILD_COUNTER(root, "NarrowIODeferredBytes", TUnit::BYTES, kParquetProfileSectionPrefix);
+    // The time of the planner of the narrowing. The time of all of plan_load() of the stream, which holds the planners and
+    // the splitting of the buffer, is PageCachePlanTime in the SharedBuffered section, and PageCacheRecoverCount and
+    // PageCacheRecoverBytes count the reads that the stream served by one read of a cut span.
+    narrow_io_plan_timer = ADD_CHILD_TIMER(root, "NarrowIOPlannerTime", kParquetProfileSectionPrefix);
+    narrow_io_stream_deferred_bytes =
+            ADD_CHILD_COUNTER(root, "SkipRangesDeferredBytes", TUnit::BYTES, kParquetProfileSectionPrefix);
+    narrow_io_stream_deferred_count =
+            ADD_CHILD_COUNTER(root, "SkipRangesDeferredCount", TUnit::UNIT, kParquetProfileSectionPrefix);
     group_min_round_cost = root->AddLowWaterMarkCounter(
             "GroupMinRound", TUnit::UNIT, RuntimeProfile::Counter::create_strategy(TCounterAggregateType::AVG),
             kParquetProfileSectionPrefix);
@@ -267,6 +286,14 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     COUNTER_UPDATE(offset_index_skip_given_up, _app_stats.offset_index_skip_given_up);
     COUNTER_UPDATE(page_cache_io_index_loads, _app_stats.page_cache_io_index_loads);
     COUNTER_UPDATE(page_cache_io_index_load_timer, _app_stats.page_cache_io_index_load_ns);
+    COUNTER_UPDATE(narrow_io_named_buffers, _app_stats.narrow_io_named_buffers);
+    COUNTER_UPDATE(narrow_io_named_bytes, _app_stats.narrow_io_named_bytes);
+    COUNTER_UPDATE(narrow_io_deferred_bytes, _app_stats.narrow_io_deferred_bytes);
+    COUNTER_UPDATE(narrow_io_plan_timer, _app_stats.narrow_io_plan_ns);
+    if (_shared_buffered_input_stream != nullptr) {
+        COUNTER_UPDATE(narrow_io_stream_deferred_bytes, _shared_buffered_input_stream->skip_ranges_deferred_bytes());
+        COUNTER_UPDATE(narrow_io_stream_deferred_count, _shared_buffered_input_stream->skip_ranges_deferred_count());
+    }
     COUNTER_SET(group_min_round_cost, _app_stats.group_min_round_cost);
     do_update_deletion_vector_filter_counter(root);
     COUNTER_UPDATE(rows_before_page_index, _app_stats.rows_before_page_index);

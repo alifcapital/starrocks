@@ -21,8 +21,10 @@
 #include <string_view>
 
 #include "common/compiler_util.h"
+#include "common/config.h"
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
+#include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
 #include "fs/fs.h"
@@ -30,6 +32,7 @@
 #include "runtime/current_thread.h"
 #include "runtime/mem_tracker.h"
 #include "util/compression/block_compression.h"
+#include "util/defer_op.h"
 
 namespace starrocks::parquet {
 
@@ -321,10 +324,47 @@ Status ColumnChunkReader::_parse_dict_page() {
     return Status::OK();
 }
 
+// The read of the dictionary page comes before any read range of the chunk, and then nobody has told the stream what the
+// chunk needs, so a shared buffer that holds the chunk loads the data behind the dictionary page too. We fear that this is
+// a waste: a dictionary filter can drop the row group, and the first range can need only a few pages. So we tell the
+// planner of the stream that the data behind the dictionary page is deferred (see NarrowIoPlanner). Returns the begin of
+// the chunk to pass to end_dictionary_read(), or -1 when nothing was told.
+//
+// We do it only for a column that will skip pages through its offset index (see RawColumnReader): the first range then
+// loads only its pages. A column that reads the pages one after the other loads all of them after the deferral, so the
+// deferral costs one more request for every row group that the dictionary does not drop, and we expect that to be
+// more than it saves. So a scan with the page skipping switched off, a chunk without an offset index and a column that
+// the scan has given up on read the buffer as before.
+int64_t ColumnChunkReader::_begin_dictionary_read() {
+    // A repeated column reads its pages one after the other and never skips a page, so nothing narrows the buffer later.
+    if (_opts.narrow_io == nullptr || _max_rep_level > 0 || !metadata().__isset.dictionary_page_offset ||
+        metadata().data_page_offset <= metadata().dictionary_page_offset) {
+        return -1;
+    }
+    if (!config::parquet_offset_index_skip_enable || !_chunk_metadata->__isset.offset_index_offset ||
+        !_chunk_metadata->__isset.offset_index_length) {
+        return -1;
+    }
+    OffsetIndexSkipAdvisor* advisor = _opts.offset_index_skip_advisor;
+    if (advisor != nullptr && !advisor->should_load(offset_index_feedback_key(metadata()))) {
+        return -1;
+    }
+    const int64_t chunk_begin = metadata().dictionary_page_offset;
+    _opts.narrow_io->begin_dictionary_read(chunk_begin, metadata().data_page_offset,
+                                           chunk_begin + metadata().total_compressed_size);
+    return chunk_begin;
+}
+
 Status ColumnChunkReader::_try_load_dictionary() {
     if (_dict_page_parsed) {
         return Status::OK();
     }
+    const int64_t announced_chunk = _begin_dictionary_read();
+    DeferOp end_dictionary_read([&] {
+        if (announced_chunk >= 0) {
+            _opts.narrow_io->end_dictionary_read(announced_chunk);
+        }
+    });
 
     // We expect the chunk to start with the dictionary page, because the callers ask for the dictionary of a chunk
     // that is dictionary encoded. If the first page is a data page, reading its header has moved the reader past it,
@@ -344,6 +384,12 @@ Status ColumnChunkReader::load_dictionary_page() {
     if (_dict_page_parsed) {
         return Status::OK();
     }
+    const int64_t announced_chunk = _begin_dictionary_read();
+    DeferOp end_dictionary_read([&] {
+        if (announced_chunk >= 0) {
+            _opts.narrow_io->end_dictionary_read(announced_chunk);
+        }
+    });
 
     RETURN_IF_ERROR(_parse_page_header());
     if (UNLIKELY(!current_page_is_dict())) {

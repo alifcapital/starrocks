@@ -75,6 +75,7 @@ ADD_BE_LIB(Formats
         parquet/complex_column_reader.cpp
         parquet/encoding.cpp
         parquet/level_codec.cpp
+        parquet/narrow_io_planner.cpp
         parquet/page_cache_io_planner.cpp
         parquet/page_reader.cpp
         parquet/parquet_file_writer.cpp

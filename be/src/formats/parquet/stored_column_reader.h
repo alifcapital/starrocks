@@ -181,6 +181,20 @@ protected:
     bool _cur_page_loaded = false;
     uint64_t _read_cursor = _opts.first_row_index;
     static constexpr size_t BATCH_PROCESS_SIZE = 8192;
+    // The chunk in the planner of the narrowing. It is set when the reader first reads a range through the offset index
+    // with a selected row, and it stays set until the reader is gone. It is null while the reader has no planner or has
+    // not read such a range. The stream may have cut pages out of the buffers of a chunk that is set (see
+    // _skip_enabled()).
+    NarrowIoPlanner::Chunk* _narrow_chunk = nullptr;
+    // The range that the reader is reading, for the planner. They are valid only inside read_range().
+    uint64_t _narrow_range_begin = 0;
+    uint64_t _narrow_range_end = 0;
+    const Filter* _narrow_filter = nullptr;
+    size_t _narrow_first_selected = 0;
+    size_t _narrow_num_filter_rows = 0;
+    // The bytes of the pages that the jumps of the reader passed. The planner defers the pages behind a range only while
+    // many bytes of the chunk are dead, and this counts them for every range, also for the ranges that need no new buffer.
+    int64_t _narrow_dead_bytes = 0;
 
 private:
     Status _next_selected_page(size_t records_to_read, ColumnContentType content_type, size_t* records_to_skip,
@@ -193,25 +207,40 @@ private:
     Status _read(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type, Column* dst,
                  size_t row_readed = 0);
 
-    // Page skipping through the offset index. It applies to a read under a filter, when the config is on and the
+    // The config can be switched off while a scan runs. We fear that a reader which walks its pages one after the other
+    // after the switch reads the pages that the narrowing cut out of the buffers of its chunk, and the stream does not
+    // hold them: the walk costs a request for a span of cut pages, at best, and two requests for a page, at worst. So
+    // a chunk that the narrowing has registered keeps skipping pages until the reader is gone, and the switch takes
+    // effect for the chunks that start after it.
+    bool _skip_enabled() const { return config::parquet_offset_index_skip_enable || _narrow_chunk != nullptr; }
+    // Page skipping through the offset index. It applies to a read under a filter, when the skipping is on and the
     // reader has the offset index.
     bool _skips_pages(const Filter* filter) const {
-        return _skip_index != nullptr && filter != nullptr && config::parquet_offset_index_skip_enable;
+        return _skip_index != nullptr && filter != nullptr && _skip_enabled();
     }
     // A read without a filter goes through the offset index too when an earlier read left the reader behind its
     // range: the pages between the reader and the range may be pages that no read needs, and walking over them reads
     // their headers.
     bool _seeks_without_filter(const Filter* filter) const {
-        return filter == nullptr && _behind && _skip_index != nullptr && config::parquet_offset_index_skip_enable;
+        return filter == nullptr && _behind && _skip_index != nullptr && _skip_enabled();
     }
     Status _read_skipping_pages(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type,
                                 Column* dst);
     Status _enter_next_page(const Range<uint64_t>& range, const Filter& filter, ColumnContentType content_type,
                             Column* dst, size_t* row_readed, size_t* unread_rows);
     Status _jump_to_page(size_t page_idx, size_t reader_page);
+    // Tells the planner of the shared buffers that the reader begins to read the range (see NarrowIoPlanner). The planner
+    // asks what the range needs, with _compute_narrow_need(), only when the stream is about to load a buffer of the chunk,
+    // so we keep the range and the filter, which live until the read ends. `first_selected` is the first selected row of
+    // the range, and `num_filter_rows` is the number of rows of the range that the filter covers. `first_unread_page` is
+    // the first page that the reader has neither read nor jumped over.
+    void _begin_narrow_io(const Range<uint64_t>& range, const Filter* filter, size_t first_selected,
+                          size_t num_filter_rows, size_t first_unread_page);
+    // What the range that _begin_narrow_io() was given needs from the chunk.
+    void _compute_narrow_need(NarrowIoPlanner::Need* need);
 
     // The reader compares every page that it enters with the offset index while the skipping is on.
-    bool _checks_pages() const { return _skip_index != nullptr && config::parquet_offset_index_skip_enable; }
+    bool _checks_pages() const { return _skip_index != nullptr && _skip_enabled(); }
     Status _check_entered_page();
 
     // input is target row, this function will convert row to values bases on _num_values_left_in_cur_page,

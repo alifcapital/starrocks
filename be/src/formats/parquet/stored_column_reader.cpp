@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "column/column.h"
 #include "column_reader.h"
@@ -33,6 +34,7 @@
 #include "formats/parquet/utils.h"
 #include "fs/fs.h"
 #include "simd/simd.h"
+#include "util/defer_op.h"
 
 namespace tparquet {
 class ColumnChunk;
@@ -363,8 +365,20 @@ Status StoredColumnReaderImpl::_read_skipping_pages(const Range<uint64_t>& range
         return _read_values_on_levels(num_rows, content_type, dst, true);
     }
 
-    size_t row_readed = 0;
     const size_t reader_page = _skip_index->page_of_row(_read_cursor);
+    // The planner asks us what the range needs only if the stream loads a buffer of the chunk during this read.
+    const bool narrowed = _opts.narrow_io != nullptr && config::parquet_offset_index_narrow_io_enable;
+    if (narrowed) {
+        _begin_narrow_io(range, filter, first_selected, num_filter_rows,
+                         _num_values_left_in_cur_page > 0 ? reader_page + 1 : reader_page);
+    }
+    DeferOp end_narrow_io([&] {
+        if (narrowed) {
+            _opts.narrow_io->end_range(_narrow_chunk);
+        }
+    });
+
+    size_t row_readed = 0;
     const size_t target_page = _skip_index->page_of_row(range.begin() + first_selected);
     if (target_page > reader_page) {
         const uint64_t target_first_row = _skip_index->page_first_row(target_page);
@@ -378,6 +392,117 @@ Status StoredColumnReaderImpl::_read_skipping_pages(const Range<uint64_t>& range
         RETURN_IF_ERROR(_skip(range.begin() + row_readed - _read_cursor));
     }
     return _read(range, filter, content_type, dst, row_readed);
+}
+
+// The jumps of this read go to the pages with a selected row, and the stream loads a shared buffer whole at the first
+// byte that a read takes from it. We fear that the buffer holds pages that we do not need, and then they are downloaded
+// in vain. So we register the range with the planner of the stream, which asks us what the range needs when the stream
+// is about to load a buffer of the chunk (_compute_narrow_need()). We do not compute it here: a scan whose data cache
+// holds the blocks never loads a buffer, and then the range costs us a few stores.
+void StoredColumnReaderImpl::_begin_narrow_io(const Range<uint64_t>& range, const Filter* filter, size_t first_selected,
+                                              size_t num_filter_rows, size_t first_unread_page) {
+    const auto& pages = _skip_index->offset_index.page_locations;
+    if (_narrow_chunk == nullptr) {
+        const tparquet::ColumnMetaData& column_metadata = _reader->metadata();
+        const int64_t chunk_begin = column_metadata.__isset.dictionary_page_offset
+                                            ? column_metadata.dictionary_page_offset
+                                            : column_metadata.data_page_offset;
+        _narrow_chunk = _opts.narrow_io->add_chunk(chunk_begin, chunk_begin + column_metadata.total_compressed_size,
+                                                   pages.front().offset,
+                                                   [this](NarrowIoPlanner::Need* need) { _compute_narrow_need(need); });
+    }
+    _narrow_range_begin = range.begin();
+    _narrow_range_end = range.end();
+    _narrow_filter = filter;
+    _narrow_first_selected = first_selected;
+    _narrow_num_filter_rows = num_filter_rows;
+    // The planner defers the pages behind the range only while many pages of the chunk are dead. We tell it how far we
+    // have come and how many bytes we jumped over, for every range: the ranges that the stream serves from loaded buffers
+    // do not ask the planner anything, and without them the planner would take their pages for dead ones.
+    const int64_t read_until = first_unread_page < pages.size()
+                                       ? pages[first_unread_page].offset
+                                       : pages.back().offset + pages.back().compressed_page_size;
+    _opts.narrow_io->begin_range(_narrow_chunk, read_until, _narrow_dead_bytes);
+}
+
+// We expect the reader to move forward in its chunk, so a page whose rows all lie in front of the end of the range is
+// never read again, unless the range needs it: these pages are dead, and the stream cuts them out of the buffer. The
+// pages behind the end of the range may be needed by a later range, and the stream defers them. The work is one pass
+// over the pages of the range: the pages are found from the selection with one jump from each page to the next selected
+// row, so the cost is the pages of the range and a scan of the filter bytes at most once, and no work for a row.
+void StoredColumnReaderImpl::_compute_narrow_need(NarrowIoPlanner::Need* need) {
+    const auto& pages = _skip_index->offset_index.page_locations;
+    const tparquet::ColumnMetaData& column_metadata = _reader->metadata();
+    const int64_t chunk_begin = column_metadata.__isset.dictionary_page_offset ? column_metadata.dictionary_page_offset
+                                                                               : column_metadata.data_page_offset;
+
+    // The dictionary page is the bytes before the first data page, and the reader loads it before the first jump, or when
+    // it walks the chunk from its start.
+    if (_skip_index_has_dict_page && !_reader->dictionary_page_parsed()) {
+        need->needed.emplace_back(chunk_begin, pages.front().offset - chunk_begin);
+    }
+    // The pages with a selected row. `row` moves from the first selected row of a page to the first selected row of a
+    // later page.
+    size_t row = _narrow_first_selected;
+    size_t last_needed_page = 0;
+    bool any_needed_page = false;
+    while (row < _narrow_num_filter_rows) {
+        const size_t page = _skip_index->page_of_row(_narrow_range_begin + row);
+        need->needed.emplace_back(pages[page].offset, pages[page].compressed_page_size);
+        last_needed_page = page;
+        any_needed_page = true;
+        if (page + 1 >= pages.size()) {
+            break;
+        }
+        const uint64_t next_first_row = _skip_index->page_first_row(page + 1);
+        if (next_first_row >= _narrow_range_begin + _narrow_num_filter_rows) {
+            break;
+        }
+        row = next_first_row - _narrow_range_begin;
+        if (_narrow_filter != nullptr) {
+            row = SIMD::find_nonzero(*_narrow_filter, row);
+        }
+    }
+
+    // The page that holds the last row of the range is dead if it ends in front of the range end. Otherwise it holds
+    // rows of the later ranges, and the pages in front of it are dead.
+    const size_t last_page = _skip_index->page_of_row(_narrow_range_end - 1);
+    bool last_page_end_known = false;
+    uint64_t last_page_end_row = 0;
+    if (last_page + 1 < pages.size()) {
+        last_page_end_known = true;
+        last_page_end_row = _skip_index->page_first_row(last_page + 1);
+    } else if (_opts.row_group_meta != nullptr) {
+        last_page_end_known = true;
+        last_page_end_row = _skip_index->rg_first_row + _opts.row_group_meta->num_rows;
+    }
+    const bool last_page_is_dead = last_page_end_known && last_page_end_row <= _narrow_range_end;
+    need->dead_end = pages[last_page].offset;
+    if (last_page_is_dead) {
+        need->dead_end += pages[last_page].compressed_page_size;
+    }
+
+    // The next range probably needs the pages behind this one, and a request for each of them costs more than a few
+    // pages. So the first bytes behind the range are read ahead, up to whole pages. The read ahead begins at the page
+    // that holds the end of the range when it also holds the rows of the next range.
+    int64_t read_ahead = config::parquet_offset_index_narrow_io_read_ahead_size;
+    if (read_ahead < 0) {
+        read_ahead = config::io_coalesce_read_max_distance_size;
+    }
+    size_t ahead_page = last_page_is_dead ? last_page + 1 : last_page;
+    if (any_needed_page) {
+        ahead_page = std::max(ahead_page, last_needed_page + 1);
+    }
+    int64_t ahead_bytes = 0;
+    size_t page = ahead_page;
+    while (page < pages.size() && ahead_bytes < read_ahead) {
+        ahead_bytes += pages[page].compressed_page_size;
+        ++page;
+    }
+    if (page > ahead_page) {
+        need->ahead_begin = pages[ahead_page].offset;
+        need->ahead_end = pages[page - 1].offset + pages[page - 1].compressed_page_size;
+    }
 }
 
 // The current page has no values left and the range has rows left. The next page of the stream starts at the next
@@ -431,6 +556,7 @@ Status StoredColumnReaderImpl::_jump_to_page(size_t page_idx, size_t reader_page
             passed_bytes += pages[i].compressed_page_size;
         }
         _skipped_pages += page_idx - first_passed_page;
+        _narrow_dead_bytes += passed_bytes;
         _opts.stats->page_skip_by_offset_index += page_idx - first_passed_page;
         _opts.stats->page_skip_by_offset_index_undecoded_bytes += passed_bytes;
     }

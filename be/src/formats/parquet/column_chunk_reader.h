@@ -144,6 +144,9 @@ public:
 
     Status load_dictionary_page();
 
+    // True when the dictionary page of the chunk was read and parsed.
+    bool dictionary_page_parsed() const { return _dict_page_parsed; }
+
 private:
     Status _parse_page_header();
     // The error for a batch with NULL values that is read into a column that cannot hold NULL. The decoders give an
@@ -158,6 +161,7 @@ private:
     Status _parse_data_page(tparquet::PageType::type page_type);
     Status _parse_dict_page();
     Status _try_load_dictionary();
+    int64_t _begin_dictionary_read();
 
 private:
     enum PageParseState {

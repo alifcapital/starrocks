@@ -130,8 +130,8 @@ struct HdfsScannerStats {
     int64_t page_skip = 0;
     // The pages that a column read under a filter jumped over through its offset index, without reading their
     // headers or decoding them, and the compressed sizes of these pages from the offset index. The sizes are the bytes
-    // that the reader did not decode. The bytes that the stream did not load are fewer or the same: a stream that
-    // loads a chunk as one buffer loads the pages that nobody decodes too.
+    // that the reader did not decode. A stream that loads a chunk as one buffer loads these pages too, unless the
+    // narrowing cuts them out of the buffer (parquet_offset_index_narrow_io_enable).
     int64_t page_skip_by_offset_index = 0;
     int64_t page_skip_by_offset_index_undecoded_bytes = 0;
     // The offset indexes that columns read to skip pages, and the columns that did not read it because the scan had
@@ -143,6 +143,17 @@ struct HdfsScannerStats {
     // offset index already does not count. The time is the time of these reads, failed ones too.
     int64_t page_cache_io_index_loads = 0;
     int64_t page_cache_io_index_load_ns = 0;
+    // The narrowing of the shared buffers (parquet_offset_index_narrow_io_enable): the buffers for which the stream asked
+    // the planner and it named dead pages, the bytes of these pages, the bytes that the planner deferred, and the time
+    // that the planner spent in the asks of the stream, which includes asking the reader what a range needs. These are
+    // the bytes that the planner named, and not the bytes that the stream did not load: the stream loads a named gap
+    // below the coalesce distance and the named parts of the data cache blocks, it asks again about a buffer that is not
+    // loaded, so it can name or defer a byte more than once, and the other providers of the stream (the page cache aware
+    // IO) name bytes too. The stream counts what it did not load, deferred and cut for all providers in its own counters.
+    int64_t narrow_io_named_buffers = 0;
+    int64_t narrow_io_named_bytes = 0;
+    int64_t narrow_io_deferred_bytes = 0;
+    int64_t narrow_io_plan_ns = 0;
     // page index
     int64_t rows_before_page_index = 0;
     int64_t page_index_ns = 0;

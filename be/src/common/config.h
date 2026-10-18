@@ -1247,11 +1247,37 @@ CONF_mBool(parquet_statistics_process_more_filter_enable, "true");
 CONF_mBool(parquet_fast_timezone_conversion, "false");
 CONF_mBool(parquet_push_down_filter_to_decoder_enable, "true");
 // A column that is read under a row filter finds the pages that hold a selected row by its offset index, so it does
-// not read the headers of the pages in between and does not decode them. The remote bytes of those pages are saved
-// only when the stream loads a column chunk in parts: piece by piece, or by the blocks of the data cache. A stream
-// that loads a chunk as one buffer loads all of it at the first header read, and the skip saves only the CPU there.
-// It does not depend on the page index: when the page index is not read, the scan plans the offset indexes alone.
+// not read the headers of the pages in between and does not decode them. The remote bytes of those pages are saved when
+// the stream loads a column chunk in parts (piece by piece, or by the blocks of the data cache), and when
+// parquet_offset_index_narrow_io_enable is true. Otherwise a stream that loads a chunk as one buffer loads all of it at the
+// first header read, and the skip saves only the CPU there. It does not depend on the page index: when the page index is
+// not read, the scan plans the offset indexes alone. A change takes effect for the chunks that a column starts to read
+// after it: a chunk whose buffers the narrowing has cut keeps skipping pages until its row group is read.
 CONF_mBool(parquet_offset_index_skip_enable, "true");
+// A column that skips pages through its offset index knows which pages its current read range needs, but a shared buffer
+// that holds the chunk is loaded whole at its first access, so the pages that the column does not need are downloaded in
+// vain. When this is true, the reader tells the stream before a buffer is loaded which bytes it does not need now: the
+// pages in front of its range that it does not need are cut out of the buffer, and the pages behind its range stay in a
+// buffer that is not loaded, which the stream asks about again when a later range first reads it. Two runs with a gap of at
+// most io_coalesce_read_max_distance_size are still loaded with one request. It has no effect when
+// parquet_offset_index_skip_enable is false.
+CONF_mBool(parquet_offset_index_narrow_io_enable, "true");
+// The bytes behind the last page that a range needs that are loaded with it, because a request costs more than a few
+// pages and the next range probably needs the next page. A negative value is io_coalesce_read_max_distance_size. A page
+// that is partly in these bytes is loaded whole.
+CONF_mInt64(parquet_offset_index_narrow_io_read_ahead_size, "-1");
+// A scan that needs most pages of a chunk would pay a request for each range, if each range loaded its pages with a buffer
+// of its own. So the reader defers the pages behind a range only while at least this share of the bytes of the chunk in
+// front of the range end is dead: the reader jumped over it, or the range does not need it. 0 always defers.
+CONF_mDouble(parquet_offset_index_narrow_io_defer_min_dead_ratio, "0.5");
+// A column reads the dictionary page of its chunk before it knows the pages of the chunk (a dictionary filter, a global
+// dictionary). When this is true, the data behind the dictionary page is at least 4 times
+// io_coalesce_read_max_distance_size, and the column will skip pages through its offset index (the chunk has an offset
+// index, parquet_offset_index_skip_enable is true and the scan has not given up on the column), the buffer that loads the
+// dictionary page loads only it, and the data is deferred, so a row group that the dictionary drops does not download its
+// data. A column that does not skip pages reads all the pages after the dictionary, so there the deferral would cost one
+// more request for every row group that the dictionary keeps, and the buffer is loaded whole.
+CONF_mBool(parquet_offset_index_narrow_io_dict_defer_enable, "true");
 // The read of an offset index is a remote read. A column that read its offset index in this many row groups of a scan,
 // and skipped no page in any of them, does not read it for the rest of the scan. 0 never gives up.
 CONF_mInt32(parquet_offset_index_skip_give_up_row_groups, "4");

@@ -30,6 +30,7 @@
 #include "common/status.h"
 #include "common/statusor.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/narrow_io_planner.h"
 #include "formats/parquet/page_cache_io_planner.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
@@ -115,6 +116,9 @@ struct ColumnReaderOptions {
     const DataCacheOptions* datacache_options;
     // Feedback of the scan on the columns that read their offset index to skip pages. Null: no feedback.
     OffsetIndexSkipAdvisor* offset_index_skip_advisor = nullptr;
+    // The planner that a column which skips pages through its offset index tells the pages it needs, so the shared
+    // buffers do not load the pages in front of its range that it does not need. Null: the buffers are loaded whole.
+    NarrowIoPlanner* narrow_io = nullptr;
 };
 
 class StoredColumnReader;

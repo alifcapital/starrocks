@@ -29,6 +29,7 @@
 #include "exprs/expr_context.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/narrow_io_planner.h"
 #include "formats/parquet/page_cache_io_planner.h"
 #include "formats/parquet/utils.h"
 #include "gen_cpp/parquet_types.h"
@@ -154,6 +155,9 @@ private:
     // buffers of the stream load these pages again with the pages around them. So we give the stream a planner that
     // names the cached pages of this row group before it loads a buffer (see PageCacheIoPlanner).
     void _setup_page_cache_io();
+    // Gives the stream the providers of this row group that name bytes it should not load: the page cache planner and
+    // the planner of the narrowing (see NarrowIoPlanner).
+    void _install_skip_ranges_providers();
     // Extract dict filter columns and conjuncts
     void _process_columns_and_conjunct_ctxs();
 
@@ -251,6 +255,13 @@ private:
     // The provider of the stream that names the cached pages of this row group. It holds the readers of the chunks, so
     // the destructor takes it out of the stream first. Null when the page cache is not used.
     std::unique_ptr<PageCacheIoPlanner> _page_cache_io_planner;
+
+    // The columns of this row group that skip pages through their offset index tell this planner the pages they need,
+    // and it names the pages in front of their ranges to the stream. Null when the shared stream is not used.
+    std::unique_ptr<NarrowIoPlanner> _narrow_io_planner;
+
+    // The provider of the stream: it asks the planners above. The destructor takes it out of the stream first.
+    SkipRangesProviderChain _skip_ranges_chain;
 
     // Column materialization layer over ColumnReaders. Predicate classification
     // still lives in GroupReader until the next refactor steps.

@@ -934,7 +934,14 @@ public:
         ranges->insert(ranges->end(), skip.begin(), skip.end());
     }
 
+    void find_defer_ranges(int64_t offset, int64_t size,
+                           std::vector<io::SharedBufferedInputStream::IORange>* ranges) override {
+        ranges->insert(ranges->end(), defer.begin(), defer.end());
+    }
+
     std::vector<io::SharedBufferedInputStream::IORange> skip;
+    // The bytes that the provider defers.
+    std::vector<io::SharedBufferedInputStream::IORange> defer;
     // (offset, size) of each ask, in the order of the asks.
     Reads asks;
     std::function<void()> on_ask;
@@ -976,6 +983,13 @@ struct PageCacheCase {
     void name_pages(std::initializer_list<PageName> pages) {
         for (PageName page : pages) {
             provider.skip.emplace_back(page * kPage, kPage);
+        }
+    }
+
+    // The provider defers these pages, as a reader that does not need them now but may need them later.
+    void defer_pages(std::initializer_list<PageName> pages) {
+        for (PageName page : pages) {
+            provider.defer.emplace_back(page * kPage, kPage);
         }
     }
 
@@ -1025,11 +1039,12 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_load_only_the_runs_that_t
     ASSERT_EQ(300 * KB, c.stream->skip_ranges_named_bytes());
     ASSERT_EQ(1, c.stream->skip_ranges_split_count());
 
-    // The runs D and F are loaded when a read needs them, each with one request, and the provider is not asked again.
+    // The runs D and F are loaded when a read needs them, each with one request. The provider is asked about each of them
+    // when a read first takes a byte from it, and it names nothing there.
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kD));
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kF));
     ASSERT_EQ((Reads{{0, 100 * KB}, {300 * KB, 100 * KB}, {500 * KB, 100 * KB}}), c.remote->reads);
-    ASSERT_EQ(1u, c.provider.asks.size());
+    ASSERT_EQ((Reads{{0, 600 * KB}, {300 * KB, 100 * KB}, {500 * KB, 100 * KB}}), c.provider.asks);
     ASSERT_EQ(3, c.stream->shared_io_count());
     ASSERT_EQ(300 * KB, c.stream->shared_io_bytes());
     ASSERT_EQ(0, c.stream->shared_align_io_bytes());
@@ -1301,12 +1316,17 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_timer_counts_the_plan) {
     ASSERT_LE(2'000'000, timer);
     ASSERT_EQ(1, c.stream->skip_ranges_plan_count());
 
-    // the new buffers are planned already, and the loaded buffer is not asked about
+    // the buffer of the read is planned already, the buffer D to F is asked about when the read takes a byte from it,
+    // and a loaded buffer is not asked about
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kD));
+    const int64_t timer_with_second_ask = c.stream->skip_ranges_timer();
+    ASSERT_LE(timer + 2'000'000, timer_with_second_ask);
+    ASSERT_EQ(2, c.stream->skip_ranges_plan_count());
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
-    ASSERT_EQ(1u, c.provider.asks.size());
-    ASSERT_EQ(timer, c.stream->skip_ranges_timer());
-    ASSERT_EQ(1, c.stream->skip_ranges_plan_count());
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kF));
+    ASSERT_EQ(2u, c.provider.asks.size());
+    ASSERT_EQ(timer_with_second_ask, c.stream->skip_ranges_timer());
+    ASSERT_EQ(2, c.stream->skip_ranges_plan_count());
     ASSERT_EQ(2, c.stream->shared_io_count());
     ASSERT_EQ(400 * KB, c.stream->shared_io_bytes());
 }
@@ -1355,7 +1375,8 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_new_buffers_keep_the_spli
             ASSERT_OK(planned.status());
             ASSERT_NE(sb, planned.value());
             ASSERT_EQ(split, planned.value()->split);
-            ASSERT_TRUE(planned.value()->planned);
+            // the run of the read is planned, and the run C to F is asked about when a read takes a byte from it
+            ASSERT_EQ(page == kA, planned.value()->planned);
         }
     }
 }
@@ -1372,8 +1393,8 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_join_runs_with_a_small_ga
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
     ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kD));
     ASSERT_EQ((Reads{{0, 100 * KB}, {300 * KB, 300 * KB}}), c.remote->reads);
-    // the gap of the page E is named, and loaded
-    ASSERT_EQ(300 * KB, c.stream->skip_ranges_named_bytes());
+    // the gap of the page E is named, and loaded, and it is named again when the read of D asks about the run D to F
+    ASSERT_EQ(400 * KB, c.stream->skip_ranges_named_bytes());
     ASSERT_EQ(200 * KB, c.stream->skip_ranges_bytes());
     ASSERT_EQ(1, c.stream->skip_ranges_split_count());
 
@@ -1495,6 +1516,56 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_ask_once_for_each_buffer)
     ASSERT_EQ(2u, c.provider.asks.size());
 }
 
+// Four lazy columns share one coalesced buffer [L1 L2 L3 L4] of 100 KB each. The provider knows the pages of L1 when the
+// read of L1 loads the buffer, and it knows the pages of L2 only when the read of L2 first takes a byte from the buffer.
+// The plan of the read of L1 leaves the run L2 to L4 unplanned, so the read of L2 asks about it and narrows L2, and the
+// plan of L2 leaves the run behind L2 unplanned in the same way.
+TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_ask_again_about_the_columns_that_share_a_buffer) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c;
+    io::SharedBufferedInputStream::CoalesceOptions options;
+    options.max_dist_size = 0;
+    options.max_buffer_size = 8 * 1024 * KB;
+    c.stream->set_coalesce_options(options);
+    c.set_ranges({io::SharedBufferedInputStream::IORange(0, 100 * KB),
+                  io::SharedBufferedInputStream::IORange(100 * KB, 100 * KB),
+                  io::SharedBufferedInputStream::IORange(200 * KB, 100 * KB),
+                  io::SharedBufferedInputStream::IORange(300 * KB, 100 * KB)});
+    ASSERT_TRUE(c.covered(0, 400 * KB));
+    c.provider.on_ask = [&c] {
+        c.provider.skip.clear();
+        c.provider.defer.clear();
+        if (c.provider.asks.size() == 1) {
+            // L1: the reader needs its first 25 KB now and may need the rest later
+            c.provider.defer.emplace_back(25 * KB, 75 * KB);
+        } else if (c.provider.asks.size() == 2) {
+            // L2: the reader needs its first 25 KB, and its pages from 125 KB to 175 KB are dead
+            c.provider.skip.emplace_back(125 * KB, 50 * KB);
+        }
+    };
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, 25 * KB));
+    ASSERT_EQ((Reads{{0, 25 * KB}}), c.remote->reads);
+    ASSERT_EQ((Reads{{0, 400 * KB}}), c.provider.asks);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(100 * KB, 25 * KB));
+    ASSERT_EQ((Reads{{0, 25 * KB}, {100 * KB, 25 * KB}}), c.remote->reads);
+    ASSERT_EQ((Reads{{0, 400 * KB}, {100 * KB, 300 * KB}}), c.provider.asks);
+    ASSERT_EQ(50 * KB, c.stream->skip_ranges_bytes());
+    ASSERT_EQ(0, c.stream->direct_io_count());
+
+    // the run behind L2 is asked about when a read takes a byte from it, and the provider names nothing there
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(300 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{0, 25 * KB}, {100 * KB, 25 * KB}, {175 * KB, 225 * KB}}), c.remote->reads);
+    ASSERT_EQ(3u, c.provider.asks.size());
+    ASSERT_EQ(3, c.stream->skip_ranges_plan_count());
+
+    // the deferred part of L1 is a buffer of its own, and its read asks the provider again
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(50 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{0, 400 * KB}, {100 * KB, 300 * KB}, {175 * KB, 225 * KB}, {25 * KB, 75 * KB}}), c.provider.asks);
+    ASSERT_EQ((Reads{{0, 25 * KB}, {100 * KB, 25 * KB}, {175 * KB, 225 * KB}, {25 * KB, 75 * KB}}), c.remote->reads);
+}
+
 // Without a provider, or after it is taken out, the buffer is loaded whole.
 TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_without_a_provider_the_buffer_is_loaded_whole) {
     constexpr int64_t KB = PageCacheCase::KB;
@@ -1537,8 +1608,9 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_cut_at_the_borders_of_the
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(550 * KB, 10 * KB));
     ASSERT_EQ((Reads{{0, 256 * KB}, {512 * KB, 256 * KB}}), c.remote->reads);
     ASSERT_EQ(256 * KB, c.stream->skip_ranges_bytes());
-    // the blocks that the range covers in part are named and loaded
-    ASSERT_EQ(600 * KB, c.stream->skip_ranges_named_bytes());
+    // the blocks that the range covers in part are named and loaded, and the buffer [512 KB, 768 KB) is asked about
+    // again when the second read takes a byte from it
+    ASSERT_EQ(788 * KB, c.stream->skip_ranges_named_bytes());
     // the second buffer holds 88 KB that a read asked for and the padding of the alignment
     ASSERT_EQ(168 * KB, c.stream->shared_align_io_bytes());
     ASSERT_EQ(0, c.stream->direct_io_count());
@@ -1587,10 +1659,11 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_cut_a_piece_of_a_large_ra
     ASSERT_FALSE(c.covered(520 * KB, 1));
     ASSERT_FALSE(c.covered(999 * KB, 1));
 
-    // the read crosses from the tail into the third piece: both are loaded, and the third piece is asked about
+    // the read crosses from the tail into the third piece: both are asked about, because the plan of the read of the
+    // middle did not need the tail, and both are loaded
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(1020 * KB, 10 * KB));
     ASSERT_EQ((Reads{{600 * KB, 100 * KB}, {1000 * KB, 24 * KB}, {1024 * KB, 512 * KB}}), c.remote->reads);
-    ASSERT_EQ(2u, c.provider.asks.size());
+    ASSERT_EQ((Reads{{512 * KB, 512 * KB}, {1000 * KB, 24 * KB}, {1024 * KB, 512 * KB}}), c.provider.asks);
     ASSERT_EQ(0, c.stream->direct_io_count());
 }
 
@@ -1737,6 +1810,313 @@ TEST_F(SharedBufferedInputStreamTest, test_skip_ranges_random_reads_return_the_b
             ASSERT_NO_FATAL_FAILURE(c.read_and_check(offset, size));
         }
         // every byte of the ranges can be read, whether a buffer holds it or not
+        for (const auto& range : ranges) {
+            ASSERT_NO_FATAL_FAILURE(c.read_and_check(range.offset, range.size));
+        }
+    }
+}
+
+// The provider defers the pages D, E and F: the read of the page A loads the run A, B and C, and the deferred pages are
+// a buffer that is not loaded. The provider is asked again when a read first takes a byte from that buffer, and then it
+// skips D, defers F, and the read of E loads only E.
+TEST_F(SharedBufferedInputStreamTest, test_defer_ranges_become_buffers_that_are_asked_again) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c;
+    c.set_chunk_range();
+    c.defer_pages({kD, kE, kF});
+
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
+    ASSERT_EQ((Reads{{0, 300 * KB}}), c.remote->reads);
+    ASSERT_EQ((Reads{{0, 600 * KB}}), c.provider.asks);
+    ASSERT_EQ(0, c.stream->skip_ranges_bytes());
+    ASSERT_EQ(300 * KB, c.stream->skip_ranges_deferred_bytes());
+    ASSERT_EQ(1, c.stream->skip_ranges_deferred_count());
+    ASSERT_EQ(1, c.stream->skip_ranges_split_count());
+    auto deferred = c.stream->find_shared_buffer(300 * KB, 300 * KB);
+    ASSERT_OK(deferred.status());
+    ASSERT_EQ(0u, deferred.value()->buffer.capacity());
+    ASSERT_FALSE(deferred.value()->planned);
+    ASSERT_FALSE(deferred.value()->split);
+    // the run is planned, and it is loaded
+    auto run = c.stream->find_shared_buffer(0, 300 * KB);
+    ASSERT_OK(run.status());
+    ASSERT_TRUE(run.value()->planned);
+
+    // The next read needs E only, and the provider knows now that D is dead and F is for later.
+    c.provider.defer.clear();
+    c.provider.skip.clear();
+    c.name_pages({kD});
+    c.defer_pages({kF});
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kE));
+    ASSERT_EQ((Reads{{0, 300 * KB}, {400 * KB, 100 * KB}}), c.remote->reads);
+    ASSERT_EQ((Reads{{0, 600 * KB}, {300 * KB, 300 * KB}}), c.provider.asks);
+    ASSERT_EQ(100 * KB, c.stream->skip_ranges_bytes());
+    ASSERT_EQ(400 * KB, c.stream->skip_ranges_deferred_bytes());
+    ASSERT_EQ(2, c.stream->skip_ranges_deferred_count());
+    ASSERT_EQ(2, c.stream->skip_ranges_split_count());
+    ASSERT_FALSE(c.page_covered(kD));
+    ASSERT_TRUE(c.page_covered(kE));
+    auto last = c.stream->find_shared_buffer(500 * KB, 100 * KB);
+    ASSERT_OK(last.status());
+    ASSERT_FALSE(last.value()->planned);
+
+    // The provider names nothing for the page F, and the buffer is loaded whole, with the last request.
+    c.provider.defer.clear();
+    c.provider.skip.clear();
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kF));
+    ASSERT_EQ((Reads{{0, 300 * KB}, {400 * KB, 100 * KB}, {500 * KB, 100 * KB}}), c.remote->reads);
+    ASSERT_EQ(3u, c.provider.asks.size());
+    ASSERT_EQ(3, c.stream->shared_io_count());
+    ASSERT_EQ(0, c.stream->direct_io_count());
+    ASSERT_EQ(0, c.stream->skip_ranges_recover_count());
+
+    // A page of the dead range is read with one read of its cut span, and not with a direct read.
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kD));
+    ASSERT_EQ((Reads{{0, 300 * KB}, {400 * KB, 100 * KB}, {500 * KB, 100 * KB}, {300 * KB, 100 * KB}}),
+              c.remote->reads);
+    ASSERT_EQ(0, c.stream->direct_io_count());
+    ASSERT_EQ(1, c.stream->skip_ranges_recover_count());
+    ASSERT_EQ(100 * KB, c.stream->skip_ranges_recover_bytes());
+}
+
+// The read that loads the buffer is never deferred, also when the provider defers the whole buffer.
+TEST_F(SharedBufferedInputStreamTest, test_defer_never_defers_the_bytes_of_the_read) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c;
+    c.set_chunk_range();
+    c.provider.defer.emplace_back(0, 600 * KB);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kC));
+    ASSERT_EQ((Reads{{200 * KB, 100 * KB}}), c.remote->reads);
+    ASSERT_EQ(500 * KB, c.stream->skip_ranges_deferred_bytes());
+    ASSERT_EQ(2, c.stream->skip_ranges_deferred_count());
+    ASSERT_EQ(0, c.stream->skip_ranges_bytes());
+    for (PageName page : {kA, kB, kD, kE, kF}) {
+        auto sb = c.stream->find_shared_buffer(page * PageCacheCase::kPage, PageCacheCase::kPage);
+        ASSERT_OK(sb.status());
+        ASSERT_FALSE(sb.value()->planned) << page;
+        ASSERT_EQ(0u, sb.value()->buffer.capacity());
+    }
+    // the deferred bytes before and behind the run are two buffers, and no buffer covers the run and its neighbors
+    ASSERT_FALSE(c.covered(100 * KB, 200 * KB));
+    ASSERT_FALSE(c.covered(200 * KB, 200 * KB));
+    // a read of a deferred byte is not a direct read
+    c.provider.defer.clear();
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
+    ASSERT_EQ(0, c.stream->direct_io_count());
+}
+
+// A deferred range that is not larger than the coalesce distance, next to a run, is loaded with the run: a buffer of its
+// own costs a request when a read needs it. A larger deferred range stays a buffer.
+TEST_F(SharedBufferedInputStreamTest, test_defer_small_range_next_to_a_run_is_loaded_with_it) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    // The page A is deferred and next to the read of the page B. It is not larger than the distance of 100 KB, so it is a
+    // part of the run, and the pages C to F are 400 KB and a buffer.
+    PageCacheCase c(0, 100 * KB);
+    c.set_chunk_range();
+    c.defer_pages({kA, kC, kD, kE, kF});
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kB));
+    ASSERT_EQ((Reads{{0, 200 * KB}}), c.remote->reads);
+    ASSERT_EQ(400 * KB, c.stream->skip_ranges_deferred_bytes());
+    ASSERT_EQ(1, c.stream->skip_ranges_deferred_count());
+
+    // The same behind the run: the page B is deferred and behind the read of the page A, so it is a part of the run, and
+    // the run C joins it. The pages D to F are deferred.
+    PageCacheCase d(0, 100 * KB);
+    d.set_chunk_range();
+    d.defer_pages({kB, kD, kE, kF});
+    ASSERT_NO_FATAL_FAILURE(d.read_page_and_check(kA));
+    ASSERT_EQ((Reads{{0, 300 * KB}}), d.remote->reads);
+    ASSERT_EQ(300 * KB, d.stream->skip_ranges_deferred_bytes());
+    ASSERT_EQ(1, d.stream->skip_ranges_deferred_count());
+
+    // A deferred range larger than the distance stays a buffer: the pages B and C are 200 KB.
+    PageCacheCase e(0, 100 * KB);
+    e.set_chunk_range();
+    e.defer_pages({kB, kC});
+    ASSERT_NO_FATAL_FAILURE(e.read_page_and_check(kA));
+    // A, D, E and F are runs; the gap between A and D is deferred, not cut, so they are not joined
+    ASSERT_EQ((Reads{{0, 100 * KB}}), e.remote->reads);
+    ASSERT_EQ(200 * KB, e.stream->skip_ranges_deferred_bytes());
+    ASSERT_NO_FATAL_FAILURE(e.read_page_and_check(kD));
+    ASSERT_EQ((Reads{{0, 100 * KB}, {300 * KB, 300 * KB}}), e.remote->reads);
+}
+
+// Skip wins over defer, and a skipped byte is a hole between the buffers.
+TEST_F(SharedBufferedInputStreamTest, test_defer_and_skip_ranges_together) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c;
+    c.set_chunk_range();
+    c.name_pages({kB});
+    // the provider defers B, C and D, and skips B
+    c.defer_pages({kB, kC, kD});
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
+    // A and the pages E and F are runs, B is cut, C and D are deferred
+    ASSERT_EQ((Reads{{0, 100 * KB}}), c.remote->reads);
+    ASSERT_EQ(100 * KB, c.stream->skip_ranges_bytes());
+    ASSERT_EQ(200 * KB, c.stream->skip_ranges_deferred_bytes());
+    ASSERT_FALSE(c.page_covered(kB));
+    ASSERT_TRUE(c.page_covered(kC));
+    ASSERT_TRUE(c.page_covered(kD));
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kE));
+    ASSERT_EQ((Reads{{0, 100 * KB}, {400 * KB, 200 * KB}}), c.remote->reads);
+    ASSERT_EQ(0, c.stream->direct_io_count());
+}
+
+// With an align size the deferred ranges give up their partial blocks, like the skipped ones, so every buffer that the
+// split makes begins and ends at a border of a block.
+TEST_F(SharedBufferedInputStreamTest, test_defer_ranges_keep_to_the_blocks) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    constexpr int64_t kBlock = 256 * KB;
+    PageCacheCase c(kBlock);
+    // the aligned range of the buffer is [0, 2 MB)
+    c.set_ranges({io::SharedBufferedInputStream::IORange(100 * KB, 1800 * KB)});
+    c.provider.defer.emplace_back(300 * KB, 1200 * KB);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(110 * KB, 10 * KB));
+    // the deferred bytes [300 KB, 1500 KB) give up their partial blocks: [512 KB, 1280 KB) is deferred
+    ASSERT_EQ((Reads{{0, 512 * KB}}), c.remote->reads);
+    ASSERT_EQ(768 * KB, c.stream->skip_ranges_deferred_bytes());
+    auto deferred = c.stream->find_shared_buffer(512 * KB, 768 * KB);
+    ASSERT_OK(deferred.status());
+    ASSERT_EQ(512 * KB, deferred.value()->offset);
+    ASSERT_EQ(768 * KB, deferred.value()->size);
+    ASSERT_FALSE(deferred.value()->planned);
+    // the bytes behind the deferred range are a run, and it is loaded whole
+    c.provider.defer.clear();
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(1600 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{0, 512 * KB}, {1280 * KB, 768 * KB}}), c.remote->reads);
+    // the deferred buffer is asked about when it is read
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(600 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{0, 512 * KB}, {1280 * KB, 768 * KB}, {512 * KB, 768 * KB}}), c.remote->reads);
+    ASSERT_EQ(0, c.stream->direct_io_count());
+}
+
+// A piece of a large io range is split to a run and a deferred buffer, which is still a piece of the large range: the
+// next piece follows it, and a read across their border is served by both.
+TEST_F(SharedBufferedInputStreamTest, test_defer_a_piece_of_a_large_range) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c(0, 0, 1024 * KB);
+    io::SharedBufferedInputStream::CoalesceOptions options;
+    options.max_dist_size = 0;
+    options.max_buffer_size = 256 * KB;
+    c.stream->set_coalesce_options(options);
+    config::io_coalesce_split_large_range = true;
+    // four pieces of 256 KB
+    c.set_ranges({io::SharedBufferedInputStream::IORange(0, 1024 * KB)});
+    c.provider.defer.emplace_back(300 * KB, 212 * KB);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(260 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{256 * KB, 44 * KB}}), c.remote->reads);
+    auto deferred = c.stream->find_shared_buffer(300 * KB, 212 * KB);
+    ASSERT_OK(deferred.status());
+    ASSERT_TRUE(deferred.value()->large);
+    ASSERT_TRUE(deferred.value()->has_next_piece);
+    ASSERT_FALSE(deferred.value()->planned);
+
+    // a read that crosses the end of the deferred buffer into the next piece loads both, and asks for each
+    c.provider.defer.clear();
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(500 * KB, 24 * KB));
+    ASSERT_EQ((Reads{{256 * KB, 44 * KB}, {300 * KB, 212 * KB}, {512 * KB, 256 * KB}}), c.remote->reads);
+    ASSERT_EQ(0, c.stream->direct_io_count());
+}
+
+// The time of the planning, the recovery of a cut span and the release. The deferred bytes are buffers, so a read of them is
+// never a recovery, and the spans of the cut bytes are the only ones that the stream recovers.
+TEST_F(SharedBufferedInputStreamTest, test_defer_plan_time_and_cut_spans) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    PageCacheCase c;
+    c.set_chunk_range();
+    ASSERT_EQ(0, c.stream->skip_ranges_timer());
+    c.name_pages({kB, kC});
+    c.defer_pages({kE, kF});
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kA));
+    ASSERT_GT(c.stream->skip_ranges_timer(), 0);
+    ASSERT_EQ(1, c.stream->skip_ranges_plan_count());
+    ASSERT_EQ(0, c.stream->skip_ranges_recover_count());
+    ASSERT_EQ(200 * KB, c.stream->skip_ranges_deferred_bytes());
+
+    // The pages E and F are a buffer, and a read of them is not a recovery. The page D is a run.
+    c.provider.skip.clear();
+    c.provider.defer.clear();
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kE));
+    ASSERT_EQ(0, c.stream->skip_ranges_recover_count());
+    ASSERT_EQ(0, c.stream->direct_io_count());
+
+    // a read in the cut span of B and C loads the span with one read, and the page C is served from it
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kB));
+    ASSERT_EQ(1, c.stream->skip_ranges_recover_count());
+    ASSERT_EQ(200 * KB, c.stream->skip_ranges_recover_bytes());
+    ASSERT_NO_FATAL_FAILURE(c.read_page_and_check(kC));
+    ASSERT_EQ(1, c.stream->skip_ranges_recover_count());
+    ASSERT_EQ(0, c.stream->direct_io_count());
+    // the recovered span is a buffer now, and it does not overlap the deferred buffer
+    ASSERT_TRUE(c.page_covered(kB));
+    ASSERT_TRUE(c.page_covered(kC));
+    ASSERT_EQ(0, c.stream->direct_io_count());
+
+    // a read that begins in a buffer and ends in a cut span, and a read outside the buffers, are direct reads
+    PageCacheCase d;
+    d.set_chunk_range();
+    d.name_pages({kB, kC});
+    ASSERT_NO_FATAL_FAILURE(d.read_page_and_check(kA));
+    ASSERT_NO_FATAL_FAILURE(d.read_and_check(90 * KB, 20 * KB));
+    ASSERT_NO_FATAL_FAILURE(d.read_and_check(1000 * KB, 10 * KB));
+    ASSERT_EQ(2, d.stream->direct_io_count());
+    ASSERT_EQ(0, d.stream->skip_ranges_recover_count());
+
+    // the cut spans are forgotten with the buffers around them
+    d.stream->release_to_offset(600 * KB);
+    ASSERT_NO_FATAL_FAILURE(d.read_page_and_check(kB));
+    ASSERT_EQ(3, d.stream->direct_io_count());
+    ASSERT_EQ(0, d.stream->skip_ranges_recover_count());
+}
+
+// Whatever the provider skips and defers, every read returns the bytes of the file.
+TEST_F(SharedBufferedInputStreamTest, test_defer_ranges_random_reads_return_the_bytes_of_the_file) {
+    constexpr int64_t KB = PageCacheCase::KB;
+    std::mt19937 gen(20261009);
+    for (int iteration = 0; iteration < 300; ++iteration) {
+        SCOPED_TRACE("iteration " + std::to_string(iteration));
+        const int64_t align_size = (gen() % 2 == 0) ? 0 : 64 * KB;
+        const int64_t distance = (gen() % 3) * 50 * KB;
+        PageCacheCase c(align_size, distance, 1024 * KB);
+        io::SharedBufferedInputStream::CoalesceOptions options;
+        options.max_dist_size = distance;
+        options.max_buffer_size = (gen() % 2 == 0) ? 8 * 1024 * KB : 200 * KB;
+        c.stream->set_coalesce_options(options);
+        config::io_coalesce_split_large_range = gen() % 2 == 0;
+
+        std::vector<io::SharedBufferedInputStream::IORange> ranges;
+        int64_t cursor = gen() % (50 * KB);
+        while (cursor < 900 * KB && ranges.size() < 3) {
+            const int64_t size = 1 + gen() % (400 * KB);
+            ranges.emplace_back(cursor, std::min(size, 1000 * KB - cursor));
+            cursor += ranges.back().size + gen() % (150 * KB);
+        }
+        c.set_ranges(ranges);
+
+        for (int i = gen() % 4; i > 0; --i) {
+            c.provider.skip.emplace_back(gen() % (1000 * KB), 1 + gen() % (200 * KB));
+        }
+        for (int i = gen() % 4; i > 0; --i) {
+            c.provider.defer.emplace_back(gen() % (1000 * KB), 1 + gen() % (300 * KB));
+        }
+
+        for (int read = 0; read < 16; ++read) {
+            if (read % 5 == 4) {
+                // the provider changes its mind for the buffers that are asked about later
+                c.provider.skip.clear();
+                c.provider.defer.clear();
+                for (int i = gen() % 3; i > 0; --i) {
+                    c.provider.defer.emplace_back(gen() % (1000 * KB), 1 + gen() % (300 * KB));
+                }
+            }
+            const auto& range = ranges[gen() % ranges.size()];
+            const int64_t offset = range.offset + gen() % range.size;
+            const int64_t size = 1 + gen() % std::min<int64_t>(range.offset + range.size - offset, 60 * KB);
+            ASSERT_NO_FATAL_FAILURE(c.read_and_check(offset, size));
+        }
         for (const auto& range : ranges) {
             ASSERT_NO_FATAL_FAILURE(c.read_and_check(range.offset, range.size));
         }

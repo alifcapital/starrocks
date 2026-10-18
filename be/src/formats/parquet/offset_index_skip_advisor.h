@@ -21,8 +21,21 @@
 #include <unordered_map>
 
 #include "common/config.h"
+#include "gen_cpp/parquet_types.h"
 
 namespace starrocks::parquet {
+
+// The feedback of the scan on the offset index is kept by the path of the column in the schema of the file.
+inline std::string offset_index_feedback_key(const tparquet::ColumnMetaData& column_metadata) {
+    std::string key;
+    for (const std::string& part : column_metadata.path_in_schema) {
+        if (!key.empty()) {
+            key += '.';
+        }
+        key += part;
+    }
+    return key;
+}
 
 // Scan-local performance feedback for the columns that read their offset index to skip pages. The read of an offset
 // index is a remote read in every row group of every file, and it pays only when a read can jump over a page. We
