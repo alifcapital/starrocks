@@ -1725,6 +1725,17 @@ CONF_Int64(datacache_max_concurrent_inserts, "1500000");
 // Once this is reached, cache population will be rejected until the flying memory usage gets under the limit.
 // If zero, the datacache module will automatically calculate a reasonable default value based on block size.
 CONF_Int64(datacache_max_flying_memory_mb, "2");
+// An async write of a block that a scan reads from a shared buffer can hold the whole buffer until the cache writes
+// the block, so the memory that the writes hold is much larger than the flying limit. When it is true, the cache copies
+// each block at the write, the buffer is not held, and the writes hold about the flying limit. When it is false, the
+// writes hold the buffers and copy nothing.
+CONF_Bool(datacache_populate_copy_blocks, "false");
+// The cache accepts or refuses each block of a shared buffer on its own, so under a burst of writes a buffer gets
+// some of its blocks into the cache, and a later read of the buffer downloads the holes between the cached blocks one
+// by one. When it is true, the first block that the cache refuses because too many writes are in flight stops the
+// writes of the rest of the buffer: the cache keeps the start of the buffer and one hole after it, which a later read
+// downloads with one request.
+CONF_mBool(datacache_populate_stop_at_busy, "false");
 // An io adaptor factor to control the io traffic between cache and network.
 // The larger this parameter, the more requests will be sent to the network.
 // Usually there is no need to modify it.

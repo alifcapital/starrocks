@@ -465,6 +465,10 @@ Status HdfsScanner::open_random_access_file() {
                                                       &_cache_select_populate_stream));
     if (_cache_input_stream) {
         _cache_input_stream->set_peer_cache_node(_scanner_ctx->scan_range->candidate_node);
+        if (_runtime_state != nullptr) {
+            _cache_input_stream->set_owner_mem_trackers(_runtime_state->query_mem_tracker_ptr(),
+                                                        _runtime_state->instance_mem_tracker_ptr());
+        }
     }
     return Status::OK();
 }
@@ -636,6 +640,8 @@ void HdfsScanner::update_counter() {
         COUNTER_UPDATE(profile->datacache_write_already_exist_bytes, stats.write_cache_already_exist_bytes);
         COUNTER_UPDATE(profile->datacache_write_busy_counter, stats.write_cache_busy_count);
         COUNTER_UPDATE(profile->datacache_write_busy_bytes, stats.write_cache_busy_bytes);
+        COUNTER_UPDATE(profile->datacache_write_stop_at_busy_counter, stats.write_cache_stop_at_busy_count);
+        COUNTER_UPDATE(profile->datacache_write_stop_at_busy_bytes, stats.write_cache_stop_at_busy_bytes);
         COUNTER_UPDATE(profile->datacache_write_mem_limit_counter, stats.write_cache_mem_limit_count);
         COUNTER_UPDATE(profile->datacache_write_mem_limit_bytes, stats.write_cache_mem_limit_bytes);
         COUNTER_UPDATE(profile->datacache_write_capacity_limit_counter, stats.write_cache_capacity_limit_count);

@@ -704,6 +704,10 @@ void HiveDataSource::_init_counter(RuntimeState* state) {
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteBusyCount", TUnit::UNIT, prefix);
         _scanner_ctx.profile.datacache_write_busy_bytes =
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteBusyBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_write_stop_at_busy_counter =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteStopAtBusyCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.datacache_write_stop_at_busy_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteStopAtBusyBytes", TUnit::BYTES, prefix);
         _scanner_ctx.profile.datacache_write_mem_limit_counter =
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheWriteMemLimitCount", TUnit::UNIT, prefix);
         _scanner_ctx.profile.datacache_write_mem_limit_bytes =

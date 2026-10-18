@@ -25,6 +25,10 @@
 #include "cache/disk_cache/io_buffer.h"
 #include "io/shared_buffered_input_stream.h"
 
+namespace starrocks {
+class MemTracker;
+} // namespace starrocks
+
 namespace starrocks::io {
 
 // The kind of file region that the current thread reads. The parquet reader sets it around the reads of the
@@ -96,6 +100,10 @@ public:
         int64_t write_cache_already_exist_bytes = 0;
         int64_t write_cache_busy_count = 0;
         int64_t write_cache_busy_bytes = 0;
+        // Blocks that we did not try to write because the cache had refused another block of their shared buffer
+        // (see datacache_populate_stop_at_busy).
+        int64_t write_cache_stop_at_busy_count = 0;
+        int64_t write_cache_stop_at_busy_bytes = 0;
         int64_t write_cache_mem_limit_count = 0;
         int64_t write_cache_mem_limit_bytes = 0;
         int64_t write_cache_capacity_limit_count = 0;
@@ -145,6 +153,8 @@ public:
             write_cache_already_exist_bytes += o.write_cache_already_exist_bytes;
             write_cache_busy_count += o.write_cache_busy_count;
             write_cache_busy_bytes += o.write_cache_busy_bytes;
+            write_cache_stop_at_busy_count += o.write_cache_stop_at_busy_count;
+            write_cache_stop_at_busy_bytes += o.write_cache_stop_at_busy_bytes;
             write_cache_mem_limit_count += o.write_cache_mem_limit_count;
             write_cache_mem_limit_bytes += o.write_cache_mem_limit_bytes;
             write_cache_capacity_limit_count += o.write_cache_capacity_limit_count;
@@ -200,6 +210,20 @@ public:
 
     void set_peer_cache_node(const std::string& peer_node);
 
+    // The trackers of set_owner_mem_trackers(). The instance tracker is a child of the query tracker and returns its
+    // consumption to it when it is destroyed, so it is declared last and destroyed first.
+    struct OwnerMemTrackers {
+        std::shared_ptr<MemTracker> query;
+        std::shared_ptr<MemTracker> instance;
+    };
+
+    // An async write of a cache block keeps the whole shared buffer of the block alive, and the last write can end in
+    // a thread of the cache after the reader has let the buffer go. We want the memory of the buffer to come back to
+    // the tracker that paid for it then. So the scanner gives the trackers of its query and of its fragment instance,
+    // and a write keeps them alive until it ends (see _populate_to_cache()).
+    void set_owner_mem_trackers(std::shared_ptr<MemTracker> query_mem_tracker,
+                                std::shared_ptr<MemTracker> instance_mem_tracker);
+
     int64_t get_align_size() const;
 
     StatusOr<std::string_view> peek(int64_t count) override;
@@ -245,7 +269,8 @@ protected:
     void _populate_to_cache(const char* src, int64_t offset, int64_t count, const SharedBufferPtr& sb);
     // Write every block of the loaded buffer `sb` that this stream has not written and the cache does not hold.
     void _populate_loaded_buffer(const SharedBufferPtr& sb);
-    void _write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options);
+    // Returns the result of the cache, or OK for a block that this stream has written already.
+    Status _write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options);
     // The counters of the region kind that the current thread reads, or nullptr if it reads data pages.
     MetadataIoStats* _metadata_stats();
 
@@ -255,8 +280,9 @@ protected:
     void _skip_cached_blocks(const SharedBufferPtr& sb, int64_t need_begin, int64_t need_end);
     bool _can_ask_cache() const;
     // Returns the size of the part of the chunk [offset, offset + size) of a remote read that one shared buffer can
-    // serve: the chunk is cut at the end of the piece of a large io range that holds `offset`, if it crosses that end.
-    int64_t _cut_chunk_at_piece_end(int64_t offset, int64_t size);
+    // serve: the chunk is cut at the end of the piece of a large io range that holds `need_offset`, if it crosses that
+    // end.
+    int64_t _cut_chunk_at_piece_end(int64_t need_offset, int64_t offset, int64_t size);
     bool _can_ignore_populate_error(const Status& status) const;
     bool _can_try_peer_cache();
 
@@ -294,6 +320,7 @@ private:
     // Blocks the cache rejected in this stream. Used only to count repeated writes of the same block.
     std::unordered_set<int64_t> _rejected_populate_blocks{};
     std::shared_ptr<AsyncWriteStats> _async_write_stats = std::make_shared<AsyncWriteStats>();
+    std::shared_ptr<const OwnerMemTrackers> _owner_mem_trackers;
 };
 
 } // namespace starrocks::io

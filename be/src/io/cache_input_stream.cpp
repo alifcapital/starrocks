@@ -23,6 +23,7 @@
 #include "common/config.h"
 #include "gutil/strings/fastmem.h"
 #include "gutil/strings/split.h"
+#include "runtime/current_thread.h"
 #include "service/backend_options.h"
 #include "util/hash_util.hpp"
 #include "util/murmur_hash3.h"
@@ -223,7 +224,8 @@ Status CacheInputStream::_read_from_cache(const int64_t offset, const int64_t si
             write_options.ttl_seconds = _ttl_seconds;
             write_options.frequency = _frequency;
             write_options.allow_zero_copy = true;
-            _write_cache(block_offset, block.buffer, &write_options);
+            // The stats count the result, and a block of the block buffer has no shared buffer to stop.
+            (void)_write_cache(block_offset, block.buffer, &write_options);
         }
     }
 
@@ -292,16 +294,24 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
         // Everytime read at most one buffer size
         int64_t read_size = std::min(_buffer_size, block_end_offset - read_offset_cursor);
         char* src = nullptr;
+        // The first byte of the chunk that the reader asked for. The scanner aligns the shared buffers to the blocks,
+        // so two io ranges that meet inside a block both cover it, and the chunk, which begins at a block border, can
+        // begin in the aligned tail of the io range in front of the read. We fear that the chunk takes that buffer:
+        // the provider would be asked about a column that the reader does not read now, it would name nothing, and
+        // the whole buffer would be downloaded for one page header of the next column. So every buffer of the chunk is
+        // looked up by this byte, and a chunk whose byte no io range holds (a hole between the ranges) is read
+        // without a buffer: the buffer behind the hole covers it with its alignment only.
+        const int64_t need_offset = std::max(read_offset_cursor, out_offset_cursor);
 
         // check [read_offset_cursor, read_size) is already in SharedBuffer
         // If existed, we can use zero copy to avoid copy data from SharedBuffer to _buffer
         SharedBufferPtr sb = nullptr;
-        auto ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        auto ret = _sb_stream->find_shared_buffer_holding(need_offset, read_offset_cursor, read_size);
         if (!ret.ok()) {
-            const int64_t cut_size = _cut_chunk_at_piece_end(read_offset_cursor, read_size);
+            const int64_t cut_size = _cut_chunk_at_piece_end(need_offset, read_offset_cursor, read_size);
             if (cut_size != read_size) {
                 read_size = cut_size;
-                ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+                ret = _sb_stream->find_shared_buffer_holding(need_offset, read_offset_cursor, read_size);
             }
         }
         if (ret.ok() && ret.value()->buffer.capacity() == 0 && !ret.value()->split && _can_ask_cache()) {
@@ -310,7 +320,7 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
             // a part of the range that is still to be read, so it stays inside one run. A buffer that an earlier
             // split made is not asked again, because the cache has answered for its blocks already.
             _skip_cached_blocks(ret.value(), read_offset_cursor, block_end_offset);
-            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+            ret = _sb_stream->find_shared_buffer_holding(need_offset, read_offset_cursor, read_size);
         }
         if (ret.ok() && ret.value()->buffer.capacity() == 0 &&
             _sb_stream->plan_load(ret.value(), read_offset_cursor, block_end_offset - read_offset_cursor)) {
@@ -319,7 +329,7 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
             // out of the buffer already, so the provider is asked about the bytes that we are about to download
             // only, and it is not asked at all when the cache serves the whole read. We look for the buffer of the
             // chunk again: the chunk is a part of the range that is still to be read, so it stays inside one run.
-            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+            ret = _sb_stream->find_shared_buffer_holding(need_offset, read_offset_cursor, read_size);
         }
         int64_t read_remote_ns = 0;
         int64_t previous_remote_bytes = _sb_stream->shared_io_bytes() + _sb_stream->direct_io_bytes();
@@ -334,7 +344,8 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
                 // A failed read leaves the content of `_buffer` undefined, so we drop the remembered range
                 // first and set it again only after the read succeeds.
                 _buffer_valid_size = 0;
-                RETURN_IF_ERROR(_sb_stream->read_at_fully(read_offset_cursor, _buffer.data(), read_size));
+                RETURN_IF_ERROR(
+                        _sb_stream->read_blocks_at_fully(need_offset, read_offset_cursor, _buffer.data(), read_size));
                 _buffer_offset = read_offset_cursor;
                 _buffer_valid_size = read_size;
                 src = _buffer.data();
@@ -426,11 +437,11 @@ bool CacheInputStream::_can_ask_cache() const {
 // A large io range is cut into pieces, and a chunk of the read can cross the end of a piece. No shared buffer covers
 // such a chunk, so it would be read with one request of its own, and the cache would not be asked about the blocks
 // of the pieces. We want the pieces to serve the chunk like any other shared buffer, so we cut the chunk at the end
-// of the piece that holds its first byte: the rest of the chunk is the next chunk, and it finds the next piece. We
-// cut only at a block border, so the next chunk begins at a block border too, and only when the piece has a next
-// piece, because the buffers of other io ranges did not serve such a chunk before either.
-int64_t CacheInputStream::_cut_chunk_at_piece_end(int64_t offset, int64_t size) {
-    auto head = _sb_stream->find_shared_buffer(offset, 1);
+// of the piece that holds its first needed byte: the rest of the chunk is the next chunk, and it finds the next
+// piece. We cut only at a block border, so the next chunk begins at a block border too, and only when the piece has
+// a next piece, because the buffers of other io ranges did not serve such a chunk before either.
+int64_t CacheInputStream::_cut_chunk_at_piece_end(int64_t need_offset, int64_t offset, int64_t size) {
+    auto head = _sb_stream->find_shared_buffer_holding(need_offset, offset, 1);
     if (!head.ok() || !head.value()->has_next_piece) {
         return size;
     }
@@ -656,18 +667,71 @@ StatusOr<std::string_view> CacheInputStream::peek(int64_t count) {
 
 static void empty_deleter(void*) {}
 
+void CacheInputStream::set_owner_mem_trackers(std::shared_ptr<MemTracker> query_mem_tracker,
+                                              std::shared_ptr<MemTracker> instance_mem_tracker) {
+    _owner_mem_trackers = std::make_shared<const OwnerMemTrackers>(
+            OwnerMemTrackers{.query = std::move(query_mem_tracker), .instance = std::move(instance_mem_tracker)});
+}
+
+namespace {
+
+// The async writes of the blocks of a shared buffer keep the buffer alive with this holder. The last write can end in
+// a thread of the cache after the reader has let the buffer go, and then the buffer is freed in that thread. We fear
+// that the free is charged to the tracker of that thread, while the tracker that paid for the buffer keeps it until the
+// query ends: with many writes in flight the query reaches its memory limit with memory that the process does not hold.
+// So the holder frees the buffer under the tracker that paid for it, and keeps that tracker and its query tracker alive
+// until then. Without an owner tracker the buffer is freed under the tracker of the thread that drops it.
+struct WriteHeldBuffer {
+    WriteHeldBuffer(SharedBufferedInputStream::SharedBufferPtr sb,
+                    std::shared_ptr<const CacheInputStream::OwnerMemTrackers> owner, MemTracker* tracker)
+            : sb(std::move(sb)), owner(std::move(owner)), tracker(tracker) {}
+
+    ~WriteHeldBuffer() {
+        if (tracker != nullptr) {
+            SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(tracker);
+            sb.reset();
+        }
+    }
+
+    SharedBufferedInputStream::SharedBufferPtr sb;
+    std::shared_ptr<const CacheInputStream::OwnerMemTrackers> owner;
+    MemTracker* tracker;
+};
+
+} // namespace
+
 void CacheInputStream::_populate_to_cache(const char* p, int64_t offset, int64_t count, const SharedBufferPtr& sb) {
     int64_t begin = offset / _block_size * _block_size;
     int64_t end = std::min((offset + count + _block_size - 1) / _block_size * _block_size, _size);
     p -= (offset - begin);
-    auto f = [sb, this](const char* buf, size_t off, size_t size) {
+    // See datacache_populate_stop_at_busy: a refused buffer writes no more blocks.
+    const bool stop_at_busy = sb != nullptr && config::datacache_populate_stop_at_busy;
+    if (stop_at_busy && sb->populate_refused) {
+        _stats.write_cache_stop_at_busy_count += (end - begin + _block_size - 1) / _block_size;
+        _stats.write_cache_stop_at_busy_bytes += end - begin;
+        return;
+    }
+    // See datacache_populate_copy_blocks: with the copy the async writes do not hold the shared buffer.
+    const bool copy = _enable_async_populate_mode && config::datacache_populate_copy_blocks;
+    std::shared_ptr<WriteHeldBuffer> held;
+    if (_enable_async_populate_mode && sb && !copy) {
+        // The threads that read through this stream load its buffers under the same tracker, so the tracker of this
+        // thread paid for the buffer. We use it only if the owner trackers keep it alive.
+        MemTracker* tracker = CurrentThread::mem_tracker();
+        if (_owner_mem_trackers == nullptr ||
+            (tracker != _owner_mem_trackers->instance.get() && tracker != _owner_mem_trackers->query.get())) {
+            tracker = nullptr;
+        }
+        held = std::make_shared<WriteHeldBuffer>(sb, tracker != nullptr ? _owner_mem_trackers : nullptr, tracker);
+    }
+    auto f = [&held, copy, this](const char* buf, size_t off, size_t size) {
         DiskCacheWriteOptions options;
         options.async = _enable_async_populate_mode;
         options.priority = _priority;
         options.ttl_seconds = _ttl_seconds;
         options.frequency = _frequency;
-        if (options.async && sb) {
-            auto cb = [sb](int code, const std::string& msg) {
+        if (held != nullptr) {
+            auto cb = [held](int code, const std::string& msg) {
                 // We only need to keep the shared buffer pointer
                 LOG_IF(WARNING, code != 0 && code != EEXIST) << "write block cache failed, errmsg: " << msg;
             };
@@ -677,16 +741,27 @@ void CacheInputStream::_populate_to_cache(const char* p, int64_t offset, int64_t
 
         IOBuffer iobuf;
         iobuf.append_user_data((void*)buf, size, empty_deleter);
-        _write_cache(off, iobuf, &options);
+        if (copy) {
+            // The cache allocates the copy in this thread and frees it in a thread of the cache when the write ends.
+            // We fear that the query pays for the copy until the query ends, so the process pays for it.
+            SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(nullptr);
+            return _write_cache(off, iobuf, &options);
+        }
+        return _write_cache(off, iobuf, &options);
     };
 
     while (begin < end) {
         size_t size = std::min(_block_size, end - begin);
-        f(p, begin, size);
+        Status st = f(p, begin, size);
         begin += size;
         p += size;
+        if (stop_at_busy && st.is_resource_busy()) {
+            sb->populate_refused = true;
+            _stats.write_cache_stop_at_busy_count += (end - begin + _block_size - 1) / _block_size;
+            _stats.write_cache_stop_at_busy_bytes += end - begin;
+            break;
+        }
     }
-    return;
 }
 
 // A read of a column index, an offset index or a bloom filter loads the whole shared buffer that covers it, and the
@@ -716,12 +791,12 @@ void CacheInputStream::_populate_loaded_buffer(const SharedBufferPtr& sb) {
     }
 }
 
-void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options) {
+Status CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options) {
     DCHECK(offset % _block_size == 0);
     const int64_t block_id = offset / _block_size;
     if (_already_populated_blocks.contains(block_id)) {
         // Already populate in CacheInputStream's lifecycle, ignore this time
-        return;
+        return Status::OK();
     }
 
     if (_rejected_populate_blocks.contains(block_id)) {
@@ -779,6 +854,7 @@ void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskC
         _stats.write_cache_capacity_limit_count += 1;
         _stats.write_cache_capacity_limit_bytes += iobuf.size();
     }
+    return r;
 }
 
 bool CacheInputStream::_can_ignore_populate_error(const Status& status) const {

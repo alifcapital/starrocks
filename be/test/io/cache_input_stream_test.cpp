@@ -21,6 +21,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,8 +29,11 @@
 #include "cache/disk_cache/starcache_engine.h"
 #include "cache/disk_cache/test_cache_utils.h"
 #include "fs/fs_util.h"
+#include "runtime/current_thread.h"
 #include "runtime/exec_env.h"
+#include "runtime/mem_tracker.h"
 #include "testutil/assert.h"
+#include "util/defer_op.h"
 
 namespace starrocks::io {
 
@@ -67,6 +71,7 @@ public:
 
     Status write(const std::string& key, const IOBuffer& buffer, DiskCacheWriteOptions* options) override {
         write_calls += 1;
+        zero_copy.push_back(options != nullptr && options->allow_zero_copy);
         if (options != nullptr && options->async && options->callback) {
             if (defer_callbacks) {
                 pending_callbacks.push_back(options->callback);
@@ -101,6 +106,7 @@ public:
     int async_code = 0;
     bool defer_callbacks = false;
     int64_t write_calls = 0;
+    std::vector<bool> zero_copy;
     std::vector<std::function<void(int, const std::string&)>> pending_callbacks;
 };
 
@@ -1005,6 +1011,118 @@ TEST_F(CacheInputStreamTest, test_async_write_callback_after_stream_destroyed) {
     ASSERT_EQ(2u, c.engine->pending_callbacks.size());
     c.cache_stream.reset();
     c.engine->pending_callbacks[1](EBUSY, "busy");
+}
+
+// An async write keeps the shared buffer of its block and the owner trackers alive after the reader lets the buffer go.
+// The last callback ends in a thread of the cache, and then the buffer is freed and the trackers are let go.
+TEST_F(CacheInputStreamTest, test_async_write_holds_the_buffer_and_the_owner_trackers_until_its_callback) {
+    WriteResultCase c("test_async_write_holds_the_buffer_and_the_owner_trackers_until_its_callback", Status::OK(),
+                      block_size);
+    c.cache_stream->set_enable_async_populate_mode(true);
+    c.engine->defer_callbacks = true;
+    auto query = std::make_shared<MemTracker>(-1, "query");
+    auto instance = std::make_shared<MemTracker>(-1, "instance", query.get());
+    c.cache_stream->set_owner_mem_trackers(query, instance);
+    ASSERT_OK(c.sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, 2 * block_size)}));
+
+    std::weak_ptr<io::SharedBufferedInputStream::SharedBuffer> buffer;
+    {
+        SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(instance.get());
+        ASSERT_NO_FATAL_FAILURE(c.read_block(0, block_size));
+        buffer = c.sb_stream->find_shared_buffer(0, block_size).value();
+    }
+    ASSERT_EQ(1u, c.engine->pending_callbacks.size());
+
+    // The reader and the stream let the buffer and the trackers go, and the write still holds them.
+    c.sb_stream->release();
+    c.cache_stream.reset();
+    ASSERT_FALSE(buffer.expired());
+    ASSERT_GT(instance.use_count(), 1);
+    ASSERT_GT(query.use_count(), 1);
+
+    std::thread cache_thread([&] {
+        c.engine->pending_callbacks[0](0, "");
+        c.engine->pending_callbacks.clear();
+    });
+    cache_thread.join();
+    ASSERT_TRUE(buffer.expired());
+    ASSERT_EQ(1, instance.use_count());
+    ASSERT_EQ(1, query.use_count());
+}
+
+// Without owner trackers the write keeps the buffer as before, and nothing else.
+TEST_F(CacheInputStreamTest, test_async_write_without_owner_trackers_holds_the_buffer_until_its_callback) {
+    WriteResultCase c("test_async_write_without_owner_trackers_holds_the_buffer_until_its_callback", Status::OK(),
+                      block_size);
+    c.cache_stream->set_enable_async_populate_mode(true);
+    c.engine->defer_callbacks = true;
+    ASSERT_OK(c.sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, 2 * block_size)}));
+
+    ASSERT_NO_FATAL_FAILURE(c.read_block(0, block_size));
+    std::weak_ptr<io::SharedBufferedInputStream::SharedBuffer> buffer =
+            c.sb_stream->find_shared_buffer(0, block_size).value();
+    c.sb_stream->release();
+    ASSERT_FALSE(buffer.expired());
+    c.engine->pending_callbacks[0](0, "");
+    c.engine->pending_callbacks.clear();
+    ASSERT_TRUE(buffer.expired());
+}
+
+TEST_F(CacheInputStreamTest, test_async_write_with_copy_does_not_hold_the_buffer) {
+    const bool saved_copy = config::datacache_populate_copy_blocks;
+    config::datacache_populate_copy_blocks = true;
+    DeferOp restore([&] { config::datacache_populate_copy_blocks = saved_copy; });
+    WriteResultCase c("test_async_write_with_copy_does_not_hold_the_buffer", Status::OK(), block_size);
+    c.cache_stream->set_enable_async_populate_mode(true);
+    c.engine->defer_callbacks = true;
+    ASSERT_OK(c.sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, 2 * block_size)}));
+
+    ASSERT_NO_FATAL_FAILURE(c.read_block(0, block_size));
+    ASSERT_EQ(std::vector<bool>{false}, c.engine->zero_copy);
+    std::weak_ptr<io::SharedBufferedInputStream::SharedBuffer> buffer =
+            c.sb_stream->find_shared_buffer(0, block_size).value();
+    c.sb_stream->release();
+    // The write is still in flight, and the buffer is gone.
+    ASSERT_EQ(1u, c.engine->pending_callbacks.size());
+    ASSERT_TRUE(buffer.expired());
+    c.engine->pending_callbacks[0](0, "");
+    c.engine->pending_callbacks.clear();
+}
+
+TEST_F(CacheInputStreamTest, test_busy_block_stops_the_writes_of_its_shared_buffer) {
+    const bool saved_stop = config::datacache_populate_stop_at_busy;
+    config::datacache_populate_stop_at_busy = true;
+    DeferOp restore([&] { config::datacache_populate_stop_at_busy = saved_stop; });
+    WriteResultCase c("test_busy_block_stops_the_writes_of_its_shared_buffer", Status::ResourceBusy("busy"),
+                      block_size);
+    ASSERT_OK(c.sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, 2 * block_size)}));
+
+    ASSERT_NO_FATAL_FAILURE(c.read_block(0, block_size));
+    ASSERT_EQ(1, c.engine->write_calls);
+    ASSERT_TRUE(c.sb_stream->find_shared_buffer(0, block_size).value()->populate_refused);
+    // The second block is in the buffer that the cache refused, so the read of it does not write it.
+    ASSERT_NO_FATAL_FAILURE(c.read_block(1, block_size));
+    ASSERT_EQ(1, c.engine->write_calls);
+    const auto& stats = c.cache_stream->stats();
+    ASSERT_EQ(1, stats.write_cache_busy_count);
+    ASSERT_EQ(1, stats.write_cache_stop_at_busy_count);
+    ASSERT_EQ(block_size, stats.write_cache_stop_at_busy_bytes);
+}
+
+TEST_F(CacheInputStreamTest, test_busy_block_does_not_stop_its_shared_buffer_without_the_switch) {
+    const bool saved_stop = config::datacache_populate_stop_at_busy;
+    config::datacache_populate_stop_at_busy = false;
+    DeferOp restore([&] { config::datacache_populate_stop_at_busy = saved_stop; });
+    WriteResultCase c("test_busy_block_does_not_stop_its_shared_buffer_without_the_switch",
+                      Status::ResourceBusy("busy"), block_size);
+    ASSERT_OK(c.sb_stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, 2 * block_size)}));
+
+    ASSERT_NO_FATAL_FAILURE(c.read_block(0, block_size));
+    ASSERT_NO_FATAL_FAILURE(c.read_block(1, block_size));
+    ASSERT_EQ(2, c.engine->write_calls);
+    ASSERT_FALSE(c.sb_stream->find_shared_buffer(0, block_size).value()->populate_refused);
+    ASSERT_EQ(2, c.cache_stream->stats().write_cache_busy_count);
+    ASSERT_EQ(0, c.cache_stream->stats().write_cache_stop_at_busy_count);
 }
 
 using Reads = std::vector<std::pair<int64_t, int64_t>>;
@@ -2024,6 +2142,98 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_never_cuts_the_blocks_of_the_rea
     ASSERT_EQ((Reads{{3 * block_size, 2 * block_size}}), c.remote->reads);
     ASSERT_EQ(6 * block_size, c.sb_stream->skip_ranges_bytes());
     ASSERT_EQ(2u, c.engine->blocks.size());
+}
+
+namespace {
+
+// Two io ranges of a row group that meet inside block 5, as a large lazy column X and the next column Y do: X is
+// [0, 5.5) blocks and Y is [5.5, 6.5) blocks. X is larger than the coalesce buffer size, so it is a large range,
+// and with the alignment both buffers cover block 5.
+void set_two_columns_meeting_in_a_block(SkipCachedBlocksCase& c, bool pieces) {
+    const int64_t block_size = CacheInputStreamTest::block_size;
+    if (pieces) {
+        c.enable_pieces(2 * block_size);
+    } else {
+        auto options = c.sb_stream->coalesce_options();
+        options.max_buffer_size = 2 * block_size;
+        c.sb_stream->set_coalesce_options(options);
+    }
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 5 * block_size + block_size / 2);
+    ranges.emplace_back(5 * block_size + block_size / 2, block_size);
+    CHECK(c.sb_stream->set_io_ranges(ranges).ok());
+}
+
+void check_header_of_the_next_column_loads_only_its_buffer(bool pieces) {
+    const int64_t block_size = CacheInputStreamTest::block_size;
+    SkipCachedBlocksCase c(fmt::format("check_header_of_the_next_column_loads_only_its_buffer_{}", pieces),
+                           block_size * 8);
+    set_two_columns_meeting_in_a_block(c, pieces);
+    FixedSkipRanges provider;
+    c.sb_stream->set_skip_ranges_provider(&provider);
+
+    // The reader reads the first page header of Y on a cold cache. Only the buffer of Y is loaded, and the provider
+    // is asked about Y, the column that the reader reads now.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size + block_size / 2, 100));
+    ASSERT_EQ((Reads{{5 * block_size, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ((Reads{{5 * block_size, 2 * block_size}}), provider.asked);
+    ASSERT_EQ(0, c.sb_stream->large_io_bytes());
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+
+    // The last page of X is in the same block. The block is in the cache now, and nothing else is downloaded.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size, block_size / 2));
+    ASSERT_EQ(1u, c.remote->reads.size());
+
+    // A page of X before the shared block loads the buffer of X that holds it, and the provider is asked about it.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(block_size, 100));
+    ASSERT_EQ(2u, c.remote->reads.size());
+    ASSERT_EQ(2u, provider.asked.size());
+    ASSERT_EQ(0, provider.asked[1].first);
+}
+
+} // namespace
+
+// The buffer of a read is found by the first byte that the reader needs, not by the start of the block: the header of
+// the next column does not load the large range in front of it, whole or its last piece.
+TEST_F(CacheInputStreamTest, test_header_of_the_next_column_does_not_load_the_large_range_in_front) {
+    check_header_of_the_next_column_loads_only_its_buffer(false);
+}
+
+TEST_F(CacheInputStreamTest, test_header_of_the_next_column_does_not_load_the_last_piece_in_front) {
+    check_header_of_the_next_column_loads_only_its_buffer(true);
+}
+
+// A read of Y that crosses the border of block 5 is served by the buffer of Y, with no direct read.
+TEST_F(CacheInputStreamTest, test_read_of_the_next_column_across_a_block_border_loads_its_buffer) {
+    SkipCachedBlocksCase c("test_read_of_the_next_column_across_a_block_border_loads_its_buffer", block_size * 8);
+    set_two_columns_meeting_in_a_block(c, false);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(6 * block_size - 100, 200));
+    ASSERT_EQ((Reads{{5 * block_size, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(0, c.sb_stream->large_io_bytes());
+}
+
+// A read of a byte that no io range holds, in a hole in front of a range Z, does not load Z, which covers the byte
+// with its alignment only. The read goes direct, and Z loads the rest of its blocks later.
+TEST_F(CacheInputStreamTest, test_read_in_a_hole_does_not_load_the_buffer_behind_it) {
+    SkipCachedBlocksCase c("test_read_in_a_hole_does_not_load_the_buffer_behind_it", block_size * 8);
+    // The two io ranges stay two buffers.
+    auto options = c.sb_stream->coalesce_options();
+    options.max_dist_size = 0;
+    c.sb_stream->set_coalesce_options(options);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(0, 2 * block_size);
+    ranges.emplace_back(3 * block_size + block_size / 2, 2 * block_size + block_size / 2);
+    ASSERT_OK(c.sb_stream->set_io_ranges(ranges));
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 100, 100));
+    ASSERT_EQ((Reads{{3 * block_size, block_size}}), c.remote->reads);
+    ASSERT_EQ(1, c.sb_stream->direct_io_count());
+
+    // Z gets block 3 from the cache and downloads the blocks 4 and 5 only.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + block_size / 2, 2 * block_size + block_size / 2));
+    ASSERT_EQ((Reads{{3 * block_size, block_size}, {4 * block_size, 2 * block_size}}), c.remote->reads);
 }
 
 // The tests below read a region of a column index or a bloom filter with a read of 100 bytes, as a parquet reader

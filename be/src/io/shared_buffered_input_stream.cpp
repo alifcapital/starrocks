@@ -429,6 +429,29 @@ StatusOr<SharedBufferedInputStream::SharedBufferPtr> SharedBufferedInputStream::
     return sb;
 }
 
+// find_shared_buffer() looks up the buffer by the offset of the read. A read that begins at a block border begins in
+// the alignment padding of the buffers, and there the lookup can take the buffer of another io range: the range in
+// front of the read covers the block with its aligned tail. Its first load would plan the bytes of a range that the
+// reader does not read now. So we look up by the byte that the reader needs, and we take the buffer only if its io
+// range holds that byte.
+StatusOr<SharedBufferedInputStream::SharedBufferPtr> SharedBufferedInputStream::find_shared_buffer_holding(
+        int64_t need_offset, int64_t offset, int64_t count) {
+    ASSIGN_OR_RETURN(SharedBufferPtr sb, find_shared_buffer(need_offset, 1));
+    if (sb->raw_offset > need_offset || sb->offset > offset || sb->offset + sb->size < offset + count) {
+        return Status::RuntimeError("no shared buffer holds the needed byte and covers the read");
+    }
+    return sb;
+}
+
+bool SharedBufferedInputStream::_pieces_hold(const std::vector<SharedBufferPtr>& pieces, int64_t need_offset) {
+    for (const SharedBufferPtr& piece : pieces) {
+        if (piece->raw_offset <= need_offset && need_offset < piece->raw_offset + piece->raw_size) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // find_shared_buffer() takes the first buffer whose key (the end of its raw range) is above the offset, and then
 // checks that the buffer covers the bytes. We want every offset that `sb` serves to find the new buffer that
 // covers it, and every offset in a hole between the ranges to find a buffer that does not cover it. So the raw
@@ -744,14 +767,27 @@ void SharedBufferedInputStream::release_to_offset(int64_t offset) {
 }
 
 Status SharedBufferedInputStream::read_at_fully(int64_t offset, void* out, int64_t count) {
-    auto st = find_shared_buffer(offset, count);
+    return _read_at_fully(-1, offset, out, count);
+}
+
+Status SharedBufferedInputStream::read_blocks_at_fully(int64_t need_offset, int64_t offset, void* out, int64_t count) {
+    return _read_at_fully(need_offset, offset, out, count);
+}
+
+Status SharedBufferedInputStream::_read_at_fully(int64_t need_offset, int64_t offset, void* out, int64_t count) {
+    auto find = [&]() {
+        return need_offset < 0 ? find_shared_buffer(offset, count)
+                               : find_shared_buffer_holding(need_offset, offset, count);
+    };
+    auto st = find();
     if (st.ok() && plan_load(st.value(), offset, count)) {
         // The buffer is replaced, and the bytes of the read stay in a buffer.
-        st = find_shared_buffer(offset, count);
+        st = find();
     }
     if (!st.ok()) {
         std::vector<SharedBufferPtr> pieces;
-        if (find_shared_pieces(offset, count, &pieces).ok() && _plan_pieces(&pieces, offset, count)) {
+        if (find_shared_pieces(offset, count, &pieces).ok() && (need_offset < 0 || _pieces_hold(pieces, need_offset)) &&
+            _plan_pieces(&pieces, offset, count)) {
             // The read crosses the border of two pieces of a large range. We expect the neighbour pages to
             // need these pieces too, so we serve the read from the pieces and do not read the bytes again
             // with a direct io.

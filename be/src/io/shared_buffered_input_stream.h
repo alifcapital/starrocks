@@ -71,6 +71,10 @@ public:
         // that a buffer holds the bytes of other columns, which the provider did not know when it was asked, and that
         // it knows more when a later read first takes a byte from them, for example the range of the next column.
         bool planned = false;
+        // True when the data cache refused to write a block of the buffer because too many writes were in flight (see
+        // datacache_populate_stop_at_busy). The reads of the buffer write its blocks in parts, so the flag stops the
+        // writes of the later parts too.
+        bool populate_refused = false;
         void align(int64_t align_size, int64_t file_size);
         std::string debug_string() const;
     };
@@ -117,6 +121,10 @@ public:
     // read the span from the read to its end (at most max_buffer_size, and not into the next buffer) with one request
     // into a new buffer, and the following pages of the span are served from it.
     Status read_at_fully(int64_t offset, void* out, int64_t count) override;
+    // read_at_fully() for a caller that reads whole blocks of the data cache: [offset, offset + count) begins at a block
+    // border, and `need_offset` is the first byte in it that the reader asked for. A buffer or a run of pieces serves
+    // the read only if its io range holds `need_offset` (see find_shared_buffer_holding()).
+    Status read_blocks_at_fully(int64_t need_offset, int64_t offset, void* out, int64_t count);
     StatusOr<int64_t> get_size() override;
     Status skip(int64_t count) override {
         _offset += count;
@@ -124,6 +132,9 @@ public:
     }
 
     StatusOr<SharedBufferPtr> find_shared_buffer(size_t offset, size_t count);
+    // The buffer whose io range holds `need_offset` and which covers [offset, offset + count). A read of whole blocks
+    // looks up its buffer with it, because with the alignment the buffer of another io range can cover the blocks too.
+    StatusOr<SharedBufferPtr> find_shared_buffer_holding(int64_t need_offset, int64_t offset, int64_t count);
     // We want a caller that knows that some bytes of `sb` are not worth loading (for example, the data cache holds
     // them) to load the rest of `sb` as before: each run of bytes with one request, when a read first needs it.
     // So this function replaces `sb`, which is not loaded yet, by one shared buffer for each of `ranges`. No new
@@ -235,6 +246,10 @@ private:
     // plan_load() for each piece of a read that crosses the border of two pieces. Returns false when the pieces do not
     // cover the read any more.
     bool _plan_pieces(std::vector<SharedBufferPtr>* pieces, size_t offset, size_t count);
+    // True when the io range of one of the pieces holds `need_offset`.
+    static bool _pieces_hold(const std::vector<SharedBufferPtr>& pieces, int64_t need_offset);
+    // read_at_fully() and read_blocks_at_fully(). A negative `need_offset` looks up the buffers by `offset`.
+    Status _read_at_fully(int64_t need_offset, int64_t offset, void* out, int64_t count);
     // Remembers the bytes of the raw range of `sb` that none of `ranges` keeps, for _recover_cut_span().
     void _record_cut_spans(const SharedBuffer& sb, const std::vector<IORange>& ranges);
     // Returns a new buffer for a read that lies inside a cut span, or nullptr.
